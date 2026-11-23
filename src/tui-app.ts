@@ -2111,6 +2111,15 @@ export interface SettingsWorkspaceOpenOptions {
   readonly createWebUiPage?: (
     done: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * PR-B: the ONE same-lease `Host · ACP access` page factory. The page paints
+   * the running Split Host's local ACP listener state and the persisted
+   * next-start preference in this ONE lease and writes each through its own
+   * existing owner.
+   */
+  readonly createAcpAccessPage?: (
+    done: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
 /** The live row handle of an OPEN `SettingsList` overlay: a section whose
@@ -28460,6 +28469,9 @@ export class TuiApp {
       ...(options.createWebUiPage === undefined
         ? {}
         : { createWebUiPage: options.createWebUiPage }),
+      ...(options.createAcpAccessPage === undefined
+        ? {}
+        : { createAcpAccessPage: options.createAcpAccessPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.

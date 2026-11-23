@@ -8,10 +8,13 @@
  * the local rendering/keyboard/mouse state of the ONE short menu and reports the
  * user's explicit intent back through {@link AcpAccessRequest}.
  *
- * Two renderers present the SAME request: the default PiTui short Settings
- * overlay and the experimental TSP native picker. Neither presenter may reach a
- * Host service, open a second Connection, or keep a cached ACP state — a
- * presenter without a live intent does nothing.
+ * Two consumer entries share ONE `AcpAccessPort` authority: the TSP native
+ * presenter (this request contract) and the PiTui `Settings · Host · ACP
+ * access` page (a same-lease Settings page that calls the port through its own
+ * factory, never through this request). The retired PiTui short SettingsList
+ * overlay no longer exists. Neither consumer may reach a Host service, open a
+ * second Connection, or keep a cached ACP state — a presenter without a live
+ * intent does nothing.
  *
  * These types are transient Client presentation only: they are not a public
  * extension API and they do not change `runtime/acp-access-port.ts`.

@@ -2706,12 +2706,12 @@ test('the real Root Shell page accepts a positive finite decimal cap', async () 
   h.dispose()
 })
 
-test('Host owns Backend, the Web UI page, the ACP preference and Session log; Tools keeps no duplicate row', async () => {
+test('Host owns Backend, the Web UI page, the ACP access page and Session log; Tools keeps no duplicate row', async () => {
   const h = setup({ columns: 200, rows: 50, sessionLog: { enabled: true, inherited: true } })
   await h.open('Host')
   await key(h, '\r')
   const general = h.rowsPlain()
-  const order = ['Backend', 'Web UI', 'Start ACP automatically', 'Session log upload']
+  const order = ['Backend', 'Web UI', 'ACP access', 'Session log upload']
     .map(label => general.findIndex(line => line.includes(label)))
   for (const [index, row] of order.entries()) {
     assert.ok(row >= 0, `Host paints ${JSON.stringify(order[index])}:\n${h.view()}`)
@@ -2724,11 +2724,11 @@ test('Host owns Backend, the Web UI page, the ACP preference and Session log; To
   await railToCategory(h, 'Tools')
   await key(h, '\r')
   const tools = h.rowsPlain().join('\n')
-  for (const label of ['Visual tools', 'Shell execution', 'ACP Server', 'Web Search / Fetch', 'MCP servers']) {
+  for (const label of ['Visual tools', 'Shell execution', 'Web Search / Fetch', 'MCP servers']) {
     assert.ok(tools.includes(label), `Tools keeps ${label}`)
   }
-  assert.doesNotMatch(tools, /Start Web automatically|Start ACP automatically/u,
-    'the migrated preference rows have no Tools duplicate')
+  assert.doesNotMatch(tools, /ACP Server|Start Web automatically|Start ACP automatically/u,
+    'the retired ACP rows have no Tools duplicate')
   assert.doesNotMatch(tools, /Session log upload/u, 'the session-log row is Host-only')
   h.dispose()
 })
@@ -9876,7 +9876,6 @@ test('the real /settings route edits rows, choices and pages without ever callin
   await railToCategory(h, 'Tools')
   await key(h, '\r') // L0 -> L1
   await key(h, '\x1b[B') // Visual tools -> Shell execution (FR5-B)
-  await key(h, '\x1b[B') // -> ACP Server (PO-1B)
   await key(h, '\x1b[B') // -> Web Search / Fetch
   await key(h, '\r') // the row's own page
   assert.match(h.rowsPlain()[0]!, /Settings · Tools · Web Search \/ Fetch/u,

@@ -295,53 +295,46 @@ export async function runAcpPo1bOptInControl(context) {
     try { await tui.waitForExit(60_000) } catch { await tui.dispose() }
     trace('acp-po1b/default-off', { socketBound: false, tuiReady: true })
 
-    // ── b0) REAL TUI Settings → Tools → ACP Server Confirm (end-to-end) ──────
-    // The plan requires at least one runtime start/stop driven by the REAL Split
-    // TUI Settings keyboard Confirm (not only a Peer invoke): drive the live
-    // `/settings` workspace and prove the REAL socket follows.
+    // ── b0) REAL TUI Settings → Host → ACP access (end-to-end) ──────────────
+    // PR-B: the ONE ACP surface on PiTui is the `Host → ACP access` page. Drive
+    // the live `/settings` workspace over the real keyboard and prove the
+    // non-writing first frame, the REAL owned 0600 socket, the two-step Disable
+    // risk confirmation and the persisted next-start preference.
     const frameOf = async target => (await target.viewport()).join('\n')
-    const enterToolsRows = async (target, label) => {
+    /** Wait for a painted pattern (the page's own settled facts are asynchronous). */
+    const waitFrame = async (target, pattern, label, timeoutMs = 60_000) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (pattern.test(await frameOf(target))) return await frameOf(target)
+        await sleep(100)
+      }
+      assert(false, `${label}: the expected frame never appeared:\n${(await frameOf(target)).slice(-2500)}`)
+    }
+    /** Down until the pattern's row owns the cursor (never a fixed key count). */
+    const selectRow = async (target, pattern, label, maxSteps = 14) => {
+      for (let step = 0; step < maxSteps; step += 1) {
+        if (pattern.test(await frameOf(target))) return
+        target.send('\x1b[B')
+        await sleep(160)
+      }
+      assert(pattern.test(await frameOf(target)), `${label}: the row was never selected:\n${(await frameOf(target)).slice(-2500)}`)
+    }
+    const openHostRows = async (target, label) => {
       target.send('/settings\r')
       await target.waitForScreen('Settings ·', `${label}: /settings open`, 60_000)
       for (let step = 0; step < 16; step += 1) {
-        if (/^\s*> Tools\b/mu.test(await frameOf(target))) break
+        if (/^\s*> Host\b/mu.test(await frameOf(target))) break
         target.send('\x1b[B')
         await sleep(160)
       }
-      assert(/^\s*> Tools\b/mu.test(await frameOf(target)), `${label}: the Tools category was never selected`)
+      assert(/^\s*> Host\b/mu.test(await frameOf(target)), `${label}: the Host category was never selected`)
       target.send('\r')
-      await target.waitForScreen('ACP Server', `${label}: Tools rows`, 30_000)
+      await target.waitForScreen('Backend', `${label}: Host rows`, 30_000)
     }
-    const selectAcpServerRow = async (target, label) => {
-      target.send('\x1b[H')
-      await sleep(160)
-      for (let step = 0; step < 12; step += 1) {
-        if (/^> ACP Server(?:\s|$)/mu.test(await frameOf(target))) return
-        target.send('\x1b[B')
-        await sleep(160)
-      }
-      assert(/^> ACP Server(?:\s|$)/mu.test(await frameOf(target)), `${label}: the ACP Server row was never selected`)
-    }
-    const enterGeneralRows = async (target, label) => {
-      for (let step = 0; step < 16; step += 1) {
-        if (/^\s*> General\b/mu.test(await frameOf(target))) break
-        target.send('\x1b[A')
-        await sleep(160)
-      }
-      assert(/^\s*> General\b/mu.test(await frameOf(target)), `${label}: the General category was never selected`)
+    const openAcpAccessPage = async (target, label) => {
+      await selectRow(target, /^> ACP access(?:\s|$)/mu, `${label}: ACP access row selection`)
       target.send('\r')
-      await target.waitForScreen('Backend', `${label}: General rows`, 30_000)
-    }
-    const selectAcpAutostartRow = async (target, label) => {
-      target.send('\x1b[H')
-      await sleep(160)
-      for (let step = 0; step < 12; step += 1) {
-        if (/^> Start ACP automatically(?:\s|$)/mu.test(await frameOf(target))) return
-        target.send('\x1b[B')
-        await sleep(160)
-      }
-      assert(/^> Start ACP automatically(?:\s|$)/mu.test(await frameOf(target)),
-        `${label}: the Start ACP automatically row was never selected`)
+      await waitFrame(target, /Scope: local Split Host ACP listener/u, `${label}: ACP access page`)
     }
     await seatFree(`\0dsh-pi-tui-c-${String(scopeId).slice(0, 40)}`, 20_000)
     const tuiSettings = new SurfaceEntryProcess(entries.client, { ...base, workDir })
@@ -349,67 +342,84 @@ export async function runAcpPo1bOptInControl(context) {
     const tuiSettingsReady = await tuiSettings.waitFor(record => record.m4a0 === 'ready', 'acp-po1b settings TUI ready', 180_000)
     assert(tuiSettingsReady.surfaceMounted === true && tuiSettingsReady.transport === 'connected',
       'b0: the real Split TUI did not mount for the Settings confirm path')
-    await enterToolsRows(tuiSettings, 'b0 enable')
-    await selectAcpServerRow(tuiSettings, 'b0 enable')
-    tuiSettings.send('\r') // L2 choice (the Host is currently Off)
-    await tuiSettings.waitForScreen('Choose value', 'b0 enable: ACP choice', 30_000)
-    tuiSettings.send('\x1b[A') // Off -> On
-    await sleep(150)
+    const tuiSocket = socketPathFor(scopeId)
+    const hostBeforeSettings = await hostStatus(host1)
+    await openHostRows(tuiSettings, 'b0')
+    await openAcpAccessPage(tuiSettings, 'b0')
+    // NON-WRITING FIRST FRAME: the page states the real Disabled listener, the
+    // proven Profile's exact client command, and binds nothing.
+    const firstFrame = await waitFrame(tuiSettings, /Listener\s+Disabled/u, 'b0: settled disabled listener')
+    assert(/^> Enable ACP(?:\s|$)/mu.test(firstFrame),
+      `b0: a disabled Host must focus its ONE runtime action:\n${firstFrame}`)
+    assert(firstFrame.includes('dsh --profile pi-tui acp stdio'),
+      `b0: the page must paint the official Profile client command:\n${firstFrame}`)
+    assert(!exists(tuiSocket), 'b0: merely opening the ACP access page must not bind acp.sock')
+    // ENABLE through the real page (the disabled Host's first focus).
     tuiSettings.send('\r')
     await tuiSettings.waitForScreen('Verified', 'b0 enable: Verified', 60_000)
-    const tuiSocket = socketPathFor(scopeId)
-    assert(exists(tuiSocket), 'b0: the REAL TUI Settings Confirm must bind acp.sock on the running Host')
+    assert(exists(tuiSocket), 'b0: the REAL TUI page Confirm must bind acp.sock on the running Host')
     const tuiSocketInfo = lstatSync(tuiSocket)
     assert(tuiSocketInfo.isSocket() && (tuiSocketInfo.mode & 0o777) === 0o600,
-      'b0: the TUI-enabled socket must be a 0600 socket')
+      'b0: the page-enabled socket must be a 0600 socket')
     const tuiHostAfterEnable = await hostStatus(host1)
-    // Disable through the SAME real TUI: Esc back to the rows, reopen, pick Off.
+    // DISABLE: the first action only enters the risk confirmation. Esc/Cancel
+    // performs ZERO writes and keeps the live socket; only the second explicit
+    // confirmation dispatches the ONE Host disable.
+    await selectRow(tuiSettings, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
+    tuiSettings.send('\r')
+    await tuiSettings.waitForScreen('Disable the local ACP listener?', 'b0 disable: risk confirmation', 30_000)
     tuiSettings.send('\x1b')
-    await tuiSettings.waitForScreen('Visual tools', 'b0 disable: back to rows', 30_000)
-    await selectAcpServerRow(tuiSettings, 'b0 disable')
+    const afterCancel = await waitFrame(tuiSettings, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
+    assert(/Listener\s+Enabled/u.test(afterCancel), 'b0: Cancel must keep the listener enabled')
+    assert(exists(tuiSocket), 'b0: the staged (cancelled) Disable must not touch the live socket')
     tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Choose value', 'b0 disable: ACP choice', 30_000)
-    tuiSettings.send('\x1b[B') // On -> Off
-    await sleep(150)
-    tuiSettings.send('\r')
+    await tuiSettings.waitForScreen('Disable the local ACP listener?', 'b0 disable: risk confirmation again', 30_000)
+    tuiSettings.send('\r') // the SECOND explicit confirmation
     await tuiSettings.waitForScreen('Verified', 'b0 disable: Verified', 60_000)
-    await waitUntil(() => !exists(tuiSocket), 'b0: acp.sock to retire after the TUI Confirm disable')
+    await waitUntil(() => !exists(tuiSocket), 'b0: acp.sock to retire after the confirmed page disable')
     const tuiHostAfterDisable = await hostStatus(host1)
-    assert(tuiHostAfterDisable.pid === tuiHostAfterEnable.pid,
-      'b0: the real TUI Settings Confirm toggle must not replace the Host')
-
-    // Plan §4.5: the persisted autoStart preference is ALSO writable from the
-    // REAL TUI keyboard (not only via a Peer settings call). FR5-B moved the
-    // row to General; confirm `Start ACP automatically` On (Verified = Host
-    // write + official authoritative read-back agreed), then restore Off.
-    tuiSettings.send('\x1b')
-    await tuiSettings.waitForScreen('Visual tools', 'b0 autostart: back to Tools rows', 30_000)
-    // The Settings header text varies with the physical width; the rail is
-    // proven by the painted General category instead.
-    for (let step = 0; step < 3 && !/^\s*> General\b/mu.test(await frameOf(tuiSettings)); step += 1) {
-      tuiSettings.send('\x1b')
-      await sleep(300)
-    }
-    await enterGeneralRows(tuiSettings, 'b0 autostart')
-    await selectAcpAutostartRow(tuiSettings, 'b0 autostart On')
+    assert(tuiHostAfterDisable.pid === hostBeforeSettings.pid
+      && tuiHostAfterDisable.pid === tuiHostAfterEnable.pid
+      && tuiHostAfterDisable.localHost.instanceId === hostBeforeSettings.localHost.instanceId,
+      'b0: the real TUI page toggle must not replace the Host')
+    // NEXT HOST START: the SAME page edits the persisted preference; it must
+    // never bind the running Host's socket.
+    await selectRow(tuiSettings, /^> Start automatically(?:\s|$)/mu, 'b0 autostart: row')
     tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Choose value', 'b0 autostart: choice', 30_000)
-    tuiSettings.send('\x1b[A') // Off (default) -> On
-    await sleep(150)
+    await tuiSettings.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: choice', 30_000)
+    tuiSettings.send('\r') // stage the opposite candidate (On)
+    await tuiSettings.waitForScreen('Save the next Host start preference as On?', 'b0 autostart: confirm step', 30_000)
     tuiSettings.send('\r')
     await tuiSettings.waitForScreen('Verified', 'b0 autostart On: Verified', 60_000)
-    tuiSettings.send('\x1b')
-    await tuiSettings.waitForScreen('Backend', 'b0 autostart: back to General rows', 30_000)
-    await selectAcpAutostartRow(tuiSettings, 'b0 autostart Off')
+    await waitFrame(tuiSettings, /Start automatically\s+On · Change…/u, 'b0 autostart On: persisted re-read')
+    assert(!exists(tuiSocket), 'b0: saving autoStart On must never bind the current Host socket')
+    await selectRow(tuiSettings, /^> Start automatically(?:\s|$)/mu, 'b0 autostart: restore row')
     tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Choose value', 'b0 autostart: choice 2', 30_000)
-    tuiSettings.send('\x1b[B') // On -> Off
-    await sleep(150)
+    await tuiSettings.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: restore choice', 30_000)
+    await selectRow(tuiSettings, /^> Off(?:\s|$)/mu, 'b0 autostart: Off candidate')
+    tuiSettings.send('\r')
+    await tuiSettings.waitForScreen('Save the next Host start preference as Off?', 'b0 autostart: restore confirm step', 30_000)
     tuiSettings.send('\r')
     await tuiSettings.waitForScreen('Verified', 'b0 autostart Off: Verified', 60_000)
+    await waitFrame(tuiSettings, /Start automatically\s+Off(?: \(default\))? · Change…/u, 'b0 autostart Off: persisted re-read')
+    // Leave the page and the workspace through the REAL Esc ladder, then exit.
+    for (let step = 0; step < 4 && (await frameOf(tuiSettings)).includes('Settings ·'); step += 1) {
+      tuiSettings.send('\x1b')
+      await sleep(220)
+    }
+    assert(!(await frameOf(tuiSettings)).includes('Settings ·'), 'b0: the Settings workspace must close with the real Esc ladder')
     tuiSettings.send('/exit\r')
     try { await tuiSettings.waitForExit(60_000) } catch { await tuiSettings.dispose() }
-    trace('acp-po1b/tui-settings-confirm', { enabledViaTui: true, disabledViaTui: true, socket0600: true, sameHost: true, autoStartViaTui: true })
+    trace('acp-po1b/tui-settings-confirm', {
+      pageFirstFrameNonWriting: true,
+      commandPainted: true,
+      enabledViaTui: true,
+      cancelledDisableZeroWrite: true,
+      disabledViaTui: true,
+      socket0600: true,
+      sameHost: true,
+      autoStartViaTui: true,
+    })
 
     // ── b) RUNTIME TOGGLE through the private Peer control ───────────────────
     const peer = await startPeer('acp-po1b runtime peer')
@@ -479,29 +489,41 @@ export async function runAcpPo1bOptInControl(context) {
     const tui2Ready = await tui2.waitFor(record => record.m4a0 === 'ready', 'acp-po1b re-enable TUI ready', 180_000)
     assert(tui2Ready.surfaceMounted === true && tui2Ready.transport === 'connected',
       'b: after re-enabling ACP the original Split TUI must still mount its surface')
-    // PO-5E: the public `/acp` quick control on this REAL Split Client. ONE
-    // explicit menu action must reach the SAME Host controller, then the menu
-    // presents the authoritative re-read. Closing the menu afterwards retires
-    // the presentation only: the accepted Host mutation is never undone.
+    // PO-5E / PR-B: the public `/acp` entry on this REAL Split Client is the
+    // SAME `Settings · Host · ACP access` typed deep link. ONE explicit Disable
+    // confirmation must reach the SAME Host controller, disconnect a REAL
+    // connected ACP peer and retire the socket while the Host/TUI keep running.
     tui2.send('/acp\r')
-    await tui2.waitForScreen('Status: enabled', 'acp command: enabled menu', 60_000)
-    await tui2.waitForScreen('Disable ACP', 'acp command: disable action', 60_000)
-    tui2.send('\x1b[B') // the status fact row -> the ONE admitted action
-    await tui2.waitForScreen("Stop this Host's local ACP v1 listener", 'acp command: disable action selected', 30_000)
+    await tui2.waitForScreen('Settings · Host · ACP access', 'acp command: typed deep link', 60_000)
+    await waitFrame(tui2, /Listener\s+Enabled/u, 'acp command: settled enabled listener')
+    // A REAL ACP peer is connected and initialized BEFORE the disable request;
+    // its closure is the observable disconnect fact.
+    const slashPeer = await openAcpClient(scopeDirOf(scopeId))
+    const slashInit = await slashPeer.initialize(1)
+    assert(slashInit?.result?.protocolVersion === 1, 'acp command: the held peer must initialize')
+    await selectRow(tui2, /^> Disable ACP…(?:\s|$)/mu, 'acp command: disable action')
     tui2.send('\r')
-    await tui2.waitForScreen('Status: disabled', 'acp command: authoritative re-read', 60_000)
+    await tui2.waitForScreen('Disable the local ACP listener?', 'acp command: risk confirmation', 30_000)
+    tui2.send('\r') // the ONE explicit confirmation
+    await tui2.waitForScreen('Verified', 'acp command: authoritative read-back', 60_000)
     await waitUntil(() => !exists(socketPath), 'b: the /acp disable retires acp.sock')
-    const afterAcpMenu = await hostStatus(host1)
-    assert(afterAcpMenu.pid === hostPidBefore && afterAcpMenu.localHost.instanceId === instanceBefore,
-      'b: the /acp menu must control the SAME Host')
-    tui2.send('\x1b') // close only: never undo the accepted disable
+    await slashPeer.closed
+    const afterAcpPage = await hostStatus(host1)
+    assert(afterAcpPage.pid === hostPidBefore && afterAcpPage.localHost.instanceId === instanceBefore,
+      'b: the /acp page must control the SAME Host')
+    // Esc returns to the Host Rows; closing the page never re-enables or undoes
+    // the accepted Host disable.
+    tui2.send('\x1b')
+    await tui2.waitForScreen('Backend', 'acp command: back to the Host rows', 30_000)
     await sleep(300)
-    assert(!exists(socketPath), 'b: closing the /acp menu must never undo the accepted Host write')
+    assert(!exists(socketPath), 'b: closing the /acp page must never undo the accepted Host write')
     trace('acp-po1b/slash-command', {
-      enabledMenu: true,
-      disabledViaMenu: true,
-      authoritativeReread: true,
+      typedDeepLink: true,
+      heldPeerDisconnected: true,
+      confirmedDisable: true,
+      authoritativeReadBack: true,
       sameHost: true,
+      backToHostRows: true,
       closeDoesNotUndo: true,
     })
     // Leave the listener ENABLED for the preference scenario (it was enabled

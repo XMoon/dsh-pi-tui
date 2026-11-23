@@ -694,8 +694,9 @@ that grant instead of the whole terminal height.
   grant shorter than that view the compositor clamp applies. It keeps that
   degradation and adds no second scrollport; "every render branch fits the
   grant" holds for the panel's own assemblies, not for the recorder view.
-- `SettingsList` limits are retained deliberately for the remaining independent
-  consumer (`/acp` on the Split backend): the list keeps
+- `SettingsList` limits are retained deliberately for that component's own
+  generic `TuiApp.openSettings` entry (no live command opens it any more since
+  the PiTui `/acp` shortcut menu was retired): the list keeps
   `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its overlay
   frame grants at most 26 content rows on any terminal taller than 30 rows. This
   is a viewport/grant rule of that component, NOT the Settings Workspace:
@@ -1062,12 +1063,13 @@ owns only the lease, focus and write-lifecycle mechanics.
   under one freeze window before committing their own state. A Settings open that
   finds a blocking owner already active is refused.
 - **There is no second settings surface behind the workspace.** The retired
-  complete settings editor and its compatibility bridge no longer exist: no
-  Settings level hands the user off to another editor, so nothing can mount a
-  `SettingsList` under or after this lease. The independent `SettingsList`
-  consumer (`/acp` on the Split backend), together with the
-  independent `/preset` capturing overlay, are their OWN overlays opened by
-  their own commands, never a continuation of a Settings workspace.
+  complete settings editor, its compatibility bridge and the retired PiTui
+  `/acp` shortcut menu no longer exist: no Settings level hands the user off to
+  another editor, so nothing can mount a `SettingsList` under or after this
+  lease. The one independent `/preset` capturing overlay is its OWN overlay
+  opened by its own command, never a continuation of a Settings workspace;
+  `/web` and `/acp` are typed same-lease Settings deeplinks (see
+  [surface-settings.md](./surface-settings.md)).
 - **Read projection, not a second store.** The panel holds no ConfigPort and no
   subscription: the `/settings` command assembles a detached snapshot at open and
   at the explicit `R` refresh, and the panel renders it. Its only write verb hands

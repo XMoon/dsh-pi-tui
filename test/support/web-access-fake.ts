@@ -30,9 +30,9 @@ export function unavailableWebAccess(): WebAccessPort {
  * The truthful-unavailable {@link AcpAccessPort} for `TuiCommandRunner` fakes.
  *
  * A runner fake is not a Split Host: it serves the same missing capability a
- * Direct backend serves, so the Settings `ACP Server` row driven through it
- * observes the unsupported path instead of a fabricated listener state. Tests
- * that exercise the Remote toggle supply their own explicit port.
+ * Direct backend serves, so the `Settings → Host → ACP access` page driven
+ * through it observes the unsupported path instead of a fabricated listener
+ * state. Tests that exercise the Remote toggle supply their own explicit port.
  */
 export function unavailableAcpAccess(): AcpAccessPort {
   const reason = 'test: the local ACP listener controls are unavailable'
