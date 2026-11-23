@@ -3,12 +3,14 @@ import test from 'node:test'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { COMPAT_MATRIX, currentDshQualification } from '../../scripts/lib/dsh-compat.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   CI_CONFIG_DEFAULTS,
   resolveCiConfig,
   resolveDshContext,
   resolveDshMode,
+  resolveFreshProfileMatrix,
 } from '../../scripts/dsh-ci-context.mjs'
 
 const expectedNpmDshVersion = Object.entries(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).devDependencies ?? {})
@@ -84,6 +86,7 @@ test('context uses the current DSH target in every mode and exposes the source p
   assert.equal(main.version, expectedNpmDshVersion)
   assert.equal(main.sourceRef, '')
   assert.equal(main.sourceExpectedVersion, '')
+  assert.deepEqual(main.freshProfileMatrix, resolveFreshProfileMatrix())
 
   // The tracked policy owns next's target; main stays npm.
   const next = resolveDshContext({ eventName: 'push', ref: 'refs/heads/next' })
@@ -109,6 +112,22 @@ test('context uses the current DSH target in every mode and exposes the source p
   assert.equal(forcedSource.sourceExpectedVersion, trackedSourceConfig.expectedVersion)
 })
 
+
+test('Fresh Profile platform matrix derives DSH versions from the current compatibility row', () => {
+  const { versions, recommended } = currentDshQualification()
+  assert.deepEqual(resolveFreshProfileMatrix(), {
+    include: [
+      ...versions.map(dsh => ({ os: 'ubuntu-24.04', dsh })),
+      { os: 'macos-latest', dsh: recommended },
+    ],
+  })
+  const missingRecommended = structuredClone(COMPAT_MATRIX)
+  missingRecommended.matrix.at(-1).versions = versions.filter(version => version !== recommended)
+  assert.throws(() => resolveFreshProfileMatrix(missingRecommended), /current DSH compatibility row/u)
+  const wrongLine = structuredClone(COMPAT_MATRIX)
+  wrongLine.matrix.at(-1).tui = '0.0.0'
+  assert.throws(() => resolveFreshProfileMatrix(wrongLine), /current DSH compatibility row/u)
+})
 
 // ---------------------------------------------------------------------------
 // The accelerated DAG's SHAPE.

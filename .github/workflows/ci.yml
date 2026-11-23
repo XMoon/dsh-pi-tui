@@ -57,6 +57,7 @@ jobs:
       version: ${{ steps.context.outputs.version }}
       source_ref: ${{ steps.context.outputs.source_ref }}
       source_expected_version: ${{ steps.context.outputs.source_expected_version }}
+      fresh_profile_matrix: ${{ steps.context.outputs.fresh_profile_matrix }}
       # The accelerated DAG's shape, resolved and validated ONCE here. No
       # consumer reads `vars.*` directly: a matrix built from one value and
       # an aggregate from another would disagree about what "all shards"
@@ -929,16 +930,7 @@ jobs:
     if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            dsh: 0.2.2-rc.3
-          - os: ubuntu-24.04
-            dsh: 0.2.2-rc.4
-          - os: ubuntu-24.04
-            dsh: 0.2.2-rc.5
-          - os: macos-latest
-            dsh: 0.2.2-rc.5
+      matrix: ${{ fromJSON(needs.dsh-context.outputs.fresh_profile_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
