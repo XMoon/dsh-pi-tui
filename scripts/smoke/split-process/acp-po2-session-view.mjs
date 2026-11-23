@@ -783,12 +783,14 @@ export async function runAcpPo2SessionView(context) {
     const rawI = track(await openAcpClient(scopeDir))
     const uninit = await sendRequest(rawI, 5, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
     // A Session call before the handshake completes is a JSON-RPC invalid
-    // request (the listener answers it; the View's own initialize gate never
-    // runs), and its stable data code still names the uninitialized View.
+    // request refused by the SDK's OWN connection gate before any product
+    // handler runs: no Session is created and no LOCAL_ACP_* data exists there.
     assert(uninit?.error?.code === -32600,
       `I: an uninitialized resume must be a JSON-RPC invalid request (got ${JSON.stringify(uninit?.error ?? uninit?.result)})`)
-    assert(uninit?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_INITIALIZED',
-      `I: an uninitialized resume must name LOCAL_ACP_VIEW_NOT_INITIALIZED (got ${JSON.stringify(uninit?.error?.data)})`)
+    assert(typeof uninit?.error?.message === 'string' && uninit.error.message.includes('must be initialized before'),
+      `I: the refusal must come from the connection initialization gate (got ${JSON.stringify(uninit?.error?.message)})`)
+    assert(uninit?.error?.data === undefined,
+      `I: the pre-handshake refusal carries no product data code (got ${JSON.stringify(uninit?.error?.data)})`)
     rawI.close()
     await rawI.closed
 

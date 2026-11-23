@@ -158,11 +158,12 @@ profile's independent `autoStart` preference enables it (see below).
   `initialize.protocolVersion` — including a client that requests a higher
   version — with `protocolVersion: 1`; the client decides whether v1 is
   acceptable or disconnects. A second `initialize` on the same connection is
-  rejected. A request to a registered Session handler before the handshake
-  completes is JSON-RPC `-32600 Invalid Request` (the stable
-  `LOCAL_ACP_SESSION_NOT_READY` / `LOCAL_ACP_VIEW_NOT_INITIALIZED` data code is
-  retained for diagnosis); after the handshake, unsupported Session operations
-  keep their existing `LOCAL_ACP_SESSION_NOT_READY` business classification.
+  rejected. A request to any registered Session handler before the handshake
+  completes is JSON-RPC `-32600 Invalid Request`, refused by the pinned ACP SDK's
+  own connection-initialization gate BEFORE this product's handler runs, so that
+  pre-handshake path carries no `LOCAL_ACP_*` diagnostic data and has no Host
+  side effect; after the handshake, unsupported Session operations keep their
+  existing `LOCAL_ACP_SESSION_NOT_READY` business classification.
   The response names `agentInfo.name` `dsh-pi-tui` and `agentInfo.version` the
   installed `@xmoon76/dsh-pi-tui` bundle version — never the DSH engine version.
   `authMethods` stays empty and `loadSession` is always `false`. When the Host

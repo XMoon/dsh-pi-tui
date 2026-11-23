@@ -107,7 +107,7 @@
     }
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "1.4.0",
+    "@agentclientprotocol/sdk": "2.9.1",
     "@resvg/resvg-js": "2.6.2",
     "@stencil-hq/tern": "0.2.0",
     "chalk": "^5.4.1",

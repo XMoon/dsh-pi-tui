@@ -395,7 +395,7 @@ test('two connections reuse JSON-RPC id 1 independently and one closing does not
   }
 })
 
-test('unsupported Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY before and after initialize', async t => {
+test('unsupported Session methods are refused by the initialize gate before the handshake and fail closed after it', async t => {
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
   t.after(() => listener.close())
@@ -410,13 +410,14 @@ test('unsupported Session methods fail closed with LOCAL_ACP_SESSION_NOT_READY b
       { id: 15, method: 'session/set_config_option', params: { sessionId: 's', configId: 'c', value: 'v' } },
     ]
     // Before initialize every registered Session request is JSON-RPC Invalid
-    // Request, while the stable data code keeps the existing diagnosis.
+    // Request, refused by the SDK connection gate before any handler runs.
     for (const call of cases) {
       client.send({ jsonrpc: '2.0', ...call })
-      const early = (await client.next()) as { id: number; error?: { code: number; data?: { code?: string } } }
+      const early = (await client.next()) as { id: number; error?: { code: number; message?: string; data?: unknown } }
       assert.equal(early.id, call.id)
       assert.equal(early.error?.code, -32600, `${call.method} must be invalid before initialize`)
-      assert.equal(early.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+      assert.match(early.error?.message ?? '', new RegExp(`must be initialized before '${call.method.replaceAll('/', '\\/')}'`, 'u'))
+      assert.equal(early.error?.data, undefined, `${call.method} carries no product diagnostic data before the handshake`)
     }
 
     initialize(client, 20)
@@ -1344,11 +1345,13 @@ test('a Host Session View advertises resume/close and serves new/close over the 
   t.after(() => listener.close())
   const client = await RawClient.open(listener.socketPath)
   try {
-    // Before initialize a lifecycle request is refused with the View code.
+    // Before initialize the SDK's own connection gate refuses the request, so
+    // this product's handler (and its diagnostic data code) never runs.
     client.send({ jsonrpc: '2.0', id: 1, method: 'session/new', params: { cwd: '/host/x', mcpServers: [] } })
-    const pre = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    const pre = (await client.next()) as { error?: { code: number; message?: string; data?: unknown } }
     assert.equal(pre.error?.code, -32600)
-    assert.equal(pre.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED')
+    assert.match(pre.error?.message ?? '', /must be initialized before 'session\/new'/u)
+    assert.equal(pre.error?.data, undefined)
 
     initialize(client, 2)
     const init = (await client.next()) as {
@@ -2118,9 +2121,10 @@ test('session/prompt keeps uninitialized, unattached, invalid and in-flight requ
   const client = await RawClient.open(listener.socketPath)
   try {
     client.send({ jsonrpc: '2.0', id: 1, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'x' }] } })
-    const uninitialized = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    const uninitialized = (await client.next()) as { error?: { code: number; message?: string; data?: unknown } }
     assert.equal(uninitialized.error?.code, -32600)
-    assert.equal(uninitialized.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED')
+    assert.match(uninitialized.error?.message ?? '', /must be initialized before 'session\/prompt'/u)
+    assert.equal(uninitialized.error?.data, undefined)
 
     initialize(client, 2)
     await client.next()
@@ -2933,11 +2937,12 @@ test('pipelined Session operations stay uninitialized until asynchronous image c
     initialize(client, 1)
     await entered.promise
     client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-pipeline', cwd: '/host/proj' } })
-    const preComplete = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    const preComplete = (await client.next()) as { id?: number; error?: { code: number; message?: string; data?: unknown } }
     assert.equal(preComplete.id, 2)
     assert.equal(preComplete.error?.code, -32600)
-    assert.equal(preComplete.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_INITIALIZED',
+    assert.match(preComplete.error?.message ?? '', /must be initialized before 'session\/resume'/u,
       'session operations cannot race ahead of the initialize response')
+    assert.equal(preComplete.error?.data, undefined)
     capability.resolve(true)
     const init = (await client.next()) as { id?: number; result?: { agentCapabilities?: { promptCapabilities?: { image?: boolean } } } }
     assert.equal(init.id, 1)

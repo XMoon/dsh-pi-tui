@@ -5,10 +5,11 @@
  */
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import * as acp from '@agentclientprotocol/sdk'
 import sharp from 'sharp'
@@ -19,7 +20,24 @@ import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
-const SDK_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.resolve('@agentclientprotocol/sdk')), 'utf8')).version
+/**
+ * The installed SDK version, read from the manifest of the package that
+ * actually resolved. The package root export moved to `dist/v1/stable` in
+ * 2.9.1, so a fixed relative depth is not a fact: walk up to the manifest that
+ * names THIS package.
+ */
+const SDK_VERSION = (() => {
+  let dir = dirname(fileURLToPath(import.meta.resolve('@agentclientprotocol/sdk')))
+  for (let depth = 0; depth < 8; depth += 1) {
+    const candidate = join(dir, 'package.json')
+    if (existsSync(candidate)) {
+      const manifest = JSON.parse(readFileSync(candidate, 'utf8'))
+      if (manifest.name === '@agentclientprotocol/sdk' && typeof manifest.version === 'string') return manifest.version
+    }
+    dir = dirname(dir)
+  }
+  throw new SplitSmokeAssertionError('independent ACP SDK client: the resolved SDK package manifest is unavailable')
+})()
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 
 function requireFact(condition, label) {
