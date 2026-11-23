@@ -170,6 +170,12 @@ export class AcpAssistantStream {
   private readonly previews = new Map<number, PreviewBlock>()
   private sent = false
   private broken = false
+  /**
+   * Permanently closed because the attempt's terminal can never be observed.
+   * Unlike `broken` (a framing violation whose REAL `end` is still a true
+   * fact), a closed attempt ignores every later frame completely.
+   */
+  private closed = false
   /** The terminal fact, once the official `end` frame arrived. */
   private terminal?: AcpStreamEnd
   /** Resolves once the terminal fact is known — or forever unknowable. */
@@ -197,6 +203,16 @@ export class AcpAssistantStream {
   }
 
   /**
+   * Whether a REAL terminal fact was recorded. A permanently closed attempt
+   * never records one, so a late `end` frame leaves this false; a merely
+   * framing-broken attempt still records its own real `end` (the join may then
+   * still find the preview matching the committed message).
+   */
+  get hasTerminal(): boolean {
+    return this.terminal !== undefined
+  }
+
+  /**
    * Declare that this attempt's terminal frame can never be observed.
    *
    * The attempt is then PERMANENTLY closed: it keeps whatever it already
@@ -206,6 +222,7 @@ export class AcpAssistantStream {
    * is inert" — it must not depend on the surrounding output-tail ordering.
    */
   endWithoutTerminal(): void {
+    this.closed = true
     this.broken = true
     this.terminalWait.resolve(undefined)
   }
@@ -217,7 +234,7 @@ export class AcpAssistantStream {
 
   /** Whether this attempt may still produce deltas. */
   isOpen(): boolean {
-    return !this.broken && this.terminal === undefined
+    return !this.closed && !this.broken && this.terminal === undefined
   }
 
   /**
@@ -228,7 +245,7 @@ export class AcpAssistantStream {
    *   carries an unrecognized chunk kind.
    */
   acceptChunk(frame: Extract<AcpAssistantStreamFrame, { type: 'chunk' }>): AcpChunkAction {
-    if (this.broken) return { kind: 'broken' }
+    if (this.closed || this.broken) return { kind: 'broken' }
     if (this.terminal !== undefined) return { kind: 'broken' }
     if (frame.revision !== this.revision + 1) return this.breakStream()
     this.revision = frame.revision
@@ -244,10 +261,13 @@ export class AcpAssistantStream {
    *   chunk count. A mismatch breaks the attempt and keeps the terminal fact.
    */
   acceptEnd(frame: Extract<AcpAssistantStreamFrame, { type: 'end' }>): boolean {
-    if (this.terminal !== undefined) return false
+    // A permanently closed attempt (its terminal became unobservable) treats a
+    // late `end` as a complete no-op: it may not even record an outcome, so the
+    // unknowable terminal fact stays unknowable.
+    if (this.closed || this.terminal !== undefined) return false
     if (this.broken) {
-      // A broken attempt still records its real terminal fact: the join must
-      // know that no durable message of this attempt can be re-sent.
+      // A framing-broken attempt still records its REAL terminal fact: the join
+      // must know that no durable message of this attempt can be re-sent.
       this.terminal = frame.outcome
       this.terminalWait.resolve(frame.outcome)
       return false

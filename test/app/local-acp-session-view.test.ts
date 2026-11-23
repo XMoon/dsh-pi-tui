@@ -4605,6 +4605,7 @@ test('G-ACP2-PR1 ST-03: an attempt whose terminal can never be observed is perma
   attempt.endWithoutTerminal()
   assert.equal(attempt.isOpen(), false, 'a lost terminal closes the attempt for good')
   assert.equal(await attempt.terminalFact, undefined, 'the terminal fact stays unknowable')
+  assert.equal(attempt.hasTerminal, false, 'no terminal fact was recorded yet')
   assert.deepEqual(
     attempt.acceptChunk({ type: 'chunk', attemptId: 'a1', revision: 3, index: 1, chunk: { type: 'text-delta', index: 0, text: 'late' } }),
     { kind: 'broken' },
@@ -4615,9 +4616,18 @@ test('G-ACP2-PR1 ST-03: an attempt whose terminal can never be observed is perma
     false,
     'a late end frame cannot claim the closed attempt',
   )
+  // The late end is a COMPLETE no-op: it may not even record an outcome.
+  assert.equal(await attempt.terminalFact, undefined, 'a late end never repairs the unknowable terminal fact')
+  assert.equal(attempt.hasTerminal, false, 'a late end on a permanently closed attempt records NOTHING')
+  assert.equal(attempt.isOpen(), false, 'a late end never reopens the attempt')
   assert.deepEqual(attempt.streamedBlocks(), [{ kind: 'message', text: 'hi' }],
     'the delivered preview stays available for the fail-closed join')
   assert.equal(attempt.hasSent(), true)
+  assert.deepEqual(
+    attempt.acceptChunk({ type: 'chunk', attemptId: 'a1', revision: 5, index: 3, chunk: { type: 'text-delta', index: 0, text: 'later' } }),
+    { kind: 'broken' },
+    'the closed attempt stays closed for every later frame',
+  )
 
   // View-level: a frame of an already-terminal turn never reaches the connection.
   {
