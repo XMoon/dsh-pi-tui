@@ -17,10 +17,12 @@
  */
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -362,6 +364,7 @@ test('an unreadable profile directory is an explicit index-unavailable, never ok
     } as never,
   })
   const persistence: HistorySearchPersistenceLike = {
+    stat: async () => undefined,
     list: async () => [],
     open: async () => { throw new Error('unused') },
   }
@@ -402,6 +405,7 @@ test('queries answered during the asynchronous bootstrap are a truthful loading'
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const persistence: HistorySearchPersistenceLike = {
+    stat: async () => undefined,
     list: async () => {
       await gate
       return []
@@ -538,6 +542,206 @@ test('dispose aborts the owned bootstrap, withdraws listeners and closes the dat
     await wire.dispose()
   }
 })
+
+test('a real AgentHandle disposal settles the index through the official Session lifecycle', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-real-disposal')
+  try {
+    const sessionId = 'history-pr1-dispose'
+    const handle = await wire.host.ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+      meta: { cwd: wire.host.anchorDir },
+    })
+    await prompt(wire, sessionId, 'req-pr1-dispose', 'hsp-pr1-dispose-text')
+    const before = await waitForSettled(
+      wire,
+      { scope: 'session', sessionId, query: 'hsp-pr1-dispose-text', limit: 25 },
+      'pre-disposal occurrence',
+    )
+    assert.equal(before.kind, 'ready', JSON.stringify(before))
+    if (before.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(before.items.length, 1)
+
+    const service = wire.service() as unknown as {
+      index: { checkpointOf(id: string): { sourceState: string; dirty: boolean } | undefined }
+      disposalCounters: { seen: number; completed: number; statCalls: number }
+      writeTail: Promise<void>
+      verifySources(): Promise<void>
+    }
+    const statCallsBefore = service.disposalCounters.statCalls
+    const disposed: string[] = []
+    const off = wire.host.ctx.on('session/disposed', (session) => {
+      disposed.push(String((session as { readonly id?: unknown }).id))
+    }, { global: true })
+    try {
+      await handle.dispose()
+    } finally {
+      off()
+    }
+    assert.ok(disposed.includes(sessionId), `the official lifecycle must dispose the exact Session: ${JSON.stringify(disposed)}`)
+
+    // Settle on THIS Session's official disposal verification: the point lookup
+    // ran and the checkpoint reached a decision. Another fixture lifecycle event
+    // may have bumped the aggregate counters earlier, so the per-Session
+    // checkpoint is the real barrier.
+    const checkpoint = () => service.index.checkpointOf(sessionId)
+    const started = Date.now()
+    while (
+      (service.disposalCounters.statCalls <= statCallsBefore
+        || (checkpoint()?.dirty !== true && checkpoint()?.sourceState !== 'persisted'))
+      && Date.now() - started < 10_000
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await service.writeTail
+    assert.ok(service.disposalCounters.statCalls > statCallsBefore, 'the disposal must read exactly one official snapshot')
+    // The live checkpoint's header hash names the IN-MEMORY header (DSH adds
+    // `delegationDepth` when the durable header materializes), so the disposal
+    // must keep the accepted rows provisional instead of claiming a proof it
+    // cannot make. The SAME periodic verification pass then reconciles it.
+    assert.equal(checkpoint()?.sourceState, 'live')
+    assert.equal(checkpoint()?.dirty, true)
+    const uncertain = await wire.search({ scope: 'session', sessionId, query: 'hsp-pr1-dispose-text', limit: 25 })
+    assert.equal(uncertain.kind, 'incomplete', JSON.stringify(uncertain))
+
+    await service.verifySources()
+    assert.equal(checkpoint()?.sourceState, 'persisted')
+    assert.equal(checkpoint()?.dirty, false)
+    const after = await waitForSettled(
+      wire,
+      { scope: 'session', sessionId, query: 'hsp-pr1-dispose-text', limit: 25 },
+      'post-disposal occurrence',
+    )
+    assert.equal(after.kind, 'ready', JSON.stringify(after))
+    if (after.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(after.items.length, 1, 'the proven accepted occurrence must survive disposal exactly once')
+    assert.equal(after.items[0]?.messageId, before.items[0]?.messageId)
+    assert.equal(after.items[0]?.contentSha256, before.items[0]?.contentSha256)
+  } finally {
+    await wire.dispose()
+  }
+})
+
+/**
+ * The isolated visible-diagnostics child: the SAME production service over a
+ * minimal structural official source. Its ONLY purpose is to prove that the
+ * debug metrics reach the standard Diag FILE sink (not a mocked logger) and
+ * never carry Session content, ids or paths. The entry is generated by the
+ * test in its own temporary directory; no production or shared test module
+ * is added.
+ */
+function historyDebugProbeScript(historyModuleUrl: string): string {
+  return `
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { PiTuiHistorySearchHostService } from ${JSON.stringify(historyModuleUrl)}
+
+const root = process.env.DSH_HOME
+if (root === undefined || root === '') throw new Error('DSH_HOME is required')
+const profileDir = join(root, 'profile')
+mkdirSync(profileDir, { recursive: true })
+
+const header = { id: 'history-pr1-debug-child', cwd: '/repo/history-pr1-child' }
+const events = [{
+  type: 'agent/inbox/spliced',
+  seq: 0,
+  time: 1000,
+  data: {
+    target: 'next-turn',
+    start: 0,
+    inserted: [{
+      id: 'history-pr1-debug-message',
+      role: 'user',
+      content: [{ type: 'text', text: 'hsp-child-secret-text' }],
+      source: { kind: 'user', rpcId: 'rpc-pr1-child' },
+    }],
+  },
+}]
+const persistence = {
+  identity: Symbol('debug-probe-persistence'),
+  async list() { return [{ header, eventCount: 1, revision: 1 }] },
+  async stat(id) { return id === header.id ? { header, eventCount: 1, revision: 1 } : undefined },
+  async open() {
+    return {
+      header,
+      inheritedEventCount: 0,
+      async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
+        return { events: events.slice(offset, offset + length) }
+      },
+      async close() {},
+    }
+  },
+}
+const query = {
+  async listSessions() { return [{ header, live: false, persisted: true }] },
+  async observeSession() { throw new Error('unused') },
+}
+const ctx = new Context()
+const lifecycle = new AbortController()
+const invocationCtx = ctx.extend({
+  invocation: {
+    peer: { principal: { kind: 'owner' }, signal: lifecycle.signal },
+    signal: lifecycle.signal,
+  },
+})
+const service = new PiTuiHistorySearchHostService(invocationCtx, {
+  profileContext: () => ({ dir: profileDir }),
+  sessionPersistence: () => persistence,
+  sessionQuery: () => query,
+})
+const deadline = Date.now() + 20_000
+for (;;) {
+  const answer = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+  if (answer.kind === 'ready') break
+  if (answer.kind === 'unavailable') throw new Error('index unavailable: ' + JSON.stringify(answer))
+  if (Date.now() > deadline) throw new Error('history index readiness timeout')
+  await new Promise(resolve => setTimeout(resolve, 10))
+}
+service.observeDisposedSession({ id: header.id })
+await service.writeTail
+await service.dispose()
+await ctx.fiber.dispose()
+`
+}
+
+test('explicit debug diagnostics reach the standard file sink without Session content', async (t) => {
+  const life = testLifecycle(t)
+  // Profile and log live in the run's isolated temp root; the generated probe
+  // entry lives under the checkout's ignored `temp/` so Node resolves the
+  // repository's own node_modules exactly like the test process does.
+  const root = life.tempDir('dsh-history-search-debug-')
+  const historyModuleUrl = new URL('../../src/app/host/features/history-search.ts', import.meta.url).href
+  const scriptBase = join(fileURLToPath(new URL('../../', import.meta.url)), 'temp')
+  mkdirSync(scriptBase, { recursive: true })
+  const scriptPath = join(life.tempDir('dsh-history-search-debug-entry-', scriptBase), 'history-search-debug-probe.mjs')
+  writeFileSync(scriptPath, historyDebugProbeScript(historyModuleUrl))
+  const runProbe = (logPath: string, level: string) => spawnSync(process.execPath, [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, DSH_HOME: root, DSH_PI_TUI_LOG: logPath, DSH_PI_TUI_LOG_LEVEL: level },
+    timeout: 60_000,
+  })
+
+  const debugLogPath = join(root, 'history-search-debug.log')
+  const debugRun = runProbe(debugLogPath, 'debug')
+  assert.equal(debugRun.status, 0, `debug probe failed: ${debugRun.stderr}`)
+  const log = readFileSync(debugLogPath, 'utf8')
+  assert.match(log, /history-search\.inventory\.start phase=cold_start directPersistenceListCalls=1 queryListSessionsCalls=1/u)
+  assert.match(log, /history-search\.inventory\.end phase=cold_start outcome=ok elapsedMs=\d+(?:\.\d)? persistedRows=1 mergedRows=1 directPersistenceListCalls=1 queryListSessionsCalls=1/u)
+  assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)?/u)
+  assert.match(log, /history-search\.disposals seen=1 statCalls=1 statNotFound=0 proofProven=1 proofInsufficient=0 proofRollback=0 proofUnreadable=0 statElapsedMsTotal=\d+(?:\.\d)? verifyElapsedMsTotal=\d+(?:\.\d)?/u)
+  assert.equal(log.match(/history-search\.disposals/gu)?.length, 1, 'a single disposal must emit exactly one bounded aggregate')
+  for (const secret of ['hsp-child-secret-text', 'history-pr1-debug-child', '/repo/history-pr1-child', root]) {
+    assert.ok(!log.includes(secret), `the debug diagnostics must not carry ${secret}`)
+  }
+
+  // Control: without explicit debug no service-owned second sink is created.
+  const offLogPath = join(root, 'history-search-off.log')
+  const offRun = runProbe(offLogPath, 'info')
+  assert.equal(offRun.status, 0, `control probe failed: ${offRun.stderr}`)
+  assert.equal(existsSync(offLogPath), false, 'debug-off must not create the service diagnostic sink')
+})
+
 /**
  * A mutable structural official source for the reconcile failure classes that
  * have no public trigger besides the periodic verification pass. `verifySources`
@@ -584,16 +788,32 @@ function mutableDeps(source: MutableOfficialSource): {
     sessionPersistence: () => HistorySearchPersistenceLike
     sessionQuery: () => HistorySearchQueryLike
   }
+  readonly calls: {
+    listCalls: () => number
+    statCalls: () => number
+    statIds: () => readonly string[]
+  }
 } {
+  const snapshot = () => ({
+    header: source.header,
+    ...(source.omitEventCount === true ? {} : { eventCount: source.eventCount ?? source.events.length }),
+    revision: source.revision,
+  })
+  let listCalls = 0
+  let statCalls = 0
+  const statIds: string[] = []
   const persistence: HistorySearchPersistenceLike = {
     identity: Symbol('mutable-persistence'),
     async list() {
+      listCalls += 1
       if (!source.present) return []
-      return [{
-        header: source.header,
-        ...(source.omitEventCount === true ? {} : { eventCount: source.eventCount ?? source.events.length }),
-        revision: source.revision,
-      }]
+      return [snapshot()]
+    },
+    async stat(id) {
+      statCalls += 1
+      statIds.push(id)
+      if (!source.present || String(source.header.id) !== id) return undefined
+      return snapshot()
     },
     async open() {
       return {
@@ -625,6 +845,11 @@ function mutableDeps(source: MutableOfficialSource): {
       profileContext: () => ({ dir: '' }),
       sessionPersistence: () => persistence,
       sessionQuery: () => query,
+    },
+    calls: {
+      listCalls: () => listCalls,
+      statCalls: () => statCalls,
+      statIds: () => [...statIds],
     },
   }
 }
@@ -745,6 +970,55 @@ test('a disposed Session keeps its rows until the durable source proves them', a
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.equal(uncertain?.kind, 'incomplete', JSON.stringify(uncertain))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a disposed Session is verified by one point lookup, never a corpus scan', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-disposal-point-')
+  const source = mutableSource('/repo/disposal-point')
+  const { deps, calls } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const disposeSession = (id: string) => (service as unknown as {
+    observeDisposedSession(session: unknown): void
+  }).observeDisposedSession({ id })
+  const checkpoint = () => (service as unknown as {
+    index: { checkpointOf(sessionId: string): { sourceState: string; dirty: boolean } | undefined }
+  }).index.checkpointOf('mutable-session')
+  const settledWrites = () => (service as unknown as { writeTail: Promise<void> }).writeTail
+  try {
+    await waitDirectReady(service)
+
+    const listCallsBefore = calls.listCalls()
+    const statCallsBefore = calls.statCalls()
+    disposeSession('mutable-session')
+    await settledWrites()
+
+    assert.equal(calls.listCalls(), listCallsBefore, 'one Session disposal must not enumerate the whole corpus')
+    assert.equal(calls.statCalls(), statCallsBefore + 1, 'the disposal must read exactly one official snapshot')
+    assert.deepEqual(calls.statIds(), ['mutable-session'], 'the point lookup must receive the exact disposed id')
+    assert.equal(checkpoint()?.sourceState, 'persisted')
+    assert.equal(checkpoint()?.dirty, false)
+    const found = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(found.kind, 'ready', JSON.stringify(found))
+    if (found.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(found.items.length, 1, 'the proven occurrence must remain searchable exactly once')
+
+    // Control: a disposed id this index never held performs NO official read
+    // and never turns an existing Session into a fabricated empty history.
+    disposeSession('mutable-session-without-checkpoint')
+    await settledWrites()
+    assert.equal(calls.statCalls(), statCallsBefore + 1, 'a checkpoint-less disposal must not call stat')
+    assert.equal(calls.listCalls(), listCallsBefore)
+    assert.deepEqual(calls.statIds(), ['mutable-session'])
+    const stillThere = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(stillThere.kind, 'ready', JSON.stringify(stillThere))
+    if (stillThere.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(stillThere.items.length, 1, 'an unknown disposal must not clear an existing occurrence')
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()
