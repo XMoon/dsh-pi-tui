@@ -1776,8 +1776,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       return {}
     } catch (error) {
+      // The cancellation class must be read BEFORE the release marks the replay
+      // stopped, otherwise every failure would be classified as a cancellation.
+      const cancelled = replay.stopped || signal.aborted
       this.releaseFailedLoad(state, op, claim, access, replay)
-      throw this.mapLoadFailure(error, replay, signal)
+      throw this.mapLoadFailure(error, replay, signal, cancelled)
     }
   }
 
@@ -1801,14 +1804,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /** Classify one load failure without leaking an exception or a Host path. */
-  private mapLoadFailure(error: unknown, replay: ViewReplay, signal: AbortSignal): unknown {
-    if (error instanceof LocalAcpViewError || error instanceof AcpScopedMcpError) return error
+  private mapLoadFailure(error: unknown, replay: ViewReplay, signal: AbortSignal, cancelled: boolean): unknown {
     if (replay.overflowed) return loadBackpressure()
+    // The cancellation class is decided FIRST: a Store/notify failure observed
+    // after close/EOF/abort is the replay being cancelled, never a corrupt
+    // attachment or a business rejection.
+    if (cancelled) {
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+    }
+    if (error instanceof LocalAcpViewError || error instanceof AcpScopedMcpError) return error
     if (error instanceof AcpProjectionError) {
       return new LocalAcpViewError(error.code, error.message, JSONRPC_INTERNAL_ERROR)
-    }
-    if (replay.stopped || signal.aborted) {
-      return new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
     }
     return new LocalAcpViewError(
       'LOCAL_ACP_VIEW_HOST_ERROR',
@@ -1926,7 +1932,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       case 'compaction/summary':
       case 'compaction/end': {
         const update = compactionUpdate({ seq: event.seq, type: event.type, data: event.data })
-        if (this.acceptCompaction(claim, update)) await this.sendProjection(claim, update)
+        if (!this.acceptCompaction(claim, update)) return
+        await this.sendProjection(claim, update)
+        this.acceptCompaction(claim, update, true)
         return
       }
       case 'session/title': {
@@ -1934,8 +1942,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         if (update === undefined) return
         const title = (update as { readonly title?: string }).title
         if (title !== undefined && claim.lastInfo?.title === title) return
-        claim.lastInfo = { ...(title === undefined ? {} : { title }) }
         await this.sendProjection(claim, update)
+        // Recorded only after delivery: a failed send must not suppress the
+        // retry of the same durable title.
+        claim.lastInfo = { ...(title === undefined ? {} : { title }) }
         return
       }
       case 'assistant/message': {
@@ -2142,22 +2152,27 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * a duplicated or out-of-order callback is dropped instead of re-projecting
    * a lifecycle the client already received.
    */
-  private acceptCompaction(claim: ViewClaim, update: SessionUpdate): boolean {
-    if (update.sessionUpdate !== 'compaction_update') return true
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate): boolean
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate, commit: true): void
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate, commit = false): boolean | void {
+    if (update.sessionUpdate !== 'compaction_update') return commit ? undefined : true
     const states = claim.compactions ??= new Map()
     const current = states.get(update.compactionId)
+    let next: 'started' | 'summarized' | 'ended' | undefined
     if (update.status === 'in_progress' && update.summary === undefined) {
-      if (current !== undefined) return false
-      states.set(update.compactionId, 'started')
-      return true
+      if (current === undefined) next = 'started'
+    } else if (update.status === 'in_progress') {
+      if (current === 'started') next = 'summarized'
+    } else if (current === 'started' || current === 'summarized') {
+      next = 'ended'
     }
-    if (update.status === 'in_progress') {
-      if (current !== 'started') return false
-      states.set(update.compactionId, 'summarized')
-      return true
+    if (next === undefined) return commit ? undefined : false
+    // The lifecycle is recorded only AFTER the send succeeded, so a failed
+    // notification cannot consume the one allowed transition.
+    if (commit) {
+      states.set(update.compactionId, next)
+      return undefined
     }
-    if (current !== 'started' && current !== 'summarized') return false
-    states.set(update.compactionId, 'ended')
     return true
   }
 
@@ -2191,6 +2206,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (unit.kind === 'update') {
         if (!this.acceptCompaction(claim, unit.update)) continue
         await this.sendProjection(claim, unit.update)
+        this.acceptCompaction(claim, unit.update, true)
         if (unit.update.sessionUpdate === 'plan' || unit.update.sessionUpdate === 'plan_update') claim.announcedPlan = true
         if (unit.update.sessionUpdate === 'plan_removed') claim.announcedPlan = false
         continue
@@ -2235,6 +2251,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const stored = await access.readOutputImage(ref, replay?.abort.signal ?? UNABORTED_SIGNAL)
       return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType }
     } catch {
+      // A close/EOF/Off during the Store read is NOT a corrupt attachment: it
+      // is the replay being cancelled.
+      if (replay?.stopped === true || replay?.abort.signal.aborted === true) {
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+      }
       throw attachmentLoadFailed()
     }
   }

@@ -5093,7 +5093,8 @@ function projectionView(
   notifications: SessionUpdate[]
   load: () => Promise<Record<string, never>>
   resume: () => Promise<Record<string, never>>
-  holdProjection: () => () => void
+  holdProjection: () => { readonly entered: Promise<void>; readonly release: () => void }
+  failProjection: (times: number) => Promise<void>
   commit: (type: string, data: Record<string, unknown>) => void
   nextSeq: () => number
 } {
@@ -5107,10 +5108,25 @@ function projectionView(
   const conn = registry.createConnection()
   const notifications: SessionUpdate[] = []
   let gate: Promise<void> | undefined
+  let entered: (() => void) | undefined
+  let failures = 0
+  let failureDrain: (() => void) | undefined
   const channels: AcpViewChannels = {
     capabilities: options.capabilities ?? PR2_CAPABILITIES,
     notifyProjection: async (_sessionId, update) => {
-      if (gate !== undefined) await gate
+      if (gate !== undefined) {
+        entered?.()
+        entered = undefined
+        await gate
+      }
+      if (failures > 0) {
+        failures -= 1
+        if (failures === 0) {
+          failureDrain?.()
+          failureDrain = undefined
+        }
+        throw new Error('projection sink failed')
+      }
       notifications.push(update)
     },
   }
@@ -5130,11 +5146,22 @@ function projectionView(
     resume: async () => await registry.resumeSession(conn, access, { sessionId, cwd: '/w' }, channels),
     holdProjection: () => {
       const held = Promise.withResolvers<void>()
+      const blocked = Promise.withResolvers<void>()
       gate = held.promise
-      return () => {
-        gate = undefined
-        held.resolve()
+      entered = blocked.resolve
+      return {
+        entered: blocked.promise,
+        release: () => {
+          gate = undefined
+          held.resolve()
+        },
       }
+    },
+    failProjection: (times: number) => {
+      failures = times
+      const settled = Promise.withResolvers<void>()
+      failureDrain = settled.resolve
+      return settled.promise
     },
     commit: (type: string, data: Record<string, unknown>) => {
       seq += 1
@@ -5399,6 +5426,57 @@ test('G-ACP2-PR2 COMPACT-01/SUB-01/MESSAGE-01 negatives: an unnegotiated client 
     'compaction, session_message and subagent updates require their negotiated capability')
 })
 
+test('G-ACP2-PR2 COMPACT-02: a failed compaction notification does not consume the lifecycle transition', async () => {
+  const view = projectionView('C4')
+  await view.resume()
+  view.notifications.length = 0
+  const failed = view.failProjection(1)
+  view.commit('compaction/start', { compactionId: 'cp-retry', turn: null })
+  await failed
+  // The SAME official start is not a duplicate when the first attempt never
+  // reached the client: the state is recorded only after a successful send.
+  view.commit('compaction/start', { compactionId: 'cp-retry', turn: null })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(view.notifications.map(update => (update as { status?: string }).status), ['in_progress'])
+})
+
+test('G-ACP2-PR2 META-02: a failed title notification does not suppress the same durable title', async () => {
+  const view = projectionView('M3')
+  await view.resume()
+  view.notifications.length = 0
+  const failed = view.failProjection(1)
+  view.commit('session/title', { title: 'Retry title', messageSeqs: [], source: 'user' })
+  await failed
+  view.commit('session/title', { title: 'Retry title', messageSeqs: [], source: 'user' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(view.notifications.map(update => (update as { title?: string }).title), ['Retry title'])
+})
+
+test('G-ACP2-PR2 LOAD-09: a close during a history Store read is a cancellation, not a corrupt attachment', async () => {
+  const view = projectionView('LD9', {
+    history: {
+      header: { sessionId: 'LD9', cwd: '/w' },
+      events: [{
+        seq: 0, type: 'tool/result',
+        data: { message: { toolCallId: 'c1', isError: false, content: [{ type: 'image', attachment: { attachmentId: 'img-held', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }] } },
+      }],
+    },
+  })
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<void>()
+  view.access.imageReadImpl = async () => {
+    readStarted.resolve()
+    await readRelease.promise
+    throw new Error('store read aborted')
+  }
+  const loading = view.load()
+  await readStarted.promise
+  await view.registry.closeSession(view.conn, view.access, 'LD9')
+  readRelease.resolve()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
+    'the abort class wins over the attachment error')
+})
+
 test('G-ACP2-PR2 MESSAGE-01: a verified child message is announced by its association first, while the runtime settlement notice never is', async () => {
   const view = projectionView('A1')
   await view.resume()
@@ -5639,18 +5717,18 @@ test('G-ACP2-PR2 LOAD-03: a turn committed while the snapshot is read replays co
   assert.equal((view.notifications[2] as { content?: { text?: string } }).content?.text, 'while reading')
 })
 
-test('G-ACP2-PR2 LOAD-04: the replay barrier stays closed until the history really drained', async () => {
+test('G-ACP2-PR2 LOAD-07: the replay barrier stays closed until the history really drained', async () => {
   const view = projectionView('LD1', {
     history: {
       header: { sessionId: 'LD1', cwd: '/w' },
       events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
     },
   })
-  const release = view.holdProjection()
+  const hold = view.holdProjection()
   const loading = view.load()
-  // The history notification is HELD at the transport, so the ordered tail is
-  // still draining when the next two facts happen.
-  await new Promise(resolve => setTimeout(resolve, 20))
+  // Deterministic: the sink itself signals that the history notification is
+  // blocked, so the ordered tail is provably still draining here.
+  await hold.entered
   await assert.rejects(
     view.registry.promptSession(view.conn, view.access, {
       sessionId: 'LD1', prompt: [{ type: 'text', text: 'too early' }],
@@ -5661,25 +5739,25 @@ test('G-ACP2-PR2 LOAD-04: the replay barrier stays closed until the history real
   // A DIFFERENT surface commits a durable humch while the drain is running: it
   // must still ride the canonical replay, never the live-only path.
   view.commit('user/message', { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'during drain' }], role: 'user' })
-  release()
+  hold.release()
   await loading
   assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['user_message_chunk', 'user_message_chunk'],
     'the snapshot AND the turn committed during the drain are replayed')
   assert.equal((view.notifications[1] as { content?: { text?: string } }).content?.text, 'during drain')
 })
 
-test('G-ACP2-PR2 LOAD-05: close during the drain cancels the replay instead of publishing a stale history', async () => {
+test('G-ACP2-PR2 LOAD-08: close during the drain cancels the replay instead of publishing a stale history', async () => {
   const view = projectionView('LD2', {
     history: {
       header: { sessionId: 'LD2', cwd: '/w' },
       events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
     },
   })
-  const release = view.holdProjection()
+  const hold = view.holdProjection()
   const loading = view.load()
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await hold.entered
   await view.registry.closeSession(view.conn, view.access, 'LD2')
-  release()
+  hold.release()
   await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
     'a closed View never publishes a stale load history')
   // The ONE frame already handed to the transport before the close cannot be
@@ -5716,14 +5794,14 @@ test('G-ACP2-PR2 PLAN-05: a turn/start reset arriving while the plan send is sti
   const view = projectionView('P5')
   await view.resume()
   view.notifications.length = 0
-  const release = view.holdProjection()
+  const hold = view.holdProjection()
   view.commit('todo/write', { todos: [{ content: 'held plan', status: 'pending' }] })
-  // The plan notification is STILL HELD at the sink when the official reset
+  // The sink proves the plan notification is STILL HELD when the official reset
   // arrives. The reset must still enter the one ordered tail; deciding at
   // arrival time would drop it while `announcedPlan` is not set yet.
+  await hold.entered
   view.commit('turn/start', { turn: 2 })
-  await new Promise(resolve => setTimeout(resolve, 20))
-  release()
+  hold.release()
   await waitUntil(() => view.notifications.length >= 2, 'the held plan then exactly one reset')
   assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'])
 })
@@ -5803,10 +5881,11 @@ test('G-ACP2-PR2 SUB-01: an end arriving while the start notification is still h
   await view.resume()
   view.notifications.length = 0
   view.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'S8', origin: 'subagent', cwd: '/w' }
-  const release = view.holdProjection()
+  const hold = view.holdProjection()
   view.registry.onSubagentStart({ runId: 'run-held', id: 'CHILD', parentSessionId: 'S8', local: true })
+  await hold.entered
   view.registry.onSubagentEnd({ runId: 'run-held', id: 'CHILD', parentSessionId: 'S8', local: true, stopReason: 'completed' })
-  release()
+  hold.release()
   await waitUntil(() => view.notifications.length >= 2, 'the held start then its end are delivered in order')
   const states = view.notifications
     .filter(update => update.sessionUpdate === 'subagent_update')
