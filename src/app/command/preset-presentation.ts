@@ -41,8 +41,10 @@ export type PresetApplyOutcome =
    *  post-commit catalog refresh failure is carried beside the committed fact;
    *  it never turns the switch into a refusal. */
   | { readonly kind: 'switched'; readonly preset: string; readonly refreshError?: string }
-  /** A newer `/preset` or a moved subject owns the surface: nothing to report. */
-  | { readonly kind: 'superseded' }
+  /** A newer `/preset` or a moved subject owns the surface: nothing to report.
+   *  `postDispatch` means the Host selection call had already been dispatched,
+   *  so ownership loss alone does not prove the Host did not commit. */
+  | { readonly kind: 'superseded'; readonly postDispatch?: boolean }
   /** The Host refused because the Session already started. */
   | { readonly kind: 'locked'; readonly sessionId: string }
   | { readonly kind: 'rejected'; readonly message: string }

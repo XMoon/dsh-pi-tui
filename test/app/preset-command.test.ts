@@ -2063,3 +2063,112 @@ test('explicit Use carries a RETURNED post-commit refresh failure beside the com
   assert.ok(!/catalog refresh failed: undefined/iu.test(result.text))
   t.app.dispose()
 })
+
+test('a post-dispatch superseded default sync is uncertain, never a proven no-switch', async () => {
+  let aDispatched = false
+  let resolveA!: () => void
+  const committed: string[] = []
+  const port: PresetCatalog = {
+    available: () => true,
+    roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+    resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    defaultId: () => 'minimal',
+    selectSessionPreset: async (_sessionId, id) => {
+      if (id === 'minimal') {
+        aDispatched = true
+        return await new Promise((resolve) => {
+          resolveA = () => {
+            committed.push(id)
+            resolve({ ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never)
+          }
+        }) as never
+      }
+      return {
+        ownership: 'current',
+        outcome: { kind: 'rejected', error: { code: 'agent-preset/select-refused', message: 'newer Use refused' } },
+      } as never
+    },
+  }
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: port,
+    settings: { get: () => undefined, mutate: async () => {} },
+  })
+  const defaultRun = t.runCommand('preset', 'default minimal') as Promise<{ kind: string; text: string }>
+  await waitFor(async () => aDispatched)
+  const useB = await t.runCommand('preset', 'ptc') as { kind: string; text: string }
+  assert.equal(useB.kind, 'error')
+  assert.match(useB.text, /newer Use refused/u)
+  resolveA()
+  const result = await defaultRun
+  assert.deepEqual(committed, ['minimal'], 'A committed exactly once; B was a proven rejection, not a commit')
+  assert.equal(result.kind, 'success', 'the Config default save remains saved')
+  assert.match(result.text, /the current blank session switch is uncertain \(it may have committed\).*newer operation replaced the display after the Host switch was dispatched.*do not retry/u)
+  assert.ok(!/was not switched/iu.test(result.text), 'ownership-only supersession after dispatch is not proof of non-commit')
+  t.app.dispose()
+})
+
+test('an owned PiTui default notice also says uncertain after a post-dispatch supersession', async () => {
+  let aDispatched = false
+  let resolveA!: () => void
+  const committed: string[] = []
+  const notices: { text: string; kind?: 'info' | 'error' }[] = []
+  let request: import('../../src/app/command/preset-presentation.ts').PresetPickerRequest | undefined
+  const presentation: PresetPresentation = {
+    notify: (text, kind) => { notices.push({ text, kind }) },
+    open: (next) => {
+      request = next
+      return {
+        setLoading: () => {},
+        setRoster: () => {},
+        setLoadError: () => {},
+        isDisposed: () => false,
+        close: () => {},
+      }
+    },
+  }
+  const port: PresetCatalog = {
+    available: () => true,
+    roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+    resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    defaultId: () => 'minimal',
+    selectSessionPreset: async (_sessionId, id) => {
+      if (id === 'minimal') {
+        aDispatched = true
+        return await new Promise((resolve) => {
+          resolveA = () => {
+            committed.push(id)
+            resolve({ ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never)
+          }
+        }) as never
+      }
+      return {
+        ownership: 'current',
+        outcome: { kind: 'rejected', error: { code: 'agent-preset/select-refused', message: 'newer Use refused' } },
+      } as never
+    },
+  }
+  const t = await setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: port,
+    presetPresentation: presentation,
+    settings: { get: () => undefined, mutate: async () => {} },
+  })
+  await t.run('')
+  await waitFor(async () => request !== undefined)
+  const defaultRun = request!.setDefault('minimal')
+  await waitFor(async () => aDispatched)
+  const useB = await request!.apply('ptc')
+  assert.equal(useB.kind, 'rejected')
+  resolveA()
+  const saved = await defaultRun
+  assert.equal(saved.kind, 'saved')
+  assert.deepEqual(committed, ['minimal'])
+  const defaultNotice = notices.find(entry => entry.text.startsWith('new-session default set: minimal'))
+  assert.ok(defaultNotice !== undefined, `the owned default notice is missing: ${JSON.stringify(notices)}`)
+  assert.match(defaultNotice.text, /switch is uncertain \(it may have committed\).*newer operation replaced the display after the Host switch was dispatched/u)
+  assert.ok(!/was not switched/iu.test(defaultNotice.text))
+  t.app.dispose()
+})

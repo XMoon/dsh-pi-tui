@@ -577,10 +577,12 @@ common.
   retries or rolls back after a confirmed Config save. The result separates
   `applied` / `applied-unrefreshed` / `uncertain` / `overridden` /
   `not-applicable` / `skipped-stale` / `failed` from a Config `unconfirmed`;
-  only a proven pre-dispatch refusal may be reported as not switched. A
-  committed switch whose post-commit catalog refresh failed, and an ambiguous
-  Host settlement, stay explicit and are never reworded as a non-switch; a
-  raising Config write remains UNCONFIRMED.
+  only a proven pre-dispatch refusal may be reported as not switched. An
+  ownership-only supersession after the Host selection was already dispatched
+  is uncertain/no-retry, not a proven non-switch. A committed switch whose
+  post-commit catalog refresh failed, and an ambiguous Host settlement, stay
+  explicit and are never reworded as a non-switch; a raising Config write
+  remains UNCONFIRMED.
 - **Loading / Error / Retry.** The overlay mounts immediately in Loading and the
   command's single read owner hydrates it in place. A failed read paints the real
   reason with `Retry` + `Close`, and Retry re-enters Loading through that same

@@ -132,9 +132,10 @@ default from another Client or Host policy wins instead of being overwritten.
 The result separates the confirmed default save from the optional sync
 (`applied`, `applied-unrefreshed`, `uncertain`, `overridden`, `not-applicable`,
 `skipped-stale`, `failed`); a newer Use wins. Only a proven pre-dispatch
-refusal may say the Session was not switched: a committed switch with a failed
-post-commit catalog refresh, and an ambiguous Host settlement, are reported
-explicitly and never as a non-switch. The Config write is an awaited settings
+refusal may say the Session was not switched: an ownership-only supersession
+after the Host selection was dispatched is uncertain/no-retry; a committed
+switch with a failed post-commit catalog refresh, and an ambiguous Host
+settlement, are reported explicitly and never as a non-switch. The Config write is an awaited settings
 mutation, not a `WriteOutcome`, so a raise is reported transparently as
 UNCONFIRMED — never as a proven rollback and never retried automatically; the
 panel dismisses and the next read is authoritative. This is the shared

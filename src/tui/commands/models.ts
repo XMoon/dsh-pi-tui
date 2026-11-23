@@ -776,7 +776,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                         ? { kind: 'applied', preset: outcome.preset }
                         : { kind: 'applied-unrefreshed', preset: outcome.preset, message: outcome.refreshError }
                     } else if (outcome.kind === 'superseded') {
-                      sync = { kind: 'skipped-stale', reason: 'a newer selection won' }
+                      sync = outcome.postDispatch === true
+                        ? {
+                            kind: 'uncertain',
+                            message: 'a newer operation replaced the display after the Host switch was dispatched',
+                          }
+                        : { kind: 'skipped-stale', reason: 'a newer selection won' }
                     } else if (outcome.kind === 'locked') {
                       sync = { kind: 'skipped-stale', reason: 'the session had already started' }
                     } else if (outcome.kind === 'rejected') {
@@ -847,7 +852,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           Promise<
             | { kind: 'pending'; preset: string }
             | { kind: 'switched'; preset: string; refreshError?: string }
-            | { kind: 'superseded' }
+            | { kind: 'superseded'; postDispatch?: boolean }
             | { kind: 'locked'; sessionId: string }
             | { kind: 'rejected'; message: string }
             | { kind: 'indeterminate'; message: string }
@@ -860,6 +865,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           const owner = pickerOwner ?? runner.captureSessionScope()
           const ownerCurrent = (): boolean => runner.isSessionScopeCurrent(owner)
           let dispatched = false
+          const superseded = (): { kind: 'superseded'; postDispatch?: boolean } => dispatched
+            ? { kind: 'superseded', postDispatch: true }
+            : { kind: 'superseded' }
           try {
           const sessionId = owner.sessionId
           if (sessionId === undefined) {
@@ -871,8 +879,8 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // A Session (or a newer pick) appeared while the resolve awaited: the
             // sessionless subject is gone — superseded, never staged onto the
             // now-live surface (v2 §0.2.5).
-            if (token !== presetOperationToken) return { kind: 'superseded' }
-            if (!ownerCurrent()) return { kind: 'superseded' }
+            if (token !== presetOperationToken) return superseded()
+            if (!ownerCurrent()) return superseded()
             runner.pendingPreset = resolved.id
             // The sessionless catalog follows the choice through the STANDING
             // scope of the new preset (no Agent, no session — composition
@@ -880,8 +888,8 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // docs/architecture/surface-catalog.md). A failed read degrades inside the
             // coordinator: the choice itself still applies.
             const outcome = await runner.refreshStandingCatalog(resolved.id, 'preset')
-            if (token !== presetOperationToken) return { kind: 'superseded' }
-            if (!ownerCurrent()) return { kind: 'superseded' }
+            if (token !== presetOperationToken) return superseded()
+            if (!ownerCurrent()) return superseded()
             if (outcome.kind === 'applied' && outcome.notice !== undefined) notifyOwned(outcome.notice, 'error')
             return { kind: 'pending', preset: resolved.id }
           }
@@ -908,10 +916,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           // moved while the Host transition was in flight, this operation no
           // longer owns the surface — it must not surface a stale rejection or
           // notice (v2 §0.2.5/§0.3.1).
-          if (token !== presetOperationToken) return { kind: 'superseded' }
-          if (!ownerCurrent()) return { kind: 'superseded' }
+          if (token !== presetOperationToken) return superseded()
+          if (!ownerCurrent()) return superseded()
           // A superseded operation owns nothing: no notice, no repaint.
-          if (result.ownership === 'superseded') return { kind: 'superseded' }
+          if (result.ownership === 'superseded') return superseded()
           const outcome = result.outcome
           if (outcome.kind === 'rejected') {
             if (outcome.error.code === 'agent-preset/locked') return { kind: 'locked', sessionId }
@@ -935,16 +943,16 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             const refreshed = await runner.refreshSessionCatalog(owner, 'preset')
             // Fence after the refresh await: a newer operation or a moved
             // subject owns the surface, and a superseded refresh must not repaint.
-            if (token !== presetOperationToken) return { kind: 'superseded' }
-            if (!ownerCurrent()) return { kind: 'superseded' }
+            if (token !== presetOperationToken) return superseded()
+            if (!ownerCurrent()) return superseded()
             // The coordinator returns a settled failure instead of throwing;
             // the Host switch stays committed and the refresh problem is
             // carried beside it, never swallowed as a clean success.
             if (refreshed.kind === 'failed') refreshError = refreshed.error
             else if (refreshed.kind === 'applied') runner.updateWelcomeCard()
           } catch (error) {
-            if (token !== presetOperationToken) return { kind: 'superseded' }
-            if (!ownerCurrent()) return { kind: 'superseded' }
+            if (token !== presetOperationToken) return superseded()
+            if (!ownerCurrent()) return superseded()
             refreshError = presetErrorText(error)
           }
           return {
@@ -956,9 +964,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // A newer `/preset` operation — or a superseded/aborted read — owns
             // the surface: an error from this stale operation must not surface a
             // stale notice (v2 §0.2.1/§0.2.3).
-            if (token !== presetOperationToken) return { kind: 'superseded' }
+            if (token !== presetOperationToken) return superseded()
             if (error instanceof SupersededReadError || !ownerCurrent() || runner.signal.aborted) {
-              return { kind: 'superseded' }
+              return superseded()
             }
             // A throw after the Host dispatch may have committed: never let
             // the caller turn it into a proven "not switched" refusal.
