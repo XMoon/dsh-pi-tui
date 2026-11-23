@@ -381,6 +381,13 @@ export async function reclaimManagedService(input) {
     if (state === 'unknown') return preserve('MANAGED_HOST_IDENTITY_UNKNOWN')
   }
   if (current.managerState === 'unknown') return preserve('MANAGER_UNVERIFIABLE')
+  if (current.managerState === 'active') {
+    const verifiedIdentities = Array.isArray(input.verifiedHostIdentities) ? input.verifiedHostIdentities : []
+    const currentHost = verifiedIdentities.find(identity => identity?.pid === current.mainPid)
+    if (current.mainPid === null || currentHost === undefined || hostProcessState(currentHost) !== 'alive') {
+      return preserve('MANAGED_MAIN_PID_UNVERIFIED')
+    }
+  }
   const manager = managerEnvironment(input.uid)
   if (manager === undefined) return preserve('SYSTEMD_RUNTIME_DIR_UNAVAILABLE')
   if (current.managerState === 'active' || current.managerState === 'inactive') {

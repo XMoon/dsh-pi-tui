@@ -120,6 +120,20 @@ function hostProcessState(identity) {
   return processState(Number(identity.pid), identity.kernelIdentity)
 }
 
+function requireExactWorker(workerPid, kernelIdentity, childPid) {
+  const observation = readProcessObservation(workerPid)
+  if (observation.kind !== 'alive'
+    || observation.state === 'Z' || observation.state === 'X' || observation.state === 'x') {
+    fail('the Worker PID is not a live kernel process immediately before the SIGKILL')
+  }
+  if (observation.ppid !== childPid) {
+    fail(`the current Worker PPID ${String(observation.ppid)} is not the spawned Vitest PID ${String(childPid)}`)
+  }
+  if (`linux:${observation.startTicks}` !== kernelIdentity) {
+    fail('the current Worker kernel birth differs from the kill-ready note immediately before the SIGKILL')
+  }
+}
+
 function requireAbsoluteDirectory(raw, label) {
   if (typeof raw !== 'string' || !raw.startsWith('/')) failInput(`${label} must be an absolute path`)
   let real
@@ -383,17 +397,7 @@ async function main() {
     if (typeof readyWorker?.kernelIdentity !== 'string' || !readyWorker.kernelIdentity.startsWith('linux:')) {
       fail('the kill-ready note carries no Worker kernel birth')
     }
-    const workerObservation = readProcessObservation(workerPid)
-    if (workerObservation.kind !== 'alive'
-      || workerObservation.state === 'Z' || workerObservation.state === 'X' || workerObservation.state === 'x') {
-      fail('the Worker PID is not a live kernel process before the SIGKILL')
-    }
-    if (workerObservation.ppid !== child.pid) {
-      fail(`the current Worker PPID ${String(workerObservation.ppid)} is not the spawned Vitest PID ${String(child.pid)}`)
-    }
-    if (`linux:${workerObservation.startTicks}` !== readyWorker.kernelIdentity) {
-      fail('the current Worker kernel birth differs from the kill-ready note')
-    }
+    requireExactWorker(workerPid, readyWorker.kernelIdentity, child.pid)
     if (!Number.isInteger(supervisorPid) || supervisorPid <= 0) {
       fail('the kill-ready receipt carries no real Supervisor PID')
     }
@@ -447,6 +451,7 @@ async function main() {
     console.log(`WORKER_PID=${String(workerPid)}`)
     console.log(`SUPERVISOR_PID=${String(supervisorPid)}`)
     console.log(`MANAGED_UNIT=${String(reservation.unitName)}`)
+    requireExactWorker(workerPid, readyWorker.kernelIdentity, child.pid)
     process.kill(workerPid, 'SIGKILL')
     const terminal = await waitForTerminalReceipt(found.path)
     const problems = auditReceipt(terminal, point)
