@@ -727,8 +727,8 @@ reports as unsupported (`WEB_CLI_UNAVAILABLE`) instead of inventing a state.
 Activation is per Host lifetime, and the NEXT cold boot is a PROFILE preference:
 the base-profile row `pi-tui-web-preferences` owns the durable boolean
 `autoStart`, written through the ordinary revision-checked Settings/ConfigEditor
-user patch and projected as the `/settings → Tools → Auto-enable Web on Host
-startup` row. Its schema default is OFF, it is independent of the running Host's
+user patch and edited ONLY inside the `Settings → Host → Web UI` page's
+`Next Host Start` section (there is no standalone preference row). Its schema default is OFF, it is independent of the running Host's
 Web state, and switching it never enables or disables a live Host. The Host-only
 entry consumes it after `runProfile()` + Loader settlement and BEFORE the
 readiness audit / Ready publication: `autoStart: true` calls the SAME
@@ -856,18 +856,37 @@ derives a request endpoint or credential from the override or from the
 credential-presence metadata — the Host operation decides the actual route and
 credential from the current Session.
 
-The Client-side `/web` menu is the ONE user entry and it holds no Web state of
-its own: it reads the Host status through the semantic WebAccessPort, performs
-each explicit action on the Host's own service, re-reads the authoritative state
-and presents what the Host really reached. The backend assembly is Direct =
-truthful unavailable (the Direct process owns no Web toggle) and Split Client =
-the private `piTuiWebAccess` namespace of the ONE mounted contribution; the
-same presentation contract feeds the default PiTui short menu and the
-experimental TSP native picker. Disabling from `/web` is the same frontend
-serving switch described below: it never revokes a Browser cookie, an existing
-Browser page, a Bearer token or a live Browser WebSocket. The listener stays
-`127.0.0.1`-only, and the first release formally supports only the trusted
-same-machine user (no LAN, public proxy or SSH tunnel guarantee).
+The Client-side `/web` command is the ONE user entry and holds no Web state of
+its own. On PiTui it is a TYPED DEEP LINK into the ONE Settings workspace's
+`Host · Web UI` page: the SAME screen lease (no overlay, no second Settings
+surface), mounted on the page's first really-painted frame, and the command
+resolves only when that mount settled — a real failure closes the lease and is
+the command's error, never a silent navigation to the Rows level. The
+experimental TSP renderer keeps its native picker over the same
+application-level presentation request. Both reach the SAME semantic
+WebAccessPort; the backend assembly is Direct = truthful unavailable (the
+Direct process owns no Web toggle, and the page states
+`Unavailable · Split Host only`) and Split Client = the private
+`piTuiWebAccess` namespace of the ONE mounted contribution. Disabling is the
+same frontend serving switch described below: it never revokes a Browser
+cookie, an existing Browser page, a Bearer token or a live Browser WebSocket.
+The listener stays `127.0.0.1`-only, and the first release formally supports
+only the trusted same-machine user (no LAN, public proxy or SSH tunnel
+guarantee).
+
+A user decision is bound to the Host generation it was DISPLAYED under, not
+only to the generation a single RPC was sent in. `WebAccessPort` therefore
+exposes `currentGeneration()` / `subscribeGeneration(listener)` (the Remote
+adapter forwards the ONE Connection generation source; Direct owns no
+transport generation) and accepts an optional `expectedGeneration` on
+`setEnabled`/`getAuthenticatedUrl`. The adapter refuses BEFORE dispatch when
+the live generation no longer matches — zero Host dispatch, a thrown
+`SupersededReadError` — and a generation change revokes the visible actions and
+re-reads before any new action is offered. A status observation is painted as
+the current Host fact only while the generation sampled before and after its
+read is the same and non-empty; a reply from a replaced Host never qualifies an
+action. Legacy callers that pass no `expectedGeneration` (the TSP picker path)
+keep their previous behavior.
 
 This is a frontend SERVING switch, not an authorization boundary. It makes no
 promise about an already-loaded browser page, an existing Browser cookie or a

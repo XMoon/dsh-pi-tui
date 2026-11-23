@@ -48,6 +48,7 @@ import { createDirectSettingsFixture } from '../support/direct-settings-fixture.
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
 import type { CredentialProviderOption, ExtensionConfigsConfig, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
+import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
 import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -169,6 +170,20 @@ interface HarnessOptions {
   webStartupUnavailable?: boolean
   /** Make `setAutoStart` reject with this reason (a refused Host write). */
   webStartupWriteFailure?: string
+  /** PR-A: the renderer's backend kind. The Web runtime cases need `remote`
+   *  (a Split Host); every other composition keeps Direct. */
+  backendKind?: 'direct' | 'remote'
+  /** PR-A: the LIVE Split Host Web frontend the `webAccess` port serves. */
+  webStatus?: WebAccessStatus
+  /** Make the Host status read throw (a disconnected / superseded Client). */
+  webStatusReadFailure?: string
+  /** Make the toggle reject with this reason (a refused/disconnected Host). */
+  webToggleFailure?: string
+  /** The state the Host reports AFTER a successful toggle (default: the
+   *  requested target). */
+  webSettledStatus?: WebAccessStatus
+  /** The official launch URL the Host hands to an explicit Open/Copy. */
+  webUrl?: string
   /** M6-2A A5: the profile-owned startup backend the ConfigPort reads. */
   backendStartupPreference?: BackendStartupPreferenceState
   /** The startup backend section is absent/unreadable. */
@@ -452,6 +467,18 @@ interface Harness {
   readonly visualState: () => VisualToolsState | undefined
   /** Every `webStartupPreference.setAutoStart` value the UI dispatched. */
   readonly webAutoStartWrites: () => readonly boolean[]
+  /** PR-A: every `webAccess.getStatus` read the Web UI page performed. */
+  readonly webStatusReads: () => number
+  /** PR-A: every `webAccess.setEnabled` value the Web UI page dispatched. */
+  readonly webEnabledWrites: () => readonly boolean[]
+  /** PR-A: every `webAccess.getAuthenticatedUrl` request (an explicit Open/Copy). */
+  readonly webUrlReads: () => number
+  /** PR-A: the URLs the Client-local opener was really handed. */
+  readonly openedUrls: () => readonly string[]
+  /** PR-A: replace the LIVE Host generation (a Host A -> B replacement). */
+  readonly bumpWebGeneration: () => void
+  /** PR-A: the current fake Host state. */
+  readonly webStatus: () => WebAccessStatus | undefined
   /** Every `backendStartupPreference.setBackend` value the UI dispatched. */
   readonly backendStartupWrites: () => readonly PublicBackendValue[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
@@ -517,7 +544,7 @@ interface Harness {
  *  conditional `Extensions` category is appended only while the extension
  *  settings registry has live rows, so a case that needs it walks by label. */
 const CATEGORY_ORDER = [
-  'About', 'General', 'Models', 'Account', 'Agent', 'Appearance',
+  'About', 'Host', 'Models', 'Account', 'Agent', 'Appearance',
   'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
 ]
 
@@ -526,7 +553,7 @@ const CATEGORY_ORDER = [
  *  the rail's own labels are the witness. */
 const railVisible = (vt: VirtualTerminal): boolean =>
   vt.getViewport().map(stripTerminalSequences)
-    .some(line => /^(?:> | {2})(?:About|General|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
+    .some(line => /^(?:> | {2})(?:About|Host|Models|Account|Agent|Appearance|Conversation|Input & Terminal|Tools|Plugins|Extensions)(?: {2,}|\s*$)/u.test(line))
 
 function setup(options: HarnessOptions = {}): Harness {
   const columns = options.columns ?? 120
@@ -615,6 +642,18 @@ function setup(options: HarnessOptions = {}): Harness {
   let policyReadSettled = agent.deferPolicyRead !== true
   let releaseDeferredPolicyRead: (() => void) | undefined
   let policyReadGate: Promise<void> | undefined
+  // PR-A: the LIVE Split Host Web frontend the `webAccess` port serves. The
+  // generation identity is a real object so a state observation is bound to
+  // the Host that produced it; `bumpWebGeneration()` replaces it.
+  let webGeneration: object | undefined = {}
+  const webGenerationListeners = new Set<() => void>()
+  let webStatus: WebAccessStatus | undefined = options.webStatus ?? { state: 'enabled' }
+  const webStatusReads = { count: 0 }
+  const webEnabledWrites: boolean[] = []
+  const webUrlReads = { count: 0 }
+  const openedUrls: string[] = []
+  const webToggleRefusal = options.webToggleFailure
+  const webUrl = options.webUrl ?? 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'
   const notifyPolicyListeners = (event: 'committed' | 'invalidated'): void => {
     for (const listener of [...policyListeners]) listener(event)
   }
@@ -722,6 +761,9 @@ function setup(options: HarnessOptions = {}): Harness {
   const notices: string[] = []
   const app = new TuiApp(vt, events, {
     copySelection: options.copySelection ?? (async (text: string) => { copied.push(text); return true }),
+    // PR-A: the Host-owned external-URL seam the Web UI page's Open action uses
+    // (the production composition wires the platform opener here).
+    openExternalUrl: (url: string) => { openedUrls.push(url) },
     ...options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle },
     ...options.appTerminalProgress === undefined ? {} : { terminalProgressMode: options.appTerminalProgress },
   })
@@ -820,7 +862,7 @@ function setup(options: HarnessOptions = {}): Harness {
     forceContextMeasurementResult: () => options.liveSession?.contextUsed === undefined
       ? { value: undefined, observation: 'unavailable' as const }
       : { value: options.liveSession.contextUsed, observation: 'fresh' as const },
-    backendKind: 'direct' as const,
+    backendKind: options.backendKind ?? 'direct',
     subscribeSessionScopeInvalidation: () => () => {},
     listScopedCommands: () => [],
     displayPreset: () => app.displayPreset(),
@@ -837,6 +879,40 @@ function setup(options: HarnessOptions = {}): Harness {
     copyToClipboard: async (text: string) => {
       copied.push(text)
       return true
+    },
+    // PR-A: the ONE semantic WebAccessPort the `Host · Web UI` page consumes.
+    // It owns NO truth: every call answers from the live fake Host above and a
+    // generation change really notifies its subscribers.
+    webAccess: {
+      getStatus: async () => {
+        webStatusReads.count += 1
+        if (options.webStatusReadFailure !== undefined) throw new Error(options.webStatusReadFailure)
+        if (webStatus === undefined) throw new Error('the Client is not connected to a Host')
+        return webStatus
+      },
+      setEnabled: async (enabled: boolean, expectedGeneration?: unknown) => {
+        if (expectedGeneration !== undefined && !Object.is(expectedGeneration, webGeneration)) {
+          throw new Error('web access toggle superseded: the Host generation changed before dispatch')
+        }
+        // The request really reached the Host; a lost receipt is a failure
+        // AFTER the dispatch, never a pre-dispatch refusal.
+        webEnabledWrites.push(enabled)
+        if (webToggleRefusal !== undefined) throw new Error(webToggleRefusal)
+        webStatus = options.webSettledStatus ?? (enabled ? { state: 'enabled' } : { state: 'disabled' })
+        return webStatus
+      },
+      getAuthenticatedUrl: async (expectedGeneration?: unknown) => {
+        if (expectedGeneration !== undefined && !Object.is(expectedGeneration, webGeneration)) {
+          throw new Error('web access link superseded: the Host generation changed before dispatch')
+        }
+        webUrlReads.count += 1
+        return { url: webUrl }
+      },
+      currentGeneration: () => webGeneration,
+      subscribeGeneration: (listener: () => void) => {
+        webGenerationListeners.add(listener)
+        return () => { webGenerationListeners.delete(listener) }
+      },
     },
     refreshStatus: () => { calls.push('refreshStatus') },
     // M6-1 F8: the ONE session-policy observation + the transport-neutral
@@ -1150,7 +1226,7 @@ function setup(options: HarnessOptions = {}): Harness {
           return { kind: 'accepted' as const }
         },
       },
-      // FR5-B: the official session-log contributor. Absent = no General row.
+      // FR5-B: the official session-log contributor. Absent = no Host row.
       sessionLogUpload: {
         read: () => {
           if (sessionLogValue === undefined) return { kind: 'unavailable' as const, reason: 'Session log upload is not mounted.' }
@@ -1362,6 +1438,15 @@ function setup(options: HarnessOptions = {}): Harness {
     warnings: () => warnings,
     visualWrites: () => visualWrites,
     webAutoStartWrites: () => webAutoStartWrites,
+    webStatusReads: () => webStatusReads.count,
+    webEnabledWrites: () => webEnabledWrites,
+    webUrlReads: () => webUrlReads.count,
+    openedUrls: () => openedUrls,
+    bumpWebGeneration: () => {
+      webGeneration = {}
+      for (const listener of [...webGenerationListeners]) listener()
+    },
+    webStatus: () => webStatus,
     backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
     writes: () => writes,
@@ -2603,17 +2688,17 @@ test('the real Root Shell page accepts a positive finite decimal cap', async () 
   h.dispose()
 })
 
-test('General owns Backend, both startup preferences and Session log; Tools keeps no duplicate preference row', async () => {
+test('Host owns Backend, the Web UI page, the ACP preference and Session log; Tools keeps no duplicate row', async () => {
   const h = setup({ columns: 200, rows: 50, sessionLog: { enabled: true, inherited: true } })
-  await h.open('General')
+  await h.open('Host')
   await key(h, '\r')
   const general = h.rowsPlain()
-  const order = ['Backend', 'Start Web automatically', 'Start ACP automatically', 'Session log upload']
+  const order = ['Backend', 'Web UI', 'Start ACP automatically', 'Session log upload']
     .map(label => general.findIndex(line => line.includes(label)))
   for (const [index, row] of order.entries()) {
-    assert.ok(row >= 0, `General paints ${JSON.stringify(order[index])}:\n${h.view()}`)
+    assert.ok(row >= 0, `Host paints ${JSON.stringify(order[index])}:\n${h.view()}`)
   }
-  assert.deepEqual([...order].sort((left, right) => left - right), order, 'General keeps the FR5-B frozen order')
+  assert.deepEqual([...order].sort((left, right) => left - right), order, 'Host keeps the frozen order')
   assert.doesNotMatch(h.view(), /Auto-enable Web on Host startup|Auto-enable ACP on Host startup/u,
     'the old labels are gone, not duplicated')
 
@@ -2626,13 +2711,13 @@ test('General owns Backend, both startup preferences and Session log; Tools keep
   }
   assert.doesNotMatch(tools, /Start Web automatically|Start ACP automatically/u,
     'the migrated preference rows have no Tools duplicate')
-  assert.doesNotMatch(tools, /Session log upload/u, 'the session-log row is General-only')
+  assert.doesNotMatch(tools, /Session log upload/u, 'the session-log row is Host-only')
   h.dispose()
 })
 
 test('Session log upload paints its upload risk and offers On/Off/Reset; Reset may read back On', async () => {
   const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true, inherited: true } })
-  await h.open('General')
+  await h.open('Host')
   await key(h, '\r')
   await highlightRow(h, 'Session log upload')
   const detail = h.view()
@@ -2667,7 +2752,7 @@ test('Session log upload paints its upload risk and offers On/Off/Reset; Reset m
 test('Session log unknown/mismatched settlements never offer a blind Retry', async () => {
   // A dispatched write whose ACK is lost is NOT a retryable refusal.
   const unknown = setup({ columns: 200, rows: 44, sessionLog: { enabled: true }, sessionLogUnconfirmed: true })
-  await unknown.open('General')
+  await unknown.open('Host')
   await key(unknown, '\r')
   await highlightRow(unknown, 'Session log upload')
   await key(unknown, '\r')
@@ -2683,7 +2768,7 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
   // An accepted official mutation whose fresh readback disagrees is not a
   // definite refusal: it is an unverified accepted settlement.
   const mismatched = setup({ columns: 200, rows: 44, sessionLog: { enabled: true }, sessionLogIgnoreWrite: true })
-  await mismatched.open('General')
+  await mismatched.open('Host')
   await key(mismatched, '\r')
   await highlightRow(mismatched, 'Session log upload')
   await key(mismatched, '\r')
@@ -2705,7 +2790,7 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
     sessionLog: { enabled: true },
     sessionLogWriteFailure: 'official validator refused',
   })
-  await refused.open('General')
+  await refused.open('Host')
   await key(refused, '\r')
   await highlightRow(refused, 'Session log upload')
   await key(refused, '\r')
@@ -2721,7 +2806,7 @@ test('Session log unknown/mismatched settlements never offer a blind Retry', asy
 
 test('the Session log Confirm button is pointer-complete with the risk frame', async () => {
   const h = setup({ columns: 200, rows: 44, sessionLog: { enabled: true } })
-  await h.open('General')
+  await h.open('Host')
   await key(h, '\r')
   await highlightRow(h, 'Session log upload')
   await key(h, '\r') // L2 choice
@@ -2737,7 +2822,7 @@ test('the Session log Confirm button is pointer-complete with the risk frame', a
 
 test('an absent session-log namespace paints no row; a stale authority stays visibly current-unknown and read-only', async () => {
   const absent = setup({ columns: 200, rows: 44 })
-  await absent.open('General')
+  await absent.open('Host')
   await key(absent, '\r')
   assert.doesNotMatch(absent.view(), /Session log upload/u, 'no official namespace = no row')
   absent.dispose()
@@ -2748,7 +2833,7 @@ test('an absent session-log namespace paints no row; a stale authority stays vis
     readiness: 'stale',
     sessionLog: { enabled: true, inherited: true },
   })
-  await stale.open('General')
+  await stale.open('Host')
   await key(stale, '\r')
   await highlightRow(stale, 'Session log upload')
   const frame = stale.view()
@@ -6815,8 +6900,8 @@ test('a resize, category change or notice insertion between press and release re
   const accountRow = switched.rowsPlain().findIndex(line => line.slice(0, 22).trim() === 'Account')
   assert.ok(accountRow >= 0)
   press(switched, accountRow, 2)
-  await key(switched, '\u001b[B') // About -> General bumps the state version
-  await key(switched, '\u001b[B') // General -> Models bumps the state version
+  await key(switched, '\u001b[B') // About -> Host bumps the state version
+  await key(switched, '\u001b[B') // Host -> Models bumps the state version
   release(switched, accountRow, 2)
   await settle(switched)
   assert.match(switched.view(), /Models & Credentials/u)
@@ -9817,80 +9902,362 @@ test('the real /settings route edits rows, choices and pages without ever callin
 
 
 
-// ── M5-W PR-C: the next-Host-launch Web preference (`web-autostart`) ────────
+// ── PR-A: `Settings · Host · Web UI`, the ONE Web frontend surface ──────────
 //
-// The row is a PROFILE preference, not the current Web state: every case below
-// drives the REAL `/settings` composition and proves the value the user picks,
-// the Host write that persists it and the authoritative re-read — never a claim
-// about the running Host's Web frontend.
+// `/web` and the `Host → Web UI` row reach the SAME page class on the SAME
+// Settings lease. Two authorities are painted side by side and never merged:
+// the CURRENT Split Host listener (runtime controls, bound to the Connection
+// generation) and the persisted next-Host-start preference (the EXISTING
+// revision-checked `web-autostart` writer). Every case drives the REAL
+// `/settings` composition; the URL is a hostile-by-default token and must
+// never reach a painted cell.
 
-/** Move from the first General row (`startup-backend`) onto `web-autostart` and open it. */
-async function openWebAutostartRow(h: Harness): Promise<void> {
-  await h.open('General')
-  await key(h, '\r') // L0 -> L1 (the Rows level, on Backend)
-  await key(h, '\x1b[B') // Backend -> Start Web automatically (FR5-B General order)
+/** Walk `Host → Web UI` through the real composition and land on the page. */
+async function openWebUi(h: Harness): Promise<void> {
+  await h.open('Host')
+  await key(h, '\r') // L0 -> L1 (Rows, on Backend)
+  await highlightRow(h, 'Web UI')
+  await key(h, '\r') // the row opens its embedded page in THIS lease
+  await settle(h)
 }
 
-test('the Auto-enable Web row shows the schema default and writes On through its own Host port', async () => {
-  const h = setup({ columns: 200, rows: 40 })
-  await openWebAutostartRow(h)
-  assert.match(h.view(), /Start Web automatically/, 'the General category carries the preference row')
-  assert.match(h.view(), /Off \(default\)/, 'the default OFF is marked as not user-overridden')
-  assert.match(
-    h.view(),
-    /applies on the next Host launch; the current Host is unchanged/u,
-    'the row states the next-launch lifetime instead of claiming a live effect',
-  )
-  await key(h, '\r') // writable L1 -> L2 inline choice
-  assert.match(h.view(), /Choose value/)
-  assert.match(h.view(), /> Off/, 'the current candidate carries the highlight')
-  await key(h, '\x1b[A') // Off (last candidate) -> On
-  assert.match(h.view(), /> On/)
-  assert.equal(h.webAutoStartWrites().length, 0, 'choosing a candidate never writes')
+/** Move the PAGE's own cursor onto one of its painted rows. */
+async function highlightPageRow(h: Harness, label: string): Promise<void> {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  for (let step = 0; step < 12; step += 1) {
+    if (new RegExp(`> ${escaped}(?:\\s|$)`, 'mu').test(h.view())) return
+    await key(h, '\x1b[B')
+  }
+  assert.fail(`the page row "${label}" never owned the selection:\n${h.view()}`)
+}
 
-  await key(h, '\r')
+/** The frame without ANSI, for token/word assertions. */
+const webUiPlain = (h: Harness): string => h.rowsPlain().join('\n')
+
+test('/web opens the Web UI page on the ONE Settings lease, with no overlay and no URL request', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  void h.invoke('web')
   await settle(h)
-  assert.deepEqual(h.webAutoStartWrites(), [true], 'the Host port receives exactly one On write')
-  assert.match(h.view(), /Status\s+Verified/)
-  assert.match(h.view(), /On/, 'the verified row reports the persisted preference')
+  assert.match(h.view(), /Settings · Host · Web UI/u, 'the breadcrumb names the page')
+  assert.match(h.view(), /Current Host/u, 'the page owns the settings body')
+  assert.match(h.view(), /Open in browser/u)
+  assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay is mounted')
+  assert.equal(h.webStatusReads(), 1, 'exactly one Host status read on the first frame')
+  assert.equal(h.webUrlReads(), 0, 'opening the page never requests the authenticated URL')
+  assert.equal(h.webEnabledWrites().length, 0, 'opening the page never writes')
+  assert.doesNotMatch(webUiPlain(h), /SECRET-LAUNCH-TOKEN/u, 'the launch token is never painted')
   h.dispose()
 })
 
-test('an unreadable Web preference offers no confirmable candidate', async () => {
-  const h = setup({ columns: 200, rows: 40, webStartupUnavailable: true })
-  await openWebAutostartRow(h)
-  assert.match(h.view(), /Start Web automatically/)
-  assert.match(h.view(), /Unavailable/, 'an absent section is reported, never the schema default')
+test('Host → Web UI reaches the same page and its Esc ladder returns Rows → rail → close', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  assert.match(h.view(), /Settings · Host · Web UI/u)
+  assert.match(h.view(), /> Open in browser/u, 'the enabled Host focuses its primary action')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'page Esc returns the Host Rows level')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /^> Host/mu, 'Rows Esc returns the category rail')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'rail Esc closes the Settings workspace')
+  assert.equal(h.app.overlayGraphState().handles, 0)
+  h.dispose()
+})
+
+test('an enabled Host paints the runtime actions and states both authorities separately', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  const frame = webUiPlain(h)
+  assert.match(frame, /Current Host/u)
+  assert.match(frame, /Serving\s+Enabled/u)
+  assert.match(frame, /Access\s+This machine · 127\.0\.0\.1/u)
+  assert.match(frame, /Actions/u)
+  assert.match(frame, /Open in browser/u)
+  assert.match(frame, /Copy access link\s+Contains a sign-in token/u)
+  assert.match(frame, /Disable Web…\s+Stops serving; does not revoke access/u)
+  assert.match(frame, /Next Host Start/u)
+  assert.match(frame, /Start automatically\s+Off \(default\) · Change…/u)
+  assert.match(frame, /Applies on the next Host start; the running Host is unchanged\./u,
+    'the preference lifetime is stated as a distinct fact')
+  assert.equal(h.webStatusReads(), 1, 'one read; the page never polls')
+  h.dispose()
+})
+
+test('a disabled Host offers only Enable Web', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' } })
+  await openWebUi(h)
+  const frame = webUiPlain(h)
+  assert.match(frame, /Serving\s+Disabled/u)
+  assert.match(frame, /Access\s+Not serving/u)
+  assert.match(frame, /> Enable Web/u, 'the disabled Host focuses Enable Web')
+  assert.doesNotMatch(frame, /Open in browser|Copy access link|Disable Web…/u,
+    'a disabled Host advertises no enabled-state action')
+  h.dispose()
+})
+
+test('changing and unavailable Hosts offer no runtime write, only Refresh', async () => {
+  for (const status of [{ state: 'changing' as const }, { state: 'unavailable' as const, reason: 'rows partially enabled' }]) {
+    const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: status })
+    await openWebUi(h)
+    const frame = webUiPlain(h)
+    assert.match(frame, /Refresh/u)
+    assert.doesNotMatch(frame, /Enable Web|Open in browser|Copy access link|Disable Web…/u,
+      `${status.state}: no runtime action is offered`)
+    if (status.state === 'unavailable') assert.match(frame, /rows partially enabled/u, 'the Host reason is stated')
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.webEnabledWrites().length, 0, `${status.state}: Enter dispatches no write`)
+    h.dispose()
+  }
+})
+
+test('Direct states the Split-Host-only capability and still shows the next-start preference', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await openWebUi(h)
+  const frame = webUiPlain(h)
+  assert.match(frame, /Serving\s+Unavailable · Split Host only/u, 'Direct names the real missing capability')
+  assert.match(frame, /Access\s+Unavailable/u)
+  assert.equal(h.webStatusReads(), 0, 'Direct never reads a fabricated Host')
+  assert.doesNotMatch(frame, /Enable Web|Open in browser|Copy access link|Disable Web…/u,
+    'Direct offers no runtime action')
+  assert.match(frame, /> Start automatically\s+Off \(default\) · Change…/u,
+    'the next-start preference stays available and is the first focus')
+  h.dispose()
+})
+
+test('Enable Web writes once and shows the settled authoritative re-read', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' } })
+  await openWebUi(h)
+  await key(h, '\r') // Enable Web (first focus)
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'exactly one Host toggle')
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u, 'the authoritative re-read settles the fact')
+  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.equal(h.webUrlReads(), 0, 'a toggle never requests the launch URL')
+  h.dispose()
+})
+
+test('Disable Web… requires the in-page confirmation; Cancel performs zero writes', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  await highlightPageRow(h, 'Disable Web…')
   await key(h, '\r')
-  assert.doesNotMatch(h.view(), /Choose value/, 'no candidate exists without an authoritative read')
+  await settle(h)
+  const confirm = webUiPlain(h)
+  assert.match(confirm, /Stop serving the Web UI\? Existing browser credentials and sessions are not revoked\./u,
+    'the exact confirm sentence is painted in full')
+  assert.match(confirm, /> Disable Web/u)
+  assert.match(confirm, /Cancel/u)
+  assert.equal(h.webEnabledWrites().length, 0, 'opening the confirmation writes nothing')
+  await key(h, '\x1b') // Esc cancels the confirmation only
+  await settle(h)
+  assert.equal(h.webEnabledWrites().length, 0, 'Cancel performs zero writes')
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u, 'the page returns to the runtime facts')
+  // Re-enter and confirm: exactly one dispatch, then the settled re-read.
+  await highlightPageRow(h, 'Disable Web…')
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\r') // Disable Web (the confirmation's first focus)
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [false], 'the second confirmation dispatches exactly one write')
+  assert.match(webUiPlain(h), /Serving\s+Disabled/u)
+  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('Open in browser requests the official URL exactly once and never paints it', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  assert.equal(h.webUrlReads(), 0, 'the first screen requests no URL')
+  await key(h, 'r') // refresh: still no URL
+  await settle(h)
+  assert.equal(h.webUrlReads(), 0, 'a refresh requests no URL')
+  await key(h, '\r') // Open in browser (first focus)
+  await settle(h)
+  assert.equal(h.webUrlReads(), 1, 'the explicit Open requests the URL exactly once')
+  assert.deepEqual(h.openedUrls(), ['http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'],
+    'the Client-local opener received the official URL')
+  assert.match(webUiPlain(h), /Status\s+Browser open requested/u, 'success claims only the request')
+  assert.doesNotMatch(webUiPlain(h), /SECRET-LAUNCH-TOKEN/u, 'the token never reaches a painted cell')
+  assert.doesNotMatch(h.notices().join('\n'), /SECRET-LAUNCH-TOKEN/u, 'nor a notice')
+  h.dispose()
+})
+
+test('Copy access link copies the official URL once and reports only the acknowledgement', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  await highlightPageRow(h, 'Copy access link')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.webUrlReads(), 1)
+  assert.deepEqual(h.copied, ['http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'])
+  assert.match(webUiPlain(h), /Status\s+Link copied/u)
+  assert.doesNotMatch(webUiPlain(h), /SECRET-LAUNCH-TOKEN/u)
+  h.dispose()
+})
+
+test('the next-start preference writes ONLY after Confirm save, through its own port', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r') // the in-page candidate choice
+  await settle(h)
+  assert.match(webUiPlain(h), /Choose the value the next Host start applies:/u)
+  assert.match(webUiPlain(h), /Off\s+\[current\]/u, 'the current candidate carries the state chip')
+  assert.equal(h.webAutoStartWrites().length, 0, 'choosing a candidate never writes')
+  await highlightPageRow(h, 'Off') // stage the other candidate
+  await key(h, '\r') // -> the confirm step
+  await settle(h)
+  assert.match(webUiPlain(h), /Confirm save/u)
+  assert.equal(h.webAutoStartWrites().length, 0, 'the confirm step itself never writes')
+  await key(h, '\r') // Confirm save
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [false], 'exactly one preference write (Off)')
+  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  assert.match(webUiPlain(h), /Start automatically\s+Off(?! \(default\))/u, 'the re-read value is painted')
+  assert.equal(h.webEnabledWrites().length, 0, 'the preference write never toggles the running Host')
+  h.dispose()
+})
+
+test('an unreadable preference offers no editable value and writes nothing', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' }, webStartupUnavailable: true })
+  await openWebUi(h)
+  const frame = webUiPlain(h)
+  assert.match(frame, /Start automatically\s+Unavailable/u, 'an absent section is reported, never defaulted')
+  assert.doesNotMatch(frame, /Change…/u, 'no edit affordance exists')
+  assert.match(frame, /No persisted preference is available to edit\./u)
+  await key(h, '\r')
+  await settle(h)
   assert.equal(h.webAutoStartWrites().length, 0)
   h.dispose()
 })
 
-test('a refused Web preference write is reported as not saved and keeps the base value', async () => {
+test('a refused preference write is reported as Not saved with the official reason', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
+    backendKind: 'remote',
+    webStatus: { state: 'enabled' },
     webStartupWriteFailure: 'settings namespace "pi-tui-web-preferences" changed since it was read (expected revision 1, now 2)',
   })
-  await openWebAutostartRow(h)
-  await key(h, '\r')
-  await key(h, '\x1b[A') // Off -> On
+  await openWebUi(h)
+  await highlightPageRow(h, 'Start automatically')
   await key(h, '\r')
   await settle(h)
-  assert.deepEqual(h.webAutoStartWrites(), [true], 'the refused decision still reached the Host once')
-  assert.match(h.view(), /Not saved/, 'the conflict is attributed to THIS request')
-  assert.match(h.view(), /changed since it was read/u, 'the official conflict reason is stated')
+  await highlightPageRow(h, 'Off')
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\r') // Confirm save
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [false], 'the refused decision still reached the Host once')
+  assert.match(webUiPlain(h), /Status\s+Not saved/u, 'the conflict is attributed to THIS request')
+  assert.match(webUiPlain(h), /changed since it was read/u, 'the official conflict reason is stated')
   h.dispose()
 })
 
-test('the Web preference never claims the current Host Web state was changed', async () => {
-  const h = setup({ columns: 200, rows: 40 })
-  await openWebAutostartRow(h)
-  const detail = h.view()
-  assert.doesNotMatch(detail, /enabled\b/u, 'the preference row never asserts the current frontend state')
-  assert.match(detail, /current Host is not changed/u)
+test('a Host A → B replacement revokes the old actions before any click can reach B', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  // Arm the confirmation's own button against Host A, then replace the Host.
+  await highlightPageRow(h, 'Disable Web…')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(webUiPlain(h), /Stop serving the Web UI\?/u)
+  const readsBefore = h.webStatusReads()
+  press(h, rowOf(h, 'Disable Web'), 3) // arm Host A's dispatch, not a write yet
+  await h.vt.waitForRender()
+  h.bumpWebGeneration()
+  await settle(h)
+  assert.ok(h.webStatusReads() > readsBefore, 'the generation change re-reads the new Host')
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u, 'the new Host fact is painted after its own read')
+  assert.doesNotMatch(webUiPlain(h), /Stop serving the Web UI\?/u,
+    'the confirmation derived from the replaced Host is revoked')
+  release(h, rowOf(h, 'Disable Web…'), 3)
+  await settle(h)
+  assert.equal(h.webEnabledWrites().length, 0, 'no write reached the new Host from the old observation')
   h.dispose()
+})
+
+test('a lost toggle receipt is Outcome unconfirmed, dispatched once, never retried', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' }, webToggleFailure: 'the connection dropped after dispatch' })
+  await openWebUi(h)
+  await key(h, '\r') // Enable Web
+  await settle(h, 10)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the request was really dispatched exactly once')
+  assert.match(webUiPlain(h), /Status\s+Outcome unconfirmed/u, 'a lost receipt is never claimed as Not changed')
+  assert.match(webUiPlain(h), /the connection dropped after dispatch/u)
+  await settle(h, 10)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'no automatic retry')
+  h.dispose()
+})
+
+test('a toggle the Host did not adopt is Not saved, not Verified', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' }, webSettledStatus: { state: 'disabled' } })
+  await openWebUi(h)
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true])
+  assert.match(webUiPlain(h), /Status\s+Not saved/u)
+  assert.match(webUiPlain(h), /the request reported success, but the Host reads Disabled/u)
+  h.dispose()
+})
+
+test('a pointer-only user completes Enable → Disable/Cancel → Back without a hidden keyboard step', async () => {
+  const h = setup({ columns: 120, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' } })
+  await openWebUi(h)
+  await clickPainted(h, 'Enable Web') // pointer only
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the painted row really dispatched the toggle')
+  await clickPainted(h, 'Disable Web…')
+  await settle(h)
+  await clickPainted(h, 'Cancel')
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the pointer Cancel performed zero writes')
+  await clickPainted(h, 'Disable Web…')
+  await settle(h)
+  await clickPainted(h, 'Disable Web') // the confirmation's own button
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true, false], 'the pointer confirmation dispatched exactly once')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the pointer Back is the real Esc ladder')
+  h.dispose()
+})
+
+test('the Web UI page stays complete and operable across the frozen size matrix', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
+    const h = setup({ columns, rows, backendKind: 'remote', webStatus: { state: 'enabled' } })
+    await openWebUi(h)
+    const frame = webUiPlain(h)
+    assert.match(frame, /Settings · Host · Web UI/u, `${columns}x${rows}: page identity`)
+    assert.match(frame, /Current Host/u, `${columns}x${rows}: the runtime facts survive`)
+    if (rows >= 24) {
+      assert.match(frame, /Next Host Start/u, `${columns}x${rows}: the preference facts survive`)
+    } else {
+      // A short grant scrolls ONE column instead of dropping the section.
+      await key(h, '\x1b[F')
+      assert.match(webUiPlain(h), /Next Host Start/u, `${columns}x${rows}: End reveals the preference facts`)
+      await key(h, '\x1b[H')
+    }
+    const bar = h.rowsPlain().at(-1) ?? ''
+    assert.match(bar, /Back \[Esc\]/u, `${columns}x${rows}: the complete Esc affordance is the last row`)
+    for (const [index, line] of h.vt.getViewport().entries()) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: row ${index} fits the width`)
+    }
+    // The primary journey is reachable at EVERY size (scrolled if needed).
+    await highlightPageRow(h, 'Disable Web…')
+    await key(h, '\r')
+    await settle(h)
+    assert.match(webUiPlain(h), /Stop serving the Web UI\?/u, `${columns}x${rows}: the confirmation is reachable`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Cancel \[Esc\]/u, `${columns}x${rows}: the confirmation keeps its Cancel affordance`)
+    await key(h, '\x1b')
+    await settle(h)
+    assert.equal(h.webEnabledWrites().length, 0, `${columns}x${rows}: Escape wrote nothing`)
+    h.dispose()
+  }
 })
 
 // ── M6-2A A5: the startup backend preference (`startup-backend`) ───────────
@@ -9901,21 +10268,21 @@ test('the Web preference never claims the current Host Web state was changed', a
 // picks, the port write that persists it and the authoritative re-read. An
 // explicit `DSH_PI_TUI_BACKEND` is a separate LAUNCH fact shown read-only.
 
-/** Open the `General` category and enter its single `Backend` row body (L1). */
+/** Open the `Host` category and enter its single `Backend` row body (L1). */
 async function openStartupBackendRow(h: Harness): Promise<void> {
-  await h.open('General')
+  await h.open('Host')
   await key(h, '\r') // L0 categories -> L1 rows (on Backend)
 }
 
-test('the Backend row lives in the fixed General category and shows the profile default', async () => {
+test('the Backend row lives in the fixed Host category and shows the profile default', async () => {
   const saved = process.env.DSH_PI_TUI_BACKEND
   delete process.env.DSH_PI_TUI_BACKEND
   try {
     const h = setup({ columns: 200, rows: 40 })
-    await h.open('General')
-    assert.match(h.view(), /^> General/mu, 'General is a reachable fixed category')
+    await h.open('Host')
+    assert.match(h.view(), /^> Host/mu, 'Host is a reachable fixed category')
     await key(h, '\r') // L0 -> L1
-    assert.match(h.view(), /Backend/u, 'the General category carries the Backend row')
+    assert.match(h.view(), /Backend/u, 'the Host category carries the Backend row')
     assert.match(h.view(), /Direct \(default\)/u, 'the schema default Direct is marked not user-overridden')
     assert.match(h.view(), /Applies on next launch; current TUI\/Host remains unchanged/u,
       'the row states the next-launch lifetime instead of claiming a live effect')
@@ -9957,7 +10324,7 @@ test('the (default) suffix follows USER provenance, not the effective value', as
     rows: 40,
     backendStartupPreference: { backend: 'daemon', revision: 2, userOverridden: true },
   })
-  await declared.open('General')
+  await declared.open('Host')
   await key(declared, '\r')
   assert.match(declared.view(), /Daemon(?! \(default\))/u, 'a USER-declared Daemon carries no default mark')
   declared.dispose()
@@ -10007,14 +10374,14 @@ test('an unreadable startup backend offers no confirmable candidate', async () =
   h.dispose()
 })
 
-test('the General Backend row is reachable and operable at 108/76/75 columns and two heights', async () => {
+test('the Host Backend row is reachable and operable at 108/76/75 columns and two heights', async () => {
   const saved = process.env.DSH_PI_TUI_BACKEND
   delete process.env.DSH_PI_TUI_BACKEND
   try {
     for (const columns of [108, 76, 75] as const) {
       for (const rows of [24, 40] as const) {
         const h = setup({ columns, rows })
-        await h.open('General')
+        await h.open('Host')
         if (columns >= 76) {
           assert.match(h.view(), /Tab (?:focus|panes)/u, `the Tab hint is advertised at ${columns}x${rows}`)
         } else {

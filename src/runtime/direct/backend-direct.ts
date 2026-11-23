@@ -118,6 +118,15 @@ class DirectUnavailableWebAccess implements WebAccessPort {
   async getAuthenticatedUrl(): Promise<WebAccessUrl> {
     throw new Error(DIRECT_WEB_ACCESS_REASON)
   }
+
+  /** Direct owns no transport generation. */
+  currentGeneration(): unknown {
+    return undefined
+  }
+
+  subscribeGeneration(): () => void {
+    return () => {}
+  }
 }
 
 /** The ONE statement of the Direct capability gap (presentation reads it). */

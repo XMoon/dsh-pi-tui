@@ -2114,14 +2114,18 @@ export function registerTuiCommands(
   })
   settingsCommands.registerSettings()
 
-  // M5-W PR-C: the ONE Split-Client Web frontend control entry, immediately
-  // after Settings. It is sessionless/local (see domain/command/policy.ts) and
-  // takes ONE optional native TSP presenter; every read/write stays here.
+  // M5-W PR-C / PR-A: the ONE Split-Client Web frontend control entry,
+  // immediately after Settings. It is sessionless/local (see
+  // domain/command/policy.ts) and takes ONE optional native TSP presenter;
+  // every read/write stays here. On the PiTui renderer `/web` is a typed deep
+  // link into the ONE `Settings · Host · Web UI` page (same lease, no second
+  // overlay), so the Settings registrar supplies that entry.
   createWebAccessCommands({
     runner,
     app: app as TuiApp | undefined,
     notify,
     registerOne,
+    openSettings: () => settingsCommands.openWebUiWorkspace(),
     ...(webPresentation === undefined ? {} : { webPresentation }),
   }).registerWeb()
 

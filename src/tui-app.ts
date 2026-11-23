@@ -2103,6 +2103,14 @@ export interface SettingsWorkspaceOpenOptions {
     done: () => void,
     openPlugins: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * PR-A: the ONE same-lease `Host · Web UI` page factory. The page paints the
+   * running Split Host's Web state and the persisted next-start preference in
+   * this ONE lease and writes each through its own existing owner.
+   */
+  readonly createWebUiPage?: (
+    done: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
 /** The live row handle of an OPEN `SettingsList` overlay: a section whose
@@ -6881,6 +6889,23 @@ export class TuiApp {
   /** Whether this surface has been finally disposed (M0). */
   isDisposed(): boolean {
     return this.disposed
+  }
+
+  /**
+   * Host-owned external URL activation: the SAME Client-local opener seam the
+   * fullscreen OSC 8 link clicks use. A surface that owns an explicit user
+   * "Open" action (the Settings `Host · Web UI` page) calls this instead of
+   * reaching the platform opener itself, so a composition without an opener
+   * (a headless/foreign renderer) learns that nothing was requested.
+   * @param url - the official http/https URL to hand to the platform opener.
+   * @returns `true` when an opener capability exists and the request was
+   *          issued; `false` when this composition has none.
+   */
+  activateExternalUrl(url: string): boolean {
+    const open = this.openExternalUrl
+    if (open === undefined) return false
+    open(url)
+    return true
   }
 
   /**
@@ -28432,6 +28457,9 @@ export class TuiApp {
       ...(options.createComputerUsePage === undefined
         ? {}
         : { createComputerUsePage: options.createComputerUsePage }),
+      ...(options.createWebUiPage === undefined
+        ? {}
+        : { createWebUiPage: options.createWebUiPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.

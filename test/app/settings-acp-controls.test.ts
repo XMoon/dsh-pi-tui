@@ -283,7 +283,7 @@ async function openTools(h: Harness): Promise<void> {
 async function openGeneral(h: Harness): Promise<void> {
   h.invoke()
   await settle(h, 'the Settings rail', frame => frame.includes('Settings ·'))
-  await selectSettingsCategory(h.vt, 'General')
+  await selectSettingsCategory(h.vt, 'Host')
   await key(h, ENTER)
 }
 

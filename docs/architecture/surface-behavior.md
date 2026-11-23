@@ -601,51 +601,66 @@ common.
 
 `/web` is ONE local, sessionless Client command that controls the Split Host's
 official Web frontend. It never creates a Session, submits a prompt, starts a
-second Host, changes the default backend or disconnects the TUI; on the Direct
-backend it answers `Web frontend controls are available only in a Split Client.`
-and opens nothing. The menu is a SHORT operation list, never a second Settings
-workspace: the default PiTui presentation is one `app.openSettings` overlay, and
-the experimental TSP renderer presents one native `ui.picker` plus ONE read-only
-Details Reading. Both consume the SAME application-level presentation request,
-so the action vocabulary cannot fork between renderers.
+second Host, changes the default backend or disconnects the TUI. It owns every
+read and write of the frontend and holds no Web state of its own: it reads the
+status through the semantic WebAccessPort, performs each explicit action on the
+Host's own service, and re-reads the authoritative state. There is no polling.
 
-The menu reads the Host's current state on entry and offers exactly what that
-state admits:
+The command has TWO renderers and ONE business authority:
 
-| Host state | Menu actions | What an action really does |
-|---|---|---|
-| `disabled` | Enable Web, Details | the Host's own `setEnabled(true)` |
-| `enabled` | Open Browser, Copy Link, Disable Web, Details | official authenticated URL for the explicit opener/clipboard, or `setEnabled(false)` |
-| `changing` | Details (no write) | nothing concurrent is submitted |
-| `unavailable` | Details (the reason is shown) | no implicit recovery or retry |
-| connection unreadable | the explicit unavailable statement, esc | no guessed Off, no write |
+- **PiTui**: a TYPED DEEP LINK into the ONE Settings workspace's
+  `Host · Web UI` page — the SAME screen lease, no overlay, no second Settings
+  surface. The page mounts on its first really-painted frame and the command
+  resolves only after that mount settled; a real failure closes the lease and
+  is the command's error, never a silent Rows fallback. The page's own
+  presentation contract (runtime vs next-launch authority, actions, confirm,
+  generation binding, `Esc` ladder) is owned by
+  [surface-settings.md](./surface-settings.md#web-ui-page-host); this section
+  owns only the command semantics. Direct shows the page with
+  `Unavailable · Split Host only` and no runtime action; it no longer refuses
+  the entry.
+- **TSP**: the existing native picker plus ONE read-only Details Reading over
+  the same application-level presentation request, so the action vocabulary
+  cannot fork between renderers. On a Direct backend that renderer keeps its
+  `Web frontend controls are available only in a Split Client.` receipt.
 
-Every operation is committed by the command, never by the presenter: one Host
-call, then ONE authoritative status re-read whose result is what the menu
-re-projects. Pointer activation of the short menu is the `SettingsList`
-component's own mouse contract and is delivered by the fullscreen/alt-screen
+Every operation is committed by the command, never by a presenter: one Host
+call, then ONE authoritative status re-read whose result is what the surface
+re-projects. Pointer activation is delivered by the fullscreen/alt-screen
 surface (the host enables terminal mouse reporting only there); the regular
-screen deliberately keeps the terminal's native selection behavior and has no
-overlay pointer capture, and this menu adds no custom mouse routing or fork
-divergence. A dismissal retires the menu only and never undoes a Host-accepted
-change. Open Browser issues the Client-local platform opener and only ever
-states `Opening browser…`; the authenticated URL contains the Host's official
-launch token and never enters a notice, the transcript, the Details page, a
-diagnostic or a trace. Copy Link reports only the clipboard's boolean
-acknowledgement (`Link copied` or `Clipboard unavailable`). Details is read-only
-and states the loopback Host, the current state, the frontend-only meaning of
-enable/disable, the next-launch lifetime of the preference and that the page
-opens the Web home where the user chooses a session — there is no TUI→browser
-session navigation or deep-link synthesis.
+screen deliberately keeps the terminal's native selection behavior. A
+dismissal retires the surface only and never undoes a Host-accepted change.
 
-The `Start Web automatically` row in `/settings → General` is a different
-fact with a different lifetime: it persists a PROFILE preference
-(`pi-tui-web-preferences.autoStart`, default Off, options On/Off) for the NEXT
-Split Host launch, read by the Host cold boot before Ready. Saving it never
-changes the current Host's FINAL Web state, the row never reports the current
-Web frontend state, and `/web` remains the immediate control. Saving any
-Settings value recomposes the Host profile, so the Web rows are briefly
-unloaded and re-mounted by the Host's own repair through the official
+The explicit actions are the same on both renderers. `Open in browser` asks for
+the official authenticated URL exactly once per action and hands it to the
+Client-local opener; it only ever claims `Browser open requested`, never that a
+browser page opened. `Copy access link` asks for it exactly once and reports
+only the clipboard's boolean acknowledgement (`Link copied` or `Clipboard
+unavailable`). The URL carries the Host's official launch token and never
+enters a notice, the transcript, a painted cell, a diagnostic or a trace; it is
+never cached or written to a file. `Enable Web` / `Disable Web` are the Host's
+own `setEnabled` switch: a confirmation is required before disabling, and
+disabling is the same frontend serving switch described below — it never
+revokes a Browser cookie, an existing Browser page, a Bearer token or a live
+Browser WebSocket. The listener stays `127.0.0.1`-only, and the first release
+formally supports only the trusted same-machine user (no LAN, public proxy or
+SSH tunnel guarantee).
+
+A user decision is bound to the Host it was DISPLAYED under. Every action is
+qualified by a CURRENT Host observation; a Connection generation change
+revokes the visible actions, the URL request and the pointer targets and
+re-reads before a new action is offered. A dispatched write is never cancelled
+by leaving the surface, never replayed, and never attributed from a later read:
+a lost receipt, a Host change during the request or an unperformable read-back
+is `Outcome unconfirmed` — never `Not changed`.
+
+The next-Split-Host-start preference (`pi-tui-web-preferences.autoStart`,
+default Off) is a DIFFERENT fact with a different lifetime: it is edited inside
+the same `Host · Web UI` page's `Next Host Start` section, is read only by the
+Host cold boot before Ready, and saving it never changes the current Host's
+final Web state. There is no standalone Settings row for it. Saving any Settings
+value recomposes the Host profile, so the Web rows are briefly unloaded and
+re-mounted by the Host's own repair through the official
 `app-boot/config-reload`; the final state is preserved, a browser connection may
 drop and reconnect during that window, and the preference still applies only to
 the next launch. A non-current configuration backend offers no confirmable
@@ -661,7 +676,7 @@ Host is `Unavailable`, and a Direct backend states `Unavailable — Split Host
 only`). Confirming On/Off sends exactly ONE `setEnabled`, then re-reads the
 authoritative listener state; only an agreeing re-read is `Verified`, a
 rejected or unreadable outcome is classified from a fresh read and never
-replayed. `Start ACP automatically` lives in `/settings → General` (the SAME row
+replayed. `Start ACP automatically` lives in `/settings → Host` (the SAME row
 id and preference authority as before the migration) and is the PERSISTED row
 (`pi-tui-acp-preferences.autoStart`, default `Off (default)`, options On/Off,
 revision-checked user patch) that applies to the NEXT Split Host start; saving
@@ -703,7 +718,7 @@ dismissal retires the menu only and never undoes a Host-accepted change.
 Details is read-only and states that the host is the local Split Host for the
 same OS user with no TCP/HTTP, the current state, that enable/disable serves or
 retires this Host's listener, that `Start ACP automatically` in
-`/settings → General` applies on the next Host start, and that closing an ACP
+`/settings → Host` applies on the next Host start, and that closing an ACP
 View only detaches it. No socket path, credential, cookie or private bind name
 enters the menu or Details; headless endpoint discovery stays `daemon status`.
 
@@ -711,7 +726,7 @@ enters the menu or Details; headless endpoint discovery stays `daemon status`.
 remain independent entries: `/acp` is the immediate quick control and the
 Settings row stays the runtime control inside Settings. The persisted
 `pi-tui-acp-preferences.autoStart` preference remains a DIFFERENT authority
-(`/settings → General → Start ACP automatically`) and is never written by
+(`/settings → Host → Start ACP automatically`) and is never written by
 `/acp`. The TUI command never calls the daemon status HTTP route, and the daemon
 status command never opens a TUI.
 

@@ -13,7 +13,7 @@ Direct is the default. To try daemon mode for a single interactive launch:
 DSH_PI_TUI_BACKEND=daemon dsh --profile pi-tui
 ~~~
 
-Alternatively, set **/settings → General → Backend** to `daemon`
+Alternatively, set **/settings → Host → Backend** to `daemon`
 and start a new TUI. This stored setting applies on the next launch only;
 it does not change the backend of a Client already running. A one-launch
 `DSH_PI_TUI_BACKEND` override has precedence over the Profile setting and
@@ -122,7 +122,7 @@ restart, and does not migrate a live Host into a new manager.
 The `daemon stop`, `restart` and `uninstall` operations can interrupt
 Host work. Check `daemon status` and the running sessions first.
 
-From the TUI, `/settings → General → Backend` saves the same Profile
+From the TUI, `/settings → Host → Backend` saves the same Profile
 preference (applies on the next launch). After a verified save to `Daemon`,
 the same settings screen offers the optional service install as a separate
 explicit action — `Not now` performs zero management IO, and one `Install`

@@ -46,8 +46,30 @@ export interface WebAccessUrl {
 export interface WebAccessPort {
   /** The Host's current state, read live on every call. */
   getStatus(): Promise<WebAccessStatus>
-  /** Enable or disable the official Web frontend on THIS Host. */
-  setEnabled(enabled: boolean): Promise<WebAccessStatus>
-  /** The official authenticated launch URL; only meaningful while `enabled`. */
-  getAuthenticatedUrl(): Promise<WebAccessUrl>
+  /** Enable or disable the official Web frontend on THIS Host. When
+   *  `expectedGeneration` is supplied, the write is refused (thrown) BEFORE any
+   *  dispatch if the live Connection generation no longer matches it, so a user
+   *  choice derived from an old Host can never reach a newly connected Host. */
+  setEnabled(enabled: boolean, expectedGeneration?: unknown): Promise<WebAccessStatus>
+  /** The official authenticated launch URL; only meaningful while `enabled`.
+   *  When `expectedGeneration` is supplied, the URL is refused (thrown) BEFORE
+   *  any dispatch if the live Connection generation no longer matches it, so a
+   *  link is never derived from a state observed on another Host. */
+  getAuthenticatedUrl(expectedGeneration?: unknown): Promise<WebAccessUrl>
+  /**
+   * The opaque identity of the CURRENT Connection generation (object identity),
+   * or `undefined` while disconnected / on Direct. A caller captures it when it
+   * observes a state and compares it before acting, so a cached observation and
+   * a user choice are bound to the SAME Host generation — `configReadiness()`
+   * alone cannot prove a reconnected Host is the one that produced the state.
+   */
+  currentGeneration(): unknown
+  /**
+   * Observe Connection generation changes. The callback fires when the Host
+   * generation that produced the current observation is no longer current, so
+   * the caller can revoke cached state/affordances and re-read before allowing
+   * a new action. Returns an unsubscribe. Direct (no transport generation) is
+   * a no-op.
+   */
+  subscribeGeneration(listener: () => void): () => void
 }

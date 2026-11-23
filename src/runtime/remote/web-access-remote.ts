@@ -5,10 +5,13 @@
  *
  * The Host stays the only authority for the current Web state and for the
  * official launch URL; this adapter owns no truth, no cache and no optimistic
- * update. Its only policy is CURRENTNESS: the Connection generation is captured
- * BEFORE dispatch and compared after it, so a reply carried by a superseded
- * generation is reported as a superseded read instead of being presented as the
- * new generation's definite outcome. A side-effecting request is never replayed.
+ * update. Its only policy is CURRENTNESS, at two layers: a caller that observed
+ * a state can pass that observation's generation as `expectedGeneration`, and
+ * the write/URL is then refused BEFORE dispatch when the live generation is no
+ * longer the same — plus the single-call fence captured before dispatch and
+ * compared after it, so a reply carried by a superseded generation is reported
+ * as a superseded read instead of being presented as the new generation's
+ * definite outcome. A side-effecting request is never replayed.
  *
  * The authenticated URL is deliberately not logged, not redacted into a
  * diagnostic and not retained: the caller is one explicit user action.
@@ -56,12 +59,34 @@ export class RemoteWebAccessPort implements WebAccessPort {
     return this.fenced('status', namespace => namespace.getStatus())
   }
 
-  async setEnabled(enabled: boolean): Promise<WebAccessStatus> {
+  async setEnabled(enabled: boolean, expectedGeneration?: unknown): Promise<WebAccessStatus> {
+    // Fail BEFORE dispatch if the caller's choice belongs to a superseded Host
+    // generation, so an old observation is never written to a newly connected
+    // Host (zero Host dispatch).
+    if (expectedGeneration !== undefined && !Object.is(this.generation.getSnapshot(), expectedGeneration)) {
+      throw new SupersededReadError('web access toggle superseded: the Host generation changed before dispatch')
+    }
     return this.fenced('toggle', namespace => namespace.setEnabled(enabled))
   }
 
-  async getAuthenticatedUrl(): Promise<WebAccessUrl> {
+  async getAuthenticatedUrl(expectedGeneration?: unknown): Promise<WebAccessUrl> {
+    // Same pre-dispatch fence: the official URL is only ever derived from the
+    // Host the caller observed it on.
+    if (expectedGeneration !== undefined && !Object.is(this.generation.getSnapshot(), expectedGeneration)) {
+      throw new SupersededReadError('web access link superseded: the Host generation changed before dispatch')
+    }
     return this.fenced('link', namespace => namespace.getAuthenticatedUrl())
+  }
+
+  /** The exact generation this adapter fences every call on (object identity). */
+  currentGeneration(): unknown {
+    return this.generation.getSnapshot()
+  }
+
+  /** Observe Connection generation changes so a caller can revoke a cached
+   *  observation and re-read before acting on a new Host. */
+  subscribeGeneration(listener: () => void): () => void {
+    return this.generation.subscribe(listener)
   }
 
   /**

@@ -73,6 +73,7 @@ import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource
 import { McpServersPage } from '../panels/mcp-servers-page.ts'
 import { McpServersController } from '../../app/command/mcp-servers.ts'
 import { ComputerUseSettingsPage, COMPUTER_USE_PAGE_TITLE } from '../panels/computer-use-settings-page.ts'
+import { WebUiSettingsPage } from '../panels/web-ui-settings-page.ts'
 import { CuaAccessSettingsController } from '../../app/command/cua-access-settings.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
@@ -107,6 +108,7 @@ type SettingsCommandRunner = Pick<
   | 'applyFooterSettings'
   | 'acpAccess'
   | 'backendKind'
+  | 'webAccess'
   | 'captureLiveSessionScope'
   | 'catalog'
   | 'clientCommands'
@@ -251,6 +253,14 @@ export interface SettingsCommandRegistrars {
    * create/switch) and lands on the Plugin List with the keyboard on it.
    */
   openPluginsWorkspace(): CommandResult
+  /**
+   * PR-A `/web`: the ONE PiTui deep link into `Settings · Host · Web UI`. It
+   * takes the SAME Settings workspace lease, mounts the page on its first
+   * really-painted frame and resolves only after that mount settled — a
+   * failure closes the lease and is the command's real error, never a silent
+   * navigation to the Rows level or a second overlay.
+   */
+  openWebUiWorkspace(): Promise<CommandResult>
 }
 
 /**
@@ -1628,6 +1638,42 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           activeWebPage = page
           return page
         },
+        // PR-A: the ONE `Host · Web UI` page. It paints the CURRENT Host
+        // runtime facts (through the semantic WebAccessPort) beside the
+        // persisted next-start preference, and writes each through its OWN
+        // existing owner: `runner.webAccess.setEnabled` and the revision-checked
+        // `web-autostart` field of `commitSettingsWorkspaceField`. The page
+        // starts its authoritative Host read on THIS factory call (the first
+        // frame that can really paint it), never while a snapshot is built.
+        createWebUiPage: (done) => {
+          const requestRender = (): void => { if (!app.isDisposed()) app.requestRender() }
+          return new WebUiSettingsPage({
+            backendKind: runner.backendKind === 'remote' ? 'remote' : 'direct',
+            readStatus: () => runner.webAccess.getStatus(),
+            setEnabled: (enabled, expectedGeneration) => runner.webAccess.setEnabled(enabled, expectedGeneration),
+            getAuthenticatedUrl: (expectedGeneration) => runner.webAccess.getAuthenticatedUrl(expectedGeneration),
+            // The Client-local opener/clipboard are the ONLY consumers of the
+            // authenticated URL; the Host never opens a browser. The opener is
+            // the app's OWN external-URL seam (the same one fullscreen link
+            // clicks use), so a composition without one reports a real failure.
+            openUrl: (url) => app.activateExternalUrl(url),
+            copyToClipboard: (text) => runner.copyToClipboard(text),
+            readPreference: () => runner.config.webStartupPreference.read(),
+            configReadiness: () => runner.config.configReadiness(),
+            commitAutostart: (value, revision) =>
+              commitSettingsWorkspaceField({ field: 'web-autostart', value, revision }, undefined),
+            currentGeneration: () => runner.webAccess.currentGeneration(),
+            subscribeGeneration: (listener) => runner.webAccess.subscribeGeneration(listener),
+            runOwned: (label, task, onError) => runOwned(label, task, {
+              diag: runner.diag,
+              sessionId: () => runner.currentSessionId,
+              onError,
+            }),
+            diagnose: (label, detail) => runner.diag.warn(label, detail),
+            requestRender,
+            done,
+          })
+        },
         // C2-R5: the two same-lease professional pages. Each factory returns
         // the EXISTING editor over its ONE authority; the root mounts it in this
         // workspace's body and never opens a second overlay.
@@ -2307,45 +2353,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /**
    * The profile-owned Web startup preference (`pi-tui-web-preferences`). It is
-   * a NEXT-Host-launch fact only: this row never reports or changes the CURRENT
-   * Host's Web state, and committing it never calls the Web frontend toggle.
+   * a NEXT-Host-launch fact only: the `Host → Web UI` page never reports it as
+   * the CURRENT Host's Web state, and committing it never calls the Web
+   * frontend toggle. The page paints the value itself from the same read, so
+   * this command owns only the writer + its authoritative re-read.
    */
-  const webAutostartSummaryOf = (state: WebStartupPreferenceState | undefined): string => {
-    if (state === undefined) return 'Unavailable'
-    // `Off (default)` marks the schema default the USER layer does not declare;
-    // the Host form's provenance is the only source for that mark.
-    if (state.autoStart) return 'On'
-    return state.userOverridden ? 'Off' : 'Off (default)'
-  }
-
-  const webAutostartEditOf = (
-    state: WebStartupPreferenceState | undefined,
-    readiness: 'ready' | 'stale' | 'unavailable',
-  ): SettingsWorkspaceEdit => {
-    const editable = state !== undefined && readiness === 'ready'
-    return {
-      field: 'web-autostart',
-      primary: 'persisted',
-      ...(state === undefined ? {} : { revision: state.revision }),
-      options: editable
-        ? [
-            { value: 'On', label: 'On', available: true, current: state.autoStart },
-            { value: 'Off', label: 'Off', available: true, current: !state.autoStart },
-          ]
-        : [],
-      // The live effect statement: the preference applies to the NEXT Host
-      // launch and leaves the running one exactly as it is.
-      runtime: 'applies on the next Host launch; the current Host is unchanged',
-      persisted: webAutostartSummaryOf(state),
-    }
-  }
-
-  const webAutostartFreshnessOf = (
-    state: WebStartupPreferenceState | undefined,
-    readiness: 'ready' | 'stale' | 'unavailable',
-  ): SettingsWorkspaceFreshness => state === undefined
-    ? 'unavailable'
-    : readiness === 'ready' ? 'ready' : 'last-known'
 
   /** A candidate identity ('On'/'Off') as the Host boolean. */
   const webAutostartValueOf = (value: string): boolean | undefined =>
@@ -4095,8 +4107,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the shipped default.
     const visualTools = runner.config.visualTools.read()
     const visualToolsFreshness = visualToolsFreshnessOf(visualTools, configReadiness)
-    const webAutostart = runner.config.webStartupPreference.read()
-    const webAutostartFreshness = webAutostartFreshnessOf(webAutostart, configReadiness)
     // The startup backend selection has its OWN authority (the `tui-startup`
     // Config section), read on this same snapshot: an unavailable or illegal
     // Profile value is never presented as the shipped `direct` default.
@@ -4740,20 +4750,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           edit: backendStartupEditOf(backendStartup, configReadiness),
         },
         {
-          // M5-W PR-C: the NEXT-Host-launch Web preference. It is a Host profile
-          // setting, not the current Web state: saving it never enables or
-          // disables the running Host, and `/web` remains the immediate control.
-          // FR5-B moved the row to General (same id, same port) so the
-          // next-Split-Host-launch preferences live together.
-          id: 'web-autostart',
+          // PR-A: the ONE Web UI row. It is a NAVIGATION row whose page owns
+          // BOTH Web authorities: the CURRENT Host listener (runtime controls)
+          // and the persisted next-Split-Host-start preference. The summary is a
+          // fixed statement of that shape, not a Host read: the workspace
+          // snapshot starts no RPC, and the page reads the Host on its first
+          // really-painted frame.
+          id: 'web-ui',
           category: 'general',
-          label: 'Start Web automatically',
-          summary: webAutostartSummaryOf(webAutostart),
-          scope: 'DSH Host profile · next Split Host launch',
-          freshness: webAutostartFreshness,
-          description: 'Automatically serves the Web frontend when a new Split Host starts. '
-            + 'The current Host is not changed; use /web for immediate control. Browser opening remains manual.',
-          edit: webAutostartEditOf(webAutostart, configReadiness),
+          label: 'Web UI',
+          summary: 'Live control · next Host start',
+          scope: 'DSH Host · running Split Host Web frontend; profile preference for the next start',
+          freshness: 'runtime',
+          description: 'Enable, disable, open or copy the link of the official Web frontend of the running Split Host, '
+            + 'and set whether a new Split Host starts it automatically. The two facts have separate authorities: '
+            + 'the runtime controls change only the current Host, and the preference changes only the next start.',
+          specialist: 'web-ui',
         },
         {
           // PO-1B: the NEXT-Split-Host-start ACP preference. A persisted profile
@@ -5353,8 +5365,30 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return { kind: 'success' }
   }
 
-  const openAuthWorkspace = (destination: AuthDestination): CommandResult => {
-    if (destination.kind === 'error') return { kind: 'error', text: destination.message }
+  /**
+   * PR-A `/web`: the ONE typed deep link into `Settings · Host · Web UI`. The
+   * SAME Settings lease is taken (no overlay, no second screen); the command
+   * awaits the page's first really-painted mount and reports the real failure
+   * instead of falling back to the Rows level. Direct and Remote both reach the
+   * page: on Direct the page states the real `Unavailable · Split Host only`
+   * capability and offers no runtime action.
+   */
+  const openWebUiWorkspace = async (): Promise<CommandResult> => {
+    let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
+    try {
+      handle = openSettingsWorkspaceWith({ initialRowId: 'web-ui', initialSpecialist: 'web-ui' })
+    } catch (error) {
+      return { kind: 'error', text: `could not open the settings workspace: ${safeErrorMessage(error)}` }
+    }
+    const settlement = await handle.whenInitialSpecialistSettled()
+    if (!settlement.ok) {
+      handle.close()
+      return { kind: 'error', text: `could not open Web UI: ${settlement.reason}` }
+    }
+    return { kind: 'success' }
+  }
+
+  const openAuthWorkspace = (destination: AuthDestination): CommandResult => {    if (destination.kind === 'error') return { kind: 'error', text: destination.message }
     if ((app as unknown as import('../../tui-app.ts').TuiApp | undefined) === undefined) {
       return {
         kind: 'error',
@@ -5390,6 +5424,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     registerKeybindings,
     openAuthWorkspace,
     openPluginsWorkspace,
+    openWebUiWorkspace,
   }
 }
 
