@@ -4910,3 +4910,38 @@ test('G-ACP2-PR1 QU-05: a View that lost ownership never writes a continued answ
       'a released offer never writes a new user message into the shared Session')
   }
 })
+
+test('G-ACP2-PR1 ST-07: a reconciliation that sends nothing never charges the pending-update budget', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-budget-join')
+  view.access.turnFence = { openTurnStartSeq: 995, lastTurn: 44 }
+  view.claim('m-budget-join', 44, request.requestId)
+  // Hold the tail so every later task is still PENDING (its reservation is
+  // charged, not yet drained).
+  const gate = view.deferredSend()
+  const attemptId = 'P1:budget'
+  view.stream({ type: 'start', attemptId, revision: 1, turn: 44, step: 1 })
+  view.stream(streamFrame(attemptId, 2, 0, { type: 'text-delta', index: 0, text: 'streamed' }))
+  // 63 further REAL pending updates fill the budget exactly to its 64 ceiling.
+  for (let call = 0; call < 63; call += 1) {
+    view.commit('tool/call', { turn: 44, callId: `call-${String(call)}`, name: 'probe', input: {} })
+  }
+  // The durable message of the fully streamed attempt sends NOTHING more: its
+  // reconciliation must fit at exactly 64 pending updates, not force 65.
+  view.commit('assistant/message', assistantData(44, 'm-budget-durable', [{ type: 'text', text: 'streamed' }]))
+  view.stream({
+    type: 'end', attemptId, revision: 3, index: 1,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
+  })
+  await flushOutput()
+  gate.release()
+  await flushOutput()
+  view.commit('turn/end', { turn: 44, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' },
+    'a zero-send reconciliation never makes a legal queue overflow')
+  assert.equal(view.notifications.filter(update => updateKind(update) === 'agent_message_chunk').length, 1,
+    'the streamed text stays delivered exactly once')
+})

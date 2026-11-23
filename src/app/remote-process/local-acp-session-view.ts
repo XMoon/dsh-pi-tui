@@ -3338,7 +3338,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const residual = attempt.hasSent()
       ? content.entries.filter(entry => entry.kind === 'message-image').length
       : content.entries.length
-    this.enqueueOutputTask(claim, flight, Math.max(1, residual), async () => {
+    this.enqueueOutputTask(claim, flight, residual, async () => {
       // Delivered bytes that no durable append can own make every later
       // outcome of this flight a failure, whatever this event proves.
       if (flight.unprovenProvisional !== undefined) throw streamDivergence()
@@ -3586,17 +3586,24 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     reserve: number,
     build: () => readonly SessionUpdate[] | Promise<readonly SessionUpdate[]>,
   ): void {
-    if (reserve === 0 || flight.settledDone) return
+    if (flight.settledDone) return
     const taskIndex = flight.outputTasksQueued
     flight.outputTasksQueued += 1
-    flight.pendingUpdates += reserve
-    if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
-      this.failPrompt(claim, flight, promptError(
-        'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
-        'the ACP output queue exceeded its bounded capacity',
-        JSONRPC_INTERNAL_ERROR,
-      ))
-      return
+    // `reserve` is the number of updates this task will hand to the transport,
+    // charged BEFORE any await so a slow Store read cannot outgrow the budget.
+    // A reconciliation that will send nothing (every streamed block already
+    // delivered) reserves 0 and therefore occupies no output budget: it only
+    // owns a tail position.
+    if (reserve > 0) {
+      flight.pendingUpdates += reserve
+      if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
+          'the ACP output queue exceeded its bounded capacity',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+        return
+      }
     }
     flight.outputTail = flight.outputTail.then(async () => {
       try {

@@ -278,6 +278,12 @@ profile's independent `autoStart` preference enables it (see below).
       message that a later attempt would have delivered is never reported. A
       genuinely failed, cancelled or interrupted turn keeps its own real
       classification instead of being rewritten as a divergence.
+    - **Budget accounting at the join.** The pending-update budget charges the
+      updates a task will actually hand to the transport, reserved before any
+      await. A reconciliation whose blocks were all streamed reserves nothing —
+      it only owns a tail position — while a message whose blocks were never
+      streamed reserves every block (and a joined message reserves its durable
+      images) before the first Store read.
     - **Wire order and identity of a joined message.** One attempt's streamed
       text/thought chunks and the residual durable blocks added at the join
       share ONE stable opaque ACP message id (the durable message id is used only
