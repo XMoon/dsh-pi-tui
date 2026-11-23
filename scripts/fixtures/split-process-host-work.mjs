@@ -1707,6 +1707,18 @@ class C1Model extends LlmAdapter {
     if (this.scenario === 'question') {
       if (!this.toolIssued.has(sessionId)) {
         this.toolIssued.add(sessionId)
+        // The newest AUTHORED user text selects the question form: a marker
+        // asks for the indefinite official `ask` (blocking) or the 1s timed
+        // wait; the environment keeps its historical whole-scenario meaning.
+        const authoredUser = [...(options.messages ?? [])].reverse()
+          .find(message => message?.role === 'user' && message?.source?.kind === 'user')
+        const authoredText = (authoredUser?.content ?? [])
+          .map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+        const timeout = authoredText.includes('acp-question-timed') || process.env.C1_TIMED_QUESTION === '1'
+          ? 1
+          : authoredText.includes('acp-question-blocking') || authoredText.includes('acp-question-decline')
+            ? -1
+            : undefined
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield {
           type: 'block-end',
@@ -1721,7 +1733,7 @@ class C1Model extends LlmAdapter {
                 question: 'Continue the C1 test?',
                 options: [{ label: 'Proceed' }, { label: 'Cancel' }],
               }],
-              ...(process.env.C1_TIMED_QUESTION === '1' ? { timeout: 1 } : {}),
+              ...(timeout === undefined ? {} : { timeout }),
             }),
           },
         }

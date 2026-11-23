@@ -643,6 +643,19 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.native-question-form') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpProtocolVersion === 1
+      && result?.nativeQuestionToolResult === true
+      && result?.continuedReplySteered === true
+      && result?.declineFailsClosed === true
+      && result?.hostIdentityKept === true
+      && result?.forms === 3
+      && result?.l6EvidenceRecorded === true,
+    `selected ${caseId}: the native-question verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'acp.transient-stream-settlement') {
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'

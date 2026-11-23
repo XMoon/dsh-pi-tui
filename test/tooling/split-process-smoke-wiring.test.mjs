@@ -540,6 +540,10 @@ test('every registry entry declares a conservative platform list and the audited
     // path) with one official SDK client and the scripted provider; its
     // packed-candidate Darwin selected run passed.
     'acp.transient-stream-settlement',
+    // The native-question case drives only the shared Split harness, the
+    // platform-specific ACP endpoint and one official SDK client; it has real
+    // packed-candidate Darwin and Linux selected runs.
+    'acp.native-question-form',
     // The Host accepted-input history search case drives only the shared Split
     // harness (tmux PTY, authenticated Host, real official Session admission,
     // two real Client PIDs and a clean Host restart); it uses no
