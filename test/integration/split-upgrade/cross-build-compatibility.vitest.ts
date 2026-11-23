@@ -547,8 +547,9 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     //   because it also hashes install-layout metadata such as
     //   `node_modules/.bin/*`; equality there is not a product invariant.
     // - each physical install is still verified against ITS OWN Supervisor
-    //   payloadHash receipt: the old profile in S1/S2 and the activated profile
-    //   here. This proves the official install did not drift after its facts.
+    //   payloadHash receipt: the old profile before/through the side-by-side
+    //   install and the activated profile here. This proves the official install
+    //   did not drift after its facts.
     assert.equal(support.productionBuildId(newProfile.packageRoot, scene.pair.targetDshVersion), sideNew.buildId,
       'the activated Profile disk content does not fingerprint as the installed side-new build')
     assert.equal(support.installedPayloadHash(newProfile.packageRoot), newProfile.payloadHash,
@@ -660,8 +661,9 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.equal(sha256File(scene.pair.new.path), scene.pair.new.sha256,
       'the frozen new tarball changed during the Scene')
     // The fixture's finish() already proves the Supervisor exit and root removal;
-    // this reads the Supervisor's OWN durable receipt so S12 also proves the
-    // FINALIZED phase and that no unattributed fallback Host survived.
+    // this reads the Supervisor's OWN durable receipt so the final resource audit
+    // also proves the FINALIZED phase and that no unattributed fallback Host
+    // survived.
     const tmpBase = process.env.SPLIT_VITEST_TMP_BASE
     if (typeof tmpBase !== 'string' || tmpBase === '') {
       throw new Error('SPLIT_VITEST_TMP_BASE is absent after the Scene finished')
