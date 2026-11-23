@@ -1326,9 +1326,16 @@ class C1Model extends LlmAdapter {
     const userText = allUserText(options.messages ?? [])
     // QUALIFICATION-ONLY read-only observation of the official live registries
     // for ONE watched Session id (`C1_WATCH_SESSION`). The phase marker comes
-    // from the prompt text so an observation is associated with the CASE STEP
-    // that triggered it, never with a log index. The pack does not ship this.
-    const phaseMatch = /projection-registry-marker:([a-z0-9-]+)/u.exec(userText)
+    // from the CURRENT authored prompt only: the official agent loop forwards
+    // the derived history, so an older marker must never shadow this step's.
+    // The pack does not ship this.
+    const reversedMessages = [...(options.messages ?? [])].reverse()
+    // The request's last user message IS this step's prompt; when the message
+    // shape carries an explicit source, prefer the user-authored one.
+    const authored = reversedMessages.find(message => message?.role === 'user' && message?.source?.kind === 'user')
+      ?? reversedMessages.find(message => message?.role === 'user')
+    const phaseText = authored === undefined ? '' : allUserText([authored])
+    const phaseMatch = /projection-registry-marker:([a-z0-9-]+)/u.exec(phaseText)
     if (phaseMatch !== null) this.record('live-registry-phase', { phase: phaseMatch[1] })
     const registry = this.probeRegistry?.({ phase: phaseMatch?.[1] ?? null, sessionId })
     if (registry !== undefined) this.record('live-registry', registry)

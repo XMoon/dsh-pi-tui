@@ -616,6 +616,19 @@ export async function runAcpProtocolProjection(context) {
     assert(registryAfter.sessionCount <= registryBefore.sessionCount
       && registryAfter.agentCount <= registryBefore.agentCount,
     `PP-11: the roster read did not raise the official live Session/Agent count (before ${JSON.stringify(registryBefore)} after ${JSON.stringify(registryAfter)})`)
+    // NEGATIVE PROOF for the phase identity: a turn WITHOUT a marker must not
+    // reuse the previous step's phase, even though its derived history still
+    // contains the earlier marker.
+    const phaseCountBefore = readC1WorkEvents(second.workRoot).filter(event => event.kind === 'live-registry-phase').length
+    const watchNoMarker = await restartConn.request(acp.methods.agent.session.prompt, {
+      sessionId: watchSession, prompt: [{ type: 'text', text: 'A prompt without any registry phase marker.' }],
+    })
+    assert(watchNoMarker?.stopReason === 'end_turn', 'PP-11: the unmarked turn completes')
+    const afterNoMarker = readC1WorkEvents(second.workRoot)
+    const phaseCountAfter = afterNoMarker.filter(event => event.kind === 'live-registry-phase').length
+    assert(phaseCountAfter === phaseCountBefore, 'PP-11: an unmarked prompt never reuses an older registry phase')
+    assert(afterNoMarker.some(event => event.kind === 'live-registry' && event.phase === null),
+      'PP-11: the unmarked turn is observed without a phase, not folded into the previous one')
     const restartLoader = await openSdkClient(endpointB, () => {})
     clients.push(restartLoader)
     await restartLoader.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
@@ -644,7 +657,16 @@ export async function runAcpProtocolProjection(context) {
         sessionCount: registryAfter.sessionCount,
         agentCount: registryAfter.agentCount,
       },
-      liveAgentCount: 'OBSERVED_UNCHANGED_BY_OFFICIAL_REGISTRY',
+      // Both values are the fixture's read of the OFFICIAL `sessions.list()` /
+      // `agents.list()` counts; the observed property is "did not increase"
+      // (a settled child may disappear), not "strictly unchanged".
+      liveAgentCount: 'OBSERVED_NOT_INCREASED',
+      // The official Writer is a kernel flock (`SessionWriteLease`) with no
+      // in-process count; acquiring it would be a write. The frozen Writer
+      // sub-item is therefore reported as NOT_VERIFIED (Owner adjudication),
+      // backed by the static source->sink chain and the cold id being absent
+      // from both official live registries.
+      writer: 'WRITER_L6_NOT_VERIFIED',
     }
 
     const durableKinds = eventsOf(sessionP).map(event => event.type)
