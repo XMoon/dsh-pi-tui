@@ -780,22 +780,36 @@ export async function cleanupNativeService({
       return `failed:${String(error?.code ?? 'NATIVE_DAEMON_FAILED')}`
     }
   }
+  // Every official mutation is admitted against the LATEST observation. A
+  // manager/source/currentness drift after `stop` must never be followed by an
+  // `uninstall` request; the helper preserve path owns that decision.
+  const runAdmittedVerb = async (verb, field) => {
+    const decision = allowNativeMutation({ reservation: facts, observation, verb })
+    if (!decision.allowed) {
+      cleanup[field] = `not-admitted:${String(decision.reason)}`
+      return false
+    }
+    cleanup[field] = await runVerb(verb)
+    return true
+  }
   if (plan.actions.includes('official-stop')) {
-    cleanup.officialStop = await runVerb('stop')
-    try {
-      observation = validateServiceObservation(await observe())
-      adopt(observation)
-    } catch {
-      return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+    if (await runAdmittedVerb('stop', 'officialStop')) {
+      try {
+        observation = validateServiceObservation(await observe())
+        adopt(observation)
+      } catch {
+        return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+      }
     }
   }
   if (plan.actions.includes('official-uninstall')) {
-    cleanup.officialUninstall = await runVerb('uninstall')
-    try {
-      observation = validateServiceObservation(await observe())
-      adopt(observation)
-    } catch {
-      return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+    if (await runAdmittedVerb('uninstall', 'officialUninstall')) {
+      try {
+        observation = validateServiceObservation(await observe())
+        adopt(observation)
+      } catch {
+        return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+      }
     }
   }
   if (observation.state !== 'removed' && observation.state !== 'reserved-but-absent') {
@@ -930,6 +944,22 @@ export function assertNativeManagedProfileInstall({ role, pair, oldBuildId, inst
     }
   }
   return Object.freeze({ version, buildId, payloadHash, packageRoot, entries: Object.freeze({ host: entries.host, client: entries.client }) })
+}
+
+/**
+ * The ONE rollback admission. A removed/absent service needs a fresh install on
+ * both managers. Linux is explicitly allowed to reinstall the old Profile over
+ * a strictly verified, still-loaded-but-inactive unit: the product's verified
+ * `daemon restart` adopts the current install. macOS must recreate the plist
+ * for the old build, so a still-installed LaunchAgent is refused.
+ */
+export function assertNativeRollbackAdmission({ manager, observation } = {}) {
+  const kind = requireNativeManagerKind(manager)
+  const observed = validateServiceObservation(observation)
+  if (observed.state === 'removed' || observed.state === 'reserved-but-absent') return observed
+  if (kind === 'systemd' && observed.state === 'installed-inactive') return observed
+  fail('NATIVE_ROLLBACK_SERVICE_STILL_MANAGED',
+    `the ${kind} managed service is still installed (${observed.state}); a rollback must not run over it`)
 }
 
 /**
@@ -1174,8 +1204,6 @@ export async function runFixedDaemonVerb({ installation, verb, abortSignal = nul
   if (child?.pid === undefined || child.pid === null) {
     throw contractError('NATIVE_DAEMON_SPAWN_FAILED', `daemon ${action} produced no child process`)
   }
-  await hooks.onSpawned?.({ verb: action, pid: child.pid, at: new Date().toISOString() })
-
   let stdoutBytes = 0
   let stderrBytes = 0
   let outputLimitExceeded = false
@@ -1238,6 +1266,24 @@ export async function runFixedDaemonVerb({ installation, verb, abortSignal = nul
     terminate()
   }
   abortSignal?.addEventListener('abort', onAbort, { once: true })
+
+  const combinedFailure = errors => {
+    const present = errors.filter(error => error !== undefined && error !== null)
+    if (present.length === 1) return present[0]
+    return new AggregateError(present, `daemon ${action} failed with an unconfirmed receipt state`)
+  }
+
+  // The child lifecycle (drain, close wait, deadline, abort, exact-child kill)
+  // is installed BEFORE any receipt hook can fail. A failing onSpawned hook
+  // therefore always terminates and reaps exactly this child before the
+  // Supervisor learns the failure; the child can never outlive its receipt.
+  let spawnedHookError
+  try {
+    await hooks.onSpawned?.({ verb: action, pid: child.pid, at: new Date().toISOString() })
+  } catch (error) {
+    spawnedHookError = error
+    terminate()
+  }
   const raced = await Promise.race([
     closePromise.then(value => ({ settled: true, value }), error => ({ settled: false, error })),
     forcePromise.then(() => ({ forced: true })),
@@ -1247,13 +1293,55 @@ export async function runFixedDaemonVerb({ installation, verb, abortSignal = nul
   if (forceTimer !== undefined) clearTimeout(forceTimer)
   abortSignal?.removeEventListener('abort', onAbort)
   if (raced.forced === true) {
-    await hooks.onNotQuiesced?.({ verb: action, pid: child.pid, at: new Date().toISOString() })
-    throw contractError('NOT_QUIESCED', `daemon ${action} child ${String(child.pid)} did not exit after TERM/KILL`)
+    let notQuiescedHookError
+    try {
+      await hooks.onNotQuiesced?.({ verb: action, pid: child.pid, at: new Date().toISOString() })
+    } catch (error) {
+      notQuiescedHookError = error
+    }
+    throw combinedFailure([
+      spawnedHookError,
+      notQuiescedHookError,
+      contractError('NOT_QUIESCED', `daemon ${action} child ${String(child.pid)} did not exit after TERM/KILL`),
+    ])
   }
   if (raced.settled === false) {
-    throw contractError('NATIVE_DAEMON_SPAWN_FAILED', `daemon ${action} could not be spawned`, raced.error ?? spawnError)
+    throw combinedFailure([
+      spawnedHookError,
+      contractError('NATIVE_DAEMON_SPAWN_FAILED', `daemon ${action} could not be spawned`, raced.error ?? spawnError),
+    ])
   }
   const exit = raced.value
+  if (spawnedHookError !== undefined) {
+    let exitHookError
+    try {
+      await hooks.onExited?.({
+        verb: action,
+        pid: child.pid,
+        exitCode: exit.code ?? null,
+        signal: exit.signal ?? null,
+        stdoutBytes,
+        stderrBytes,
+        outputLimitExceeded,
+        at: new Date().toISOString(),
+      })
+    } catch (error) {
+      exitHookError = error
+    }
+    const terminal = exit.signal !== null
+      ? contractError('NATIVE_DAEMON_SIGNALLED', `daemon ${action} exited on signal ${String(exit.signal)} after its spawn receipt failed`)
+      : exit.code === 0
+        ? contractError('NATIVE_DAEMON_HOOK_FAILED', `daemon ${action} finished but its spawn receipt could not be recorded`)
+        : contractError('NATIVE_DAEMON_FAILED', `daemon ${action} exited with code ${String(exit.code)} after its spawn receipt failed`)
+    Object.assign(terminal, {
+      exitCode: exit.code ?? null,
+      signal: exit.signal ?? null,
+      stdoutBytes,
+      stderrBytes,
+      outputLimitExceeded,
+    })
+    throw combinedFailure([spawnedHookError, exitHookError, terminal])
+  }
   await hooks.onExited?.({
     verb: action,
     pid: child.pid,

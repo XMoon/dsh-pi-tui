@@ -33,6 +33,7 @@ import {
   applyServiceObservation,
   assertManagedReservationScene,
   assertNativeManagedProfileInstall,
+  assertNativeRollbackAdmission,
   classifyCurrentProfile,
   classifyManagedInspection,
   classifyNativeClientOwnership,
@@ -1029,18 +1030,23 @@ async function cleanup(reason) {
       await terminateQualificationClient(reason)
       // A Scene Client's production discovery fallback can start a detached
       // Host this Supervisor never created. Audit and reclaim it before any
-      // terminal quiescence claim or root removal.
-      await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
-      // Native-only compensation runs BEFORE the Host generations are stopped:
-      // the registered Client/shell PIDs are validated against uid, kernel birth,
-      // command and the run-owned scratch, never by name or process group.
+      // terminal quiescence claim or root removal. A native Scene skips this
+      // FIRST pass: the manager-owned Host legitimately runs local-host.mjs
+      // under the Scene root but belongs to the reserved service, not to a
+      // Client fallback; it is stopped by cleanupNativeManagedService below
+      // and the post-host audit then owns any true leftover.
       if (isNativeScene()) {
+        // Native-only compensation runs BEFORE the Host generations are stopped:
+        // the registered Client/shell PIDs are validated against uid, kernel
+        // birth, command and the run-owned scratch, never by name or group.
         try {
           await reclaimNativeClients(`cleanup:${reason}`)
         } catch (error) {
           clean = false
           appendNote('native-client-reclaim-failed', { reason: boundedError(error) })
         }
+      } else {
+        await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
       }
       for (const handle of [...hosts].reverse()) {
         if (handle.exited) await assertHostGroupGone(handle, reason)
@@ -2241,9 +2247,10 @@ async function handleNativeInstallManagedProfile(message) {
   }
   if (role === 'old') {
     const verified = await observeNativeService({ runStatus: false })
-    if (verified.observation.state !== 'removed' && verified.observation.state !== 'reserved-but-absent') {
-      throw new Error('NATIVE_ROLLBACK_SERVICE_STILL_MANAGED: the managed service must be removed before the rollback reinstall')
-    }
+    // Linux may roll back over a strictly verified installed-inactive unit:
+    // the product's verified restart adopts the current install. macOS must
+    // recreate the LaunchAgent plist, so an installed job is refused.
+    assertNativeRollbackAdmission({ manager: runtime.manager, observation: verified.observation })
   }
   const facts = await installProfilePackage(scene.pair[role].path)
   const installGeneration = current.installGeneration + 1

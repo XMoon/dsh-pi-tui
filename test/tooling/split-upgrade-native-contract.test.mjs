@@ -25,6 +25,7 @@ import {
   assertManagedReservationObservable,
   assertManagedReservationScene,
   assertNativeManagedProfileInstall,
+  assertNativeRollbackAdmission,
   buildNativeDaemonEnvironment,
   buildReservationFacts,
   classifyCurrentProfile,
@@ -201,6 +202,10 @@ function syntheticTarball(root, name, manifest) {
   const stage = join(root, `${name}-stage`)
   mkdirSync(join(stage, 'package'), { recursive: true })
   writeFileSync(join(stage, 'package', 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  // GNU tar normalizes two archives of identical files to the same bytes. A
+  // deterministic per-role payload keeps the two artifacts distinct on every
+  // tar implementation without relying on mtime or path outside the archive.
+  writeFileSync(join(stage, 'package', 'build-marker.txt'), `${name}\n`)
   const path = join(root, `${name}.tgz`)
   const packed = spawnSync('tar', ['-czf', path, '-C', stage, 'package'], {
     encoding: 'utf8',
@@ -262,6 +267,37 @@ test('a rollback install must restore the exact old production build id', () => 
     installed: installed({ buildId: BUILD_A }),
   })
   assert.equal(admitted.buildId, BUILD_A)
+})
+
+test('the rollback admission allows a verified inactive Linux unit but never an installed launchd job', () => {
+  const facts = reservation()
+  const inactive = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: ownedInspection(facts),
+    verifiedAt: '2026-11-23T00:00:00.000Z',
+  })
+  const managed = activeObservation(facts)
+  const removed = absentObservation(facts, { everObservedInstalled: true })
+  const unverifiable = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: ownedInspection(facts, { file: 'foreign' }),
+    verifiedAt: '2026-11-23T00:00:00.000Z',
+  })
+  assert.equal(assertNativeRollbackAdmission({ manager: 'systemd', observation: inactive }).state, 'installed-inactive')
+  assert.equal(assertNativeRollbackAdmission({ manager: 'systemd', observation: removed }).state, 'removed')
+  assert.equal(assertNativeRollbackAdmission({ manager: 'launchd', observation: removed }).state, 'removed')
+  expectContractError(() => assertNativeRollbackAdmission({ manager: 'launchd', observation: inactive }),
+    'NATIVE_ROLLBACK_SERVICE_STILL_MANAGED')
+  expectContractError(() => assertNativeRollbackAdmission({ manager: 'systemd', observation: managed }),
+    'NATIVE_ROLLBACK_SERVICE_STILL_MANAGED')
+  expectContractError(() => assertNativeRollbackAdmission({ manager: 'launchd', observation: managed }),
+    'NATIVE_ROLLBACK_SERVICE_STILL_MANAGED')
+  expectContractError(() => assertNativeRollbackAdmission({ manager: 'systemd', observation: unverifiable }),
+    'NATIVE_ROLLBACK_SERVICE_STILL_MANAGED')
+  expectContractError(() => assertNativeRollbackAdmission({ manager: 'upstart', observation: inactive }),
+    'NATIVE_MANAGER_KIND_INVALID')
 })
 
 // ── manager / platform admission ───────────────────────────────────────────
@@ -850,6 +886,155 @@ test('cleanup never reports a committed-but-unacked install as never installed',
   assert.equal(result.record.everObservedInstalled, true, 'a committed install is never recorded as never installed')
   assert.equal(result.record.fileIdentity, null, 'the removed terminal record clears the current identity')
   assert.equal(result.record.observed.state, 'removed')
+})
+
+test('cleanup stops a managed-active service and proves the recorded Host gone', async () => {
+  const facts = reservation()
+  const reserved = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
+  const managed = activeObservation(facts)
+  const record = { ...reserved, everObservedInstalled: true, observed: managed, hostIdentities: [hostIdentity()] }
+  const installedInactive = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: ownedInspection(facts),
+    verifiedAt: '2026-11-23T00:00:02.000Z',
+  })
+  const removed = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath }),
+    verifiedAt: '2026-11-23T00:00:03.000Z',
+  })
+  // stop keeps the unit installed (inactive); uninstall then removes it.
+  const observations = [managed, installedInactive, removed]
+  let readIndex = 0
+  const official = []
+  const helper = []
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record,
+    adapter: {
+      async inspectManagedService() {
+        return rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
+      },
+      async reclaimManagedService(input) {
+        helper.push(input)
+        return { clean: false, action: 'preserve', reason: 'unexpected', observation: rawInspection() }
+      },
+    },
+    observe: async () => observations[readIndex++],
+    runOfficialVerb: async verb => {
+      official.push(verb)
+    },
+    writeRecord: async () => {},
+    readRecord: () => null,
+    probeKernel: async () => ({ status: 'alive', uid: facts.uid }),
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [{ label: 'client-a', gone: true }],
+    verifiedAt: '2026-11-23T00:00:04.000Z',
+  })
+  assert.deepEqual(official, ['stop', 'uninstall'])
+  assert.equal(helper.length, 0)
+  assert.equal(result.clean, true)
+  assert.equal(result.record.cleanup.officialStop, 'exited-0')
+  assert.equal(result.record.cleanup.officialUninstall, 'exited-0')
+  assert.equal(result.record.observed.state, 'removed')
+  assert.equal(result.record.hostIdentities.length, 1)
+})
+
+test('cleanup re-admits uninstall against the post-stop observation and never mutates a drifted service', async () => {
+  const facts = reservation()
+  const reserved = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
+  const managed = activeObservation(facts)
+  const drifted = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: ownedInspection(facts, { file: 'foreign' }),
+    verifiedAt: '2026-11-23T00:00:02.000Z',
+  })
+  const official = []
+  const helper = []
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record: { ...reserved, everObservedInstalled: true, observed: managed },
+    adapter: {
+      async inspectManagedService() {
+        return ownedInspection(facts, { file: 'foreign' })
+      },
+      async reclaimManagedService(input) {
+        helper.push(input)
+        return {
+          clean: false,
+          action: 'preserve',
+          reason: 'OWNER_UNPROVEN',
+          observation: rawInspection({
+            unitName: facts.unitName,
+            unitPath: facts.unitPath,
+            file: 'foreign',
+            managerState: 'not-loaded',
+            reason: 'FOREIGN_SERVICE_FILE',
+          }),
+        }
+      },
+    },
+    observe: async () => (official.length === 0 ? managed : drifted),
+    runOfficialVerb: async verb => {
+      official.push(verb)
+    },
+    writeRecord: async () => {},
+    readRecord: () => null,
+    probeKernel: async () => null,
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [],
+    verifiedAt: '2026-11-23T00:00:03.000Z',
+  })
+  assert.deepEqual(official, ['stop'], 'the drifted service must never receive an uninstall request')
+  assert.equal(helper.length, 1)
+  assert.match(result.record.cleanup.officialUninstall, /^not-admitted:/u)
+  assert.equal(result.clean, false)
+  assert.equal(result.reason, 'NATIVE_SERVICE_PRESERVED')
+  assert.equal(result.record.lifecycle, 'unverifiable')
+})
+
+test('a failing spawn receipt terminates and reaps exactly the issued child', async () => {
+  const child = fakeChild()
+  await assert.rejects(runFixedDaemonVerb({
+    installation: INSTALLATION,
+    verb: 'install',
+    spawnImpl: () => child,
+    hooks: {
+      async onSpawned() {
+        throw new Error('receipt disk full')
+      },
+    },
+  }), error => {
+    assert.ok(error instanceof AggregateError)
+    assert.ok(error.errors.some(value => value.message.includes('receipt disk full')))
+    assert.ok(error.errors.some(value => value.code === 'NATIVE_DAEMON_SIGNALLED'))
+    return true
+  })
+  assert.deepEqual(child.signals, ['SIGTERM'])
+})
+
+test('a failing spawn receipt with an unsettled child is NOT_QUIESCED after TERM/KILL', async () => {
+  const child = fakeChild({ closeOnSignal: false })
+  await assert.rejects(runFixedDaemonVerb({
+    installation: INSTALLATION,
+    verb: 'install',
+    timing: { termGraceMs: 10, killGraceMs: 10 },
+    spawnImpl: () => child,
+    hooks: {
+      async onSpawned() {
+        throw new Error('receipt disk full')
+      },
+    },
+  }), error => {
+    assert.ok(error instanceof AggregateError)
+    assert.ok(error.errors.some(value => value.message.includes('receipt disk full')))
+    assert.ok(error.errors.some(value => value.code === 'NOT_QUIESCED'))
+    return true
+  })
+  assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL'])
 })
 
 // ── daemon CLI primitive ───────────────────────────────────────────────────
