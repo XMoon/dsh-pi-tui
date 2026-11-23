@@ -546,12 +546,20 @@ export async function runAcpProtocolProjection(context) {
       // Session/Agent registry for this ONE id on every provider call.
       C1_WATCH_SESSION: restartSession,
     })
-    const registryBeforeAfter = async index => {
-      const events = readC1WorkEvents(second.workRoot).filter(event => event.kind === 'live-registry')
-      const event = events[index]
-      if (event === undefined) fail(`PP-11: the registry observation #${String(index)} is missing`)
-      assert(event.watched === restartSession, 'PP-11: the watch targets the cold Session')
-      return event
+    // Phase-associated observations: the fixture records the phase from the
+    // prompt marker, so "after" can only come from the post-list step.
+    const registryPhase = async phase => {
+      const events = readC1WorkEvents(second.workRoot)
+        .filter(event => event.kind === 'live-registry' && event.phase === phase)
+      if (events.length === 0) fail(`PP-11: no registry observation for phase ${phase}`)
+      for (const event of events) {
+        assert(event.watched === restartSession, 'PP-11: the watch targets the cold Session')
+        assert(event.selfSessionLive === true && event.selfAgentLive === true,
+          `PP-11: the probe sees the live registry (${phase}: ${JSON.stringify(event)})`)
+        assert(event.watchedSessionLive === false && event.watchedAgentLive === false,
+          `PP-11: the cold Session/Agent is NOT live (${phase}: ${JSON.stringify(event)})`)
+      }
+      return events.at(-1)
     }
     host = second.host
     const scopeIdB = second.ready.localHost.scopeId
@@ -584,12 +592,12 @@ export async function runAcpProtocolProjection(context) {
     // the official registry observation; it happens BEFORE the roster read.
     const watchSession = (await restartConn.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })).sessionId
     const watchBefore = await restartConn.request(acp.methods.agent.session.prompt, {
-      sessionId: watchSession, prompt: [{ type: 'text', text: FIRST_PROMPT }],
+      sessionId: watchSession, prompt: [{ type: 'text', text: `${FIRST_PROMPT} projection-registry-marker:before` }],
     })
     assert(watchBefore?.stopReason === 'end_turn', 'PP-11: the registry-watch turn completes')
-    const registryBefore = await registryBeforeAfter(0)
-    assert(registryBefore.sessionLive === false && registryBefore.agentLive === false,
-      `PP-11: the cold Session is NOT live before the roster read (${JSON.stringify(registryBefore)})`)
+    const registryBefore = await registryPhase('before')
+    assert(registryBefore.sessionCount > 0 && registryBefore.agentCount > 0,
+      `PP-11: the official live registries are populated before the roster read (${JSON.stringify(registryBefore)})`)
     const restartPage = await restartConn.request(acp.methods.agent.session.list, {})
     const restartRow = (restartPage?.sessions ?? []).find(session => session.sessionId === restartSession)
     assert(restartRow !== undefined, 'PP-11: the cold Session is in the authorized roster of the NEW Host')
@@ -599,12 +607,15 @@ export async function runAcpProtocolProjection(context) {
     assert(restartEventsAfterList === restartEventsBeforeList,
       `PP-11: the cold list appends no durable event (${String(restartEventsBeforeList)} -> ${String(restartEventsAfterList)})`)
     const watchAfter = await restartConn.request(acp.methods.agent.session.prompt, {
-      sessionId: watchSession, prompt: [{ type: 'text', text: SECOND_PROMPT }],
+      sessionId: watchSession, prompt: [{ type: 'text', text: `${SECOND_PROMPT} projection-registry-marker:after` }],
     })
     assert(watchAfter?.stopReason === 'end_turn', 'PP-11: the second registry-watch turn completes')
-    const registryAfter = await registryBeforeAfter(1)
-    assert(registryAfter.sessionLive === false && registryAfter.agentLive === false,
-      `PP-11: the roster read did NOT activate the cold Session/Agent (${JSON.stringify(registryAfter)})`)
+    const registryAfter = await registryPhase('after')
+    // The criterion is "the roster read must not RAISE the count": a settled
+    // child from the earlier turn may legitimately disappear between phases.
+    assert(registryAfter.sessionCount <= registryBefore.sessionCount
+      && registryAfter.agentCount <= registryBefore.agentCount,
+    `PP-11: the roster read did not raise the official live Session/Agent count (before ${JSON.stringify(registryBefore)} after ${JSON.stringify(registryAfter)})`)
     const restartLoader = await openSdkClient(endpointB, () => {})
     clients.push(restartLoader)
     await restartLoader.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
@@ -619,9 +630,21 @@ export async function runAcpProtocolProjection(context) {
       listedOnNewHost: true,
       appendedNoEvent: restartEventsAfterList === restartEventsBeforeList,
       freshLoadSucceeded: restartLoad !== undefined,
-      registryBefore: { sessionLive: registryBefore.sessionLive, agentLive: registryBefore.agentLive },
-      registryAfter: { sessionLive: registryAfter.sessionLive, agentLive: registryAfter.agentLive },
-      liveAgentCount: 'OBSERVED_ABSENT_BEFORE_AND_AFTER',
+      registryBefore: {
+        phase: registryBefore.phase,
+        watchedSessionLive: registryBefore.watchedSessionLive,
+        watchedAgentLive: registryBefore.watchedAgentLive,
+        sessionCount: registryBefore.sessionCount,
+        agentCount: registryBefore.agentCount,
+      },
+      registryAfter: {
+        phase: registryAfter.phase,
+        watchedSessionLive: registryAfter.watchedSessionLive,
+        watchedAgentLive: registryAfter.watchedAgentLive,
+        sessionCount: registryAfter.sessionCount,
+        agentCount: registryAfter.agentCount,
+      },
+      liveAgentCount: 'OBSERVED_UNCHANGED_BY_OFFICIAL_REGISTRY',
     }
 
     const durableKinds = eventsOf(sessionP).map(event => event.type)

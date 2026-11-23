@@ -1323,12 +1323,15 @@ class C1Model extends LlmAdapter {
       return
     }
     recordPromptFacts(options)
-    // QUALIFICATION-ONLY read of the official live registry for ONE watched
-    // Session id (`C1_WATCH_SESSION`). It never mutates anything and exists only
-    // in this fixture: the pack does not ship it.
-    const registry = this.probeRegistry?.()
-    if (registry !== undefined) this.record('live-registry', registry)
     const userText = allUserText(options.messages ?? [])
+    // QUALIFICATION-ONLY read-only observation of the official live registries
+    // for ONE watched Session id (`C1_WATCH_SESSION`). The phase marker comes
+    // from the prompt text so an observation is associated with the CASE STEP
+    // that triggered it, never with a log index. The pack does not ship this.
+    const phaseMatch = /projection-registry-marker:([a-z0-9-]+)/u.exec(userText)
+    if (phaseMatch !== null) this.record('live-registry-phase', { phase: phaseMatch[1] })
+    const registry = this.probeRegistry?.({ phase: phaseMatch?.[1] ?? null, sessionId })
+    if (registry !== undefined) this.record('live-registry', registry)
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
 
@@ -2447,11 +2450,23 @@ export async function apply(ctx) {
   const watchSession = process.env.C1_WATCH_SESSION
   const probeRegistry = watchSession === undefined || watchSession === ''
     ? undefined
-    : () => ({
-      watched: watchSession,
-      sessionLive: ctx.get('sessions')?.get(watchSession) !== undefined,
-      agentLive: ctx.get('agents')?.get(watchSession) !== undefined,
-    })
+    : ({ phase, sessionId }) => {
+      // Global live counts come from the official registries' own `list()`; the
+      // call's OWN session is the known-live positive control, so a probe that
+      // always reports false cannot pass.
+      const sessionIds = ctx.get('sessions')?.list().map(session => session.id) ?? []
+      const agentIds = ctx.get('agents')?.list().map(agent => agent.id) ?? []
+      return {
+        phase,
+        watched: watchSession,
+        watchedSessionLive: sessionIds.includes(watchSession),
+        watchedAgentLive: agentIds.includes(watchSession),
+        sessionCount: sessionIds.length,
+        agentCount: agentIds.length,
+        selfSessionLive: sessionIds.includes(sessionId),
+        selfAgentLive: agentIds.includes(sessionId),
+      }
+    }
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
