@@ -43,6 +43,7 @@ import {
   executeNativeServiceReservation,
   isNativeDaemonUnquiesced,
   loadNativeManagerAdapter,
+  runOwnedNativeCli,
   nativeBootstrapAdmission,
   parseManagedDaemonStatus,
   requireLaunchdCustomization,
@@ -1549,6 +1550,26 @@ async function executeNativeDaemonVerb(verb, { mutating = true, abortSignal, rec
 }
 
 /**
+ * The ONE official CLI owner. Every real child (including read-only `status`)
+ * enters the same in-flight slot and the same sticky terminal fence before it
+ * spawns. A closed lifecycle is re-checked after every async precondition;
+ * cleanup verbs may pass `allowClosed` because the cleanup itself is the owner
+ * of the closing lifecycle.
+ */
+async function runNativeCli(verb, { mutating = true, abortSignal, recordOperation = true, allowClosed = false } = {}) {
+  const runtime = requireNativeRuntime(`daemon ${verb}`)
+  return await runOwnedNativeCli({
+    slot: runtime,
+    verb,
+    allowClosed,
+    lifecycleClosed,
+    refreshFence: () => refreshNativeCliFence(),
+    setFence: (failedVerb, error) => setNativeCliFence(failedVerb, error, runtime.cliPending),
+    execute: async action => await executeNativeDaemonVerb(action, { mutating, abortSignal, recordOperation }),
+  })
+}
+
+/**
  * Read the real manager/profile/Host facts and fold them into the ONE native
  * receipt. A status query is only attempted when the raw observation is safe to
  * query; helper unverifiability never authorizes a manager mutation.
@@ -1566,7 +1587,7 @@ async function observeNativeService({ runStatus = true, lifecycle } = {}) {
     && inspection.managerState !== 'unknown'
   if (canQueryStatus) {
     try {
-      const result = await executeNativeDaemonVerb('status', { mutating: false, recordOperation: false })
+      const result = await runNativeCli('status', { mutating: false, recordOperation: false })
       status = parseManagedDaemonStatus(result.stdout)
     } catch (error) {
       appendNote('native-status-unavailable', { code: error?.code ?? boundedError(error) })
@@ -1631,19 +1652,12 @@ async function cleanupNativeManagedService(reason) {
       adapter: runtime.adapter,
       cliFence,
       observe: async () => (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation,
-      runOfficialVerb: async verb => {
-        try {
-          await executeNativeDaemonVerb(verb, {
-            mutating: false,
-            abortSignal: cleanupAbort.signal,
-            recordOperation: false,
-          })
-        } catch (error) {
-          const unquiesced = isNativeDaemonUnquiesced(error)
-          if (unquiesced !== null) setNativeCliFence(verb, unquiesced, undefined)
-          throw error
-        }
-      },
+      runOfficialVerb: async verb => await runNativeCli(verb, {
+        mutating: false,
+        abortSignal: cleanupAbort.signal,
+        recordOperation: false,
+        allowClosed: true,
+      }),
       writeRecord: record => writeNativeRecord(record),
       readRecord: () => runtime.record,
       probeKernel: async pid => (pid === null ? null : nativeKernelFacts(pid)),
@@ -2215,6 +2229,7 @@ async function handleNativeReserveManagedService() {
     },
     adapter: runtime.adapter,
     writeDurable: async record => {
+      assertLifecycleOpen('NATIVE_RESERVE_MANAGED_SERVICE')
       runtime.reservation = record.reservation
       runtime.record = record
       writeReceipt({ phase: 'NATIVE_SERVICE_RESERVED', native: record })
@@ -2256,17 +2271,15 @@ async function handleNativeRunProfileDaemon(message) {
       throw new Error(`NATIVE_DAEMON_NOT_ADMITTED: daemon ${verb} refused (${String(decision.reason)})`)
     }
   }
-  const promise = executeNativeDaemonVerb(verb, { mutating: verb !== 'status' })
-  runtime.cliPending = { verb, promise, pid: undefined, kernelIdentity: undefined }
+  let result
   try {
-    const result = await promise
+    result = await runNativeCli(verb, { mutating: verb !== 'status' })
     // Every successful official mutation is verified against the real manager
     // before the Worker receives the exit facts; `status` already ran.
     await observeNativeService({ runStatus: verb !== 'status' })
     return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
   } catch (error) {
     const unquiesced = isNativeDaemonUnquiesced(error)
-    if (unquiesced !== null) setNativeCliFence(verb, unquiesced, runtime.cliPending)
     const topCode = unquiesced !== null ? 'NOT_QUIESCED' : error?.code
     const terminalPhase = topCode === 'NATIVE_DAEMON_CANCELLED' && error?.issued !== false
       ? 'CANCELLED'
@@ -2294,8 +2307,6 @@ async function handleNativeRunProfileDaemon(message) {
       throw combined === error ? error : combined
     }
     throw error
-  } finally {
-    runtime.cliPending = undefined
   }
 }
 
@@ -2321,6 +2332,9 @@ async function handleNativeInstallManagedProfile(message) {
     // recreate the LaunchAgent plist, so an installed job is refused.
     assertNativeRollbackAdmission({ manager: runtime.manager, observation: verified.observation })
   }
+  // The lifecycle may have closed while the manager was read. Re-check
+  // synchronously at the official install boundary, not only at dispatch entry.
+  assertLifecycleOpen('NATIVE_INSTALL_MANAGED_PROFILE')
   const facts = await installProfilePackage(scene.pair[role].path)
   const installGeneration = current.installGeneration + 1
   try {
@@ -2379,6 +2393,7 @@ async function handleNativeCustomizeManagedService(message) {
   if (runtime.record.fileIdentity === null) {
     throw new Error('NATIVE_CUSTOMIZE_UNOWNED: the managed plist has no recorded file identity')
   }
+  assertLifecycleOpen('NATIVE_CUSTOMIZE_MANAGED_SERVICE')
   const result = await runtime.adapter.customizeManagedService({
     ...runtime.reservation,
     fileIdentity: runtime.record.fileIdentity,
@@ -2431,6 +2446,11 @@ async function handleNativeCustomizeManagedService(message) {
   }
   // The updated real file identity is durable BEFORE the Worker is acknowledged.
   writeReceipt({ phase: 'NATIVE_SERVICE_CUSTOMIZED', native: record })
+  if (lifecycleClosed) {
+    // The helper transaction already committed. The record above is the truth;
+    // the Worker must not receive a success acknowledgement from a closing Scene.
+    throw new Error('NATIVE_SCENE_CLOSED: the managed-plist customization committed while the Scene was closing')
+  }
   return { reservation: runtime.reservation, observation: record.observed }
 }
 

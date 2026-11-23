@@ -750,6 +750,53 @@ export function planNativeCleanup({ reservation, observation } = {}) {
 }
 
 /**
+ * The ONE single-CLI owner used by the Supervisor. The caller keeps the
+ * persistent slot state; this function only enforces: one in-flight child,
+ * no spawn after the lifecycle closed (unless this is the cleanup owner), no
+ * spawn behind a live terminal fence, and a sticky fence when the child is
+ * NOT_QUIESCED.
+ */
+export async function runOwnedNativeCli({
+  slot,
+  verb,
+  execute,
+  refreshFence,
+  setFence,
+  lifecycleClosed = false,
+  allowClosed = false,
+} = {}) {
+  const state = requireObject(slot, 'cli slot', 'NATIVE_CONTRACT_INVALID')
+  const action = requireManagedDaemonVerb(verb)
+  if (typeof execute !== 'function' || typeof refreshFence !== 'function' || typeof setFence !== 'function') {
+    fail('NATIVE_CONTRACT_INVALID', 'runOwnedNativeCli requires execute, refreshFence and setFence')
+  }
+  requireBoolean(lifecycleClosed, 'lifecycleClosed')
+  requireBoolean(allowClosed, 'allowClosed')
+  if (state.pending !== undefined && state.pending !== null) {
+    throw contractError('NATIVE_CLI_BUSY', `daemon ${String(state.pending.verb)} is still in flight`)
+  }
+  if (lifecycleClosed && !allowClosed) {
+    throw contractError('NATIVE_SCENE_CLOSED', `daemon ${action} may not start after the Scene closed`)
+  }
+  const fence = requireObject(refreshFence(), 'cli fence verdict', 'NATIVE_CLI_FENCE_INVALID')
+  const fenceState = requireOneOf(fence.state, ['clear', 'alive', 'unknown'], 'cliFence.state', 'NATIVE_CLI_FENCE_INVALID')
+  if (fenceState !== 'clear') {
+    throw contractError('NATIVE_CLI_NOT_QUIESCED', `a previous daemon child is not proven reaped (${fenceState}, pid ${String(fence.pid ?? 'unknown')})`)
+  }
+  const promise = execute(action)
+  state.pending = { verb: action, promise }
+  try {
+    return await promise
+  } catch (error) {
+    const unquiesced = isNativeDaemonUnquiesced(error)
+    if (unquiesced !== null) setFence(action, unquiesced, state.pending)
+    throw error
+  } finally {
+    state.pending = undefined
+  }
+}
+
+/**
  * The ONE native cleanup decision sequence. The Supervisor keeps the receipt
  * writer, cancellation and CLI ownership; this function keeps the shared
  * ordering: official stop/uninstall only for strictly owned state, helper

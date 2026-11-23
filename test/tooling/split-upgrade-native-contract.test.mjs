@@ -50,6 +50,7 @@ import {
   requireLaunchdCustomization,
   requireManagedDaemonVerb,
   runFixedDaemonVerb,
+  runOwnedNativeCli,
   sanitizeDaemonOutput,
   serializeKernelIdentity,
   validateManagerInspection,
@@ -1401,6 +1402,102 @@ test('an unquiesced official stop fails closed with no uninstall or helper fallb
   assert.equal(result.reason, 'NATIVE_CLI_NOT_QUIESCED')
   assert.equal(result.record.lifecycle, 'unverifiable')
   assert.equal(result.record.cleanup.officialStop, 'unquiesced:7777')
+})
+
+test('the single CLI owner refuses a second child while a slow status is still in flight', async () => {
+  const slot = {}
+  const calls = []
+  let release
+  const slow = new Promise(resolve => { release = resolve })
+  const refreshClear = () => ({ state: 'clear', pid: null })
+  const noFence = () => {
+    throw new Error('a settled status must not create a fence')
+  }
+  const slowRun = runOwnedNativeCli({
+    slot,
+    verb: 'status',
+    refreshFence: refreshClear,
+    setFence: noFence,
+    execute: async verb => {
+      calls.push(verb)
+      return await slow
+    },
+  })
+  await Promise.resolve()
+  assert.equal(slot.pending.verb, 'status')
+  // A cleanup that starts while the read-only status is still alive must not
+  // get a second official child.
+  await assert.rejects(runOwnedNativeCli({
+    slot,
+    verb: 'stop',
+    allowClosed: true,
+    lifecycleClosed: true,
+    refreshFence: refreshClear,
+    setFence: noFence,
+    execute: async verb => {
+      calls.push(verb)
+      return { exitCode: 0 }
+    },
+  }), error => error?.code === 'NATIVE_CLI_BUSY')
+  release({ exitCode: 0 })
+  assert.deepEqual(await slowRun, { exitCode: 0 })
+  assert.deepEqual(calls, ['status'])
+  assert.equal(slot.pending, undefined)
+})
+
+test('the CLI owner re-checks the closed lifecycle and the sticky fence before every spawn', async () => {
+  const slot = {}
+  const refreshClear = () => ({ state: 'clear', pid: null })
+  const noFence = () => {
+    throw new Error('must not fence')
+  }
+  await assert.rejects(runOwnedNativeCli({
+    slot,
+    verb: 'install',
+    lifecycleClosed: true,
+    allowClosed: false,
+    refreshFence: refreshClear,
+    setFence: noFence,
+    execute: async () => ({ exitCode: 0 }),
+  }), error => error?.code === 'NATIVE_SCENE_CLOSED')
+
+  const unquiesced = Object.assign(new Error('child did not exit'), { code: 'NOT_QUIESCED', pid: 4321, verb: 'stop' })
+  let fence = null
+  await assert.rejects(runOwnedNativeCli({
+    slot,
+    verb: 'stop',
+    refreshFence: refreshClear,
+    setFence: (verb, error) => {
+      assert.equal(verb, 'stop')
+      fence = { state: 'alive', pid: error.pid }
+    },
+    execute: async () => {
+      throw unquiesced
+    },
+  }), error => error === unquiesced)
+  assert.deepEqual(fence, { state: 'alive', pid: 4321 })
+  await assert.rejects(runOwnedNativeCli({
+    slot,
+    verb: 'uninstall',
+    allowClosed: true,
+    lifecycleClosed: true,
+    refreshFence: () => fence,
+    setFence: noFence,
+    execute: async () => ({ exitCode: 0 }),
+  }), error => error?.code === 'NATIVE_CLI_NOT_QUIESCED')
+  assert.equal(slot.pending, undefined, 'a refused command leaves the slot free')
+  // After the caller proves the same child gone, its refresh returns clear and
+  // the next command is admitted.
+  const result = await runOwnedNativeCli({
+    slot,
+    verb: 'uninstall',
+    allowClosed: true,
+    lifecycleClosed: true,
+    refreshFence: () => ({ state: 'clear', pid: null }),
+    setFence: noFence,
+    execute: async () => ({ exitCode: 0 }),
+  })
+  assert.deepEqual(result, { exitCode: 0 })
 })
 
 // ── current Profile entry ─────────────────────────────────────────────────
