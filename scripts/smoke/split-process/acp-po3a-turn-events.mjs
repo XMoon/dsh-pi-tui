@@ -154,6 +154,27 @@ function sendRequest(client, id, method, params) {
   return client.next(120_000)
 }
 
+/**
+ * Read this connection's messages until the response for `id` arrives or the
+ * window is silent, keeping every notification. A held turn may legally stream
+ * transient updates, so "still held" means "no RESPONSE yet", never "no line".
+ */
+async function readUntilResponseOrSilence(client, id, notifications, windowMs) {
+  const deadline = Date.now() + windowMs
+  for (;;) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return undefined
+    let message
+    try {
+      message = await client.next(remaining)
+    } catch {
+      return undefined
+    }
+    if (message?.id === id && (message.result !== undefined || message.error !== undefined)) return message
+    notifications.push(message)
+  }
+}
+
 /** Read this connection's messages until the response for `id` arrives. */
 async function readUntilResponse(client, id, notifications) {
   for (;;) {
@@ -494,11 +515,14 @@ export async function runAcpPo3aTurnEvents(context) {
         && event.data?.target === 'next-step'
         && (event.data.inserted ?? []).some(message => message?.id === steerItem.id),
       'E: the existing Ctrl+S to steer the exact Host occurrence', 120_000)
-    assert(await conn1.silent(1_000),
+    // The held step legally streams its provisional text, so the proof is that
+    // its prompt request is still unanswered — not that the socket is silent.
+    const mixedNotifications = []
+    const heldResponse = await readUntilResponseOrSilence(conn1, 4, mixedNotifications, 1_000)
+    assert(heldResponse === undefined,
       'E: the ACP turn must still be held when the steer is claimed')
 
     releaseHeldTurn()
-    const mixedNotifications = []
     const mixedResponse = await readUntilResponse(conn1, 4, mixedNotifications)
     assert(mixedResponse?.error?.code === -32603,
       `E: a mixed turn must fail as a JSON-RPC internal failure (got ${JSON.stringify(mixedResponse?.result ?? mixedResponse?.error)})`)

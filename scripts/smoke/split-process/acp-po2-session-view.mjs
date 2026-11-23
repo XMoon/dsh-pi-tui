@@ -782,8 +782,11 @@ export async function runAcpPo2SessionView(context) {
     // I) uninitialized session/resume.
     const rawI = track(await openAcpClient(scopeDir))
     const uninit = await sendRequest(rawI, 5, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(uninit?.error?.code === -32042,
-      `I: an uninitialized resume must be -32042 (got ${JSON.stringify(uninit?.error ?? uninit?.result)})`)
+    // A Session call before the handshake completes is a JSON-RPC invalid
+    // request (the listener answers it; the View's own initialize gate never
+    // runs), and its stable data code still names the uninitialized View.
+    assert(uninit?.error?.code === -32600,
+      `I: an uninitialized resume must be a JSON-RPC invalid request (got ${JSON.stringify(uninit?.error ?? uninit?.result)})`)
     assert(uninit?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_INITIALIZED',
       `I: an uninitialized resume must name LOCAL_ACP_VIEW_NOT_INITIALIZED (got ${JSON.stringify(uninit?.error?.data)})`)
     rawI.close()

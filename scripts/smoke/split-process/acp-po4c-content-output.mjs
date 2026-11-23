@@ -363,7 +363,16 @@ export async function runAcpPo4cContentOutput(context) {
     const sessionId = openedSession.openSessionId
 
     const acp = await openConnection(scopeDir, 'PO-4C primary ACP connection')
-    assertStrict.deepEqual((await resume(acp, sessionId, 'PO-4C attach the TUI Session')).result, {})
+    const attached = await resume(acp, sessionId, 'PO-4C attach the TUI Session')
+    assertStrict.equal(attached.error, undefined,
+      `PO-4C: attaching the TUI Session must succeed (got ${JSON.stringify(attached.error)})`)
+    // Current contract: an attached View answers the connection-owned model
+    // options; no business payload of the Session may ride along.
+    const attachedResult = attached.result ?? {}
+    assertStrict.deepEqual(Object.keys(attachedResult).filter(key => key !== 'configOptions'), [],
+      `PO-4C: resume must not carry a business payload (got ${JSON.stringify(attachedResult)})`)
+    assert(attachedResult.configOptions === undefined || Array.isArray(attachedResult.configOptions),
+      'PO-4C: only the optional connection-owned config options may accompany resume')
 
     // L6-C01: committed assistant text/image/text. The transient contract sends
     // the two standard text deltas as they arrive and appends the never-streamed

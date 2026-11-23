@@ -412,7 +412,11 @@ export async function runAcpScopedMcpB0(context) {
     assert(openedA.initialized?.protocolVersion === 1, 'Q02: initialize must answer protocolVersion 1')
     assert(openedA.initialized?.agentInfo?.name === 'dsh-pi-tui', 'Q02: initialize must name dsh-pi-tui')
     const resumeA = await acpA.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
-    assert(JSON.stringify(resumeA) === '{}', `Q02: session/resume(A) must return {} (got ${JSON.stringify(resumeA)})`)
+    // Current contract: the attached View answers the connection-owned model
+    // options; no business payload of the Session may ride along.
+    assert(Object.keys(resumeA ?? {}).filter(key => key !== 'configOptions').length === 0
+      && (resumeA?.configOptions === undefined || Array.isArray(resumeA.configOptions)),
+    `Q02: session/resume(A) must attach without a business payload (got ${JSON.stringify(resumeA)})`)
     assert(surfaceSessionId(tuiA) === sessionA, 'Q02: the real TUI A must keep Session A after the ACP resume')
     await assertSameHost(hostIdentity, 'Q02 Host after ACP resume')
 

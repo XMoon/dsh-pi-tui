@@ -280,7 +280,11 @@ async function runScene(context, kind, env, operation) {
     assert.equal(capabilities.promptCapabilities.audio, false)
     assert.equal(capabilities.promptCapabilities.embeddedContext, false)
     requireFact(capabilities.loadSession !== true, 'session/load remains unadvertised')
-    assert.deepEqual(await sdk.request(acp.methods.agent.session.resume, { sessionId, cwd: workspace }), {})
+    const resumed = await sdk.request(acp.methods.agent.session.resume, { sessionId, cwd: workspace })
+    // Current contract: the attached View answers the connection-owned model
+    // options; no business payload of the Session may ride along.
+    requireFact(isDeepStrictEqual(Object.keys(resumed ?? {}).filter(key => key !== 'configOptions'), []),
+      `resume must not carry a business payload (got ${JSON.stringify(resumed)})`)
     const session = { context, scene, sdk, sessionId, workRoot, identity, workspace }
     result = await operation(session)
     sdk.assertWindow()
