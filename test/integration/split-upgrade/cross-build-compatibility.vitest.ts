@@ -539,14 +539,19 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     const newProfile = await scene.activateNewProfileAfterOldStopped()
     assert.equal(newProfile.version, sideNew.version, 'the activated Profile does not carry the new version')
     assert.equal(newProfile.buildId, sideNew.buildId, 'the activated Profile does not carry the new build identity')
-    // `installedPayloadHash` also hashes pnpm install-layout metadata inside the
-    // package root (for example `node_modules/.bin/*`), so two real installs of
-    // the SAME tarball are not byte-tree-identical. `productionBuildId` is the
-    // product's authoritative cross-install build identity (every dist file plus
-    // the manifest name/version and the exact DSH pin); recompute it from the
-    // activated profile's own disk content instead of trusting the cached fact.
+    // Two different checks are deliberately kept here:
+    // - cross-install same-build identity is `productionBuildId` (every dist file
+    //   plus the manifest name/version and the exact DSH pin). Raw
+    //   `installedPayloadHash` is NOT comparable across independent pnpm installs
+    //   because it also hashes install-layout metadata such as
+    //   `node_modules/.bin/*`; equality there is not a product invariant.
+    // - each physical install is still verified against ITS OWN Supervisor
+    //   payloadHash receipt: the old profile in S1/S2 and the activated profile
+    //   here. This proves the official install did not drift after its facts.
     assert.equal(support.productionBuildId(newProfile.packageRoot, scene.pair.targetDshVersion), sideNew.buildId,
       'the activated Profile disk content does not fingerprint as the installed side-new build')
+    assert.equal(support.installedPayloadHash(newProfile.packageRoot), newProfile.payloadHash,
+      'the activated Profile no longer matches its own installed payload receipt')
     assert.ok(realpathSync(join(scene.installation.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'))
       === newProfile.packageRoot, 'the activated Profile does not resolve the new package')
     assert.ok(realpathSync(scene.installation.entries.client) === newProfile.entries.client,
