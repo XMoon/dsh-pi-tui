@@ -19,7 +19,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { TuiTest, sessions as openTuiSessions } from '@microsoft/tui-test'
 
-import { SupervisorClient } from './split-supervisor-client.ts'
+import { SupervisorClient, type SupervisorExitResult } from './split-supervisor-client.ts'
 
 const SUPPORT_DIR = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = realpathSync(join(SUPPORT_DIR, '..', '..'))
@@ -33,9 +33,16 @@ interface SplitUpgradePairModule {
   readSplitUpgradePairEnvironment(): { oldTgz: string; newTgz: string }
 }
 
+interface SplitUpgradeNativeContractModule {
+  combineNativeFailures(primary: unknown, cleanup: unknown): Error | undefined
+}
+
 const splitUpgradePair = await import(
   pathToFileURL(join(REPO_ROOT, 'test', 'support', 'split-upgrade-pair.mjs')).href
 ) as SplitUpgradePairModule
+const splitUpgradeNativeContract = await import(
+  pathToFileURL(join(REPO_ROOT, 'test', 'support', 'split-upgrade-native-contract.mjs')).href
+) as SplitUpgradeNativeContractModule
 
 export interface UpgradePackageFacts {
   path: string
@@ -49,6 +56,72 @@ export interface UpgradePairFacts {
   new: UpgradePackageFacts
   targetDshVersion: string
   policy: 'default' | 'native'
+}
+
+/** The two supported native manager kinds of the shared bridge. */
+export type NativeManagerKind = 'systemd' | 'launchd'
+/** The exact public daemon verbs the native bridge may execute. */
+export type ManagedDaemonVerb = 'status' | 'install' | 'start' | 'restart' | 'stop' | 'uninstall'
+
+/** The immutable reservation facts a native Scene worker may read. */
+export interface NativeReservationFacts {
+  manager: NativeManagerKind
+  uid: number
+  accountHome: string
+  profile: 'pi-tui'
+  profileRealpath: string
+  dshHome: string
+  scopeId: string
+  unitName: string
+  unitPath: string
+  parentRunId: string | null
+  sceneId: string
+  oldBuildId: string
+}
+
+/** One raw OS manager observation reported by the fixed platform helper. */
+export interface NativeManagerInspection {
+  file: 'absent' | 'owned' | 'foreign' | 'unverifiable'
+  managerState: 'not-loaded' | 'inactive' | 'active' | 'unknown'
+  ownerVerified: boolean
+  managerObserved: boolean
+  unitName: string
+  unitPath: string
+  fragmentPath: string | null
+  sourcePath: string | null
+  mainPid: number | null
+  loadState: string | null
+  activeState: string | null
+  unitFileState: string | null
+  jobState: string | null
+  fileFacts: null | {
+    mode: number
+    sha256: string
+    device: string
+    inode: string
+    owner: string
+    scopeId: string
+    profileIdentity: string
+    installBuild: string
+    execStart: string | null
+    programArguments: string[] | null
+    nonGeneratedSha256: string | null
+  }
+  reason: string | null
+}
+
+/** The Supervisor-normalized observation of this run's managed service. */
+export interface ManagedServiceObservation extends NativeManagerInspection {
+  state: 'reserved-but-absent' | 'installed-inactive' | 'managed-active' | 'removed' | 'unverifiable'
+  authenticatedHostReady: boolean
+  authenticatedHostPid: number | null
+  verifiedAt: string
+}
+
+/** The complete read-only native service snapshot returned to a Worker. */
+export interface NativeServiceSnapshot {
+  reservation: Readonly<NativeReservationFacts>
+  observation: ManagedServiceObservation
 }
 
 export interface InstallationFacts {
@@ -67,6 +140,7 @@ interface SceneBootstrapFacts {
   installation: InstallationFacts
   c1Work: { patchPath: string }
   oldProfile: InstalledPackageFacts
+  native?: { manager: NativeManagerKind }
 }
 
 export interface InstalledPackageFacts {
@@ -192,6 +266,20 @@ export interface UpgradeScene {
   refreshClientBusinessPids(client?: UpgradeClientHandle): Promise<void>
   /** Probe-only barrier reporting into the Supervisor receipt. */
   report(event: string, detail?: Record<string, unknown>): Promise<void>
+  /** Native-only: persist the run-owned reservation BEFORE any native install. */
+  reserveManagedService(): Promise<NativeServiceSnapshot>
+  /** Native-only: read the real manager/profile/Host facts of this run. */
+  verifyManagedService(): Promise<NativeServiceSnapshot>
+  /** Native-only: run ONE fixed official daemon verb through the Supervisor. */
+  runProfileDaemon(verb: ManagedDaemonVerb): Promise<{ exitCode: number; stdout: string; stderr: string }>
+  /** Native-only: install the new or the old Profile through the official CLI. */
+  installManagedProfile(role: 'new' | 'old'): Promise<InstalledPackageFacts>
+  /** Native-only (launchd): the fixed, owner-safe user customization transaction. */
+  customizeManagedService(input: {
+    extraEnvironmentKey: 'UPGRADE_USER_FLAG'
+    value: 'keep-me'
+    comment: 'user-maintained-launch-agent-comment'
+  }): Promise<NativeServiceSnapshot>
   finish(): Promise<void>
   dispose(): Promise<void>
 }
@@ -464,6 +552,11 @@ class Scene implements UpgradeScene {
   readonly installation: InstallationFacts
   readonly #supervisor: SupervisorClient
   readonly #c1Work: { patchPath: string }
+  /** The native manager of this Scene, or undefined for a default Scene. */
+  readonly #native: { manager: NativeManagerKind } | undefined
+  /** This Scene's own Supervisor run/receipt identity (native failure checks). */
+  readonly #runId: string
+  readonly #receiptPath: string | undefined
   readonly #hosts: OpaqueHostHandle[] = []
   readonly #clients = new Map<string, UpgradeClient>()
   /** The Scene-owned reexec target reserved for a Client started before install. */
@@ -474,13 +567,23 @@ class Scene implements UpgradeScene {
   #sideNew: InstalledPackageFacts | undefined
   #finished = false
 
-  constructor(facts: SceneBootstrapFacts, supervisor: SupervisorClient, sceneId: string) {
+  constructor(
+    facts: SceneBootstrapFacts,
+    supervisor: SupervisorClient,
+    sceneId: string,
+    runId: string,
+    receiptPath: string | undefined,
+    native?: { manager: NativeManagerKind },
+  ) {
     this.sceneId = sceneId
     this.workRoot = facts.workDir
     this.pair = facts.pair
     this.installation = facts.installation
     this.#c1Work = facts.c1Work
     this.#supervisor = supervisor
+    this.#native = native ?? facts.native
+    this.#runId = runId
+    this.#receiptPath = receiptPath
     mkdirSync(join(this.workRoot, 'trace'), { recursive: true, mode: 0o700 })
     mkdirSync(join(this.workRoot, 'artifacts'), { recursive: true, mode: 0o700 })
     mkdirSync(join(this.workRoot, 'clients'), { recursive: true, mode: 0o700 })
@@ -563,7 +666,37 @@ class Scene implements UpgradeScene {
   }): Promise<UpgradeClientHandle> {
     let entry: string
     if (options.source === 'profile') {
-      entry = this.installation.entries.client
+      if (this.#native !== undefined) {
+        // A native Client must run the CURRENT build recorded by this run, not
+        // the bootstrap snapshot: the Supervisor re-reads the real installed
+        // package and the Worker re-resolves the same lexical Profile entry.
+        const current = await this.#supervisor.request('NATIVE_CURRENT_PROFILE', {}, { timeoutMs: 30_000 }) as {
+          packageRoot: string
+          version: string
+          buildId: string
+          payloadHash: string
+          entries: { host: string; client: string }
+        }
+        const lexicalEntry = join(
+          this.installation.profileDir,
+          'node_modules',
+          '@xmoon76',
+          'dsh-pi-tui',
+          'dist',
+          'local-client.mjs',
+        )
+        let resolvedEntry: string
+        try {
+          resolvedEntry = realpathSync(lexicalEntry)
+        } catch (error) {
+          throw new Error(`startClient: the current Profile Client entry cannot be resolved: ${asError(error).message}`)
+        }
+        assert(resolvedEntry === current.entries.client,
+          `startClient: the current Profile Client entry resolves to ${resolvedEntry}, not the Supervisor's current install entry ${current.entries.client}`)
+        entry = lexicalEntry
+      } else {
+        entry = this.installation.entries.client
+      }
     } else if (options.source === 'side-old') {
       assert(this.#sideOld !== undefined, 'startClient: side-old has not been installed')
       entry = this.#sideOld.entries.client
@@ -803,6 +936,111 @@ class Scene implements UpgradeScene {
       `${label}: the reserved side-new target resolves to ${resolved}, not the installed ${facts.packageRoot}`)
   }
 
+  #requireNativeMethod(label: string): NativeManagerKind {
+    assert(this.#native !== undefined, `${label}: this is not a native upgrade Scene`)
+    return this.#native.manager
+  }
+
+  async reserveManagedService(): Promise<NativeServiceSnapshot> {
+    const manager = this.#requireNativeMethod('reserveManagedService')
+    const snapshot = await this.#supervisor.request('NATIVE_RESERVE_MANAGED_SERVICE', {}, { timeoutMs: 120_000 }) as NativeServiceSnapshot
+    assert(snapshot?.reservation?.manager === manager,
+      `reserveManagedService: the Supervisor reserved a ${String(snapshot?.reservation?.manager)} service, not ${manager}`)
+    assert(snapshot?.reservation?.sceneId === this.sceneId,
+      'reserveManagedService: the reservation belongs to another Scene')
+    assert(snapshot?.observation?.state === 'reserved-but-absent',
+      `reserveManagedService: the reservation observation is ${String(snapshot?.observation?.state)}`)
+    return snapshot
+  }
+
+  async verifyManagedService(): Promise<NativeServiceSnapshot> {
+    this.#requireNativeMethod('verifyManagedService')
+    return await this.#supervisor.request('NATIVE_VERIFY_MANAGED_SERVICE', {}, { timeoutMs: 180_000 }) as NativeServiceSnapshot
+  }
+
+  async runProfileDaemon(verb: ManagedDaemonVerb): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    this.#requireNativeMethod('runProfileDaemon')
+    assert(['status', 'install', 'start', 'restart', 'stop', 'uninstall'].includes(verb),
+      `runProfileDaemon: unsupported daemon verb ${String(verb)}`)
+    return await this.#supervisor.request('NATIVE_RUN_PROFILE_DAEMON', { verb }, { timeoutMs: 300_000 })
+  }
+
+  async installManagedProfile(role: 'new' | 'old'): Promise<InstalledPackageFacts> {
+    this.#requireNativeMethod('installManagedProfile')
+    assert(role === 'new' || role === 'old', `installManagedProfile: unknown role ${String(role)}`)
+    return await this.#supervisor.request('NATIVE_INSTALL_MANAGED_PROFILE', { role }, { timeoutMs: 600_000 })
+  }
+
+  async customizeManagedService(input: {
+    extraEnvironmentKey: 'UPGRADE_USER_FLAG'
+    value: 'keep-me'
+    comment: 'user-maintained-launch-agent-comment'
+  }): Promise<NativeServiceSnapshot> {
+    const manager = this.#requireNativeMethod('customizeManagedService')
+    assert(manager === 'launchd',
+      'customizeManagedService: the managed-service customization is launchd-only')
+    return await this.#supervisor.request('NATIVE_CUSTOMIZE_MANAGED_SERVICE', { customization: input }, { timeoutMs: 120_000 })
+  }
+
+  /** Read this run's own Supervisor receipt; never another run's file. */
+  #readSupervisorReceipt(): Record<string, any> {
+    assert(this.#receiptPath !== undefined, 'the native Supervisor receipt path is not recorded')
+    assert(existsSync(this.#receiptPath), `the Supervisor receipt is missing: ${this.#receiptPath}`)
+    return JSON.parse(readFileSync(this.#receiptPath, 'utf8')) as Record<string, any>
+  }
+
+  #nativeCleanupFailure(message: string, facts: Record<string, unknown>): Error {
+    const error = new Error(
+      `NATIVE_SUPERVISOR_CLEANUP_FAILED: ${message}; run=${this.#runId}; supervisor=${JSON.stringify(facts)}; `
+      + `receipt=${this.#receiptPath ?? 'none'}; evidence root: ${this.workRoot}`,
+    )
+    return Object.assign(error, { code: 'NATIVE_SUPERVISOR_CLEANUP_FAILED', ...facts })
+  }
+
+  /**
+   * A native Scene may not report success while its own Supervisor exited
+   * abnormally, left a NOT_QUIESCED receipt, or failed to reclaim the recorded
+   * managed service. A default Scene keeps its historical evidence rules.
+   */
+  #assertNativeTerminalReceipt(phases: readonly string[], exit: SupervisorExitResult): void {
+    if (this.#native === undefined) return
+    if (exit.code !== 0 || exit.signal !== null) {
+      throw this.#nativeCleanupFailure('the Supervisor did not exit cleanly', {
+        code: exit.code,
+        signal: exit.signal,
+        phase: undefined,
+      })
+    }
+    const receipt = this.#readSupervisorReceipt()
+    if (!phases.includes(String(receipt.phase))) {
+      throw this.#nativeCleanupFailure('the Supervisor receipt is not a clean terminal phase', {
+        code: exit.code,
+        signal: exit.signal,
+        phase: receipt.phase,
+        reason: receipt.errorName ?? receipt.cleanup?.errorName,
+      })
+    }
+    if (receipt.native !== null && receipt.native !== undefined) {
+      if (receipt.native.cleanup?.attempted !== true) {
+        throw this.#nativeCleanupFailure('the native cleanup was not attempted', {
+          code: exit.code,
+          signal: exit.signal,
+          phase: receipt.phase,
+          reason: 'NATIVE_CLEANUP_NOT_ATTEMPTED',
+        })
+      }
+      const state = receipt.native.observed?.state
+      if (state !== 'removed' && state !== 'reserved-but-absent') {
+        throw this.#nativeCleanupFailure('the native managed service is not confirmed removed', {
+          code: exit.code,
+          signal: exit.signal,
+          phase: receipt.phase,
+          reason: String(receipt.native.observed?.reason ?? state ?? 'NATIVE_SERVICE_STATE_UNKNOWN'),
+        })
+      }
+    }
+  }
+
   async finish(): Promise<void> {
     assert(!this.#finished, 'finish(): the Scene is already finished')
     const errors: Error[] = []
@@ -817,6 +1055,7 @@ class Scene implements UpgradeScene {
     await this.#supervisor.request('FINALIZE', { clientsClosed: true }, { timeoutMs: 180_000 })
     const exit = await this.#supervisor.waitExit(30_000)
     assert(exit.code === 0 && exit.signal === null, `Supervisor FINALIZE exit was ${JSON.stringify(exit)}`)
+    this.#assertNativeTerminalReceipt(['FINALIZED'], exit)
     assert(!existsSync(this.workRoot), `the Scene root still exists after FINALIZE: ${this.workRoot}`)
     this.#finished = true
   }
@@ -836,10 +1075,23 @@ class Scene implements UpgradeScene {
     } catch (error) {
       errors.push(asError(error))
     }
+    let supervisorExit: SupervisorExitResult | undefined
     try {
       await this.#supervisor.close({ timeoutMs: 300_000, allowKill: false })
+      if (this.#native !== undefined) {
+        // A close() that does not throw is not a clean exit: a native Scene
+        // must prove the real child exit code and the independent receipt.
+        supervisorExit = await this.#supervisor.waitExit(30_000)
+      }
     } catch (error) {
       errors.push(asError(error))
+    }
+    if (this.#native !== undefined && supervisorExit !== undefined) {
+      try {
+        this.#assertNativeTerminalReceipt(['ABORTED_CLEAN', 'FINALIZED'], supervisorExit)
+      } catch (error) {
+        errors.push(asError(error))
+      }
     }
     if (errors.length > 0) {
       throw new AggregateError(errors, `upgrade Scene cleanup failed with ${String(errors.length)} error(s); evidence root: ${this.workRoot}`)
@@ -895,7 +1147,7 @@ export async function createUpgradeScene(): Promise<UpgradeScene> {
       sceneId,
       parentRunId,
     }, { timeoutMs: 600_000 }) as SceneBootstrapFacts
-    return new Scene({ ...facts, pair }, supervisor, sceneId)
+    return new Scene({ ...facts, pair }, supervisor, sceneId, runId, undefined)
   } catch (error) {
     try {
       await supervisor.close({ timeoutMs: 300_000, allowKill: false })
@@ -904,6 +1156,86 @@ export async function createUpgradeScene(): Promise<UpgradeScene> {
         'BOOTSTRAP_UPGRADE failed and the Supervisor did not reach a bounded exit')
     }
     throw error
+  }
+}
+
+interface SupervisorReceiptFacts {
+  phase?: string
+  sceneRoot?: string
+  native?: unknown
+}
+
+function readSupervisorReceiptFacts(path: string): SupervisorReceiptFacts | undefined {
+  if (!existsSync(path)) return undefined
+  return JSON.parse(readFileSync(path, 'utf8')) as SupervisorReceiptFacts
+}
+
+/** A NOT_QUIESCED bootstrap record only hides real resources when one exists. */
+function receiptOwnsLiveResources(facts: SupervisorReceiptFacts | undefined): boolean {
+  if (facts === undefined) return false
+  if (facts.native !== null && facts.native !== undefined) return true
+  return typeof facts.sceneRoot === 'string' && existsSync(facts.sceneRoot)
+}
+
+/**
+ * Create the ONE native Upgrade Scene. The pair preflight runs BEFORE the
+ * Supervisor is forked, so an invalid pairing creates no scene root, no
+ * Profile install and no Host process. A missing platform helper is a
+ * controlled Supervisor refusal before any native side effect.
+ */
+export async function createNativeUpgradeScene(options: { manager: NativeManagerKind }): Promise<UpgradeScene> {
+  const manager = options?.manager
+  assert(manager === 'systemd' || manager === 'launchd',
+    `createNativeUpgradeScene: unsupported native manager ${String(manager)}`)
+  const tmpBase = requireAbsoluteDirectory('SPLIT_VITEST_TMP_BASE')
+  const { oldTgz, newTgz } = splitUpgradePair.readSplitUpgradePairEnvironment()
+  const pair = splitUpgradePair.inspectSplitUpgradePair(oldTgz, newTgz, { policy: 'native' })
+  const sceneId = randomUUID()
+  const parentRunId = process.env.SPLIT_VITEST_RUN_ID
+  const runId = `${parentRunId === undefined || parentRunId === '' ? 'split-upgrade' : parentRunId}-${sceneId}`
+  const receiptPath = join(tmpBase, 'split-resources', `${runId}.json`)
+  const supervisor = new SupervisorClient({ runId })
+  try {
+    const facts = await supervisor.request('BOOTSTRAP_UPGRADE', {
+      oldTgz: pair.old.path,
+      newTgz: pair.new.path,
+      expectedPairSha: { old: pair.old.sha256, new: pair.new.sha256 },
+      policy: 'native',
+      manager,
+      tmpBase,
+      workerPid: process.pid,
+      workerPpid: process.ppid,
+      sceneId,
+      parentRunId,
+    }, { timeoutMs: 600_000 }) as SceneBootstrapFacts
+    assert(facts.native?.manager === manager,
+      `createNativeUpgradeScene: the Supervisor created a ${String(facts.native?.manager)} Scene, not ${manager}`)
+    return new Scene({ ...facts, pair }, supervisor, sceneId, runId, receiptPath, { manager })
+  } catch (error) {
+    const cleanupErrors: Error[] = []
+    try {
+      await supervisor.close({ timeoutMs: 300_000, allowKill: false })
+    } catch (closeError) {
+      cleanupErrors.push(asError(closeError))
+    }
+    try {
+      const exit = await supervisor.waitExit(30_000)
+      if (exit.code !== 0 || exit.signal !== null) {
+        cleanupErrors.push(new Error(`createNativeUpgradeScene: the Supervisor exit was ${JSON.stringify(exit)}`))
+      }
+      const receiptFacts = readSupervisorReceiptFacts(receiptPath)
+      if (receiptFacts?.phase === 'NOT_QUIESCED' && receiptOwnsLiveResources(receiptFacts)) {
+        cleanupErrors.push(new Error(`createNativeUpgradeScene: the Supervisor receipt is NOT_QUIESCED: ${receiptPath}`))
+      }
+    } catch (waitError) {
+      cleanupErrors.push(asError(waitError))
+    }
+    const cleanupError = cleanupErrors.length === 0
+      ? undefined
+      : cleanupErrors.length === 1
+        ? cleanupErrors[0]
+        : new AggregateError(cleanupErrors, 'native bootstrap cleanup produced several failures')
+    throw splitUpgradeNativeContract.combineNativeFailures(error, cleanupError) ?? error
   }
 }
 
