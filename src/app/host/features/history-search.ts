@@ -28,7 +28,9 @@
 
 import { randomUUID } from 'node:crypto'
 import { normalize } from 'node:path'
+import { symbols } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
+import { assertSessionHeadersCompatible } from '@deepseek-ai/dsh-session-query'
 import { TypertRemoteService, type RemoteInvocation } from '@deepseek-ai/dsh-typert-protocol'
 import {
   HostAdmissionFold,
@@ -36,7 +38,7 @@ import {
   type HostAdmissionOccurrence,
 } from '../../../domain/history/host-admission.ts'
 import { diagFromEnv, type Diag } from '../../../runtime/process/diagnostics.ts'
-import { runDetached } from '../../../runtime/process/tasks.ts'
+import { runDetached, observeSettled } from '../../../runtime/process/tasks.ts'
 import {
   PI_TUI_HISTORY_SEARCH_NAMESPACE,
   decodeHistorySearchCursor,
@@ -80,15 +82,32 @@ export interface HistorySearchEventLike {
   readonly data: unknown
 }
 
-/** A structural official Session header (only the fields this service needs). */
-export interface HistorySearchHeaderLike {
+/**
+ * The exact immutable official Header facts `assertSessionHeadersCompatible`
+ * reads. It is a structural view, NOT a local comparison: the official exported
+ * check below is the only implementation of the compatibility rule.
+ */
+export interface HistorySearchSessionHeaderLike {
   readonly id: unknown
+  readonly createdAt: number
   readonly cwd?: string
+  readonly parentSession?: unknown
+  readonly isSeeded: boolean
+  readonly delegationDepth?: number
 }
+
+/**
+ * The official package-root Header compatibility check over the structural
+ * view consumed here (the same exported function `SessionCorpus` uses).
+ */
+const assertOfficialSessionHeadersCompatible = assertSessionHeadersCompatible as unknown as (
+  live: HistorySearchSessionHeaderLike,
+  persisted: HistorySearchSessionHeaderLike,
+) => void
 
 /** A structural official persistence snapshot. */
 export interface HistorySearchPersistenceSnapshotLike {
-  readonly header: HistorySearchHeaderLike
+  readonly header: HistorySearchSessionHeaderLike
   readonly eventCount?: number
   /** Opaque change token comparable only within one persistence instance. */
   readonly revision?: unknown
@@ -96,7 +115,7 @@ export interface HistorySearchPersistenceSnapshotLike {
 
 /** A structural official read handle. */
 export interface HistorySearchReadHandleLike {
-  readonly header: HistorySearchHeaderLike
+  readonly header: HistorySearchSessionHeaderLike
   readonly inheritedEventCount: number
   read(
     offset?: number,
@@ -108,17 +127,26 @@ export interface HistorySearchReadHandleLike {
 
 /** A structural official observation lease. */
 export interface HistorySearchObservationLike {
-  readonly header: HistorySearchHeaderLike
+  readonly header: HistorySearchSessionHeaderLike
   readonly inheritedEventCount: number
   readonly events: readonly HistorySearchEventLike[]
   [Symbol.dispose](): void
 }
 
-/** A structural official live-preferred Session record. */
-export interface HistorySearchSessionRecordLike {
-  readonly header: HistorySearchHeaderLike
-  readonly live?: boolean
-  readonly persisted?: boolean
+/** The narrow official live `sessions` registry face this service consumes. */
+export interface HistorySearchLiveSessionLike {
+  readonly id: unknown
+  readonly header: HistorySearchSessionHeaderLike
+}
+
+/**
+ * The official live Session registry. `get` returns the EXACT live entry so a
+ * candidate can prove its captured Session object is still current; `list` is
+ * the authoritative live half of the logical corpus (never a Client roster).
+ */
+export interface HistorySearchSessionsLike {
+  list(): readonly HistorySearchLiveSessionLike[]
+  get(id: string): HistorySearchLiveSessionLike | undefined
 }
 
 /** The narrow official `sessionPersistence` face this service consumes. */
@@ -140,7 +168,6 @@ export interface HistorySearchPersistenceLike {
 
 /** The narrow official `sessionQuery` face this service consumes. */
 export interface HistorySearchQueryLike {
-  listSessions(signal?: AbortSignal): Promise<readonly HistorySearchSessionRecordLike[]>
   observeSession(
     id: string,
     options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
@@ -157,6 +184,8 @@ export type PiTuiHistorySearchHostDeps = {
   profileContext(): HistorySearchProfileContextLike | undefined
   sessionPersistence(): HistorySearchPersistenceLike | undefined
   sessionQuery(): HistorySearchQueryLike | undefined
+  /** The existing Host `sessions` registry; the live half of the official corpus. */
+  sessions(): HistorySearchSessionsLike | undefined
 }
 
 type IndexState =
@@ -173,12 +202,56 @@ interface PendingSession {
   bytes: number
 }
 
-/** One official Session identity resolved from the two official enumerations. */
+/** One official Session identity resolved from one persistence listing + live registry. */
 interface OfficialSession {
-  readonly header: HistorySearchHeaderLike
+  readonly header: HistorySearchSessionHeaderLike
   readonly live: boolean
   readonly eventCount?: number
   readonly revision?: unknown
+}
+
+/**
+ * One in-flight official read candidate's source/identity/checkpoint witness.
+ *
+ * It exists ONLY while that candidate is reading; it is never a second durable
+ * business fact and never outlives the candidate.
+ */
+interface HistoryCandidateWitness {
+  readonly sessionId: string
+  readonly persistence: HistorySearchPersistenceLike
+  readonly persistenceIdentity: unknown
+  readonly sessions: HistorySearchSessionsLike
+  readonly sessionsIdentity: unknown
+  /** The exact live entry captured before the read (undefined when not live). */
+  readonly liveObject: HistorySearchLiveSessionLike | undefined
+  /** The checkpoint this candidate expects right now (undefined = no row). */
+  expected: HistorySessionCheckpointRow | undefined
+  invalidated: boolean
+}
+
+/** The serial writer's settled receipt: it never rejects. */
+type WriteReceipt = 'committed' | 'failed'
+
+/** One fenced short commit against an in-flight candidate's witness. */
+type CandidateCommit = 'committed' | 'stale' | 'failed'
+
+/** One official replay attempt's settled outcome. */
+type ReplayOutcome = 'complete' | 'stale' | 'failed'
+
+/** One registered per-Session official repair and the fact it owns. */
+interface HistorySessionRepairFlight {
+  readonly promise: Promise<void>
+  readonly kind: 'rebuild' | 'disposal'
+}
+
+/** O(1) serial-writer aggregate counters; diagnostics only, never business state. */
+interface HistoryWriterCounters {
+  committed: number
+  failed: number
+  busyMsTotal: number
+  busyMsMax: number
+  awaitWritesMsTotal: number
+  awaitWritesMsMax: number
 }
 
 /** The two — and only two — production callers of the official enumeration. */
@@ -218,6 +291,35 @@ function roundMilliseconds(value: number): number {
 /** Elapsed milliseconds since `startedAt`, rounded to at most one decimal place. */
 function elapsedMilliseconds(startedAt: number): number {
   return roundMilliseconds(performance.now() - startedAt)
+}
+
+/**
+ * `ctx.reflect.get` returns a fresh traceable proxy per call; the Cordis
+ * `symbols.original` value is the process-local service identity.
+ */
+function serviceIdentity(value: object): object {
+  return (value as { readonly [symbols.original]?: object })[symbols.original] ?? value
+}
+
+/**
+ * Exact checkpoint equality for an in-flight candidate fence: every identity and
+ * progress field is compared, never just `nextSeq`.
+ */
+function sameCheckpoint(
+  current: HistorySessionCheckpointRow | undefined,
+  expected: HistorySessionCheckpointRow | undefined,
+): boolean {
+  if (current === undefined || expected === undefined) return current === expected
+  return current.sessionId === expected.sessionId
+    && current.headerHash === expected.headerHash
+    && current.inheritedCut === expected.inheritedCut
+    && current.nextSeq === expected.nextSeq
+    && current.lastEventHash === expected.lastEventHash
+    && current.headerCwd === expected.headerCwd
+    && current.effectiveCwd === expected.effectiveCwd
+    && current.dirty === expected.dirty
+    && current.sourceState === expected.sourceState
+    && current.uncertainSources === expected.uncertainSources
 }
 
 /** A contiguous gap in the observed Session sequence. */
@@ -327,6 +429,25 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private disposal: Promise<void> | undefined
   private warmupSettled: Promise<void> = Promise.resolve()
   private writeTail: Promise<void> = Promise.resolve()
+  /** The ONE active full-corpus pass (never more than one). */
+  private fullMaintenanceFlight: Promise<void> | undefined
+  private maintenanceRunning = false
+  /** At most ONE in-flight official repair per exact Session id. */
+  private readonly sessionRepairFlights = new Map<string, HistorySessionRepairFlight>()
+  /** A disposal proof requested while another same-id repair is in flight. */
+  private readonly disposalRequests = new Set<string>()
+  /** Active read candidates by exact Session id (source/identity/checkpoint witness). */
+  private readonly activeCandidates = new Map<string, Set<HistoryCandidateWitness>>()
+  /**
+   * Sessions whose committed index content is not yet proven complete. It is
+   * the phase barrier that keeps an interrupted/multi-batch repair from being
+   * promoted to `ready`; entries are removed only by a proven completion.
+   */
+  private readonly reconcilePending = new Set<string>()
+  /** The first cold pass has not settled yet: queries stay a truthful `loading`. */
+  private initialPassComplete = false
+  /** A pass or repair failed to read the official source; a later full pass clears it. */
+  private sourceFaulted = false
   private pendingEventCount = 0
   private pendingBytes = 0
   private verificationTimer: ReturnType<typeof setTimeout> | undefined
@@ -342,6 +463,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private readonly verifiedRevisions = new Map<string, { readonly identity: symbol | undefined; readonly revision: unknown }>()
   /** Explicitly requested visible debug diagnostics; O(1) metrics stay unformatted otherwise. */
   private readonly diagnosticsEnabled: boolean
+  /** O(1) serial-writer aggregates (diagnostics, never business state). */
+  private readonly writerCounters: HistoryWriterCounters = {
+    committed: 0,
+    failed: 0,
+    busyMsTotal: 0,
+    busyMsMax: 0,
+    awaitWritesMsTotal: 0,
+    awaitWritesMsMax: 0,
+  }
   /** O(1) disposal observation counters (diagnostics, never business state). */
   private readonly disposalCounters: HistorySearchDisposalCounters = {
     seen: 0,
@@ -362,7 +492,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.diagnosticsEnabled = process.env.DSH_PI_TUI_LOG_LEVEL === 'debug'
     this.diag = loggerDiag(ctx, this.diagnosticsEnabled)
     // Subscribe BEFORE the official enumeration: the listener only captures a
-    // bounded pending fact, never performs a full read in the event callback.
+    // bounded pending fact and invalidates same-Session candidates in the SAME
+    // synchronous stack, never performs a full read in the event callback.
     this.listenerDisposers.push(ctx.on('session/event', (session, event) => {
       this.observeLiveEvent(session, event)
     }, { global: true }))
@@ -487,12 +618,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     return { kind: 'ready', chunk, nextOffset, contentLength: row.content.length }
   }
 
-  /** Abort owned work, remove listeners, wait for the serial queue, close the DB. */
-  /** Cursor generation: exactly the index's committed content revision. */
-  private get revision(): number {
-    return this.index?.revision ?? 0
-  }
-
+  /** Abort owned work, withdraw listeners, join every owned flight, close the DB. */
   dispose(): Promise<void> {
     if (this.disposal !== undefined) return this.disposal
     this.disposed = true
@@ -504,18 +630,122 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.verificationTimer = undefined
     }
     this.disposal = (async () => {
+      // Cancel first, then join every promise this service registered, and
+      // only then drain the serial writer and close the ONE database handle.
       await this.warmupSettled
+      await this.joinMaintenance()
       await this.writeTail
       this.pending.clear()
       this.pendingEventCount = 0
       this.pendingBytes = 0
       this.liveSessions.clear()
+      this.activeCandidates.clear()
+      this.reconcilePending.clear()
+      this.sessionRepairFlights.clear()
+      this.disposalRequests.clear()
       const index = this.index
       this.index = undefined
       index?.close()
       this.diag.dispose()
     })()
     return this.disposal
+  }
+
+  /** Settle every already-registered full/repair flight (never starts new work). */
+  private async joinMaintenance(): Promise<void> {
+    for (;;) {
+      const flights: Promise<void>[] = []
+      if (this.fullMaintenanceFlight !== undefined) flights.push(this.fullMaintenanceFlight)
+      for (const flight of this.sessionRepairFlights.values()) flights.push(flight.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+
+  /** Cursor generation: exactly the index's committed content revision. */
+  private get revision(): number {
+    return this.index?.revision ?? 0
+  }
+
+  // ── candidate witness (source/identity/checkpoint fence) ────────────────
+
+  private createWitness(
+    sessionId: string,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    expected: HistorySessionCheckpointRow | undefined,
+  ): HistoryCandidateWitness {
+    const witness: HistoryCandidateWitness = {
+      sessionId,
+      persistence,
+      persistenceIdentity: serviceIdentity(persistence),
+      sessions,
+      sessionsIdentity: serviceIdentity(sessions),
+      liveObject: sessions.get(sessionId),
+      expected,
+      invalidated: false,
+    }
+    const active = this.activeCandidates.get(sessionId)
+    if (active === undefined) this.activeCandidates.set(sessionId, new Set([witness]))
+    else active.add(witness)
+    return witness
+  }
+
+  private releaseWitness(witness: HistoryCandidateWitness): void {
+    const active = this.activeCandidates.get(witness.sessionId)
+    if (active === undefined) return
+    active.delete(witness)
+    if (active.size === 0) this.activeCandidates.delete(witness.sessionId)
+  }
+
+  /** In the SAME synchronous listener stack: invalidate every same-id candidate. */
+  private invalidateCandidates(sessionId: string): void {
+    const active = this.activeCandidates.get(sessionId)
+    if (active === undefined) return
+    for (const witness of active) witness.invalidated = true
+  }
+
+  /**
+   * Re-read the live source facts a candidate captured; a commit may only
+   * happen while the SAME service instances, live object, no buffered accepted
+   * event and the exact expected checkpoint still hold.
+   */
+  private isCandidateCurrent(witness: HistoryCandidateWitness): boolean {
+    if (witness.invalidated || this.disposed || this.lifecycle.signal.aborted) return false
+    const persistence = this.deps.sessionPersistence()
+    if (persistence === undefined || serviceIdentity(persistence) !== witness.persistenceIdentity) return false
+    const sessions = this.deps.sessions()
+    if (sessions === undefined || serviceIdentity(sessions) !== witness.sessionsIdentity) return false
+    if (this.pending.has(witness.sessionId)) return false
+    if (witness.sessions.get(witness.sessionId) !== witness.liveObject) return false
+    return sameCheckpoint(this.index?.checkpointOf(witness.sessionId), witness.expected)
+  }
+
+  /** Run one SHORT index mutation behind the candidate fence. */
+  private async commitWitness(witness: HistoryCandidateWitness, action: () => void): Promise<CandidateCommit> {
+    let stale = false
+    const receipt = await this.enqueueWrite(() => {
+      if (!this.isCandidateCurrent(witness)) {
+        stale = true
+        return
+      }
+      action()
+    })
+    if (receipt === 'failed') return 'failed'
+    return stale ? 'stale' : 'committed'
+  }
+
+  /**
+   * Mark one Session for a later official reconcile without touching its rows.
+   * A failed classification already keeps the index incomplete; this marker is
+   * best-effort bookkeeping of the same fact.
+   */
+  private async markSessionDirty(sessionId: string): Promise<void> {
+    await this.enqueueWrite(() => {
+      if (this.index === undefined) return
+      if (this.index.checkpointOf(sessionId) === undefined) return
+      this.index.markSession({ sessionId, dirty: true })
+    })
   }
 
   // ── live observation ─────────────────────────────────────────────────────
@@ -525,6 +755,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
     if (record.id === undefined) return
     const sessionId = String(record.id)
+    // A creation/replacement makes any same-id official read candidate stale in
+    // this same synchronous stack, before the new fact is remembered.
+    this.invalidateCandidates(sessionId)
     const inherited = typeof record.inheritedEventCount === 'number' && Number.isSafeInteger(record.inheritedEventCount)
       && record.inheritedEventCount >= 0
       ? record.inheritedEventCount
@@ -540,14 +773,17 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
     if (record.id === undefined) return
     const sessionId = String(record.id)
+    // FIRST invalidate every same-id candidate: an event accepted before this
+    // listener returned must never be overwritten by a pre-event read.
+    this.invalidateCandidates(sessionId)
     const parsed = eventOf(event)
     if (parsed === undefined) {
       // A committed live event that violates the structural contract cannot be
       // folded and must not be skipped: report the source as uncertain and
       // rebuild this Session from the official source.
-      this.state = { kind: 'incomplete', reason: 'source-uncertain' }
       this.diag.warn('history search observed a malformed live event', { category: 'source-uncertain' })
-      this.enqueueRebuild(sessionId)
+      this.markReconcileNeeded('source-uncertain')
+      this.scheduleSessionRepair(sessionId, 'rebuild')
       return
     }
     this.rememberLiveSession(session)
@@ -575,9 +811,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // trustworthy. Discard this Session's batch and rebuild it from the
         // official source instead of silently keeping either body.
         this.discardPendingSession(sessionId)
-        this.state = { kind: 'incomplete', reason: 'reconciling' }
         this.diag.warn('history search observed a conflicting live sequence', { category: 'reconciling' })
-        this.enqueueRebuild(sessionId)
+        this.markReconcileNeeded('reconciling')
+        this.scheduleSessionRepair(sessionId, 'rebuild')
         return
       }
       existing.events.push(parsed)
@@ -601,31 +837,19 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.pendingBytes -= pending.bytes
   }
 
-  /** Re-read one Session from the official source on the serial writer. */
-  private enqueueRebuild(sessionId: string): void {
-    this.enqueueWrite(async () => {
-      const query = this.deps.sessionQuery()
-      if (query === undefined) {
-        this.state = { kind: 'unavailable', reason: 'service-missing' }
-        return
-      }
-      await this.rebuildSession(sessionId, query)
-      this.refreshCompleteness()
-    })
-  }
-
   private observeDisposedSession(session: unknown): void {
     if (this.disposed) return
     const record = session as { readonly id?: unknown }
     if (record.id === undefined) return
     const sessionId = String(record.id)
+    this.invalidateCandidates(sessionId)
     this.liveSessions.delete(sessionId)
-    this.enqueueWrite(async () => {
-      // A disposed Session keeps its accepted rows: only the official durable
-      // source can prove them, so re-verify before changing the checkpoint.
-      await this.verifySessionAgainstPersistence(sessionId)
-      this.recordCompletedDisposal()
-    })
+    // A Session without a derived checkpoint has nothing to prove: skip the
+    // official read instead of observing a Session this index never held.
+    if (this.index?.checkpointOf(sessionId) === undefined) return
+    // A disposed Session keeps its accepted rows: only the official durable
+    // source can prove them, so re-verify before changing the checkpoint.
+    this.scheduleSessionRepair(sessionId, 'disposal')
   }
 
   private handleOverflow(): void {
@@ -634,43 +858,144 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.pending.clear()
     this.pendingEventCount = 0
     this.pendingBytes = 0
-    if (this.state.kind !== 'unavailable') {
-      this.state = { kind: 'incomplete', reason: 'resource-limit' }
-    }
+    this.markReconcileNeeded('resource-limit')
     this.diag.warn('history search live buffer reached its bound', { sessions: affected.length })
-    this.enqueueWrite(async () => {
+    // Merge the affected ids into the per-id repair map: no writer callback
+    // awaits an official read, and different ids make progress independently.
+    for (const sessionId of affected) this.scheduleSessionRepair(sessionId, 'rebuild')
+  }
+
+  // ── maintenance ownership (full pass + per-Session repairs) ─────────────
+
+  /**
+   * Register at most ONE official repair per exact Session id. The repair runs
+   * OUTSIDE the serial writer and its own short commits are witness-fenced. A
+   * disposal proof requested behind an active rebuild is chained afterwards.
+   */
+  private scheduleSessionRepair(sessionId: string, kind: 'rebuild' | 'disposal'): void {
+    if (this.disposed || this.lifecycle.signal.aborted) return
+    this.reconcilePending.add(sessionId)
+    this.markReconcileNeeded('reconciling')
+    if (kind === 'disposal') this.disposalRequests.add(sessionId)
+    if (this.sessionRepairFlights.has(sessionId)) return
+    const effectiveKind = this.disposalRequests.delete(sessionId) ? 'disposal' : kind
+    const flight = this.runSessionRepair(sessionId, effectiveKind)
+    this.sessionRepairFlights.set(sessionId, { promise: flight, kind: effectiveKind })
+    runDetached('history search Session repair', () => flight, { diag: this.diag })
+    observeSettled(flight, () => {
+      const registered = this.sessionRepairFlights.get(sessionId)
+      if (registered?.promise === flight) this.sessionRepairFlights.delete(sessionId)
+      if (this.disposalRequests.delete(sessionId) && !this.disposed && !this.lifecycle.signal.aborted) {
+        this.scheduleSessionRepair(sessionId, 'disposal')
+      }
+      if (this.pending.size > 0) this.enqueueDrain()
+      this.refreshCompleteness()
+    })
+  }
+
+  private async runSessionRepair(sessionId: string, kind: 'rebuild' | 'disposal'): Promise<void> {
+    try {
+      if (this.disposed || this.index === undefined) return
+      const persistence = this.deps.sessionPersistence()
+      const sessions = this.deps.sessions()
       const query = this.deps.sessionQuery()
-      if (query === undefined) {
+      if (persistence === undefined || sessions === undefined || query === undefined) {
         this.state = { kind: 'unavailable', reason: 'service-missing' }
         return
       }
-      for (const sessionId of affected) {
-        await this.rebuildSession(sessionId, query)
+      if (kind === 'disposal') {
+        if (this.index.checkpointOf(sessionId) === undefined) return
+        await this.verifySessionAgainstPersistence(sessionId)
+        this.recordCompletedDisposal()
+        return
       }
-      this.refreshCompleteness()
-    })
+      const live = sessions.get(sessionId)
+      if (live !== undefined) {
+        const outcome = await this.rebuildLiveSession(sessionId, persistence, sessions, query)
+        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+        return
+      }
+      const checkpoint = this.index.checkpointOf(sessionId)
+      if (checkpoint === undefined) {
+        // A missing row can be an interrupted rebuild or a now-persisted-only
+        // Session: the official durable snapshot decides whether it exists.
+        const signal = this.lifecycle.signal
+        const snapshot = await persistence.stat(sessionId, { signal })
+        signal.throwIfAborted()
+        if (snapshot === undefined) return
+        const record: OfficialSession = {
+          header: structuredClone(snapshot.header),
+          live: false,
+          ...(snapshot.eventCount === undefined ? {} : { eventCount: snapshot.eventCount }),
+          ...(snapshot.revision === undefined ? {} : { revision: snapshot.revision }),
+        }
+        const outcome = await this.replayOfficialSession(
+          sessionId,
+          record,
+          persistence,
+          sessions,
+          query,
+          this.emptyPhaseCounters(),
+          { rebuild: true },
+        )
+        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+        return
+      }
+      await this.verifySessionAgainstPersistence(sessionId)
+      this.recordCompletedDisposal()
+    } catch (error) {
+      if (this.lifecycle.signal.aborted || this.disposed) return
+      this.sourceFaulted = true
+      this.markReconcileNeeded('source-read-failed')
+      await this.markSessionDirty(sessionId)
+      throw error
+    }
   }
 
   // ── serial write queue ───────────────────────────────────────────────────
 
   /**
-   * Append one task to the ONE serial index writer. The returned tail never
-   * rejects: failures are classified, mark the index incomplete and schedule a
-   * reconcile, so a later query never inherits a poisoned queue.
+   * Append one SHORT task to the ONE serial index writer. The returned receipt
+   * never rejects: a failure is classified, marks the index incomplete and
+   * settles as `failed` so a maintenance chain stops instead of claiming it
+   * completed; a later query never inherits a poisoned queue.
    */
-  private enqueueWrite(task: () => Promise<void>): void {
-    const run = this.writeTail.then(task, task)
-    this.writeTail = run.catch(error => {
-      if (this.lifecycle.signal.aborted || this.disposed) return
-      this.diag.warn('history search index write failed', { category: error instanceof Error ? error.name : 'unknown' })
-      // Keep the index CLOSED until a later successful write proves it safe
-      // again: a refresh that only re-reads must not promote an unsafe derived
-      // store (for example a tampered sidecar) back to `ready`.
-      this.indexFaulted = true
-      if (this.state.kind !== 'unavailable') {
-        this.state = { kind: 'incomplete', reason: 'source-read-failed' }
-      }
-    })
+  private enqueueWrite(task: () => void | Promise<void>): Promise<WriteReceipt> {
+    const run = this.writeTail.then(
+      () => this.runMeasuredWrite(task),
+      () => this.runMeasuredWrite(task),
+    )
+    const settled = run.then(
+      () => {
+        this.writerCounters.committed += 1
+        return 'committed' as const
+      },
+      error => {
+        if (this.lifecycle.signal.aborted || this.disposed) return 'failed' as const
+        this.writerCounters.failed += 1
+        this.diag.warn('history search index write failed', { category: error instanceof Error ? error.name : 'unknown' })
+        // Keep the index CLOSED until a later successful write proves it safe
+        // again: a refresh that only re-reads must not promote an unsafe derived
+        // store (for example a tampered sidecar) back to `ready`.
+        this.indexFaulted = true
+        this.markReconcileNeeded('source-read-failed')
+        return 'failed' as const
+      },
+    )
+    this.writeTail = settled.then(() => undefined)
+    return settled
+  }
+
+  /** Measure ONLY the writer task (never the queue wait) for O(1) diagnostics. */
+  private async runMeasuredWrite(task: () => void | Promise<void>): Promise<void> {
+    const startedAt = performance.now()
+    try {
+      await task()
+    } finally {
+      const elapsed = performance.now() - startedAt
+      this.writerCounters.busyMsTotal += elapsed
+      this.writerCounters.busyMsMax = Math.max(this.writerCounters.busyMsMax, elapsed)
+    }
   }
 
   private enqueueDrain(): void {
@@ -682,38 +1007,51 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.drainScheduled) return
     this.drainScheduled = true
     this.drainSchedules += 1
-    this.enqueueWrite(async () => {
+    this.enqueueWrite(() => {
       this.drainScheduled = false
-      await this.drainPending()
+      this.drainPending()
     })
   }
 
+  /** Await the writer tail captured at query admission (short commits only). */
   private async awaitWrites(signal: AbortSignal): Promise<void> {
+    const startedAt = performance.now()
     const tail = this.writeTail
-    if (signal.aborted) throw signal.reason
-    await new Promise<void>((resolve, reject) => {
-      const onAbort = (): void => {
-        try {
-          signal.throwIfAborted()
-        } catch (error) {
-          reject(error)
+    try {
+      if (signal.aborted) throw signal.reason
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => {
+          try {
+            signal.throwIfAborted()
+          } catch (error) {
+            reject(error)
+          }
         }
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-      tail.then(
-        () => {
-          signal.removeEventListener('abort', onAbort)
-          resolve()
-        },
-        error => {
-          signal.removeEventListener('abort', onAbort)
-          reject(error)
-        },
-      )
-    })
+        signal.addEventListener('abort', onAbort, { once: true })
+        tail.then(
+          () => {
+            signal.removeEventListener('abort', onAbort)
+            resolve()
+          },
+          error => {
+            signal.removeEventListener('abort', onAbort)
+            reject(error)
+          },
+        )
+      })
+    } finally {
+      const elapsed = performance.now() - startedAt
+      this.writerCounters.awaitWritesMsTotal += elapsed
+      this.writerCounters.awaitWritesMsMax = Math.max(this.writerCounters.awaitWritesMsMax, elapsed)
+    }
   }
 
-  private async drainPending(): Promise<void> {
+  /**
+   * ONE synchronous drain of the bounded live buffer. Normal contiguous batches
+   * commit here; a missing/dirty checkpoint or a gap only marks the Session dirty
+   * and hands it to the per-id repair owner — never an official read in here.
+   */
+  private drainPending(): void {
     if (this.disposed || this.pending.size === 0) return
     if (this.state.kind === 'loading') return
     if (this.index === undefined) return
@@ -721,40 +1059,31 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.pending.clear()
     this.pendingEventCount = 0
     this.pendingBytes = 0
-    const rebuild: string[] = []
+    const repair: string[] = []
     for (const [sessionId, batch] of batches) {
       if (this.lifecycle.signal.aborted) return
       const checkpoint = this.index.checkpointOf(sessionId)
       if (checkpoint === undefined || checkpoint.dirty) {
-        rebuild.push(sessionId)
+        repair.push(sessionId)
         continue
       }
       try {
         this.commitLiveBatch(sessionId, checkpoint, batch)
       } catch (error) {
         // The buffered events are already out of the queue: mark BEFORE
-        // rethrowing so the periodic verification rebuilds this Session from
-        // the official source instead of permanently skipping the batch.
+        // handing the Session to the repair owner so the official source is
+        // re-read instead of permanently skipping the batch.
         this.index.markSession({ sessionId, dirty: true })
         if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
-          rebuild.push(sessionId)
+          repair.push(sessionId)
           continue
         }
         throw error
       }
     }
-    for (const sessionId of rebuild) {
-      const query = this.deps.sessionQuery()
-      if (query === undefined) {
-        this.state = { kind: 'unavailable', reason: 'service-missing' }
-        return
-      }
-      try {
-        await this.rebuildSession(sessionId, query)
-      } catch (error) {
-        this.index.markSession({ sessionId, dirty: true })
-        throw error
-      }
+    for (const sessionId of repair) {
+      this.reconcilePending.add(sessionId)
+      this.scheduleSessionRepair(sessionId, 'rebuild')
     }
     this.refreshCompleteness()
   }
@@ -816,7 +1145,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     readonly effectiveCwd: string | null
     readonly sourceState: 'persisted' | 'live'
     readonly events: readonly HostAdmissionEventLike[]
-  }): { readonly effectiveCwd: string | null; readonly lastEventHash: string | null } {
+  }, witness?: HistoryCandidateWitness): { readonly effectiveCwd: string | null; readonly lastEventHash: string | null } {
     const index = this.requireIndex()
     // ONE shared monotonic contract for every replay path: the batch must be
     // the exact contiguous official sequence starting at the committed
@@ -853,6 +1182,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const effectiveCwd = normalizeHistoryCwd(fold.currentCwd)
     const lastEventHash = lastEvent === undefined ? null : sessionEventHash(lastEvent)
     const nextSeq = expectedSeq
+    const uncertainSourcesDelta = delta.unknownSourceCount + delta.invalidCwdCount
+    const previousUncertainSources = witness?.expected?.uncertainSources ?? 0
     index.commitBatch({
       sessionId: input.sessionId,
       headerHash: input.headerHash,
@@ -863,9 +1194,25 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       effectiveCwd,
       lastEventHash,
       sourceState: input.sourceState,
-      uncertainSourcesDelta: delta.unknownSourceCount + delta.invalidCwdCount,
+      uncertainSourcesDelta,
       occurrences,
     })
+    if (witness !== undefined) {
+      // The maintenance chain's next async read must compare against the
+      // checkpoint THIS commit produced, including its exact uncertain count.
+      witness.expected = {
+        sessionId: input.sessionId,
+        headerCwd: normalizeHistoryCwd(input.headerCwd),
+        inheritedCut: input.inheritedEventCount,
+        nextSeq,
+        effectiveCwd,
+        lastEventHash,
+        headerHash: input.headerHash,
+        sourceState: input.sourceState,
+        uncertainSources: previousUncertainSources + uncertainSourcesDelta,
+        dirty: false,
+      }
+    }
     // A successful commit proves the private file set is usable again.
     this.indexFaulted = false
     return { effectiveCwd, lastEventHash }
@@ -873,21 +1220,27 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   // ── bootstrap / cold replay ──────────────────────────────────────────────
 
-  private async bootstrap(): Promise<void> {
-    const startedAt = performance.now()
-    const counters: HistorySearchPhaseCounters = {
+  private emptyPhaseCounters(): HistorySearchPhaseCounters {
+    return {
       sessionsVisited: 0,
       replayAttempted: 0,
       replayCompleted: 0,
       replayElapsedMsTotal: 0,
       replayElapsedMsMax: 0,
     }
+  }
+
+  private async bootstrap(): Promise<void> {
+    const startedAt = performance.now()
+    const counters = this.emptyPhaseCounters()
+    const writerBefore = { ...this.writerCounters }
     let outcome: HistorySearchPhaseOutcome = 'incomplete'
     try {
       const profile = this.deps.profileContext()
       const persistence = this.deps.sessionPersistence()
+      const sessions = this.deps.sessions()
       const query = this.deps.sessionQuery()
-      if (profile === undefined || persistence === undefined || query === undefined) {
+      if (profile === undefined || persistence === undefined || sessions === undefined || query === undefined) {
         this.state = { kind: 'unavailable', reason: 'service-missing' }
         outcome = 'unavailable'
         return
@@ -904,40 +1257,46 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return
       }
       this.index = index
-      await this.coldStart(persistence, query, counters)
-      outcome = this.settledPhaseOutcome()
+      await this.coldStart(persistence, sessions, query, counters)
+      this.sourceFaulted = false
     } catch (error) {
-      if (this.lifecycle.signal.aborted || this.disposed) return
-      if (this.state.kind !== 'unavailable') {
-        this.state = { kind: 'incomplete', reason: 'source-read-failed' }
+      if (!this.lifecycle.signal.aborted && !this.disposed) {
+        this.sourceFaulted = true
+        this.markReconcileNeeded('source-read-failed')
+        this.diag.warn('history search bootstrap failed', { category: error instanceof Error ? error.name : 'unknown' })
       }
-      this.diag.warn('history search bootstrap failed', { category: error instanceof Error ? error.name : 'unknown' })
     } finally {
-      if (this.lifecycle.signal.aborted || this.disposed) outcome = 'cancelled'
+      this.initialPassComplete = true
+      if (this.lifecycle.signal.aborted || this.disposed) {
+        outcome = 'cancelled'
+      } else {
+        this.refreshCompleteness()
+        outcome = this.settledPhaseOutcome()
+      }
       this.logPhaseEnd('history-search.bootstrap.end', outcome, startedAt, counters)
+      this.logWriterAggregate('cold_start', writerBefore)
       this.scheduleVerification()
     }
   }
 
   private async coldStart(
     persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
     counters: HistorySearchPhaseCounters,
   ): Promise<void> {
     const signal = this.lifecycle.signal
-    const official = await this.enumerateOfficialSessions(persistence, query, signal, 'cold_start')
-    const index = this.requireIndex()
-    index.deleteSessionsExcept(new Set(official.keys()))
+    const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'cold_start')
+    await this.reconcileRemovedSessions(official, persistence, sessions)
     for (const [sessionId, record] of official) {
       counters.sessionsVisited += 1
       signal.throwIfAborted()
       // A checkpoint read from disk belongs to a PREVIOUS process. Its revision
       // is not comparable here and a tail hash alone cannot prove the prefix,
       // so cold start always rebuilds from the official source.
-      if (index.checkpointOf(sessionId) !== undefined) index.resetSession(sessionId)
-      await this.replayOfficialSession(sessionId, record, persistence, query, counters)
-      this.rememberVerifiedRevision(sessionId, record, persistence)
-      this.drainPendingSession(sessionId)
+      const outcome = await this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+      if (outcome === 'failed') return
+      if (outcome === 'complete') this.drainPendingSession(sessionId)
       await yieldEventLoop()
     }
     // Sessions born during the warmup window were buffered by the listener
@@ -948,58 +1307,70 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         continue
       }
       counters.sessionsVisited += 1
-      await this.rebuildSession(sessionId, query)
+      const outcome = await this.rebuildLiveSession(sessionId, persistence, sessions, query)
+      if (outcome === 'failed') return
     }
     this.refreshCompleteness()
   }
 
+  /**
+   * ONE official persisted snapshot + the official live `sessions` registry.
+   * The persisted listing is read exactly once per pass; live headers win after
+   * the official compatibility check (never a second corpus listing).
+   */
   private async enumerateOfficialSessions(
     persistence: HistorySearchPersistenceLike,
-    query: HistorySearchQueryLike,
+    sessions: HistorySearchSessionsLike,
     signal: AbortSignal,
     phase: HistorySearchInventoryPhase,
   ): Promise<Map<string, OfficialSession>> {
     const startedAt = performance.now()
     let outcome: 'ok' | 'error' | 'cancelled' = 'error'
     let directPersistenceListCalls = 0
-    let queryListSessionsCalls = 0
+    const queryListSessionsCalls = 0
     let persistedRows = 0
     let mergedRows = 0
+    let liveSessionsObserved = 0
     this.logDiagnostic('history-search.inventory.start', {
       phase,
-      directPersistenceListCalls: 1,
-      queryListSessionsCalls: 1,
+      directPersistenceListCalls,
+      queryListSessionsCalls,
+      liveSessionsObserved,
     })
     try {
       directPersistenceListCalls += 1
       const snapshots = await persistence.list({ signal })
-      queryListSessionsCalls += 1
-      const records = await query.listSessions(signal)
       signal.throwIfAborted()
       const union = new Map<string, OfficialSession>()
       for (const snapshot of snapshots) {
         const sessionId = String(snapshot.header.id)
         union.set(sessionId, {
-          header: snapshot.header,
+          // Detached read-only view: the official list result is not retained.
+          header: structuredClone(snapshot.header),
           live: false,
           ...(snapshot.eventCount === undefined ? {} : { eventCount: snapshot.eventCount }),
           ...(snapshot.revision === undefined ? {} : { revision: snapshot.revision }),
         })
       }
-      for (const record of records) {
-        const sessionId = String(record.header.id)
+      // The live registry is SYNCHRONOUS: it never triggers a second listing.
+      for (const session of sessions.list()) {
+        liveSessionsObserved += 1
+        const sessionId = String(session.id)
         const existing = union.get(sessionId)
+        if (existing !== undefined) {
+          // The SAME official check `SessionCorpus.listSessions()` applies.
+          assertOfficialSessionHeadersCompatible(session.header, existing.header)
+        }
         union.set(sessionId, {
-          header: record.header,
-          live: record.live === true || existing?.live === true,
+          header: structuredClone(session.header),
+          live: true,
+          // The persisted snapshot's durable facts survive the live precedence:
+          // an unchanged-revision check must never lose its only official token.
           ...(existing?.eventCount === undefined ? {} : { eventCount: existing.eventCount }),
-          // sessionQuery.listSessions() has no persistence revision; the
-          // persistence snapshot's revision must survive the union, otherwise the
-          // equal-header/equal-count content-change check below loses its ONLY
-          // authoritative unchanged fact.
           ...(existing?.revision === undefined ? {} : { revision: existing.revision }),
         })
       }
+      signal.throwIfAborted()
       persistedRows = snapshots.length
       mergedRows = union.size
       outcome = 'ok'
@@ -1013,6 +1384,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         outcome,
         elapsedMs: elapsedMilliseconds(startedAt),
         ...(outcome === 'ok' ? { persistedRows, mergedRows } : {}),
+        ...(outcome === 'ok' ? { liveSessionsObserved } : {}),
         directPersistenceListCalls,
         queryListSessionsCalls,
       })
@@ -1024,68 +1396,130 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessionId: string,
     record: OfficialSession,
     persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
     counters: HistorySearchPhaseCounters,
-  ): Promise<void> {
+    options: { readonly rebuild: boolean },
+  ): Promise<ReplayOutcome> {
     counters.replayAttempted += 1
     const startedAt = performance.now()
+    this.reconcilePending.add(sessionId)
+    this.markReconcileNeeded('reconciling')
+    const signal = this.lifecycle.signal
+    const witness = this.createWitness(sessionId, persistence, sessions, this.index?.checkpointOf(sessionId))
     try {
-      const signal = this.lifecycle.signal
-      const headerHash = sessionHeaderHash(record.header)
-      let checkpoint = this.index?.checkpointOf(sessionId)
-      if (checkpoint !== undefined && checkpoint.headerHash !== headerHash) {
-        this.index?.resetSession(sessionId)
-        checkpoint = undefined
+      // The enumerated live/persisted classification must still describe the
+      // SAME live source; a source change here is stale, never merged blindly.
+      if (record.live !== (witness.liveObject !== undefined)) return 'stale'
+      if (options.rebuild && witness.expected !== undefined) {
+        const reset = await this.resetWitness(witness)
+        if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
       }
+      if (witness.expected !== undefined && witness.expected.headerHash !== sessionHeaderHash(record.header)) {
+        const reset = await this.resetWitness(witness)
+        if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
+      }
+      let outcome: ReplayOutcome
       if (record.live) {
         const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
         try {
           const inherited = Number(observation.inheritedEventCount)
           const events = eventsOf(observation.events, sessionId)
-          await this.replayEventList(sessionId, observation.header, inherited, events, checkpoint, 'live')
+          outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, false)
         } finally {
           observation[Symbol.dispose]()
         }
       } else {
         const handle = await persistence.open(sessionId, 'read', { signal })
         try {
-          await this.replayHandle(sessionId, handle, checkpoint, record.eventCount)
+          outcome = await this.replayHandle(sessionId, handle, witness, record.eventCount)
         } finally {
           await handle.close()
         }
+        // The same-instance revision must still name the SAME source after the
+        // read; a missing/changed token keeps this round incomplete.
+        if (outcome === 'complete') outcome = await this.proveCurrentSource(sessionId, record, persistence)
       }
-      counters.replayCompleted += 1
+      if (outcome === 'complete') {
+        this.reconcilePending.delete(sessionId)
+        counters.replayCompleted += 1
+      } else {
+        await this.markSessionDirty(sessionId)
+      }
+      return outcome
     } finally {
+      this.releaseWitness(witness)
       const elapsed = elapsedMilliseconds(startedAt)
       counters.replayElapsedMsTotal += elapsed
       counters.replayElapsedMsMax = Math.max(counters.replayElapsedMsMax, elapsed)
     }
   }
 
+  /** Drop one candidate's derived rows, still behind its own witness fence. */
+  private async resetWitness(witness: HistoryCandidateWitness): Promise<CandidateCommit> {
+    return this.commitWitness(witness, () => {
+      this.requireIndex().resetSession(witness.sessionId)
+      witness.expected = undefined
+    })
+  }
+
+  /** Same-instance revision re-check after a cold read (`stat` on the same instance). */
+  private async proveCurrentSource(
+    sessionId: string,
+    record: OfficialSession,
+    persistence: HistorySearchPersistenceLike,
+  ): Promise<ReplayOutcome> {
+    if (record.revision === undefined) return 'stale'
+    const snapshot = await persistence.stat(sessionId, { signal: this.lifecycle.signal })
+    this.lifecycle.signal.throwIfAborted()
+    if (snapshot === undefined || snapshot.revision === undefined) return 'stale'
+    if (snapshot.revision !== record.revision) return 'stale'
+    this.rememberVerifiedRevision(sessionId, record, persistence)
+    return 'complete'
+  }
+
+  /** A read slice must be the exact contiguous official sequence (source breach otherwise). */
+  private assertContiguousSlice(sessionId: string, startSeq: number, events: readonly HistorySearchEventLike[]): void {
+    let expected = startSeq
+    for (const event of events) {
+      if (event.seq !== expected) {
+        throw new HistorySearchConflictError(
+          sessionId,
+          `expected seq ${String(expected)} but observed ${String(event.seq)}`,
+        )
+      }
+      expected += 1
+    }
+  }
+
   private async replayHandle(
     sessionId: string,
     handle: HistorySearchReadHandleLike,
-    checkpoint: HistorySessionCheckpointRow | undefined,
+    witness: HistoryCandidateWitness,
     expectedEventCount: number | undefined,
-  ): Promise<void> {
+  ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
     const headerHash = sessionHeaderHash(handle.header)
     const inherited = Number(handle.inheritedEventCount)
     const headerCwd = normalizeHistoryCwd(handle.header.cwd)
+    const checkpoint = witness.expected
     let nextSeq = checkpoint?.nextSeq ?? 0
     let effectiveCwd = checkpoint?.effectiveCwd ?? headerCwd
     let lastEventHash = checkpoint?.lastEventHash ?? null
     if (checkpoint !== undefined && checkpoint.inheritedCut !== inherited) {
-      this.index?.resetSession(sessionId)
+      const reset = await this.resetWitness(witness)
+      if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
       nextSeq = 0
       effectiveCwd = headerCwd
       lastEventHash = null
     }
     if (nextSeq > 0) {
+      signal.throwIfAborted()
       const tail = await handle.read(nextSeq - 1, 1, { signal })
       const tailEvent = tail.events[0]
       if (tailEvent === undefined || tailEvent.seq !== nextSeq - 1 || sessionEventHash(tailEvent) !== lastEventHash) {
-        this.index?.resetSession(sessionId)
+        const reset = await this.resetWitness(witness)
+        if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
         nextSeq = 0
         effectiveCwd = headerCwd
         lastEventHash = null
@@ -1096,19 +1530,23 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const slice = await handle.read(nextSeq, HISTORY_SEARCH_READ_BATCH, { signal })
       const events = eventsOf(slice.events, sessionId)
       if (events.length === 0) break
-      const result = this.writeBatch({
-        sessionId,
-        headerHash,
-        inheritedEventCount: inherited,
-        headerCwd,
-        baseNextSeq: nextSeq,
-        effectiveCwd,
-        sourceState: 'persisted',
-        events,
+      this.assertContiguousSlice(sessionId, nextSeq, events)
+      const receipt = await this.commitWitness(witness, () => {
+        const result = this.writeBatch({
+          sessionId,
+          headerHash,
+          inheritedEventCount: inherited,
+          headerCwd,
+          baseNextSeq: nextSeq,
+          effectiveCwd,
+          sourceState: 'persisted',
+          events,
+        }, witness)
+        nextSeq = events[events.length - 1]!.seq + 1
+        effectiveCwd = result.effectiveCwd
+        lastEventHash = result.lastEventHash
       })
-      nextSeq = events[events.length - 1]!.seq + 1
-      effectiveCwd = result.effectiveCwd
-      lastEventHash = result.lastEventHash
+      if (receipt !== 'committed') return receipt === 'failed' ? 'failed' : 'stale'
       if (events.length < HISTORY_SEARCH_READ_BATCH) break
       await yieldEventLoop()
     }
@@ -1120,23 +1558,31 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         `the official log ended at ${String(nextSeq)} before its advertised count ${String(expectedEventCount)}`,
       )
     }
+    return 'complete'
   }
 
   private async replayEventList(
     sessionId: string,
-    header: HistorySearchHeaderLike,
+    header: HistorySearchSessionHeaderLike,
     inherited: number,
     events: readonly HistorySearchEventLike[],
-    checkpoint: HistorySessionCheckpointRow | undefined,
-    sourceState: 'persisted' | 'live',
-  ): Promise<void> {
+    witness: HistoryCandidateWitness,
+    rebuild: boolean,
+  ): Promise<ReplayOutcome> {
+    const signal = this.lifecycle.signal
     const headerHash = sessionHeaderHash(header)
     const headerCwd = normalizeHistoryCwd(header.cwd)
+    if (rebuild && witness.expected !== undefined) {
+      const reset = await this.resetWitness(witness)
+      if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
+    }
+    const checkpoint = witness.expected
     let nextSeq = checkpoint?.nextSeq ?? 0
     let effectiveCwd = checkpoint?.effectiveCwd ?? headerCwd
     let lastEventHash = checkpoint?.lastEventHash ?? null
-    if (checkpoint !== undefined && checkpoint.inheritedCut !== inherited) {
-      this.index?.resetSession(sessionId)
+    if (checkpoint !== undefined && (checkpoint.inheritedCut !== inherited || checkpoint.headerHash !== headerHash)) {
+      const reset = await this.resetWitness(witness)
+      if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
       nextSeq = 0
       effectiveCwd = headerCwd
       lastEventHash = null
@@ -1144,29 +1590,34 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (nextSeq > 0) {
       const tail = events[nextSeq - 1]
       if (tail === undefined || tail.seq !== nextSeq - 1 || sessionEventHash(tail) !== lastEventHash) {
-        this.index?.resetSession(sessionId)
+        const reset = await this.resetWitness(witness)
+        if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
         nextSeq = 0
         effectiveCwd = headerCwd
         lastEventHash = null
       }
     }
     for (;;) {
-      this.lifecycle.signal.throwIfAborted()
+      signal.throwIfAborted()
       const slice = events.slice(nextSeq, nextSeq + HISTORY_SEARCH_READ_BATCH)
       if (slice.length === 0) break
-      const result = this.writeBatch({
-        sessionId,
-        headerHash,
-        inheritedEventCount: inherited,
-        headerCwd,
-        baseNextSeq: nextSeq,
-        effectiveCwd,
-        sourceState,
-        events: slice,
+      this.assertContiguousSlice(sessionId, nextSeq, slice)
+      const receipt = await this.commitWitness(witness, () => {
+        const result = this.writeBatch({
+          sessionId,
+          headerHash,
+          inheritedEventCount: inherited,
+          headerCwd,
+          baseNextSeq: nextSeq,
+          effectiveCwd,
+          sourceState: 'live',
+          events: slice,
+        }, witness)
+        nextSeq = slice[slice.length - 1]!.seq + 1
+        effectiveCwd = result.effectiveCwd
+        lastEventHash = result.lastEventHash
       })
-      nextSeq = slice[slice.length - 1]!.seq + 1
-      effectiveCwd = result.effectiveCwd
-      lastEventHash = result.lastEventHash
+      if (receipt !== 'committed') return receipt === 'failed' ? 'failed' : 'stale'
       if (slice.length < HISTORY_SEARCH_READ_BATCH) break
       await yieldEventLoop()
     }
@@ -1177,19 +1628,34 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         `the official observation ended at ${String(nextSeq)} for ${String(events.length)} events`,
       )
     }
+    return 'complete'
   }
 
   /** Rebuild one Session from a complete official observation (live preferred). */
-  private async rebuildSession(sessionId: string, query: HistorySearchQueryLike): Promise<void> {
+  private async rebuildLiveSession(
+    sessionId: string,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    query: HistorySearchQueryLike,
+  ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
-    const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
+    this.reconcilePending.add(sessionId)
+    this.markReconcileNeeded('reconciling')
+    const witness = this.createWitness(sessionId, persistence, sessions, this.index?.checkpointOf(sessionId))
     try {
-      const inherited = Number(observation.inheritedEventCount)
-      const events = eventsOf(observation.events, sessionId)
-      this.index?.resetSession(sessionId)
-      await this.replayEventList(sessionId, observation.header, inherited, events, undefined, 'live')
+      const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
+      try {
+        const inherited = Number(observation.inheritedEventCount)
+        const events = eventsOf(observation.events, sessionId)
+        const outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, true)
+        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+        else await this.markSessionDirty(sessionId)
+        return outcome
+      } finally {
+        observation[Symbol.dispose]()
+      }
     } finally {
-      observation[Symbol.dispose]()
+      this.releaseWitness(witness)
     }
   }
 
@@ -1200,12 +1666,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.pendingEventCount -= batch.events.length
     this.pendingBytes -= batch.bytes
     const checkpoint = this.index.checkpointOf(sessionId)
-    if (checkpoint === undefined || checkpoint.dirty) return
+    if (checkpoint === undefined || checkpoint.dirty) {
+      this.reconcilePending.add(sessionId)
+      this.scheduleSessionRepair(sessionId, 'rebuild')
+      return
+    }
     try {
       this.commitLiveBatch(sessionId, checkpoint, batch)
     } catch (error) {
       if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
         this.index.markSession({ sessionId, dirty: true })
+        this.reconcilePending.add(sessionId)
+        this.scheduleSessionRepair(sessionId, 'rebuild')
         return
       }
       throw error
@@ -1216,28 +1688,40 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   private scheduleVerification(): void {
     if (this.disposed || this.lifecycle.signal.aborted) return
+    if (this.verificationTimer !== undefined) return
     this.verificationTimer = setTimeout(() => {
       this.verificationTimer = undefined
-      this.enqueueWrite(async () => {
-        try {
-          await this.verifySources()
-        } finally {
-          this.scheduleVerification()
-        }
-      })
+      this.startFullMaintenance()
     }, HISTORY_SEARCH_VERIFICATION_INTERVAL_MS)
     this.verificationTimer.unref?.()
   }
 
-  private async verifySources(): Promise<void> {
-    const startedAt = performance.now()
-    const counters: HistorySearchPhaseCounters = {
-      sessionsVisited: 0,
-      replayAttempted: 0,
-      replayCompleted: 0,
-      replayElapsedMsTotal: 0,
-      replayElapsedMsMax: 0,
+  /** Queue ONE full maintenance round; the next timer starts after it settles. */
+  private startFullMaintenance(): void {
+    if (this.disposed || this.lifecycle.signal.aborted) return
+    if (this.maintenanceRunning || this.fullMaintenanceFlight !== undefined) {
+      this.scheduleVerification()
+      return
     }
+    const flight = this.verifySources()
+    this.fullMaintenanceFlight = flight
+    runDetached('history search periodic verification', () => flight, { diag: this.diag })
+    observeSettled(flight, () => {
+      if (this.fullMaintenanceFlight === flight) this.fullMaintenanceFlight = undefined
+      this.scheduleVerification()
+      this.refreshCompleteness()
+    })
+  }
+
+  private async verifySources(): Promise<void> {
+    if (this.maintenanceRunning) {
+      if (this.fullMaintenanceFlight !== undefined) await this.fullMaintenanceFlight
+      return
+    }
+    this.maintenanceRunning = true
+    const startedAt = performance.now()
+    const counters = this.emptyPhaseCounters()
+    const writerBefore = { ...this.writerCounters }
     let outcome: HistorySearchPhaseOutcome = 'incomplete'
     try {
       if (this.disposed || this.index === undefined) {
@@ -1245,104 +1729,217 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return
       }
       const persistence = this.deps.sessionPersistence()
+      const sessions = this.deps.sessions()
       const query = this.deps.sessionQuery()
-      if (persistence === undefined || query === undefined) {
+      if (persistence === undefined || sessions === undefined || query === undefined) {
         this.state = { kind: 'unavailable', reason: 'service-missing' }
         outcome = 'unavailable'
         return
       }
       const signal = this.lifecycle.signal
-      const official = await this.enumerateOfficialSessions(persistence, query, signal, 'periodic_verify')
-      const removed = this.index.deleteSessionsExcept(new Set(official.keys()))
-      for (const sessionId of removed) this.verifiedRevisions.delete(sessionId)
+      const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'periodic_verify')
+      if (await this.reconcileRemovedSessions(official, persistence, sessions) === 'failed') {
+        outcome = 'incomplete'
+        return
+      }
       for (const [sessionId, record] of official) {
         counters.sessionsVisited += 1
         signal.throwIfAborted()
-        let checkpoint = this.index.checkpointOf(sessionId)
-        if (
-          checkpoint !== undefined
-          && checkpoint.sourceState === 'live'
-          && !record.live
-          && (checkpoint.dirty || checkpoint.uncertainSources > 0)
-        ) {
-          // Disposed provisional rows: never reset before the official durable
-          // source proves the claimed prefix. A short source is append lag, not a
-          // rollback; truncating it into `ready` would silently drop accepted rows.
-          const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
-          signal.throwIfAborted()
-          if (proof === 'insufficient' || proof === 'unreadable') {
-            this.index.markSession({ sessionId, dirty: true })
-            this.state = {
-              kind: 'incomplete',
-              reason: proof === 'unreadable' ? 'source-read-failed' : 'reconciling',
-            }
-            continue
-          }
-          if (proof === 'rollback') {
-            // Header/cut/tail explicitly replaced: the official source is the
-            // authoritative rollback and a rebuild is safe.
-            this.index.resetSession(sessionId)
-            await this.replayOfficialSession(sessionId, record, persistence, query, counters)
-            this.rememberVerifiedRevision(sessionId, record, persistence)
-            continue
-          }
-          // The claimed prefix is present: settle the provisional marker, then
-          // apply the normal revision rules below.
-          this.index.markSession({ sessionId, sourceState: 'persisted', dirty: false })
-          checkpoint = this.index.checkpointOf(sessionId)
-          if (checkpoint === undefined) continue
-        } else if (checkpoint === undefined || checkpoint.dirty || checkpoint.uncertainSources > 0) {
-          // A dirty/uncertain checkpoint cannot prove its whole prefix from the
-          // tail alone (a middle event may have been repaired), and an incremental
-          // replay that finds no new tail events would never call writeBatch(),
-          // leaving dirty set forever. Reconcile from official events instead.
-          if (checkpoint !== undefined) this.index.resetSession(sessionId)
-          await this.replayOfficialSession(sessionId, record, persistence, query, counters)
-          this.rememberVerifiedRevision(sessionId, record, persistence)
-          continue
+        const activeRepair = this.sessionRepairFlights.get(sessionId)
+        if (activeRepair !== undefined) {
+          // Same-id work never races: let the already-registered repair settle
+          // (its own error owner classifies a failure), then re-read the current
+          // checkpoint and decide whether this round still needs an observation.
+          await activeRepair.promise.then(() => undefined, () => undefined)
         }
-        if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
-          this.index.resetSession(sessionId)
-          await this.replayOfficialSession(sessionId, record, persistence, query, counters)
-          this.rememberVerifiedRevision(sessionId, record, persistence)
-          continue
-        }
-        if (!record.live && record.eventCount !== undefined && record.eventCount < checkpoint.nextSeq) {
-          // A durable tail shrink is a rollback: rebuild from the official log.
-          // A LIVE Session's persistence count may legitimately lag its accepted
-          // events (append is not the durability barrier), so it is never read as
-          // a shrink here.
-          this.index.resetSession(sessionId)
-          await this.replayOfficialSession(sessionId, record, persistence, query, counters)
-          this.rememberVerifiedRevision(sessionId, record, persistence)
-          continue
-        }
-        if (!record.live) {
-          const unchanged = this.revisionUnchanged(sessionId, record, persistence)
-          const extended = record.eventCount !== undefined && record.eventCount > checkpoint.nextSeq
-          if (!unchanged || extended) {
-            if (!unchanged) {
-              // A changed or absent same-instance revision is NOT proof that the
-              // old prefix survived a middle-of-log repair, even when the tail
-              // event hash still matches. Rebuild this Session from official
-              // events instead of trusting the stored checkpoint.
-              this.index.resetSession(sessionId)
-            }
-            await this.replayOfficialSession(sessionId, record, persistence, query, counters)
-            this.rememberVerifiedRevision(sessionId, record, persistence)
-            continue
-          }
-        }
-        if (checkpoint.sourceState === 'live' && !record.live && record.eventCount !== undefined && record.eventCount >= checkpoint.nextSeq) {
-          this.index.markSession({ sessionId, sourceState: 'persisted' })
+        const result = await this.reconcileOfficialSession(sessionId, record, persistence, sessions, query, counters)
+        if (result === 'failed') {
+          outcome = 'incomplete'
+          return
         }
       }
-      this.drainAllPendingNow()
+      // Accepted live events that arrived during the pass merge in order BEFORE
+      // the completeness decision; the writer only sees short commits.
+      const drained = await this.enqueueWrite(() => {
+        this.drainAllPendingNow()
+      })
+      this.dropSettledReconcilePending(official)
       this.refreshCompleteness()
+      if (drained === 'committed') this.sourceFaulted = false
       outcome = this.settledPhaseOutcome()
+    } catch (error) {
+      if (!this.lifecycle.signal.aborted && !this.disposed) {
+        this.sourceFaulted = true
+        this.markReconcileNeeded('source-read-failed')
+        this.diag.warn('history search verification failed', { category: error instanceof Error ? error.name : 'unknown' })
+      }
+      throw error
     } finally {
+      this.maintenanceRunning = false
       if (this.lifecycle.signal.aborted || this.disposed) outcome = 'cancelled'
       this.logPhaseEnd('history-search.verify.end', outcome, startedAt, counters)
+      this.logWriterAggregate('periodic_verify', writerBefore)
+    }
+  }
+
+  /** Apply the frozen per-Session reconciliation rules with SHORT index commits only. */
+  private async reconcileOfficialSession(
+    sessionId: string,
+    record: OfficialSession,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    query: HistorySearchQueryLike,
+    counters: HistorySearchPhaseCounters,
+  ): Promise<ReplayOutcome> {
+    const signal = this.lifecycle.signal
+    let checkpoint = this.index?.checkpointOf(sessionId)
+    if (
+      checkpoint !== undefined
+      && checkpoint.sourceState === 'live'
+      && !record.live
+      && (checkpoint.dirty || checkpoint.uncertainSources > 0)
+    ) {
+      // Disposed provisional rows: never reset before the official durable
+      // source proves the claimed prefix. A short source is append lag, not a
+      // rollback; truncating it into `ready` would silently drop accepted rows.
+      const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+      signal.throwIfAborted()
+      if (proof === 'insufficient' || proof === 'unreadable') {
+        this.reconcilePending.add(sessionId)
+        await this.markSessionDirty(sessionId)
+        this.markReconcileNeeded(proof === 'unreadable' ? 'source-read-failed' : 'reconciling')
+        return 'stale'
+      }
+      if (proof === 'rollback') {
+        // Header/cut/tail explicitly replaced: the official source is the
+        // authoritative rollback and a rebuild is safe.
+        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+      }
+      // The claimed prefix is present: settle the provisional marker, then
+      // apply the normal revision rules below.
+      const settled = await this.commitCheckpointMarker(sessionId, persistence, sessions, checkpoint, {
+        sourceState: 'persisted',
+        dirty: false,
+      })
+      if (settled !== 'committed') {
+        this.reconcilePending.add(sessionId)
+        return settled === 'failed' ? 'failed' : 'stale'
+      }
+      checkpoint = this.index?.checkpointOf(sessionId)
+      if (checkpoint === undefined) {
+        this.reconcilePending.add(sessionId)
+        return 'stale'
+      }
+    } else if (checkpoint === undefined || checkpoint.dirty || checkpoint.uncertainSources > 0) {
+      // A dirty/uncertain checkpoint cannot prove its whole prefix from the tail
+      // alone (a middle event may have been repaired), and an incremental replay
+      // that finds no new tail events would never call writeBatch(), leaving
+      // dirty set forever. Reconcile from official events instead.
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+    }
+    if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+    }
+    if (!record.live && record.eventCount !== undefined && record.eventCount < checkpoint.nextSeq) {
+      // A durable tail shrink is a rollback: rebuild from the official log. A
+      // LIVE Session's persistence count may legitimately lag its accepted
+      // events (append is not the durability barrier), so it is never read as a
+      // shrink here.
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+    }
+    if (!record.live) {
+      const unchanged = this.revisionUnchanged(sessionId, record, persistence)
+      const extended = record.eventCount !== undefined && record.eventCount > checkpoint.nextSeq
+      if (!unchanged || extended) {
+        // A changed or absent same-instance revision is NOT proof that the old
+        // prefix survived a middle-of-log repair, even when the tail event hash
+        // still matches. Rebuild from official events instead of trusting it.
+        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: !unchanged })
+      }
+    }
+    if (checkpoint.sourceState === 'live' && !record.live && record.eventCount !== undefined && record.eventCount >= checkpoint.nextSeq) {
+      const settled = await this.commitCheckpointMarker(sessionId, persistence, sessions, checkpoint, { sourceState: 'persisted' })
+      if (settled !== 'committed') {
+        this.reconcilePending.add(sessionId)
+        return settled === 'failed' ? 'failed' : 'stale'
+      }
+    }
+    this.reconcilePending.delete(sessionId)
+    return 'complete'
+  }
+
+  /** One short checkpoint-marker mutation behind the candidate witness fence. */
+  private async commitCheckpointMarker(
+    sessionId: string,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    expected: HistorySessionCheckpointRow,
+    marker: { readonly dirty?: boolean; readonly sourceState?: 'persisted' | 'live' },
+  ): Promise<CandidateCommit> {
+    const witness = this.createWitness(sessionId, persistence, sessions, expected)
+    try {
+      return await this.commitWitness(witness, () => {
+        this.requireIndex().markSession({ sessionId, ...marker })
+      })
+    } finally {
+      this.releaseWitness(witness)
+    }
+  }
+
+  /**
+   * Delete derived Sessions absent from the authoritative roster, one guarded
+   * short write each: a new live object, a buffered accepted event, a new
+   * maintenance candidate or a moved checkpoint refuses the deletion.
+   */
+  private async reconcileRemovedSessions(
+    official: ReadonlyMap<string, OfficialSession>,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+  ): Promise<ReplayOutcome> {
+    if (this.index === undefined) return 'complete'
+    let allApplied = true
+    for (const checkpoint of this.index.listSessions()) {
+      const sessionId = checkpoint.sessionId
+      if (official.has(sessionId)) continue
+      const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)
+      try {
+        let stale = false
+        const receipt = await this.enqueueWrite(() => {
+          // A live entry, a buffered accepted event, an active same-id repair or
+          // a moved checkpoint refuses this derived deletion outright.
+          if (!this.isCandidateCurrent(witness) || this.sessionRepairFlights.has(sessionId)) {
+            stale = true
+            return
+          }
+          if (witness.sessions.get(sessionId) !== undefined) {
+            stale = true
+            return
+          }
+          this.requireIndex().deleteSession(sessionId)
+        })
+        if (receipt === 'failed') return 'failed'
+        if (stale) {
+          allApplied = false
+          this.reconcilePending.add(sessionId)
+          this.markReconcileNeeded('reconciling')
+          continue
+        }
+        this.verifiedRevisions.delete(sessionId)
+        this.reconcilePending.delete(sessionId)
+      } finally {
+        this.releaseWitness(witness)
+      }
+    }
+    return allApplied ? 'complete' : 'stale'
+  }
+
+  /** IDs that are neither official nor derivable no longer keep the barrier up. */
+  private dropSettledReconcilePending(official: ReadonlyMap<string, OfficialSession>): void {
+    for (const sessionId of [...this.reconcilePending]) {
+      if (official.has(sessionId)) continue
+      if (this.sessionRepairFlights.has(sessionId)) continue
+      if (this.index?.checkpointOf(sessionId) !== undefined) continue
+      this.reconcilePending.delete(sessionId)
     }
   }
 
@@ -1433,7 +2030,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     try {
       if (this.disposed || this.index === undefined) return
       const persistence = this.deps.sessionPersistence()
-      if (persistence === undefined) {
+      const sessions = this.deps.sessions()
+      if (persistence === undefined || sessions === undefined) {
         this.state = { kind: 'unavailable', reason: 'service-missing' }
         return
       }
@@ -1441,59 +2039,80 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // official read instead of observing a Session this index never held.
       const checkpoint = this.index.checkpointOf(sessionId)
       if (checkpoint === undefined) return
-      const signal = this.lifecycle.signal
-      counters.statCalls += 1
-      const statStartedAt = performance.now()
-      let snapshot: HistorySearchPersistenceSnapshotLike | undefined
+      const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)
       try {
-        snapshot = await persistence.stat(sessionId, { signal })
+        const signal = this.lifecycle.signal
+        counters.statCalls += 1
+        const statStartedAt = performance.now()
+        let snapshot: HistorySearchPersistenceSnapshotLike | undefined
+        try {
+          snapshot = await persistence.stat(sessionId, { signal })
+        } finally {
+          counters.statElapsedMsTotal += elapsedMilliseconds(statStartedAt)
+        }
+        if (snapshot === undefined) {
+          counters.statNotFound += 1
+          // Not durable: keep the speculative rows and report the honest state.
+          this.markReconcileNeeded('source-uncertain')
+          await this.markWitnessDirty(witness)
+          return
+        }
+        if (checkpoint.headerHash !== sessionHeaderHash(snapshot.header)) {
+          this.markReconcileNeeded('reconciling')
+          await this.markWitnessDirty(witness)
+          return
+        }
+        if (snapshot.eventCount !== undefined && snapshot.eventCount < checkpoint.nextSeq) {
+          this.markReconcileNeeded('reconciling')
+          await this.markWitnessDirty(witness)
+          return
+        }
+        // rc.5 JSONL `stat()` does not always provide eventCount, so an absent
+        // count is NOT proof that the live rows are durable. Prove the exact
+        // prefix this checkpoint claims before it may become `persisted`.
+        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+        if (proof === 'proven') counters.proofProven += 1
+        else if (proof === 'insufficient') counters.proofInsufficient += 1
+        else if (proof === 'rollback') counters.proofRollback += 1
+        else counters.proofUnreadable += 1
+        if (this.disposed || this.lifecycle.signal.aborted) return
+        if (proof === 'unreadable') {
+          this.diag.warn('history search disposed-session proof failed', { category: 'unreadable-source' })
+          this.markReconcileNeeded('source-read-failed')
+          await this.markWitnessDirty(witness)
+          return
+        }
+        if (proof !== 'proven') {
+          // Short/unreadable prefix is append lag, not a rollback: keep the rows
+          // and the provisional checkpoint and retry through the normal pass.
+          this.markReconcileNeeded('reconciling')
+          await this.markWitnessDirty(witness)
+          return
+        }
+        const settled = await this.commitWitness(witness, () => {
+          this.requireIndex().markSession({ sessionId, sourceState: 'persisted', dirty: false })
+        })
+        if (settled !== 'committed') {
+          this.reconcilePending.add(sessionId)
+          this.markReconcileNeeded('reconciling')
+          return
+        }
+        this.reconcilePending.delete(sessionId)
+        this.refreshCompleteness()
       } finally {
-        counters.statElapsedMsTotal += elapsedMilliseconds(statStartedAt)
+        this.releaseWitness(witness)
       }
-      if (snapshot === undefined) {
-        counters.statNotFound += 1
-        // Not durable: keep the speculative rows and report the honest state.
-        this.state = { kind: 'incomplete', reason: 'source-uncertain' }
-        this.index.markSession({ sessionId, dirty: true })
-        return
-      }
-      if (checkpoint.headerHash !== sessionHeaderHash(snapshot.header)) {
-        this.index.markSession({ sessionId, dirty: true })
-        this.state = { kind: 'incomplete', reason: 'reconciling' }
-        return
-      }
-      if (snapshot.eventCount !== undefined && snapshot.eventCount < checkpoint.nextSeq) {
-        this.index.markSession({ sessionId, dirty: true })
-        this.state = { kind: 'incomplete', reason: 'reconciling' }
-        return
-      }
-      // rc.5 JSONL `stat()` does not always provide eventCount, so an absent
-      // count is NOT proof that the live rows are durable. Prove the exact
-      // prefix this checkpoint claims before it may become `persisted`.
-      const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
-      if (proof === 'proven') counters.proofProven += 1
-      else if (proof === 'insufficient') counters.proofInsufficient += 1
-      else if (proof === 'rollback') counters.proofRollback += 1
-      else counters.proofUnreadable += 1
-      if (this.disposed || this.lifecycle.signal.aborted) return
-      if (proof === 'unreadable') {
-        this.diag.warn('history search disposed-session proof failed', { category: 'unreadable-source' })
-        this.index.markSession({ sessionId, dirty: true })
-        this.state = { kind: 'incomplete', reason: 'source-read-failed' }
-        return
-      }
-      if (proof !== 'proven') {
-        // Short/unreadable prefix is append lag, not a rollback: keep the rows
-        // and the provisional checkpoint and retry through the normal pass.
-        this.index.markSession({ sessionId, dirty: true })
-        this.state = { kind: 'incomplete', reason: 'reconciling' }
-        return
-      }
-      this.index.markSession({ sessionId, sourceState: 'persisted', dirty: false })
-      this.refreshCompleteness()
     } finally {
       counters.verifyElapsedMsTotal += elapsedMilliseconds(verifyStartedAt)
     }
+  }
+
+  /** Best-effort dirty marker behind the candidate's own witness fence. */
+  private async markWitnessDirty(witness: HistoryCandidateWitness): Promise<void> {
+    const settled = await this.commitWitness(witness, () => {
+      this.requireIndex().markSession({ sessionId: witness.sessionId, dirty: true })
+    })
+    if (settled !== 'committed') this.reconcilePending.add(witness.sessionId)
   }
 
   /** Emit the bounded disposal aggregate after one COMPLETED verification. */
@@ -1538,6 +2157,22 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     })
   }
 
+  /** O(1) serial-writer aggregate for ONE pass (never per Session or per row). */
+  private logWriterAggregate(
+    phase: HistorySearchInventoryPhase,
+    before: HistoryWriterCounters,
+  ): void {
+    this.logDiagnostic('history-search.writer', {
+      phase,
+      writerCommitted: this.writerCounters.committed - before.committed,
+      writerFailed: this.writerCounters.failed - before.failed,
+      writerBusyMsTotal: roundMilliseconds(this.writerCounters.busyMsTotal - before.busyMsTotal),
+      writerBusyMsMaxObserved: roundMilliseconds(this.writerCounters.busyMsMax),
+      awaitWritesMsTotal: roundMilliseconds(this.writerCounters.awaitWritesMsTotal - before.awaitWritesMsTotal),
+      awaitWritesMsMaxObserved: roundMilliseconds(this.writerCounters.awaitWritesMsMax),
+    })
+  }
+
   /** The diagnostic outcome of a pass that settled normally. */
   private settledPhaseOutcome(): HistorySearchPhaseOutcome {
     if (this.state.kind === 'ready') return 'ready'
@@ -1545,10 +2180,32 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     return 'incomplete'
   }
 
+  /** Truthful immediate downgrade; never overrides a definite `unavailable`. */
+  private markReconcileNeeded(reason: HistorySearchIncompleteReason = 'reconciling'): void {
+    if (this.state.kind === 'unavailable') return
+    if (this.state.kind === 'loading' && !this.initialPassComplete) return
+    this.state = { kind: 'incomplete', reason }
+  }
+
+  /**
+   * Derive the ONE public completeness state from the committed index, the
+   * outstanding repair barrier and the sticky fault latches. A pass that is
+   * still in its first cold replay stays `loading`; an interrupted repair can
+   * never be observed as `ready`.
+   */
   private refreshCompleteness(): void {
     if (this.disposed || this.index === undefined) return
-    if (this.indexFaulted) {
+    if (this.state.kind === 'unavailable') return
+    if (!this.initialPassComplete) {
+      this.state = { kind: 'loading' }
+      return
+    }
+    if (this.sourceFaulted || this.indexFaulted) {
       this.state = { kind: 'incomplete', reason: 'source-read-failed' }
+      return
+    }
+    if (this.reconcilePending.size > 0) {
+      this.state = { kind: 'incomplete', reason: 'reconciling' }
       return
     }
     const checkpoints = this.index.listSessions()

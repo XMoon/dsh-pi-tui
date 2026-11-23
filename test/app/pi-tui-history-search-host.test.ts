@@ -24,7 +24,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import { createRemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts'
@@ -42,9 +42,11 @@ import {
 import {
   HISTORY_SEARCH_MAX_PENDING_EVENTS,
   PiTuiHistorySearchHostService,
+  type HistorySearchLiveSessionLike,
   type HistorySearchPersistenceLike,
   type HistorySearchProfileContextLike,
   type HistorySearchQueryLike,
+  type HistorySearchSessionsLike,
 } from '../../src/app/host/features/history-search.ts'
 
 type Host = Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
@@ -110,7 +112,7 @@ async function waitForSettled(
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
     const answer = await wire.search(request)
-    if (answer.kind !== 'loading') return answer
+    if (answer.kind !== 'loading' && answer.kind !== 'incomplete') return answer
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   throw new Error(`timed out waiting for ${label}`)
@@ -140,6 +142,39 @@ async function prompt(wire: HistoryHost, sessionId: string, requestId: string, t
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/** A real rc.5 `SessionHeader` shape for the structural official fakes. */
+function testHeader(id: string, cwd?: string, overrides: Partial<SessionHeader> = {}): SessionHeader {
+  return {
+    version: SESSION_FORMAT_VERSION,
+    id: SessionId(id),
+    createdAt: 1_721_232_000_000,
+    ...(cwd === undefined ? {} : { cwd }),
+    isSeeded: false,
+    ...overrides,
+  }
+}
+
+/** A live registry fake that keeps ONE exact Session object per header identity. */
+function liveRegistry(source: { live?: boolean; header: SessionHeader }): HistorySearchSessionsLike {
+  let cachedHeader: SessionHeader | undefined
+  let cached: HistorySearchLiveSessionLike | undefined
+  const liveObject = (): HistorySearchLiveSessionLike | undefined => {
+    if (source.live !== true) return undefined
+    if (cachedHeader !== source.header) {
+      cachedHeader = source.header
+      cached = { id: source.header.id, header: source.header }
+    }
+    return cached
+  }
+  return {
+    list: () => (liveObject() === undefined ? [] : [liveObject()!]),
+    get: (id) => {
+      const object = liveObject()
+      return object !== undefined && String(object.id) === id ? object : undefined
+    },
+  }
 }
 
 test('an Owner search returns the exact accepted occurrence through the real Gateway', async (t) => {
@@ -316,6 +351,7 @@ test('a Host without the official history services answers explicit unavailable,
     profileContext: () => undefined,
     sessionPersistence: () => undefined,
     sessionQuery: () => undefined,
+    sessions: () => undefined,
   })
   try {
     const answer = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
@@ -337,6 +373,7 @@ test('a Host without the official history services answers explicit unavailable,
       profileContext: () => ({ dir: secondProfile }) as HistorySearchProfileContextLike,
       sessionPersistence: () => undefined,
       sessionQuery: () => undefined,
+      sessions: () => undefined,
     })
     try {
       const secondAnswer = await second.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
@@ -369,13 +406,14 @@ test('an unreadable profile directory is an explicit index-unavailable, never ok
     open: async () => { throw new Error('unused') },
   }
   const query: HistorySearchQueryLike = {
-    listSessions: async () => [],
     observeSession: async () => { throw new Error('unused') },
   }
+  const sessions: HistorySearchSessionsLike = { list: () => [], get: () => undefined }
   const service = new PiTuiHistorySearchHostService(invocationCtx, {
     profileContext: () => ({ dir: missingProfile }),
     sessionPersistence: () => persistence,
     sessionQuery: () => query,
+    sessions: () => sessions,
   })
   try {
     const started = Date.now()
@@ -413,13 +451,17 @@ test('queries answered during the asynchronous bootstrap are a truthful loading'
     open: async () => { throw new Error('unused') },
   }
   const query: HistorySearchQueryLike = {
-    listSessions: async () => [],
     observeSession: async () => { throw new Error('unused') },
+  }
+  const sessions: HistorySearchSessionsLike = {
+    list: () => [],
+    get: () => undefined,
   }
   const service = new PiTuiHistorySearchHostService(invocationCtx, {
     profileContext: () => ({ dir: profileDir }),
     sessionPersistence: () => persistence,
     sessionQuery: () => query,
+    sessions: () => sessions,
   })
   try {
     const loading = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
@@ -635,6 +677,7 @@ function historyDebugProbeScript(historyModuleUrl: string): string {
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { PiTuiHistorySearchHostService } from ${JSON.stringify(historyModuleUrl)}
 
 const root = process.env.DSH_HOME
@@ -642,7 +685,13 @@ if (root === undefined || root === '') throw new Error('DSH_HOME is required')
 const profileDir = join(root, 'profile')
 mkdirSync(profileDir, { recursive: true })
 
-const header = { id: 'history-pr1-debug-child', cwd: '/repo/history-pr1-child' }
+const header = {
+  version: SESSION_FORMAT_VERSION,
+  id: SessionId('history-pr1-debug-child'),
+  createdAt: 1721232000000,
+  cwd: '/repo/history-pr1-child',
+  isSeeded: false,
+}
 const events = [{
   type: 'agent/inbox/spliced',
   seq: 0,
@@ -674,8 +723,11 @@ const persistence = {
   },
 }
 const query = {
-  async listSessions() { return [{ header, live: false, persisted: true }] },
   async observeSession() { throw new Error('unused') },
+}
+const sessions = {
+  list() { return [] },
+  get() { return undefined },
 }
 const ctx = new Context()
 const lifecycle = new AbortController()
@@ -689,6 +741,7 @@ const service = new PiTuiHistorySearchHostService(invocationCtx, {
   profileContext: () => ({ dir: profileDir }),
   sessionPersistence: () => persistence,
   sessionQuery: () => query,
+  sessions: () => sessions,
 })
 const deadline = Date.now() + 20_000
 for (;;) {
@@ -699,6 +752,7 @@ for (;;) {
   await new Promise(resolve => setTimeout(resolve, 10))
 }
 service.observeDisposedSession({ id: header.id })
+await Promise.allSettled([...service.sessionRepairFlights.values()].map(entry => entry.promise))
 await service.writeTail
 await service.dispose()
 await ctx.fiber.dispose()
@@ -726,9 +780,10 @@ test('explicit debug diagnostics reach the standard file sink without Session co
   const debugRun = runProbe(debugLogPath, 'debug')
   assert.equal(debugRun.status, 0, `debug probe failed: ${debugRun.stderr}`)
   const log = readFileSync(debugLogPath, 'utf8')
-  assert.match(log, /history-search\.inventory\.start phase=cold_start directPersistenceListCalls=1 queryListSessionsCalls=1/u)
-  assert.match(log, /history-search\.inventory\.end phase=cold_start outcome=ok elapsedMs=\d+(?:\.\d)? persistedRows=1 mergedRows=1 directPersistenceListCalls=1 queryListSessionsCalls=1/u)
+  assert.match(log, /history-search\.inventory\.start phase=cold_start directPersistenceListCalls=0 queryListSessionsCalls=0 liveSessionsObserved=0/u)
+  assert.match(log, /history-search\.inventory\.end phase=cold_start outcome=ok elapsedMs=\d+(?:\.\d)? persistedRows=1 mergedRows=1 liveSessionsObserved=0 directPersistenceListCalls=1 queryListSessionsCalls=0/u)
   assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)?/u)
+  assert.match(log, /history-search\.writer phase=cold_start writerCommitted=\d+ writerFailed=0/u)
   assert.match(log, /history-search\.disposals seen=1 statCalls=1 statNotFound=0 proofProven=1 proofInsufficient=0 proofRollback=0 proofUnreadable=0 statElapsedMsTotal=\d+(?:\.\d)? verifyElapsedMsTotal=\d+(?:\.\d)?/u)
   assert.equal(log.match(/history-search\.disposals/gu)?.length, 1, 'a single disposal must emit exactly one bounded aggregate')
   for (const secret of ['hsp-child-secret-text', 'history-pr1-debug-child', '/repo/history-pr1-child', root]) {
@@ -750,7 +805,9 @@ test('explicit debug diagnostics reach the standard file sink without Session co
  */
 interface MutableOfficialSource {
   present: boolean
-  header: { readonly id: unknown; readonly cwd?: string }
+  header: SessionHeader
+  /** A deliberately different durable header observation (conflict cases). */
+  persistedHeader?: SessionHeader
   events: { type: string; seq: number; time: number; data: unknown }[]
   revision: number
   /** Advertised durable count when it deliberately disagrees with `events`. */
@@ -772,7 +829,7 @@ function mutableSource(headerCwd: string): MutableOfficialSource {
   })
   return {
     present: true,
-    header: { id: 'mutable-session', cwd: headerCwd },
+    header: testHeader('mutable-session', headerCwd),
     events: [
       { type: 'agent/inbox/spliced', seq: 0, time: 1000, data: { target: 'next-turn', start: 0, inserted: [message('mutable first', 1)] } },
       { type: 'working-directory/change', seq: 1, time: 1001, data: { cwd: `${headerCwd}-two` } },
@@ -787,6 +844,7 @@ function mutableDeps(source: MutableOfficialSource): {
     profileContext: () => { dir: string }
     sessionPersistence: () => HistorySearchPersistenceLike
     sessionQuery: () => HistorySearchQueryLike
+    sessions: () => HistorySearchSessionsLike
   }
   readonly calls: {
     listCalls: () => number
@@ -794,8 +852,9 @@ function mutableDeps(source: MutableOfficialSource): {
     statIds: () => readonly string[]
   }
 } {
+  const durableHeader = () => source.persistedHeader ?? source.header
   const snapshot = () => ({
-    header: source.header,
+    header: durableHeader(),
     ...(source.omitEventCount === true ? {} : { eventCount: source.eventCount ?? source.events.length }),
     revision: source.revision,
   })
@@ -812,12 +871,12 @@ function mutableDeps(source: MutableOfficialSource): {
     async stat(id) {
       statCalls += 1
       statIds.push(id)
-      if (!source.present || String(source.header.id) !== id) return undefined
+      if (!source.present || String(durableHeader().id) !== id) return undefined
       return snapshot()
     },
     async open() {
       return {
-        header: source.header,
+        header: durableHeader(),
         inheritedEventCount: 0,
         async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
           const durable = source.durableEventCount ?? source.events.length
@@ -828,9 +887,6 @@ function mutableDeps(source: MutableOfficialSource): {
     },
   }
   const query: HistorySearchQueryLike = {
-    async listSessions() {
-      return source.present ? [{ header: source.header, live: source.live === true, persisted: true }] : []
-    },
     async observeSession() {
       return {
         header: source.header,
@@ -840,11 +896,13 @@ function mutableDeps(source: MutableOfficialSource): {
       }
     },
   }
+  const sessions = liveRegistry(source)
   return {
     deps: {
       profileContext: () => ({ dir: '' }),
       sessionPersistence: () => persistence,
       sessionQuery: () => query,
+      sessions: () => sessions,
     },
     calls: {
       listCalls: () => listCalls,
@@ -858,6 +916,7 @@ interface DirectHistoryDeps {
   profileContext: () => HistorySearchProfileContextLike | undefined
   sessionPersistence: () => HistorySearchPersistenceLike | undefined
   sessionQuery: () => HistorySearchQueryLike | undefined
+  sessions: () => HistorySearchSessionsLike | undefined
 }
 
 function directService(ctx: Context, deps: DirectHistoryDeps, profileDir: string): PiTuiHistorySearchHostService {
@@ -899,7 +958,7 @@ test('a replaced header, a durable tail shrink and a vanished Session are re-rea
 
     // A replaced Session header (same id, different cwd) forces a rebuild and
     // the occurrence follows the OFFICIAL event-time directories.
-    source.header = { id: 'mutable-session', cwd: '/repo/replaced' }
+    source.header = testHeader('mutable-session', '/repo/replaced')
     source.revision += 1
     await verify()
     const replaced = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
@@ -989,18 +1048,24 @@ test('a disposed Session is verified by one point lookup, never a corpus scan', 
   const checkpoint = () => (service as unknown as {
     index: { checkpointOf(sessionId: string): { sourceState: string; dirty: boolean } | undefined }
   }).index.checkpointOf('mutable-session')
-  const settledWrites = () => (service as unknown as { writeTail: Promise<void> }).writeTail
+  const settledWrites = async () => {
+    await Promise.allSettled([...(service as unknown as {
+      sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    }).sessionRepairFlights.values()].map(entry => entry.promise))
+    await (service as unknown as { writeTail: Promise<void> }).writeTail
+  }
   try {
     await waitDirectReady(service)
 
     const listCallsBefore = calls.listCalls()
     const statCallsBefore = calls.statCalls()
+    const statIdsBefore = calls.statIds().length
     disposeSession('mutable-session')
     await settledWrites()
 
     assert.equal(calls.listCalls(), listCallsBefore, 'one Session disposal must not enumerate the whole corpus')
     assert.equal(calls.statCalls(), statCallsBefore + 1, 'the disposal must read exactly one official snapshot')
-    assert.deepEqual(calls.statIds(), ['mutable-session'], 'the point lookup must receive the exact disposed id')
+    assert.deepEqual(calls.statIds().slice(statIdsBefore), ['mutable-session'], 'the point lookup must receive the exact disposed id')
     assert.equal(checkpoint()?.sourceState, 'persisted')
     assert.equal(checkpoint()?.dirty, false)
     const found = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
@@ -1014,7 +1079,7 @@ test('a disposed Session is verified by one point lookup, never a corpus scan', 
     await settledWrites()
     assert.equal(calls.statCalls(), statCallsBefore + 1, 'a checkpoint-less disposal must not call stat')
     assert.equal(calls.listCalls(), listCallsBefore)
-    assert.deepEqual(calls.statIds(), ['mutable-session'])
+    assert.deepEqual(calls.statIds().slice(statIdsBefore), ['mutable-session'])
     const stillThere = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
     assert.equal(stillThere.kind, 'ready', JSON.stringify(stillThere))
     if (stillThere.kind !== 'ready') throw new Error('expected ready')
@@ -1092,6 +1157,7 @@ test('a conflicting duplicate live sequence discards the buffer and rebuilds fro
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-live-conflict-')
   const source = mutableSource('/repo/live-conflict')
+  source.live = true
   const { deps } = mutableDeps(source)
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
@@ -1135,9 +1201,10 @@ test('the live buffer counts real UTF-8 bytes and reconciles without losing entr
   const profileDir = life.tempDir('dsh-history-search-utf8-bound-')
   const source: MutableOfficialSource = {
     present: true,
-    header: { id: 'big-session', cwd: '/repo/big' },
+    header: testHeader('big-session', '/repo/big'),
     events: [],
     revision: 1,
+    live: true,
   }
   const bigEvent = (index: number) => ({
     type: 'agent/inbox/spliced',
@@ -1266,11 +1333,14 @@ test('an unsafe sidecar keeps the index closed until a later write proves it saf
     assert.equal(faulted.kind, 'incomplete', JSON.stringify(faulted))
 
     // A read-only verification pass must NOT promote the unsafe store back to
-    // ready; every write it attempts hits the same private-file refusal.
-    await assert.rejects(
-      (service as unknown as { verifySources(): Promise<void> }).verifySources(),
-      (error: unknown) => error instanceof Error && /sidecar|private/u.test(error.message),
-    )
+    // ready; every short write it attempts hits the same private-file refusal.
+    // The ONE writer classifies that failure and its `failed` receipt keeps the
+    // index closed instead of claiming the pass completed.
+    const writerCounters = () => (service as unknown as { writerCounters: { failed: number } }).writerCounters
+    const writerFailedBefore = writerCounters().failed
+    await (service as unknown as { verifySources(): Promise<void> }).verifySources()
+    assert.ok(writerCounters().failed > writerFailedBefore,
+      'the verification pass must report the refused short write through the writer receipt')
     const stillClosed = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
     assert.equal(stillClosed.kind, 'incomplete', JSON.stringify(stillClosed))
 
@@ -1488,7 +1558,9 @@ test('a disposed Session without eventCount is not marked persisted without a du
     const started = Date.now()
     while (Date.now() - started < 5_000) {
       answer = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
-      if (answer.kind === 'incomplete') break
+      // The public `incomplete` answer and the retry marker are two short,
+      // separately observed facts: wait for the dirty checkpoint too.
+      if (answer.kind === 'incomplete' && checkpoint()?.dirty === true) break
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.equal(answer?.kind, 'incomplete', JSON.stringify(answer))
@@ -1606,6 +1678,435 @@ test('a disposal during the disposed-session prefix proof never mutates the clos
     releaseProof()
     await assert.rejects(pending, (error: unknown) => (error as Error).name === 'AbortError')
   } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('one official enumeration merges the live registry without a second persisted listing', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-enumeration')
+  try {
+    await wire.host.harness.create(SessionId('history-enum-live'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, 'history-enum-live', 'req-enum-live', 'hsp-enum-live')
+    // A live-only Session: announced but without a durable accepted prompt yet.
+    await wire.host.harness.create(SessionId('history-enum-live-only'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    // A durable Session that is no longer live after its AgentHandle disposal.
+    const durable = await wire.host.ctx.agents.create({
+      sessionId: SessionId('history-enum-durable'),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+      meta: { cwd: wire.host.anchorDir },
+    })
+    await prompt(wire, 'history-enum-durable', 'req-enum-durable', 'hsp-enum-durable')
+    await waitForReady(wire, 'enumeration index')
+    await durable.dispose()
+    // The disposal proof is a repair owned by the maintenance chain; run the
+    // same production pass explicitly instead of waiting the 30 s cadence.
+    await (wire.service() as unknown as { verifySources(): Promise<void> }).verifySources()
+    await waitForReady(wire, 'enumeration after disposal')
+
+    const ctx = wire.host.ctx
+    const rawQuery = ctx.sessionQuery
+    const rawSessions = ctx.sessions as unknown as HistorySearchSessionsLike
+    const rawPersistence = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    let listCalls = 0
+    const counting: HistorySearchPersistenceLike = {
+      identity: rawPersistence.identity,
+      list: (options) => {
+        listCalls += 1
+        return rawPersistence.list(options)
+      },
+      stat: (id, options) => rawPersistence.stat(id, options),
+      open: (id, access, options) => rawPersistence.open(id, access, options),
+    }
+    const originalQueryList = rawQuery.listSessions
+    let queryListCalls = 0
+    rawQuery.listSessions = function (...args: never[]) {
+      queryListCalls += 1
+      return originalQueryList.apply(this, args as unknown as [AbortSignal?])
+    }
+    let merged: Map<string, { readonly header: SessionHeader; readonly live: boolean }>
+    try {
+      const service = wire.service() as unknown as {
+        enumerateOfficialSessions(
+          persistence: HistorySearchPersistenceLike,
+          sessions: HistorySearchSessionsLike,
+          signal: AbortSignal,
+          phase: 'periodic_verify',
+        ): Promise<Map<string, { readonly header: SessionHeader; readonly live: boolean }>>
+      }
+      merged = await service.enumerateOfficialSessions(counting, rawSessions, new AbortController().signal, 'periodic_verify')
+      assert.equal(listCalls, 1, 'one PiTui enumeration must make exactly one persisted listing')
+      assert.equal(queryListCalls, 0, 'the production enumeration must not call sessionQuery.listSessions')
+    } finally {
+      rawQuery.listSessions = originalQueryList
+    }
+
+    // The independent DSH `SessionCorpus` result is the oracle for ids, exact
+    // headers and live precedence (its own extra listing is outside the count).
+    const oracle = new Map<string, { header: SessionHeader; live: boolean }>()
+    for (const record of await rawQuery.listSessions()) oracle.set(String(record.header.id), record)
+    assert.deepEqual([...merged.keys()].sort(), [...oracle.keys()].sort(), 'the merged corpus must name the same Sessions')
+    for (const [sessionId, record] of merged) {
+      const expected = oracle.get(sessionId)
+      assert.ok(expected !== undefined, `the oracle must know ${sessionId}`)
+      assert.deepEqual(record.header, expected.header, `exact header equivalence for ${sessionId}`)
+      assert.equal(record.live, expected.live, `live precedence equivalence for ${sessionId}`)
+    }
+    assert.equal(merged.get('history-enum-live')?.live, true)
+    assert.equal(merged.get('history-enum-live-only')?.live, true)
+    assert.equal(merged.get('history-enum-durable')?.live, false)
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('a periodic full pass makes one persisted listing and no second query listing', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-periodic-count')
+  try {
+    await wire.host.harness.create(SessionId('history-count'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, 'history-count', 'req-count', 'hsp-periodic-count')
+    await waitForReady(wire, 'count index')
+
+    const ctx = wire.host.ctx
+    const rawPersistence = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    let listCalls = 0
+    const counting: HistorySearchPersistenceLike = {
+      identity: rawPersistence.identity,
+      list: (options) => {
+        listCalls += 1
+        return rawPersistence.list(options)
+      },
+      stat: (id, options) => rawPersistence.stat(id, options),
+      open: (id, access, options) => rawPersistence.open(id, access, options),
+    }
+    const internals = wire.service() as unknown as {
+      deps: { sessionPersistence(): HistorySearchPersistenceLike | undefined }
+      verifySources(): Promise<void>
+    }
+    const originalPersistence = internals.deps.sessionPersistence
+    const originalQueryList = ctx.sessionQuery.listSessions
+    let queryListCalls = 0
+    ctx.sessionQuery.listSessions = function (...args: never[]) {
+      queryListCalls += 1
+      return originalQueryList.apply(this, args as unknown as [AbortSignal?])
+    }
+    internals.deps.sessionPersistence = () => counting
+    try {
+      await internals.verifySources()
+    } finally {
+      internals.deps.sessionPersistence = originalPersistence
+      ctx.sessionQuery.listSessions = originalQueryList
+    }
+    assert.equal(listCalls, 1, 'one full pass must make exactly one persisted listing')
+    assert.equal(queryListCalls, 0, 'the full pass must not enumerate through sessionQuery.listSessions')
+    assert.equal((await wire.search({ scope: 'all', query: 'hsp-periodic-count', limit: 5 })).kind, 'ready')
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('an Owner search and exact readText complete while the periodic persisted listing is blocked', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-blocked-list')
+  try {
+    const text = 'hsp-blocked-list-still-searchable'
+    await wire.host.harness.create(SessionId('history-blocked-list'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, 'history-blocked-list', 'req-blocked-list', text)
+    const ready = await waitForSettled(
+      wire,
+      { scope: 'session', sessionId: 'history-blocked-list', query: 'hsp-blocked-list', limit: 25 },
+      'blocked-list readiness',
+    )
+    assert.equal(ready.kind, 'ready', JSON.stringify(ready))
+    if (ready.kind !== 'ready') throw new Error('expected ready')
+    const item = ready.items[0]!
+
+    const ctx = wire.host.ctx
+    const rawPersistence = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    let enteredList!: () => void
+    const listEntered = new Promise<void>(resolve => { enteredList = resolve })
+    let releaseList!: () => void
+    const listGate = new Promise<void>(resolve => { releaseList = resolve })
+    const blocked: HistorySearchPersistenceLike = {
+      identity: rawPersistence.identity,
+      list: async (options) => {
+        enteredList()
+        await listGate
+        return rawPersistence.list(options)
+      },
+      stat: (id, options) => rawPersistence.stat(id, options),
+      open: (id, access, options) => rawPersistence.open(id, access, options),
+    }
+    const internals = wire.service() as unknown as {
+      deps: { sessionPersistence(): HistorySearchPersistenceLike | undefined }
+      verifySources(): Promise<void>
+    }
+    const originalPersistence = internals.deps.sessionPersistence
+    internals.deps.sessionPersistence = () => blocked
+    const pass = internals.verifySources()
+    await listEntered
+    try {
+      // The persisted list Promise is STILL blocked: both Owner reads must
+      // complete from the already-complete SQLite epoch without waiting.
+      const search = await wire.search({ scope: 'all', query: 'hsp-blocked-list', limit: 25 })
+      assert.equal(search.kind, 'ready', JSON.stringify(search))
+      if (search.kind !== 'ready') throw new Error('expected ready')
+      assert.deepEqual(search.items.map(row => row.messageId), [item.messageId])
+      const chunk = await wire.readText({
+        sessionId: item.sessionId,
+        messageId: item.messageId,
+        contentSha256: item.contentSha256,
+        offset: 0,
+        limit: 4096,
+      })
+      assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
+      if (chunk.kind !== 'ready') throw new Error('expected ready')
+      assert.equal(chunk.chunk, text)
+    } finally {
+      internals.deps.sessionPersistence = originalPersistence
+      releaseList()
+      await pass
+    }
+  } finally {
+    await wire.dispose()
+  }
+})
+
+test('a live/persisted Header conflict fails closed with the official SOURCE_CONFLICT', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-header-conflict-')
+  const source = mutableSource('/repo/header-conflict')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  try {
+    await waitDirectReady(service)
+    // Same id, conflicting immutable Header fact: the official compatibility
+    // check must reject the whole enumeration, not silently prefer one side.
+    source.persistedHeader = source.header
+    source.header = testHeader('mutable-session', '/repo/header-conflict', { createdAt: source.header.createdAt + 1 })
+    await assert.rejects(
+      verify(),
+      (error: unknown) => (error as { code?: string }).code === 'SESSION_QUERY_SOURCE_CONFLICT',
+    )
+    const answer = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a stale roster deletion is refused while the Session is live again', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-stale-roster-')
+  const source = mutableSource('/repo/stale-roster')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  const internals = service as unknown as {
+    deps: { sessions(): HistorySearchSessionsLike | undefined }
+    index: { occurrenceCount(): number; checkpointOf(id: string): { dirty: boolean } | undefined }
+  }
+  const occurrences = () => internals.index.occurrenceCount()
+  try {
+    await waitDirectReady(service)
+    assert.equal(occurrences(), 2)
+
+    // The roster goes stale (empty) while the same id is live again: the old
+    // deletion candidate must be refused, keeping every accepted row.
+    source.present = false
+    source.live = true
+    const liveObject: HistorySearchLiveSessionLike = { id: source.header.id, header: source.header }
+    const staleRegistry: HistorySearchSessionsLike = {
+      list: () => [],
+      get: (id) => (String(source.header.id) === id ? liveObject : undefined),
+    }
+    const originalSessions = internals.deps.sessions
+    internals.deps.sessions = () => staleRegistry
+    try {
+      await verify()
+    } finally {
+      internals.deps.sessions = originalSessions
+    }
+    const refused = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(refused.kind, 'incomplete', JSON.stringify(refused))
+    assert.equal(occurrences(), 2, 'a refused deletion must keep the derived rows')
+    assert.equal(internals.index.checkpointOf('mutable-session')?.dirty, false)
+
+    // The consistent authoritative roster now exposes the live Session again;
+    // the next pass rebuilds it and the messages survive exactly once.
+    source.present = true
+    source.revision += 1
+    await verify()
+    await waitDirectReady(service)
+    const first = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    const second = await service.search({ scope: 'all', query: 'mutable second', limit: 25 }, new AbortController().signal)
+    assert.equal(first.kind, 'ready', JSON.stringify(first))
+    assert.equal(second.kind, 'ready', JSON.stringify(second))
+    if (first.kind !== 'ready' || second.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(first.items.length, 1)
+    assert.equal(second.items.length, 1)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a stale official read cannot reset or overwrite a replaced live Session source', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-stale-candidate-')
+  const source = mutableSource('/repo/stale-candidate')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  const internals = service as unknown as {
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    index: { occurrenceCount(): number; checkpointOf(id: string): { dirty: boolean } | undefined }
+  }
+  const occurrences = () => internals.index.occurrenceCount()
+  const deliver = (event: unknown) => (service as unknown as {
+    observeLiveEvent(session: unknown, event: unknown): void
+  }).observeLiveEvent(liveSessionOf(source), event)
+  const query = deps.sessionQuery()
+  assert.ok(query !== undefined)
+  const realObserve = query.observeSession
+  let observeEntered!: () => void
+  const entered = new Promise<void>(resolve => { observeEntered = resolve })
+  let releaseObserve!: () => void
+  const gate = new Promise<void>(resolve => { releaseObserve = resolve })
+  try {
+    await waitDirectReady(service)
+    query.observeSession = async (id, options) => {
+      // Read the real payload FIRST, then hold it: a later release must return
+      // this exact stale snapshot, never a re-read.
+      const observation = await realObserve.call(query, id, options)
+      observeEntered()
+      await gate
+      return observation
+    }
+    // A conflicting duplicate live sequence schedules the official rebuild; it
+    // then blocks inside its already-complete observation.
+    deliver(source.events[0])
+    deliver({
+      type: 'user/message',
+      seq: 0,
+      time: 9999,
+      data: { id: 'stale-candidate-conflict', role: 'user', content: [{ type: 'text', text: 'must not be indexed' }], source: { kind: 'user', rpcId: 'rpc-conflict' } },
+    })
+    await entered
+
+    // The live Session object and its whole log are replaced while the old
+    // candidate holds its snapshot.
+    source.header = testHeader('mutable-session', '/repo/stale-replaced')
+    source.events = [{
+      type: 'agent/inbox/spliced',
+      seq: 0,
+      time: 5000,
+      data: {
+        target: 'next-turn',
+        start: 0,
+        inserted: [{
+          id: 'msg-replaced',
+          role: 'user',
+          content: [{ type: 'text', text: 'replaced source first' }],
+          source: { kind: 'user', rpcId: 'rpc-replaced' },
+        }],
+      },
+    }]
+    source.revision += 1
+    const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+    releaseObserve()
+    await Promise.allSettled(flights)
+
+    // The stale candidate wrote/deleted nothing; the old rows stay provisional
+    // and the next official pass rebuilds from the replaced source.
+    assert.equal(occurrences(), 2, 'a stale candidate must not reset the committed rows')
+    assert.equal(internals.index.checkpointOf('mutable-session')?.dirty, true)
+    await verify()
+    await waitDirectReady(service)
+    const replaced = await service.search({ scope: 'all', query: 'replaced source first', limit: 25 }, new AbortController().signal)
+    const stale = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(replaced.kind, 'ready', JSON.stringify(replaced))
+    assert.equal(stale.kind, 'ready', JSON.stringify(stale))
+    if (replaced.kind !== 'ready' || stale.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(replaced.items.length, 1)
+    assert.deepEqual(stale.items, [])
+  } finally {
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a multi-batch first import stays a truthful loading until the final official batch settles', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-first-import-')
+  const message = (index: number) => ({
+    id: `import-msg-${String(index)}`,
+    role: 'user',
+    content: [{ type: 'text', text: `import-text-${String(index)}` }],
+    source: { kind: 'user', rpcId: `import-rpc-${String(index)}` },
+  })
+  const events = Array.from({ length: 600 }, (_, index) => ({
+    type: 'agent/inbox/spliced',
+    seq: index,
+    time: 1000 + index,
+    data: { target: 'next-turn', start: index, inserted: [message(index)] },
+  }))
+  const source: MutableOfficialSource = {
+    present: true,
+    header: testHeader('import-session', '/repo/import'),
+    events,
+    revision: 1,
+  }
+  const { deps } = mutableDeps(source)
+  const rawPersistence = deps.sessionPersistence()
+  assert.ok(rawPersistence !== undefined)
+  let reads = 0
+  let secondReadEntered!: () => void
+  const secondRead = new Promise<void>(resolve => { secondReadEntered = resolve })
+  let releaseSecondRead!: () => void
+  const secondReadGate = new Promise<void>(resolve => { releaseSecondRead = resolve })
+  const blockedPersistence: HistorySearchPersistenceLike = {
+    ...rawPersistence,
+    async open(id, access, options) {
+      const handle = await rawPersistence.open(id, access, options)
+      return {
+        ...handle,
+        async read(offset, length, readOptions) {
+          reads += 1
+          if (reads === 2) {
+            secondReadEntered()
+            await secondReadGate
+          }
+          return handle.read(offset, length, readOptions)
+        },
+      }
+    },
+  }
+  const ctx = new Context()
+  const service = directService(ctx, { ...deps, sessionPersistence: () => blockedPersistence }, profileDir)
+  try {
+    // The first 256-event batch may already be committed, but the index is
+    // still `loading` because the first complete official pass has not ended.
+    await secondRead
+    const loading = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+    assert.equal(loading.kind, 'loading', JSON.stringify(loading))
+    releaseSecondRead()
+    await waitDirectReady(service, 30_000)
+    const counted = (service as unknown as { index: { occurrenceCount(): number } }).index.occurrenceCount()
+    assert.equal(counted, events.length, 'every imported official event must be committed before ready')
+    const last = await service.search({ scope: 'all', query: 'import-text-599', limit: 25 }, new AbortController().signal)
+    assert.equal(last.kind, 'ready', JSON.stringify(last))
+    if (last.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(last.items.length, 1)
+  } finally {
+    releaseSecondRead()
+    await service.dispose()
     await ctx.fiber.dispose()
   }
 })

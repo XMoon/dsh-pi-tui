@@ -101,6 +101,7 @@ import {
   type HistorySearchPersistenceLike,
   type HistorySearchProfileContextLike,
   type HistorySearchQueryLike,
+  type HistorySearchSessionsLike,
 } from './features/history-search.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
@@ -353,6 +354,7 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
         profileContext: () => ctx.reflect.get('profileContext') as HistorySearchProfileContextLike | undefined,
         sessionPersistence: () => ctx.reflect.get('sessionPersistence') as HistorySearchPersistenceLike | undefined,
         sessionQuery: () => ctx.reflect.get('sessionQuery') as HistorySearchQueryLike | undefined,
+        sessions: () => ctx.reflect.get('sessions') as HistorySearchSessionsLike | undefined,
       })
     })
     fibers.push(historySearchFiber)
