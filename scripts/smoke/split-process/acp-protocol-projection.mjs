@@ -9,7 +9,9 @@
  *
  *   - LIST: the authorized root roster (real Session Controller visibility)
  *     reports the real title/cwd/activity, hides the subagent child, honours the
- *     cwd filter and NEVER activates an Agent;
+ *     cwd filter, and leaves NO View/claim and NO appended event behind — proven
+ *     on an isolated control Session that is created, detached before the read
+ *     and successfully loaded again from a fresh connection;
  *   - LOAD: a fresh connection replays the complete canonical history in
  *     `seq` order and only then answers, while `resume` replays NOTHING;
  *   - gating: the SAME durable history reaches a capability-negotiated client as
@@ -17,6 +19,9 @@
  *     standard legacy `plan` (no supplemental frame at all);
  *   - live: the attached View reports the official plan, title, occupancy and
  *     the verified child association of the real subagent run.
+ *
+ * The child's official `send_message` produces the real durable `agent-message`
+ * that becomes `session_message` with the verified author lineage.
  *
  * Anything the minimal real Host in this scene cannot produce is reported as an
  * explicit `NOT_OBSERVED` fact in the evidence, never as a fabricated PASS.
@@ -267,6 +272,17 @@ export async function runAcpProtocolProjection(context) {
       `PP-04: the announced parent is the official durable creator (${JSON.stringify(childHeader.parentSession)})`)
     assert(subagentUpdates.every(update => update.capabilities === undefined),
       'PP-04: no child mutation capability is ever advertised')
+    // The child sends ONE official `send_message`; the PARENT transcript gets a
+    // durable agent-message and this View projects it as a standard
+    // `session_message` with the real author Session id.
+    const sessionMessage = await waitForFact(() => updatesOf(capableUpdates, sessionP)
+      .find(update => update.sessionUpdate === 'session_message'), 'PP-04 the real session_message projection')
+    assert(sessionMessage.senderSessionId === childId,
+      `PP-04: the message author is the real child Session (${JSON.stringify(sessionMessage.senderSessionId)})`)
+    assert(sessionMessage.recipientSessionId === sessionP,
+      `PP-04: the message recipient is this Session (${JSON.stringify(sessionMessage.recipientSessionId)})`)
+    assert(JSON.stringify(sessionMessage.content).includes('projection child message'),
+      `PP-04: the message carries the child content (${JSON.stringify(sessionMessage.content).slice(0, 200)})`)
     const childUpdates = () => updatesOf(capableUpdates, sessionP)
       .filter(update => update.sessionUpdate === 'subagent_update' && update.sessionId === childId)
     const runningChild = childUpdates().find(update => update.state?.state === 'running')
@@ -312,6 +328,12 @@ export async function runAcpProtocolProjection(context) {
       'PP-05: the same id reaches its official completed terminal')
     assert(compactionUpdates.every(update => typeof update.compactionId === 'string' && update.compactionId.length > 0),
       'PP-05: every reported compaction is keyed by an official id')
+    // The official `todos` fold reset at turn 2's `turn/start` removes the plan
+    // announced in turn 1 (the negotiated client gets plan_removed).
+    const resetPlan = await waitForFact(() => updatesOf(capableUpdates, sessionP)
+      .find(update => update.sessionUpdate === 'plan_removed'), 'PP-05 the plan reset of the new turn')
+    assert(resetPlan.planId === `dsh-todos:${sessionP}`,
+      `PP-05: the reset names the announced plan id (${JSON.stringify(resetPlan.planId)})`)
     const durableCompaction = eventsOf(sessionP).filter(event => event.type.startsWith('compaction/'))
     assert(durableCompaction.length >= 3,
       `PP-05: the durable log owns the real compaction lifecycle (${JSON.stringify(durableCompaction.map(event => event.type))})`)
@@ -336,10 +358,35 @@ export async function runAcpProtocolProjection(context) {
     assert(!baselineKinds.includes('plan_update'), 'PP-06: no plan_update without the client capability')
 
     // ── G) LIST: the authorized root roster, from real Host facts.
+    // An isolated, freshly created root Session is the CONTROL: it carries no
+    // projection-scene history, so any View/claim left behind by the roster read
+    // is visible on it. Create it, close its View, then measure.
+    const coldConn = await openSdkClient(endpoint, () => {})
+    clients.push(coldConn)
+    await coldConn.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    const coldSession = (await coldConn.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })).sessionId
+    assert(typeof coldSession === 'string' && coldSession !== sessionP, 'PP-07: the control Session is a distinct real Session')
+    await coldConn.request(acp.methods.agent.session.close, { sessionId: coldSession })
+    // The official JSONL storage is write-behind: the Session's own creation
+    // events land shortly after `session/new` returns. Establish a STABLE
+    // baseline before the roster read instead of mistaking that write for the
+    // list's side effect.
+    const stableEventCount = async sessionId => {
+      let previous = -1
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const current = eventsOf(sessionId).length
+        if (current === previous) return current
+        previous = current
+        await new Promise(resolveWait => setTimeout(resolveWait, 100))
+      }
+      fail(`the ${sessionId} event log never settled`)
+    }
+    const coldEventsBeforeList = await stableEventCount(coldSession)
     const rootEventsBeforeList = eventsOf(sessionP).length
     const firstPage = await capable.request(acp.methods.agent.session.list, {})
     const listedIds = (firstPage?.sessions ?? []).map(session => session.sessionId)
     assert(listedIds.includes(sessionP), `PP-07: the real root Session is listed (${JSON.stringify(listedIds)})`)
+    assert(listedIds.includes(coldSession), `PP-07: the isolated control Session is listed too (${JSON.stringify(listedIds)})`)
     assert(!listedIds.includes(childId), 'PP-07: the subagent Session is never a top-level row')
     const rowP = firstPage.sessions.find(session => session.sessionId === sessionP)
     assert(rowP.cwd === hostCwd, `PP-07: the row carries the official absolute cwd (${JSON.stringify(rowP.cwd)})`)
@@ -359,15 +406,26 @@ export async function runAcpProtocolProjection(context) {
     // child Session was never claimed by this connection (it would have been
     // refused as already attached).
     const rootEventsAfterList = eventsOf(sessionP).length
+    const coldEventsAfterList = eventsOf(coldSession).length
     assert(rootEventsAfterList === rootEventsBeforeList,
-      `PP-07: listing appends no Session event (${String(rootEventsBeforeList)} -> ${String(rootEventsAfterList)})`)
-    const childLoadRefusal = await capable.request(acp.methods.agent.session.load, {
-      sessionId: childId, cwd: hostCwd, mcpServers: [],
-    }).then(() => undefined, error => error)
-    assert(childLoadRefusal !== undefined && childLoadRefusal?.data?.code !== 'LOCAL_ACP_VIEW_BUSY',
-      'PP-07: listing created no View/claim for the child Session')
+      `PP-07: listing appends no event to the projection Session (${String(rootEventsBeforeList)} -> ${String(rootEventsAfterList)})`)
+    assert(coldEventsAfterList === coldEventsBeforeList,
+      `PP-07: listing appends no event to the control Session (${String(coldEventsBeforeList)} -> ${String(coldEventsAfterList)})`)
+    // POSITIVE proof: a FRESH connection loads the control Session successfully.
+    // A Host-wide View/claim left behind by the list would refuse it as already
+    // attached; this asserts the actual success instead of excluding one code.
+    const probeUpdates = []
+    const probe = await openSdkClient(endpoint, params => { probeUpdates.push(params) })
+    clients.push(probe)
+    await probe.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    const coldProbeLoad = await probe.request(acp.methods.agent.session.load, {
+      sessionId: coldSession, cwd: hostCwd, mcpServers: [],
+    })
+    assert(coldProbeLoad !== undefined, 'PP-07: the control Session loads after the roster reads (no claim was left)')
+    await probe.request(acp.methods.agent.session.close, { sessionId: coldSession })
     const listReadsWithoutSideEffects = rootEventsAfterList === rootEventsBeforeList
-      && childLoadRefusal?.data?.code !== 'LOCAL_ACP_VIEW_BUSY'
+      && coldEventsAfterList === coldEventsBeforeList
+      && coldProbeLoad !== undefined
 
     // ── H) LOAD: the complete canonical history replays before the response.
     await capable.request(acp.methods.agent.session.close, { sessionId: sessionP })
@@ -431,6 +489,9 @@ export async function runAcpProtocolProjection(context) {
       'PP-09: start/summary/end all replay from the canonical log')
     assert(capableHistoryKinds.every(kind => kind !== 'notice'),
       'PP-09: no notice is ever fabricated')
+    const historyMessage = capableHistory.find(update => update.sessionUpdate === 'session_message')
+    assert(historyMessage !== undefined && historyMessage.senderSessionId === childId,
+      `PP-09: the canonical history replays the real agent message (${JSON.stringify(capableHistoryKinds)})`)
     // The response is the LAST frame on the wire: every replayed update was
     // already decoded by the official client before the response settled.
     assert(loadWireOrder.length > 1 && loadWireOrder.at(-1) === 'load-response'
@@ -462,6 +523,9 @@ export async function runAcpProtocolProjection(context) {
         rows: listedIds.length,
         ownRow: rowP,
         childHidden: !listedIds.includes(childId),
+        controlSession: coldSession,
+        controlAppendedNoEvent: coldEventsAfterList === coldEventsBeforeList,
+        controlLoadedAfterList: coldProbeLoad !== undefined,
         cwdFiltered: true,
       },
       load: {
@@ -478,7 +542,7 @@ export async function runAcpProtocolProjection(context) {
         compaction: { id: compactionId, updates: compactionUpdates.length },
       },
       durableEventKinds: durableKinds,
-      sessionMessage: 'NOT_OBSERVED_IN_SCENE',
+      sessionMessage: { sender: childId, recipient: sessionP, projected: true },
       notice: 'NO_OFFICIAL_PRODUCER',
       verdict: 'PASS',
     }

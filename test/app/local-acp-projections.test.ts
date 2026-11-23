@@ -18,6 +18,7 @@ import {
   compactionUpdate,
   encodeSessionCursor,
   planEntriesFromTodos,
+  planRemoval,
   planEntriesOf,
   planIdOf,
   planUpdate,
@@ -76,6 +77,14 @@ test('human user messages project as user chunks while injections and question r
     kind: 'update',
     update: { sessionUpdate: 'user_message_chunk', messageId: 'm-human', content: { type: 'text', text: 'hello' } },
   }])
+})
+
+test('the official turn/start reset becomes one plan-reset step, and the removal matches the negotiated shape', () => {
+  assert.deepEqual(projectSessionHistory([{ seq: 0, type: 'turn/start', data: { turn: 2 } }], ALL_CAPABILITIES), [
+    { kind: 'plan-reset' },
+  ])
+  assert.deepEqual(planRemoval(true, 'S1'), { sessionUpdate: 'plan_removed', planId: 'dsh-todos:S1' })
+  assert.deepEqual(planRemoval(false, 'S1'), { sessionUpdate: 'plan', entries: [] })
 })
 
 test('a durable agent-message replays as session_message only for a subagents-capable client', () => {
@@ -192,7 +201,15 @@ test('host-internal durable events are never projected as message content', () =
     { seq: 3, type: 'session/title', data: { title: 'T', messageSeqs: [], source: 'user' } },
     { seq: 4, type: 'totally-unknown/event', data: {} },
   ], ALL_CAPABILITIES)
-  assert.deepEqual(units, [])
+  // `turn/start` is the ONLY official plan-reset trigger; everything else in
+  // this run projects no message content at all.
+  assert.deepEqual(units, [{ kind: 'plan-reset' }])
+  assert.deepEqual(projectSessionHistory([
+    { seq: 1, type: 'system/message', data: { message: { content: [{ type: 'text', text: 'prompt' }] } } },
+    { seq: 2, type: 'developer/message', data: { message: { content: [{ type: 'tool-addition', toolName: 'x' }] } } },
+    { seq: 3, type: 'session/title', data: { title: 'T', messageSeqs: [], source: 'user' } },
+    { seq: 4, type: 'totally-unknown/event', data: {} },
+  ], ALL_CAPABILITIES), [])
 })
 
 test('plan projection uses the stable baseline without the client capability and plan_update with it', () => {

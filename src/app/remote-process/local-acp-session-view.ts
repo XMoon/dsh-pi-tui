@@ -103,6 +103,7 @@ import {
   imageRef,
   planEntriesFromTodos,
   planEntriesOf,
+  planRemoval,
   planUpdate,
   projectSessionHistory,
   sessionInfoUpdateOf,
@@ -929,6 +930,12 @@ interface ViewClaim {
   compactions?: Map<string, 'started' | 'summarized' | 'ended'>
   /** Child Session ids whose association this View already announced. */
   announcedChildren?: Set<string>
+  /**
+   * Whether this View already announced a standing plan. The official `todos`
+   * projection resets to null at the next `turn/start`; only an ALREADY
+   * announced plan needs removal then (null never means "unavailable").
+   */
+  announcedPlan?: boolean
   /** This Session's own official header, read once for inter-agent lineage. */
   selfHeader?: AcpHistoryHeader
 }
@@ -1715,42 +1722,53 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released while its history was read', JSONRPC_INVALID_PARAMS)
       }
       if (replay.overflowed) throw loadBackpressure()
-      // DRAIN: the buffered live events are committed to the tail in seq order
-      // BEFORE the barrier closes, so an event arriving later can only queue
-      // behind them. `seq <= cut` duplicates the snapshot and is dropped.
-      // The buffered live window joins by seq: ascending order and each seq
-      // exactly once, whatever order the observation callbacks arrived in.
-      const uniqueLive = new Map<number, AcpHistoryEvent>()
-      for (const event of replay.buffered) {
-        if (event.seq > cut && !uniqueLive.has(event.seq)) uniqueLive.set(event.seq, event)
-      }
-      const live = [...uniqueLive.values()].sort((left, right) => left.seq - right.seq)
-      const bufferedEdges = [...replay.subagents]
-      replay.buffered.length = 0
-      replay.subagents.length = 0
-      claim.replay = undefined
+      // DRAIN: the barrier stays OPEN until the ordered tail really drained, so
+      // this View still refuses a new prompt and close/EOF can still abort the
+      // replay's Store reads for the whole output phase. `seq <= cut` duplicates
+      // the snapshot and is dropped; the rest joins by ascending seq exactly
+      // once. The loop re-takes the buffer after every await, and closes the
+      // barrier in the SAME synchronous step as an empty check — no observation
+      // callback can interleave between them.
       await this.enqueueProjectionTask(claim, async () => {
         await this.sendHistoryUnits(claim, replay, units, access)
-        // Official child edges were NOT Session events: announce them before the
-        // buffered turn, so a child's association precedes any buffered message
-        // that names it (stable v1 `subagent_update` ordering).
-        for (const edge of bufferedEdges) await this.releaseSubagent(claim, access, replay, edge)
-        // The buffered window is still canonical HISTORY: every transcript fact
-        // converts through the SAME pure converter, so a turn committed while
-        // the snapshot was read is neither dropped nor re-invented. The live-only
-        // read-only classes keep their own projection (a durable title arrives
-        // only as a live event; provider usage needs the live projection read).
-        for (const event of live) {
-          if (event.type === 'session/title') {
-            await this.sendLiveEvent(claim, replay, event)
-            continue
+        const sentSeqs = new Set<number>()
+        for (;;) {
+          if (replay.stopped) return
+          if (replay.overflowed) throw loadBackpressure()
+          // Official child edges were NOT Session events: announce them before
+          // the buffered turn, so a child's association precedes any buffered
+          // message that names it (stable v1 `subagent_update` ordering).
+          const edges = replay.subagents.splice(0, replay.subagents.length)
+          const unique = new Map<number, AcpHistoryEvent>()
+          for (const event of replay.buffered.splice(0, replay.buffered.length)) {
+            if (event.seq <= cut || sentSeqs.has(event.seq) || unique.has(event.seq)) continue
+            unique.set(event.seq, event)
           }
-          await this.sendHistoryUnits(
-            claim, replay,
-            projectSessionHistory([event], claim.capabilities ?? NO_PROJECTION_CAPABILITIES, claim.sessionId),
-            access,
-          )
-          if (event.type === 'assistant/message') await this.sendLiveEvent(claim, replay, event)
+          const events = [...unique.values()].sort((left, right) => left.seq - right.seq)
+          for (const event of events) sentSeqs.add(event.seq)
+          if (edges.length === 0 && events.length === 0) {
+            claim.replay = undefined
+            return
+          }
+          for (const edge of edges) await this.releaseSubagent(claim, access, replay, edge)
+          // The buffered window is still canonical HISTORY: every transcript fact
+          // converts through the SAME pure converter, so a turn committed while
+          // the snapshot was read is neither dropped nor re-invented. The
+          // live-only read-only classes keep their own projection (a durable
+          // title arrives only as a live event; provider usage needs the live
+          // projection read).
+          for (const event of events) {
+            if (event.type === 'session/title') {
+              await this.sendLiveEvent(claim, replay, event)
+              continue
+            }
+            await this.sendHistoryUnits(
+              claim, replay,
+              projectSessionHistory([event], claim.capabilities ?? NO_PROJECTION_CAPABILITIES, claim.sessionId),
+              access,
+            )
+            if (event.type === 'assistant/message') await this.sendLiveEvent(claim, replay, event)
+          }
         }
       })
       if (this.claims.get(sessionId) !== claim || replay.stopped) {
@@ -1804,6 +1822,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * load already replays every `todo/write`). `null`/absent projection sends
    * nothing; an empty list is a formal clear.
    */
+  /**
+   * The ONE plan-removal path: the official `todos` projection reset (a new
+   * `turn/start`) removes the plan this View already announced, with the
+   * negotiated `plan_removed` or the baseline complete empty `plan`. A View
+   * that never announced a plan sends nothing.
+   */
+  private async resetPlan(claim: ViewClaim): Promise<void> {
+    if (claim.announcedPlan !== true) return
+    await this.sendProjection(claim, planRemoval(claim.capabilities?.plan === true, claim.sessionId))
+    claim.announcedPlan = false
+  }
+
   private offerCurrentPlan(claim: ViewClaim, access: HostAcpSessionAccess): void {
     if (claim.notifyProjection === undefined) return
     const task = this.enqueueProjectionTask(claim, async () => {
@@ -1819,6 +1849,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         return
       }
       await this.sendProjection(claim, planUpdate(entries, claim.capabilities?.plan === true, claim.sessionId))
+      claim.announcedPlan = true
     })
     task.catch(error => { this.reportProjectionFailure(error) })
   }
@@ -1847,6 +1878,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       case 'todo/write':
       case 'session/title':
         return true
+      case 'turn/start':
+        return claim.announcedPlan === true
       case 'compaction/start':
       case 'compaction/summary':
       case 'compaction/end':
@@ -1876,6 +1909,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           return
         }
         await this.sendProjection(claim, planUpdate(entries, claim.capabilities?.plan === true, claim.sessionId))
+        claim.announcedPlan = true
+        return
+      }
+      case 'turn/start': {
+        // The official `todos` fold clears at every turn start; the removal is
+        // sent only when this View already announced a plan.
+        await this.resetPlan(claim)
         return
       }
       case 'compaction/start':
@@ -2135,9 +2175,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (replay.stopped || !this.projectionCurrent(claim)) {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
       }
+      if (unit.kind === 'plan-reset') {
+        await this.resetPlan(claim)
+        continue
+      }
       if (unit.kind === 'update') {
         if (!this.acceptCompaction(claim, unit.update)) continue
         await this.sendProjection(claim, unit.update)
+        if (unit.update.sessionUpdate === 'plan' || unit.update.sessionUpdate === 'plan_update') claim.announcedPlan = true
+        if (unit.update.sessionUpdate === 'plan_removed') claim.announcedPlan = false
         continue
       }
       if (unit.kind === 'image') {

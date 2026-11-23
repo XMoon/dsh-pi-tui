@@ -1492,8 +1492,17 @@ class C1Model extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
-      // A delegated CHILD session answers its own task; it never delegates again.
+      // A delegated CHILD session first sends ONE real message to its creator
+      // through the official `send_message` tool — the only real producer of a
+      // durable `source.kind:'agent-message'` — and then answers its own task.
       if (userText.includes('projection-child-task')) {
+        if (!afterTool) {
+          yield* this.toolCall('send_message', `projection-child-message-${sessionId}`, {
+            agent: 'lead',
+            message: `projection child message ${token}`,
+          })
+          return
+        }
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: `projection child answer ${token}` }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: `projection child answer ${token}` } }

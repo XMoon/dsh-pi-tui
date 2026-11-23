@@ -795,11 +795,15 @@ never becomes an answer to an ACP `session/prompt`.
   the current official `todos` projection once) becomes the stable legacy
   `sessionUpdate: 'plan'` for a client without `clientCapabilities.plan`, and
   the negotiated `plan_update` (one stable `planId` per Session) for a client
-  that declared it. An empty list is a formal clear, `null`/absent sends
-  nothing, and `plan_removed` is never sent because DSH has no official plan
-  removal. DSH records no priority, so every entry carries the fixed
-  presentation default `medium`; that is a display adaptation, never a claimed
-  DSH priority.
+  that declared it. An empty list is a formal clear. The official `todos` fold
+  resets to `null` at every `turn/start` (it keeps the finished checklist on
+  `turn/end`), so a View that already announced a plan removes it on that
+  reset: `plan_removed` for the negotiated client, the complete empty legacy
+  `plan` otherwise. `null`/absent still sends nothing when no plan was ever
+  announced — the official `null` means "no active plan", never "unavailable".
+  DSH records no priority, so every entry carries the fixed presentation
+  default `medium`; that is a display adaptation, never a claimed DSH
+  priority.
 - **Session info.** A durable `session/title` becomes a field-level
   `session_info_update` carrying that event's own durable time; an unchanged
   title is not re-sent and a local `Date.now()` activity is never fabricated.

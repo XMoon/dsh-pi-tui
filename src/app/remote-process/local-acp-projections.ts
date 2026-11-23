@@ -103,6 +103,12 @@ export type AcpHistoryUnit =
   | { readonly kind: 'image'; readonly image: AcpHistoryImage }
   | { readonly kind: 'tool-result'; readonly result: AcpHistoryToolResult }
   | { readonly kind: 'session-message'; readonly message: AcpHistoryAgentMessage }
+  /**
+   * The official `turn/start` reset of the standing `todos` projection. The
+   * View removes an ALREADY announced plan; an empty one has nothing to remove
+   * (the official null means "no active plan", not "unavailable").
+   */
+  | { readonly kind: 'plan-reset' }
 
 /** One durable inter-agent message replayed as a standard `session_message`. */
 export interface AcpHistoryAgentMessage {
@@ -225,6 +231,11 @@ function projectHistoryEvent(
       return
     case 'tool/result':
       projectToolResult(event.data, units)
+      return
+    case 'turn/start':
+      // The official `todos` fold resets to null at every turn start; the View
+      // owns whether a plan was announced and therefore needs removal.
+      units.push({ kind: 'plan-reset' })
       return
     case 'todo/write': {
       const entries = planEntriesOf(event.data)
@@ -500,6 +511,17 @@ export function planUpdate(entries: readonly PlanEntry[], negotiated: boolean, s
     sessionUpdate: 'plan_update',
     plan: { type: 'items', planId: planIdOf(sessionId), entries: [...entries] },
   }
+}
+
+/**
+ * The removal of an ALREADY announced plan when the official `todos` projection
+ * resets at the next `turn/start`. A negotiated client gets the stable
+ * `plan_removed` for the exact plan id; a baseline client gets the same
+ * complete replacement with zero entries (the legacy `plan` is whole-list).
+ */
+export function planRemoval(negotiated: boolean, sessionId = ''): SessionUpdate {
+  if (!negotiated) return { sessionUpdate: 'plan', entries: [] }
+  return { sessionUpdate: 'plan_removed', planId: planIdOf(sessionId) }
 }
 
 /** The stable per-Session plan identity this Host uses for `plan_update`. */

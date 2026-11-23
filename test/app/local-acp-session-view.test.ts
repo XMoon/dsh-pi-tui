@@ -5498,6 +5498,51 @@ test('G-ACP2-PR2 SUB-01 negative: an ordinary fork (parentSession without origin
   assert.deepEqual(view.notifications, [], 'a fork header is not a subagent association')
 })
 
+test('G-ACP2-PR2 PLAN-02: the official turn/start reset removes the already announced plan', async () => {
+  const view = projectionView('P1')
+  await view.resume()
+  view.notifications.length = 0
+  view.commit('todo/write', { todos: [{ content: 'first turn work', status: 'completed' }] })
+  await waitUntil(() => view.notifications.length >= 1, 'the first plan is projected')
+  view.commit('turn/start', { turn: 2 })
+  await waitUntil(() => view.notifications.length >= 2, 'the reset removes the announced plan')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'],
+    'a negotiated client gets plan_removed for the exact plan id')
+  assert.equal((view.notifications[1] as { planId?: string }).planId, 'dsh-todos:P1')
+  // A turn start with NOTHING announced sends nothing: official null is not a
+  // plan removal.
+  view.notifications.length = 0
+  view.commit('turn/start', { turn: 3 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(view.notifications.length, 0)
+})
+
+test('G-ACP2-PR2 PLAN-03: a baseline client gets the empty whole-list replacement on the same reset', async () => {
+  const view = projectionView('P2', { capabilities: PR2_BASELINE })
+  await view.resume()
+  view.notifications.length = 0
+  view.commit('todo/write', { todos: [{ content: 'first turn work', status: 'pending' }] })
+  await waitUntil(() => view.notifications.length >= 1, 'the legacy plan is projected')
+  view.commit('turn/start', { turn: 2 })
+  await waitUntil(() => view.notifications.length >= 2, 'the reset replaces the legacy plan')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan', 'plan'])
+  assert.deepEqual((view.notifications[1] as { entries?: unknown[] }).entries, [])
+})
+
+test('G-ACP2-PR2 PLAN-04: a replayed plan then turn/start keeps the same reset order', async () => {
+  const view = projectionView('P3', {
+    history: {
+      header: { sessionId: 'P3', cwd: '/w' },
+      events: [
+        { seq: 0, type: 'todo/write', data: { todos: [{ content: 'history work', status: 'completed' }] } },
+        { seq: 1, type: 'turn/start', data: { turn: 2 } },
+      ],
+    },
+  })
+  await view.load()
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'])
+})
+
 test('G-ACP2-PR2 PLAN-01: resume reads the CURRENT official plan once, and a null projection sends nothing', async () => {
   const view = projectionView('R2')
   view.access.todosValue = [{ content: 'open work', status: 'pending' }]
@@ -5592,6 +5637,56 @@ test('G-ACP2-PR2 LOAD-03: a turn committed while the snapshot is read replays co
     'tool_call_update',
   ], 'the snapshot history then the buffered turn, each transcript fact exactly once')
   assert.equal((view.notifications[2] as { content?: { text?: string } }).content?.text, 'while reading')
+})
+
+test('G-ACP2-PR2 LOAD-04: the replay barrier stays closed until the history really drained', async () => {
+  const view = projectionView('LD1', {
+    history: {
+      header: { sessionId: 'LD1', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  const release = view.holdProjection()
+  const loading = view.load()
+  // The history notification is HELD at the transport, so the ordered tail is
+  // still draining when the next two facts happen.
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await assert.rejects(
+    view.registry.promptSession(view.conn, view.access, {
+      sessionId: 'LD1', prompt: [{ type: 'text', text: 'too early' }],
+    }, new AbortController().signal, false, async () => {}),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+    'a prompt cannot enter while the load history is still being sent',
+  )
+  // A DIFFERENT surface commits a durable humch while the drain is running: it
+  // must still ride the canonical replay, never the live-only path.
+  view.commit('user/message', { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'during drain' }], role: 'user' })
+  release()
+  await loading
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['user_message_chunk', 'user_message_chunk'],
+    'the snapshot AND the turn committed during the drain are replayed')
+  assert.equal((view.notifications[1] as { content?: { text?: string } }).content?.text, 'during drain')
+})
+
+test('G-ACP2-PR2 LOAD-05: close during the drain cancels the replay instead of publishing a stale history', async () => {
+  const view = projectionView('LD2', {
+    history: {
+      header: { sessionId: 'LD2', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  const release = view.holdProjection()
+  const loading = view.load()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await view.registry.closeSession(view.conn, view.access, 'LD2')
+  release()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
+    'a closed View never publishes a stale load history')
+  // The ONE frame already handed to the transport before the close cannot be
+  // retracted; nothing after it may be published.
+  assert.equal(view.notifications.length, 1)
+  assert.equal(view.notifications[0]?.sessionUpdate, 'user_message_chunk')
+  assert.equal(view.registry.hasClaim('LD2'), false)
 })
 
 test('G-ACP2-PR2 SUB-02: an official child edge observed inside a load barrier never precedes the canonical history', async () => {

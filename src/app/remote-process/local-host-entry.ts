@@ -659,20 +659,27 @@ interface SessionProjectionServiceLike {
 }
 
 /** The official header facts a Session List/History read needs (structural). */
-interface SessionHeaderFactsLike {
+export interface SessionHeaderFactsLike {
   readonly id: string
   readonly cwd?: string
   readonly parentSession?: string
   readonly origin?: 'subagent'
 }
 
-/** One title/header observation result of the official Session Query (structural). */
-type SessionTitleObservationLike =
+/**
+ * One title/header observation result of the official Session Query
+ * (structural). The official `SessionTitleObservation` carries the folded
+ * header as `value.session` (a `structuredClone` of the durable header) plus an
+ * optional `value.title`; the seam is asserted against that official result in
+ * `test/app/local-acp-host-cold-header.test.ts` so a renamed field cannot fall
+ * through to `undefined` at runtime.
+ */
+export type SessionTitleObservationLike =
   | {
     readonly sessionId: string
     readonly status: 'fulfilled'
     readonly value: {
-      readonly header: SessionHeaderFactsLike
+      readonly session: SessionHeaderFactsLike
       readonly title?: { readonly title: string }
     }
   }
@@ -837,7 +844,10 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       if (sessionQuery === undefined) return undefined
       const [result] = await sessionQuery.readTitleSnapshots([sessionId], signal)
       if (result === undefined || result.status !== 'fulfilled') return undefined
-      return headerFactsOf(result.value.header)
+      // The official observation carries the folded header as `value.session`;
+      // its id must still be the exact Session this View asked about.
+      const facts = headerFactsOf(result.value.session)
+      return facts.sessionId === sessionId ? facts : undefined
     },
     contextPressure: session => projectionValueOf(sessionProjections, session, 'contextPressure'),
     sessionTodos: session => projectionValueOf(sessionProjections, session, 'todos'),
