@@ -1107,6 +1107,58 @@ test('a mixed turn fails closed whether the foreign claim lands before or after 
   }
 })
 
+test('DSH internal inbox injections do not make the ACP-owned turn MIXED', async () => {
+  {
+    // next-step context is claimed before the ACP next-turn message in one batch.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-owned')
+    view.registry.onInboxClaimed(view.agent, {
+      id: 'm-skill',
+      source: { kind: 'skill-invocation', name: 'review-fix-loop', form: 'instructions' },
+    }, 5)
+    view.registry.onInboxClaimed(view.agent, {
+      id: 'm-time',
+      source: { kind: 'time-context', form: 'snapshot' },
+    }, 5)
+    view.claim('m-owned', 5, request.requestId)
+    view.commit('assistant/message', assistantData(5, 'm-answer', [{ type: 'text', text: 'answer' }]))
+    view.commit('turn/end', { turn: 5, reason: { kind: 'completed' } })
+    assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+    assert.deepEqual(view.notifications, [
+      { sessionUpdate: 'agent_message_chunk', messageId: 'm-answer', content: { type: 'text', text: 'answer' } },
+    ], 'injected context does not suppress the owned response')
+  }
+  {
+    // A subagent notice and a clock snapshot arrive while the ACP turn runs.
+    const view = promptView()
+    await view.attach()
+    const attempt = view.start()
+    const request = view.access.promptCalls[0]!
+    view.insert(request.requestId, 'm-owned')
+    view.claim('m-owned', 6, request.requestId)
+    view.commit('assistant/message', assistantData(6, 'm-before', [{ type: 'text', text: 'before' }]))
+    await flushOutput()
+    view.registry.onInboxClaimed(view.agent, {
+      id: 'm-subagent',
+      source: { kind: 'subagent-settled', form: 'notice' },
+    }, 6)
+    view.registry.onInboxClaimed(view.agent, {
+      id: 'm-time',
+      source: { kind: 'time-context', form: 'snapshot' },
+    }, 6)
+    view.commit('assistant/message', assistantData(6, 'm-after', [{ type: 'text', text: 'after' }]))
+    view.commit('turn/end', { turn: 6, reason: { kind: 'completed' } })
+    assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+    assert.deepEqual(view.notifications, [
+      { sessionUpdate: 'agent_message_chunk', messageId: 'm-before', content: { type: 'text', text: 'before' } },
+      { sessionUpdate: 'agent_message_chunk', messageId: 'm-after', content: { type: 'text', text: 'after' } },
+    ], 'later internal claims do not stop subsequent ACP output')
+  }
+})
+
 test('turn reasons map to the legal stop reasons or a stable failure; no outcome is silently end_turn', async () => {
   const cases: Array<{ reason: Record<string, unknown>; expected: string }> = [
     { reason: { kind: 'completed' }, expected: 'end_turn' },
