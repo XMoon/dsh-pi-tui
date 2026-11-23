@@ -1085,18 +1085,23 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** The first focus the page should land on for the CURRENT observations: the
-   *  primary Host action (or the Copy when the enabled Host offers it), else
-   *  the editable next-start preference, else Refresh. */
+   *  primary Host action (or the Client-local Copy when no runtime toggle
+   *  exists), else the editable next-start preference, else Refresh. */
   private firstFocusId(): string | undefined {
     const rows = this.rowSpecs()
     const host = this.hostCurrent()
+    const hasCopy = rows.some(row => row.id === 'copy')
     const preferred = host === undefined
-      ? undefined
+      // Direct / checking / unreadable: the proven Profile's Copy is the ONE
+      // real action; without it the editable preference owns the focus.
+      ? (hasCopy ? 'copy' : undefined)
       : host.status.state === 'enabled'
-        ? (rows.some(row => row.id === 'copy') ? 'copy' : 'disable')
+        ? (hasCopy ? 'copy' : 'disable')
         : host.status.state === 'disabled'
           ? 'enable'
-          : undefined
+          // changing / unavailable: no runtime toggle, but Copy still only
+          // depends on the proven Profile.
+          : (hasCopy ? 'copy' : undefined)
     if (preferred !== undefined && rows.some(row => row.id === preferred)) return preferred
     if (rows.some(row => row.id === 'autostart')) return 'autostart'
     return rows[0]?.id

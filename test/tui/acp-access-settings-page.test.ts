@@ -276,7 +276,8 @@ test('Direct states Split Host only, offers no toggle and still edits the prefer
   assert.equal(h.reads(), 0, 'Direct performs no fake Host read')
   assert.match(h.frame(), /^> Start automatically/mu, 'the editable preference owns the focus')
   const direct = await mount({ backendKind: 'direct', profile: 'pi-tui' })
-  assert.match(direct.frame(), /Copy client command/u, 'the proven Profile command is still copyable')
+  assert.match(direct.frame(), /^> Copy client command/mu,
+    'the proven Profile\'s Copy is the first focus when no runtime toggle exists')
   assert.match(direct.frame(), /dsh --profile pi-tui acp stdio/u)
   direct.close()
   const noPreference = await mount({ backendKind: 'direct', preference: undefined, readiness: 'unavailable', profile: undefined })
@@ -419,7 +420,8 @@ test('an unreadable Host state revokes every action and states the real failure'
   assert.match(h.frame(), /Access\s+Unavailable/u)
   assert.match(h.frame(), /the Client is not connected to a Host/u)
   assert.doesNotMatch(h.frame(), /> (?:Enable ACP|Disable ACP…)/u)
-  assert.match(h.frame(), /^> Start automatically/mu, 'the editable preference owns the focus')
+  assert.match(h.frame(), /^> Copy client command/mu,
+    'with no runtime toggle the proven Profile\'s Copy owns the focus')
   h.close()
 })
 

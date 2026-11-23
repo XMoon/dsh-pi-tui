@@ -10567,6 +10567,8 @@ test('Direct states the Split-Host-only capability, offers no toggle and still e
   assert.match(frame, /Access\s+Unavailable/u)
   assert.equal(h.acpStatusReads(), 0, 'Direct never reads a fabricated Host')
   assert.doesNotMatch(frame, /Enable ACP|Disable ACP…/u, 'Direct offers no runtime action')
+  assert.match(frame, /> Copy client command/u,
+    'the proven Profile\'s Copy owns the first focus when there is no runtime toggle')
   assert.equal(h.copied.length, 0, 'opening the page copies nothing')
   h.dispose()
 })
