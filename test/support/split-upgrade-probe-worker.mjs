@@ -35,8 +35,11 @@ const SCENARIOS = new Set([
   'upgrade-worker-kill:bootstrap-install',
   'upgrade-worker-kill:reload-child-active',
   'upgrade-worker-kill:reload-child-started-before-report',
+  'upgrade-worker-kill:qualification-client-active',
+  'upgrade-worker-kill:qualification-pre-spawn',
   'upgrade-sibling-live',
   'upgrade-live-host-exit',
+  'upgrade-qualification-host-death',
 ])
 
 function arg(name) {
@@ -218,8 +221,28 @@ async function runReloadChildActive(scene, point = 'reload-child-active') {
   await holdForExternalKill('reload-child-active')
 }
 
-async function runSiblingLive(scene) {
-  const stopFile = process.env.SPLIT_UPGRADE_PROBE_SIBLING_STOP_FILE
+/**
+ * The one-shot qualification Client is live inside the Supervisor when the
+ * external probe kills this Worker. The Supervisor owns its process group and
+ * must reclaim it together with the Host generation and the Scene root.
+ */
+async function runQualificationClientActive(scene) {
+  await scene.installOldProfile()
+  await scene.installNewSideBySide()
+  const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+  await scene.report('worker-kill-point', {
+    point: 'qualification-client-active',
+    workerPid: process.pid,
+    hostPid: host.ready?.pid,
+    hostPgid: host.pgid,
+  })
+  // The Supervisor registers the qualification Client synchronously and holds
+  // the kill barrier before sending the RPC op.
+  await scene.probeSideNewClientHostFoundation(host)
+  throw new Error('qualification-client-active: the qualification proof completed before the external SIGKILL')
+}
+
+async function runSiblingLive(scene) {  const stopFile = process.env.SPLIT_UPGRADE_PROBE_SIBLING_STOP_FILE
   if (typeof stopFile !== 'string' || stopFile === '') {
     throw new Error('upgrade-sibling-live: SPLIT_UPGRADE_PROBE_SIBLING_STOP_FILE must be set')
   }
@@ -281,6 +304,25 @@ async function main() {
       case 'upgrade-worker-kill:reload-child-started-before-report':
         await runReloadChildActive(scene, 'reload-child-started-before-report')
         return
+      case 'upgrade-worker-kill:qualification-pre-spawn': {
+        await scene.installOldProfile()
+        await scene.installNewSideBySide()
+        const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+        await scene.report('worker-kill-point', {
+          point: 'qualification-pre-spawn',
+          workerPid: process.pid,
+          hostPid: host.ready?.pid,
+          hostPgid: host.pgid,
+        })
+        // The Supervisor receives the Host status, then holds the barrier while
+        // no qualification Client exists. The external probe kills this worker
+        // in that window; the Supervisor cleanup must create nothing afterwards.
+        await scene.probeSideNewClientHostFoundation(host)
+        throw new Error('qualification-pre-spawn: the Supervisor never held the pre-spawn barrier')
+      }
+      case 'upgrade-worker-kill:qualification-client-active':
+        await runQualificationClientActive(scene)
+        return
       case 'upgrade-worker-kill:old-host-ready': {
         await scene.installOldProfile()
         await scene.startHost({ source: 'profile', scenario: 'long-turn' })
@@ -312,6 +354,42 @@ async function main() {
         // kill point.
         await scene.installNewSideBySide()
         throw new Error('side-build-install: the install completed before the external SIGKILL')
+      }
+      case 'upgrade-qualification-host-death': {
+        // The Supervisor injects an abrupt old-Host crash AFTER its status
+        // proof and BEFORE the qualification Client's ensureLocalHost(). The
+        // real production discovery fallback then starts a detached Host; the
+        // operation must refuse and the Supervisor must reclaim that Host
+        // before any terminal quiescence claim.
+        await scene.installOldProfile()
+        await scene.installNewSideBySide()
+        const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
+        // The external probe must first observe this live Host holding the
+        // authoritative kernel Host seat; only then may the injected-death
+        // window start. A file handshake keeps that ordering deterministic.
+        const releaseFile = process.env.SPLIT_VITEST_UPGRADE_SEAT_CHECK_RELEASE
+        if (typeof releaseFile !== 'string' || releaseFile === '') {
+          throw new Error('qualification-host-death: SPLIT_VITEST_UPGRADE_SEAT_CHECK_RELEASE must be set')
+        }
+        const seatDeadline = Date.now() + 120_000
+        while (!existsSync(releaseFile)) {
+          if (Date.now() > seatDeadline) throw new Error('qualification-host-death: the external seat probe never released the window')
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+        let refusal
+        try {
+          await scene.probeSideNewClientHostFoundation(host)
+        } catch (error) {
+          refusal = error instanceof Error ? error.message : String(error)
+        }
+        if (refusal === undefined) throw new Error('qualification-host-death: the proof unexpectedly succeeded')
+        console.log(`UPGRADE_PROBE_WORKER_FACTS ${JSON.stringify({
+          scenario: 'upgrade-qualification-host-death',
+          refused: true,
+          hostPid: host.ready?.pid,
+          injectedDeath: true,
+        })}`)
+        return
       }
       case 'upgrade-live-host-exit': {
         await scene.installOldProfile()

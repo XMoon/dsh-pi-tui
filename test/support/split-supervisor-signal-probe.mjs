@@ -17,7 +17,9 @@
  * Modes (Upgrade U0):
  *   --mode upgrade-sequential-hosts
  *   --mode upgrade-live-profile-refusal
- *   --mode upgrade-worker-kill --at old-host-ready|between-host-generations|new-host-spawned-before-ack|side-build-install
+ *   --mode upgrade-live-host-exit
+ *   --mode upgrade-qualification-host-death
+ *   --mode upgrade-worker-kill --at old-host-ready|between-host-generations|new-host-spawned-before-ack|side-build-install|bootstrap-install|reload-child-active|reload-child-started-before-report|qualification-client-active|qualification-pre-spawn
  *
  * Required env:
  *   Pilot: SPLIT_VITEST_TMP_BASE + SPLIT_VITEST_CANDIDATE_TGZ
@@ -26,15 +28,16 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './split-upgrade-install-state.mjs'
 
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
-const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report']
-const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-worker-kill']
+const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report', 'qualification-client-active', 'qualification-pre-spawn']
+const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-qualification-host-death', 'upgrade-worker-kill']
 
 function arg(name) {
   const index = process.argv.indexOf(name)
@@ -176,6 +179,48 @@ function groupAlive(pgid) {
   }
 }
 
+/** Whether the kernel Host seat of one scope is free (Linux abstract / Darwin O_EXLOCK). */
+async function hostSeatFree(seat) {
+  if (seat?.kind === 'linux-abstract') {
+    return await new Promise((resolve, reject) => {
+      const server = createServer()
+      let settled = false
+      server.once('error', error => {
+        if (settled) return
+        settled = true
+        if (error?.code === 'EADDRINUSE') {
+          resolve(false)
+          return
+        }
+        reject(error)
+      })
+      server.listen(seat.name, () => {
+        if (settled) return
+        settled = true
+        server.close(() => resolve(true))
+      })
+    })
+  }
+  if (seat?.kind === 'darwin-file' && typeof seat.path === 'string' && seat.path !== '') {
+    // O_RDWR|O_EXLOCK|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, no O_CREAT.
+    const flags = 2 | 32 | 4 | 256 | 16777216
+    const started = Date.now()
+    for (;;) {
+      try {
+        closeSync(openSync(seat.path, flags, 0o600))
+        return true
+      } catch (error) {
+        if (error?.code === 'ENOENT') return true
+        if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
+        if (Date.now() - started > 15_000) return false
+        await sleep(50)
+      }
+    }
+  }
+  fail(`unsupported Host seat descriptor: ${JSON.stringify(seat ?? null)}`)
+  return false
+}
+
 function checkNoLingeringPaths(receipt) {
   let commands
   try {
@@ -261,6 +306,19 @@ function checkUpgradeReceiptResources(receipt, options = {}) {
       if (pidAlive(pid)) problems.push(`Client business PID still alive: ${String(pid)} (${String(client.label)})`)
     }
   }
+  for (const qualification of receipt.qualificationClients ?? []) {
+    if (pidAlive(qualification.pid)) problems.push(`qualification Client PID still alive: ${String(qualification.pid)}`)
+    if (qualification.pgid !== undefined && groupAlive(qualification.pgid)) {
+      problems.push(`qualification Client process group still alive: ${String(qualification.pgid)}`)
+    }
+  }
+  for (const fallback of receipt.fallbackHosts ?? []) {
+    if (fallback.reclaimed !== true) problems.push(`fallback Host PID ${String(fallback.pid)} was not reclaimed`)
+    if (pidAlive(fallback.pid)) problems.push(`fallback Host PID still alive: ${String(fallback.pid)}`)
+    if (fallback.pgid !== undefined && groupAlive(fallback.pgid)) {
+      problems.push(`fallback Host process group still alive: ${String(fallback.pgid)}`)
+    }
+  }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor.pid)}`)
   return problems
 }
@@ -319,11 +377,18 @@ const env = {
     : { SPLIT_VITEST_CANDIDATE_TGZ: candidate }),
 }
 if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
-if (mode === 'upgrade-worker-kill' && at === 'new-host-spawned-before-ack') {
-  env.SPLIT_VITEST_UPGRADE_KILL_POINT = 'new-host-spawned-before-ack'
+if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || at === 'qualification-client-active'
+  || at === 'qualification-pre-spawn')) {
+  env.SPLIT_VITEST_UPGRADE_KILL_POINT = at
 }
 if (mode === 'upgrade-live-host-exit') {
   env.SPLIT_VITEST_UPGRADE_HOST_EXIT_AFTER_PROFILE_INSTALL = '1'
+}
+let seatCheckReleaseFile
+if (mode === 'upgrade-qualification-host-death') {
+  seatCheckReleaseFile = join(tmpBase, `split-upgrade-seat-check-${String(process.pid)}.flag`)
+  env.SPLIT_VITEST_UPGRADE_QUALIFICATION_HOST_DEATH = '1'
+  env.SPLIT_VITEST_UPGRADE_SEAT_CHECK_RELEASE = seatCheckReleaseFile
 }
 
 const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
@@ -339,7 +404,8 @@ let siblingChild
 let siblingRunId
 let siblingStopFile
 if (upgradeMode) {
-  if (mode === 'upgrade-worker-kill' && (at === 'reload-child-active' || at === 'reload-child-started-before-report')) {
+  if (mode === 'upgrade-worker-kill' && (at === 'reload-child-active' || at === 'reload-child-started-before-report'
+    || at === 'qualification-client-active' || at === 'qualification-pre-spawn')) {
     siblingRunId = `${runId}-sibling`
     siblingStopFile = join(tmpBase, `split-upgrade-sibling-stop-${String(process.pid)}.flag`)
     siblingChild = spawn(process.execPath, [
@@ -408,6 +474,82 @@ try {
     }, 'live sibling Upgrade Scene', 600_000)
   }
   if (upgradeMode) {
+    if (mode === 'upgrade-qualification-host-death') {
+      // Controlled negative for the discovery-fallback window: old Host A dies
+      // after the Supervisor's status-before proof and before the real
+      // qualification Client's ensureLocalHost(). The operation must refuse and
+      // the Supervisor must reclaim the detached Host that fallback started,
+      // with a strict terminal proof (no live Host/Client/group/seat/root).
+      //
+      // Positive control for the seat proof itself: while the real Host is
+      // still alive it must hold the authoritative kernel Host seat, so the
+      // same probe used for the terminal proof must report it as NOT free.
+      // Only after that check does the injected-death window start.
+      const liveReceipt = await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        const live = (current?.hosts ?? []).find(host => host.exited !== true
+          && typeof host.scopeId === 'string' && host.scopeId !== '')
+        return live === undefined ? undefined : current
+      }, 'live Host generation with a scope id', 300_000)
+      const liveHost = (liveReceipt.hosts ?? []).find(host => host.exited !== true
+        && typeof host.scopeId === 'string' && host.scopeId !== '')
+      if (liveHost === undefined) fail('upgrade-qualification-host-death: no live Host identity for the seat control')
+      if (await hostSeatFree(liveHost.seat)) {
+        fail('upgrade-qualification-host-death: the Host seat probe reports free while the Host is live; it is not discriminating')
+      }
+      writeFileSync(seatCheckReleaseFile, 'checked\n', { mode: 0o600 })
+      const exit = await waitChildExit(child, 900_000)
+      childExited = true
+      if (exit.code !== 0 || exit.signal !== null) {
+        fail(`upgrade-qualification-host-death worker exited abnormally: ${JSON.stringify(exit)}`)
+      }
+      const terminalReceipt = await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        return current?.phase === 'ABORTED_CLEAN' ? current : undefined
+      }, 'upgrade-qualification-host-death ABORTED_CLEAN', 120_000)
+      verifyUpgradePair(terminalReceipt, oldTgz, newTgz)
+      if (!Array.isArray(terminalReceipt.hosts) || terminalReceipt.hosts.length !== 1) {
+        fail(`upgrade-qualification-host-death: expected one Host generation, got ${String(terminalReceipt.hosts?.length)}`)
+      }
+      const injected = (terminalReceipt.notes ?? []).some(note => note.event === 'qualification-host-death-injected')
+      if (!injected) fail('upgrade-qualification-host-death: the receipt carries no injected Host-death note')
+      if (terminalReceipt.hosts[0].exitSignal !== 'SIGKILL') {
+        fail(`upgrade-qualification-host-death: the injected Host did not die by SIGKILL: ${JSON.stringify(terminalReceipt.hosts[0].exitSignal)}`)
+      }
+      if ((terminalReceipt.qualificationClients ?? []).some(entry => entry.exited !== true)) {
+        fail('upgrade-qualification-host-death: a qualification Client did not exit')
+      }
+      const fallbacks = terminalReceipt.fallbackHosts ?? []
+      if (fallbacks.length === 0) {
+        fail('upgrade-qualification-host-death: the injected Host death did not exercise the discovery fallback')
+      }
+      const seat = terminalReceipt.hosts[0].seat
+      if (seat === null || seat === undefined) {
+        fail('upgrade-qualification-host-death: the terminal receipt carries no Host seat descriptor')
+      }
+      if (!(await hostSeatFree(seat))) {
+        fail('upgrade-qualification-host-death: the Host seat is still held after cleanup')
+      }
+      const problems = checkUpgradeReceiptResources(terminalReceipt)
+      if (problems.length > 0) fail(problems.join('; '))
+      checkNoLingeringPaths(terminalReceipt)
+      if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
+        mode,
+        runId,
+        workerPid: terminalReceipt.worker.pid,
+        supervisorPid: terminalReceipt.supervisor?.pid,
+        supervisorPhase: terminalReceipt.phase,
+        hosts: terminalReceipt.hosts,
+        qualificationClients: terminalReceipt.qualificationClients,
+        fallbackHosts: fallbacks,
+        hostSeatFree: true,
+        sceneRoot: terminalReceipt.sceneRoot,
+        sentinelPid: sentinel.pid,
+      })}`)
+      console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_PASS mode=${mode} supervisor_phase=${terminalReceipt.phase} fallback_hosts=${String(fallbacks.length)}`)
+      return
+    }
     if (mode === 'upgrade-live-host-exit') {
       const exit = await waitChildExit(child, 600_000)
       childExited = true
@@ -513,6 +655,27 @@ try {
         const pids = client?.businessPids ?? []
         return pids.length >= 2 && pids.every(pid => pidAlive(pid)) ? current : undefined
       }, `reload replacement child at ${barrierPoint}`, 600_000)
+    } else if (barrierPoint === 'qualification-pre-spawn') {
+      await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        const held = (current?.notes ?? []).some(note => note.event === 'qualification-pre-spawn-hold')
+        if (!held) return undefined
+        if ((current?.qualificationClients ?? []).length > 0) {
+          fail('qualification-pre-spawn: a qualification Client was registered before the barrier')
+        }
+        return pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid) ? current : undefined
+      }, 'qualification pre-spawn hold', 600_000)
+    } else if (barrierPoint === 'qualification-client-active') {
+      await waitUntil(() => {
+        const current = latestUpgradeReceipt(tmpBase, runId)
+        const ledger = Array.isArray(current?.qualificationClients) ? current.qualificationClients : []
+        const qualification = ledger.at(-1)
+        if (qualification === undefined || qualification.exited === true
+          || !pidAlive(qualification.pid) || !groupAlive(qualification.pgid)) {
+          return undefined
+        }
+        return pidAlive(current?.host?.pid) && groupAlive(current?.host?.pgid) ? current : undefined
+      }, 'one-shot qualification Client active', 600_000)
     } else if (barrierPoint === 'old-host-ready') {
       await waitUntil(() => {
         const current = latestUpgradeReceipt(tmpBase, runId)
@@ -552,6 +715,25 @@ try {
       allowNoHosts: barrierPoint === 'side-build-install' || barrierPoint === 'bootstrap-install',
     })
     if (problems.length > 0) fail(problems.join('; '))
+    if (barrierPoint === 'qualification-pre-spawn') {
+      // The killed worker's request must have created nothing after cleanup
+      // took over: no qualification Client, no fallback Host, and the one Host
+      // generation plus the kernel Host seat must be fully reclaimed.
+      const held = (terminalReceipt.notes ?? []).some(note => note.event === 'qualification-pre-spawn-hold')
+      if (!held) fail('qualification-pre-spawn: the pre-spawn barrier note is missing')
+      if ((terminalReceipt.qualificationClients ?? []).length !== 0) {
+        fail('qualification-pre-spawn: a qualification Client was registered after the Worker died')
+      }
+      if ((terminalReceipt.fallbackHosts ?? []).length !== 0) {
+        fail('qualification-pre-spawn: a fallback Host was started after the Worker died')
+      }
+      if (!Array.isArray(terminalReceipt.hosts) || terminalReceipt.hosts.length !== 1) {
+        fail(`qualification-pre-spawn: expected one Host generation, got ${String(terminalReceipt.hosts?.length)}`)
+      }
+      const seat = terminalReceipt.hosts[0].seat
+      if (seat === null || seat === undefined) fail('qualification-pre-spawn: the receipt carries no Host seat descriptor')
+      if (!(await hostSeatFree(seat))) fail('qualification-pre-spawn: the Host seat is still held after cleanup')
+    }
     if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
     if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
     let siblingFinal
@@ -683,6 +865,9 @@ try {
   }
   if (siblingStopFile !== undefined) {
     try { unlinkSync(siblingStopFile) } catch { /* not created */ }
+  }
+  if (seatCheckReleaseFile !== undefined) {
+    try { unlinkSync(seatCheckReleaseFile) } catch { /* not created */ }
   }
   try { process.kill(-sentinel.pid, 'SIGKILL') } catch {
     try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
