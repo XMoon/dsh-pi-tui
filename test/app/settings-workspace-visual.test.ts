@@ -537,6 +537,9 @@ interface Harness {
   readonly notices: () => readonly string[]
   /** Move the LIVE backend readiness the ConfigPort answers. */
   readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
+  /** PR-A: replace the persisted next-start preference the ConfigPort reads
+   *  (a reconnected Host's mirror committing a changed value/revision). */
+  readonly setWebStartupPreference: (state: WebStartupPreferenceState | undefined) => void
   /** Resolves once the held first document write really started. */
   readonly firstWriteStarted: () => Promise<void>
   /** Release the held first document write. */
@@ -1477,6 +1480,7 @@ function setup(options: HarnessOptions = {}): Harness {
       for (const run of list) run()
     },
     setReadiness: (next: 'ready' | 'stale' | 'unavailable') => { readiness = next },
+    setWebStartupPreference: (state) => { webStartupState = state },
     /** Resolves once the first held document write really started. */
     firstWriteStarted: () => firstReplaceRunning ?? Promise.resolve(),
     /** Release the held first document write. */
@@ -10217,6 +10221,50 @@ test('/web opened while the Client is DISCONNECTED settles Unavailable and recov
   assert.equal(h.webStatusReads(), 2, 'the reconnection drives ONE authoritative re-read')
   assert.match(webUiPlain(h), /Serving\s+Enabled/u, 'the current Host fact settles the page')
   assert.equal(h.webEnabledWrites().length, 0)
+  h.dispose()
+})
+
+test('a Host rollover downgrades the next-start preference until the new Config mirror is current', async () => {
+  const h = setup({ columns: 120, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  // Stage the preference confirmation through the real page + real writer path.
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(webUiPlain(h), /Choose the value the next Host start applies:/u)
+  await key(h, '\r')
+  await settle(h)
+  assert.match(webUiPlain(h), /Save the next Host start preference as On\?/u)
+  assert.equal(h.webAutoStartWrites().length, 0, 'staging writes nothing')
+  // The Remote Config mirror invalidates on the Host generation rollover: the
+  // Port reads unavailable and no committed preference remains.
+  h.setReadiness('unavailable')
+  h.setWebStartupPreference(undefined)
+  h.bumpWebGeneration()
+  await settle(h)
+  const nonCurrent = webUiPlain(h)
+  assert.doesNotMatch(nonCurrent, /Save the next Host start|Confirm save|Change…/u,
+    'the staged confirmation and the edit affordance are revoked')
+  assert.match(nonCurrent, /Start automatically\s+Unavailable/u, 'the stale value is never painted as current')
+  assert.match(nonCurrent, /The Host configuration is unavailable; the next-start preference is read-only\./u)
+  assert.equal(h.webAutoStartWrites().length, 0, 'zero preference writes under a non-current authority')
+  // A reconnected mirror commits a CHANGED value + revision; the page adopts it.
+  h.setReadiness('ready')
+  h.setWebStartupPreference({ autoStart: true, revision: 7, userOverridden: true })
+  h.bumpWebGeneration()
+  await settle(h)
+  assert.match(webUiPlain(h), /Start automatically\s+On · Change…/u, 'the new value/revision is adopted')
+  // The staged change submits revision 7: this fixture's writer refuses any
+  // other revision, so `Verified` proves the adoption reached the writer.
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\r') // candidates -> confirm-save (the OPPOSITE of On is staged)
+  await settle(h)
+  await key(h, '\r') // Confirm save
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [false])
+  assert.match(webUiPlain(h), /Status\s+Verified/u)
   h.dispose()
 })
 

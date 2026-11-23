@@ -427,20 +427,40 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     } else if (this.phase === 'confirm-disable' || this.phase === 'loading' || this.phase === 'settled') {
       this.phase = 'ready'
     }
+    // The SAME rollover invalidates the Remote Config mirror: re-read the
+    // next-start preference from the live authority and revoke a staged step
+    // whose authority is no longer current.
+    this.reconcilePreference()
     this.changed()
     this.startStatusRead()
   }
 
-  /** Re-read the persisted preference (never a Host read). */
-  private refreshPreference(): void {
+  /**
+   * ONE live read of the persisted next-start preference and its Config
+   * authority (never a Host Web read). The edit grant is never taken from a
+   * cached readiness: when the authority is no longer current the staged
+   * preference step is revoked (zero writes) and the painted fact degrades to
+   * `Unavailable`/`last known` from THIS read. The Remote Config mirror
+   * invalidates on the same Connection generation rollover the page observes,
+   * so a replaced/disconnected Host can never leave an editable preference
+   * behind.
+   */
+  private reconcilePreference(): void {
     this.preferenceReadiness = this.intents.configReadiness()
     this.preference = this.intents.readPreference()
+    if (this.preferenceEditable()) return
+    this.autostartCandidate = undefined
+    if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
+      this.phase = 'ready'
+      this.revealSelection = true
+    }
   }
 
-  /** Whether the next-launch preference may be edited right now: the Config
-   *  authority must be ready and actually expose a revision. */
+  /** Whether the next-launch preference may be edited right now. It consults
+   *  the LIVE Config authority (ready state + an exposed revision), never only
+   *  the last painted projection. */
   private preferenceEditable(): boolean {
-    return this.preferenceReadiness === 'ready' && this.preference !== undefined
+    return this.intents.configReadiness() === 'ready' && this.intents.readPreference() !== undefined
   }
 
   private hostCurrent(): { readonly status: WebAccessStatus; readonly generation: unknown } | undefined {
@@ -622,7 +642,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
    *  confirm. */
   private refreshAll(): void {
     if (this.phase !== 'ready' && this.phase !== 'settled') return
-    this.refreshPreference()
+    this.reconcilePreference()
     if (this.host.kind !== 'split-host-only') {
       this.host = { kind: 'checking' }
       this.changed()
@@ -750,6 +770,9 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
    * calls the runtime toggle and never guesses a default.
    */
   private dispatchConfig(): void {
+    // Admit the write against the LIVE Config authority, never the cached
+    // projection the confirmation was staged from.
+    this.reconcilePreference()
     const candidate = this.autostartCandidate
     const state = this.preference
     if (candidate === undefined || state === undefined || !this.preferenceEditable()) return
@@ -772,7 +795,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       }
       // The persisted fact is re-read from the SAME authority the writer
       // verified; the settlement is never applied optimistically.
-      this.refreshPreference()
+      this.reconcilePreference()
       this.configOutcome = configOutcomeNote(outcome)
       this.autostartCandidate = undefined
       this.phase = 'settled'
@@ -780,7 +803,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.changed()
     }, (error) => {
       if (this.disposed || serial !== this.writeSerial) return
-      this.refreshPreference()
+      this.reconcilePreference()
       this.configOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
       this.autostartCandidate = undefined
       this.phase = 'settled'
@@ -1098,6 +1121,9 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
 
   render(width: number): string[] {
     if (this.disposed) return [fit('', width)]
+    // The painted Config fact and the edit grant come from THIS frame's live
+    // read, so a non-current authority can never survive as an affordance.
+    this.reconcilePreference()
     this.ensureSelection()
     const bodyRows = this.bodyRows()
     const content = this.content(width)

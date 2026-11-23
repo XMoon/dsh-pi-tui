@@ -57,6 +57,7 @@ interface PageHarness {
   readonly opened: () => readonly string[]
   readonly copied: () => readonly string[]
   readonly commits: () => readonly string[]
+  readonly commitRevisions: () => readonly number[]
   readonly diagnoses: () => readonly { label: string; detail: Record<string, unknown> }[]
   readonly doneCalls: () => number
   readonly generation: { value: object | undefined }
@@ -65,6 +66,11 @@ interface PageHarness {
   readonly connect: () => void
   /** Resolve (or reject) the N-th held status read. */
   readonly resolveRead: (index: number, result: WebAccessStatus | { readonly error: string }) => void
+  /** Replace the LIVE Config authority (the Remote mirror's invalidation). */
+  readonly setAuthority: (
+    readiness: 'ready' | 'stale' | 'unavailable',
+    preference: WebStartupPreferenceState | undefined,
+  ) => void
   readonly releaseToggle: () => void
   readonly releaseUrl: () => void
   readonly key: (data: string) => Promise<void>
@@ -87,6 +93,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   const opened: string[] = []
   const copied: string[] = []
   const commits: string[] = []
+  const commitRevisions: number[] = []
   const diagnoses: { label: string; detail: Record<string, unknown> }[] = []
   let doneCalls = 0
   let pageRef: WebUiSettingsPage | undefined
@@ -129,8 +136,9 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     copyToClipboard: async (text) => { copied.push(text); return options.copy ?? true },
     readPreference: () => preference,
     configReadiness: () => readiness,
-    commitAutostart: async (value) => {
+    commitAutostart: async (value, revision) => {
       commits.push(value)
+      commitRevisions.push(revision)
       if (options.commitFailure !== undefined) throw new Error(options.commitFailure)
       return options.commit ?? { outcome: 'verified' }
     },
@@ -172,6 +180,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     opened: () => opened,
     copied: () => copied,
     commits: () => commits,
+    commitRevisions: () => commitRevisions,
     diagnoses: () => diagnoses,
     doneCalls: () => doneCalls,
     generation,
@@ -182,6 +191,10 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     connect: () => {
       generation.value = {}
       for (const listener of [...listeners]) listener()
+    },
+    setAuthority: (nextReadiness, nextPreference) => {
+      readiness = nextReadiness
+      preference = nextPreference
     },
     resolveRead: (index, result) => {
       const settle = heldReads[index]
@@ -454,6 +467,54 @@ test('PAGE: a status reply from a superseded generation is never painted as curr
   h.resolveRead(1, { state: 'disabled' })
   await h.flush()
   assert.match(h.frame(), /Serving\s+Disabled/u, 'only the current Host\'s reply settles the fact')
+  h.close()
+})
+
+test('PAGE: a Host rollover revokes the next-start edit grant taken from the old Config mirror', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  // Stage the confirmation through the page's own ladder (zero writes so far).
+  await h.key('\x1b[B')
+  await h.key('\x1b[B')
+  await h.key('\x1b[B') // Start automatically
+  await h.key('\r') // candidate choice
+  await h.key('\r') // -> confirm-save
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  assert.equal(h.commits().length, 0)
+  // The Remote Config mirror invalidates on the Host rollover: readiness goes
+  // unavailable and no committed preference remains.
+  h.setAuthority('unavailable', undefined)
+  h.bumpGeneration()
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Confirm save|Save the next Host start|Cancel/u,
+    'the staged confirmation derived from the old authority is revoked')
+  assert.match(h.frame(), /Start automatically\s+Unavailable/u, 'the stale value is never painted as current')
+  assert.doesNotMatch(h.frame(), /Change…/u, 'no edit affordance under a non-current authority')
+  assert.match(h.frame(), /The Host configuration is unavailable; the next-start preference is read-only\./u)
+  // The preference row left the keyboard order entirely: no number of Down
+  // presses can focus it, and no Enter can stage or dispatch it.
+  for (let step = 0; step < 6; step += 1) {
+    await h.key('\x1b[B')
+    assert.doesNotMatch(h.frame(), /> Start automatically/u, 'the non-current preference is not focusable')
+  }
+  assert.equal(h.commits().length, 0, 'zero preference writes under a non-current authority')
+  assert.equal(h.writes().length, 0)
+  // Reconnection: the NEW Host's mirror commits a CHANGED value + revision.
+  h.setAuthority('ready', { autoStart: true, revision: 7, userOverridden: true })
+  h.bumpGeneration()
+  await h.flush()
+  assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the new value is adopted from the live authority')
+  // The staged change must submit the NEW revision, never the old one: the
+  // fixture writer refuses any other revision.
+  for (let step = 0; step < 8 && !/^> Open in browser/mu.test(h.frame()); step += 1) await h.key('\x1b[B')
+  assert.match(h.frame(), /^> Open in browser/mu, 'the focus is deterministic before the staged change')
+  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B') // Open -> Copy -> Disable -> Start automatically
+  await h.key('\r') // candidates: the OPPOSITE of the persisted On is staged (Off)
+  await h.key('\r') // -> confirm-save
+  await h.key('\r') // Confirm save
+  await h.flush()
+  assert.deepEqual(h.commitRevisions(), [7], 'the adoption really refreshed the revision')
+  assert.deepEqual(h.commits(), ['Off'])
+  assert.match(h.frame(), /Status\s+Verified/u)
   h.close()
 })
 
