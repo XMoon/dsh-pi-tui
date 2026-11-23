@@ -852,10 +852,13 @@ export async function runAcpPo2SessionView(context) {
       cwd: hostCwdNew,
       mcpServers: [{ name: 'po2-mcp', command: '/bin/true', args: [], env: [] }],
     })
-    assert(mcpReject?.error?.code === -32602,
-      `L: non-empty mcpServers must be -32602 (got ${JSON.stringify(mcpReject?.error ?? mcpReject?.result)})`)
-    assert(mcpReject?.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
-      `L: non-empty mcpServers must name LOCAL_ACP_VIEW_INVALID_REQUEST (got ${JSON.stringify(mcpReject?.error?.data)})`)
+    // The current contract MOUNTS an ACP mcpServers declaration through the
+    // official Agent-scoped MCP client, so a declaration that cannot start is a
+    // real scoped-MCP failure (a stable code), never a silent success.
+    assert(mcpReject?.error?.code === -32603,
+      `L: a non-startable mcpServers declaration must fail closed (got ${JSON.stringify(mcpReject?.error ?? mcpReject?.result)})`)
+    assert(mcpReject?.error?.data?.code === 'LOCAL_ACP_MCP_START_FAILED',
+      `L: a non-startable mcpServers declaration must name LOCAL_ACP_MCP_START_FAILED (got ${JSON.stringify(mcpReject?.error?.data)})`)
     connL.close()
     await connL.closed
 
