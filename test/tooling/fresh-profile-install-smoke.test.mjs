@@ -23,6 +23,7 @@ import {
   parseFreshProfileArgs,
   resolveFreshCandidate,
 } from '../../scripts/fresh-profile-install-smoke.mjs'
+import { currentDshQualification } from '../../scripts/lib/dsh-compat.mjs'
 import { pnpmExecutable } from '../../scripts/lib/process.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -42,9 +43,12 @@ function packFixture(directory) {
 }
 
 test('the gate accepts only the qualified DSH pins and one positional candidate', () => {
-  assert.deepEqual(parseFreshProfileArgs(['--', '/tmp/candidate.tgz']), { candidate: '/tmp/candidate.tgz', dshTarget: '0.2.2-rc.5', upgradeOld: undefined })
-  assert.deepEqual(parseFreshProfileArgs(['--dsh', '0.2.2-rc.4', '/tmp/candidate.tgz']), { candidate: '/tmp/candidate.tgz', dshTarget: '0.2.2-rc.4', upgradeOld: undefined })
-  assert.throws(() => parseFreshProfileArgs(['--dsh', '0.2.2-rc.6', '/tmp/candidate.tgz']), /unsupported DSH target/u)
+  const { versions, recommended } = currentDshQualification()
+  assert.deepEqual(parseFreshProfileArgs(['--', '/tmp/candidate.tgz']), { candidate: '/tmp/candidate.tgz', dshTarget: recommended, upgradeOld: undefined })
+  for (const version of versions) {
+    assert.equal(parseFreshProfileArgs(['--dsh', version, '/tmp/candidate.tgz']).dshTarget, version)
+  }
+  assert.throws(() => parseFreshProfileArgs(['--dsh', '0.0.0', '/tmp/candidate.tgz']), /unsupported DSH target/u)
   assert.throws(() => parseFreshProfileArgs(['a.tgz', 'b.tgz']), /at most one candidate/u)
   assert.throws(() => parseFreshProfileArgs(['--unknown']), /unknown option/u)
 })

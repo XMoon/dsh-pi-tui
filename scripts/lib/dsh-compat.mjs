@@ -17,6 +17,17 @@ export const COMPAT_MATRIX = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'dsh-compat-matrix.json'), 'utf8'),
 )
 
+/** Resolve the exact published DSH pins qualified by this checkout's TUI line.
+ * Fresh Profile's CI matrix and its CLI use this same authority. */
+export function currentDshQualification(matrix = COMPAT_MATRIX) {
+  const row = matrix.matrix.at(-1)
+  const recommended = matrix.current.upgradeDsh
+  if (row?.tui !== matrix.current.since || !row.versions.includes(recommended)) {
+    throw new Error('current DSH compatibility row must match current.since and include current.upgradeDsh')
+  }
+  return { versions: row.versions, recommended }
+}
+
 /** The matrix rows a release body must document below its own line: the two
  * most recent rows that released a compatible TUI, newest first. A row without
  * a TUI is skipped (nothing to install) and so is a row sharing the current

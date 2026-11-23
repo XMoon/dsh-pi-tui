@@ -629,12 +629,9 @@ test('the fresh-profile job is the npm-mode dual-platform DSH matrix gate', () =
   const jobs = workflow().jobs
   const job = jobs['fresh-profile']
   assert.ok(job, 'the fresh-profile job must exist in ci.yml')
-  assert.deepEqual(job.strategy.matrix.include, [
-    { os: 'ubuntu-24.04', dsh: '0.2.2-rc.3' },
-    { os: 'ubuntu-24.04', dsh: '0.2.2-rc.4' },
-    { os: 'ubuntu-24.04', dsh: '0.2.2-rc.5' },
-    { os: 'macos-15', dsh: '0.2.2-rc.5' },
-  ], 'the Fresh gate must run Linux rc.3/rc.4/rc.5 and native macOS rc.5')
+  assert.equal(jobs['dsh-context'].outputs.fresh_profile_matrix, '${{ steps.context.outputs.fresh_profile_matrix }}')
+  assert.equal(job.strategy.matrix, '${{ fromJSON(needs.dsh-context.outputs.fresh_profile_matrix) }}',
+    'the Fresh gate must consume the matrix resolved from the current compatibility row')
   assert.equal(job['continue-on-error'], undefined,
     'a cancelled/failed Fresh platform can never be treated as green')
   assert.match(job.if, /needs\.dsh-context\.result == 'success'/u)

@@ -20,6 +20,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
+import { COMPAT_MATRIX, currentDshQualification } from './lib/dsh-compat.mjs'
 import { DEFAULT_SOURCE_CONFIG, loadDshSourceConfig, npmDshVersion } from './lib/dsh-distribution.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -145,6 +146,17 @@ export function resolveCiConfig({ shards, maxParallel, testConcurrency } = {}) {
   }
 }
 
+/** Derive Linux's full current DSH window and macOS's recommended pairing. */
+export function resolveFreshProfileMatrix(matrix = COMPAT_MATRIX) {
+  const { versions, recommended } = currentDshQualification(matrix)
+  return {
+    include: [
+      ...versions.map(dsh => ({ os: 'ubuntu-24.04', dsh })),
+      { os: 'macos-latest', dsh: recommended },
+    ],
+  }
+}
+
 /** Resolve and validate all context outputs. */
 export function resolveDshContext({
   eventName,
@@ -165,6 +177,7 @@ export function resolveDshContext({
     sourceExpectedVersion: mode === 'source' ? config.expectedVersion : '',
     sourceConfig: config.path,
     ci,
+    freshProfileMatrix: resolveFreshProfileMatrix(),
   }
 }
 
@@ -191,6 +204,7 @@ function writeOutputs(context) {
     `shards=${JSON.stringify(context.ci.shards)}`,
     `max_parallel=${context.ci.maxParallel}`,
     `test_concurrency=${context.ci.testConcurrency}`,
+    `fresh_profile_matrix=${JSON.stringify(context.freshProfileMatrix)}`,
     `effective_config=${effectiveConfig(context)}`,
   ].join('\n') + '\n')
 }
@@ -237,6 +251,7 @@ function cli() {
     shards: JSON.stringify(context.ci.shards),
     max_parallel: context.ci.maxParallel,
     test_concurrency: context.ci.testConcurrency,
+    fresh_profile_matrix: JSON.stringify(context.freshProfileMatrix),
     effective_config: effectiveConfig(context),
   })) console.log(`${key}=${value}`)
   writeOutputs(context)

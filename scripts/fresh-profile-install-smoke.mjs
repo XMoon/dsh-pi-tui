@@ -66,6 +66,7 @@ import {
   sha256,
   tmuxRunner,
 } from './lib/dsh-smoke-harness.mjs'
+import { currentDshQualification } from './lib/dsh-compat.mjs'
 import { assertInstalledDshFamily, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import { createSplitSmokeProfile } from './lib/split-smoke-profile.mjs'
 import { createSplitProcessScope, readStartIdentity } from './lib/split-smoke-processes.mjs'
@@ -73,8 +74,8 @@ import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 import { selectCandidate } from './qualify-tarball.mjs'
 
 const EXPECTED_NAME = '@xmoon76/dsh-pi-tui'
-const DEFAULT_DSH_TARGET = '0.2.2-rc.5'
-const SUPPORTED_DSH_TARGETS = new Set(['0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'])
+const { versions: supportedDshVersions, recommended: DEFAULT_DSH_TARGET } = currentDshQualification()
+const SUPPORTED_DSH_TARGETS = new Set(supportedDshVersions)
 const STORE_PACKAGES = ['@deepseek-ai/dsh-client-store', 'zustand', 'immer']
 /** The internal ACP stdio Adapter entry the installed candidate must carry. */
 const ACP_STDIO_ENTRY = join('dist', 'acp-stdio.mjs')
