@@ -772,8 +772,10 @@ export async function runOwnedNativeCli({
   }
   requireBoolean(lifecycleClosed, 'lifecycleClosed')
   requireBoolean(allowClosed, 'allowClosed')
-  if (state.pending !== undefined && state.pending !== null) {
-    throw contractError('NATIVE_CLI_BUSY', `daemon ${String(state.pending.verb)} is still in flight`)
+  // The canonical slot field IS the Supervisor's `runtime.cliPending`; there
+  // is no second pending name to drift out of sync.
+  if (state.cliPending !== undefined && state.cliPending !== null) {
+    throw contractError('NATIVE_CLI_BUSY', `daemon ${String(state.cliPending.verb)} is still in flight`)
   }
   if (lifecycleClosed && !allowClosed) {
     throw contractError('NATIVE_SCENE_CLOSED', `daemon ${action} may not start after the Scene closed`)
@@ -784,15 +786,15 @@ export async function runOwnedNativeCli({
     throw contractError('NATIVE_CLI_NOT_QUIESCED', `a previous daemon child is not proven reaped (${fenceState}, pid ${String(fence.pid ?? 'unknown')})`)
   }
   const promise = execute(action)
-  state.pending = { verb: action, promise }
+  state.cliPending = { verb: action, promise, pid: undefined, kernelIdentity: undefined }
   try {
     return await promise
   } catch (error) {
     const unquiesced = isNativeDaemonUnquiesced(error)
-    if (unquiesced !== null) setFence(action, unquiesced, state.pending)
+    if (unquiesced !== null) setFence(action, unquiesced, state.cliPending)
     throw error
   } finally {
-    state.pending = undefined
+    state.cliPending = undefined
   }
 }
 

@@ -1405,7 +1405,9 @@ test('an unquiesced official stop fails closed with no uninstall or helper fallb
 })
 
 test('the single CLI owner refuses a second child while a slow status is still in flight', async () => {
-  const slot = {}
+  // The exact Supervisor runtime shape: the shared owner must fill the SAME
+  // `cliPending` field the cleanup wait and the fence callback read.
+  const slot = { cliPending: undefined, cliFence: undefined }
   const calls = []
   let release
   const slow = new Promise(resolve => { release = resolve })
@@ -1424,7 +1426,9 @@ test('the single CLI owner refuses a second child while a slow status is still i
     },
   })
   await Promise.resolve()
-  assert.equal(slot.pending.verb, 'status')
+  assert.equal(slot.cliPending.verb, 'status', 'the shared owner must populate the canonical cliPending slot')
+  assert.equal(slot.cliPending.pid, undefined)
+  assert.equal(slot.cliFence, undefined)
   // A cleanup that starts while the read-only status is still alive must not
   // get a second official child.
   await assert.rejects(runOwnedNativeCli({
@@ -1442,7 +1446,7 @@ test('the single CLI owner refuses a second child while a slow status is still i
   release({ exitCode: 0 })
   assert.deepEqual(await slowRun, { exitCode: 0 })
   assert.deepEqual(calls, ['status'])
-  assert.equal(slot.pending, undefined)
+  assert.equal(slot.cliPending, undefined)
 })
 
 test('the CLI owner re-checks the closed lifecycle and the sticky fence before every spawn', async () => {
@@ -1485,7 +1489,7 @@ test('the CLI owner re-checks the closed lifecycle and the sticky fence before e
     setFence: noFence,
     execute: async () => ({ exitCode: 0 }),
   }), error => error?.code === 'NATIVE_CLI_NOT_QUIESCED')
-  assert.equal(slot.pending, undefined, 'a refused command leaves the slot free')
+  assert.equal(slot.cliPending, undefined, 'a refused command leaves the slot free')
   // After the caller proves the same child gone, its refresh returns clear and
   // the next command is admitted.
   const result = await runOwnedNativeCli({
