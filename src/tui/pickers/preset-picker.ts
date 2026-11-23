@@ -7,11 +7,13 @@
  *   the ONE bottom Action Bar: `Use next`/`Use session`, `Set default`,
  *   `Close [Esc]` (`Esc` last). Selecting, searching and opening a row are
  *   BROWSE-ONLY; the two explicit bar actions are the only writers.
- * - **Details** — ONE strictly read-only scrolled Markdown reader: complete
- *   Name/ID/Type/Scope, the committed relationships, a broken row's failure
- *   reason, the complete description and — for a SHIPPED preset only — the
- *   official Mode guide appended in the same body. The only row below it is
- *   `Back [Esc]`.
+ * - **Details** — ONE scrolled Markdown reader: complete Name/ID/Type/Scope,
+ *   the committed relationships, a broken row's failure reason, the complete
+ *   description and — for a SHIPPED preset only — the official Mode guide
+ *   appended in the same body. It carries the SAME explicit `Use*` /
+ *   `Set default` actions and `Back [Esc]`; the reader's first `Enter` only
+ *   moves focus to an enabled action, and only the following Action `Enter`
+ *   writes. A refused write is stated at the top of the same reader.
  *
  * The panel owns only transient presentation state. Every read/write authority
  * stays in the command: `request.apply` / `request.setDefault` are the original
@@ -27,7 +29,6 @@ import {
   Key,
   matchesKey,
   truncateToWidth,
-  visibleWidth,
   wrapTextWithAnsi,
   type Component,
   type Focusable,
@@ -59,13 +60,16 @@ import {
 type PresetPhase = 'loading' | 'ready' | 'error' | 'pending'
 /** The ONE visible page: Detail REPLACES the Catalog in the same overlay. */
 type PresetPage = 'catalog' | 'details'
-/** The two logical regions of the Catalog; only `actions` may write. */
-type PresetZone = 'list' | 'actions'
+/** ONE page-local transient keyboard focus; never a Host-state fact. */
+type PresetFocus = 'list' | 'reader' | 'use' | 'set-default' | 'retry'
+/** The two inert keyboard hints carried by the SAME pinned Action Bar. */
+type BarHint = 'Tab actions' | 'Enter actions'
 /** Which explicit write owns the `pending` phase (the visible label). */
 type PendingKind = 'use' | 'default'
 
-/** The identified bar actions. `close` is the dismissal authority. */
-type PresetActionId = 'use' | 'set-default' | 'close' | 'retry'
+/** The identified bar actions. `close`/`back` are the page dismissal/navigation
+ *  authorities; `retry` owns the failed-read action. */
+type PresetActionId = 'use' | 'set-default' | 'close' | 'back' | 'retry'
 
 /** One roster row projected for display. Derived from the live DTO on every
  *  read — never a second store. */
@@ -91,19 +95,26 @@ interface BarHit {
   readonly end: number
 }
 
-interface BarSegment extends ActionBarSegment {
+interface BarActionSegment extends ActionBarSegment {
+  readonly kind: 'action'
   readonly id: PresetActionId
   readonly enabled: boolean
+  readonly label: string
+  readonly shortLabel: string
 }
+
+interface BarHintSegment extends ActionBarSegment {
+  readonly kind: 'hint'
+  readonly hint: BarHint
+}
+
+type BarSegment = BarActionSegment | BarHintSegment
 
 /** The last painted frame: pointer geometry and the semantic facts a gesture
  *  must still agree with at release time. */
 interface PresetFrame {
   readonly width: number
   readonly barRow: number
-  readonly backRow: number
-  /** The complete painted `Back [Esc]` span, absent when it did not fit. */
-  readonly backHit: { readonly start: number; readonly end: number } | undefined
   readonly readerLineCount: number
   readonly readerRows: number
   /** How many Catalog list-body rows really painted this frame (a one-row
@@ -125,32 +136,20 @@ interface PresetFrame {
   readonly generation: number
 }
 
-type PresetPress =
-  | {
-    readonly kind: 'bar'
-    readonly id: PresetActionId
-    readonly row: number
-    readonly start: number
-    readonly end: number
-    readonly width: number
-    readonly height: number
-    readonly originX: number
-    readonly originY: number
-    readonly pageMarker: string
-    readonly selectionMarker: string
-    readonly generation: number
-  }
-  | {
-    readonly kind: 'back'
-    readonly row: number
-    readonly width: number
-    readonly height: number
-    readonly originX: number
-    readonly originY: number
-    readonly pageMarker: string
-    readonly selectionMarker: string
-    readonly generation: number
-  }
+type PresetPress = {
+  readonly kind: 'bar'
+  readonly id: PresetActionId
+  readonly row: number
+  readonly start: number
+  readonly end: number
+  readonly width: number
+  readonly height: number
+  readonly originX: number
+  readonly originY: number
+  readonly pageMarker: string
+  readonly selectionMarker: string
+  readonly generation: number
+}
 
 /** The panel's dependencies: the command-owned request plus the two app seams
  *  (repaint and the identity-safe overlay closer). */
@@ -169,13 +168,11 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   private rows = new Map<string, PresetRowView>()
   private phase: PresetPhase = 'loading'
   private page: PresetPage = 'catalog'
-  private zone: PresetZone = 'list'
+  private focusTarget: PresetFocus = 'list'
   private pendingKind: PendingKind | undefined
   private roster: PresetPickerRoster | undefined
   /** The browse target: a raw preset id, never an index or a drawn label. */
   private selectedId: string | undefined
-  /** The base id the actions zone owns Enter for (a disabled id never wins). */
-  private actionFocus: PresetActionId | undefined
   /** The ONE local status statement (read failure / last write outcome). */
   private notice = ''
   private noticeIsError = false
@@ -271,7 +268,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.notice = ''
     this.noticeIsError = false
     this.page = 'catalog'
-    this.zone = 'list'
+    this.focusTarget = 'list'
     this.errorScroll = 0
     if (this.roster === undefined) {
       this.picker.setItems([])
@@ -304,7 +301,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     // it, fall back to the catalogue (query and target stay).
     if (this.page === 'details' && !this.rows.has(this.selectedId ?? '')) {
       this.page = 'catalog'
-      this.zone = 'list'
+      this.focusTarget = 'list'
     }
     this.rebuildReader()
     this.deps.requestRender()
@@ -318,7 +315,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.phase = 'error'
     this.pendingKind = undefined
     this.page = 'catalog'
-    this.zone = 'list'
+    this.focusTarget = 'list'
     this.errorScroll = 0
     const detail = sanitizedPhysicalLine(message)
     this.notice = detail
@@ -420,6 +417,11 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     const next = this.picker.getSelectedItem()?.value
     if (next === this.selectedId) return
     this.selectedId = next
+    // A moved browse target is a new context: no stale write focus and no old
+    // refusal/outcome statement may describe it.
+    this.focusTarget = this.baseFocus()
+    this.notice = ''
+    this.noticeIsError = false
     if (this.phase === 'ready') this.picker.setItems(this.buildItems())
   }
 
@@ -448,9 +450,22 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.picker.clearMousePress()
   }
 
+  /** The READY page's own base focus; the only focus a page switch restores. */
+  private baseFocus(): PresetFocus {
+    return this.page === 'details' ? 'reader' : 'list'
+  }
+
+  /** The row the CURRENT page writes: the Catalog's filtered visible selection,
+   *  or the ID the Details page is bound to. Never a drawn label. */
+  private activeRow(): PresetRowView | undefined {
+    return this.page === 'details'
+      ? this.rows.get(this.selectedId ?? '')
+      : this.selectedRowView()
+  }
+
   /** The ONE availability decision: painted and admitted from this result. */
   private writeAvailability(): { use?: string; setDefault?: string } {
-    const row = this.selectedRowView()
+    const row = this.activeRow()
     if (row === undefined) return { use: 'No preset selected', setDefault: 'No preset selected' }
     if (row.broken !== undefined) return { use: 'Preset failed to load', setDefault: 'Preset failed to load' }
     const defaultId = this.defaultId()
@@ -463,120 +478,156 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     }
   }
 
-  /** The operations of the CURRENT page/phase (unfocused), in bar order. */
-  private baseActions(): Array<BarSegment & { readonly label: string; readonly shortLabel: string }> {
-    const close = (): BarSegment & { readonly label: string; readonly shortLabel: string } => ({
-      text: 'Close [Esc]',
-      priority: 1000,
-      id: 'close',
-      enabled: true,
-      label: 'Close',
-      shortLabel: 'Close',
-    })
-    if (this.phase === 'loading' || this.phase === 'pending') return [close()]
-    if (this.page === 'details') return []
-    if (this.phase === 'error') {
-      return [
-        {
-          text: 'Retry',
-          priority: 10,
-          id: 'retry',
-          enabled: true,
-          label: 'Retry',
-          shortLabel: 'Retry',
-        },
-        close(),
-      ]
-    }
+  private actionAvailability(id: 'use' | 'set-default'): string | undefined {
+    if (this.phase !== 'ready') return 'Unavailable'
     const availability = this.writeAvailability()
-    const action = (
-      id: 'use' | 'set-default',
-      label: string,
-      short: string,
-      reason: string | undefined,
-      priority: number,
-    ): BarSegment & { readonly label: string; readonly shortLabel: string } => ({
-      text: label,
-      short,
-      priority,
-      id,
-      enabled: reason === undefined,
-      label,
-      shortLabel: short,
+    return id === 'use' ? availability.use : availability.setDefault
+  }
+
+  private barAction(
+    id: PresetActionId,
+    label: string,
+    shortLabel: string,
+    enabled: boolean,
+    priority: number,
+  ): BarActionSegment {
+    return { kind: 'action', text: label, short: shortLabel, priority, id, enabled, label, shortLabel }
+  }
+
+  /** The CURRENT page/phase bar in display order. The keyboard hint is a
+   *  low-priority, inert segment of the SAME row; it is present only on a base
+   *  focus with at least one real enabled action. */
+  private barSegments(focus: PresetFocus): BarSegment[] {
+    const closeOrBack = (): BarActionSegment => this.phase === 'pending'
+      ? this.barAction('close', 'Close [Esc]', 'Close [Esc]', true, 1000)
+      : this.page === 'details'
+        ? this.barAction('back', 'Back [Esc]', 'Back [Esc]', true, 1000)
+        : this.barAction('close', 'Close [Esc]', 'Close [Esc]', true, 1000)
+    if (this.phase === 'loading' || this.phase === 'pending') return [closeOrBack()]
+    if (this.page === 'details') {
+      if (this.phase !== 'ready') return [closeOrBack()]
+      const availability = this.writeAvailability()
+      const use = this.barAction(
+        'use',
+        this.deps.request.subject.sessionless ? 'Use next' : 'Use session',
+        'Use',
+        availability.use === undefined,
+        30,
+      )
+      const setDefault = this.barAction('set-default', 'Set default', 'Set', availability.setDefault === undefined, 20)
+      const segments: BarSegment[] = [use, setDefault]
+      if (focus === 'reader' && (use.enabled || setDefault.enabled)) {
+        segments.push({ kind: 'hint', hint: 'Enter actions', text: 'Enter actions', priority: 0 })
+      }
+      segments.push(closeOrBack())
+      return this.applyFocusCue(segments, focus)
+    }
+    if (this.phase === 'error') {
+      return this.applyFocusCue([
+        this.barAction('retry', 'Retry', 'Retry [Enter]', true, 10),
+        closeOrBack(),
+      ], focus)
+    }
+    if (this.phase !== 'ready') return [closeOrBack()]
+    const availability = this.writeAvailability()
+    const use = this.barAction(
+      'use',
+      this.deps.request.subject.sessionless ? 'Use next' : 'Use session',
+      'Use',
+      availability.use === undefined,
+      30,
+    )
+    const setDefault = this.barAction('set-default', 'Set default', 'Set', availability.setDefault === undefined, 20)
+    const segments: BarSegment[] = [use, setDefault]
+    if (focus === 'list' && (use.enabled || setDefault.enabled)) {
+      segments.push({ kind: 'hint', hint: 'Tab actions', text: 'Tab actions', priority: 0 })
+    }
+    segments.push(closeOrBack())
+    return this.applyFocusCue(segments, focus)
+  }
+
+  /** The focused business action names the Enter that will really run it; the
+   *  hint is removed on that focus, so the cue can never sit beside a second
+   *  claim about Enter. Close/Back stay on their real Esc device. */
+  private applyFocusCue(segments: readonly BarSegment[], focus: PresetFocus): BarSegment[] {
+    if (focus !== 'use' && focus !== 'set-default' && focus !== 'retry') return [...segments]
+    return segments.map((segment): BarSegment => {
+      if (segment.kind !== 'action' || segment.id !== focus || !segment.enabled) return segment
+      return {
+        ...segment,
+        text: `${segment.label} [Enter]`,
+        short: `${segment.shortLabel} [Enter]`,
+      }
     })
-    return [
-      action('use', this.deps.request.subject.sessionless ? 'Use next' : 'Use session', 'Use', availability.use, 30),
-      action('set-default', 'Set default', 'Default', availability.setDefault, 20),
-      close(),
-    ]
   }
 
-  /** The CURRENTLY enabled actions the last bar layout can really paint: an
-   *  action the layout dropped at this width is not a keyboard target (the same
-   *  rule pointer hits already follow). Availability itself is re-derived from
-   *  the current state, never from a paint-time snapshot. */
-  private paintedRing(): PresetActionId[] {
+  /** The current page/phase ring from the LAST painted bar. A dropped,
+   *  disabled or unpainted action is never a hidden Enter target. */
+  private paintedRing(): PresetFocus[] {
+    const base = this.baseFocus()
     const frame = this.lastFrame
-    const base = this.baseActions()
-    // A Details frame carries no bar: the next Catalog bar will be laid out at
-    // the same width, so derive the fitting set from the CURRENT actions
-    // instead of treating every action as absent.
-    const fitting = frame === undefined
-      ? undefined
-      : frame.barRow >= 0
-        ? frame.fittingActions
-        : layoutActionBarRow(base, Math.max(0, Math.floor(frame.width) - 2)).spans
-          .map(span => base[span.inputIndex]!.id)
-    return base
-      .filter(segment => segment.enabled && (fitting === undefined || fitting.includes(segment.id)))
-      .map(segment => segment.id)
+    if (frame === undefined || frame.pageMarker !== this.pageMarker()) return [base]
+    const ring: PresetFocus[] = [base]
+    for (const id of ['use', 'set-default'] as const) {
+      if (frame.paintedActions.includes(id) && this.actionAvailability(id) === undefined) ring.push(id)
+    }
+    if (this.phase === 'error' && frame.paintedActions.includes('retry')) ring.push('retry')
+    return ring
   }
 
-  /** The ONE enabled action of the ring, wrapping in `delta`'s direction. */
-  private stepActionFocus(delta: -1 | 1): void {
+  /** Step the ONE page-local focus around the flat ring. There is no second
+   *  actions sub-mode and the arrows never move between actions. */
+  private stepFocus(delta: -1 | 1): void {
     const ring = this.paintedRing()
     if (ring.length === 0) return
-    const at = ring.findIndex(id => id === this.focusedActionId(ring))
-    this.actionFocus = ring[(Math.max(at, 0) + delta + ring.length) % ring.length]
+    const at = ring.indexOf(this.focusTarget)
+    if (at === -1) {
+      this.focusTarget = ring[0]!
+      this.invalidateGestures()
+      this.deps.requestRender()
+      return
+    }
+    if (ring.length === 1) return
+    this.focusTarget = ring[(at + delta + ring.length) % ring.length]!
+    this.invalidateGestures()
     this.deps.requestRender()
   }
 
-  /** The ONE painted enabled action the actions zone currently owns Enter for.
-   *  A disabled or dropped action owns no Enter, so the fallback never parks
-   *  the keyboard on a dead entry. */
-  private focusedActionId(ring: readonly PresetActionId[] = this.paintedRing()): PresetActionId | undefined {
-    return ring.find(id => id === this.actionFocus) ?? ring[0]
-  }
-
-  /** The bar operations with the `Verb [Enter]` cue on the ONE focus the
-   *  actions zone currently owns. Close already spells its real Esc device; a
-   *  focused Close names the Enter that now runs it (one action advertises
-   *  ONE key). */
-  private buildActions(focus: PresetActionId | undefined): BarSegment[] {
-    return this.baseActions().map((segment): BarSegment => {
-      if (segment.id !== focus || !segment.enabled) return segment
-      const text = segment.id === 'close' ? 'Close [Enter]' : `${segment.label} [Enter]`
-      const short = segment.id === 'close' ? undefined : `${segment.shortLabel} [Enter]`
-      return { ...segment, text, ...(short === undefined ? {} : { short }) }
-    })
+  /** Details reader Enter: move focus to the FIRST currently painted enabled
+   *  action. This is a focus move only — it never dispatches a write and never
+   *  scrolls the reader. No enabled action means no move and no hint. */
+  private focusFirstEnabledAction(): void {
+    if (this.page !== 'details' || this.phase !== 'ready') return
+    const first = this.paintedRing().find(id => id === 'use' || id === 'set-default')
+    if (first === undefined || first === this.focusTarget) return
+    this.focusTarget = first
+    this.invalidateGestures()
+    this.deps.requestRender()
   }
 
   /* --------------------------------------------------------------- writers */
 
   private dispatchAction(id: PresetActionId): void {
     if (this.disposed) return
-    if (id !== 'close' && !this.paintedRing().includes(id)) return
     if (id === 'close') {
       this.deps.close()
       return
     }
-    if (id === 'retry') {
-      if (this.phase === 'error') this.retry()
+    if (id === 'back') {
+      if (this.page === 'details' && this.phase === 'ready') this.backToCatalog()
       return
     }
-    if (this.page !== 'catalog' || this.phase !== 'ready') return
+    if (id === 'retry') {
+      if (this.phase === 'error' && this.paintedRing().includes('retry')) this.retry()
+      return
+    }
+    if (this.phase !== 'ready') return
     if (!this.ensureCurrent()) return
-    const row = this.selectedRowView()
+    // The SAME admission for a keyboard Enter and a pointer click: the action
+    // must still be enabled AND painted in the CURRENT ring, and the row must
+    // be the one this page writes.
+    if (!this.paintedRing().includes(id)) return
+    const row = this.activeRow()
     if (row === undefined || row.broken !== undefined) return
     const availability = this.writeAvailability()
     if (id === 'use' && availability.use === undefined) this.applySelection(row)
@@ -591,7 +642,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.phase = 'loading'
     this.notice = ''
     this.noticeIsError = false
-    this.zone = 'list'
+    this.page = 'catalog'
+    this.focusTarget = 'list'
     if (this.roster === undefined) {
       this.picker.setItems([])
       this.picker.setNoMatchText('  Loading agent presets…')
@@ -600,15 +652,16 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.deps.request.retry()
   }
 
-  /** Commit the browse target through the ORIGINAL session-preset write. */
+  /** Commit the CURRENT page's bound row through the ORIGINAL session writer.
+   *  The page and target stay visible while the admitted write is pending. */
   private applySelection(row: PresetRowView): void {
     this.notice = ''
     this.noticeIsError = false
     this.phase = 'pending'
     this.pendingKind = 'use'
-    this.zone = 'actions'
-    this.actionFocus = 'use'
+    this.focusTarget = this.baseFocus()
     this.invalidateGestures()
+    this.rebuildReader()
     this.deps.requestRender()
     const request = this.deps.request
     request.runOwned('preset selection', () => request.isCurrent()
@@ -645,9 +698,9 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.noticeIsError = false
     this.phase = 'pending'
     this.pendingKind = 'default'
-    this.zone = 'actions'
-    this.actionFocus = 'set-default'
+    this.focusTarget = this.baseFocus()
     this.invalidateGestures()
+    this.rebuildReader()
     this.deps.requestRender()
     const request = this.deps.request
     request.runOwned('preset default', () => request.isCurrent()
@@ -668,22 +721,26 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     })
   }
 
-  /** Restore the READY catalogue after a KNOWN refusal, keeping the target and
-   *  stating the reason in the status row. Never an automatic retry. */
+  /** Restore the READY page after a KNOWN refusal, keeping the page and its
+   *  target. Details states the complete reason in the SAME reader at the top;
+   *  the Catalog keeps its complete status viewport. No automatic retry. */
   private restoreAfterRefusal(notice: string): void {
     this.phase = 'ready'
     this.pendingKind = undefined
-    this.page = 'catalog'
-    this.zone = 'list'
     this.notice = notice
     this.noticeIsError = true
+    this.focusTarget = this.baseFocus()
     this.invalidateGestures()
+    if (this.page === 'details') {
+      this.detailsScroll = 0
+      this.rebuildReader()
+    }
     this.deps.requestRender()
   }
 
   /* ---------------------------------------------------------- details page */
 
-  /** Enter the strictly read-only Details page for the PAINTED selection. */
+  /** Enter Details for the PAINTED selection. Reading is a zero-write page. */
   private openDetails(id?: string): void {
     if (this.disposed || this.phase !== 'ready' || this.page !== 'catalog') return
     if (!this.ensureCurrent()) return
@@ -694,7 +751,9 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     if (row === undefined) return
     this.selectedId = row.id
     this.page = 'details'
-    this.zone = 'list'
+    this.focusTarget = 'reader'
+    this.notice = ''
+    this.noticeIsError = false
     this.detailsScroll = 0
     this.rebuildReader()
     this.invalidateGestures()
@@ -704,7 +763,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   private backToCatalog(): void {
     if (this.page !== 'details') return
     this.page = 'catalog'
-    this.zone = 'list'
+    this.focusTarget = 'list'
     // The query, selection and list window are the SAME list state: nothing to
     // restore, the picker was never unmounted.
     this.invalidateGestures()
@@ -728,6 +787,12 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
    *  SAME body, and a Custom row never borrows it. */
   private detailsBody(row: PresetRowView): string {
     const lines: string[] = []
+    if (this.notice !== '') {
+      // A refused write stays on THIS page: the complete sanitized reason is
+      // the FIRST scrollable section of the same one reader, never a second
+      // container and never a one-row truncation.
+      lines.push('## Operation failed', '', sanitizeDisplayText(this.notice), '')
+    }
     const fact = (label: string, value: string): void => {
       lines.push(`**${label}**  ${sanitizeDisplayText(value)}  `)
     }
@@ -783,26 +848,38 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     return true
   }
 
+  /** A real search edit (printable text or a meaningful Backspace), never a
+   *  navigation/action key. Used to hand an action focus back to the search. */
+  private isSearchText(data: string): boolean {
+    if (data === '\x7f' || data === '\b') return true
+    if (data === '' || data.startsWith('\x1b')) return false
+    for (const char of data) {
+      const codePoint = char.codePointAt(0) ?? 0
+      if (codePoint < 0x20 || codePoint === 0x7f) return false
+    }
+    return true
+  }
+
   handleInput(data: string): void {
     if (this.disposed) return
     if (!this.ensureCurrent()) return
     // Every keyboard input revokes an outstanding pointer gesture.
     this.invalidateGestures()
-    if (this.page === 'details') {
-      this.handleDetailsInput(data)
-      return
-    }
     if (matchesKey(data, 'escape')) {
-      // The ONE Esc ladder: an admitted write closes; otherwise clear a
-      // non-empty query before closing the overlay.
       if (this.phase === 'pending') {
         this.deps.close()
         return
       }
+      if (this.page === 'details') {
+        this.backToCatalog()
+        return
+      }
+      // Catalog: a non-empty query is cleared before the overlay closes.
       if (this.picker.getFilter() !== '') {
         const keep = this.picker.getSelectedItem()?.value
         this.picker.setFilter('')
         if (keep !== undefined) this.picker.setSelectedValue(keep)
+        this.focusTarget = 'list'
         this.syncSelection()
         this.deps.requestRender()
         return
@@ -811,53 +888,55 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       return
     }
     if (this.phase === 'pending') return
-    if (this.phase === 'loading') {
-      // A running (re-)read admits the search box only; no browse, no write.
-      if (this.isListNavigation(data) || matchesKey(data, 'enter') || matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) return
-      this.forwardSearchInput(data)
+    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+      if (this.phase === 'loading') return
+      this.stepFocus(matchesKey(data, 'shift+tab') ? -1 : 1)
       return
     }
-    if (this.phase === 'error') {
-      if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
-        this.zone = this.zone === 'list' ? 'actions' : 'list'
-        this.deps.requestRender()
-        return
-      }
-      if (this.zone === 'actions') {
-        if (matchesKey(data, 'left') || matchesKey(data, 'up')) return this.stepActionFocus(-1)
-        if (matchesKey(data, 'right') || matchesKey(data, 'down')) return this.stepActionFocus(1)
-        if (matchesKey(data, 'enter')) {
-          const id = this.focusedActionId()
-          if (id !== undefined) this.dispatchAction(id)
-          return
-        }
-        // A failed read has no browsable list: the search box stays editable
-        // from the footer zone too (the Esc ladder needs it in every phase).
-        this.forwardSearchInput(data)
-        return
-      }
-      // A failed read owns no browsable list: only the search box stays live,
-      // plus the read-only error viewport's navigation keys.
-      if (this.scrollErrorStatus(data)) return
+    if (this.page === 'details') {
+      this.handleDetailsInput(data)
+      return
+    }
+    if (this.phase === 'loading') {
+      // A running (re-)read admits the search box only; no browse, no write.
       if (this.isListNavigation(data) || matchesKey(data, 'enter')) return
       this.forwardSearchInput(data)
       return
     }
-    // Ready catalogue.
-    if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
-      this.zone = this.zone === 'list' ? 'actions' : 'list'
-      this.deps.requestRender()
+    if (this.phase === 'error') {
+      if (this.focusTarget === 'retry') {
+        if (matchesKey(data, 'enter')) {
+          this.dispatchAction('retry')
+          return
+        }
+        if (this.isSearchText(data)) {
+          this.focusTarget = 'list'
+          this.forwardSearchInput(data)
+          return
+        }
+        if (this.scrollErrorStatus(data)) return
+        return
+      }
+      // A failed read owns no browsable list: only the search box and the
+      // complete error viewport stay live.
+      if (matchesKey(data, 'enter')) return
+      if (this.scrollErrorStatus(data)) return
+      if (this.isListNavigation(data)) return
+      this.forwardSearchInput(data)
       return
     }
-    if (this.zone === 'actions') {
-      if (matchesKey(data, 'left') || matchesKey(data, 'up')) return this.stepActionFocus(-1)
-      if (matchesKey(data, 'right') || matchesKey(data, 'down')) return this.stepActionFocus(1)
+    // Ready catalogue.
+    if (this.focusTarget === 'use' || this.focusTarget === 'set-default') {
       if (matchesKey(data, 'enter')) {
-        const id = this.focusedActionId()
-        if (id !== undefined) this.dispatchAction(id)
+        this.dispatchAction(this.focusTarget)
+        return
       }
-      // The actions zone owns the keyboard: every other key is consumed (Tab
-      // returns to the list, where typing edits the search).
+      if (this.isSearchText(data)) {
+        // Typing/backspace exits the action focus and edits the search; the
+        // printable character is not swallowed by the action ring.
+        this.focusTarget = 'list'
+        this.forwardSearchInput(data)
+      }
       return
     }
     if (matchesKey(data, 'enter')) {
@@ -883,92 +962,61 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   }
 
   private handleDetailsInput(data: string): void {
-    // The Details page paints ONE way back (`Back [Esc]`); Enter is not an
-    // advertised action there.
-    if (matchesKey(data, 'escape')) {
-      this.backToCatalog()
+    if (this.phase !== 'ready') return
+    if (this.focusTarget === 'reader') {
+      if (matchesKey(data, 'enter')) {
+        this.focusFirstEnabledAction()
+        return
+      }
+      const pageRows = Math.max(1, (this.lastFrame?.readerRows ?? 1) - 1)
+      const maxScroll = Math.max(0, (this.lastFrame?.readerLineCount ?? 0) - Math.max(1, this.lastFrame?.readerRows ?? 1))
+      let next: number | undefined
+      if (matchesKey(data, Key.up)) next = this.detailsScroll - 1
+      else if (matchesKey(data, Key.down)) next = this.detailsScroll + 1
+      else if (matchesKey(data, Key.pageUp)) next = this.detailsScroll - pageRows
+      else if (matchesKey(data, Key.pageDown)) next = this.detailsScroll + pageRows
+      else if (matchesKey(data, Key.home)) next = 0
+      else if (matchesKey(data, Key.end)) next = maxScroll
+      if (next === undefined) return
+      this.detailsScroll = Math.max(0, Math.min(next, maxScroll))
+      this.deps.requestRender()
       return
     }
-    const pageRows = Math.max(1, (this.lastFrame?.readerRows ?? 1) - 1)
-    const maxScroll = Math.max(0, (this.lastFrame?.readerLineCount ?? 0) - Math.max(1, this.lastFrame?.readerRows ?? 1))
-    let next: number | undefined
-    if (matchesKey(data, Key.up)) next = this.detailsScroll - 1
-    else if (matchesKey(data, Key.down)) next = this.detailsScroll + 1
-    else if (matchesKey(data, Key.pageUp)) next = this.detailsScroll - pageRows
-    else if (matchesKey(data, Key.pageDown)) next = this.detailsScroll + pageRows
-    else if (matchesKey(data, Key.home)) next = 0
-    else if (matchesKey(data, Key.end)) next = maxScroll
-    if (next === undefined) return
-    this.detailsScroll = Math.max(0, Math.min(next, maxScroll))
-    this.deps.requestRender()
+    if (matchesKey(data, 'enter')) {
+      if (this.focusTarget === 'use' || this.focusTarget === 'set-default') this.dispatchAction(this.focusTarget)
+      return
+    }
+    // Details has no hidden search: direction keys and printable text never
+    // move the write target or edit the Catalog query.
   }
 
   /* --------------------------------------------------------------- mouse */
+
+  /** Returning to the page's base focus is the ONLY pointer focus restoration:
+   *  a list/search/reader press never inherits a business-action focus. */
+  private resetFocusToBase(): void {
+    const base = this.baseFocus()
+    if (this.focusTarget === base) return
+    this.focusTarget = base
+    this.deps.requestRender()
+  }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (!this.ensureCurrent()) return undefined
     const frame = this.lastFrame
     if (frame === undefined || event.width !== frame.width) return undefined
-    // ANY real wheel on the surface revokes an outstanding pointer gesture
-    // (footer/back press, browse press), wherever it lands: list chrome, the
-    // status row, the bar itself or the reader. A wheel that moved the content
-    // must never let a later release run a previously pressed action.
+    // ANY real wheel on the surface revokes an outstanding pointer gesture.
     if (event.type === 'wheel' && (event.wheelDelta ?? 0) !== 0) this.invalidateGestures()
     const pressed = this.pressed
     if (event.type === 'click' || (event.type === 'press' && event.button === 'left')) this.pressed = undefined
 
-    if (this.page === 'details') {
-      if (event.y === frame.backRow) {
-        if (event.type === 'wheel') {
-          this.scrollReader(event.wheelDelta ?? 0)
-          return { handled: true, render: true }
-        }
-        const back = frame.backHit
-        if (back === undefined || event.x < back.start || event.x >= back.end) {
-          // The row carries only its complete painted Back span; nothing else
-          // on the last physical row is a pointer target.
-          return { handled: true }
-        }
-        if (event.type === 'press') {
-          if (event.button !== 'left') return { handled: true }
-          this.pressed = {
-            kind: 'back',
-            row: event.y,
-            width: event.width,
-            height: event.height,
-            originX: event.screenX - event.x,
-            originY: event.screenY - event.y,
-            pageMarker: frame.pageMarker,
-            selectionMarker: frame.selectionMarker,
-            generation: frame.generation,
-          }
-          return { handled: true, focus: !this.focused }
-        }
-        if (event.type === 'release') return { handled: true }
-        if (event.type !== 'click' || event.button !== 'left') return { handled: true }
-        if (pressed?.kind !== 'back'
-          || pressed.row !== event.y
-          || pressed.width !== event.width
-          || pressed.height !== event.height
-          || pressed.originX !== event.screenX - event.x
-          || pressed.originY !== event.screenY - event.y
-          || pressed.pageMarker !== this.pageMarker()
-          || pressed.selectionMarker !== this.selectionMarker()
-          || pressed.generation !== this.gestureGeneration
-          || pressed.generation !== frame.generation) {
-          return { handled: true }
-        }
-        this.backToCatalog()
-        return { handled: true }
-      }
-      // One read-only reader: a wheel ANYWHERE on the page scrolls it; the
-      // bar-less page has no other pointer target.
-      if (event.type === 'wheel') {
-        this.scrollReader(event.wheelDelta ?? 0)
-        return { handled: true, render: true }
-      }
-      return { handled: true }
+    // Details has ONE scrolled reader: a wheel anywhere on the page scrolls it
+    // and restores the reader focus (never a write).
+    if (this.page === 'details' && event.type === 'wheel') {
+      this.resetFocusToBase()
+      this.scrollReader(event.wheelDelta ?? 0)
+      return { handled: true, render: true }
     }
 
     if (event.y === frame.barRow) {
@@ -995,8 +1043,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       if (event.type === 'release') return { handled: true }
       if (event.type !== 'click' || event.button !== 'left' || hit === undefined) return { handled: true }
       // The release must name the SAME action, its exact painted span, the
-      // same page/selection and the same gesture generation: a resize, refresh,
-      // navigation or replacement between press and release commits nothing.
+      // same page/focus/selection and the same gesture generation.
       if (pressed?.kind !== 'bar'
         || pressed.id !== hit.id
         || pressed.row !== event.y
@@ -1016,12 +1063,22 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       return { handled: true }
     }
 
+    if (this.page === 'details') {
+      // A reader press/click restores the reading focus; nothing else on the
+      // Details page is a pointer target.
+      if ((event.type === 'press' && event.button === 'left') || event.type === 'click') {
+        this.resetFocusToBase()
+      }
+      return { handled: true }
+    }
+
     // Only the painted list-body rows are the picker's own identity-fenced
     // router: the status row and every cell below the painted body are inert,
     // and a one-row grant paints the exit bar alone (no older row hit may be
     // replayed against it).
     if (event.y >= frame.listRows) return { handled: true }
 
+    if (event.type === 'press' || event.type === 'click' || event.type === 'wheel') this.resetFocusToBase()
     // The list/search rows are the picker's own identity-fenced router. A row
     // PRESS that MOVES the highlight only browses: its release can never open
     // Details, so the first click can never look like an activation.
@@ -1084,7 +1141,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   }
 
   private selectionMarker(): string {
-    return `${this.selectedId ?? ''}:${this.zone}:${String(this.actionFocus)}`
+    return `${this.selectedId ?? ''}:${this.page}:${this.focusTarget}`
   }
 
   render(width: number): string[] {
@@ -1103,8 +1160,6 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       this.lastFrame = {
         width,
         barRow: 0,
-        backRow: -1,
-        backHit: undefined,
         readerLineCount: 0,
         readerRows: 0,
         listRows: 0,
@@ -1160,8 +1215,6 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.lastFrame = {
       width,
       barRow: lines.length - 1,
-      backRow: -1,
-      backHit: undefined,
       readerLineCount: 0,
       readerRows: 0,
       listRows: list.length,
@@ -1202,20 +1255,16 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
 
   private renderBar(width: number): { line: string; hits: readonly BarHit[]; fitted: readonly PresetActionId[]; painted: readonly PresetActionId[] } {
     const contentWidth = Math.max(0, Math.floor(width) - 2)
-    const base = this.baseActions()
-    const baseLayout = layoutActionBarRow(base, contentWidth)
-    const baseFitting = baseLayout.truncated
-      ? []
-      : baseLayout.spans.map(span => base[span.inputIndex]!.id)
-    const enabledFitting = (fitting: readonly PresetActionId[]): PresetActionId[] =>
-      base.filter(segment => segment.enabled && fitting.includes(segment.id)).map(segment => segment.id)
-    // Choose the focus among the actions the CURRENT layout really paints: a
-    // segment dropped at this width is not an Enter target, and a focus cue
-    // that would itself push its action out falls back to the first painted
-    // enabled entry.
-    let focus = this.zone === 'actions' ? this.focusedActionId(enabledFitting(baseFitting)) : undefined
+    const base = this.baseFocus()
+    let focus = this.focusTarget
+    // A focus whose action is currently unavailable never survives to paint a
+    // cue or to become an Enter target.
+    if (focus !== base && !this.focusActionEnabled(focus)) {
+      focus = base
+      this.focusTarget = base
+    }
     for (;;) {
-      const segments = this.buildActions(focus)
+      const segments = this.barSegments(focus)
       const layout = layoutActionBarRow(segments, contentWidth)
       if (layout.truncated || layout.spans.length === 0) {
         return { line: truncateToWidth(`  ${color.textMuted(layout.text)}`, width, ''), hits: [], fitted: [], painted: [] }
@@ -1225,6 +1274,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       const painted: PresetActionId[] = []
       const line = layout.spans.map((span) => {
         const segment = segments[span.inputIndex]!
+        if (segment.kind === 'hint') return color.textMuted(span.text)
         fitted.push(segment.id)
         if (segment.enabled) {
           hits.push({ id: segment.id, start: span.startCol + 2, end: span.endCol + 2 })
@@ -1232,52 +1282,69 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
         }
         return segment.enabled ? color.primary(span.text) : color.textDim(span.text)
       }).join(color.textMuted(ACTION_BAR_SEPARATOR))
-      if (focus === undefined) {
+      const focusedAction = focus === 'use' || focus === 'set-default' || focus === 'retry' ? focus : undefined
+      if (focus === base || (focusedAction !== undefined && painted.includes(focusedAction))) {
         return { line: truncateToWidth(`  ${line}`, width, ''), hits, fitted, painted }
       }
-      const ring = enabledFitting(fitted)
-      if (ring.includes(focus)) {
-        return { line: truncateToWidth(`  ${line}`, width, ''), hits, fitted, painted }
-      }
-      if (ring.length === 0) {
-        return { line: truncateToWidth(`  ${line}`, width, ''), hits, fitted, painted }
-      }
-      // The focused action was dropped by the cue layout: repaint with the
-      // first action this layout really offers.
-      focus = ring[0]!
-      this.actionFocus = focus
+      // The cue layout dropped the focused action: return to the page base.
+      // Never silently retarget the keyboard at another business action.
+      focus = base
+      this.focusTarget = base
     }
+  }
+
+  private focusActionEnabled(focus: PresetFocus): boolean {
+    if (focus === 'use' || focus === 'set-default') return this.actionAvailability(focus) === undefined
+    if (focus === 'retry') return this.phase === 'error'
+    return true
+  }
+
+  private detailsStatus(): { text: string; error: boolean } | undefined {
+    if (this.phase === 'pending') {
+      return { text: this.pendingKind === 'default' ? 'Saving default…' : 'Applying preset…', error: false }
+    }
+    if (this.phase !== 'ready' || this.notice !== '') return undefined
+    const availability = this.writeAvailability()
+    const reason = availability.use ?? availability.setDefault
+    return reason === undefined ? undefined : { text: reason, error: false }
   }
 
   private renderDetails(width: number, budget: number): string[] {
     const row = this.rows.get(this.selectedId ?? '')
     if (row === undefined) return []
+    const bar = this.renderBar(width)
     const title = this.renderDetailsTitle(width, row)
-    const back = this.renderBack(width)
+    const status = this.detailsStatus()
+    const statusLine = status === undefined
+      ? undefined
+      : this.paintStatusLine(truncateToWidth(`  ${sanitizedPhysicalLine(status.text)}`, width, ''), status.error)
     const lines: string[] = []
     let readerRows = 0
     if (budget <= 1) {
-      lines.push(back.line)
+      // The real exit control alone on the shortest grant.
+      lines.push(bar.line)
     } else if (budget === 2) {
-      // Identity + the real way back; the reader yields whole.
-      lines.push(title, back.line)
+      // Identity + the real exit; the reader yields whole.
+      lines.push(title, bar.line)
+    } else if (statusLine !== undefined && budget === 3) {
+      lines.push(title, statusLine, bar.line)
     } else {
-      readerRows = budget - 2
+      const statusRows = statusLine === undefined ? 0 : 1
+      readerRows = Math.max(1, budget - 2 - statusRows)
       lines.push(title)
       lines.push(...this.renderReader(width, readerRows))
-      lines.push(back.line)
+      if (statusLine !== undefined) lines.push(statusLine)
+      lines.push(bar.line)
     }
     this.lastFrame = {
       width,
-      barRow: -1,
-      backRow: lines.length - 1,
-      backHit: back.complete ? { start: 2, end: 2 + visibleWidth('Back [Esc]') } : undefined,
+      barRow: lines.length - 1,
       readerLineCount: readerRows > 0 ? this.readerLines.length : 0,
       readerRows,
       listRows: 0,
-      barHits: [],
-      fittingActions: [],
-      paintedActions: [],
+      barHits: bar.hits,
+      fittingActions: bar.fitted,
+      paintedActions: bar.painted,
       statusTotalRows: 0,
       statusViewportRows: 0,
       pageMarker: this.pageMarker(),
@@ -1302,11 +1369,4 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     return this.readerLines.slice(this.detailsScroll, this.detailsScroll + rows)
   }
 
-  private renderBack(width: number): { line: string; complete: boolean } {
-    const text = 'Back [Esc]'
-    if (visibleWidth(text) + 2 > width) {
-      return { line: truncateToWidth(`  ${text}`, width, ''), complete: false }
-    }
-    return { line: `  ${color.primary('Back')}${color.textMuted(' [Esc]')}`, complete: true }
-  }
 }

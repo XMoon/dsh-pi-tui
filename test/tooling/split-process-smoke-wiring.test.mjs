@@ -546,6 +546,11 @@ test('every registry entry declares a conservative platform list and the audited
     // independent Host restart); its packed-candidate Darwin selected run
     // passed with three real Clients and two Host generations.
     'surface.sessionless-default-preset',
+    // UX PR3 v1.2: the blank-session default-sync case drives the same shared
+    // Split harness with a real `/new`, the shared Set default writer and the
+    // existing Host selection path, then an independent Host restart; its
+    // packed-candidate Darwin selected run passed.
+    'surface.blank-session-default-sync',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

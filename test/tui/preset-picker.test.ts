@@ -60,6 +60,7 @@ const hexToRgb = (hex: string): number =>
 
 const ENTER = '\r'
 const TAB = '\t'
+const SHIFT_TAB = '\x1b[Z'
 const ESC = '\x1b'
 const DOWN = '\x1b[B'
 const UP = '\x1b[A'
@@ -146,7 +147,9 @@ async function openPanel(options: HarnessOptions = {}): Promise<Harness> {
     },
     setDefault: async (id) => {
       defaults.push(id)
-      return options.setDefault === undefined ? { kind: 'saved', preset: id } : options.setDefault(id)
+      return options.setDefault === undefined
+        ? { kind: 'saved', preset: id, sync: { kind: 'not-applicable' as const } }
+        : options.setDefault(id)
     },
     retry: () => { retries += 1 },
     isCurrent: () => current,
@@ -371,9 +374,11 @@ test('Enter opens Details and writes nothing; Esc returns to the same query and 
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(view.includes('Preset details · My reviewer'), `Enter opens the highlighted Details:\n${view}`)
-  assert.ok(!view.includes('Use next') && !view.includes('Set default'), `Details carries no writer:\n${view}`)
+  assert.ok(view.includes('Use next') && view.includes('Set default') && view.includes('Back [Esc]'),
+    `Details carries the shared writer bar and Back:\n${view}`)
+  assert.ok(view.includes('Enter actions'), `the reader focus advertises the two-step Enter:\n${view}`)
   assert.deepEqual(h.applied, [])
-  assert.deepEqual(h.defaults, [])
+  assert.deepEqual(h.defaults, [], 'opening Details/reading never writes')
   h.vt.sendInput(ESC)
   await h.vt.waitForRender()
   const back = contentLines(h.vt)
@@ -440,7 +445,9 @@ test('a broken preset is readable on Details but never writable', async () => {
   const details = viewOf(h.vt)
   assert.ok(details.includes('Failed to load'), `Details names the failure:\n${details}`)
   assert.ok(details.includes('bad tools declaration'), `the complete reason must be readable:\n${details}`)
-  assert.ok(!details.includes('Use next') && !details.includes('Set default'), 'Details carries no writer')
+  assert.ok(details.includes('Use next') && details.includes('Set default'),
+    `Details still paints the shared actions as disabled:\n${details}`)
+  assert.ok(details.includes('Preset failed to load'), `the disabled reason is readable on Details:\n${details}`)
   h.vt.sendInput(ESC)
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Preset failed to load'), `the Catalog states the disabled reason:\n${viewOf(h.vt)}`)
@@ -448,7 +455,6 @@ test('a broken preset is readable on Details but never writable', async () => {
   h.vt.sendInput(ENTER)
   await h.vt.waitForRender()
   assert.deepEqual(h.applied, [], 'a broken preset can never be applied')
-  h.vt.sendInput(RIGHT)
   h.vt.sendInput(ENTER)
   await h.vt.waitForRender()
   assert.deepEqual(h.defaults, [], 'a broken preset can never become the default')
@@ -461,6 +467,7 @@ test('Use next stages exactly one apply through the focused painted action', asy
   const h = await openPanel({ hydrate: roster({ defaultId: 'standard' }) })
   h.vt.sendInput(DOWN)
   h.vt.sendInput(DOWN)
+  await h.vt.waitForRender()
   h.vt.sendInput(TAB)
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Use next [Enter]'), `the focused Use names Enter:\n${viewOf(h.vt)}`)
@@ -476,7 +483,8 @@ test('Set default writes exactly once through the original writer', async () => 
   h.vt.sendInput(DOWN)
   h.vt.sendInput(DOWN)
   h.vt.sendInput(TAB)
-  h.vt.sendInput(RIGHT)
+  await h.vt.waitForRender()
+  h.vt.sendInput(TAB)
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('Set default [Enter]'), `the focused Default names Enter:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
@@ -488,20 +496,19 @@ test('Set default writes exactly once through the original writer', async () => 
 
 test('Already the default and Settings unavailable are painted reasons with zero writes', async () => {
   const already = await openPanel({ hydrate: roster({ defaultId: 'standard' }) })
-  already.vt.sendInput(TAB)
-  already.vt.sendInput(RIGHT)
-  await already.vt.waitForRender()
   assert.ok(viewOf(already.vt).includes('Already the default'), viewOf(already.vt))
-  already.vt.sendInput(ENTER)
+  already.vt.sendInput(TAB)
+  already.vt.sendInput(TAB) // the disabled Default is skipped by the ring
+  already.vt.sendInput(ENTER) // list focus -> Details, never a hidden default write
   await already.vt.waitForRender()
   assert.deepEqual(already.defaults, [], 'a disabled Set default can never write')
+  assert.ok(viewOf(already.vt).includes('Preset details'), `the ring returned to the list:\n${viewOf(already.vt)}`)
   already.app.dispose()
 
   const unavailable = await openPanel({ hydrate: roster({ defaultId: 'standard', canSetDefault: false }) })
-  unavailable.vt.sendInput(TAB)
-  unavailable.vt.sendInput(RIGHT)
-  await unavailable.vt.waitForRender()
   assert.ok(viewOf(unavailable.vt).includes('Settings unavailable'), viewOf(unavailable.vt))
+  unavailable.vt.sendInput(TAB)
+  unavailable.vt.sendInput(TAB)
   unavailable.vt.sendInput(ENTER)
   await unavailable.vt.waitForRender()
   assert.deepEqual(unavailable.defaults, [], 'an unavailable settings owner can never write')
@@ -573,12 +580,18 @@ test('a thrown apply keeps the picker ready and states the failure (no silent su
 })
 
 test('a saved OR unconfirmed default both dismiss without an implicit retry', async () => {
-  for (const outcome of [{ kind: 'saved', preset: 'ptc' } as const, { kind: 'unconfirmed', message: 'settings write raised' } as const]) {
+  for (const outcome of [
+    { kind: 'saved', preset: 'ptc', sync: { kind: 'not-applicable' as const } } as const,
+    { kind: 'unconfirmed', message: 'settings write raised' } as const,
+  ]) {
     const h = await openPanel({ hydrate: roster({ defaultId: 'standard' }), setDefault: () => outcome })
     h.vt.sendInput(DOWN)
     h.vt.sendInput(DOWN)
+    await h.vt.waitForRender()
     h.vt.sendInput(TAB)
-    h.vt.sendInput(RIGHT)
+    await h.vt.waitForRender()
+    h.vt.sendInput(TAB)
+    await h.vt.waitForRender()
     h.vt.sendInput(ENTER)
     await h.vt.waitForRender()
     await new Promise<void>(resolve => setImmediate(resolve))
@@ -651,8 +664,9 @@ test('every painted row fits the frozen 44-column frame and the bar is last', as
   for (const line of linesOf(h.vt)) {
     assert.ok(visibleWidth(line) <= 44, `no painted row may exceed the terminal width:\n${line}`)
   }
+  assert.ok(viewOf(h.vt).includes('Tab actions'), `44 columns keeps the inert Tab hint:\n${viewOf(h.vt)}`)
   const row = rowOf(h.vt, 'Close [Esc]')
-  assert.equal(row, linesOf(h.vt).findIndex(line => line.includes('Close [Esc]')), 'the bar is painted once')
+  assert.equal(row, linesOf(h.vt).findIndex(line => line.includes('Close [Esc]')), 'the bar is painted once and keeps its whole Esc device')
   const frameBottom = linesOf(h.vt).findIndex(line => line.includes('╰'))
   assert.equal(row, frameBottom - 1, `the action bar must be the last content row:\n${viewOf(h.vt)}`)
   h.app.stop()
@@ -864,22 +878,20 @@ test('the preset slot is independent from the model slot (one logical overlay ea
 })
 
 test('a layout-dropped business action is not reachable from the keyboard', async () => {
-  // At 32 columns the action bar can only keep Use + Close: Set default is
-  // dropped as a whole segment and must not become an invisible Enter target.
-  const h = await openPanel({ width: 32, rows: 20, hydrate: roster({ defaultId: 'standard' }) })
-  h.vt.sendInput(DOWN) // standard -> ptc (Set default becomes available)
-  await h.vt.waitForRender()
+  // At 22 columns both business actions are dropped as WHOLE segments; the
+  // ring keeps the list alone and no hidden Enter target survives.
+  const h = await openPanel({ width: 22, rows: 20, hydrate: roster({ defaultId: 'standard' }) })
   const view = viewOf(h.vt)
-  assert.ok(!view.includes('Set default') && !view.includes('Default'),
-    `the narrow bar must drop the whole secondary action:\n${view}`)
+  assert.ok(!view.includes('Set default') && !view.includes('Use'), `the narrow bar drops both actions:\n${view}`)
+  assert.ok(view.includes('Close [Esc]'), `the real exit stays:\n${view}`)
   h.vt.sendInput(TAB)
-  h.vt.sendInput(RIGHT) // the ring can only reach the painted Close
   await h.vt.waitForRender()
-  assert.ok(viewOf(h.vt).includes('Close [Enter]'), `focus falls on the painted Close:\n${viewOf(h.vt)}`)
-  h.vt.sendInput(ENTER)
+  assert.ok(!viewOf(h.vt).includes('[Enter]'), `no dropped action can gain a cue:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(ENTER) // list focus -> Details, never a dropped write
   await h.vt.waitForRender()
   assert.deepEqual(h.defaults, [], 'a dropped action never writes through the keyboard')
-  assert.equal(h.closes(), 1, 'Enter ran the painted action instead')
+  assert.deepEqual(h.applied, [])
+  assert.ok(viewOf(h.vt).includes('Preset details'), `Enter stayed on the list semantics:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -1210,4 +1222,290 @@ test('a panel mounted by the previous close callback wins the new open request',
   await vt.waitForRender()
   assert.ok(!viewOf(vt).includes('C-close-callback-body'), 'the current closer closes its own panel')
   app.dispose()
+})
+
+/* ------------------------------------- details actions + flat focus ring */
+
+test('Details reader Enter first focuses the action (zero write); the next Enter writes once', async () => {
+  const h = await openPanel({ hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Enter actions'), `the reader advertises the two-step Enter:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('Use next [Enter]'), 'no action owns Enter on arrival')
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use next [Enter]'), `the first Enter only moves focus:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('Enter actions'), 'the focused action replaces the hint')
+  assert.deepEqual(h.applied, [], 'the focus move writes nothing')
+  assert.deepEqual(h.defaults, [])
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, ['standard'], 'the second Enter is the explicit write')
+  assert.equal(h.closes(), 1, 'the committed Use dismisses the panel')
+  h.app.dispose()
+})
+
+test('Details Tab/Shift+Tab walks reader → Use → Set default and keeps the reader scroll', async () => {
+  const h = await openPanel({ hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(DOWN)
+  h.vt.sendInput(DOWN) // minimal is not the default
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  h.vt.sendInput(END)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('How to use'), `the reader is at its tail first:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use next [Enter]'), `Tab reaches Use:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('How to use'), 'Tab never resets/reflows the reader position')
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Set default [Enter]'), `the next Tab reaches Default:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(SHIFT_TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use next [Enter]'), `Shift+Tab reverses the ring:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(SHIFT_TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Enter actions'), `Shift+Tab returns to the reader:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.defaults, ['minimal'], 'the focused Default is the one explicit write')
+  assert.deepEqual(h.applied, [])
+  h.app.dispose()
+})
+
+test('Details paints no Enter hint when no action is enabled (broken row)', async () => {
+  const h = await openPanel({
+    hydrate: roster({ roster: { presets: [BROKEN], defaultId: undefined }, defaultId: undefined }),
+  })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Preset failed to load'), viewOf(h.vt))
+  assert.ok(!viewOf(h.vt).includes('Enter actions'), `a dead ring must not advertise Enter:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [])
+  assert.deepEqual(h.defaults, [])
+  assert.ok(viewOf(h.vt).includes('Preset details'), 'Enter stays a no-op on the reader')
+  h.app.dispose()
+})
+
+test('Details pointer Use/Default use the ONE painted span and reject a crossed release', async () => {
+  const h = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(DOWN)
+  h.vt.sendInput(DOWN)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  // Crossed press/release: no write.
+  const useRow = rowOf(h.vt, 'Use next')
+  const useCol = cellIndexOf(h.vt, useRow, 'Use next') + 2
+  const defCol = cellIndexOf(h.vt, useRow, 'Set default') + 2
+  sgrPress(h.vt, useCol, useRow)
+  sgrRelease(h.vt, defCol, useRow)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, [])
+  assert.deepEqual(h.defaults, [])
+  // Positive pointer Use.
+  clickVisibleText(h, 'Use next')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.applied, ['minimal'], 'the complete painted Use span writes once')
+  h.app.dispose()
+
+  // Positive pointer Default on a fresh Details page.
+  const d = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  d.vt.sendInput(DOWN)
+  d.vt.sendInput(DOWN)
+  await d.vt.waitForRender()
+  d.vt.sendInput(ENTER)
+  await d.vt.waitForRender()
+  clickVisibleText(d, 'Set default')
+  await d.vt.waitForRender()
+  assert.deepEqual(d.defaults, ['minimal'], 'the complete painted Default span writes once')
+  d.app.dispose()
+})
+
+test('Details Pending keeps the page, offers only Close, and never replays the action', async () => {
+  const gate = deferred<PresetApplyOutcome>()
+  const h = await openPanel({
+    hydrate: roster({ defaultId: 'standard' }),
+    apply: async () => await gate.promise,
+  })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  const pending = viewOf(h.vt)
+  assert.ok(pending.includes('Preset details'), `Pending keeps the Details page:\n${pending}`)
+  assert.ok(pending.includes('Applying preset…'), pending)
+  assert.ok(pending.includes('Close [Esc]'), pending)
+  assert.ok(!pending.includes('Enter actions') && !pending.includes('[Enter]'),
+    `Pending offers no second write/focus:\n${pending}`)
+  h.vt.sendInput(TAB)
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.equal(h.applied.filter(id => id === 'standard').length, 1, 'Pending refuses a second dispatch')
+  h.vt.sendInput(ESC)
+  await h.vt.waitForRender()
+  assert.equal(h.closes(), 1, 'Esc closes Pending instead of going Back')
+  gate.resolve({ kind: 'switched', preset: 'standard' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.equal(h.applied.filter(id => id === 'standard').length, 1, 'the late settlement adds no write')
+  h.app.dispose()
+})
+
+test('a rejected Details write stays on Details with the complete reason in the reader', async () => {
+  const reason = 'the Host refused this preset because the tools declaration is incomplete; no retry will be attempted automatically'
+  const h = await openPanel({
+    hydrate: roster({ defaultId: 'standard' }),
+    apply: () => ({ kind: 'rejected', message: reason }),
+  })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  const view = viewOf(h.vt)
+  assert.ok(view.includes('Preset details · Standard mode'), `a refusal stays on Details:\n${view}`)
+  assert.ok(view.includes('Operation failed'), `the same reader starts with the failure:\n${view}`)
+  assert.ok(view.includes('the Host refused this preset'), `the reason is readable:\n${view}`)
+  assert.ok(view.includes('Enter actions'), `focus returns to the reader:\n${view}`)
+  assert.deepEqual(h.applied, ['standard'], 'no implicit retry')
+  h.vt.sendInput(ESC)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Agent presets'), 'Esc still goes Back')
+  h.app.dispose()
+})
+
+test('44-column Details shows Enter actions/Verb [Enter] with a whole Back [Esc]', async () => {
+  const h = await openPanel({ width: 44, rows: 20, hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(DOWN)
+  h.vt.sendInput(DOWN)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Enter actions'), `44 columns keeps the hint:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Back [Esc]'), `44 columns keeps the whole Back:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use [Enter]'), `44 columns keeps the Use cue:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Back [Esc]'), `the cue never drops Back:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Set default [Enter]'), `44 columns keeps the Default cue:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Back [Esc]'), `the Default cue never drops Back:\n${viewOf(h.vt)}`)
+  h.app.dispose()
+})
+
+test('mixed keyboard/pointer ownership: a list click returns to browsing and never reuses the action', async () => {
+  const h = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use next [Enter]'), viewOf(h.vt))
+  const reviewerRow = rowOf(h.vt, 'My reviewer')
+  const reviewerCol = cellIndexOf(h.vt, reviewerRow, 'My reviewer') + 2
+  sgrPress(h.vt, reviewerCol, reviewerRow)
+  sgrRelease(h.vt, reviewerCol, reviewerRow)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Preset details · My reviewer'),
+    `Enter after a list click opens Details, never the stale Use:\n${viewOf(h.vt)}`)
+  assert.deepEqual(h.applied, [], 'no hidden action focus survived the list click')
+  h.app.dispose()
+})
+
+test('a long rejected Details write exposes its complete scrollable reason', async () => {
+  const reason = Array.from({ length: 60 }, (_, index) => `details-cause-${index} remains readable`).join('; ')
+  const h = await openPanel({
+    width: 44,
+    rows: 20,
+    hydrate: roster({ defaultId: 'standard' }),
+    apply: () => ({ kind: 'rejected', message: reason }),
+  })
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Operation failed'), `the refusal leads the reader:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('details-cause-0'), `the reason head is readable first:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('details-cause-59'), `the tail starts below the viewport:\n${viewOf(h.vt)}`)
+  for (let page = 0; page < 12 && !viewOf(h.vt).includes('details-cause-59'); page += 1) {
+    h.vt.sendInput(PAGE_DOWN)
+    await h.vt.waitForRender()
+  }
+  assert.ok(viewOf(h.vt).includes('details-cause-59'), `PageDown reaches the complete reason tail:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Back [Esc]'), `the bar survives the scrolled error:\n${viewOf(h.vt)}`)
+  assert.deepEqual(h.applied, ['standard'], 'no automatic retry')
+  h.app.dispose()
+})
+
+test('typing from an action focus exits to the search; the inert Details hint is not a pointer target', async () => {
+  const h = await openPanel({ hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use next [Enter]'), viewOf(h.vt))
+  h.vt.sendInput('ptc')
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('PTC mode (ptc)') || viewOf(h.vt).includes('1/1'),
+    `typing returns to the query instead of being swallowed:\n${viewOf(h.vt)}`)
+  assert.deepEqual(h.applied, [], 'leaving the action focus writes nothing')
+  h.app.dispose()
+
+  const d = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  d.vt.sendInput(ENTER)
+  await d.vt.waitForRender()
+  clickVisibleText(d, 'Enter actions')
+  await d.vt.waitForRender()
+  assert.deepEqual(d.applied, [])
+  assert.deepEqual(d.defaults, [])
+  assert.ok(viewOf(d.vt).includes('Preset details'), 'the hint never navigates or writes')
+  d.app.dispose()
+})
+
+test('Details reader wheel/Tab keep their own contexts and Back preserves the Catalog target', async () => {
+  const h = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  h.vt.sendInput(DOWN)
+  h.vt.sendInput(DOWN)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  const readerRow = rowOf(h.vt, 'Description') + 2
+  const wheel = `\x1b[<65;4;${readerRow + 1}M`
+  h.vt.sendInput(wheel)
+  await h.vt.waitForRender()
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('Use next [Enter]'), `Tab reaches Use after a wheel:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(TAB)
+  await h.vt.waitForRender()
+  h.vt.sendInput(ENTER)
+  await h.vt.waitForRender()
+  assert.deepEqual(h.defaults, ['minimal'], 'the focused Default still writes its bound row')
+  h.app.dispose()
+
+  const b = await openPanel({ fullscreen: true, hydrate: roster({ defaultId: 'standard' }) })
+  b.vt.sendInput(DOWN)
+  await b.vt.waitForRender()
+  b.vt.sendInput(ENTER)
+  await b.vt.waitForRender()
+  b.vt.sendInput(ESC)
+  await b.vt.waitForRender()
+  assert.ok(viewOf(b.vt).includes('PTC mode (ptc)'), `Back keeps the selected target:\n${viewOf(b.vt)}`)
+  b.app.dispose()
 })

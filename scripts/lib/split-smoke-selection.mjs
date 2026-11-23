@@ -43,6 +43,7 @@ import { runPtySessionWriteRecovery } from '../smoke/split-process/pty-session-w
 import { runSessionlessHostFileF5B } from '../smoke/split-process/sessionless-host-file-f5b.mjs'
 import { runSessionlessDefaultModel } from '../smoke/split-process/sessionless-default-model.mjs'
 import { runSessionlessDefaultPreset } from '../smoke/split-process/sessionless-default-preset.mjs'
+import { runBlankSessionDefaultSync } from '../smoke/split-process/blank-session-default-sync.mjs'
 import { runRemoteGitBranchLocality } from '../smoke/split-process/remote-git-branch-locality.mjs'
 import { runSharedSessionInteractions } from '../smoke/split-process/shared-session-interactions.mjs'
 import { runPromptSessionFocusTurnParity } from '../smoke/split-process/prompt-session-focus-turn-parity.mjs'
@@ -218,6 +219,13 @@ const CASE_REGISTRY = Object.freeze([
     title: 'a real sessionless /preset reads the Host Catalog and stages the pending preset / persists the future default through the TWO explicit actions, survives an independent Host restart and creates no Session',
     platforms: LINUX_DARWIN,
     run: runSessionlessDefaultPreset,
+  }),
+  Object.freeze({
+    suite: 'surface',
+    id: 'surface.blank-session-default-sync',
+    title: 'a real Split blank Session /preset Set default saves the real Config owner, synchronizes that exact Session once, and a new Client after an independent Host restart reads the default back',
+    platforms: LINUX_DARWIN,
+    run: runBlankSessionDefaultSync,
   }),
   Object.freeze({
     suite: 'surface',

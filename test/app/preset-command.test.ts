@@ -352,7 +352,9 @@ test('/preset picker: Enter opens read-only Details; the explicit Use next actio
   assert.equal(t.pending.value, undefined, 'reading Details never stages a preset')
   // Back to the Catalog, then the explicit bottom action commits.
   t.vt.sendInput('\x1b')
+  await t.view()
   t.vt.sendInput('\t')
+  await t.view()
   t.vt.sendInput('\r')
   await t.view()
   assert.equal(t.pending.value, 'standard')
@@ -371,7 +373,9 @@ test('/preset picker: Enter reads Details, the explicit Use session action switc
   assert.ok(t.vt.getViewport().join('\n').includes('Preset details · Standard mode'), 'Enter opens Details')
   assert.deepEqual(t.presets.selected, [], 'reading Details never switches')
   t.vt.sendInput('\x1b')
+  await t.view()
   t.vt.sendInput('\t')
+  await t.view()
   t.vt.sendInput('\r')
   await t.view()
   assert.deepEqual(t.presets.selected, ['standard'], 'the explicit Use session action switches once')
@@ -1315,8 +1319,10 @@ test('/preset commits a Host-blank selection even when the transcript has a turn
   await t.view()
   assert.deepEqual(t.presets.selected, [], 'reading Details never writes')
   t.vt.sendInput('\x1b') // back to the Catalog
-  t.vt.sendInput('\t') // the actions zone
-  t.vt.sendInput('\r') // the explicit Use session action
+  await t.view()
+  t.vt.sendInput('\t') // the explicit Use session action
+  await t.view()
+  t.vt.sendInput('\r')
   await t.view()
   assert.deepEqual(t.presets.selected, ['standard'],
     'the Host blank selection commits despite the transcript turn')
@@ -1767,5 +1773,130 @@ test('a newer /preset started inside the mount window owns the command slot', as
   assert.equal(live[0]!.loading, 1, 'the newer invocation enters Loading through its own owner')
   assert.equal(live[0]!.rosters, 1, 'the newer invocation hydrates the surface')
   assert.equal(live[0]!.closed, 0, 'the newer mount stays the live owner')
+  t.app.dispose()
+})
+
+/* ------------------------------- shared Set default: Config + blank sync */
+
+test('typed /preset default saves Config and switches the captured blank session once', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(t.presets.selected, ['minimal'], 'the exact captured blank session switched once')
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, 'default preset set: minimal; current blank session switched to minimal')
+  assert.equal(t.pending.value, undefined, 'a live session default never stages the sessionless pending')
+  t.app.dispose()
+})
+
+test('typed /preset default reports a confirmed Config save when the blank-session sync fails', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    selectFailure: new Error('host refused the blank-session sync'),
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(t.presets.selected, [], 'the sync rejection never switches the session')
+  assert.equal(result.kind, 'success', 'the Config save remains confirmed')
+  assert.match(result.text, /default preset set: minimal; current blank session was not switched: host refused the blank-session sync/u)
+  t.app.dispose()
+})
+
+test('sessionless Set default keeps the run-local pending override and never creates a Session', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  await t.run('ptc')
+  assert.equal(t.pending.value, 'ptc')
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.equal(t.pending.value, 'ptc', 'the default save never rewrites the run-local pending preset')
+  assert.deepEqual(t.presets.selected, [], 'sessionless default sync writes no Host session')
+  assert.deepEqual(t.ensureCalls, [], 'no Session is created for the sync')
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.equal(result.text, 'default preset set: minimal')
+  t.app.dispose()
+})
+
+test('a started Session saves the default without attempting a sync', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', [{ type: 'turn/start' }]),
+    sessionBlank: false,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(t.presets.selected, [], 'a started Session is never switched')
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.equal(result.text, 'default preset set: minimal')
+  t.app.dispose()
+})
+
+test('a newer explicit Use wins over a Set default sync that settles later', async () => {
+  let releaseSettings!: () => void
+  const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve })
+  let mutateStarted = false
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    settings: {
+      get: () => undefined,
+      mutate: async () => {
+        mutateStarted = true
+        await settingsGate
+      },
+    },
+  })
+  const defaultRun = t.runCommand('preset', 'default minimal') as Promise<{ kind: string; text: string }>
+  await waitFor(async () => mutateStarted)
+  await t.run('ptc')
+  assert.deepEqual(t.presets.selected, ['ptc'], 'the newer Use switches the session first')
+  releaseSettings()
+  const result = await defaultRun
+  assert.deepEqual(t.presets.selected, ['ptc'], 'the older default sync never overwrites the newer Use')
+  assert.match(result.text, /default preset set: minimal; current session was not switched/u)
+  t.app.dispose()
+})
+
+test('a confirmed default stays saved when the optional standing refresh throws', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+    refreshCatalog: async (request) => {
+      if (request.target.kind === 'preset') throw new Error('standing refresh exploded')
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(t.presets.selected, ['minimal'], 'the blank session sync still ran')
+  assert.equal(result.kind, 'success', 'the Config save is not reclassified as unconfirmed')
+  assert.match(result.text, /default preset set: minimal; current blank session switched to minimal/u)
+  assert.ok(!/unconfirmed|rolled back/iu.test(result.text))
   t.app.dispose()
 })

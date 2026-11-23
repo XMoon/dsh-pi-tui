@@ -131,27 +131,33 @@ async function filterPreset(client, preset, label) {
   await waitForScreenText(client, preset, `${label} filtered ${preset}`)
 }
 
-/** The explicit `Use next`: Tab reaches the actions zone, Enter runs the
- *  focused primary action (no row Enter ever writes). */
+/** The explicit `Use next`: one Tab reaches the Use action, Enter runs it
+ *  (no row Enter ever writes). */
 async function useNext(client, preset, label) {
   await openPresetPanel(client, label)
   await filterPreset(client, preset, label)
   client.send('\t')
-  await sleep(150)
+  await waitForCondition(async () => {
+    const frame = await frameText(client)
+    return frame.includes('Use next [Enter]') || frame.includes('Use [Enter]')
+  }, `${label} Use focus`, 60_000)
   client.send('\r')
   await waitForScreenGone(client, 'Agent presets', `${label} Catalog closed on Use next`)
   await assertNoWriteFailure(client, label)
 }
 
-/** The explicit `Set default`: Tab reaches the actions zone, Right moves to the
- *  secondary writer, Enter commits it. */
+/** The explicit `Set default`: the flat ring reaches Use on the first Tab and
+ *  Set default on the second; Enter commits the focused secondary writer. */
 async function setDefault(client, preset, label) {
   await openPresetPanel(client, label)
   await filterPreset(client, preset, label)
   client.send('\t')
-  await sleep(150)
-  client.send('\x1b[C')
-  await sleep(150)
+  await sleep(200)
+  client.send('\t')
+  await waitForCondition(async () => {
+    const frame = await frameText(client)
+    return frame.includes('Set default [Enter]') || frame.includes('Set [Enter]')
+  }, `${label} Default focus`, 60_000)
   client.send('\r')
   await waitForScreenGone(client, 'Agent presets', `${label} Catalog closed on Set default`)
   await assertNoWriteFailure(client, label)

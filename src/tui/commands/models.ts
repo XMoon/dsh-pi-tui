@@ -27,6 +27,7 @@ import type {
 import type {
   PresetApplyOutcome,
   PresetDefaultOutcome,
+  PresetDefaultSyncOutcome,
   PresetPickerHandle,
   PresetPresentation,
 } from '../../app/command/preset-presentation.ts'
@@ -157,6 +158,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   // It is DISTINCT from `presetOperationToken` (which owns the WRITE): the
   // surface token decides which picker is allowed to hydrate/repaint/close.
   let presetSurfaceToken = 0
+  // The latest `/preset default` operation: a NEWER default save owns the
+  // optional blank-Session synchronization, so an older save that settles
+  // later must never switch the Session to its superseded id.
+  let presetDefaultOperationToken = 0
   // The ONE mounted `/preset` panel handle of this registration lifetime. It
   // records the presentation slot only — never a second read/write owner — so
   // a newer invocation (typed included) can retire the previous panel while an
@@ -713,28 +718,70 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           runner.config.presetDefault.get() ?? presets.defaultId()
         const presetErrorText = (error: unknown): string => safeErrorMessage(error)
         /**
-         * The ONE new-session-default writer: the typed `/preset default <id>`
-         * verb and the picker's `Set as default for new sessions` row call THIS
-         * function, so the validate/config-write/standing-refresh contract is
-         * never duplicated. It persists the default for FUTURE sessions only;
-         * the current Session, the run-local pending preset and the live catalog
-         * are untouched.
+         * The ONE shared `Set default` writer used by the typed verb, the PiTui
+         * panel and the TSP native presenter. It validates through the roster,
+         * persists the Config default, and only then — with the Config write
+         * CONFIRMED — attempts ONE bounded switch of the exact Session captured
+         * at operation start when that Session is still blank/current and no
+         * newer operation won. A sync failure never rolls back or reclassifies
+         * the saved default.
          */
-        const setPresetDefault = async (id: string): Promise<void> => {
+        const setPresetDefault = async (id: string): Promise<PresetDefaultSyncOutcome> => {
+          const syncScope = runner.captureSessionScope()
+          const syncEligible = syncScope.sessionId !== undefined && runner.sessionBlank() === true
+          const defaultToken = ++presetDefaultOperationToken
+          const useTokenAtStart = presetOperationToken
           // Validate before writing settings. `code` is legal when the current
           // DSH roster contains a custom preset with that id; an unknown code
           // remains an ordinary unknown-preset failure and is never aliased.
           await presets.resolve(id, runner.signal)
           await runner.config.presetDefault.set(id)
+          let sync: PresetDefaultSyncOutcome = { kind: 'not-applicable' }
+          if (syncEligible) {
+            const stillEligible = defaultToken === presetDefaultOperationToken
+              && useTokenAtStart === presetOperationToken
+              && runner.isSessionScopeCurrent(syncScope)
+              && runner.sessionBlank() === true
+            if (!stillEligible) {
+              sync = { kind: 'skipped-stale', reason: 'the session changed while the default was being saved' }
+            } else {
+              try {
+                // The ORIGINAL session-selection writer and Host transition
+                // gate; no second select path and no Session creation here.
+                const outcome = await applyPresetSelection(id, syncScope)
+                if (outcome.kind === 'switched') sync = { kind: 'applied', preset: outcome.preset }
+                else if (outcome.kind === 'superseded') sync = { kind: 'skipped-stale', reason: 'a newer selection won' }
+                else if (outcome.kind === 'locked') sync = { kind: 'skipped-stale', reason: 'the session had already started' }
+                else if (outcome.kind === 'rejected') sync = { kind: 'failed', message: outcome.message }
+                else if (outcome.kind === 'indeterminate') {
+                  sync = { kind: 'failed', message: `${outcome.message} (the switch may have committed)` }
+                } else {
+                  sync = { kind: 'failed', message: 'the blank session was no longer switchable' }
+                }
+              } catch (error) {
+                sync = { kind: 'failed', message: presetErrorText(error) }
+              }
+            }
+          }
           // The saved default only affects sessions created from now on. A
           // standing catalog refresh follows ONLY when no higher-precedence
           // override (run-local pending or launch-time --preset) masks the
-          // new default — the masked case must not re-read a preset the next
-          // session will not compose on.
+          // new default. Its failure cannot unsave the confirmed Config fact.
           if (runner.effectivePresetId === undefined) {
-            const outcome = await runner.refreshStandingCatalog(id, 'preset')
-            if (outcome.kind === 'applied' && outcome.notice !== undefined) notifyOwned(outcome.notice, 'error')
+            try {
+              const outcome = await runner.refreshStandingCatalog(id, 'preset')
+              if (outcome.kind === 'applied' && outcome.notice !== undefined) notifyOwned(outcome.notice, 'error')
+            } catch (error) {
+              notifyOwned(`standing catalog refresh: ${presetErrorText(error)}`, 'error')
+            }
           }
+          return sync
+        }
+        const defaultSyncSuffix = (sync: PresetDefaultSyncOutcome): string => {
+          if (sync.kind === 'applied') return `; current blank session switched to ${sync.preset}`
+          if (sync.kind === 'skipped-stale') return `; current session was not switched (${sync.reason})`
+          if (sync.kind === 'failed') return `; current blank session was not switched: ${sync.message}`
+          return ''
         }
         const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
         const verb = matched?.[1] ?? ''
@@ -743,18 +790,6 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           // Re-read the live preset at use time: the roster await above must not
           // let a stale capture describe the current Session.
           return { kind: 'success', text: `preset: ${runner.currentPreset() ?? 'none'} · default: ${await displayedDefault()}` }
-        }
-        if (verb === 'default') {
-          if (!runner.config.presetDefault.available()) return { kind: 'error', text: 'settings service unavailable' }
-          if (rest === '') {
-            return { kind: 'success', text: `default preset: ${await displayedDefault()}` }
-          }
-          try {
-            await setPresetDefault(rest)
-          } catch (error) {
-            return { kind: 'error', text: presetErrorText(error) }
-          }
-          return { kind: 'success', text: `default preset set: ${rest}` }
         }
         // Selecting swaps the composition; only a blank session may do so — a
         // started conversation's history was produced under its preset's tools.
@@ -900,6 +935,21 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           }
           return outcome
         }
+        if (verb === 'default') {
+          if (!runner.config.presetDefault.available()) return { kind: 'error', text: 'settings service unavailable' }
+          if (rest === '') {
+            return { kind: 'success', text: `default preset: ${await displayedDefault()}` }
+          }
+          let sync: PresetDefaultSyncOutcome
+          try {
+            sync = await setPresetDefault(rest)
+          } catch (error) {
+            return { kind: 'error', text: presetErrorText(error) }
+          }
+          // The Config save is authoritative even when the optional blank-
+          // Session switch fails; the typed result states both facts.
+          return { kind: 'success', text: `default preset set: ${rest}${defaultSyncSuffix(sync)}` }
+        }
         if (verb !== '') {
           try {
             const outcome = await applyPresetSelection(verb)
@@ -1012,8 +1062,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           if (!runner.config.presetDefault.available()) {
             return { kind: 'unconfirmed', message: 'settings service unavailable' }
           }
+          let sync: PresetDefaultSyncOutcome
           try {
-            await setPresetDefault(id)
+            sync = await setPresetDefault(id)
           } catch (error) {
             // A newer `/preset` owns the surface: its notice describes a
             // different invocation.
@@ -1023,8 +1074,8 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             return { kind: 'unconfirmed', message }
           }
           if (surfaceToken !== presetSurfaceToken) return { kind: 'superseded' }
-          notifyOwned(`new-session default set: ${id} — changes new sessions only; the current session is unchanged`, 'info')
-          return { kind: 'saved', preset: id }
+          notifyOwned(`new-session default set: ${id}${defaultSyncSuffix(sync)}`, sync.kind === 'failed' ? 'error' : 'info')
+          return { kind: 'saved', preset: id, sync }
         }
         /** Read (or re-read) the roster through the original owner. Never a
          *  second catalog read: the same scope, signal, token and supersession

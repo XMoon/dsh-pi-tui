@@ -47,13 +47,27 @@ export type PresetApplyOutcome =
   | { readonly kind: 'indeterminate'; readonly message: string }
 
 /**
+ * The optional blank-Session synchronization AFTER a confirmed Config default
+ * save (the dsh-web behavior): only an exact, still-blank, still-current
+ * Session captured at operation start may be switched, and a failure here never
+ * rolls back or reclassifies the already-saved default.
+ */
+export type PresetDefaultSyncOutcome =
+  | { readonly kind: 'not-applicable' }
+  | { readonly kind: 'applied'; readonly preset: string }
+  | { readonly kind: 'skipped-stale'; readonly reason: string }
+  | { readonly kind: 'failed'; readonly message: string }
+
+/**
  * The `Set as default for new sessions` settlement. `unconfirmed` is deliberate: the
  * Config owner's write is an awaited settings mutation that raises on failure,
  * so a throw proves NEITHER commit nor rollback — the presenter must not claim
  * a failed save left the previous default in place, and must not retry it.
+ * A `saved` result always carries the SEPARATE sync result; a sync failure is
+ * never reported as an unconfirmed Config write.
  */
 export type PresetDefaultOutcome =
-  | { readonly kind: 'saved'; readonly preset: string }
+  | { readonly kind: 'saved'; readonly preset: string; readonly sync: PresetDefaultSyncOutcome }
   | { readonly kind: 'superseded' }
   | { readonly kind: 'unconfirmed'; readonly message: string }
 

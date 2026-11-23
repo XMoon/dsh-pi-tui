@@ -122,11 +122,18 @@ current frame really built.
 `Set default` and the typed `/preset default <id>` verb call the SAME extracted
 writer: validate through `presets.resolve`, write through the existing Config
 owner, and refresh the standing catalog only when no higher-precedence override
-masks the new default. It affects future Sessions only; it never recomposes the
-current Session and never rewrites the run-local pending preset. The Config
-write is an awaited settings mutation, not a `WriteOutcome`, so a raise is
-reported transparently as UNCONFIRMED — never as a proven rollback and never
-retried automatically; the panel dismisses and the next read is authoritative.
+masks the new default. After that Config write is CONFIRMED, the writer may
+attempt ONE switch of the exact current blank Session captured when the
+operation started, using the existing session-selection path; it never creates a
+Session, never switches a started Session, never rewrites the run-local pending
+preset, and never retries or rolls back. The result separates the confirmed
+default save from the optional sync (`applied`, `not-applicable`,
+`skipped-stale`, `failed`); a newer Use wins. The Config write is an awaited
+settings mutation, not a `WriteOutcome`, so a raise is reported transparently as
+UNCONFIRMED — never as a proven rollback and never retried automatically; the
+panel dismisses and the next read is authoritative. This is the shared
+business semantics for every entry, including the TSP-native presenter; the TSP
+page layout and keyboard state machine are unchanged.
 
 Browsing, searching, activating a card and reading Details only change local
 presentation state. Closing never cancels an admitted business operation.

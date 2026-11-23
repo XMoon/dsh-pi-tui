@@ -1253,7 +1253,7 @@ test('native Preset: the default write is explicit, scoped and dismisses (saved 
   await waitUntil('default write admitted', () => saved.defaults.length === 1)
   assert.deepEqual(saved.defaults, ['reviewer'])
   await waitUntil('the pending default copy', () => props(saved.pane).message === 'Saving default…')
-  saved.settleDefault({ kind: 'saved', preset: 'reviewer' })
+  saved.settleDefault({ kind: 'saved', preset: 'reviewer', sync: { kind: 'not-applicable' } })
   await waitUntil('saved dismisses', () => picker(saved.pane) === undefined)
   // An UNCONFIRMED settings write dismisses too: a raise proves no rollback, so the
   // next read — never this panel's snapshot — is authoritative.
@@ -1464,7 +1464,7 @@ test('native Preset: a late default settlement never touches the replaced panel'
   await waitUntil('the new panel is ready', () => props(pane).state === 'ready'
     && props(pane).selected === 'preset:reviewer')
   const newPanel = picker(pane)!.id
-  m.settleDefault({ kind: 'saved', preset: 'ptc' })
+  m.settleDefault({ kind: 'saved', preset: 'ptc', sync: { kind: 'not-applicable' } })
   await settle(300)
   assert.equal(picker(pane)?.id, newPanel, 'the newer panel is still the mounted one')
   assert.equal(props(pane).state, 'ready')

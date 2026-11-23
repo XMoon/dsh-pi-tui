@@ -149,7 +149,8 @@ test('real /preset: immediate Loading → Ready Catalog → pointer browse/Detai
   sgrRelease(t.vt, selectedCol, selectedRow)
   await waitForText(t, 'Preset details · PTC mode')
   assert.ok(viewOf(t.vt).includes('ID') && viewOf(t.vt).includes('ptc'), viewOf(t.vt))
-  assert.ok(!viewOf(t.vt).includes('Use next'), 'Details carries no writer')
+  assert.ok(viewOf(t.vt).includes('Use next') && viewOf(t.vt).includes('Set default') && viewOf(t.vt).includes('Enter actions'),
+    `Details carries the shared writer bar and the Enter hint:\n${viewOf(t.vt)}`)
   assert.equal(t.pending.value, undefined)
 
   // The Back row is the pointer way back; query/selection survive.
@@ -289,7 +290,9 @@ test('the explicit Set default action runs the ONE Config writer and refreshes o
   t.vt.sendInput(DOWN) // standard -> ptc
   await t.vt.waitForRender()
   t.vt.sendInput(TAB)
-  t.vt.sendInput(RIGHT) // Use next -> Set default
+  await t.vt.waitForRender()
+  t.vt.sendInput(TAB) // Use next -> Set default
+  await t.vt.waitForRender()
   t.vt.sendInput(ENTER)
   await waitUntil(() => mutated.length === 1, 'the Config write')
   assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }])
@@ -315,7 +318,9 @@ test('the explicit Set default action runs the ONE Config writer and refreshes o
   masked.vt.sendInput(DOWN)
   await masked.vt.waitForRender()
   masked.vt.sendInput(TAB)
-  masked.vt.sendInput(RIGHT)
+  await masked.vt.waitForRender()
+  masked.vt.sendInput(TAB)
+  await masked.vt.waitForRender()
   masked.vt.sendInput(ENTER)
   await waitUntil(() => mutated.length === 1, 'the masked Config write')
   assert.deepEqual(masked.refreshes, [], 'a masked default change must not refresh the standing catalog')
@@ -404,7 +409,9 @@ test('an unconfirmed default write dismisses the panel without claiming a rollba
   t.vt.sendInput(DOWN)
   await t.vt.waitForRender()
   t.vt.sendInput(TAB)
-  t.vt.sendInput(RIGHT)
+  await t.vt.waitForRender()
+  t.vt.sendInput(TAB)
+  await t.vt.waitForRender()
   t.vt.sendInput(ENTER)
   await waitUntil(() => !viewOf(t.vt).includes('Agent presets'), 'the unconfirmed dismissal')
   assert.equal(writes, 1, 'the failed settings mutation is never retried')
@@ -565,4 +572,53 @@ test('AltScreen pointer negatives: stale press after resize, disabled action and
   await t.vt.waitForRender()
   assert.equal(t.pending.value, undefined, 'a press/release mismatch writes nothing')
   assert.ok(viewOf(t.vt).includes('Agent presets'), 'a mismatched release also does not close')
+})
+
+test('real /preset: Details reader Enter focuses first; the second Enter writes the shared Use', async () => {
+  const t = setup({ width: 100, height: 30 })
+  await t.run('')
+  await waitForText(t, 'Standard mode (standard)')
+  t.vt.sendInput('\r')
+  await waitForText(t, 'Preset details · Standard mode')
+  assert.equal(t.pending.value, undefined, 'opening Details never writes')
+  assert.ok(viewOf(t.vt).includes('Enter actions'), viewOf(t.vt))
+  t.vt.sendInput('\r')
+  await t.vt.waitForRender()
+  assert.ok(viewOf(t.vt).includes('Use next [Enter]'), `the first Enter only focuses:\n${viewOf(t.vt)}`)
+  assert.equal(t.pending.value, undefined, 'the focus move is zero-write')
+  t.vt.sendInput('\r')
+  await waitUntil(() => t.pending.value === 'standard', 'the explicit Details Use write')
+  await waitUntil(() => !viewOf(t.vt).includes('Agent presets'), 'the panel closes after the write')
+  assert.deepEqual(t.ensureCalls, [], 'Use next still creates no Session')
+})
+
+test('real /preset: Details Tab→Tab→Enter saves the default and syncs the blank Session', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    width: 100,
+    height: 30,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  await t.run('')
+  await waitForText(t, 'Standard mode (standard)')
+  t.vt.sendInput('\x1b[B') // standard -> ptc
+  await t.vt.waitForRender()
+  t.vt.sendInput('\r')
+  await waitForText(t, 'Preset details · PTC mode')
+  t.vt.sendInput('\t')
+  await t.vt.waitForRender()
+  t.vt.sendInput('\t')
+  await t.vt.waitForRender()
+  assert.ok(viewOf(t.vt).includes('Set default [Enter]'), `the flat ring reaches Default:\n${viewOf(t.vt)}`)
+  t.vt.sendInput('\r')
+  await waitUntil(() => mutated.length === 1, 'the Config default write')
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }])
+  await waitUntil(() => t.presets.selected.includes('ptc'), 'the blank Session sync')
+  assert.deepEqual(t.presets.selected, ['ptc'], 'one shared selection writer ran once')
+  await waitForText(t, 'current blank session switched to ptc')
 })
