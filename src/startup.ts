@@ -409,6 +409,22 @@ export interface TuiWebControlStartup {
   markCoordinatorMounted?(): void
 }
 
+/** The public headless ACP control CLI verbs (PR-C ACP headless CLI). */
+export type AcpControlVerb = 'status' | 'enable' | 'disable'
+
+/** One immutable headless ACP control intent parsed by the nested CLI grammar. */
+export interface AcpControlIntent {
+  readonly verb: AcpControlVerb
+}
+
+/** The headless ACP control CLI arm: no TUI, no Client, no Host start. */
+export interface TuiAcpControlStartup {
+  readonly kind: 'acp-control'
+  readonly control: AcpControlIntent
+  /** Same one-shot cold-ready handshake as the client arm. */
+  markCoordinatorMounted?(): void
+}
+
 /** The trusted-profile ACP stdio arm: one internal stdio Adapter child, no TUI. */
 export interface TuiAcpStdioStartup {
   readonly kind: 'acp-stdio'
@@ -421,6 +437,7 @@ export type TuiDaemonStartupValues =
   | TuiDaemonClientStartup
   | TuiDaemonControlStartup
   | TuiWebControlStartup
+  | TuiAcpControlStartup
   | TuiAcpStdioStartup
 
 /**
@@ -663,7 +680,7 @@ Examples:
   // selects the Direct/daemon backend and never opens a TUI/Client/Host.
   const acp = withUsageExitCode(program.command('acp').description('Run the local ACP front door.'))
   acp.action(() => {
-    acp.error('error: an acp command is required (stdio)')
+    acp.error('error: an acp command is required (stdio, status, enable or disable)')
   })
   const acpStdio = withUsageExitCode(acp.command('stdio').description('bridge ACP v1 bytes over stdio to the running Host listener'))
   acpStdio.action(() => {
@@ -673,9 +690,27 @@ Examples:
     if (isHostOnlyRole()) acpStdio.error('error: acp commands are not available in a Host-only process')
     publishDaemonService(ctx, { kind: 'acp-stdio' })
   })
+  // The headless ACP management verbs sit beside the byte bridge. Each verb
+  // publishes one immutable acp-control intent for the manager row; none of
+  // them selects a backend, opens a TUI/Client or starts a Host.
+  const addAcpControlVerb = (name: AcpControlVerb, description: string): Command => {
+    const command = withUsageExitCode(acp.command(name).description(description))
+    command.action(() => {
+      rejectSessionFlags(program, command, 'acp')
+      if (isHostOnlyRole()) command.error('error: acp commands are not available in a Host-only process')
+      publishDaemonService(ctx, { kind: 'acp-control', control: { verb: name } })
+    })
+    return command
+  }
+  addAcpControlVerb('status', 'show the running Host\'s local ACP listener state')
+  addAcpControlVerb('enable', 'enable the running Host\'s local ACP listener')
+  addAcpControlVerb('disable', 'disable the running Host\'s local ACP listener')
   acp.addHelpText('after', `
 Examples:
   dsh --profile pi-tui acp stdio
+  dsh --profile pi-tui acp status
+  dsh --profile pi-tui acp enable
+  dsh --profile pi-tui acp disable
 `)
 
   program.addHelpText('after', `
@@ -690,6 +725,7 @@ Examples:
   dsh --profile pi-tui web status            inspect the Host's Web frontend
   dsh --profile pi-tui web url               print the authenticated Web URL
   dsh --profile pi-tui acp stdio             bridge an external ACP v1 client to the local Host
+  dsh --profile pi-tui acp status            inspect the Host's local ACP listener
 `)
   return program
 }
@@ -1012,6 +1048,17 @@ function acpStdioNotMountedMessage(): string {
   return 'dsh-pi-tui acp stdio: ACP_STDIO_LAUNCHER_UNAVAILABLE'
 }
 
+/** The actionable error for a committed ACP management startup whose launcher
+ *  row never mounted. It must never carry the stdio bridge's code, because the
+ *  requested command is not the byte relay. */
+function acpControlNotMountedMessage(profile: string): string {
+  return [
+    `dsh-pi-tui ${bundleVersionLabel(CURRENT_DSH_REQUIREMENT.since)} was invoked for an acp CLI command, but the daemon launcher row did not mount.`,
+    'The pi-tui-daemon-launcher row failed to import/apply or stayed pending on tuiDaemonStartup (see the loader warnings above); DSH app-boot treats that as an optional plugin failure.',
+    `This installation cannot run the acp CLI; reinstall the profile or fix its composition, then re-run: dsh --profile ${shellQuoteProfile(profile)} acp status`,
+  ].join('\n')
+}
+
 /**
  * Publish the daemon startup service. The daemon-launcher row injects it,
  * spawns exactly ONE foreground Client OS process and waits for its real exit.
@@ -1042,9 +1089,11 @@ function publishDaemonService(ctx: Context, values: TuiDaemonStartupValues): voi
         ? controlNotMountedMessage()
         : values.kind === 'web-control'
           ? webControlNotMountedMessage(runningProfileName(ctx))
-          : values.kind === 'acp-stdio'
-            ? acpStdioNotMountedMessage()
-            : coordinatorNotMountedMessage(runningProfileName(ctx))
+          : values.kind === 'acp-control'
+            ? acpControlNotMountedMessage(runningProfileName(ctx))
+            : values.kind === 'acp-stdio'
+              ? acpStdioNotMountedMessage()
+              : coordinatorNotMountedMessage(runningProfileName(ctx))
       process.stderr.write(`\n${message}\n\n`)
       ctx.get('appExit')?.(1)
     })

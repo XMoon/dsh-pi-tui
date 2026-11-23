@@ -120,17 +120,21 @@ type LocalRequestInit = RequestInit & { readonly cache?: 'no-store' }
  * attributed to this observation.
  *
  * @param verified - the already authenticated Host record and in-memory cookie.
+ * @param signal - an optional owner cancellation (the management CLI lifecycle);
+ *   it is combined with the fixed observation timeout and never extends it.
  * @returns the validated live listener status, or `undefined` when unprovable.
  */
 export async function observeAuthenticatedLocalAcpStatus(
   verified: VerifiedLocalHost,
+  signal?: AbortSignal,
 ): Promise<PiTuiAcpAccessStatus | undefined> {
+  const timeout = AbortSignal.timeout(LOCAL_ACP_STATUS_TIMEOUT_MS)
   const request: LocalRequestInit = {
     method: 'GET',
     headers: { cookie: verified.cookie },
     redirect: 'manual',
     cache: 'no-store',
-    signal: AbortSignal.timeout(LOCAL_ACP_STATUS_TIMEOUT_MS),
+    signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
   }
   let response: Response
   try {

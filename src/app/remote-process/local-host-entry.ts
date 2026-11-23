@@ -63,6 +63,10 @@ import {
   createLocalAcpStatusHandler,
 } from './local-acp-status.ts'
 import {
+  LOCAL_ACP_CONTROL_ROUTE,
+  createLocalAcpControlHandler,
+} from './local-acp-control-route.ts'
+import {
   LOCAL_WEB_CONTROL_ROUTE,
   createLocalWebControlHandler,
 } from './local-web-control-route.ts'
@@ -1274,8 +1278,9 @@ interface HostWebAccessService {
 interface PublishedLocalHost {
   readonly identity: LocalInstanceRecord
   /** Release ALL entry-owned exact routes (identity echo, the read-only
-   *  workspace-object observation, the read-only ACP status observation and
-   *  the headless Web CLI adapter) before the official shutdown runs. */
+   *  workspace-object observation, the read-only ACP status observation, the
+   *  headless ACP CLI adapter and the headless Web CLI adapter) before the
+   *  official shutdown runs. */
   unregisterRoutes(): Promise<void>
 }
 
@@ -1346,6 +1351,7 @@ async function publishLocalHost(
   let unregisterIdentity: (() => Promise<void>) | undefined
   let unregisterWorkspaceObject: (() => Promise<void>) | undefined
   let unregisterAcpStatus: (() => Promise<void>) | undefined
+  let unregisterAcpControl: (() => Promise<void>) | undefined
   let unregisterWebControl: (() => Promise<void>) | undefined
   try {
     unregisterIdentity = connection.fetch.register({
@@ -1377,6 +1383,15 @@ async function publishLocalHost(
       requestBody: 'buffered',
       fetch: createLocalAcpStatusHandler(instanceId, acpController),
     })
+    // The headless ACP CLI adapter joins the SAME official Owner-only admission
+    // and the SAME publication lifetime. It borrows the ONE Host-entry ACP
+    // runtime controller and never holds ACP state of its own.
+    unregisterAcpControl = connection.fetch.register({
+      path: LOCAL_ACP_CONTROL_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: createLocalAcpControlHandler(instanceId, acpController),
+    })
     // The headless Web CLI adapter joins the SAME official Owner-only admission
     // and the SAME publication lifetime. It borrows the existing Web service
     // and never holds status, tokens or a mutation queue of its own.
@@ -1397,6 +1412,14 @@ async function publishLocalHost(
       body: JSON.stringify({ instanceId, path: scope.profileRealpath }),
     })
     await waitForRefusal(`${origin}${LOCAL_ACP_STATUS_ROUTE}`)
+    // The write probe carries a legal `enable` body under THIS instance so a
+    // broken Owner fence would actually toggle the listener: the following
+    // status/daemon verdicts are real business negatives, never a shape check.
+    await waitForRefusal(`${origin}${LOCAL_ACP_CONTROL_ROUTE}`, 10_000, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema: 1, instanceId, op: 'enable' }),
+    })
     await waitForRefusal(`${origin}${LOCAL_WEB_CONTROL_ROUTE}`)
     await waitForRefusal(`${origin}${LOCAL_WEB_CONTROL_ROUTE}`, 10_000, {
       method: 'POST',
@@ -1424,6 +1447,11 @@ async function publishLocalHost(
       // The registry was never committed; cleanup continues below.
     }
     try {
+      await unregisterAcpControl?.()
+    } catch {
+      // The registry was never committed; cleanup continues below.
+    }
+    try {
       await unregisterAcpStatus?.()
     } catch {
       // The registry was never committed; cleanup continues below.
@@ -1445,6 +1473,7 @@ async function publishLocalHost(
     identity,
     async unregisterRoutes(): Promise<void> {
       await unregisterWebControl?.()
+      await unregisterAcpControl?.()
       await unregisterAcpStatus?.()
       await unregisterWorkspaceObject?.()
       await unregisterIdentity?.()
