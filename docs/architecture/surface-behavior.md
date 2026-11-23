@@ -691,9 +691,13 @@ Settings workspace lease and mounts `Settings · Host · ACP access` on its firs
 really-painted frame (Direct included). There is no PiTui overlay, no second
 settings screen and no silent Rows-level fallback: a mount failure closes the
 lease and is the command's real error. The TSP renderer keeps its ONE native
-`ui.picker` plus ONE read-only Details Reading over the SAME
-application-level presentation request, so the action vocabulary cannot fork
-between renderers and neither entry reaches a Host service directly.
+`ui.picker` plus ONE read-only Details Reading over the ORIGINAL
+`AcpAccessRequest` presentation request. The two renderers do NOT share a
+presenter or an action vocabulary: the PiTui page adds Copy, the next-start
+preference and the risk confirmation, while the TSP picker keeps its own frozen
+status/enable/disable/Details actions. Their common authority is the ONE
+`AcpAccessPort` Host controller, and neither entry reaches a Host service
+directly.
 
 On the page the Host state admits exactly:
 

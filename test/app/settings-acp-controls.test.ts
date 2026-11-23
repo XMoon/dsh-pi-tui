@@ -77,6 +77,8 @@ interface Harness {
   readonly setReadiness: (readiness: 'ready' | 'stale' | 'unavailable') => void
   /** Simulate a Connection generation change (Host A -> Host B). */
   readonly bumpGeneration: () => void
+  /** Release every held status read (the preflight and the new Host's read). */
+  readonly releaseAcpReads: () => void
   readonly dispose: () => void
 }
 
@@ -88,6 +90,8 @@ function setup(options: {
   readonly pref?: AcpStartupPreferenceState | undefined
   readonly readiness?: 'ready' | 'stale' | 'unavailable'
   readonly profile?: string | undefined
+  /** Hold every `getStatus` after the page-entry read (the live preflight). */
+  readonly holdSecondAcpRead?: boolean
 } = {}): Harness {
   const columns = options.columns ?? 200
   const rows = options.rows ?? 44
@@ -121,6 +125,9 @@ function setup(options: {
     setEnabledGenerations: [] as unknown[],
     gate: undefined as Promise<void> | undefined,
     release: undefined as (() => void) | undefined,
+    reads: 0,
+    readGate: undefined as Promise<void> | undefined,
+    releaseRead: undefined as (() => void) | undefined,
   }
   const pref = {
     state: 'pref' in options ? options.pref : { autoStart: false, revision: 1, userOverridden: false },
@@ -134,7 +141,14 @@ function setup(options: {
   let generation: object | undefined = { id: 1 }
   const generationListeners = new Set<() => void>()
   const acpAccess: AcpAccessPort = {
-    getStatus: async () => acp.status,
+    getStatus: async () => {
+      acp.reads += 1
+      if (options.holdSecondAcpRead === true && acp.reads >= 2) {
+        acp.readGate ??= new Promise<void>(resolve => { acp.releaseRead = resolve })
+        await acp.readGate
+      }
+      return acp.status
+    },
     setEnabled: async (enabled: boolean, expectedGeneration?: unknown) => {
       if (expectedGeneration !== undefined && !Object.is(generation, expectedGeneration)) {
         throw new Error('superseded: the Host generation changed before dispatch')
@@ -269,6 +283,7 @@ function setup(options: {
       generation = { id: ((generation as { id?: number } | undefined)?.id ?? 0) + 1 }
       for (const listener of [...generationListeners]) listener()
     },
+    releaseAcpReads: () => { acp.releaseRead?.(); acp.releaseRead = undefined },
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -438,6 +453,27 @@ test('without a proven Profile the page states the limitation and offers no Copy
   await settle(h, 'the staged disable confirmation', frame => frame.includes('Disable the local ACP listener?'))
   await key(h, '\x1b')
   assert.deepEqual(h.copied, [])
+  h.dispose()
+})
+
+test('a Host replacement during the live preflight is a definitive zero-write Not changed', async () => {
+  const h = setup({ status: { state: 'disabled' }, holdSecondAcpRead: true })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /^> Enable ACP/mu)
+  await key(h, ENTER) // Enable ACP: the live preflight read is held unresolved
+  assert.match(h.view(), /Waiting for the answer…/u)
+  // Host A is replaced by Host B while the preflight has NOT invoked a write.
+  h.acp.status = { state: 'enabled' }
+  h.bumpGeneration()
+  await settle(h, 'the definitive pre-dispatch word', frame => /Status\s+Not changed/u.test(frame))
+  assert.match(h.view(), /the Host changed before the request was sent/u)
+  assert.doesNotMatch(h.view(), /Outcome unconfirmed/u)
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'no Host write was invoked before the preflight settled')
+  h.releaseAcpReads()
+  await settle(h, 'the replacement Host fact', frame => /Listener\s+Enabled/u.test(frame))
+  assert.match(h.view(), /^> Copy client command/mu, 'the replacement Host state owns the action')
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'the stale preflight reply never dispatches')
   h.dispose()
 })
 

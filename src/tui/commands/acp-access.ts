@@ -16,12 +16,15 @@
  *      → one authoritative status re-read → the menu is reprojected
  * ```
  *
- * It is a SESSIONLESS, LOCAL command: typing `/acp` never creates a Session,
- * never submits a prompt, never starts a second Host, never changes the default
- * backend and never persists the next-launch `autoStart` preference. Both
- * presentation entries share ONE business authority: the `AcpAccessPort` Host
- * controller. A PiTui composition never falls back to the retired short
- * SettingsList overlay.
+ * It is a SESSIONLESS, LOCAL command: typing `/acp` itself creates no Session,
+ * submits no prompt, starts no second Host, changes no default backend and
+ * performs no Host read or write. The next-launch `autoStart` preference is
+ * never written by the runtime toggle; on PiTui that preference is reachable
+ * as an EXPLICIT, revision-checked action inside the page `/acp` opens. Both
+ * presentation entries share ONE business authority across their different
+ * renderer UX: the `AcpAccessPort` Host controller (the TSP picker keeps its
+ * own frozen presentation request). A PiTui composition never falls back to
+ * the retired short SettingsList overlay.
  *
  * @module tui/commands/acp-access
  */

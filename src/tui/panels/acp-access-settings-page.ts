@@ -304,6 +304,15 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   /** The identity of the ONE admitted page task; a superseded settlement
    *  paints nothing. */
   private writeSerial = 0
+  /**
+   * The ACTUAL stage of the ONE pending runtime operation. `preflight` means
+   * no Host mutation has been invoked yet (a Host replacement is a definitive
+   * zero-write `Not changed`); `invoked` means `setEnabled` was really called
+   * and its outcome is unknown until it settles. Invocation — not promise
+   * fulfillment — is the dividing line: a rejected call may still have been
+   * applied by the Host.
+   */
+  private runtimeStage: 'preflight' | 'invoked' | undefined
   private awaitingPaint = true
   private paint: PagePaint | undefined
   private pressed: { readonly paint: PagePaint; readonly target: PagePaint['targets'][number] } | undefined
@@ -452,18 +461,22 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** A Connection generation change revokes every Host-derived fact and action
-   *  and re-reads the CURRENT Host. A dispatched runtime write keeps settling
-   *  in its own owner; its UI presentation is retired as unconfirmed here. */
+   *  and re-reads the CURRENT Host. A runtime operation that had not invoked
+   *  `setEnabled` yet is a DEFINITIVE zero-write `Not changed`; only an invoked
+   *  call whose outcome is unknown is retired as unconfirmed. */
   private onGenerationChanged(): void {
     if (this.disposed || this.host.kind === 'split-host-only') return
     this.readSerial += 1
     this.host = { kind: 'checking' }
     if (this.phase === 'pending-runtime') {
-      // The request belonged to the replaced Host: retire this page's right to
-      // paint its result (its owner still settles and diagnoses) and state the
-      // only honest outcome.
+      // Retire this page's right to paint the old task's result (its owner
+      // still settles and diagnoses). The stage decides the only honest word:
+      // a preflight that never invoked the mutation wrote NOTHING.
       this.writeSerial += 1
-      this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running' }
+      this.runtimeOutcome = this.runtimeStage === 'invoked'
+        ? { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running' }
+        : { word: 'Not changed', tone: 'muted', detail: 'the Host changed before the request was sent' }
+      this.runtimeStage = undefined
       this.phase = 'ready'
     } else if (this.phase === 'confirm-disable' || this.phase === 'loading' || this.phase === 'settled') {
       this.phase = 'ready'
@@ -699,9 +712,11 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * painted observation, ONE live preflight read under the SAME generation,
    * then at most ONE `setEnabled(target, generation)` and ONE authoritative
    * read-back. A state that already reached the target, or that is changing or
-   * unavailable, dispatches ZERO writes and states `Not changed`; a request
-   * whose receipt/read-back is lost is `Outcome unconfirmed` and is never
-   * retried.
+   * unavailable, dispatches ZERO writes and states `Not changed`. The
+   * preflight/`setEnabled` boundary decides the failure vocabulary: a Host
+   * replacement BEFORE the invocation is a definitive zero-write
+   * `Not changed`; once invoked, a lost receipt/read-back or a Host
+   * replacement is `Outcome unconfirmed` and is never retried.
    */
   private dispatchRuntime(target: boolean): void {
     const host = this.hostCurrent()
@@ -719,6 +734,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     const serial = ++this.writeSerial
+    this.runtimeStage = 'preflight'
     this.phase = 'pending-runtime'
     this.runtimeOutcome = undefined
     this.selectedId = undefined
@@ -735,10 +751,12 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       }
       const currentAfterPreflight = Object.is(generation, this.intents.currentGeneration())
       if (this.disposed || serial !== this.writeSerial) {
+        // The preflight settles AFTER the page/request was retired: the Host
+        // mutation was never invoked (the stage is still `preflight`).
         this.intents.diagnose('acp access runtime write', {
           target,
-          dispatched: false,
-          phase: 'preflight',
+          invoked: false,
+          stage: 'preflight',
           settled: currentAfterPreflight ? (before?.state ?? 'unknown') : 'host-changed',
           ...(preflightFailure === undefined ? {} : { preflightFailure }),
         })
@@ -766,6 +784,9 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
         this.commitPreDispatchRefusal(before, `the listener already reports ${listenerWord(before).text}`)
         return
       }
+      // From here on the mutation is INVOKED: a rejection may still have been
+      // applied by the Host, so the outcome is classified conservatively.
+      this.runtimeStage = 'invoked'
       let failure: string | undefined
       try {
         await this.intents.setEnabled(target, generation)
@@ -785,11 +806,15 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       const stillCurrent = sameGeneration && Object.is(generation, this.intents.currentGeneration())
       if (this.disposed || serial !== this.writeSerial) {
         // The page that started the write is gone: the WRITE OWNER still
-        // records the real outcome so a dispatched write is never silently
-        // lost (no notice/overlay may be revived).
+        // records what really happened so an invoked write is never silently
+        // lost (no notice/overlay may be revived). `invoked` is the honest
+        // fact; a fulfilled/rejected RPC is reported separately and never
+        // treated as proof that the Host accepted the request.
         this.intents.diagnose('acp access runtime write', {
           target,
-          dispatched: failure === undefined,
+          invoked: true,
+          stage: 'post-invoke',
+          result: failure === undefined ? 'returned' : 'rejected',
           ...(failure === undefined ? {} : { failure }),
           settled: stillCurrent ? (status?.state ?? 'unknown') : 'host-changed',
           ...(readFailure === undefined ? {} : { readFailure }),
@@ -810,6 +835,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   /** ZERO runtime writes were dispatched: state the real Host fact (when the
    *  preflight produced one) plus the clear `Not changed` word. */
   private commitPreDispatchRefusal(status: AcpAccessStatus | undefined, detail: string): void {
+    this.runtimeStage = undefined
     if (status !== undefined) {
       this.host = { kind: 'current', status, generation: this.intents.currentGeneration() }
       this.runtimeOutcome = { word: 'Not changed', tone: 'muted', detail }
@@ -834,6 +860,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     readFailure: string | undefined,
     stillCurrent: boolean,
   ): void {
+    this.runtimeStage = undefined
     if (!stillCurrent) {
       this.host = { kind: 'checking' }
       this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running; its outcome cannot be attributed' }

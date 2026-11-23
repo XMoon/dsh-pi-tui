@@ -52,6 +52,8 @@ interface PageHarnessOptions {
   readonly disconnected?: boolean
   /** Hold every status read; the case resolves each one by index. */
   readonly holdRead?: boolean
+  /** Hold every status read AFTER the page-entry read (read #2 onward). */
+  readonly holdSecondRead?: boolean
 }
 
 interface PageHarness {
@@ -114,7 +116,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       // The real Remote adapter's single-call fence rejects a read while no
       // Host generation exists.
       if (generation.value === undefined) throw new Error('the Client is not connected to a Host')
-      if (options.holdRead === true) {
+      if (options.holdRead === true || (options.holdSecondRead === true && reads >= 2)) {
         return await new Promise<AcpAccessStatus>((resolve, reject) => {
           heldReads.push(result => { if (result instanceof Error) reject(result); else resolve(result) })
         })
@@ -397,6 +399,55 @@ test('a Host generation change during a pending write is Outcome unconfirmed and
   h.releaseWrite()
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'the old Host request is never replayed against the new one')
+  h.close()
+})
+
+test('a Host replacement DURING the preflight is a definitive zero-write Not changed', async () => {
+  // The second status read is the mandatory live preflight: hold it unresolved
+  // and replace the Host before `setEnabled` can be invoked.
+  const h = await mount({ status: { state: 'disabled' }, holdSecondRead: true })
+  assert.match(h.frame(), /^> Enable ACP/mu)
+  assert.equal(h.reads(), 1, 'only the page-entry read settled')
+  await h.key('\r') // Enable ACP: the live preflight is now held
+  assert.equal(h.reads(), 2)
+  assert.match(h.frame(), /Waiting for the answer…/u)
+  h.bumpGeneration() // Host A -> B while the preflight promise is unresolved
+  await h.flush()
+  assert.deepEqual(h.writes(), [], 'ZERO Host writes were invoked before the preflight settled')
+  assert.match(h.frame(), /Status\s+Not changed/u, 'a pre-dispatch abort is definitive, never unconfirmed')
+  assert.match(h.frame(), /the Host changed before the request was sent/u)
+  assert.doesNotMatch(h.frame(), /Outcome unconfirmed/u)
+  // The stale preflight reply is discarded and the CURRENT Host is read.
+  h.resolveRead(0, { state: 'disabled' })
+  await h.flush()
+  assert.deepEqual(h.writes(), [], 'the stale reply never dispatches either')
+  h.resolveRead(1, { state: 'enabled' })
+  await h.flush()
+  assert.match(h.frame(), /Listener\s+Enabled/u, 'the replacement Host owns the painted fact')
+  assert.match(h.frame(), /^> Copy client command/mu, 'only the new Host state admits its action')
+  const diagnostic = h.diagnoses().find(entry => entry.label === 'acp access runtime write')
+  assert.ok(diagnostic !== undefined)
+  assert.equal(diagnostic.detail.invoked, false)
+  assert.equal(diagnostic.detail.stage, 'preflight')
+  h.close()
+})
+
+test('a retired INVOKED write reports invocation honestly, never a false no-dispatch', async () => {
+  // The call is really invoked and even applied; the page leaves before the
+  // rejected reply arrives. `invoked` must not be derived from fulfillment.
+  const h = await mount({ status: { state: 'disabled' }, holdWrite: true, writeFailureAfterApply: 'the reply was lost' })
+  await h.key('\r') // Enable ACP: setEnabled is invoked and held
+  assert.match(h.frame(), /Waiting for the answer…/u)
+  await h.key('\x1b') // leave the page while the invoked write is in flight
+  assert.equal(h.doneCalls(), 1)
+  h.releaseWrite() // the Host applies the request, then the reply throws
+  await h.flush()
+  assert.deepEqual(h.writes(), [true], 'the invoked write is dispatched exactly once and never replayed')
+  const diagnostic = h.diagnoses().find(entry => entry.label === 'acp access runtime write')
+  assert.ok(diagnostic !== undefined, 'the retired page still diagnoses the invoked write')
+  assert.equal(diagnostic.detail.invoked, true, 'invocation is the fact, not the rejected promise')
+  assert.equal(diagnostic.detail.result, 'rejected')
+  assert.equal(typeof diagnostic.detail.failure, 'string')
   h.close()
 })
 
