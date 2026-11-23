@@ -166,9 +166,11 @@ specialist-page contract below).
   no complete Esc affordance leaves the row inert.
 - **Each browse level publishes at most ONE forward pointer target.** On the
   category rail the fully painted `open`/`focus` hint is the pointer analogue of
-  `Enter`/`Right`; on the Rows level the painted `Right`/`Enter <action>` pair is
-  ONE span over the cells the LAST frame really drew, and its release replays the
-  CURRENT state's Enter ladder (`handleInput('\r')`). The action word is the
+  `Enter`/`Right`; on the Rows level each painted `Right`/`Enter <action>` half
+  is targetable, and when both halves are on screen they join into ONE span over
+  the cells the LAST frame really drew (a half the width dropped or truncated is
+  simply absent). Its release replays the CURRENT state's Enter ladder
+  (`handleInput('\r')`). The action word is the
   row's real forward action: a mountable embedded specialist page is `open`, a
   row whose specialist page cannot be composed or opened stays `details` (never
   a false `open`), a writable row is `choose` unless an edit commit is pending

@@ -4118,6 +4118,8 @@ test('the Rows bar routes the real forward action: writable chooses, specialist 
   openForwardRows(h, 'general')
   assert.match(paintedBar(h), /Left back · Right choose · Back \[Esc\]/u,
     'a writable row advertises its real Choose action')
+  assert.doesNotMatch(paintedBar(h), /Enter choose/u,
+    'the dropped Enter half is absent; the painted Right half is the ONE target')
 
   // The painted Choose is the pointer analogue of the keyboard Enter.
   clickBarHint(h, 'Right choose')
@@ -4130,7 +4132,8 @@ test('the Rows bar routes the real forward action: writable chooses, specialist 
   const bar = paintedBar(h)
   assert.match(bar, /Left back · Right open · Back \[Esc\]/u,
     'a mountable specialist advertises Open, not the old Details lie')
-  assert.doesNotMatch(bar, /details/u)
+  assert.doesNotMatch(bar, /details|Enter open/u,
+    'no false Details and no target for the dropped Enter half')
 
   // The row click stays select-only: it can never mount the page.
   const lines = plain(h, 44).split('\n')
