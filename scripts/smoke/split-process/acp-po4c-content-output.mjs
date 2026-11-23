@@ -704,9 +704,10 @@ export async function runAcpPo4cContentOutput(context) {
     // The capacity connection owns its own new Session, whose first prompt also
     // projects that Session's durable title; what must NEVER appear is RESULT
     // content or an image from the over-budget frame.
-    assert(capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'
-      || READ_ONLY_PROJECTION_KINDS.has(update?.sessionUpdate)),
-    `PO-4C: an over-budget frame delivers no result content (got ${JSON.stringify(capacityUpdates.map(update => update?.sessionUpdate))})`)
+    const capacityDeliveredNoResultContent = capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'
+      || READ_ONLY_PROJECTION_KINDS.has(update?.sessionUpdate))
+    assert(capacityDeliveredNoResultContent,
+      `PO-4C: an over-budget frame delivers no result content (got ${JSON.stringify(capacityUpdates.map(update => update?.sessionUpdate))})`)
     assert(!JSON.stringify(capacity.entries).includes('"type":"image"'),
       'PO-4C: an over-budget frame never delivers any image content')
     const afterOverflow = await runPrompt(sibling, siblingSession, MARKERS.health,
@@ -788,7 +789,7 @@ export async function runAcpPo4cContentOutput(context) {
         overBudgetCode: overflowRecord.code,
         overBudgetImageCount: 2,
         overBudgetStoredBytes: [mixedRef.bytes, toolRef.bytes],
-        noContentOrStopReason: capacityUpdates.every(update => update?.sessionUpdate === 'tool_call')
+        noContentOrStopReason: capacityDeliveredNoResultContent
           && capacityResponses.length === 0,
         siblingAfterOverflow: true,
         tuiAlive: tuiAfterOverflow === sessionId,
