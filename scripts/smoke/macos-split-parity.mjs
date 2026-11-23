@@ -1662,7 +1662,10 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     assert(init?.result?.agentInfo?.name === 'dsh-pi-tui', `${label}: agentInfo.name must be dsh-pi-tui`)
     assert(init?.result?.agentInfo?.version === manifest.version,
       `${label}: agentInfo.version must be the installed bundle version ${manifest.version}`)
-    assert(init?.result?.agentCapabilities?.loadSession === false, `${label}: loadSession must stay false`)
+    // G-ACP2-PR2: the same Host serves canonical history/roster reads.
+    assert(init?.result?.agentCapabilities?.loadSession === true, `${label}: loadSession must be advertised`)
+    assert(init?.result?.agentCapabilities?.sessionCapabilities?.list !== undefined,
+      `${label}: sessionCapabilities.list must be advertised`)
     assert(init?.result?.agentCapabilities?.sessionCapabilities?.resume !== undefined,
       `${label}: sessionCapabilities.resume must be advertised`)
     assert(init?.result?.agentCapabilities?.sessionCapabilities?.close !== undefined,

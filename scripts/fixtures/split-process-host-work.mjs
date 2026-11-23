@@ -63,6 +63,10 @@ const SCENARIOS = new Set([
   // itself keeps its original rewriting behaviour for the TUI cases that prove
   // the authoritative-block-end supersede.
   'long-turn-stream',
+  // G-ACP2-PR2 protocol projection: the scripted provider's three real turns
+  // (official `todo_write`, one real `subagent` child, provider usage, then a
+  // step-pressure compaction) are the durable facts an ACP client consumes.
+  'acp-projection',
   // G-ACP2 transient streaming: the ONLY scripted provider whose deltas and
   // durable block agree. Its first delta is held so a case can prove the ACP
   // chunk precedes the durable append, and one prompt selects a deliberately
@@ -1232,7 +1236,18 @@ class C1Model extends LlmAdapter {
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
+    // G-ACP2-PR2: the real provider step counter of the protocol-projection
+    // scenario (one extra turn per official tool result).
+    this.projectionStep = new Map()
     this.childHeld = false
+  }
+
+  projectionStepOf(sessionId) {
+    return this.projectionStep.get(sessionId) ?? 0
+  }
+
+  setProjectionStep(sessionId, step) {
+    this.projectionStep.set(sessionId, step)
   }
 
   /** Emit ONE standard provider tool-call block (the same chunk shape every
@@ -1262,6 +1277,11 @@ class C1Model extends LlmAdapter {
     const modelSwitchContext = process.env.C1_MODEL_S1_ROUTE === model
       ? { context: { contextWindow: 200_000 } }
       : {}
+    // G-ACP2-PR2: the protocol-projection scenario needs a REAL declared route
+    // capacity so the official token meter can pair provider usage with it.
+    const projectionRouteContext = this.scenario === 'acp-projection' && model === 'c1'
+      ? { context: { contextWindow: Number(process.env.C1_PROJECTION_CONTEXT_WINDOW ?? 200_000) } }
+      : {}
     const modelS1Reasoning = process.env.C1_MODEL_S1_ROUTE === model
       ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
       : {}
@@ -1270,6 +1290,7 @@ class C1Model extends LlmAdapter {
       id: model,
       name: model,
       ...modelSwitchContext,
+      ...projectionRouteContext,
       ...modelS1Reasoning,
       ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
       ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
@@ -1457,6 +1478,95 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `po4c answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `po4c answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'acp-projection') {
+      // The compaction summarizer runs with its OWN purpose: the answer must be
+      // a plain text summary, never one of the scenario's tool turns.
+      if (options.purpose === 'compaction') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'projection compaction summary' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'projection compaction summary' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // A delegated CHILD session answers its own task; it never delegates again.
+      if (userText.includes('projection-child-task')) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `projection child answer ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `projection child answer ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // G-ACP2-PR2 protocol projection: three REAL provider turns per Session.
+      // Step 0 writes the official whole-list todo snapshot through the real
+      // `todo_write` tool, step 1 delegates one REAL subagent child through the
+      // `subagent` tool, and step 2 answers with text plus its own provider
+      // usage so the official token meter has a real occupancy sample.
+      const step = this.projectionStepOf(sessionId)
+      this.setProjectionStep(sessionId, step + 1)
+      if (step === 0) {
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `projection-todo-${sessionId}`,
+            name: 'todo_write',
+            arguments: JSON.stringify({
+              todos: [
+                { content: 'inspect the projection', status: 'in_progress' },
+                { content: 'prove the replay', status: 'pending' },
+              ],
+            }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (step === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `projection-child-${sessionId}`,
+            name: 'subagent',
+            arguments: JSON.stringify({
+              description: 'projection child',
+              prompt: `projection-child-task ${token}`,
+            }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      // The first prompt's CLOSING answer reports a LARGE provider occupancy,
+      // so the official step-pressure check compacts the context before the
+      // NEXT prompt's first step. Any later answer reports a small real sample.
+      // The closing answer of the FIRST prompt is deliberately large and
+      // reports the scripted provider's occupancy: the next step's official
+      // pressure check then has a real surface to compact (the retained tail is
+      // the big assistant node, the prefix is the system prompt + first user
+      // message), which is what makes a REAL durable compaction happen.
+      const closingAnswer = step === 2
+        ? {
+          text: `projection answer ${token} ${'projection long context '.repeat(6_000)}`,
+          usage: {
+            inputTokens: Number(process.env.C1_PROJECTION_PRESSURE_TOKENS ?? 150_000),
+            outputTokens: 20,
+            totalTokens: Number(process.env.C1_PROJECTION_PRESSURE_TOKENS ?? 150_000) + 20,
+          },
+        }
+        : { text: `projection answer ${token}`, usage: { inputTokens: 1_200, outputTokens: 20, totalTokens: 1_220 } }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: closingAnswer.text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: closingAnswer.text } }
+      yield { type: 'usage', usage: closingAnswer.usage }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }

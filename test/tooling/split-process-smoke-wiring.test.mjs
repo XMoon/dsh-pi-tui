@@ -544,6 +544,11 @@ test('every registry entry declares a conservative platform list and the audited
     // platform-specific ACP endpoint and one official SDK client; it has real
     // packed-candidate Darwin and Linux selected runs.
     'acp.native-question-form',
+    // G-ACP2/PR2 protocol projection drives only the shared Split harness, the
+    // platform-specific ACP endpoint, official SDK clients and the real scripted
+    // provider (todo tool, subagent child, provider usage, step-pressure
+    // compaction); no platform-specific primitive beyond that shared seam.
+    'acp.protocol-projection',
     // The Host accepted-input history search case drives only the shared Split
     // harness (tmux PTY, authenticated Host, real official Session admission,
     // two real Client PIDs and a clean Host restart); it uses no

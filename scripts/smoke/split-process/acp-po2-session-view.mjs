@@ -439,7 +439,9 @@ export async function runAcpPo2SessionView(context) {
     assert(initA?.result?.agentInfo?.name === 'dsh-pi-tui', 'B: agentInfo.name must be dsh-pi-tui')
     assert(initA?.result?.agentInfo?.version === installedVersion,
       `B: agentInfo.version must be the installed bundle version ${installedVersion}`)
-    assert(initA?.result?.agentCapabilities?.loadSession === false, 'B: loadSession must stay false')
+    // G-ACP2-PR2: canonical history/roster reads are advertised when bound.
+    assert(initA?.result?.agentCapabilities?.loadSession === true, 'B: a read-seam-ready Host advertises session/load')
+    assert(initA?.result?.agentCapabilities?.sessionCapabilities?.list !== undefined, 'B: and session/list')
     assert(initA?.result?.agentCapabilities?.sessionCapabilities?.resume !== undefined,
       'B: sessionCapabilities.resume must be advertised when the Session View is installed')
     assert(initA?.result?.agentCapabilities?.sessionCapabilities?.close !== undefined,
@@ -866,18 +868,21 @@ export async function runAcpPo2SessionView(context) {
 
     // M) PO-3A admits prompts only on an ATTACHED View: a prompt from a
     //    connection that holds no View for that Session stays fail-closed.
-    //    session/list stays unsupported.
+    //    session/list reads the authorized roster without owning any View.
     const { client: connM } = await openInitialized(scopeDir, 'M unsupported methods')
     const promptReject = await sendRequest(connM, 2, 'session/prompt', { sessionId: sessionA, prompt: [{ type: 'text', text: 'hi' }] })
     assert(promptReject?.error?.code === -32602,
       `M: an unattached session/prompt must be -32602 (got ${JSON.stringify(promptReject?.error ?? promptReject?.result)})`)
     assert(promptReject?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED',
       `M: an unattached session/prompt must name LOCAL_ACP_VIEW_NOT_OWNED (got ${JSON.stringify(promptReject?.error?.data)})`)
-    const listReject = await sendRequest(connM, 3, 'session/list', {})
-    assert(listReject?.error?.code === -32042,
-      `M: session/list must be -32042 (got ${JSON.stringify(listReject?.error ?? listReject?.result)})`)
-    assert(listReject?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY',
-      `M: session/list must name LOCAL_ACP_SESSION_NOT_READY (got ${JSON.stringify(listReject?.error?.data)})`)
+    const listed = await sendRequest(connM, 3, 'session/list', {})
+    const listedIds = (listed?.result?.sessions ?? []).map(session => session.sessionId)
+    assert(Array.isArray(listed?.result?.sessions),
+      `M: session/list must serve the authorized roster (got ${JSON.stringify(listed?.error ?? listed?.result)})`)
+    assert(listedIds.includes(sessionA),
+      `M: the authorized roster must carry this Host's root Session (got ${JSON.stringify(listedIds)})`)
+    assert((listed?.result?.sessions ?? []).every(session => typeof session.cwd === 'string' && session.cwd.startsWith('/')),
+      'M: every listed row carries a standard absolute cwd')
     connM.close()
     await connM.closed
 

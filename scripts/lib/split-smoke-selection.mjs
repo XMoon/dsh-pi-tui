@@ -98,6 +98,7 @@ import { runAcpScopedMcpB0 } from '../smoke/split-process/acp-scoped-mcp-b0.mjs'
 import { runAcpScopedMcpB1 } from '../smoke/split-process/acp-scoped-mcp-b1.mjs'
 import { runAcpMultiSessionB2 } from '../smoke/split-process/acp-multi-session-b2.mjs'
 import { runAcpV1ConformanceB3 } from '../smoke/split-process/acp-v1-conformance-b3.mjs'
+import { runAcpProtocolProjection } from '../smoke/split-process/acp-protocol-projection.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -706,6 +707,14 @@ const CASE_REGISTRY = Object.freeze([
     title: 'an installed Host negotiates the ACP v1 entry, advertises only real Session capabilities, serves a standard prompt and refuses unadvertised methods without Host side effects',
     platforms: LINUX_DARWIN,
     run: runAcpV1ConformanceB3,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.protocol-projection',
+    title: 'one real Host projects its official Session roster, canonical history, todo plan, occupancy, compaction and verified subagent child onto the stable ACP v1 wire, replaying a full load only after the drain and never sending a supplemental frame to an unnegotiated client',
+    platforms: LINUX_DARWIN,
+    run: runAcpProtocolProjection,
   }),
 ])
 

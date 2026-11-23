@@ -374,7 +374,9 @@ export async function runAcpPo3aTurnEvents(context) {
     assert(initB?.result?.protocolVersion === 1, 'B: initialize must answer protocolVersion 1')
     assert(initB?.result?.agentInfo?.version === installedVersion,
       `B: agentInfo.version must be the installed bundle version ${installedVersion}`)
-    assert(initB?.result?.agentCapabilities?.loadSession === false, 'B: loadSession must stay false')
+    // G-ACP2-PR2: canonical history/roster reads are advertised when bound.
+    assert(initB?.result?.agentCapabilities?.loadSession === true, 'B: a read-seam-ready Host advertises session/load')
+    assert(initB?.result?.agentCapabilities?.sessionCapabilities?.list !== undefined, 'B: and session/list')
     assert(initB?.result?.agentCapabilities?.promptCapabilities?.image === false,
       'B: inline image prompts must stay unadvertised')
     assert(initB?.result?.agentCapabilities?.sessionCapabilities?.resume !== undefined,

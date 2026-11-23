@@ -388,8 +388,9 @@ export async function runAcpV1ConformanceB3(context) {
 
     const main = await openAcp('B3-03 main SDK', { captureClientReverseRequests: false })
     assert(main.initialized.protocolVersion === 1, 'B3-03: SDK initialize must answer protocolVersion 1')
-    assert(await main.client.request('session/list', {}).then(() => false).catch(error => error?.code === -32042),
-      'B3-03: the initialized SDK connection must be live and session/list must remain fail-closed')
+    const listedRoster = await main.client.request('session/list', {})
+    assert(Array.isArray(listedRoster?.sessions),
+      `B3-03: the initialized SDK connection must serve the authorized Session roster (got ${JSON.stringify(listedRoster)})`)
 
     // B3-04: client capability combinations never manufacture server auth,
     // fs/terminal, list/load/delete/fork or a positive MCP HTTP/SSE promise.
@@ -408,15 +409,18 @@ export async function runAcpV1ConformanceB3(context) {
     assert(main.initialized.agentInfo?.version === installation.manifest.version,
       `B3-04: agentInfo.version must be the installed bundle version, got ${JSON.stringify(main.initialized.agentInfo?.version)}`)
     assert(JSON.stringify(main.initialized.authMethods) === '[]', `B3-04: authMethods must be empty: ${JSON.stringify(main.initialized.authMethods)}`)
-    assert(mainCaps?.loadSession === false, 'B3-04: loadSession must be false')
+    assert(mainCaps?.loadSession === true,
+      'B3-04: a Host with the official Controller/Query read seams must advertise session/load')
     assert(mainCaps?.sessionCapabilities?.resume !== undefined && mainCaps.sessionCapabilities.close !== undefined,
       'B3-04: a real Host View must advertise resume/close')
-    assert(mainCaps?.sessionCapabilities?.list === undefined
-      && mainCaps?.sessionCapabilities?.load === undefined
+    assert(mainCaps?.sessionCapabilities?.list !== undefined,
+      'B3-04: and the authorized Session roster')
+    assert(mainCaps?.sessionCapabilities?.load === undefined
       && mainCaps?.sessionCapabilities?.delete === undefined
       && mainCaps?.sessionCapabilities?.fork === undefined
       && mainCaps?.sessionCapabilities?.additionalDirectories === undefined
-      && mainCaps?.sessionCapabilities?.options === undefined,
+      && mainCaps?.sessionCapabilities?.options === undefined
+      && mainCaps?.sessionCapabilities?.systemPrompt === undefined,
     `B3-04: unsupported Session capabilities must stay absent: ${JSON.stringify(mainCaps?.sessionCapabilities)}`)
     assert(mainCaps?.promptCapabilities?.audio === false && mainCaps?.promptCapabilities?.embeddedContext === false,
       'B3-04: audio/embeddedContext prompt capabilities must be false')
@@ -547,13 +551,19 @@ export async function runAcpV1ConformanceB3(context) {
     const settingsBefore = existsSync(settingsPath) ? readFileSync(settingsPath, 'utf8') : undefined
     const probeBefore = await control('probe')
     const listed = await optional.request(2, 'session/list', {})
-    assert(listed.error?.code === -32042 && listed.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY',
-      `B3-07: session/list: ${JSON.stringify(listed)}`)
-    const loaded = await optional.request(3, 'session/load', { sessionId: sessionA, cwd: hostCwd, mcpServers: [] })
-    assert(loaded.error?.code === -32601, `B3-07: session/load must be method-not-found: ${JSON.stringify(loaded)}`)
+    assert(Array.isArray(listed.result?.sessions),
+      `B3-07: session/list must serve the authorized roster: ${JSON.stringify(listed)}`)
+    // `session/load` is a real method now, but a Session another connection
+    // already holds must stay fail-closed: no second View, no Host side effect.
+    const loaded = await optional.request(3, 'session/load', { sessionId: sessionB, cwd: hostCwd, mcpServers: [] })
+    assert(loaded.error?.code === -32602
+      && (loaded.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED' || loaded.error?.data?.code === 'LOCAL_ACP_VIEW_BUSY'),
+    `B3-07: a foreign-attached Session must never get a second View: ${JSON.stringify(loaded)}`)
     const setMode = await optional.request(4, 'session/set_mode', { sessionId: sessionB, modeId: 'x' })
     assert(setMode.error?.code === -32601, `B3-07: session/set_mode must be method-not-found: ${JSON.stringify(setMode)}`)
-    const unknownMethod = await optional.request(5, '_/b3-method', {})
+    const removed = await optional.request(5, 'session/delete', { sessionId: sessionB })
+    assert(removed.error?.code === -32601, `B3-07: session/delete must be method-not-found: ${JSON.stringify(removed)}`)
+    const unknownMethod = await optional.request(6, '_/b3-method', {})
     assert(unknownMethod.error?.code === -32601, `B3-07: unknown method must be method-not-found: ${JSON.stringify(unknownMethod)}`)
     optional.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionA } })
     assert(await optional.silent(200), 'B3-07: session/cancel must not receive a response')

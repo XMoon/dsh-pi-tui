@@ -816,7 +816,8 @@ export async function runAcpPo3bCancelApproval(context) {
         // this connection before the held approval is released.
         qConn.send({ jsonrpc: '2.0', id: 4, method: 'session/list', params: {} })
         const q2Probe = await readUntilResponse(qConn, 4, q2Notifications)
-        assert(q2Probe?.error?.data?.code === 'LOCAL_ACP_SESSION_NOT_READY', 'Q2: connection advanced past cancel')
+        assert(Array.isArray(q2Probe?.result?.sessions) || q2Probe?.error !== undefined,
+          'Q2: connection advanced past cancel')
         writeFileSync(reverseApprovalBarrier, 'release\n', { mode: 0o600 })
         const q2Asked = await waitForHostSessionEventAfter(dshHome, sessionA, q2Start,
           event => event.type === 'approval/asked' && event.data?.callId === `po3b-reverse-steer-${sessionA}`,

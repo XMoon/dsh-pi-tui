@@ -48,6 +48,11 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from '../../src/app/remote-process/local-acp-session-view.ts'
+import type {
+  AcpHistoryHeader,
+  AcpSessionHistory,
+  AcpSessionReadRow,
+} from '../../src/app/remote-process/local-acp-projections.ts'
 import type { AcpModelCurrentness, AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import type { AcpScopedMcpCurrentness, AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
 import { AcpModelError } from '../../src/app/remote-process/local-acp-model-selection.ts'
@@ -1157,6 +1162,12 @@ function makeFakeAccess(options: {
     callId: string,
     answer: AcpQuestionAnswer,
   ) => AcpContinuedAnswerOutcome
+  readonly sessionRead?: boolean
+  readonly sessionRows?: readonly AcpSessionReadRow[]
+  readonly sessionHistory?: (sessionId: string) => AcpSessionHistory
+  readonly sessionHeaderFacts?: (sessionId: string) => AcpHistoryHeader | undefined
+  readonly contextPressureValue?: unknown
+  readonly sessionTodosValue?: unknown
 } = {}): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
@@ -1167,6 +1178,9 @@ function makeFakeAccess(options: {
   removedMessageIds: string[]
   cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }>
   modelSelections: AcpModelOptionRequest[]
+  sessionListReads: () => number
+  sessionHistoryReads: () => string[]
+  resolveCalls: () => string[]
   turnFence: { openTurnStartSeq: number | null; lastTurn: number }
   staleCancel: { value: boolean }
   pendingInbox: Set<string>
@@ -1184,6 +1198,9 @@ function makeFakeAccess(options: {
   let observeCalls = 0
   const staleCancel = { value: false }
   let counter = 0
+  let sessionListReads = 0
+  const sessionHistoryReads: string[] = []
+  const resolveCalls: string[] = []
   return {
     access: {
       hasQuestionService() {
@@ -1216,6 +1233,7 @@ function makeFakeAccess(options: {
         return { kind: 'created' as const, sessionId: id }
       },
       async resolveAgent(sessionId: string) {
+        resolveCalls.push(sessionId)
         const agent = agents.get(sessionId)
         return agent === undefined
           ? { error: { code: 'session/not-found', message: 'not found' } }
@@ -1291,6 +1309,28 @@ function makeFakeAccess(options: {
         if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session) return { kind: 'stale' }
         return { kind: 'current' as const, openTurn: turnFence.openTurnStartSeq === null ? null : turnFence.lastTurn }
       },
+      supportsSessionRead() {
+        return options.sessionRead === true
+      },
+      async readSessionList(signal?: AbortSignal) {
+        sessionListReads += 1
+        signal?.throwIfAborted()
+        return options.sessionRows ?? []
+      },
+      async readSessionHistory(sessionId: string, signal?: AbortSignal) {
+        sessionHistoryReads.push(sessionId)
+        signal?.throwIfAborted()
+        return options.sessionHistory?.(sessionId) ?? { header: { sessionId }, events: [] }
+      },
+      async sessionHeaderFacts(sessionId: string) {
+        return options.sessionHeaderFacts?.(sessionId)
+      },
+      contextPressure() {
+        return options.contextPressureValue
+      },
+      sessionTodos() {
+        return options.sessionTodosValue
+      },
       observePromptFacts(listener: AcpPromptFactListener) {
         observeCalls += 1
         facts = {
@@ -1315,6 +1355,8 @@ function makeFakeAccess(options: {
           onAssistantStream: (agent, frame) => listener.onAssistantStream(agent, frame),
           onQuestionRequest: (request, next) => listener.onQuestionRequest(request, next),
           onQuestionProjection: (session, key) => listener.onQuestionProjection(session, key),
+          onSubagentStart: info => listener.onSubagentStart(info),
+          onSubagentEnd: info => listener.onSubagentEnd(info),
         }
         return () => { facts = undefined }
       },
@@ -1322,6 +1364,9 @@ function makeFakeAccess(options: {
     prompts,
     facts: () => facts,
     observeCalls: () => observeCalls,
+    sessionListReads: () => sessionListReads,
+    sessionHistoryReads: () => sessionHistoryReads,
+    resolveCalls: () => resolveCalls,
     agentOf: (id: string) => agents.get(id),
     seed: (id: string, cwd: string) => {
       const agent = { id, session: { id, header: { cwd } } }
@@ -1927,6 +1972,24 @@ test('session/new carries the authoritative created session id in JSON-RPC error
       return undefined
     },
     currentSession() {
+      return undefined
+    },
+    supportsSessionRead() {
+      return false
+    },
+    async readSessionList() {
+      return []
+    },
+    async readSessionHistory(sessionId: string) {
+      return { header: { sessionId }, events: [] }
+    },
+    async sessionHeaderFacts() {
+      return undefined
+    },
+    contextPressure() {
+      return undefined
+    },
+    sessionTodos() {
       return undefined
     },
     async mountScopedMcp() {
@@ -2974,7 +3037,9 @@ test('an uninitialized sibling keeps the text-only input cap while an image conn
     // The image connection was not affected by the sibling's breach.
     imageConnection.send({ jsonrpc: '2.0', id: 2, method: 'session/list', params: {} })
     const reply = (await imageConnection.next()) as { error?: { data?: { code?: string } } }
-    assert.equal(reply.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY')
+    // This fake Host installs the View but no read seams, so `session/list`
+    // stays unadvertised and refuses with its own capability classification.
+    assert.equal(reply.error?.data?.code, 'LOCAL_ACP_LIST_UNAVAILABLE')
   } finally {
     imageConnection.close()
     textSibling.close()
@@ -3179,7 +3244,7 @@ test('the derived frame budget accepts exactly its bound and rejects one byte ab
     await expectClose(rejected)
     accepted.send({ jsonrpc: '2.0', id: 4, method: 'session/list', params: {} })
     const reply = (await accepted.next()) as { error?: { data?: { code?: string } } }
-    assert.equal(reply.error?.data?.code, 'LOCAL_ACP_SESSION_NOT_READY', 'the accepted connection stays healthy')
+    assert.equal(reply.error?.data?.code, 'LOCAL_ACP_LIST_UNAVAILABLE', 'the accepted connection stays healthy')
   } finally {
     accepted.close()
     rejected.close()
@@ -3478,9 +3543,9 @@ test('PO-4C C-L5-03: a slow reader is closed by the bounded chunked drain while 
     await withTimeout(victim.closed, 10_000, 'the dead slow-reader connection is observed by its client')
     // The sibling connection is entirely unaffected.
     healthy.send({ jsonrpc: '2.0', id: 9, method: 'session/list', params: {} })
-    const siblingResponse = (await healthy.next()) as { id?: number; error?: { code?: number } }
+    const siblingResponse = (await healthy.next()) as { id?: number; error?: { code?: number; data?: { code?: string } } }
     assert.equal(siblingResponse.id, 9)
-    assert.equal(siblingResponse.error?.code, -32042)
+    assert.equal(siblingResponse.error?.data?.code, 'LOCAL_ACP_LIST_UNAVAILABLE')
   } finally {
     victim.close()
     healthy.close()
@@ -4045,6 +4110,128 @@ test('G-ACP2-PR1 ST-01 wire: transient deltas reach the ACP client before the du
     const settled = (await client.next()) as { readonly id?: number; readonly result?: { readonly stopReason?: string } }
     assert.equal(settled.id, 3)
     assert.deepEqual(settled.result, { stopReason: 'end_turn' })
+  } finally {
+    client.close()
+  }
+})
+
+// ───────────────────── G-ACP2-PR2 list/load over the real socket ────────────
+
+test('G-ACP2-PR2 LIST-01 wire: the authorized root roster is listed without activating an Agent', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    sessionRead: true,
+    sessionRows: [
+      { sessionId: 's-root', cwd: '/host/proj', updatedAt: 1_700_000_000_000, title: 'Real title' },
+      { sessionId: 's-child', cwd: '/host/proj', updatedAt: 1_700_000_000_500, origin: 'subagent' },
+      { sessionId: 's-cold', cwd: '/host/other', updatedAt: 1_600_000_000_000 },
+    ],
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    const init = (await client.next()) as {
+      result?: { agentCapabilities?: { loadSession?: boolean; sessionCapabilities?: { list?: unknown } } }
+    }
+    assert.equal(init.result?.agentCapabilities?.loadSession, true, 'a Host with the read seams advertises session/load')
+    assert.notEqual(init.result?.agentCapabilities?.sessionCapabilities?.list, undefined, 'and session/list')
+
+    // An uninitialized connection never reaches the handler (SDK gate).
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/list', params: {} })
+    const listed = (await client.next()) as {
+      result?: { sessions?: Array<{ sessionId: string; cwd: string; title?: string; updatedAt?: string }>; nextCursor?: string }
+    }
+    assert.deepEqual(listed.result?.sessions, [
+      {
+        sessionId: 's-root',
+        cwd: '/host/proj',
+        title: 'Real title',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      },
+      {
+        sessionId: 's-cold',
+        cwd: '/host/other',
+        updatedAt: new Date(1_600_000_000_000).toISOString(),
+      },
+    ], 'the subagent row is never a top-level session and titles come from the official fold')
+    assert.equal(fake.sessionListReads(), 1)
+    assert.deepEqual(fake.resolveCalls(), [], 'listing never resolves or activates an Agent')
+
+    // A cwd filter narrows to its exact authorized rows.
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/list', params: { cwd: '/host/other' } })
+    const filtered = (await client.next()) as { result?: { sessions?: Array<{ sessionId: string }> } }
+    assert.deepEqual(filtered.result?.sessions?.map(row => row.sessionId), ['s-cold'])
+
+    // A relative cwd and a malformed cursor are the standard invalid-params refusal.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/list', params: { cwd: 'relative' } })
+    const badCwd = (await client.next()) as { error?: { code?: number; data?: { code?: string } } }
+    assert.equal(badCwd.error?.code, -32602)
+    assert.equal(badCwd.error?.data?.code, 'LOCAL_ACP_LIST_INVALID_REQUEST')
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/list', params: { cursor: 'not-a-cursor' } })
+    const badCursor = (await client.next()) as { error?: { code?: number; data?: { code?: string } } }
+    assert.equal(badCursor.error?.code, -32602)
+    assert.equal(badCursor.error?.data?.code, 'LOCAL_ACP_LIST_INVALID_REQUEST')
+    assert.deepEqual(fake.resolveCalls(), [], 'no list refusal ever activates a Session')
+  } finally {
+    client.close()
+  }
+})
+
+test('G-ACP2-PR2 LOAD-01 wire: session/load replays the canonical history before its response, while resume replays none', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    sessionRead: true,
+    sessionHistory: sessionId => ({
+      header: { sessionId, cwd: '/host/proj' },
+      events: [
+        { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'earlier question' }], role: 'user' } },
+        { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'earlier answer' }] } } },
+      ],
+    }),
+  })
+  fake.seed('loaded', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+
+    // First a plain resume of the same Session: it must never replay history.
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'loaded', cwd: '/host/proj' } })
+    const resumed = (await client.next()) as { result?: unknown }
+    assert.deepEqual(resumed.result, {})
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/list', params: {} })
+    const probe = (await client.next()) as { id?: number; result?: unknown; method?: string }
+    assert.equal(probe.id, 3, 'no session/update frame is interleaved after a resume')
+    assert.equal(probe.method, undefined)
+    assert.equal(fake.sessionHistoryReads().length, 0, 'resume never reads canonical history')
+
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/close', params: { sessionId: 'loaded' } })
+    await client.next()
+
+    // Now load the SAME Session: every historical fact arrives BEFORE the response.
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/load', params: { sessionId: 'loaded', cwd: '/host/proj', mcpServers: [] } })
+    const frames: Array<{ id?: number; method?: string; params?: { update?: { sessionUpdate?: string; content?: { text?: string } } }; result?: unknown; error?: unknown }> = []
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; method?: string }
+      frames.push(frame as never)
+      if (frame.id === 5) break
+    }
+    const updates = frames.filter(frame => frame.method === 'session/update')
+    assert.deepEqual(updates.map(frame => frame.params?.update?.sessionUpdate), ['user_message_chunk', 'agent_message_chunk'])
+    assert.deepEqual(updates.map(frame => frame.params?.update?.content?.text), ['earlier question', 'earlier answer'])
+    assert.equal(frames[frames.length - 1]?.id, 5, 'the response is the LAST frame: the history was fully drained first')
+    assert.deepEqual(frames[frames.length - 1]?.result, {})
+    assert.deepEqual(fake.sessionHistoryReads(), ['loaded'])
+
+    // A second load of the same Session on the same connection is refused as busy.
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/load', params: { sessionId: 'loaded', cwd: '/host/proj', mcpServers: [] } })
+    const busy = (await client.next()) as { error?: { code?: number; data?: { code?: string } } }
+    assert.equal(busy.error?.code, -32602)
+    assert.equal(busy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
   } finally {
     client.close()
   }

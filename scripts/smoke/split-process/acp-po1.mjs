@@ -276,7 +276,10 @@ export async function runAcpPo1(context) {
       assert(init1?.result?.agentInfo?.name === 'dsh-pi-tui', 'agentInfo.name must be dsh-pi-tui')
       assert(init1?.result?.agentInfo?.version === installedVersion, `agentInfo.version must be the installed bundle version ${installedVersion}`)
       assert(Array.isArray(init1?.result?.authMethods) && init1.result.authMethods.length === 0, 'authMethods must be empty')
-      assert(init1?.result?.agentCapabilities?.loadSession === false, 'loadSession must be false')
+      // G-ACP2-PR2: this real Host binds the official Controller/Query read
+      // seams, so its truthful advertisement includes load and list.
+      assert(init1?.result?.agentCapabilities?.loadSession === true, 'loadSession must be advertised when the read seams are ready')
+      assert(init1?.result?.agentCapabilities?.sessionCapabilities?.list !== undefined, 'session/list must be advertised')
 
       // Independent connections reuse id 1 without cross-talk.
       const init2 = await c2.initialize(1)
