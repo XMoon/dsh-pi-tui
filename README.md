@@ -77,6 +77,7 @@ Daemon 的选择也可以在 `/settings → General → Backend` 保存，**下�
 - **Agent 与工具**：流式 Markdown、Thinking / Tool / Context 展开、审批与 Question、模型与 Reasoning Effort、Plan、Goal 和 Todo。
 - **Session 与 Workspace**：`/sessions` 浏览工作区与会话；`/new`、`/resume`、`/fork`、`/rewind`、`--session` 和 `--continue`；可只读预览后再选择恢复。
 - **Team / Subagent / Job**：`/model` 可控制 Root Agent Team；`/tasks` 显示 Work/Team、嵌套 Subagent 和 Job。Subagent 默认展开，已完成的 Job 历史可以按需展开。
+- **Preset**：裸 `/preset` 打开两页 Catalog + Details——搜索、Built-in/Custom 分组与状态标记，阅读与打开详情不会写入；只有底部的 `Use next` / `Use session` 和 `Set default` 显式动作才会应用预设或保存新会话默认值。`/preset status`、`/preset default [<id>]` 与 `/preset <id>` 保留。
 - **输入与终端操作**：`@file` 补全、图片/普通文件附件、`Ctrl+V` 图片粘贴、`!` 和 `!!` Shell、外部编辑器和可编辑的 Footer。
 - **阅读与搜索**：`/display` 切换 Full / Focus / Compact；Transcript View / Full 搜索、卡片折叠、`Ctrl+R` 历史输入召回。Current session 历史可跨工作目录读取同一 Session 的历史记录。
 - **Settings / 插件**：Provider 登录和凭据、审批、MCP Server 管理、Web Search/Fetch、Plugin Manager、动态 Extension Settings，以及 Client-local `./tui` 扩展加载。
@@ -89,6 +90,7 @@ Daemon 的选择也可以在 `/settings → General → Backend` 保存，**下�
 |---|---|
 | `/sessions` · `/resume` · `/new` | 找回或开始会话 |
 | `/model` · `/tasks` · `/plan` · `/goal` | 模型、任务和 Agent 工作模式 |
+| `/preset` | 浏览、应用会话预设或保存新会话默认值 |
 | `/settings` · `/plugins` · `/keybindings` | 配置与扩展 |
 | `/display` · `/export` · `/deliverables` | 阅读与导出 |
 | `Ctrl+F` · `Ctrl+Shift+F` | 已绘制文本 / 可用 Session 历史搜索 |

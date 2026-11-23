@@ -11,7 +11,8 @@
  */
 
 import { createRequire } from 'node:module'
-import { realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
@@ -251,6 +252,12 @@ function cookieFetch(
   // never sets this variable.
   const dropModelAck = process.env.SPLIT_PROCESS_CLIENT_DROP_MODEL_ACK === '1'
   let modelAckDropped = false
+  // Qualification-only preset-roster read fault: while the named control
+  // directory contains a `fail` marker, the Client's `agentPresets/list` read
+  // fails BEFORE dispatch, so the UI must prove the real Error + Retry path and
+  // then recover through the SAME read owner once the marker is removed. The
+  // smoke owns the marker; production never sets this variable.
+  const failPresetRosterDir = process.env.SPLIT_PROCESS_CLIENT_FAIL_PRESET_ROSTER
   const expireOperatorOnce = process.env.SPLIT_PROCESS_CLIENT_EXPIRE_OPERATOR_ONCE
   /**
    * Qualification-only delay before the forged operator expires: a real TTL
@@ -282,6 +289,19 @@ function cookieFetch(
       headers.set('cookie', `${separator > 0 ? pair.slice(0, separator) : 'dsh-auth'}=qualification-forged-operator`)
     }
     const request: LocalRequestInit = { ...init, headers, redirect: 'manual', cache: 'no-store' }
+    if (failPresetRosterDir !== undefined && failPresetRosterDir !== ''
+      && typeof init.body === 'string'
+      && existsSync(join(failPresetRosterDir, 'fail'))) {
+      let method: unknown
+      try {
+        method = (JSON.parse(init.body) as { readonly method?: unknown }).method
+      } catch {
+        method = undefined
+      }
+      if (method === 'agentPresets/list') {
+        throw new Error('local transport: qualification failed the agentPresets/list roster read before dispatch')
+      }
+    }
     if (dropPromptAck && !promptAckDropped && typeof init.body === 'string') {
       let method: unknown
       try {

@@ -127,6 +127,12 @@ function startHarness(options: { pendingTransition?: boolean } = {}): Harness {
     effectivePresetId: undefined,
     pendingPreset: undefined as string | undefined,
     currentPreset: () => undefined,
+    // The shared default writer now captures the exact Session scope before
+    // its Config write; this harness is sessionless, so the sync is
+    // not-applicable and no session-transition path is entered.
+    captureSessionScope: () => ({ sessionId: undefined }) as never,
+    isSessionScopeCurrent: () => true,
+    sessionBlank: () => undefined,
     catalog: {
       presets: {
         available: () => true,

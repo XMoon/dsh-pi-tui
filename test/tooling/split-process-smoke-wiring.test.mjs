@@ -540,6 +540,17 @@ test('every registry entry declares a conservative platform list and the audited
     // two real Client PIDs and a clean Host restart); it uses no
     // platform-specific process/seat primitive beyond that shared seam.
     'surface.host-history-search-pr1',
+    // UX PR3: the sessionless `/preset` case drives only the shared Split
+    // harness (tmux PTY, authenticated Host, real roster read, explicit
+    // Use next/Set default, one qualification-only roster-read fault and an
+    // independent Host restart); its packed-candidate Darwin selected run
+    // passed with three real Clients and two Host generations.
+    'surface.sessionless-default-preset',
+    // UX PR3 v1.2: the blank-session default-sync case drives the same shared
+    // Split harness with a real `/new`, the shared Set default writer and the
+    // existing Host selection path, then an independent Host restart; its
+    // packed-candidate Darwin selected run passed.
+    'surface.blank-session-default-sync',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

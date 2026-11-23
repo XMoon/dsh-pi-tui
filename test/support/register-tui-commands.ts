@@ -9,14 +9,16 @@
 import { commandSummaryOf } from '../../src/domain/catalog/surface.ts'
 import { registerTuiCommands, type InitialCommandCatalog, type TuiCommandRunner } from '../../src/commands.ts'
 import { listGlobalCommands } from '../../src/runtime/direct/surface-catalog.ts'
+import type { PresetPresentation } from '../../src/app/command/preset-presentation.ts'
 
 export function registerTuiCommandsWithDirectSeams(
   runner: TuiCommandRunner,
   initial?: InitialCommandCatalog,
+  presetPresentation?: PresetPresentation,
 ): ReturnType<typeof registerTuiCommands> {
   return registerTuiCommands(runner, initial, {
     listGlobalCommands: () => runner.commandRegistry === undefined
       ? []
       : listGlobalCommands(runner.commandRegistry).map(commandSummaryOf),
-  })
+  }, undefined, presetPresentation)
 }

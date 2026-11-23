@@ -1402,7 +1402,7 @@ test('Model, Browser, and Preset retire one another through the shared TSP layer
   const preset = renderer.presetPresentation!.open({
     subject: { sessionless: false },
     apply: async () => ({ kind: 'rejected', message: 'unused' }),
-    setDefault: async () => ({ kind: 'saved', preset: 'unused' }),
+    setDefault: async () => ({ kind: 'saved', preset: 'unused', sync: { kind: 'not-applicable' } }),
     retry() {},
     isCurrent: () => true,
     runOwned: () => assert.fail('the exclusivity test must not submit a preset operation'),

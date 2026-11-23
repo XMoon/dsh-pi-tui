@@ -512,6 +512,91 @@ The current, sole owning contract for this behavior is
 [Session Workspace behavior](./surface-session.md). This heading retains existing entry links; do not
 maintain a second copy of the behavior here.
 
+## Agent preset picker (`/preset`)
+
+The PiTui bare `/preset` is ONE root-owned capturing overlay with TWO pages: a
+Catalog and a Details reader. BOTH pages carry the same explicit business
+actions. The shared Host/Config write semantics and the state vocabulary are
+owned by [TSP preset selection](../tsp/preset-selection.md); this section owns
+the PiTui interaction contract. The TSP-native picker keeps its own two-zone
+UI and read-only Details; only the shared `Set default` business effect below is
+common.
+
+- **Authority.** `src/tui/commands/models.ts` owns the one roster read and the
+  `Use`/`Set default` writers; the panel holds only local page/focus/scroll
+  state. `Use next` (sessionless) stages `runner.pendingPreset` and creates no
+  Session; `Use session` (a still-blank live Session) commits through the Host
+  transition gate and its `agent-preset/selected` authority. The Catalog writes
+  the filtered visible selected raw ID; Details writes the ID it is bound to.
+  A started Session keeps the existing bare `/preset` refusal with no selectable
+  UI. The typed `/preset status`, `/preset default [<id>]` and `/preset <id>`
+  verbs keep their existing command results; typed `default` and every picker
+  share the one default writer.
+- **Flat focus ring.** ONE page-local `focusTarget` (`list`/`reader`,
+  `use`, `set-default`, or Error `retry`) replaces any parallel zone/action
+  state. Catalog Ready is `list → Use → Set default → list`; Details Ready is
+  `reader → Use → Set default → reader`. `Tab`/`Shift+Tab` move directly to the
+  concrete action; arrows never switch business actions. `Close`/`Back` stay on
+  their real `Esc` device and never enter the ring. A disabled/dropped/unpainted
+  action is excluded; a changed row, resize or unavailable action returns the
+  focus to the page base rather than silently retargeting a later Enter.
+- **Catalog.** Built-in then Custom groups, name/id/description search, complete
+  `name (id)` labels and atomic `[current]` / `[next session]` / `[default]` /
+  `[draft]` / `[unavailable]` chips. The pinned Action Bar carries
+  `Use next` or `Use session`, `Set default`, an inert `Tab actions` keyboard
+  hint (while the list has focus and an enabled action is painted), and
+  `Close [Esc]` last. A focused action replaces the hint with `Verb [Enter]`.
+  Browsing, searching and opening Details never write; the first pointer click
+  on a different row only selects, and activation requires the row already
+  selected (keyboard `Enter` or a second click).
+- **Details** is ONE read-only Markdown reader (complete Name/ID/Type/Scope,
+  committed relationships, a broken row's failure reason, the complete
+  description and — for a shipped preset only — the official Mode guide) with
+  the SAME pinned Action Bar: `Use next/Use session`, `Set default`, an inert
+  `Enter actions` hint while the reader has focus, and `Back [Esc]` last.
+  Reader `Enter` only moves focus to the first enabled painted action (zero
+  write); a subsequent Action `Enter` is the explicit write. `Tab` never moves
+  the reader scroll. `Esc` or the painted Back span returns to the Catalog with
+  the query, selection and list window intact.
+- **Pending / refusal.** Entering Pending preserves the page and the bound row,
+  redraws the bar as `Close [Esc]` only, and states `Applying preset…` /
+  `Saving default…`; `Esc` closes and never cancels the admitted writer. A
+  rejected/locked Use returns the SAME page Ready with focus on its base: the
+  Catalog keeps its complete error viewport, Details puts the complete sanitized
+  reason at the top of the same reader (`detailsScroll=0`). No implicit retry
+  and no second write.
+- **Set default (shared with dsh-web).** The writer validates through the
+  roster, writes the Config default, and only after that write is CONFIRMED
+  re-reads the Host-authoritative effective default. It attempts ONE switch of
+  the exact Session captured at operation start only when that effective id
+  still equals the requested id, the Session is still the current,
+  still-proven blank one, and no newer Use/default operation won; a newer
+  effective default from another Client or Host policy wins and this operation
+  does not switch the Session. It never creates a Session, never switches a
+  started Session, never rewrites the run-local pending preset, and never
+  retries or rolls back after a confirmed Config save. The result separates
+  `applied` / `applied-unrefreshed` / `uncertain` / `overridden` /
+  `not-applicable` / `skipped-stale` / `failed` from a Config `unconfirmed`;
+  only a proven pre-dispatch refusal may be reported as not switched. An
+  ownership-only supersession after the Host selection was already dispatched
+  is uncertain/no-retry, not a proven non-switch. A committed switch whose
+  post-commit catalog refresh failed, and an ambiguous Host settlement, stay
+  explicit and are never reworded as a non-switch; a raising Config write
+  remains UNCONFIRMED.
+- **Loading / Error / Retry.** The overlay mounts immediately in Loading and the
+  command's single read owner hydrates it in place. A failed read paints the real
+  reason with `Retry` + `Close`, and Retry re-enters Loading through that same
+  owner (one read in flight). An empty roster is the readable
+  `No agent presets configured.` state — never a silent first-row fallback.
+- **Lifecycle.** Every `/preset` invocation retires the previous panel; the one
+  logical overlay is remounted across a fullscreen switch/resize without losing
+  local state. A late read or settlement that no longer owns the surface commits
+  no frame and never reopens a closed panel. `Close`/`Esc` dismiss the panel but
+  never cancel an admitted Host/Config write; rejected/locked writes keep the
+  ready page with the real reason, an indeterminate write dismisses without an
+  implicit retry, and a raising default write is reported UNCONFIRMED — never
+  as a proven rollback.
+
 ## Web frontend control (`/web`)
 
 `/web` is ONE local, sessionless Client command that controls the Split Host's

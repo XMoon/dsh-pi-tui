@@ -1,31 +1,24 @@
 /**
- * Headless tests for the /preset command surface: the sessionless roster
- * (no session created before one exists), the one-Enter switch through the
- * SettingsList values mechanism, the blank-session recompose path, the
- * started-session refusal, and the English display copy.
+ * Headless tests for the /preset command surface: the sessionless Catalog
+ * (no session created before one exists), the blank-session recompose path,
+ * the started-session refusal, the typed verbs and the English display copy.
+ * (The two-page panel itself is the subject of `preset-picker.test.ts` and the
+ * real owner+UI chain of `preset-pitui-presentation.test.ts`.)
  * @module @xmoon76/dsh-pi-tui/preset-command.test
  */
 
 import assert from 'node:assert/strict'
-import { fakeAgentModel } from '../support/agent-model-double.ts'
-import { unavailableAcpAccess, unavailableWebAccess, unavailableMcpServers } from '../support/web-access-fake.ts'
-import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
-import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
-import { parseCommand } from '@deepseek-ai/dsh-commands'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { type TuiCommandRunner, type TuiSettingsLike } from '../../src/commands.ts'
+import type { PresetCatalog } from '../../src/runtime/catalog-port.ts'
 import { afterEach, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
-import { CommandId } from '@deepseek-ai/dsh-commands'
-import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../../src/commands.ts'
 import {
   executeHostCommandSubmission,
   type HostCommandSubmissionDeps,
 } from '../../src/app/submission/runtime.ts'
-import type { PresetCatalog } from '../../src/runtime/catalog-port.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../../src/runtime/remote/write-failure.ts'
 import { mergeDraft } from '../../src/app/submission/steer.ts'
 import { KeybindingEditorController } from '../../src/tui/keybindings/ui/controller.ts'
@@ -36,35 +29,14 @@ import { SESSIONLESS_COMMANDS } from '../../src/index.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { customThemesDir } from '../../src/client/theme/files.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
-import { TuiApp } from '../../src/tui-app.ts'
-import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
-import { sessionScopeFacts } from '../support/session-scope-facts.ts'
-import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
-import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
-import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
-import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import type { PresetPickerHandle, PresetPresentation } from '../../src/app/command/preset-presentation.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
-import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
-import { visibleWidth } from '@xmoon76/pi-tui'
-import { currentPalette } from '../../src/tui/theme/runtime.ts'
-import { unconfiguredPolicyObservation, unconfiguredSessionPolicyPort } from '../support/session-policy-fake.ts'
+import { disposeHarnessApps, fakeAgent, setup, SHIPPED_ROWS } from '../support/preset-command-harness.ts'
 
 
 /** The plain (ANSI-stripped) viewport of one VT frame. */
 const plainViewport = (vt: VirtualTerminal): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
-
-/** The row inside an overlay Frame's borders (trimmed), so the SettingsList
- *  cursor marker is observable. */
-const frameContent = (line: string): string => {
-  const start = line.indexOf('│')
-  const end = line.lastIndexOf('│')
-  return start >= 0 && end > start ? line.slice(start + 1, end).trim() : line.trim()
-}
-
-/** Whether the row carries the SettingsList cursor marker. */
-const isCursorRow = (vt: VirtualTerminal, row: number): boolean =>
-  frameContent(plainViewport(vt)[row] ?? '').startsWith('>')
 
 /** The viewport row of the first painted occurrence of `needle`. */
 function rowOfText(vt: VirtualTerminal, needle: string): number {
@@ -73,24 +45,10 @@ function rowOfText(vt: VirtualTerminal, needle: string): number {
   return row
 }
 
-/** The terminal-CELL column of the first painted occurrence of `needle`. */
-function cellIndexOfText(vt: VirtualTerminal, row: number, needle: string): number {
-  const plain = plainViewport(vt)[row] ?? ''
-  const index = plain.indexOf(needle)
-  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}:\n${plain}`)
-  return visibleWidth(plain.slice(0, index))
-}
-
-const hexToRgb = (hex: string): number =>
-  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
-
-/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
- * is disposed after each test — the process slot (the vendored fork
- * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/tui/process-slot.ts). */
-const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+/** Every TuiApp the shared harness started is disposed after each test (the
+ *  process slot is exclusive; release needs the FINAL dispose, not stop()). */
 afterEach(() => {
-  disposeStartedApps()
+  disposeHarnessApps()
 })
 
 /** Poll an async predicate until true or the timeout elapses (the picker
@@ -110,431 +68,6 @@ process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
 
-/** A blank or started fake agent. */
-function fakeAgent(sessionId: string, events: readonly { type: string }[] = []): Agent {
-  // The alpha.4 Session shape: the log is served through the snapshot reads.
-  return {
-    session: {
-      id: sessionId,
-      header: { cwd: '/ws' },
-      get seq() { return events.length },
-      eventAt: (seq: number) => events[seq],
-      snapshotEvents: () => events,
-    },
-    ctx: { on: () => () => {} },
-    options: { provider: 'p', model: 'm' },
-    // DSH 0.2.2: the Agent owns its model selection (`AgentModel`).
-    model: fakeAgentModel(undefined, { provider: 'p', model: 'm' }),
-  } as unknown as Agent
-}
-
-/** The four shipped rows WITH Chinese metadata, exactly as the dsh install's
- * agent-presets package ships them in its official shipped root. */
-/** The 0.1.7 shipped declarations publish no name/description of their
- * own (the official built-in classification); the TUI's fixed English copy
- * supplies the picker text. */
-const SHIPPED_ROWS = [
-  { id: 'standard' },
-  { id: 'ptc' },
-  { id: 'minimal' },
-  { id: 'cordis' },
-]
-
-function presetService(
-  rows: { id: string; name?: string; description?: string; trust?: string }[],
-  defaultPresetId = 'standard',
-  selectFailure?: unknown,
-  /** Scripted Host lock state; true = locked, false/undefined = unlocked. The
-   *  double never derives blankness from the fake transcript. */
-  selectLocked?: boolean,
-  /** Per-call official roster projection override (broken/odd-row tests). */
-  rosterOverride?: () => Promise<unknown>,
-  /** Explicit resolve override (subject-drift windows). */
-  resolveOverride?: (id?: string) => Promise<{ readonly id: string; broken?: string }>,
-  /** Runs inside the official Host select BEFORE it settles (transition drift). */
-  selectHook?: () => void,
-) {
-  const resolved: string[] = []
-  const selected: string[] = []
-  return {
-    resolved,
-    selected,
-    service: {
-      defaultId: defaultPresetId,
-      // The PUBLIC official roster projection (the @Remote('list') method).
-      remoteExportList: async () => rosterOverride !== undefined
-        ? await rosterOverride()
-        : {
-            presets: rows.map(row => ({
-              id: row.id,
-              isDefault: row.id === defaultPresetId,
-              ...row.name === undefined ? {} : { name: row.name },
-              ...row.description === undefined ? {} : { description: row.description },
-            })),
-          },
-      resolve: async (id?: string) => {
-        if (resolveOverride !== undefined) return resolveOverride(id)
-        // Real-registry semantics: an omitted id resolves the deployment
-        // default; an unknown id (explicit OR default) is refused.
-        const wanted = id ?? defaultPresetId
-        resolved.push(wanted)
-        const row = rows.find(candidate => candidate.id === wanted)
-        if (row === undefined) throw new Error(`agent-presets: preset "${wanted}" not found (available: standard)`)
-        return { id: row.id, trust: row.trust ?? 'system', path: `/presets/${row.id}` }
-      },
-      // The official blank-session select: re-checks the session's turn
-      // boundary and refuses a started one with agent-preset/locked.
-      select: async (agent: unknown, id: string) => {
-        selectHook?.()
-        if (selectFailure !== undefined) throw selectFailure
-        const row = rows.find(candidate => candidate.id === id)
-        if (row === undefined) throw Object.assign(new Error(`agent-presets: preset "${id}" not found (available: standard)`), { code: 'agent-preset/not-found' })
-        if (selectLocked === true) {
-          throw Object.assign(new Error('session has already started; its agent preset is fixed'), { code: 'agent-preset/locked' })
-        }
-        void agent
-        selected.push(id)
-        return id
-      },
-      composedPreset: () => undefined,
-    },
-  }
-}
-
-/** A fake commands service recording the registered definitions. With
- * `registered` the effective list returns the recorded definitions too — the
- * real official service lists what the TUI registered (`/preset` included),
- * which the candidate-visibility tests must observe. `presetOverride` models a
- * scoped preset/plugin command that SHADOWS the TUI's `/preset` with its own
- * descriptor (same name, its OWN definitionId). */
-function fakeCommands(
-  registered = false,
-  presetOverride?: { name: string; definitionId?: string; description?: string },
-) {
-  const defs: { name: string; definitionId?: string; description?: string; input?: { hint: string }; handler?: unknown }[] = []
-  return {
-    defs,
-    service: {
-      register: (def: { name: string; definitionId?: string; description?: string; input?: { hint: string }; handler?: unknown }): (() => void) => {
-        defs.push(def)
-        return () => {}
-      },
-      list: () => {
-        const entries = registered
-          ? defs.map(def => ({
-              name: def.name,
-              ...def.definitionId === undefined ? {} : { definitionId: def.definitionId },
-              description: def.description ?? '',
-              ...def.input === undefined ? {} : { input: def.input },
-            }))
-          : []
-        const shadowed = presetOverride === undefined
-          ? entries
-          : entries.map(entry => entry.name === 'preset' ? { ...presetOverride } : entry)
-        return [...shadowed, { name: 'builtin', description: 'a builtin', input: { hint: '' } }]
-      },
-      find: () => undefined,
-      execute: async () => undefined,
-    },
-  }
-}
-
-/** A stub runner with a MUTABLE pending preset and a scripted Host blank read.
- * `refreshCatalog` records every request and resolves a scripted outcome
- * (a failed outcome by default, so a test that does not care about the
- * refresh still sees the preset change succeed). */
-function stubRunner(options: {
-  ctx: Context
-  app: TuiApp
-  agent: Agent | undefined
-  /** A mutable live-Session holder (agent + generation) for stale tests. */
-  state?: { agent: Agent | undefined; generation: number }
-  sessionBlank?: boolean
-  refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
-  ensureCalls?: string[]
-  tuiSettings?: TuiSettingsLike
-  applyFooterSettings?: () => void
-  extensions?: TuiCommandRunner['extensions']
-  agents?: TuiCommandRunner['agents']
-  sessionReader?: Partial<TuiCommandRunner['sessionReader']>
-  effectivePresetId?: string
-  recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
-  clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
-  /** Defaults to a pass-through capture (the test themes use id === name). */
-  captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
-  /** The runner's displayed/current Session preset read (`/preset status`, the
-   *  picker's "[current]" state chip). Absent = undefined (no live subject). */
-  currentPreset?: () => string | undefined
-  /** Replace the preset catalog sub-domain with a scripted port (the /preset
-   *  handler's only business authority). Used by the command-settlement
-   *  family to script exact `WriteOutcome`s without a Host. */
-  presetsPort?: PresetCatalog
-}): { runner: TuiCommandRunner; pending: { value: string | undefined }; refreshes: CatalogRefreshRequest[] } {
-  const pending = { value: undefined as string | undefined }
-  const refreshes: CatalogRefreshRequest[] = []
-  const catalog = new DirectCatalogPort(options.ctx as never, (sessionId) => {
-    const live = options.state !== undefined ? options.state.agent : options.agent
-    return live?.session.id === sessionId ? live : undefined
-  })
-  if (options.presetsPort !== undefined) Object.assign(catalog, { presets: options.presetsPort })
-  const runner: TuiCommandRunner = {
-    webAccess: unavailableWebAccess(),
-    acpAccess: unavailableAcpAccess(),
-    mcpServers: unavailableMcpServers(),
-    beginClientWrite: () => () => {},
-    deliveredFilesSnapshot: () => undefined,
-    ctx: options.ctx,
-    app: options.app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    ...sessionScopeFacts(
-      () => options.state !== undefined ? options.state.agent : options.agent,
-      () => options.state?.generation ?? 0,
-    ),
-    sessionPolicy: unconfiguredSessionPolicyPort(),
-    sessionMarkdown: { read: async () => ({ kind: 'unavailable' }) },
-    policy: unconfiguredPolicyObservation(),
-    // The collision baseline reads the FAKE registry through the scoped-command
-    // facade, exactly like the production provider.
-    listScopedCommands: () => (options.ctx.get('commands') as unknown as { list(): readonly SurfaceCommandSummary[] }).list(),
-    get currentSessionId() { return (options.state !== undefined ? options.state.agent : options.agent)?.session.id },
-    ensureSession: async () => { options.ensureCalls?.push('ensureSession') },
-    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
-    defaultSelection: () => undefined,
-    defaultIntent: undefined,
-    setDefaultIntent: () => {},
-    defaultIntentRecord: undefined,
-    settleIntent: () => {},
-    awaitPendingDefaultWrite: async () => {},
-    trackDefaultWrite: () => {},
-    get defaultIntentOutcome() { return undefined },
-    setModelSelectionPending: () => {},
-    reconcileDefaultIntent: () => {},
-    sessionBlank: () => options.sessionBlank,
-    tuiSettings: options.tuiSettings,
-    applyFooterSettings: () => {},
-    agents: options.agents ?? {
-      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
-      create: async () => ({}) as never,
-      open: async () => ({}) as never,
-    },
-    sessionReader: {
-      list: async () => [],
-      search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
-      turnOutline: () => undefined,
-      sessionStatus: () => undefined,
-       ...options.sessionReader,
-    },
-    catalog,
-    config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
-    commandRegistry: options.ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
-    clientCommands: createClientCommandRegistry(parseCommand),
-    hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
-    interaction: {
-      questions: {
-        onRequest: () => true,
-        subscribe: () => undefined,
-        snapshot: () => undefined,
-        claimTimedWait: async () => undefined,
-        answerContinued: async () => 'not-continued' as const,
-      },
-      onApprovalRequest: () => {},
-      },
-    sessionWriter: {
-      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
-      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
-      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
-      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
-      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
-    },
-    cwd: '/ws',
-    sessionCwd: () => '/ws',
-    imageStore: new DraftImageStore(),
-    copyToClipboard: async () => true,
-    imageLimits: () => undefined,
-    insertIntoEditor: () => {},
-    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
-    signal: new AbortController().signal,
-    switchSession: async () => undefined,
-    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
-      await steps.prepare?.()
-      return { ok: true, next: await steps.create() }
-    },
-    currentPreset: () => options.currentPreset?.(),
-    get pendingPreset() { return pending.value },
-    set pendingPreset(id: string | undefined) { pending.value = id },
-    get effectivePresetId() { return pending.value ?? options.effectivePresetId },
-    refreshSessionCatalog: async (_scope, source) => {
-      const agent = options.state !== undefined ? options.state.agent : options.agent
-      const request: CatalogRefreshRequest = {
-        source,
-        target: { kind: 'agent', key: options.state?.generation ?? 0 },
-        agent,
-      }
-      refreshes.push(request)
-      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
-    },
-    refreshStandingCatalog: async (presetId, source) => {
-      const request: CatalogRefreshRequest = { source, target: { kind: 'preset', presetId } }
-      refreshes.push(request)
-      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
-    },
-    refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
-    focusEnabled: () => false,
-    setFocusMode: () => {},
-    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
-    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
-    updateWelcomeCard: () => {},
-    openJobView: () => {},
-    openTasksBrowser: () => {}, openScheduleWorkspace: () => ({ kind: 'success' } as const), createPluginManagerPage: () => undefined,
-    openRewindPicker: () => {},
-    sessionTransitionPending: () => false,
-    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
-    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
-    enterView: async () => {},
-    requestExit: () => {},
-    extensions: (options.extensions ?? { themes: new ThemeRegistry(), settings: new SettingsRegistry() }) as never,
-    captureExtensionHealthRef: options.captureExtensionHealthRef
-      ?? ((slot, id) => {
-        // Real-service semantics: only a REGISTERED plugin theme resolves
-        // (a custom-file name must not produce a health ref).
-        if (slot === 'theme') {
-          const themes = options.extensions?.themes as { paletteForSelectable?: (value: string) => unknown } | undefined
-          if (themes?.paletteForSelectable?.(id) === undefined) return undefined
-          // Real-service semantics: the ref carries the CONTRIBUTION id
-          // (the value `plugin:<owner>/<id>` maps to `<id>`).
-          return { slot, id: id.startsWith('plugin:') ? id.slice(id.lastIndexOf('/') + 1) : id, owner: 'test-owner' }
-        }
-        return { slot, id, owner: 'test-owner' }
-      }),
-    recordExtensionError: options.recordExtensionError,
-    clearExtensionError: options.clearExtensionError,
-    exit: () => {},
-  }
-  return { runner, pending, refreshes }
-}
-
-function invoke(rawInput: string): CommandInvocation {
-  return {
-    commandId: CommandId('cmd-test-1'),
-    agent: undefined as unknown as Agent,
-    rawInput,
-    attachments: [],
-    signal: new AbortController().signal,
-  }
-}
-
-/** Register the TUI commands and return the /preset surface under test. */
-function setup(options: {
-  rows?: { id: string; name?: string; description?: string; trust?: string }[]
-  agent?: Agent
-  state?: { agent: Agent | undefined; generation: number }
-  sessionBlank?: boolean
-  selectFailure?: unknown
-  selectLocked?: boolean
-  /** Per-call official roster override (see presetService). */
-  roster?: () => Promise<unknown>
-  /** Explicit resolve override (see presetService). */
-  resolve?: (id?: string) => Promise<{ readonly id: string; broken?: string }>
-  /** Runs inside the official Host select before it settles (see presetService). */
-  selectHook?: () => void
-  refreshCatalog?: (request: CatalogRefreshRequest) => Promise<CatalogRefreshOutcome>
-  settings?: { get(ns: string): unknown; mutate(ns: string, patch: unknown[]): Promise<unknown> }
-  tuiSettings?: TuiSettingsLike
-  extensions?: TuiCommandRunner['extensions']
-  defaultPresetId?: string
-  agents?: TuiCommandRunner['agents']
-  sessionReader?: Partial<TuiCommandRunner['sessionReader']>
-  effectivePresetId?: string
-  recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
-  clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
-  captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
-  /** Make the fake commands service list what was registered (the real
-   * service's behavior; required to observe `/preset` in the candidates). */
-  commandsListRegistered?: boolean
-  /** A scoped same-name `/preset` descriptor that shadows the TUI's own
-   * (its OWN definitionId — never the TUI identity). */
-  commandsPresetOverride?: { name: string; definitionId?: string; description?: string }
-  /** Omit the `agentPresets` service (a rosterless deployment). */
-  noPresets?: boolean
-  /** Replace the preset catalog sub-domain with a scripted port. */
-  presetsPort?: PresetCatalog
-  /** The runner's displayed/current Session preset read. */
-  currentPreset?: () => string | undefined
-  width?: number
-  /** Viewport height. */
-  height?: number
-}) {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(options.width ?? 100, options.height ?? 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
-  ctx.provide('commands', commands.service as never)
-  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
-  const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
-  if (options.noPresets !== true) ctx.provide('agentPresets', presets.service as never)
-  if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
-  const ensureCalls: string[] = []
-  const { runner, pending, refreshes } = stubRunner({
-    ctx,
-    app,
-    agent: options.agent,
-    state: options.state,
-    sessionBlank: options.sessionBlank,
-    refreshCatalog: options.refreshCatalog,
-    ensureCalls,
-    tuiSettings: options.tuiSettings,
-    applyFooterSettings: () => {},
-    extensions: (options.extensions ?? { themes: new ThemeRegistry(), settings: new SettingsRegistry() }) as never,
-    agents: options.agents,
-    sessionReader: options.sessionReader,
-    effectivePresetId: options.effectivePresetId,
-    captureExtensionHealthRef: options.captureExtensionHealthRef
-      ?? ((slot, id) => {
-        // Real-service semantics: only a REGISTERED plugin theme resolves
-        // (a custom-file name must not produce a health ref).
-        if (slot === 'theme') {
-          const themes = options.extensions?.themes as { paletteForSelectable?: (value: string) => unknown } | undefined
-          if (themes?.paletteForSelectable?.(id) === undefined) return undefined
-          // Real-service semantics: the ref carries the CONTRIBUTION id
-          // (the value `plugin:<owner>/<id>` maps to `<id>`).
-          return { slot, id: id.startsWith('plugin:') ? id.slice(id.lastIndexOf('/') + 1) : id, owner: 'test-owner' }
-        }
-        return { slot, id, owner: 'test-owner' }
-      }),
-    recordExtensionError: options.recordExtensionError,
-    clearExtensionError: options.clearExtensionError,
-    presetsPort: options.presetsPort,
-    currentPreset: options.currentPreset,
-  })
-  const surface = registerTuiCommandsWithDirectSeams(runner)
-  const def = commands.defs.find(entry => entry.name === 'preset')
-  assert.ok(def?.handler !== undefined, 'preset handler missing')
-  const run = async (rawInput: string): Promise<unknown> =>
-    (def!.handler as (inv: CommandInvocation) => unknown)(invoke(rawInput))
-  const runCommand = async (name: string, rawInput = ''): Promise<unknown> => {
-    const found = commands.defs.find(entry => entry.name === name)
-    assert.ok(found?.handler !== undefined, `${name} handler missing`)
-    return (found!.handler as (inv: CommandInvocation) => unknown)(invoke(rawInput))
-  }
-  /** Invoke one registered handler as the outer command plane would: the
-   *  execution's command id is the disposition correlation key. */
-  const invokeCommand = async (name: string, commandId: string, rawInput: string): Promise<unknown> => {
-    const found = commands.defs.find(entry => entry.name === name)
-    assert.ok(found?.handler !== undefined, `${name} handler missing`)
-    return (found!.handler as (inv: CommandInvocation) => unknown)({ ...invoke(rawInput), commandId: CommandId(commandId) })
-  }
-  const view = async (): Promise<string> => {
-    await vt.waitForRender()
-    return vt.getViewport().join('\n')
-  }
-  return { vt, app, run, runCommand, invokeCommand, view, pending, presets, ensureCalls, refreshes, surface }
-}
 
 test('/preset is in the sessionless dispatch gate', () => {
   // The gate is exactly where /preset used to create a session before the
@@ -572,23 +105,27 @@ test('/keybindings opens sessionless without creating a session', async () => {
   }
 })
 
-test('/preset with no session opens the English roster and creates nothing', async () => {
-  const t = setup({})
+test('/preset with no session opens the Catalog and creates nothing', async () => {
+  const t = setup({ rows: [...SHIPPED_ROWS, { id: 'reviewer', name: 'My reviewer', description: 'Reviews diffs before merge.' }] })
   const result = await t.run('')
   assert.deepEqual(result, { kind: 'success' })
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   const view = await t.view()
+  // The OWNER-frozen Catalog: identity, Built-in -> Custom groups, complete
+  // `name (id)` labels, the selected row's short detail and the ONE action bar.
+  assert.ok(view.includes('Agent presets'), `Catalog identity missing:\n${view}`)
+  assert.ok(view.includes('Built-in · 4'), `Built-in group missing:\n${view}`)
+  assert.ok(view.includes('Custom · 1'), `Custom group missing:\n${view}`)
   assert.ok(view.includes('Standard mode (standard)'), `roster row missing:\n${view}`)
-  assert.ok(view.includes('PTC mode (ptc)'), `roster row missing:\n${view}`)
-  assert.ok(view.includes('Minimal mode (minimal)'), `roster row missing:\n${view}`)
-  assert.ok(view.includes('Creator mode (cordis)'), `roster row missing:\n${view}`)
-  assert.ok(!view.includes('标准模式'), `Chinese preset name leaked:\n${view}`)
-  assert.ok(!view.includes('PTC 模式'), `Chinese preset name leaked:\n${view}`)
-  // The selected row's full description renders below the list (web parity);
-  // the wrap may split the trailing annotations across lines.
-  assert.ok(view.includes('Full coding agent with file editing'), `description missing:\n${view}`)
-  assert.ok(view.includes('· system'), `annotations missing:\n${view}`)
-  assert.ok(view.includes('default'), `annotations missing:\n${view}`)
+  assert.ok(view.includes('PTC mode (ptc)') && view.includes('Minimal mode (minimal)')
+    && view.includes('Creator mode (cordis)'), `roster rows missing:\n${view}`)
+  assert.ok(view.includes('My reviewer (reviewer)'), `custom roster row missing:\n${view}`)
+  assert.ok(!view.includes('标准模式') && !view.includes('PTC 模式'), `Chinese preset name leaked:\n${view}`)
+  assert.ok(view.includes('Full coding agent with file editing'), `selected row detail missing:\n${view}`)
+  assert.ok(view.includes('[default]'), `the committed default chip missing:\n${view}`)
+  assert.ok(view.includes('Use next') && view.includes('Set default') && view.includes('Close [Esc]'),
+    `the ONE action bar missing:\n${view}`)
+  assert.deepEqual(t.presets.selected, [], 'opening the Catalog never writes')
   t.app.stop()
 })
 
@@ -611,26 +148,32 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   t.app.stop()
 })
 
-test('/preset with an EMPTY roster keeps the original command success text', async () => {
+test('/preset with an EMPTY roster paints the readable Catalog empty state', async () => {
   const t = setup({ roster: async () => ({ presets: [] }) })
   const result = await t.run('') as { kind: string; text?: string }
-  // The PiTui command settlement is part of the frozen surface: an empty roster
-  // is a successful command whose text the command path owns.
-  assert.deepEqual(result, { kind: 'success', text: 'no agent presets configured' })
+  // The UX redesign replaces the retired one-line command text with the
+  // in-panel empty state; the command itself still succeeds and creates nothing.
+  assert.deepEqual(result, { kind: 'success' })
   assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
   const view = await t.view()
-  assert.ok(!view.includes('Standard mode (standard)'), `an empty roster opens no overlay:\n${view}`)
+  assert.ok(view.includes('No agent presets configured.'), `the Catalog empty state missing:\n${view}`)
+  assert.ok(view.includes('No preset selected'), `the disabled write reason missing:\n${view}`)
+  assert.ok(!view.includes('Standard mode (standard)'), `an empty roster paints no row:\n${view}`)
   t.app.stop()
 })
 
-test('/preset roster failure keeps the original command failure settlement', async () => {
+test('/preset roster failure paints the in-panel Error + Retry instead of a thrown command', async () => {
   const t = setup({ roster: async () => { throw new Error('catalog is unreachable') } })
-  // The read failure is rethrown to the command path (which owns the notice,
-  // the health record and the draft restore) — never swallowed into a success
-  // plus a late background notice.
-  await assert.rejects(async () => { await t.run('') }, /catalog is unreachable/u)
+  // The UX redesign owns the read failure in the panel: the SAME read owner
+  // reports it to `setLoadError`, so the command settles successfully and the
+  // user sees the real reason with an explicit Retry — never a silent no-UI.
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
   const view = await t.view()
-  assert.ok(!view.includes('Standard mode (standard)'), `no overlay after a failed read:\n${view}`)
+  assert.ok(view.includes('Preset catalog unavailable'), `the failure must name itself:\n${view}`)
+  assert.ok(view.includes('catalog is unreachable'), `the real read reason must be visible:\n${view}`)
+  assert.ok(view.includes('Retry') && view.includes('Close [Esc]'), `Retry + Close missing:\n${view}`)
+  assert.ok(!view.includes('Standard mode (standard)'), `no roster row after a failed read:\n${view}`)
   t.app.stop()
 })
 
@@ -797,30 +340,49 @@ test('/new honors the launch-time effective preset', async () => {
   t.app.stop()
 })
 
-test('/preset picker with no session sets the pending preset on one Enter', async () => {
+test('/preset picker: Enter opens read-only Details; the explicit Use next action writes', async () => {
   const t = setup({})
   await t.run('')
+  await t.view()
+  // Enter is BROWSE/READ: it opens the selected preset's Details and writes 0.
+  t.vt.sendInput('\r')
+  await t.view()
+  assert.ok(t.vt.getViewport().join('\n').includes('Preset details · Standard mode'),
+    `Enter must open Details:\n${t.vt.getViewport().join('\n')}`)
+  assert.equal(t.pending.value, undefined, 'reading Details never stages a preset')
+  // Back to the Catalog, then the explicit bottom action commits.
+  t.vt.sendInput('\x1b')
+  await t.view()
+  t.vt.sendInput('\t')
   await t.view()
   t.vt.sendInput('\r')
   await t.view()
   assert.equal(t.pending.value, 'standard')
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('new sessions will start on preset standard'), `notify missing:\n${view}`)
-  assert.ok(!view.includes('Standard mode (standard)'), `roster still open:\n${view}`)
+  assert.ok(!view.includes('Standard mode (standard)'), `the panel closes after the committed action:\n${view}`)
   t.app.stop()
 })
 
-test('/preset picker switches a blank session with one Enter', async () => {
+test('/preset picker: Enter reads Details, the explicit Use session action switches a blank session', async () => {
   const t = setup({ agent: fakeAgent('s1', []) })
   await t.run('')
   await t.view()
   t.vt.sendInput('\r')
   await t.view()
-  assert.deepEqual(t.presets.selected, ['standard'], 'Enter must confirm the switch (values mechanism)')
+  assert.ok(t.vt.getViewport().join('\n').includes('Preset details · Standard mode'), 'Enter opens Details')
+  assert.deepEqual(t.presets.selected, [], 'reading Details never switches')
+  t.vt.sendInput('\x1b')
+  await t.view()
+  t.vt.sendInput('\t')
+  await t.view()
+  t.vt.sendInput('\r')
+  await t.view()
+  assert.deepEqual(t.presets.selected, ['standard'], 'the explicit Use session action switches once')
   assert.equal(t.pending.value, undefined)
   const view = t.vt.getViewport().join('\n')
   assert.ok(view.includes('session preset switched to standard'), `notify missing:\n${view}`)
-  assert.ok(!view.includes('Standard mode (standard)'), `roster still open:\n${view}`)
+  assert.ok(!view.includes('Standard mode (standard)'), `the panel closes after the committed action:\n${view}`)
   t.app.stop()
 })
 
@@ -844,7 +406,7 @@ test('/preset with a started session refuses without offering a roster', async (
   t.app.stop()
 })
 
-test('/preset on a blank session opens the roster (Host blank authority, not the transcript)', async () => {
+test('/preset on a blank session opens the Catalog (Host blank authority, not the transcript)', async () => {
   const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true })
   const result = await t.run('') as { kind: string }
   assert.equal(result.kind, 'success')
@@ -853,38 +415,7 @@ test('/preset on a blank session opens the roster (Host blank authority, not the
   t.app.stop()
 })
 
-test('the preset picker [current] chip keeps textMuted on BOTH the selected and the unselected row (real overlay frame)', async () => {
-  // §4.5/§12.2 + rollout PR5b requirement 4: the chip lives in the vendored
-  // SettingsList value slot, whose own paint is `selected ? primary : textDim`
-  // — so the cell colour is asserted in the REAL painted frame in both states,
-  // never from the rendered string.
-  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true, currentPreset: () => 'standard' })
-  const result = await t.run('') as { kind: string }
-  assert.equal(result.kind, 'success')
-  await t.view()
-  // The `standard` row is both the deployment default and the current Session
-  // preset, and the picker opens on it: the first frame is the SELECTED state.
-  const selectedRow = rowOfText(t.vt, '[current]')
-  assert.ok(isCursorRow(t.vt, selectedRow), `the first frame must have the cursor ON the [current] row:\n${plainViewport(t.vt).join('\n')}`)
-  assert.equal(t.vt.getCellFgRgb(selectedRow, cellIndexOfText(t.vt, selectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
-    `the [current] chip is textMuted on the SELECTED row (not primary):\n${plainViewport(t.vt).join('\n')}`)
-  // Move the cursor off the current row: the UNSELECTED state must keep the
-  // SAME ink (not textDim).
-  t.vt.sendInput('\x1b[B')
-  await t.view()
-  const unselectedRow = rowOfText(t.vt, '[current]')
-  assert.ok(!isCursorRow(t.vt, unselectedRow), `the second frame must have the cursor OFF the [current] row:\n${plainViewport(t.vt).join('\n')}`)
-  assert.equal(t.vt.getCellFgRgb(unselectedRow, cellIndexOfText(t.vt, unselectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
-    `the [current] chip is textMuted on the UNSELECTED row (not textDim):\n${plainViewport(t.vt).join('\n')}`)
-  t.app.stop()
-})
-
-test('the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)', async () => {
-  // §4.5/§12.2 + rollout PR5b requirement 4: the `default` fact left the
-  // description and became a second chip beside `[current]`; the retired
-  // `default · ← current` prose must not come back in any ink. This is the
-  // frame the committed AFTER sample is generated from, so a stale sample
-  // (the pre-migration description) fails here instead of shipping in docs/.
+test('the Catalog paints Current and Default as TWO atomic chips and no retired prose', async () => {
   const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true, currentPreset: () => 'standard' })
   const result = await t.run('') as { kind: string }
   assert.equal(result.kind, 'success')
@@ -892,99 +423,9 @@ test('the preset picker paints BOTH state chips whole and no retired prose marke
   const view = plainViewport(t.vt)
   const currentRow = rowOfText(t.vt, '[current]')
   assert.ok(view[currentRow]!.includes('[current] [default]'),
-    `the current row must paint BOTH chips whole in its value slot:\n${view.join('\n')}`)
-  const description = view.slice(currentRow + 1).join('\n')
-  assert.ok(!/ default\b/.test(description),
-    `the description must not carry the retired bare \`default\` prose:\n${view.join('\n')}`)
+    `the current row must paint BOTH chips whole:\n${view.join('\n')}`)
   assert.ok(!view.some(line => line.includes('← current')),
     `the retired \`← current\` prose must not be painted anywhere:\n${view.join('\n')}`)
-  t.app.stop()
-})
-
-test('the preset state chips stay WHOLE at every supported frame width (real overlay frames)', async () => {
-  // The PR #309 review P2 acceptance matrix. The vendored value slot truncates
-  // by raw width, so the chip is handed to it as a WHOLE part (X061) and the
-  // label column yields: the state is never cut (`[defaul`), never left with a
-  // dangling separator, and never pushed out of the row.
-  const longId = 'a-very-long-custom-preset-name-here'
-  // The custom row publishes no `name`, so its label is `<id> (<id>)` — 73
-  // cells, wider than the 36-cell label column, exactly the review's case.
-  const rows = [{ id: 'standard' }, { id: longId }]
-  for (const width of [120, 67, 66, 59, 58, 57, 56, 52, 48, 44]) {
-    const t = setup({
-      agent: fakeAgent('s1', []),
-      sessionBlank: true,
-      currentPreset: () => 'standard',
-      rows,
-      width,
-      height: 20,
-    })
-    const result = await t.run('') as { kind: string }
-    assert.equal(result.kind, 'success')
-    await t.view()
-    const view = plainViewport(t.vt)
-    const chipRows = view.filter(line => line.includes('[current]'))
-    assert.equal(chipRows.length, 1, `at ${width} columns exactly the current row is marked:\n${view.join('\n')}`)
-    const marked = chipRows[0]!
-    assert.ok(!/\[default(?!\])/.test(marked), `no half chip at ${width} columns:\n${view.join('\n')}`)
-    // §4.5: the pair is two chips — a dropped chip takes its separator with it.
-    assert.ok(!marked.includes('·'), `no dangling separator at ${width} columns:\n${marked}`)
-    // The long label is clipped INSIDE its column: nothing may overflow.
-    for (const line of view) {
-      assert.ok(visibleWidth(line) <= width, `no painted row may exceed ${width} columns:\n${line}`)
-    }
-    t.app.stop()
-    // The process slot is released only by the final dispose (the keybindings
-    // are process-global), so the next width needs its own fresh slot.
-    t.app.dispose()
-  }
-})
-
-test('a wide → narrow → wide resize restores both chips and keeps the row clickable', async () => {
-  const longId = 'a-very-long-custom-preset-name-here'
-  const t = setup({
-    agent: fakeAgent('s1', []),
-    sessionBlank: true,
-    currentPreset: () => 'standard',
-    rows: [{ id: 'standard' }, { id: longId }],
-    width: 120,
-    height: 20,
-  })
-  // Overlay mouse integration is a fullscreen-screen behavior (the main-screen
-  // terminal never enables SGR reporting) — the same frame the mouse parity
-  // suites drive.
-  t.app.setFullscreen(true)
-  const result = await t.run('') as { kind: string }
-  assert.equal(result.kind, 'success')
-  await t.view()
-  assert.ok(plainViewport(t.vt).some(line => line.includes('[current] [default]')),
-    `the wide frame paints both chips:\n${plainViewport(t.vt).join('\n')}`)
-  // Shrink: the second chip yields WHOLE, the current chip survives (the label
-  // yields its cells — X061's reservation).
-  t.vt.resize(48, 20)
-  await t.view()
-  let view = plainViewport(t.vt)
-  assert.ok(view.some(line => line.includes('[current]')), `the current chip survives the shrink:\n${view.join('\n')}`)
-  assert.ok(!view.some(line => line.includes('[default')), `the second chip yields whole:\n${view.join('\n')}`)
-  // Widen back: both chips return (no cached width state in the slot).
-  t.vt.resize(120, 20)
-  await t.view()
-  assert.ok(plainViewport(t.vt).some(line => line.includes('[current] [default]')),
-    `both chips must come back after widening:\n${plainViewport(t.vt).join('\n')}`)
-  // Shrink again and click: the hit map is rebuilt for the NARROW geometry, so
-  // a click on the long-name row still selects THAT row (not the chip row).
-  t.vt.resize(48, 20)
-  await t.view()
-  view = plainViewport(t.vt)
-  // The label is the shared head…tail abbreviation now, so match its head only.
-  const targetRow = view.findIndex(line => line.includes('a-very-long'))
-  assert.ok(targetRow >= 0, `the long-name row must be painted:\n${view.join('\n')}`)
-  const leftBorder = view[targetRow]!.indexOf('│')
-  assert.ok(leftBorder >= 0, `frame left border missing:\n${view.join('\n')}`)
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${targetRow + 1}M`)
-  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${targetRow + 1}m`)
-  await t.view()
-  assert.deepEqual(t.presets.selected, [longId], `the click must select the clicked row:\n${plainViewport(t.vt).join('\n')}`)
   t.app.stop()
 })
 
@@ -1048,11 +489,7 @@ test('a 19-22 character preset id stays whole in the 44-column label (PR #309 re
   }
 })
 
-test('/preset search still finds a keyword the label abbreviation cut away (PR #309 review)', async () => {
-  // The 25-cell label abbreviates an over-wide row, so the list's search must read
-  // the COMPLETE `name (id)` (fork X062) — otherwise a keyword from the middle of
-  // the name answers an empty list. The 30-cell id abbreviates to the head's 12 +
-  // `…` + the tail's 12, so `quasar` (cells 11-16) is cut AND leaves no `u` behind.
+test('/preset search uses the COMPLETE name/id/description of every row', async () => {
   const id = `${'k'.repeat(11)}quasar${'z'.repeat(13)}`
   const t = setup({
     agent: fakeAgent('s1', []),
@@ -1065,14 +502,11 @@ test('/preset search still finds a keyword the label abbreviation cut away (PR #
   const result = await t.run('') as { kind: string }
   assert.equal(result.kind, 'success')
   await t.view()
-  const labelRow = plainViewport(t.vt).find(line => line.includes('[current]'))
-  assert.ok(labelRow !== undefined && labelRow.includes('\u2026') && !labelRow.includes('quasar'),
-    `the label is the abbreviation that cut the keyword:\n${plainViewport(t.vt).join('\n')}`)
   // The search goes through the REAL overlay input, not the row object.
   t.vt.sendInput('quasar')
   await t.view()
   const view = plainViewport(t.vt).join('\n')
-  assert.ok(!view.includes('No matching settings'), `a middle keyword must still find the preset row:\n${view}`)
+  assert.ok(!view.includes('No matching presets'), `a middle keyword must still find the preset row:\n${view}`)
   assert.ok(view.includes(id), `the found row must carry the complete identity:\n${view}`)
   t.app.stop()
 })
@@ -1881,7 +1315,14 @@ test('/preset commits a Host-blank selection even when the transcript has a turn
   assert.equal(opened.kind, 'success')
   const view = await t.view()
   assert.ok(view.includes('Standard mode (standard)'), 'the Host turn-boundary authority wins over the transcript')
-  t.vt.sendInput('\r') // pick the first roster row
+  t.vt.sendInput('\r') // Enter opens the read-only Details
+  await t.view()
+  assert.deepEqual(t.presets.selected, [], 'reading Details never writes')
+  t.vt.sendInput('\x1b') // back to the Catalog
+  await t.view()
+  t.vt.sendInput('\t') // the explicit Use session action
+  await t.view()
+  t.vt.sendInput('\r')
   await t.view()
   assert.deepEqual(t.presets.selected, ['standard'],
     'the Host blank selection commits despite the transcript turn')
@@ -2039,11 +1480,14 @@ test('a /preset picker opened on S1 cannot switch S2 after a session switch (sub
   // A Session switch lands AFTER the overlay opened.
   state.agent = fakeAgent('s2', [])
   state.generation = 2
-  t.vt.sendInput('\r') // submit the STALE overlay
+  t.vt.sendInput('\t') // reach the actions zone on the STALE overlay
+  t.vt.sendInput('\r') // the explicit Use session action
   await t.vt.waitForRender()
   await Promise.resolve()
   await Promise.resolve()
   assert.deepEqual(t.presets.selected, [], 'a stale preset picker must not switch the new Session')
+  assert.ok(!t.vt.getViewport().join('\n').includes('Standard mode (standard)'),
+    `the superseded panel must retire:\n${t.vt.getViewport().join('\n')}`)
   t.app.stop()
 })
 
@@ -2055,7 +1499,8 @@ test('a sessionless /preset picker cannot switch a Session that appeared in the 
   assert.match(t.vt.getViewport().join('\n'), /standard/i, 'the sessionless preset picker must open before the create')
   // A first create publishes a live Agent BEFORE the generation bump.
   state.agent = fakeAgent('s1', [])
-  t.vt.sendInput('\r') // submit the stale sessionless overlay
+  t.vt.sendInput('\t')
+  t.vt.sendInput('\r')
   await t.vt.waitForRender()
   await Promise.resolve()
   await Promise.resolve()
@@ -2278,4 +1723,452 @@ test('the navigation intent starts only for the final TUI-owned route and never 
     ['begin:new', 'invoke', 'finish:new'],
     'the TUI-owned /new route registers one intent and finishes it at the terminal sink',
   )
+})
+
+
+test('a newer /preset started inside the mount window owns the command slot', async () => {
+  let secondRun: Promise<unknown> | undefined
+  let invokeSecond: (() => void) | undefined
+  const opened: Array<{
+    loading: number
+    rosters: number
+    closed: number
+    request: import('../../src/app/command/preset-presentation.ts').PresetPickerRequest
+    handle: PresetPickerHandle
+  }> = []
+  let calls = 0
+  const presentation: PresetPresentation = {
+    notify: () => {},
+    open: (request) => {
+      calls += 1
+      if (calls === 1) invokeSecond!()
+      const record = { loading: 0, rosters: 0, closed: 0, request, handle: undefined as unknown as PresetPickerHandle }
+      const handle: PresetPickerHandle = {
+        setLoading: () => { record.loading += 1 },
+        setRoster: () => { record.rosters += 1 },
+        setLoadError: () => {},
+        isDisposed: () => record.closed > 0,
+        close: () => { record.closed += 1 },
+      }
+      record.handle = handle
+      opened.push(record)
+      return handle
+    },
+  }
+  const t = await setup({ presetPresentation: presentation })
+  invokeSecond = () => { secondRun = t.run('') }
+  const first = await t.run('')
+  await secondRun
+  await waitFor(async () => opened.some(o => o.rosters === 1))
+
+  assert.equal(opened.length, 2, 'both invocations reached their own presentation')
+  assert.deepEqual(first, { kind: 'success' })
+  const live = opened.filter(o => o.request.isCurrent())
+  assert.equal(live.length, 1, 'exactly ONE invocation owns the command surface')
+  const stale = opened.find(o => !o.request.isCurrent())!
+  assert.ok(stale !== undefined)
+  assert.equal(stale.loading, 0, 'the superseded invocation never starts its read')
+  assert.equal(stale.rosters, 0)
+  assert.equal(stale.closed, 1, 'the stale mount is released exactly once')
+  assert.equal(live[0]!.loading, 1, 'the newer invocation enters Loading through its own owner')
+  assert.equal(live[0]!.rosters, 1, 'the newer invocation hydrates the surface')
+  assert.equal(live[0]!.closed, 0, 'the newer mount stays the live owner')
+  t.app.dispose()
+})
+
+/* ------------------------------- shared Set default: Config + blank sync */
+
+test('typed /preset default saves Config and switches the captured blank session once', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(t.presets.selected, ['minimal'], 'the exact captured blank session switched once')
+  assert.equal(result.kind, 'success')
+  assert.equal(result.text, 'default preset set: minimal; current blank session switched to minimal')
+  assert.equal(t.pending.value, undefined, 'a live session default never stages the sessionless pending')
+  t.app.dispose()
+})
+
+test('typed /preset default never claims a host-thrown blank-session sync did not switch', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    selectFailure: new Error('host refused the blank-session sync'),
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(t.presets.selected, [], 'the sync rejection never switches the session')
+  assert.equal(result.kind, 'success', 'the Config save remains confirmed')
+  assert.match(result.text, /the current blank session switch is uncertain \(it may have committed\): host refused the blank-session sync — do not retry/u)
+  assert.ok(!/was not switched/iu.test(result.text), 'an ambiguous Host failure must not be reported as proven no-switch')
+  t.app.dispose()
+})
+
+test('sessionless Set default keeps the run-local pending override and never creates a Session', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  await t.run('ptc')
+  assert.equal(t.pending.value, 'ptc')
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.equal(t.pending.value, 'ptc', 'the default save never rewrites the run-local pending preset')
+  assert.deepEqual(t.presets.selected, [], 'sessionless default sync writes no Host session')
+  assert.deepEqual(t.ensureCalls, [], 'no Session is created for the sync')
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.equal(result.text, 'default preset set: minimal')
+  t.app.dispose()
+})
+
+test('a started Session saves the default without attempting a sync', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', [{ type: 'turn/start' }]),
+    sessionBlank: false,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(t.presets.selected, [], 'a started Session is never switched')
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.equal(result.text, 'default preset set: minimal')
+  t.app.dispose()
+})
+
+test('a newer explicit Use wins over a Set default sync that settles later', async () => {
+  let releaseSettings!: () => void
+  const settingsGate = new Promise<void>((resolve) => { releaseSettings = resolve })
+  let mutateStarted = false
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    settings: {
+      get: () => undefined,
+      mutate: async () => {
+        mutateStarted = true
+        await settingsGate
+      },
+    },
+  })
+  const defaultRun = t.runCommand('preset', 'default minimal') as Promise<{ kind: string; text: string }>
+  await waitFor(async () => mutateStarted)
+  await t.run('ptc')
+  assert.deepEqual(t.presets.selected, ['ptc'], 'the newer Use switches the session first')
+  releaseSettings()
+  const result = await defaultRun
+  assert.deepEqual(t.presets.selected, ['ptc'], 'the older default sync never overwrites the newer Use')
+  assert.match(result.text, /default preset set: minimal; current session was not switched/u)
+  t.app.dispose()
+})
+
+test('a confirmed default stays saved when the optional standing refresh throws', async () => {
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+    refreshCatalog: async (request) => {
+      if (request.target.kind === 'preset') throw new Error('standing refresh exploded')
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(t.presets.selected, ['minimal'], 'the blank session sync still ran')
+  assert.equal(result.kind, 'success', 'the Config save is not reclassified as unconfirmed')
+  assert.match(result.text, /default preset set: minimal; current blank session switched to minimal/u)
+  assert.ok(!/unconfirmed|rolled back/iu.test(result.text))
+  t.app.dispose()
+})
+
+test('default sync re-reads the Host-effective default instead of projecting a stale requested id', async () => {
+  const selected: string[] = []
+  const port: PresetCatalog = {
+    available: () => true,
+    roster: async () => ({
+      presets: [{ id: 'standard', isDefault: true }, { id: 'minimal' }],
+      defaultId: 'standard',
+    }) as never,
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    defaultId: () => 'standard',
+    selectSessionPreset: async (_sessionId, id) => {
+      selected.push(id)
+      return { ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never
+    },
+  }
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: port,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(selected, [], 'the stale requested id never reaches the Host session sink')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /default preset set: minimal; the effective default is now standard, so this session was not switched/u)
+  t.app.dispose()
+})
+
+test('default sync keeps a committed switch when the post-commit catalog refresh throws', async () => {
+  const selected: string[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+      defaultId: () => 'minimal',
+      selectSessionPreset: async (_sessionId, id) => {
+        selected.push(id)
+        return { ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never
+      },
+    },
+    settings: {
+      get: () => undefined,
+      mutate: async () => {},
+    },
+    refreshCatalog: async (request) => {
+      if (request.target.kind === 'agent') throw new Error('catalog refresh exploded after commit')
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(selected, ['minimal'], 'the Host switch committed exactly once')
+  assert.equal(result.kind, 'success', 'the confirmed Config save is not reclassified')
+  assert.match(result.text, /current blank session switched to minimal, but the catalog refresh failed: catalog refresh exploded after commit/u)
+  assert.ok(!/was not switched/iu.test(result.text), 'a committed post-refresh failure is not a no-switch claim')
+  t.app.dispose()
+})
+
+test('explicit Use keeps the committed switch beside a post-commit catalog refresh failure', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal' }], defaultId: 'standard' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      defaultId: () => 'standard',
+      selectSessionPreset: async (_sessionId, id) => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { preset: id } },
+      }) as never,
+    },
+    refreshCatalog: async (request) => {
+      if (request.target.kind === 'agent') throw new Error('catalog refresh exploded after commit')
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  const result = await t.runCommand('preset', 'minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /session preset switched to minimal; catalog refresh failed: catalog refresh exploded after commit/u)
+  t.app.dispose()
+})
+
+test('a proven Host rejection remains a distinct not-switched sync outcome', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+      defaultId: () => 'minimal',
+      selectSessionPreset: async () => ({
+        ownership: 'current',
+        outcome: { kind: 'rejected', error: { code: 'agent-preset/select-refused', message: 'the Host refused plainly' } },
+      }) as never,
+    },
+    settings: { get: () => undefined, mutate: async () => {} },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /current blank session was not switched: the Host refused plainly/u)
+  assert.ok(!/uncertain|may have committed/iu.test(result.text), 'a proven rejection must not be worded as uncertain')
+  t.app.dispose()
+})
+
+test('default sync carries a RETURNED post-commit refresh failure beside the committed switch', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+      defaultId: () => 'minimal',
+      selectSessionPreset: async (_sessionId, id) => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { preset: id } },
+      }) as never,
+    },
+    settings: { get: () => undefined, mutate: async () => {} },
+    refreshCatalog: async (request) => request.target.kind === 'agent'
+      ? { kind: 'failed', error: 'catalog read failed after commit' }
+      : { kind: 'applied', snapshot: {} as never },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /current blank session switched to minimal, but the catalog refresh failed: catalog read failed after commit/u)
+  assert.ok(!/catalog refresh failed: undefined/iu.test(result.text))
+  t.app.dispose()
+})
+
+test('explicit Use carries a RETURNED post-commit refresh failure beside the committed switch', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal' }], defaultId: 'standard' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      defaultId: () => 'standard',
+      selectSessionPreset: async (_sessionId, id) => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { preset: id } },
+      }) as never,
+    },
+    refreshCatalog: async (request) => request.target.kind === 'agent'
+      ? { kind: 'failed', error: 'catalog read failed after commit' }
+      : { kind: 'applied', snapshot: {} as never },
+  })
+  const result = await t.runCommand('preset', 'minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /session preset switched to minimal; catalog refresh failed: catalog read failed after commit/u)
+  assert.ok(!/catalog refresh failed: undefined/iu.test(result.text))
+  t.app.dispose()
+})
+
+test('a post-dispatch superseded default sync is uncertain, never a proven no-switch', async () => {
+  let aDispatched = false
+  let resolveA!: () => void
+  const committed: string[] = []
+  const port: PresetCatalog = {
+    available: () => true,
+    roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+    resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    defaultId: () => 'minimal',
+    selectSessionPreset: async (_sessionId, id) => {
+      if (id === 'minimal') {
+        aDispatched = true
+        return await new Promise((resolve) => {
+          resolveA = () => {
+            committed.push(id)
+            resolve({ ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never)
+          }
+        }) as never
+      }
+      return {
+        ownership: 'current',
+        outcome: { kind: 'rejected', error: { code: 'agent-preset/select-refused', message: 'newer Use refused' } },
+      } as never
+    },
+  }
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: port,
+    settings: { get: () => undefined, mutate: async () => {} },
+  })
+  const defaultRun = t.runCommand('preset', 'default minimal') as Promise<{ kind: string; text: string }>
+  await waitFor(async () => aDispatched)
+  const useB = await t.runCommand('preset', 'ptc') as { kind: string; text: string }
+  assert.equal(useB.kind, 'error')
+  assert.match(useB.text, /newer Use refused/u)
+  resolveA()
+  const result = await defaultRun
+  assert.deepEqual(committed, ['minimal'], 'A committed exactly once; B was a proven rejection, not a commit')
+  assert.equal(result.kind, 'success', 'the Config default save remains saved')
+  assert.match(result.text, /the current blank session switch is uncertain \(it may have committed\).*newer operation replaced the display after the Host switch was dispatched.*do not retry/u)
+  assert.ok(!/was not switched/iu.test(result.text), 'ownership-only supersession after dispatch is not proof of non-commit')
+  t.app.dispose()
+})
+
+test('an owned PiTui default notice also says uncertain after a post-dispatch supersession', async () => {
+  let aDispatched = false
+  let resolveA!: () => void
+  const committed: string[] = []
+  const notices: { text: string; kind?: 'info' | 'error' }[] = []
+  let request: import('../../src/app/command/preset-presentation.ts').PresetPickerRequest | undefined
+  const presentation: PresetPresentation = {
+    notify: (text, kind) => { notices.push({ text, kind }) },
+    open: (next) => {
+      request = next
+      return {
+        setLoading: () => {},
+        setRoster: () => {},
+        setLoadError: () => {},
+        isDisposed: () => false,
+        close: () => {},
+      }
+    },
+  }
+  const port: PresetCatalog = {
+    available: () => true,
+    roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+    resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+    defaultId: () => 'minimal',
+    selectSessionPreset: async (_sessionId, id) => {
+      if (id === 'minimal') {
+        aDispatched = true
+        return await new Promise((resolve) => {
+          resolveA = () => {
+            committed.push(id)
+            resolve({ ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never)
+          }
+        }) as never
+      }
+      return {
+        ownership: 'current',
+        outcome: { kind: 'rejected', error: { code: 'agent-preset/select-refused', message: 'newer Use refused' } },
+      } as never
+    },
+  }
+  const t = await setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: port,
+    presetPresentation: presentation,
+    settings: { get: () => undefined, mutate: async () => {} },
+  })
+  await t.run('')
+  await waitFor(async () => request !== undefined)
+  const defaultRun = request!.setDefault('minimal')
+  await waitFor(async () => aDispatched)
+  const useB = await request!.apply('ptc')
+  assert.equal(useB.kind, 'rejected')
+  resolveA()
+  const saved = await defaultRun
+  assert.equal(saved.kind, 'saved')
+  assert.deepEqual(committed, ['minimal'])
+  const defaultNotice = notices.find(entry => entry.text.startsWith('new-session default set: minimal'))
+  assert.ok(defaultNotice !== undefined, `the owned default notice is missing: ${JSON.stringify(notices)}`)
+  assert.match(defaultNotice.text, /switch is uncertain \(it may have committed\).*newer operation replaced the display after the Host switch was dispatched/u)
+  assert.ok(!/was not switched/iu.test(defaultNotice.text))
+  t.app.dispose()
 })

@@ -694,8 +694,8 @@ that grant instead of the whole terminal height.
   grant shorter than that view the compositor clamp applies. It keeps that
   degradation and adds no second scrollport; "every render branch fits the
   grant" holds for the panel's own assemblies, not for the recorder view.
-- `SettingsList` limits are retained deliberately for the independent consumers
-  (`/preset`, and `/web` / `/acp` on the Split backend): the list keeps
+- `SettingsList` limits are retained deliberately for the remaining independent
+  consumers (`/web` / `/acp` on the Split backend): the list keeps
   `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its overlay
   frame grants at most 26 content rows on any terminal taller than 30 rows. This
   is a viewport/grant rule of that component, NOT the Settings Workspace:
@@ -713,6 +713,13 @@ that grant instead of the whole terminal height.
   SettingsList still lacks filtered-state Home/End paging, and such a list still
   shows at most six visible rows. A blocking owner pre-empts by closure (§10.1
   above).
+- `/preset` is NOT a `SettingsList` consumer any more: its own root-owned
+  capturing overlay ([Agent preset picker](./surface-behavior.md#agent-preset-picker-preset))
+  uses the shared `ResponsiveOverlayFrame` at the design-language `88×28` wide
+  step and grants the one panel its own row budget. The physical frame is
+  re-created on a fullscreen swap/resize while the SAME panel keeps its
+  query/page/reading state; it opens no second modal, no settings submenu and
+  no second focus owner.
 
 ## 10. One-shot closure: output viewer and task browser
 
@@ -1058,10 +1065,9 @@ owns only the lease, focus and write-lifecycle mechanics.
   complete settings editor and its compatibility bridge no longer exist: no
   Settings level hands the user off to another editor, so nothing can mount a
   `SettingsList` under or after this lease. The independent `SettingsList`
-  consumers (`/preset`, `/web` and `/acp` on the
-  Split backend) are their
-  OWN overlays opened by their own commands, never a continuation of a Settings
-  workspace.
+  consumers (`/web` and `/acp` on the Split backend), together with the
+  independent `/preset` capturing overlay, are their OWN overlays opened by
+  their own commands, never a continuation of a Settings workspace.
 - **Read projection, not a second store.** The panel holds no ConfigPort and no
   subscription: the `/settings` command assembles a detached snapshot at open and
   at the explicit `R` refresh, and the panel renders it. Its only write verb hands

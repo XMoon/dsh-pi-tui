@@ -405,10 +405,12 @@ specialist-page contract below).
   so no category carries a transition launcher and no Settings gesture hands
   the user off to a second editor. The retired complete settings editor (and
   its Web rows, phase map and credential hand-off) no longer exists. The
-  `SettingsList` component itself remains: independent commands (`/preset`,
-  plus `/web` / `/acp` on the Split backend) open it
+  `SettingsList` component itself remains: independent commands (`/web` /
+  `/acp` on the Split backend) open it
   with their own row lists through `TuiApp.openSettings`, which is not a
-  Settings workspace path. `/keybindings conflicts` is NOT one of them: it
+  Settings workspace path. `/preset` is its own independent root capturing
+  overlay (`TuiApp.openPresetPicker`), never a `SettingsList` row list and
+  never part of this workspace's lease. `/keybindings conflicts` is NOT one of them: it
   enters the same Keyboard shortcuts specialist page in this workspace.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On), the
