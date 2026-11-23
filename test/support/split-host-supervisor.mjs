@@ -36,10 +36,12 @@ import {
   assertNativeRollbackAdmission,
   classifyCurrentProfile,
   classifyManagedInspection,
+  classifyNativeCliFence,
   classifyNativeClientOwnership,
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
+  isNativeDaemonUnquiesced,
   loadNativeManagerAdapter,
   nativeBootstrapAdmission,
   parseManagedDaemonStatus,
@@ -1197,6 +1199,53 @@ function nativeKernelFacts(pid) {
   return { status: 'alive', uid }
 }
 
+/** The exact CLI child's fresh kernel birth for the sticky ownership fence. */
+function nativeCliKernelFacts(pid) {
+  if (!Number.isInteger(pid) || pid <= 0 || typeof readKernelProcess !== 'function') return { status: 'unknown' }
+  let observation
+  try {
+    observation = readKernelProcess(pid)
+  } catch {
+    return { status: 'unknown' }
+  }
+  if (observation.kind === 'gone') return { status: 'gone' }
+  if (observation.kind === 'unknown') return { status: 'unknown' }
+  return { status: 'alive', birth: serializeKernelIdentity(observation.identity) }
+}
+
+/**
+ * Record a sticky exact-child obligation. The in-memory single-CLI slot may be
+ * cleared when its promise settles, but this fence blocks every later manager
+ * command until the same kernel child is independently proved gone.
+ */
+function setNativeCliFence(verb, error, pending) {
+  const runtime = requireNativeScene('native CLI fence')
+  const pid = Number.isInteger(error?.pid)
+    ? error.pid
+    : (Number.isInteger(pending?.pid) ? pending.pid : null)
+  let kernelIdentity = pending?.kernelIdentity ?? null
+  if (pid !== null && kernelIdentity === null) {
+    const fresh = nativeCliKernelFacts(pid)
+    if (fresh.status === 'alive') kernelIdentity = fresh.birth
+  }
+  runtime.cliFence = { verb, pid, kernelIdentity, at: now(), reason: String(error?.message ?? 'NOT_QUIESCED') }
+  appendNote('native-cli-unquiesced', { verb, pid, reason: runtime.cliFence.reason })
+}
+
+/** Fresh fence verdict; a proven gone/reused child is the only way to lift it. */
+function refreshNativeCliFence() {
+  const runtime = requireNativeScene('native CLI fence')
+  const fence = runtime.cliFence
+  if (fence === undefined) return { state: 'clear', pid: null }
+  const kernel = fence.pid === null ? null : nativeCliKernelFacts(fence.pid)
+  const decision = classifyNativeCliFence({ fence, kernel })
+  if (decision.state === 'clear') {
+    runtime.cliFence = undefined
+    appendNote('native-cli-fence-released', { pid: fence.pid, verb: fence.verb })
+  }
+  return decision
+}
+
 /** Capture the ownership facts of ONE Worker-owned Client/shell PID. */
 function captureNativeClientIdentity(pid, { requireScratch, scratch }) {
   const snapshot = nativeProcessSnapshot(pid)
@@ -1440,6 +1489,11 @@ function nativeCliHooks(verb, { mutating = true, recordOperation = true } = {}) 
       writeReceipt({ native: nativeRuntime.record })
     },
     onSpawned: ({ pid, at }) => {
+      if (nativeRuntime?.cliPending !== undefined) {
+        nativeRuntime.cliPending.pid = pid
+        const kernel = nativeCliKernelFacts(pid)
+        if (kernel.status === 'alive') nativeRuntime.cliPending.kernelIdentity = kernel.birth
+      }
       const record = nativeRuntime.record
       nativeRuntime.record = {
         ...record,
@@ -1561,28 +1615,35 @@ async function cleanupNativeManagedService(reason) {
     runtime.abortController.abort()
     const pending = runtime.cliPending
     if (pending !== undefined) {
-      await pending.promise.catch(() => undefined)
+      let rejection
+      await pending.promise.catch(error => { rejection = error })
+      const unquiesced = isNativeDaemonUnquiesced(rejection)
+      if (unquiesced !== null) setNativeCliFence(pending.verb, unquiesced, pending)
+      runtime.cliPending = undefined
       await Promise.resolve()
-      if (runtime.cliPending !== undefined) {
-        writeNativeRecord({
-          ...runtime.record,
-          lifecycle: 'unverifiable',
-          cleanup: { attempted: true, officialStop: 'not-attempted', officialUninstall: 'not-attempted', fallback: 'not-attempted', reason: 'NATIVE_CLI_NOT_QUIESCED' },
-        })
-        return { clean: false, reason: 'NATIVE_CLI_NOT_QUIESCED' }
-      }
     }
+    const fence = refreshNativeCliFence()
+    const cliFence = fence.state === 'clear' ? null : fence
     const cleanupAbort = new AbortController()
     const result = await cleanupNativeService({
       reservation,
       record: runtime.record,
       adapter: runtime.adapter,
+      cliFence,
       observe: async () => (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation,
-      runOfficialVerb: async verb => await executeNativeDaemonVerb(verb, {
-        mutating: false,
-        abortSignal: cleanupAbort.signal,
-        recordOperation: false,
-      }),
+      runOfficialVerb: async verb => {
+        try {
+          await executeNativeDaemonVerb(verb, {
+            mutating: false,
+            abortSignal: cleanupAbort.signal,
+            recordOperation: false,
+          })
+        } catch (error) {
+          const unquiesced = isNativeDaemonUnquiesced(error)
+          if (unquiesced !== null) setNativeCliFence(verb, unquiesced, undefined)
+          throw error
+        }
+      },
       writeRecord: record => writeNativeRecord(record),
       readRecord: () => runtime.record,
       probeKernel: async pid => (pid === null ? null : nativeKernelFacts(pid)),
@@ -1894,6 +1955,7 @@ async function handleBootstrapUpgrade(message) {
         record: undefined,
         currentProfile: undefined,
         cliPending: undefined,
+        cliFence: undefined,
         abortController: new AbortController(),
       }
     }
@@ -2178,6 +2240,10 @@ async function handleNativeRunProfileDaemon(message) {
   if (runtime.cliPending !== undefined) {
     throw new Error(`NATIVE_CLI_BUSY: daemon ${String(runtime.cliPending.verb)} is still in flight`)
   }
+  const previousFence = refreshNativeCliFence()
+  if (previousFence.state !== 'clear') {
+    throw new Error(`NATIVE_CLI_NOT_QUIESCED: a previous daemon child is not proven reaped (${previousFence.state}, pid ${String(previousFence.pid)})`)
+  }
   if (verb !== 'status') {
     const verified = await observeNativeService({ runStatus: false })
     const decision = allowNativeMutation({
@@ -2191,7 +2257,7 @@ async function handleNativeRunProfileDaemon(message) {
     }
   }
   const promise = executeNativeDaemonVerb(verb, { mutating: verb !== 'status' })
-  runtime.cliPending = { verb, promise }
+  runtime.cliPending = { verb, promise, pid: undefined, kernelIdentity: undefined }
   try {
     const result = await promise
     // Every successful official mutation is verified against the real manager
@@ -2199,10 +2265,13 @@ async function handleNativeRunProfileDaemon(message) {
     await observeNativeService({ runStatus: verb !== 'status' })
     return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
   } catch (error) {
-    const terminalPhase = error?.code === 'NATIVE_DAEMON_CANCELLED' && error?.issued !== false
+    const unquiesced = isNativeDaemonUnquiesced(error)
+    if (unquiesced !== null) setNativeCliFence(verb, unquiesced, runtime.cliPending)
+    const topCode = unquiesced !== null ? 'NOT_QUIESCED' : error?.code
+    const terminalPhase = topCode === 'NATIVE_DAEMON_CANCELLED' && error?.issued !== false
       ? 'CANCELLED'
-      : error?.code === 'NATIVE_DAEMON_TIMEOUT' || error?.code === 'NOT_QUIESCED'
-        || error?.code === 'NATIVE_DAEMON_SPAWN_FAILED'
+      : topCode === 'NATIVE_DAEMON_TIMEOUT' || topCode === 'NOT_QUIESCED'
+        || topCode === 'NATIVE_DAEMON_SPAWN_FAILED'
         ? 'UNKNOWN'
         : undefined
     if (terminalPhase !== undefined && runtime.record?.lastOperation !== undefined && runtime.record.lastOperation !== null) {
@@ -2214,7 +2283,7 @@ async function handleNativeRunProfileDaemon(message) {
     }
     // A committed-but-unacknowledged command is never called "not executed":
     // re-read the real manager unless the CLI child itself is still unsettled.
-    if (!lifecycleClosed && error?.code !== 'NOT_QUIESCED') {
+    if (!lifecycleClosed && unquiesced === null) {
       let observeError
       try {
         await observeNativeService({ runStatus: false })

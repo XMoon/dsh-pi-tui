@@ -69,6 +69,45 @@ const KERNEL_STATES = Object.freeze(['alive', 'gone', 'different', 'unknown'])
 const OBSERVATION_STATES = Object.freeze(['reserved-but-absent', 'installed-inactive', 'managed-active', 'removed', 'unverifiable'])
 const NATIVE_LIFECYCLES = Object.freeze(['reserved', 'mutating', 'observed', 'cleaning', 'removed', 'unverifiable'])
 
+/**
+ * Find the real unquiesced CLI-child failure even when a receipt hook failure
+ * wrapped it in an AggregateError. The exact child pid is carried on the
+ * NOT_QUIESCED error so the caller can keep a sticky ownership fence.
+ */
+export function isNativeDaemonUnquiesced(error) {
+  if (error === null || error === undefined || typeof error !== 'object') return null
+  if (error.code === 'NOT_QUIESCED') return error
+  if (Array.isArray(error.errors)) {
+    for (const nested of error.errors) {
+      const found = isNativeDaemonUnquiesced(nested)
+      if (found !== null) return found
+    }
+  }
+  return null
+}
+
+/**
+ * Classify a sticky exact-child fence against a fresh kernel observation. Only
+ * a proven gone/different PID lifts it; an alive same-birth child or an
+ * unreadable observation keeps it closed.
+ */
+export function classifyNativeCliFence({ fence, kernel = null } = {}) {
+  if (fence === null || fence === undefined) return Object.freeze({ state: 'clear', pid: null })
+  const source = requireObject(fence, 'cli fence', 'NATIVE_CLI_FENCE_INVALID')
+  const pid = requirePositiveInteger(source.pid, 'cli fence pid', 'NATIVE_CLI_FENCE_INVALID')
+  const kernelIdentity = source.kernelIdentity === null || source.kernelIdentity === undefined
+    ? null
+    : requireNonEmptyString(source.kernelIdentity, 'cli fence kernelIdentity', 'NATIVE_CLI_FENCE_INVALID')
+  if (kernelIdentity === null) return Object.freeze({ state: 'unknown', pid })
+  if (kernel === null || kernel === undefined) return Object.freeze({ state: 'unknown', pid })
+  const observation = requireObject(kernel, 'cli fence kernel observation', 'NATIVE_CLI_FENCE_INVALID')
+  const status = requireOneOf(observation.status, KERNEL_STATES, 'cli fence kernel.status', 'NATIVE_CLI_FENCE_INVALID')
+  if (status === 'gone' || status === 'different') return Object.freeze({ state: 'clear', pid })
+  if (status === 'unknown') return Object.freeze({ state: 'unknown', pid })
+  const birth = requireNonEmptyString(observation.birth, 'cli fence kernel.birth', 'NATIVE_CLI_FENCE_INVALID')
+  return Object.freeze({ state: birth === kernelIdentity ? 'alive' : 'clear', pid })
+}
+
 /** One controlled native-bridge failure; never a silent fallback. */
 export class NativeContractError extends Error {
   /**
@@ -724,6 +763,7 @@ export async function cleanupNativeService({
   runOfficialVerb,
   writeRecord,
   readRecord = null,
+  cliFence = null,
   probeKernel,
   probeHostKernel,
   probeClients,
@@ -744,10 +784,32 @@ export async function cleanupNativeService({
   if (readRecord !== null && typeof readRecord !== 'function') {
     fail('NATIVE_CONTRACT_INVALID', 'cleanupNativeService readRecord must be a function or null')
   }
+  const fence = cliFence === null || cliFence === undefined ? null : requireObject(cliFence, 'cliFence', 'NATIVE_CLI_FENCE_INVALID')
+  if (fence !== null) {
+    requireOneOf(fence.state, ['alive', 'unknown'], 'cliFence.state', 'NATIVE_CLI_FENCE_INVALID')
+    if (fence.pid !== null && fence.pid !== undefined) requirePositiveInteger(fence.pid, 'cliFence.pid', 'NATIVE_CLI_FENCE_INVALID')
+  }
   const at = () => (verifiedAt === undefined ? new Date().toISOString() : verifiedAt)
   const cleanup = { attempted: true, officialStop: 'skipped', officialUninstall: 'skipped', fallback: 'skipped' }
   let current = { ...source, lifecycle: 'cleaning', cleanup }
   await writeRecord(current)
+  if (fence !== null) {
+    // The previous exact CLI child is not proven reaped. No manager observation,
+    // no mutation, no helper reclaim, no clean terminal phase.
+    current = {
+      ...current,
+      lifecycle: 'unverifiable',
+      cleanup: {
+        ...cleanup,
+        officialStop: `not-attempted:unquiesced:${String(fence.pid ?? 'unknown')}`,
+        officialUninstall: 'not-attempted:unquiesced',
+        fallback: 'not-attempted:unquiesced',
+        reason: 'NATIVE_CLI_NOT_QUIESCED',
+      },
+    }
+    await writeRecord(current)
+    return Object.freeze({ clean: false, reason: 'NATIVE_CLI_NOT_QUIESCED', record: current })
+  }
   // The Supervisor may have advanced the live receipt while the helper was
   // observed (a committed-but-unacknowledged install, a legal unit rewrite).
   // Adopt those facts; never downgrade the record to its pre-observation state.
@@ -775,9 +837,13 @@ export async function cleanupNativeService({
   const runVerb = async verb => {
     try {
       await runOfficialVerb(verb)
-      return 'exited-0'
+      return { settled: true, unquiesced: null, detail: 'exited-0' }
     } catch (error) {
-      return `failed:${String(error?.code ?? 'NATIVE_DAEMON_FAILED')}`
+      const unquiesced = isNativeDaemonUnquiesced(error)
+      if (unquiesced !== null) {
+        return { settled: false, unquiesced, detail: `unquiesced:${String(unquiesced.pid ?? 'unknown')}` }
+      }
+      return { settled: true, unquiesced: null, detail: `failed:${String(error?.code ?? 'NATIVE_DAEMON_FAILED')}` }
     }
   }
   // Every official mutation is admitted against the LATEST observation. A
@@ -787,13 +853,18 @@ export async function cleanupNativeService({
     const decision = allowNativeMutation({ reservation: facts, observation, verb })
     if (!decision.allowed) {
       cleanup[field] = `not-admitted:${String(decision.reason)}`
-      return false
+      return { settled: true, unquiesced: null, detail: cleanup[field] }
     }
-    cleanup[field] = await runVerb(verb)
-    return true
+    const result = await runVerb(verb)
+    cleanup[field] = result.detail
+    return result
   }
   if (plan.actions.includes('official-stop')) {
-    if (await runAdmittedVerb('stop', 'officialStop')) {
+    const stopped = await runAdmittedVerb('stop', 'officialStop')
+    // An unquiesced stop is a sticky exact-child obligation: no next official
+    // verb, no helper reclaim, no clean verdict.
+    if (stopped.unquiesced !== null) return await failCleanup('NATIVE_CLI_NOT_QUIESCED')
+    if (stopped.settled) {
       try {
         observation = validateServiceObservation(await observe())
         adopt(observation)
@@ -803,7 +874,9 @@ export async function cleanupNativeService({
     }
   }
   if (plan.actions.includes('official-uninstall')) {
-    if (await runAdmittedVerb('uninstall', 'officialUninstall')) {
+    const uninstalled = await runAdmittedVerb('uninstall', 'officialUninstall')
+    if (uninstalled.unquiesced !== null) return await failCleanup('NATIVE_CLI_NOT_QUIESCED')
+    if (uninstalled.settled) {
       try {
         observation = validateServiceObservation(await observe())
         adopt(observation)
@@ -1299,11 +1372,9 @@ export async function runFixedDaemonVerb({ installation, verb, abortSignal = nul
     } catch (error) {
       notQuiescedHookError = error
     }
-    throw combinedFailure([
-      spawnedHookError,
-      notQuiescedHookError,
-      contractError('NOT_QUIESCED', `daemon ${action} child ${String(child.pid)} did not exit after TERM/KILL`),
-    ])
+    const unquiesced = contractError('NOT_QUIESCED', `daemon ${action} child ${String(child.pid)} did not exit after TERM/KILL`)
+    Object.assign(unquiesced, { pid: child.pid, verb: action, unquiesced: true })
+    throw combinedFailure([spawnedHookError, notQuiescedHookError, unquiesced])
   }
   if (raced.settled === false) {
     throw combinedFailure([

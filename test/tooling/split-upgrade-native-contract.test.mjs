@@ -31,10 +31,12 @@ import {
   classifyCurrentProfile,
   classifyManagedInspection,
   classifyNativeCleanup,
+  classifyNativeCliFence,
   classifyNativeClientOwnership,
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
+  isNativeDaemonUnquiesced,
   LAUNCHD_CUSTOMIZATION,
   loadNativeManagerAdapter,
   MANAGED_DAEMON_OUTPUT_LIMIT_BYTES,
@@ -1277,6 +1279,128 @@ test('the daemon status key=value block is parsed without inventing readiness', 
   assert.equal(parsed.unitState, 'active')
   assert.ok(!('acp' in parsed))
   expectContractError(() => parseManagedDaemonStatus('profile=pi-tui\n'), 'NATIVE_DAEMON_STATUS_INVALID')
+})
+
+test('an exact-child NQ fence blocks every later manager command until the child is proved gone', async () => {
+  const child = fakeChild({ closeOnSignal: false })
+  let failure
+  try {
+    await runFixedDaemonVerb({
+      installation: INSTALLATION,
+      verb: 'stop',
+      timing: { termGraceMs: 10, killGraceMs: 10 },
+      spawnImpl: () => child,
+      hooks: {
+        async onSpawned() {
+          throw new Error('receipt disk full')
+        },
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.ok(failure instanceof AggregateError)
+  assert.ok(failure.errors.some(value => value.message.includes('receipt disk full')), 'the primary hook failure is preserved')
+  const unquiesced = isNativeDaemonUnquiesced(failure)
+  assert.ok(unquiesced !== null, 'the nested NOT_QUIESCED is found through AggregateError')
+  assert.equal(unquiesced.pid, child.pid)
+  assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL'])
+
+  const facts = reservation()
+  const record = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
+  const calls = []
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record,
+    adapter: {
+      async inspectManagedService() {
+        calls.push('inspect')
+        return rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
+      },
+      async reclaimManagedService(input) {
+        calls.push('reclaim')
+        return { clean: true, action: 'removed', reason: 'unexpected', observation: rawInspection() }
+      },
+    },
+    cliFence: { state: 'alive', pid: unquiesced.pid },
+    observe: async () => {
+      calls.push('observe')
+      return absentObservation(facts)
+    },
+    runOfficialVerb: async verb => {
+      calls.push(`official:${verb}`)
+    },
+    writeRecord: async () => {},
+    probeKernel: async () => null,
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [],
+    verifiedAt: '2026-11-23T00:00:00.000Z',
+  })
+  assert.deepEqual(calls, [], 'no manager observation, mutation or helper reclaim may run under a live fence')
+  assert.equal(result.clean, false)
+  assert.equal(result.reason, 'NATIVE_CLI_NOT_QUIESCED')
+  assert.equal(result.record.lifecycle, 'unverifiable')
+  assert.match(result.record.cleanup.officialStop, /^not-attempted:unquiesced:/u)
+  assert.equal(result.record.cleanup.reason, 'NATIVE_CLI_NOT_QUIESCED')
+})
+
+test('the exact-child fence lifts only after the same PID is proved gone or reused', () => {
+  const fence = { pid: 4242, kernelIdentity: 'linux:777' }
+  assert.equal(classifyNativeCliFence({ fence, kernel: { status: 'alive', birth: 'linux:777' } }).state, 'alive')
+  assert.equal(classifyNativeCliFence({ fence, kernel: { status: 'alive', birth: 'linux:888' } }).state, 'clear')
+  assert.equal(classifyNativeCliFence({ fence, kernel: { status: 'gone' } }).state, 'clear')
+  assert.equal(classifyNativeCliFence({ fence, kernel: { status: 'different' } }).state, 'clear')
+  assert.equal(classifyNativeCliFence({ fence, kernel: { status: 'unknown' } }).state, 'unknown')
+  assert.equal(classifyNativeCliFence({ fence, kernel: null }).state, 'unknown')
+  assert.equal(classifyNativeCliFence({ fence: { pid: 4242, kernelIdentity: null }, kernel: { status: 'alive', birth: 'linux:777' } }).state,
+    'unknown', 'an unrecoverable original birth can never be guessed clear')
+  assert.deepEqual(classifyNativeCliFence({ fence: null }), { state: 'clear', pid: null })
+})
+
+test('an unquiesced official stop fails closed with no uninstall or helper fallback', async () => {
+  const facts = reservation()
+  const managed = activeObservation(facts)
+  const record = { ...nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) }), everObservedInstalled: true, observed: managed }
+  const stopFailure = Object.assign(new Error('stop child did not exit'), {
+    code: 'NOT_QUIESCED',
+    pid: 7777,
+    verb: 'stop',
+    unquiesced: true,
+  })
+  const nestedFailure = new AggregateError([new Error('receipt disk full'), stopFailure], 'daemon stop failed with an unconfirmed receipt state')
+  assert.equal(isNativeDaemonUnquiesced(nestedFailure), stopFailure)
+  const verbs = []
+  const helper = []
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record,
+    adapter: {
+      async inspectManagedService() {
+        return ownedInspection(facts, { managerState: 'active', mainPid: 4242 })
+      },
+      async reclaimManagedService(input) {
+        helper.push(input)
+        return { clean: true, action: 'removed', reason: 'unexpected', observation: rawInspection() }
+      },
+    },
+    observe: async () => managed,
+    runOfficialVerb: async verb => {
+      verbs.push(verb)
+      if (verb === 'stop') throw nestedFailure
+    },
+    writeRecord: async () => {},
+    readRecord: () => null,
+    probeKernel: async () => ({ status: 'alive', uid: facts.uid }),
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [],
+    verifiedAt: '2026-11-23T00:00:01.000Z',
+  })
+  assert.deepEqual(verbs, ['stop'], 'no uninstall may follow an unquiesced stop')
+  assert.equal(helper.length, 0, 'no helper reclaim may follow an unquiesced stop')
+  assert.equal(result.clean, false)
+  assert.equal(result.reason, 'NATIVE_CLI_NOT_QUIESCED')
+  assert.equal(result.record.lifecycle, 'unverifiable')
+  assert.equal(result.record.cleanup.officialStop, 'unquiesced:7777')
 })
 
 // ── current Profile entry ─────────────────────────────────────────────────
