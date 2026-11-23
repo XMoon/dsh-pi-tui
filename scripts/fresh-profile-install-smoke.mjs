@@ -901,8 +901,10 @@ async function runScenario({ candidate, dshTarget, workDir }) {
   const acpHelp = runDsh(profile.dshInvocation, ['--profile', 'pi-tui', 'acp', '--help'], profile.profileDir, profile.env)
   assert(acpHelp.status === 0,
     `dsh --profile pi-tui acp --help exited ${String(acpHelp.status)}: ${redact(resultText(acpHelp))}`, 'PUBLIC_ACP_ENTRY_INVALID')
-  assert((acpHelp.stdout ?? '').includes('stdio'),
-    'the public acp --help does not list the stdio command', 'PUBLIC_ACP_ENTRY_INVALID')
+  for (const verb of ['stdio', 'status', 'enable', 'disable']) {
+    assert((acpHelp.stdout ?? '').includes(verb),
+      `the public acp --help does not list the ${verb} command`, 'PUBLIC_ACP_ENTRY_INVALID')
+  }
   const acpNoHost = runDsh(profile.dshInvocation, ['--profile', 'pi-tui', 'acp', 'stdio'], profile.profileDir, profile.env)
   assert(acpNoHost.status === 3,
     `dsh --profile pi-tui acp stdio without a Host exited ${String(acpNoHost.status)}, expected 3: ${redact(resultText(acpNoHost))}`,
@@ -918,7 +920,37 @@ async function runScenario({ candidate, dshTarget, workDir }) {
   const noHostAdapters = liveAdapterProcesses(profile.profilePackage)
   assert(noHostAdapters.length === 0,
     'the no-Host acp stdio command left an ACP stdio adapter process', 'A2_QUISCENCE_UNPROVEN')
+  // PR-C: the same pristine install exposes the public headless ACP management
+  // grammar, and every management verb fails closed with the stable
+  // missing-Host code BEFORE this run starts a Host: no stdout bytes, no
+  // Host/client/adapter process and no published instance record.
+  const acpManagement = {}
+  for (const verb of ['status', 'enable', 'disable']) {
+    const command = runDsh(profile.dshInvocation, ['--profile', 'pi-tui', 'acp', verb], profile.profileDir, profile.env)
+    assert(command.status === 3,
+      `dsh --profile pi-tui acp ${verb} without a Host exited ${String(command.status)}, expected 3: ${redact(resultText(command))}`,
+      'PRC_PUBLIC_NO_HOST_NOT_FAIL_CLOSED')
+    assert((command.stdout ?? '') === '',
+      `the no-Host acp ${verb} command wrote ${String(Buffer.byteLength(command.stdout ?? ''))} stdout bytes`,
+      'PRC_STDOUT_NOT_EMPTY')
+    assert(/^dsh-pi-tui acp: HOST_NOT_RUNNING: /u.test(command.stderr ?? ''),
+      `the no-Host acp ${verb} stderr lacks the fixed HOST_NOT_RUNNING line: ${redact(command.stderr ?? '')}`,
+      'PRC_PUBLIC_NO_HOST_NOT_FAIL_CLOSED')
+    acpManagement[verb] = {
+      exitCode: command.status,
+      stdoutBytes: Buffer.byteLength(command.stdout ?? ''),
+      stderrCode: 'HOST_NOT_RUNNING',
+    }
+  }
+  const afterManagementFacts = processFacts(profile.profileDir, profile.dshHome)
+  assert(afterManagementFacts.host.length === 0 && afterManagementFacts.client.length === 0,
+    `the no-Host acp management commands left processes behind: ${JSON.stringify({ hosts: afterManagementFacts.host.length, clients: afterManagementFacts.client.length })}`,
+    'DAEMON_HOST_IDENTITY_FAILURE')
+  const managementAdapters = liveAdapterProcesses(profile.profilePackage)
+  assert(managementAdapters.length === 0,
+    'a no-Host acp management command left an ACP stdio adapter process', 'PRC_QUISCENCE_UNPROVEN')
   const acpStdio = {
+    management: acpManagement,
     noHost: {
       installedEntry: ACP_STDIO_ENTRY,
       helpExitCode: acpHelp.status,

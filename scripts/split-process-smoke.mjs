@@ -643,6 +643,21 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.headless-cli') {
+    assert(result?.status === 'PASS'
+      && result?.headlessCli === 'PASS'
+      && result?.noHostRefusal === true
+      && result?.statusPureRead === true
+      && result?.enableDisableRoundTrip === true
+      && result?.sameHostIdentity === true
+      && result?.stdioProtocolClean === true
+      && result?.disableClosesPeer === true
+      && result?.anonymousPostRefused === true
+      && result?.authenticatedStrictRefusals === true
+      && result?.crossProfileIsolated === true,
+    `selected ${caseId}: the headless ACP CLI verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.headlessCli ?? 'missing')}`)
+    return
+  }
   if (caseId === 'acp.native-question-form') {
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'

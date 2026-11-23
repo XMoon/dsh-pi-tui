@@ -78,6 +78,7 @@ import { runPublicDaemonEntry } from '../smoke/split-process/public-daemon-entry
 import { runAcpPo1bOptInControl } from '../smoke/split-process/acp-po1b.mjs'
 import { runAcpPo2SessionView } from '../smoke/split-process/acp-po2-session-view.mjs'
 import { runAcpStdioA1 } from '../smoke/split-process/acp-stdio-a1.mjs'
+import { runAcpCli } from '../smoke/split-process/acp-cli.mjs'
 import {
   runManagedHostAuthFailureNegative,
   runManagedHostConcurrentColdStart,
@@ -529,6 +530,22 @@ const CASE_REGISTRY = Object.freeze([
     title: 'the public trusted-profile acp stdio command relays an official ACP v1 client to the existing Host-owned Session View and fails closed without a ready enabled Host',
     platforms: LINUX_DARWIN,
     run: runAcpStdioA1,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    // PR-C headless ACP CLI: the public installed `acp status|enable|disable`
+    // management grammar against ONE packed Host, the real external ACP client
+    // over the public stdio relay, the peer disconnect caused by `acp disable`,
+    // the Owner-only route's real admission/shape refusals and a live second
+    // Profile's independence. It drives only the shared Split harness (public
+    // CLI + per-platform scope/identity APIs) plus the shared loopback HTTP
+    // contract, with a real packed-candidate Darwin selected run; no
+    // Linux-only process primitive is involved.
+    id: 'acp.headless-cli',
+    title: 'the real installed dsh acp CLI reads, enables and disables ONE Host local ACP listener, serves and disconnects a real external ACP client, keeps the same Host identity and refuses unauthenticated/foreign-instance/cross-profile control',
+    platforms: LINUX_DARWIN,
+    run: runAcpCli,
   }),
   Object.freeze({
     suite: 'managed-host',
