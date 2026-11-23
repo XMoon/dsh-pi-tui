@@ -599,3 +599,140 @@ test('a mounted web launcher suppresses the cold-ready error', (t) => {
   assert.deepEqual(exitCodes, [])
   assert.equal(text, '')
 })
+
+// ── headless ACP CLI grammar (PR-C ACP headless CLI) ──────────────────────
+
+function acpController(ctx: Context): { kind: string; control?: { verb: string }; markCoordinatorMounted?: () => void } | undefined {
+  return ctx.get(TUI_DAEMON_STARTUP_SERVICE) as { kind: string; control?: { verb: string }; markCoordinatorMounted?: () => void } | undefined
+}
+
+/** Silence and capture stdout writes for the duration of `fn`. */
+function captureStdout<T>(fn: () => T): { value: T; text: string } {
+  const lines: string[] = []
+  const original = process.stdout.write.bind(process.stdout)
+  process.stdout.write = ((chunk: string) => { lines.push(chunk); return true }) as typeof process.stdout.write
+  try {
+    const value = fn()
+    return { value, text: lines.join('') }
+  } finally {
+    process.stdout.write = original
+  }
+}
+
+for (const verb of ['status', 'enable', 'disable']) {
+  test(`acp ${verb} publishes one acp-control intent and opens no TUI`, (t) => {
+    withEnv('direct', () => {
+      const { ctx, exitCodes } = mount(t, ['acp', verb])
+      const startup = acpController(ctx)
+      assert.equal(startup?.kind, 'acp-control')
+      assert.equal(startup?.control?.verb, verb)
+      assert.equal(ctx.get(TUI_STARTUP_SERVICE), undefined, 'an acp management command never publishes the Direct TUI')
+      assert.deepEqual(exitCodes, [])
+    })
+  })
+}
+
+for (const backend of ['daemon', 'wire-local', '']) {
+  test(`acp status ignores ENV ${JSON.stringify(backend)} and keeps the same acp-control intent`, (t) => {
+    withEnv(backend, () => {
+      const { ctx, exitCodes } = mount(t, ['acp', 'status'])
+      assert.equal(acpController(ctx)?.control?.verb, 'status')
+      assert.deepEqual(exitCodes, [], 'an invalid backend value must not block an acp management command')
+    })
+  })
+}
+
+test('acp without a verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['acp'])
+  assert.equal(acpController(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('an unknown acp verb exits 2 and publishes no service', (t) => {
+  const { ctx, exitCodes } = mount(t, ['acp', 'destroy'])
+  assert.equal(acpController(ctx), undefined)
+  assert.deepEqual(exitCodes, [2])
+})
+
+test('an extra positional on an acp management verb exits 2 and publishes no service', (t) => {
+  for (const verb of ['status', 'enable', 'disable']) {
+    const { ctx, exitCodes } = mount(t, ['acp', verb, 'extra'])
+    assert.equal(acpController(ctx), undefined, `acp ${verb} extra must not publish a service`)
+    assert.deepEqual(exitCodes, [2])
+  }
+})
+
+test('a session flag around an acp management verb exits 2 and publishes no service', (t) => {
+  for (const args of [
+    ['--session', 'mysql', 'acp', 'status'],
+    ['acp', 'status', '--session', 'mysql'],
+    ['--continue', 'acp', 'enable'],
+    ['acp', 'disable', '--preset', 'minimal'],
+  ]) {
+    const { ctx, exitCodes } = mount(t, args)
+    assert.equal(acpController(ctx), undefined, `${args.join(' ')} must not publish a service`)
+    assert.deepEqual(exitCodes, [2])
+  }
+})
+
+test('acp help lists every public verb, exits 0 and publishes no service', (t) => {
+  for (const args of [['acp', '--help'], ['acp', 'status', '--help'], ['acp', 'enable', '--help'], ['acp', 'disable', '--help']]) {
+    const captured = captureStdout(() => mount(t, args))
+    assert.equal(acpController(captured.value.ctx), undefined, `${args.join(' ')} must not publish a service`)
+    assert.deepEqual(captured.value.exitCodes, [0], `${args.join(' ')} must be help-only`)
+    if (args.length === 1) {
+      for (const verb of ['stdio', 'status', 'enable', 'disable']) {
+        assert.match(captured.text, new RegExp(`\\b${verb}\\b`, 'u'), `acp --help must list ${verb}`)
+      }
+    }
+  }
+})
+
+test('an acp management command works without an interactive TTY', (t) => {
+  const { ctx, exitCodes } = mount(t, ['acp', 'disable'])
+  assert.equal(acpController(ctx)?.control?.verb, 'disable')
+  assert.deepEqual(exitCodes, [])
+})
+
+test('a Host-only process rejects the acp management route without publishing a service', (t) => {
+  const hostEntry = join(testLifecycle(t).tempDir('acp-cli-host-only-'), 'local-host.mjs')
+  writeFileSync(hostEntry, '')
+  const previousArgv = process.argv[1]
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  process.argv[1] = hostEntry
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  process.env.DSH_PI_TUI_HOST_ENTRY = hostEntry
+  try {
+    for (const verb of ['status', 'enable', 'disable']) {
+      const { ctx, exitCodes } = mount(t, ['acp', verb])
+      assert.equal(acpController(ctx), undefined, 'a Host-only process must not acquire an acp-control intent')
+      assert.deepEqual(exitCodes, [2])
+    }
+  } finally {
+    process.argv[1] = previousArgv
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+  }
+})
+
+test('an acp cold-ready commit without the launcher row exits nonzero with the ACP CLI message', (t) => {
+  const { ctx, fireReady, exitCodes } = mount(t, ['acp', 'status'])
+  assert.ok(acpController(ctx) !== undefined)
+  const { text } = captureStderr(() => { fireReady() })
+  assert.deepEqual(exitCodes, [1])
+  assert.match(text, /acp CLI command/u)
+  assert.match(text, /daemon launcher row did not mount/u)
+  assert.doesNotMatch(text, /ACP_STDIO_LAUNCHER_UNAVAILABLE/u)
+  assert.doesNotMatch(text, /daemon TUI/u)
+})
+
+test('a mounted acp launcher suppresses the cold-ready error', (t) => {
+  const { ctx, fireReady, exitCodes } = mount(t, ['acp', 'enable'])
+  acpController(ctx)?.markCoordinatorMounted?.()
+  const { text } = captureStderr(() => { fireReady() })
+  assert.deepEqual(exitCodes, [])
+  assert.equal(text, '')
+})

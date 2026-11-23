@@ -532,6 +532,11 @@ test('every registry entry declares a conservative platform list and the audited
     // command, the same per-platform scope/identity APIs and the shared ACP
     // SDK against a real Host; both platform arms are required by its plan.
     'acp.stdio-bridge-a1',
+    // PR-C drives the public installed `dsh ... acp status|enable|disable`
+    // commands, the same per-platform local Host/scope/identity APIs, the
+    // shared loopback HTTP contract and one real external ACP client over the
+    // public stdio relay; it uses no Linux-only process primitive.
+    'acp.headless-cli',
     // G-ACP1B/B3 adds only the packaged Host's v1 entry/capability conformance
     // over the same shared Split harness and platform-specific ACP endpoint.
     'acp.v1-conformance-b3',
@@ -1096,6 +1101,44 @@ test('the trusted-profile ACP stdio case is selectable-only, dual-platform and r
   assert.throws(() => assertSelectedVerdict('acp.stdio-bridge-a1', { ...complete, status: 'NOT_VERIFIED' }),
     /selected acp\.stdio-bridge-a1/u)
 })
+test('the headless ACP CLI case is selectable-only, dual-platform and rejects incomplete proof', () => {
+  const entry = listSelectableCases().find(candidate => candidate.id === 'acp.headless-cli')
+  assert.ok(entry, 'the PR-C headless ACP CLI case must stay registered')
+  assert.equal(entry.suite, 'acp', 'the case belongs to the ACP suite')
+  assert.equal(entry.defaultLane, false, 'the packed management-CLI case stays outside the default expensive lane')
+  assert.deepEqual(entry.platforms, ['linux', 'darwin'], 'the selected case must carry the two real platform arms')
+  assert.equal(typeof entry.run, 'function')
+  // It is not part of the default full lane, and it dispatches on both audited platforms.
+  assert.ok(!listDefaultLaneCases().some(candidate => candidate.id === 'acp.headless-cli'),
+    'a selectable-only case must never silently join the default lane')
+  for (const platform of ['linux', 'darwin']) {
+    assert.deepEqual(resolveSelection({ mode: 'case', id: 'acp.headless-cli' }, platform).cases, [entry])
+  }
+  const complete = {
+    status: 'PASS',
+    headlessCli: 'PASS',
+    noHostRefusal: true,
+    statusPureRead: true,
+    enableDisableRoundTrip: true,
+    sameHostIdentity: true,
+    stdioProtocolClean: true,
+    disableClosesPeer: true,
+    anonymousPostRefused: true,
+    authenticatedStrictRefusals: true,
+    crossProfileIsolated: true,
+  }
+  assert.equal(assertSelectedVerdict('acp.headless-cli', complete), undefined)
+  const missing = { ...complete }
+  delete missing.disableClosesPeer
+  assert.throws(() => assertSelectedVerdict('acp.headless-cli', missing), /selected acp\.headless-cli/u)
+  assert.throws(() => assertSelectedVerdict('acp.headless-cli', { ...complete, anonymousPostRefused: false }),
+    /selected acp\.headless-cli/u)
+  assert.throws(() => assertSelectedVerdict('acp.headless-cli', { ...complete, status: 'NOT_VERIFIED' }),
+    /selected acp\.headless-cli/u)
+  assert.throws(() => assertSelectedVerdict('acp.headless-cli', { ...complete, headlessCli: 'NOT_RUN' }),
+    /selected acp\.headless-cli/u)
+})
+
 test('the ACP prompt/turn/event selected verdict accepts only the complete real-L6 proof', () => {
   const complete = {
     status: 'PASS',

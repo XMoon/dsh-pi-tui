@@ -139,7 +139,17 @@ dsh --profile pi-tui web status
 
 **ACP v1** 是默认关闭的、同机同用户本地接口。外部 ACP 客户端通过当前安装 Profile 的官方命令 `dsh --profile pi-tui acp stdio` 接入：它把该客户端的 stdio 原样转发给现有 Host 的本地 ACP Listener，**不会**另建 Host、Agent、Session 或 Writer，也**不会**自动启动 Host 或启用 Listener。它是填给 ACP 客户端的 stdio command，不是让用户在交互终端里期待 TUI 画面的命令。
 
-准备步骤：先启动并确认 Host，再从已连接的 Daemon TUI 用 `/acp` 把 Listener 切到 **Enabled**（`/settings → General → Start ACP automatically` 只控制下次 Host 冷启动），用 `daemon status` 确认 `acp=enabled`，然后才在外部 ACP 客户端的 stdio command 配置里填写该命令：
+Listener 的运行状态也可以用不打开 TUI 的 headless 命令读取和切换（同样**不会启动 Host**）：
+
+~~~sh
+dsh --profile pi-tui acp status
+dsh --profile pi-tui acp enable
+dsh --profile pi-tui acp disable
+~~~
+
+`acp status` 只读，输出一行 `acp=enabled|disabled|changing|unavailable`；`acp enable` / `acp disable` 只发送一次写入并打印 Host 真实达到的状态——`changing` 或响应丢失不会被猜成成功。它们只管理**当前 Profile 已运行 Host** 的运行时 Listener，不改变下次冷启动的 `autoStart`，也不会停止 Host、Agent、Session 或 TUI；`disable` 会断开已有 ACP 连接并停止接受新连接。
+
+准备步骤：先启动并确认 Host，再从已连接的 Daemon TUI 用 `/acp`（或 headless 的 `acp enable`）把 Listener 切到 **Enabled**（`/settings → General → Start ACP automatically` 只控制下次 Host 冷启动），用 `daemon status` 或 `acp status` 确认 `acp=enabled`，然后才在外部 ACP 客户端的 stdio command 配置里填写该命令：
 
 ~~~sh
 dsh --profile pi-tui daemon start
@@ -150,7 +160,7 @@ dsh --profile pi-tui acp stdio
 
 受信默认 Profile 保证该命令的 stdout 只承载 ACP 协议字节；第三方插件若在早期启动阶段直接写 stdout，仍可能污染它（属于接受的部署约束）。本地 ACP 支持 `initialize`、`session/new|resume|prompt|cancel|close`、能力协商后的图片输入，以及客户端在 `session/new|resume` 中声明的 **Agent-scoped stdio** MCP Server（每个 Session 最多 4 个）。一条 ACP 连接可持有**至多 8 个**不同 Session 的 View；同一 Host Session 同时只由一条 ACP 连接持有 View，而多个 TUI 不受此限制。它**不**提供 Host 级 MCP Server 管理，也不支持 HTTP/SSE、`session/list`、`session/load` 或未证明的文件传输，仍是 **Limited ACP v1**，不等于完整 ACP v1。接入步骤见 [Daemon 指南的外部 ACP 客户端章节](docs/guides/daemon.md#external-acp-client-over-stdio)；直接使用 SDK 连接 Listener 的例子仍作为高级用法保留在 [ACP v1 SDK 例子](docs/guides/daemon.md#local-acp-v1-sdk-client-example)。
 
-> **发行边界：** `acp stdio` 属于当前 `main` 的 A1/A2 候选实现；已发布的 **v0.5.8** 发行文件**不包含**这个新入口，因此上文“0.5.8 安装”段落不能作为该命令可用的安装保证。该入口进入 npm `@latest` 需要独立的后续发行；请对实际安装的版本运行 `dsh --profile pi-tui acp --help` 确认。
+> **发行边界：** `acp stdio` 与 `acp status|enable|disable` 属于当前 `main` 的候选实现；已发布的 **v0.5.8** 发行文件**不包含**这些新入口，因此上文“0.5.8 安装”段落不能作为这些命令可用的安装保证。它们进入 npm `@latest` 需要独立的后续发行；请对实际安装的版本运行 `dsh --profile pi-tui acp --help` 确认。
 
 在 [Herdr](https://github.com/herdrdev/herdr) Pane 中运行时，TUI 可以上报 Agent 工作状态；对有持久 Session ID 的场景可提供经 Profile 约束的恢复命令，实际能力取决于 Herdr 客户端。
 

@@ -27,6 +27,7 @@ import { Readable, Transform, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { protocolOnly } from '../../lib/split-smoke-acp-wire.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostAssistantHasText, hostSessionEvents, waitForHostSessionEventAfter, waitForHostSessionHeader } from '../../lib/split-smoke-sessions.mjs'
 import { waitForCondition } from '../../lib/split-smoke-processes.mjs'
@@ -48,24 +49,6 @@ function sleep(ms) {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
-}
-
-function validJsonRpcLine(line) {
-  try {
-    const value = JSON.parse(line)
-    return value !== null && typeof value === 'object' && !Array.isArray(value) && value.jsonrpc === '2.0'
-  } catch {
-    return false
-  }
-}
-
-/** Validate the complete stdout byte stream as NDJSON JSON-RPC. */
-function protocolOnly(raw) {
-  if (raw.length === 0) return { valid: true, frames: 0 }
-  const text = raw.toString('utf8')
-  if (!text.endsWith('\n')) return { valid: false, frames: 0 }
-  const lines = text.slice(0, -1).split('\n')
-  return { valid: lines.every(validJsonRpcLine), frames: lines.length }
 }
 
 /** One spawned public CLI command with its real stdout bytes and stderr text. */

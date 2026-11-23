@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Headless ACP management.** `dsh --profile pi-tui acp status|enable|disable` reads and toggles the local ACP listener of the running Host for the current Profile without opening a TUI or starting a Host. `status` is read-only and prints the Host's real state; `enable` / `disable` send exactly one write and report an unconfirmed or lost outcome as unknown instead of guessing success. They do not change the next-launch autostart preference and do not stop the Host, Agent, Session or TUI.
+
 ## [0.5.8] - 2026-11-22
 
 ### Added

@@ -103,8 +103,12 @@ const WEB_CLI_HTTP_TIMEOUT_MS = 30_000
  * A response can begin and then lose its socket before `end`; the response
  * `error`/`aborted`/incomplete-`close` paths and the overall timeout all reject,
  * so a partial 200 can never leave the smoke awaiting forever.
+ *
+ * @param rawUrl - the absolute http(s) URL to request.
+ * @param init - method/headers/body for the one request.
+ * @param label - the case name used in the bounded failure message.
  */
-export function requestFresh(rawUrl, init = {}) {
+export function requestFresh(rawUrl, init = {}, label = 'Web CLI') {
   return new Promise((resolve, reject) => {
     let url
     try {
@@ -119,7 +123,7 @@ export function requestFresh(rawUrl, init = {}) {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      reject(new SplitSmokeAssertionError(`HTTP request failed during the Web CLI case${code === undefined ? '' : ` (${code})`}`))
+      reject(new SplitSmokeAssertionError(`HTTP request failed during the ${label} case${code === undefined ? '' : ` (${code})`}`))
     }
     const succeed = value => {
       if (settled) return

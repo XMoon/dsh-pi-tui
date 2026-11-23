@@ -139,7 +139,17 @@ Also available: `web disable` / `web open`. The commands do **not** start a Host
 
 **ACP v1** is a default-off, same-user local interface. An external ACP client joins through the current Profile's public `dsh --profile pi-tui acp stdio` command: it relays that client's stdio to the existing Host's local ACP listener. It creates **no** second Host, Agent, Session or Writer and never starts the Host or enables the listener by itself. It is the stdio command you configure in an ACP client, not a command whose interactive terminal is expected to show a TUI.
 
-Preparation: start and confirm the Host, then switch the listener to **Enabled** from a connected Daemon TUI with `/acp` (`/settings → General → Start ACP automatically` only controls the next cold Host start), confirm `acp=enabled` with `daemon status`, and only then put the command into the external ACP client's stdio command configuration:
+The listener's runtime state can also be read and toggled without opening a TUI (these commands never start a Host either):
+
+~~~sh
+dsh --profile pi-tui acp status
+dsh --profile pi-tui acp enable
+dsh --profile pi-tui acp disable
+~~~
+
+`acp status` is read-only and prints one `acp=enabled|disabled|changing|unavailable` line; `acp enable` / `acp disable` send exactly one write and print the state the Host actually reached — a `changing` state or a lost response is never guessed as success. They manage only the running Host of the current Profile: they do not change the next-launch `autoStart`, do not stop the Host/Agent/Session/TUI, and `disable` closes existing ACP peers and stops accepting new ones.
+
+Preparation: start and confirm the Host, then switch the listener to **Enabled** from a connected Daemon TUI with `/acp` (or with the headless `acp enable`), confirm `acp=enabled` with `daemon status` or `acp status`, and only then put the command into the external ACP client's stdio command configuration:
 
 ~~~sh
 dsh --profile pi-tui daemon start
@@ -150,7 +160,7 @@ dsh --profile pi-tui acp stdio
 
 The trusted default Profile keeps that command's stdout to ACP protocol bytes; a third-party plugin that writes stdout during early startup can still pollute it (an accepted deployment constraint). Local ACP supports `initialize`, `session/new|resume|prompt|cancel|close`, capability-negotiated images, and **Agent-scoped stdio** MCP servers declared by the client in `session/new|resume` (at most 4 per Session). One ACP connection may hold **up to eight** Session Views; a Host Session is held by at most one ACP connection at a time, with no such limit on TUI Views. It provides **no** Host-wide MCP server management and does not support HTTP/SSE, `session/list`, `session/load` or unproven file transfer. This remains **Limited ACP v1**, not a full ACP v1. See [the external ACP client section of the Daemon guide](docs/guides/daemon.md#external-acp-client-over-stdio); the direct SDK connection example remains advanced usage in the [ACP v1 SDK example](docs/guides/daemon.md#local-acp-v1-sdk-client-example).
 
-> **Release boundary:** `acp stdio` belongs to the current `main` A1/A2 candidate implementation. The published **v0.5.8** release files do **not** contain this new entry, so the “0.5.8 installation” section above is not an installation guarantee for that command. Shipping it to npm `@latest` needs an independent future release; verify the version you actually installed with `dsh --profile pi-tui acp --help`.
+> **Release boundary:** `acp stdio` and `acp status|enable|disable` belong to the current `main` candidate implementation. The published **v0.5.8** release files do **not** contain these new entries, so the “0.5.8 installation” section above is not an installation guarantee for these commands. Shipping them to npm `@latest` needs an independent future release; verify the version you actually installed with `dsh --profile pi-tui acp --help`.
 
 When launched inside [Herdr](https://github.com/herdrdev/herdr), the TUI can report Agent status and provide Profile-pinned recovery commands for durable Sessions where the Herdr Client supports them.
 

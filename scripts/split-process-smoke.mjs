@@ -643,6 +643,21 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.headless-cli') {
+    assert(result?.status === 'PASS'
+      && result?.headlessCli === 'PASS'
+      && result?.noHostRefusal === true
+      && result?.statusPureRead === true
+      && result?.enableDisableRoundTrip === true
+      && result?.sameHostIdentity === true
+      && result?.stdioProtocolClean === true
+      && result?.disableClosesPeer === true
+      && result?.anonymousPostRefused === true
+      && result?.authenticatedStrictRefusals === true
+      && result?.crossProfileIsolated === true,
+    `selected ${caseId}: the headless ACP CLI verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.headlessCli ?? 'missing')}`)
+    return
+  }
   if (caseId === 'acp.native-question-form') {
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'
@@ -1134,6 +1149,12 @@ async function runSelectedCases(selection) {
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, identity) => trackedProcesses.set(pid, identity),
       untrackDetachedPid: pid => trackedProcesses.delete(pid),
+      // A selected case may drive a process through a PUBLIC command instead of
+      // this lane's constructors (for example the installed `daemon start`).
+      // Such a case reports the authoritative identity facts here so the
+      // machine-readable SELECTED_FACTS line and the quiescence check cover that
+      // process exactly like a lane-created child.
+      recordProcessIdentity: identity => { createdProcesses.push({ identityFacts: () => identity }) },
       // The current selected case id + the shared boundary reporter: a selected
       // case must be able to publish the same NOT_VERIFIED line as a full-lane
       // scene, and the line has to name the case it belongs to.

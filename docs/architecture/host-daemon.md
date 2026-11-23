@@ -503,3 +503,64 @@ state authority and the only mutation writer.
   cancels, replays or rolls back a pending business result. The CLI prints a
   stable line that current work may be interrupted and that unsettled writes are
   not replayed automatically.
+
+### Headless ACP CLI
+
+`dsh --profile pi-tui acp status|enable|disable` is the ONE headless ACP
+management grammar. The three verbs are nested under the existing `acp`
+command, need no interactive TTY, publish one typed `acp-control` intent to the
+same launcher row, and never resolve a Client artifact, open a Direct/Remote
+TUI, create a Session/Agent/Writer, spawn the ACP stdio adapter, install or
+start/stop a Host, or enable a Profile `autoStart`. `acp stdio` remains the
+machine protocol bridge and the management verbs never write human text into
+that stream; `acp` and `acp --help` are pure help and publish no service. The
+verbs are supported on Linux and macOS; `--session`, `--continue` and
+`--preset` are refused before any Host probe, in either argument position.
+
+Every verb operates on the official `profileContext` Profile and the current
+same-scope authenticated Host only: the read-only scope facts, official
+`/connect` Cookie, identity echo and fresh kernel identity are the same local
+authority the Web CLI uses, and no verb starts a Host.
+
+- **Status is a pure read.** `acp status` performs exactly ONE observation
+  through the existing Owner-only `GET /api/pi-tui.acp-status` route and
+  prints exactly one `acp=enabled|disabled|changing|unavailable` line with exit
+  `0`. It never issues a write, never creates the profile run directory and
+  never starts a Host. Only a genuine authenticated same-instance answer is
+  printed; an old Host without the route, a timeout, a malformed/foreign reply
+  or any other unprovable outcome exits `4` with `ACP_CLI_UNAVAILABLE`, an
+  empty stdout and never a guessed `disabled`. The observation is independent
+  of the compressed `daemon status` summary: `acp status` reports the Host's
+  real four-state vocabulary, while `daemon status` keeps its existing
+  `enabled|disabled|unavailable` projection.
+- **One write, one route.** `acp enable|disable` sends exactly ONE
+  authenticated Owner-only `POST /api/pi-tui.acp-control` with the current
+  instance id and the requested operation; the Host-entry's ONE ACP runtime
+  controller remains the only listener owner. The CLI never connects to the
+  public `acp.sock`, never opens a second controller and never starts a Host.
+  Runtime toggling does not rewrite the profile `acp-autostart` preference, does
+  not stop the Host/Agent/Session/TUI, and disabling closes existing ACP peers,
+  stops accepting new ones and retires the owned socket inode.
+- **Fixed write result contract.** A reply that proves the requested target was
+  reached prints `acp=enabled|disabled` and exits `0`. A verified settled
+  `unavailable` prints `acp=unavailable` and exits `4` with `ACP_UNAVAILABLE`.
+  A reply that proves a `changing` or target-mismatched state prints that actual
+  state and exits `5` with `ACP_OUTCOME_UNCONFIRMED`. A deterministic
+  pre-dispatch refusal keeps the empty-stdout taxonomy: missing/dead Host exits
+  `3` with `HOST_NOT_RUNNING` (the message names the explicit
+  `daemon start` next step but never performs it), authentication refusal exits
+  `3` with `HOST_AUTH_FAILED`, wrong instance/identity exits `3` with
+  `HOST_IDENTITY_REFUSED`, and an unsupported platform, old Host without the
+  route, or strict schema/media/method rejection exits `4` with
+  `ACP_CLI_UNAVAILABLE`. A lost response, timeout, abort, unverifiable reply or
+  Host `503` after dispatch exits `5` with `ACP_OUTCOME_UNCONFIRMED`: the write
+  may have committed, the CLI never replays it and never claims it did not
+  happen.
+- **One-shot ownership.** The ACP management arm uses the existing one-shot
+  `DaemonControlRunner` lifecycle: the operation starts only on the real
+  cold-ready commit, is aborted by its fiber disposal, settles `appExit` exactly
+  once, and maps an unexpected local throw to
+  `dsh-pi-tui acp: ACP_CLI_UNAVAILABLE` rather than a daemon/Web/stdio code.
+  Every failure line is one stable `dsh-pi-tui acp: <CODE>: <sanitized reason>`
+  line; raw Error text, argv, private paths, socket paths, Cookies and Host
+  URLs never reach stdout/stderr.

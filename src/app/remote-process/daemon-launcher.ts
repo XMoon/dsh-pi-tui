@@ -27,7 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-scope.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
-import type { TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
+import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
 
 /**
  * The read-only ACP stdio launch target, structurally identical to the
@@ -698,6 +698,10 @@ export function apply(ctx: Context): void {
     applyWebControl(ctx, startup, profileContext, appExit)
     return
   }
+  if (startup.kind === 'acp-control') {
+    applyAcpControl(ctx, startup, profileContext, appExit)
+    return
+  }
   if (startup.kind === 'acp-stdio') {
     applyAcpStdio(ctx, startup, profileContext, appExit)
     return
@@ -825,14 +829,18 @@ function managementProfile(profileContext: ProfileContextLike): {
  *  only on the real cold-ready commit, and dispose through the row fiber. */
 function mountManagementRunner(
   ctx: Context,
-  startup: TuiDaemonControlStartup | TuiWebControlStartup,
+  startup: TuiDaemonControlStartup | TuiWebControlStartup | TuiAcpControlStartup,
   runner: DaemonControlRunner,
   controller: AbortController,
 ): void {
   // The row mounted: the startup handshake must not report a missing launcher.
   startup.markCoordinatorMounted?.()
   const ready = ctx.get('appReady') as { onReady(listener: () => void): () => void } | undefined
-  const lifecycleName = startup.kind === 'web-control' ? 'pi-tui-web-control' : 'pi-tui-daemon-control'
+  const lifecycleName = startup.kind === 'web-control'
+    ? 'pi-tui-web-control'
+    : startup.kind === 'acp-control'
+      ? 'pi-tui-acp-control'
+      : 'pi-tui-daemon-control'
   if (ready === undefined) {
     runner.start()
   } else {
@@ -867,6 +875,35 @@ function applyManagement(
       return await runDaemonControl(startup.control, profile, { signal: controller.signal })
     },
     appExit,
+  })
+  mountManagementRunner(ctx, startup, runner, controller)
+}
+
+/** Assemble ONE headless ACP CLI operation for this official Profile. It never
+ *  resolves a Client artifact, never spawns a Client or the ACP stdio adapter
+ *  and never opens the TUI. */
+function applyAcpControl(
+  ctx: Context,
+  startup: TuiAcpControlStartup,
+  profileContext: ProfileContextLike,
+  appExit: (code: number) => void,
+): void {
+  const profile = managementProfile(profileContext)
+  const controller = new AbortController()
+  const runner = new DaemonControlRunner({
+    run: async () => {
+      const { runLocalAcpControl } = await import('./local-acp-control.ts')
+      return await runLocalAcpControl(startup.control, profile, { signal: controller.signal })
+    },
+    appExit,
+    // An unexpected ACP CLI failure must never be reported as a daemon manager
+    // or stdio-bridge failure: the fixed prefix names the acp command and
+    // carries no secret.
+    fallback: {
+      code: 4,
+      stdout: '',
+      stderr: 'dsh-pi-tui acp: ACP_CLI_UNAVAILABLE: an unexpected local ACP CLI failure occurred\n',
+    },
   })
   mountManagementRunner(ctx, startup, runner, controller)
 }
