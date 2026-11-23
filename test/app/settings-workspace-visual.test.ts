@@ -10423,6 +10423,119 @@ test('a pointer-only user completes Enable → Disable/Cancel → Back without a
   h.dispose()
 })
 
+/** The painted category-rail row of one label (never a metadata/body mention). */
+const railRowOf = (h: Harness, label: string): number => {
+  const row = h.rowsPlain().findIndex(line =>
+    new RegExp(`^(?:> | {2})${label}(?: {2,}|\\s*$)`, 'u').test(line))
+  assert.ok(row >= 0, `the rail must paint ${label}:\n${h.view()}`)
+  return row
+}
+
+/** Click the Rows bar's painted Open: a narrow bar drops the Enter form first. */
+const clickRowsOpen = async (h: Harness): Promise<void> => {
+  const bar = h.rowsPlain().at(-1) ?? ''
+  const hint = bar.includes('Right open') ? 'Right open' : 'Enter open'
+  assert.ok(bar.includes(hint), `the Rows bar must paint a complete Open hint:\n${h.view()}`)
+  await clickPainted(h, hint, true)
+}
+
+test('a 44x20 pointer-only user walks Categories → Host Rows → Web UI and completes Enable → Disable/Cancel → Back', async () => {
+  const h = setup({ columns: 44, rows: 20, backendKind: 'remote', webStatus: { state: 'disabled' } })
+  await h.openHome()
+  // A narrow terminal opens on the About content: its painted Esc is the
+  // pointer route back to the rail.
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Categories/u, 'the About Esc returns to the rail')
+
+  const hostRow = railRowOf(h, 'Host')
+  press(h, hostRow, cellIndexOf(h, hostRow, 'Host'))
+  release(h, hostRow, cellIndexOf(h, hostRow, 'Host'))
+  await settle(h)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Categories/u, 'the category click only selects')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Host')), 'the clicked category is selected')
+  await clickPainted(h, 'Enter open', true)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Host · Rows/u)
+
+  // The row click stays select-only; the painted bar Open is the pointer route.
+  const webRow = rowOf(h, 'Web UI')
+  press(h, webRow, cellIndexOf(h, webRow, 'Web UI'))
+  release(h, webRow, cellIndexOf(h, webRow, 'Web UI'))
+  await settle(h)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Host · Rows/u, 'a row click never drills')
+  assert.doesNotMatch(h.view(), /Settings · Host · Web UI/u)
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Web UI')), 'the row is selected')
+  await clickRowsOpen(h)
+  assert.match(h.view(), /Settings · Host · Web UI/u, 'the painted Open mounts the SAME page')
+  assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay was opened')
+
+  await clickPainted(h, 'Enable Web')
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the painted page action dispatched the toggle')
+  assert.match(h.view(), /Disable Web…/u)
+  await clickPainted(h, 'Disable Web…')
+  await settle(h)
+  await clickPainted(h, 'Cancel')
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the pointer Cancel performs zero writes')
+  await clickPainted(h, 'Disable Web…')
+  await settle(h)
+  await clickPainted(h, 'Confirm [Enter]', true) // the page's own painted confirm bar
+  await settle(h)
+  assert.deepEqual(h.webEnabledWrites(), [true, false], 'the pointer confirmation dispatched exactly once')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Host · Rows/u, 'page Back returns to the Host Rows level')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Categories/u, 'Rows Back returns to the rail')
+  h.dispose()
+})
+
+test('a 72x24 pointer-only user reaches ACP access through the Rows Open hint and completes Copy → Disable/Cancel → Back', async () => {
+  const h = setup({ columns: 72, rows: 24, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await h.openHome()
+  await clickPainted(h, 'Back [Esc]', true)
+  const hostRow = railRowOf(h, 'Host')
+  press(h, hostRow, cellIndexOf(h, hostRow, 'Host'))
+  release(h, hostRow, cellIndexOf(h, hostRow, 'Host'))
+  await settle(h)
+  await clickPainted(h, 'Enter open', true)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Host · Rows/u)
+
+  // The row click stays select-only; the painted bar Open reaches the page.
+  const acpRow = rowOf(h, 'ACP access')
+  press(h, acpRow, cellIndexOf(h, acpRow, 'ACP access'))
+  release(h, acpRow, cellIndexOf(h, acpRow, 'ACP access'))
+  await settle(h)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Host · Rows/u, 'the row click stays on Rows')
+  assert.doesNotMatch(h.view(), /Settings · Host · ACP access/u)
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> ACP access')), 'the row is selected')
+  await clickRowsOpen(h)
+  assert.match(h.view(), /Settings · Host · ACP access/u, 'the painted Open mounts the SAME page')
+  assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay was opened')
+
+  await clickPainted(h, 'Copy client command')
+  await settle(h)
+  assert.ok(h.copied.some(text => text.includes('dsh --profile pi-tui acp stdio')),
+    'the painted Copy really handed the proven command to the clipboard')
+  await clickPainted(h, 'Disable ACP…')
+  await settle(h)
+  await clickPainted(h, 'Cancel')
+  await settle(h)
+  assert.deepEqual(h.acpEnabledWrites(), [], 'the pointer Cancel performs zero writes')
+  await clickPainted(h, 'Disable ACP…')
+  await settle(h)
+  await clickPainted(h, 'Confirm [Enter]', true) // the page's own painted confirm bar
+  await settle(h)
+  assert.deepEqual(h.acpEnabledWrites(), [false], 'the pointer confirmation dispatched exactly once')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Host · Rows/u, 'page Back returns to the Host Rows level')
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.rowsPlain()[0] ?? '', /Settings · Categories/u, 'Rows Back returns to the rail')
+  h.dispose()
+})
+
 test('the Web UI page stays complete and operable across the frozen size matrix', async () => {
   for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
     const h = setup({ columns, rows, backendKind: 'remote', webStatus: { state: 'enabled' } })

@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ACP settings unified in the Host · ACP access page.** On PiTui, `/acp` and `/settings → Host → ACP access` now open the same Settings page: the running Host's local ACP listener state, Enable/Disable with a confirmation before disabling, one-click copy of the proven Profile's `acp stdio` client command, the next-Host-start `Start automatically` preference and the client setup guidance. The runtime state and the next-start preference stay independent; the previous `Tools → ACP Server` and `Host → Start ACP automatically` rows and the old `/acp` popup menu are retired.
 - **Headless ACP management.** `dsh --profile pi-tui acp status|enable|disable` reads and toggles the local ACP listener of the running Host for the current Profile without opening a TUI or starting a Host. `status` is read-only and prints the Host's real state; `enable` / `disable` send exactly one write and report an unconfirmed or lost outcome as unknown instead of guessing success. They do not change the next-launch autostart preference and do not stop the Host, Agent, Session or TUI.
 
+### Changed
+
+- **Truthful, clickable Settings row actions.** The Settings Rows action bar now names the row's real forward action (`Open`, `Choose` or `Details`) and the fully painted hint is clickable through the same Enter path as the keyboard; an unavailable or uncomposed specialist page is never advertised as `Open`. Clicking the row itself still only selects it.
+
 ## [0.5.8] - 2026-11-22
 
 ### Added

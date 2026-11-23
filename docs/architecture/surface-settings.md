@@ -164,6 +164,19 @@ specialist-page contract below).
   pending mutation, dirty draft, awaiting-paint grant or install phase is never
   bypassed. No page registers a second last-row owner, and a page that painted
   no complete Esc affordance leaves the row inert.
+- **Each browse level publishes at most ONE forward pointer target.** On the
+  category rail the fully painted `open`/`focus` hint is the pointer analogue of
+  `Enter`/`Right`; on the Rows level the painted `Right`/`Enter <action>` pair is
+  ONE span over the cells the LAST frame really drew, and its release replays the
+  CURRENT state's Enter ladder (`handleInput('\r')`). The action word is the
+  row's real forward action: a mountable embedded specialist page is `open`, a
+  row whose specialist page cannot be composed or opened stays `details` (never
+  a false `open`), a writable row is `choose` unless an edit commit is pending
+  (the choice cannot start then, so the word is `details`), and every other row
+  is `details`. A hint the width dropped or truncated publishes no target, and
+  clicking the row itself still only selects it. The Detail level publishes no
+  second forward target: its own `Change…`/`Manage…` affordances remain the
+  pointer route.
 
 - `About` is the default home: the Welcome-card brand/whale plus the runtime
   facts (the bundle's own version, the installed DSH version — `Unknown` when

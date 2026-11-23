@@ -792,8 +792,14 @@ const BAR_OPEN_ID = 'open'
  *  bar kind could be half-wired (press armed, wheel cancel and release blind). */
 const isActionBarTargetKind = (kind: HitTarget['kind']): boolean =>
   kind === 'bar-escape' || kind === 'bar-open' || kind === 'bar-span'
-/** The painted hint labels that mean "open/focus the selected rail entry". */
-const BAR_OPEN_HINTS: readonly string[] = ['Right open', 'Enter open', 'Enter/Right focus']
+/** The painted forward hints that replay the Enter ladder: the category rail's
+ *  open/focus entry and the Rows level's truthful row action. Only a hint that
+ *  the LAST frame really painted whole becomes a pointer target; a dropped one
+ *  publishes no geometry. */
+const BAR_OPEN_HINTS: readonly string[] = [
+  'Right open', 'Enter open', 'Enter/Right focus',
+  'Right choose', 'Enter choose', 'Right details', 'Enter details',
+]
 
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
@@ -2572,26 +2578,28 @@ export class SettingsWorkspacePanel implements Component {
    */
   private renderNavigationActionBar(width: number): PaintedBarLine {
     if (this.bodyFloor() < 1) return this.paintBar([{ text: 'Close [Esc]', priority: 8 }], width)
-    return this.paintBar(this.navigationActionBarSegments(), width, true)
+    return this.paintBar(this.navigationActionBarSegments(), width, BAR_OPEN_HINTS)
   }
 
   /** Paint the shared Settings row: the LAST (Esc) segment carries the scoped
    *  Fullscreen secondary-verb ink while every other hint and the separator stay
    *  `textMuted` (design language §7.1). The unpainted complete span of the Esc
    *  segment is the ONE pointer geometry this frame may publish; a truncated or
-   *  dropped segment publishes none. */
-  private paintBar(segments: readonly ActionBarSegment[], width: number, openHint: boolean = false): PaintedBarLine {
+   *  dropped segment publishes none. `openHints` admits which painted segments
+   *  are the caller's forward/Enter affordances (never every `Enter *` hint on
+   *  every level). */
+  private paintBar(segments: readonly ActionBarSegment[], width: number, openHints: readonly string[] = []): PaintedBarLine {
     const layout = layoutActionBarRow(segments, width)
     if (layout.truncated || layout.spans.length === 0) return { line: color.textMuted(layout.text) }
     const escapeIndex = segments.length - 1
     let span: { startCol: number; endCol: number } | undefined
-    // A pointer OPEN affordance exists only while EVERY open hint painted in
-    // full: a truncated or dropped hint publishes no geometry, exactly like the
-    // Esc affordance.
+    // A pointer OPEN affordance exists only for a hint this call admits AND
+    // that painted in full: a truncated or dropped hint publishes no geometry,
+    // exactly like the Esc affordance.
     let openSpan: { startCol: number; endCol: number } | undefined
     const openSpans: Array<{ startCol: number, endCol: number }> = []
     const painted = layout.spans.map(candidate => {
-      if (openHint && BAR_OPEN_HINTS.includes(candidate.text)) {
+      if (openHints.includes(candidate.text)) {
         openSpans.push({ startCol: candidate.startCol, endCol: candidate.endCol })
       }
       if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
@@ -3723,12 +3731,32 @@ export class SettingsWorkspacePanel implements Component {
     return lines
   }
 
+  /**
+   * The forward action a Rows-level Enter/Right really performs for the
+   * selected row: mount its embedded specialist page, start its transient
+   * choice, or enter the read-only Detail. It mirrors `enterDetail()` — a row
+   * whose page cannot be composed or opened keeps `details` (never a false
+   * `open`), and a pending commit cannot start a second choice so a writable
+   * row falls back to `details`. The Rows bar word and its pointer target use
+   * THIS one answer, so the painted action is the action.
+   */
+  private rowForwardAction(row: SettingsWorkspaceRow | undefined): 'open' | 'choose' | 'details' {
+    if (row?.specialist !== undefined) {
+      return row.specialistAvailable === false || this.specialistEntryFor(row.specialist) === undefined
+        ? 'details'
+        : 'open'
+    }
+    if (row?.edit === undefined || row.edit.options.length === 0) return 'details'
+    return this.editPhase.kind === 'pending' ? 'details' : 'choose'
+  }
+
   /** The pinned Action Bar (design language §7): the surface's own actions
    *  first and `Esc` LAST, while `Esc` keeps the highest drop priority. Whole
    *  segments are dropped by priority through the shared row layout, so a hint
    *  is never cut mid-word. */
   private renderActionBar(plan: SettingsChromePlan): PaintedBarLine {
     const row = this.selectedRow()
+    const rowAction = this.rowForwardAction(row)
     const back = this.focus === 'categories' ? 'Close [Esc]' : 'Back [Esc]'
     if (this.bodyFloor() < 1) return this.paintBar([{ text: back, priority: 8 }], plan.width)
     let segments: ActionBarSegment[]
@@ -3758,8 +3786,8 @@ export class SettingsWorkspacePanel implements Component {
         ...(this.focus === 'rows' ? [
           { text: 'Up/Down select', priority: 4 },
           { text: 'Left back', priority: 7 },
-          { text: 'Right details', priority: 6 },
-          { text: 'Enter details', priority: 5 },
+          { text: `Right ${rowAction}`, priority: 6 },
+          { text: `Enter ${rowAction}`, priority: 5 },
         ] : []),
         ...(this.focus === 'detail' && detailScroll ? [
           { text: 'Up/Down scroll', priority: 4 },
@@ -3771,7 +3799,6 @@ export class SettingsWorkspacePanel implements Component {
     } else if (this.focus === 'categories') {
       segments = this.navigationActionBarSegments()
     } else if (this.focus === 'rows') {
-      const rowAction = row?.edit === undefined || row.edit.options.length === 0 ? 'details' : 'choose'
       // C2-R6: on the Extensions Rows level Tab/Shift+Tab cycle the PLUGIN
       // GROUPS, so the bar advertises that instead of the root's `Tab panes`
       // region hint (which would be a false hint there). One group keeps the
@@ -3804,9 +3831,12 @@ export class SettingsWorkspacePanel implements Component {
     // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
-    // The open hints (`Right open` / `Enter open`) are REAL pointer targets in
-    // every state that paints them, not keyboard-only text.
-    const rendered = this.paintBar(segments, plan.width, true)
+    // Only the TWO BROWSE levels publish a painted forward target: the rail's
+    // open/focus entry and the Rows level's truthful row action. A Detail-level
+    // `Enter choose` is not a second pointer button (the Detail already paints
+    // its own Change…/Manage… affordance).
+    const openHints = this.focus === 'categories' || this.focus === 'rows' ? BAR_OPEN_HINTS : []
+    const rendered = this.paintBar(segments, plan.width, openHints)
     const choosing = this.choiceField() !== undefined
     this.paintedChoiceNavigation = choosing && rendered.line.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
