@@ -178,15 +178,11 @@ interface HarnessOptions {
   /** PR-A: start with NO Connection generation (a Client before the Split Host
    *  connects). The port rejects a status read exactly like the real adapter. */
   webDisconnected?: boolean
-  /** Make the Host status read throw (a disconnected / superseded Client). */
-  webStatusReadFailure?: string
   /** Make the toggle reject with this reason (a refused/disconnected Host). */
   webToggleFailure?: string
   /** The state the Host reports AFTER a successful toggle (default: the
    *  requested target). */
   webSettledStatus?: WebAccessStatus
-  /** The official launch URL the Host hands to an explicit Open/Copy. */
-  webUrl?: string
   /** Hold the official URL reply until `releaseWebUrl()`: the window between
    *  the URL RPC settling and the Client sink. */
   holdWebUrl?: boolean
@@ -667,7 +663,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const openedUrls: string[] = []
   let heldWebUrl: (() => void) | undefined
   const webToggleRefusal = options.webToggleFailure
-  const webUrl = options.webUrl ?? 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'
+  const webUrl = 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'
   const notifyPolicyListeners = (event: 'committed' | 'invalidated'): void => {
     for (const listener of [...policyListeners]) listener(event)
   }
@@ -902,7 +898,6 @@ function setup(options: HarnessOptions = {}): Harness {
         webStatusReads.count += 1
         // The real adapter's single-call fence: no Host generation = no read.
         if (webGeneration === undefined) throw new Error('the Client is not connected to a Host')
-        if (options.webStatusReadFailure !== undefined) throw new Error(options.webStatusReadFailure)
         if (webStatus === undefined) throw new Error('the Client is not connected to a Host')
         return webStatus
       },

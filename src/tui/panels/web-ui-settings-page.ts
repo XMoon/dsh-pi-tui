@@ -436,14 +436,17 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /**
-   * ONE live read of the persisted next-start preference and its Config
-   * authority (never a Host Web read). The edit grant is never taken from a
-   * cached readiness: when the authority is no longer current the staged
-   * preference step is revoked (zero writes) and the painted fact degrades to
-   * `Unavailable`/`last known` from THIS read. The Remote Config mirror
-   * invalidates on the same Connection generation rollover the page observes,
-   * so a replaced/disconnected Host can never leave an editable preference
-   * behind.
+   * ONE live observation of the persisted next-start preference and its Config
+   * authority (never a Host Web read). The readiness preference and the value
+   * are captured TOGETHER and every projection/admission of this observation
+   * derives from the SAME pair — the page never reads the authority twice in
+   * one decision, so a painted `Unavailable` fact can never sit beside an
+   * editable row (or a stale revision beside an edit grant).
+   *
+   * The Remote Config mirror invalidates on the same Connection generation
+   * rollover the page observes. When the captured authority is not current the
+   * staged preference step is revoked here (zero writes) and the painted fact
+   * degrades to `Unavailable`/`last known` from THIS observation.
    */
   private reconcilePreference(): void {
     this.preferenceReadiness = this.intents.configReadiness()
@@ -456,11 +459,12 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     }
   }
 
-  /** Whether the next-launch preference may be edited right now. It consults
-   *  the LIVE Config authority (ready state + an exposed revision), never only
-   *  the last painted projection. */
+  /** Whether the OBSERVATION captured by the current projection/admission may
+   *  be edited: the authority must be `ready` and must expose a revision. Every
+   *  caller reconciles first (projection, generation change, refresh, action,
+   *  write admission), so this never re-reads the authority. */
   private preferenceEditable(): boolean {
-    return this.intents.configReadiness() === 'ready' && this.intents.readPreference() !== undefined
+    return this.preferenceReadiness === 'ready' && this.preference !== undefined
   }
 
   private hostCurrent(): { readonly status: WebAccessStatus; readonly generation: unknown } | undefined {
@@ -492,6 +496,9 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
 
   private activateRow(id: string): void {
     if (this.disposed) return
+    // An action is admitted against a CURRENT Config observation, never against
+    // the projection a previous frame captured.
+    this.reconcilePreference()
     switch (id) {
       case 'open': this.openBrowser(); return
       case 'copy': this.copyLink(); return

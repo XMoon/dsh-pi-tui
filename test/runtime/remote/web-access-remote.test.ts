@@ -46,7 +46,11 @@ function generationSource(initial: RemoteConnectionGeneration | undefined): {
 const ok = <T>(value: T): { ok: true; value: T } => ({ ok: true, value })
 
 /** One fresh opaque generation identity (the Connection mints a new object). */
-const nextGeneration = (): RemoteConnectionGeneration => ({ id: Math.random() })
+let generationSeq = 0
+const nextGeneration = (): RemoteConnectionGeneration => {
+  generationSeq += 1
+  return { id: generationSeq }
+}
 
 /** One namespace whose calls the case observes and can hold/fail. */
 function namespace(overrides: Partial<RemoteWebAccessNamespace> = {}): {
@@ -75,7 +79,7 @@ function namespace(overrides: Partial<RemoteWebAccessNamespace> = {}): {
   return { face, calls, enabled }
 }
 
-test('UNIT: the legacy status read is generation-fenced around the call and keeps its shape', async () => {
+test('the legacy status read is generation-fenced around the call and keeps its shape', async () => {
   const generation = generationSource(nextGeneration())
   const calls = namespace()
   const port = new RemoteWebAccessPort(calls.face, generation)
@@ -89,7 +93,7 @@ test('UNIT: the legacy status read is generation-fenced around the call and keep
   await assert.rejects(new RemoteWebAccessPort(held.face, generation).getStatus(), SupersededReadError)
 })
 
-test('UNIT: a disconnected Client is a definite read failure, never a fabricated state', async () => {
+test('a disconnected Client is a definite read failure, never a fabricated state', async () => {
   const disconnected = new RemoteWebAccessPort(namespace().face, generationSource(undefined))
   await assert.rejects(disconnected.getStatus(), /not connected to a Host/u)
   // A Host whose private namespace is not mounted is a definite unavailable,
@@ -98,7 +102,7 @@ test('UNIT: a disconnected Client is a definite read failure, never a fabricated
   await assert.rejects(unmounted.getStatus(), /piTuiWebAccess Remote namespace is not mounted/u)
 })
 
-test('UNIT: the legacy toggle/URL calls stay compatible (no expectedGeneration)', async () => {
+test('the legacy toggle/URL calls stay compatible (no expectedGeneration)', async () => {
   const generation = generationSource(nextGeneration())
   const calls = namespace()
   const port = new RemoteWebAccessPort(calls.face, generation)
@@ -108,7 +112,7 @@ test('UNIT: the legacy toggle/URL calls stay compatible (no expectedGeneration)'
   assert.deepEqual(calls.enabled, [true])
 })
 
-test('UNIT: expectedGeneration refuses BEFORE dispatch when the Host was replaced', async () => {
+test('expectedGeneration refuses BEFORE dispatch when the Host was replaced', async () => {
   const observed = nextGeneration()
   const generation = generationSource(observed)
   const calls = namespace()
@@ -119,7 +123,7 @@ test('UNIT: expectedGeneration refuses BEFORE dispatch when the Host was replace
   assert.deepEqual(calls.calls, [], 'zero Host dispatch: not one namespace method was called')
 })
 
-test('UNIT: a matching expectedGeneration dispatches exactly once', async () => {
+test('a matching expectedGeneration dispatches exactly once', async () => {
   const observed = nextGeneration()
   const generation = generationSource(observed)
   const calls = namespace()
@@ -129,7 +133,7 @@ test('UNIT: a matching expectedGeneration dispatches exactly once', async () => 
   assert.deepEqual(calls.calls, ['setEnabled:false', 'getAuthenticatedUrl'], 'one dispatch per intent, never replayed')
 })
 
-test('UNIT: a reply carried by a replaced Host is superseded, and the request is never resent', async () => {
+test('a reply carried by a replaced Host is superseded, and the request is never resent', async () => {
   const observed = nextGeneration()
   const generation = generationSource(observed)
   let dispatched = 0
@@ -146,7 +150,7 @@ test('UNIT: a reply carried by a replaced Host is superseded, and the request is
   assert.equal(dispatched, 1, 'the side-effecting request is never replayed')
 })
 
-test('UNIT: a refusal and a transport rejection are generation-bound too', async () => {
+test('a refusal and a transport rejection are generation-bound too', async () => {
   const generation = generationSource(nextGeneration())
   const refused = namespace({ getStatus: async () => ({ ok: false, error: new Error('refused') } as never) })
   await assert.rejects(new RemoteWebAccessPort(refused.face, generation).getStatus(), /refused/u)
@@ -158,7 +162,7 @@ test('UNIT: a refusal and a transport rejection are generation-bound too', async
     'a stale failure is never presented as the new generation\'s definite state')
 })
 
-test('UNIT: currentGeneration/subscribeGeneration forward the ONE Connection authority', () => {
+test('currentGeneration/subscribeGeneration forward the ONE Connection authority', () => {
   const first = nextGeneration()
   const generation = generationSource(first)
   const port = new RemoteWebAccessPort(namespace().face, generation)

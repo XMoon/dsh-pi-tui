@@ -19,7 +19,6 @@ import { mountEmbeddedPage, type EmbeddedPageMount } from '../support/embedded-p
 import { WebUiSettingsPage, type WebUiSettingsPageIntents } from '../../src/tui/panels/web-ui-settings-page.ts'
 import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
 import type { WebStartupPreferenceState } from '../../src/runtime/config-port.ts'
-import type { SettingsWorkspaceCommitOutcome } from '../../src/tui/panels/settings-workspace-panel.ts'
 
 interface PageHarnessOptions {
   readonly columns?: number
@@ -28,10 +27,8 @@ interface PageHarnessOptions {
   readonly status?: WebAccessStatus
   readonly readFailure?: string
   readonly toggleFailure?: string
-  readonly settledStatus?: WebAccessStatus
   readonly preference?: WebStartupPreferenceState | undefined
   readonly readiness?: 'ready' | 'stale' | 'unavailable'
-  readonly commit?: SettingsWorkspaceCommitOutcome
   readonly commitFailure?: string
   readonly copy?: boolean
   readonly urlFailure?: string
@@ -117,13 +114,12 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       return status
     },
     setEnabled: async (enabled) => {
-      if (options.toggleFailure === undefined && options.settledStatus === undefined) {
-        // Default: the Host adopts the request.
-        await new Promise<void>(resolve => { heldToggle = resolve })
-      }
+      // A refused/lost-receipt case settles immediately; the adopting Host
+      // answers only when the case releases the held request.
+      if (options.toggleFailure === undefined) await new Promise<void>(resolve => { heldToggle = resolve })
       writes.push(enabled)
       if (options.toggleFailure !== undefined) throw new Error(options.toggleFailure)
-      status = options.settledStatus ?? (enabled ? { state: 'enabled' } : { state: 'disabled' })
+      status = enabled ? { state: 'enabled' } : { state: 'disabled' }
       return status
     },
     getAuthenticatedUrl: async () => {
@@ -140,7 +136,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       commits.push(value)
       commitRevisions.push(revision)
       if (options.commitFailure !== undefined) throw new Error(options.commitFailure)
-      return options.commit ?? { outcome: 'verified' }
+      return { outcome: 'verified' }
     },
     currentGeneration: () => generation.value,
     subscribeGeneration: (listener) => {
@@ -217,7 +213,7 @@ async function settleAll(vt: VirtualTerminal): Promise<void> {
   await vt.waitForRender()
 }
 
-test('PAGE: the enabled first focus is Open in browser; the disabled one is Enable Web', async () => {
+test('the enabled first focus is Open in browser; the disabled one is Enable Web', async () => {
   const enabled = await mount({ status: { state: 'enabled' } })
   assert.match(enabled.frame(), /^> Open in browser/mu)
   enabled.close()
@@ -227,7 +223,7 @@ test('PAGE: the enabled first focus is Open in browser; the disabled one is Enab
   disabled.close()
 })
 
-test('PAGE: with no Host action the editable preference is the first focus, else Refresh', async () => {
+test('with no Host action the editable preference is the first focus, else Refresh', async () => {
   const direct = await mount({ backendKind: 'direct' })
   assert.match(direct.frame(), /Serving\s+Unavailable · Split Host only/u)
   assert.match(direct.frame(), /^> Start automatically/mu, 'the editable preference owns the focus')
@@ -239,7 +235,7 @@ test('PAGE: with no Host action the editable preference is the first focus, else
   noPreference.close()
 })
 
-test('PAGE: the Esc ladder cancels a confirmation before leaving, and leaves no write behind', async () => {
+test('the Esc ladder cancels a confirmation before leaving, and leaves no write behind', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   await h.key('\x1b[B') // Open -> Copy
   await h.key('\x1b[B') // Copy -> Disable
@@ -255,7 +251,7 @@ test('PAGE: the Esc ladder cancels a confirmation before leaving, and leaves no 
   h.close()
 })
 
-test('PAGE: the next-start candidate ladder stages zero writes and saves only on Confirm save', async () => {
+test('the next-start candidate ladder stages zero writes and saves only on Confirm save', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   await h.key('\x1b[B')
   await h.key('\x1b[B')
@@ -276,7 +272,7 @@ test('PAGE: the next-start candidate ladder stages zero writes and saves only on
   h.close()
 })
 
-test('PAGE: a pending runtime write leaves on Esc while its owner keeps settling, diagnosed', async () => {
+test('a pending runtime write leaves on Esc while its owner keeps settling, diagnosed', async () => {
   const h = await mount({ status: { state: 'disabled' } })
   await h.key('\r') // Enable Web
   assert.match(h.frame(), /Waiting for the answer…/u)
@@ -293,7 +289,7 @@ test('PAGE: a pending runtime write leaves on Esc while its owner keeps settling
   h.close()
 })
 
-test('PAGE: a Host generation change revokes the actions and re-reads before any new action', async () => {
+test('a Host generation change revokes the actions and re-reads before any new action', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   const readsBefore = h.reads()
   h.bumpGeneration()
@@ -303,7 +299,7 @@ test('PAGE: a Host generation change revokes the actions and re-reads before any
   h.close()
 })
 
-test('PAGE: a generation change during a pending write reports Outcome unconfirmed', async () => {
+test('a generation change during a pending write reports Outcome unconfirmed', async () => {
   const h = await mount({ status: { state: 'disabled' } })
   await h.key('\r') // Enable, held
   h.bumpGeneration()
@@ -313,7 +309,7 @@ test('PAGE: a generation change during a pending write reports Outcome unconfirm
   h.close()
 })
 
-test('PAGE: a lost toggle receipt is Outcome unconfirmed and is never retried', async () => {
+test('a lost toggle receipt is Outcome unconfirmed and is never retried', async () => {
   const h = await mount({ status: { state: 'disabled' }, toggleFailure: 'the connection dropped after dispatch' })
   await h.key('\r')
   await h.flush()
@@ -325,7 +321,7 @@ test('PAGE: a lost toggle receipt is Outcome unconfirmed and is never retried', 
   h.close()
 })
 
-test('PAGE: the launch URL is requested only by an explicit Open/Copy and never painted', async () => {
+test('the launch URL is requested only by an explicit Open/Copy and never painted', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   await h.flush()
   assert.equal(h.urlReads(), 0)
@@ -347,7 +343,7 @@ test('PAGE: the launch URL is requested only by an explicit Open/Copy and never 
   h.close()
 })
 
-test('PAGE: a refused URL or clipboard is an honest error, never a fake success', async () => {
+test('a refused URL or clipboard is an honest error, never a fake success', async () => {
   const refused = await mount({ status: { state: 'enabled' }, urlFailure: 'the Host refused the link' })
   await refused.key('\r')
   await refused.flush()
@@ -362,7 +358,7 @@ test('PAGE: a refused URL or clipboard is an honest error, never a fake success'
   noClipboard.close()
 })
 
-test('PAGE: an unreadable Host state revokes every action and states the real failure', async () => {
+test('an unreadable Host state revokes every action and states the real failure', async () => {
   const h = await mount({ status: { state: 'enabled' }, readFailure: 'the Client is not connected to a Host' })
   assert.match(h.frame(), /Serving\s+Unavailable/u)
   assert.match(h.frame(), /the Client is not connected to a Host/u)
@@ -371,7 +367,7 @@ test('PAGE: an unreadable Host state revokes every action and states the real fa
   h.close()
 })
 
-test('PAGE: a short grant keeps ONE scrollable column and the Esc affordance', async () => {
+test('a short grant keeps ONE scrollable column and the Esc affordance', async () => {
   const h = await mount({ status: { state: 'enabled' }, columns: 44, rows: 8 })
   assert.match(h.frame(), /Settings|Current Host/u)
   assert.match(h.bar(), /Back \[Esc\]/u, 'the physical last row keeps the Esc affordance')
@@ -382,7 +378,7 @@ test('PAGE: a short grant keeps ONE scrollable column and the Esc affordance', a
   h.close()
 })
 
-test('PAGE: a committed preference re-reads the persisted value, never the requested one', async () => {
+test('a committed preference re-reads the persisted value, never the requested one', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   await h.key('\x1b[B')
   await h.key('\x1b[B')
@@ -397,7 +393,7 @@ test('PAGE: a committed preference re-reads the persisted value, never the reque
   h.close()
 })
 
-test('PAGE: a URL reply from a REPLACED Host never reaches the opener', async () => {
+test('a URL reply from a REPLACED Host never reaches the opener', async () => {
   const h = await mount({ status: { state: 'enabled' }, holdUrl: true })
   await h.key('\r') // Open in browser: the URL RPC is held
   await h.flush()
@@ -415,7 +411,7 @@ test('PAGE: a URL reply from a REPLACED Host never reaches the opener', async ()
   h.close()
 })
 
-test('PAGE: a URL reply from a REPLACED Host never reaches the clipboard', async () => {
+test('a URL reply from a REPLACED Host never reaches the clipboard', async () => {
   const h = await mount({ status: { state: 'enabled' }, holdUrl: true })
   await h.key('\x1b[B') // Open -> Copy
   await h.key('\r')
@@ -431,7 +427,7 @@ test('PAGE: a URL reply from a REPLACED Host never reaches the clipboard', async
   h.close()
 })
 
-test('PAGE: a /web opened while DISCONNECTED settles Unreadable and recovers on connect', async () => {
+test('the page opened while DISCONNECTED settles Unreadable and recovers on connect', async () => {
   const h = await mount({ status: { state: 'enabled' }, disconnected: true })
   // The initial read really failed with the port's own disconnected error and
   // settled as a usable, truthful frame — not an endless Reading/Checking.
@@ -454,7 +450,7 @@ test('PAGE: a /web opened while DISCONNECTED settles Unreadable and recovers on 
   h.close()
 })
 
-test('PAGE: a status reply from a superseded generation is never painted as current', async () => {
+test('a status reply from a superseded generation is never painted as current', async () => {
   const h = await mount({ status: { state: 'disabled' }, holdRead: true })
   // Read #1 is in flight for Host A; the Host is then replaced and read #2
   // starts. The OLD reply settles first and must not speak for Host B.
@@ -470,7 +466,7 @@ test('PAGE: a status reply from a superseded generation is never painted as curr
   h.close()
 })
 
-test('PAGE: a Host rollover revokes the next-start edit grant taken from the old Config mirror', async () => {
+test('a Host rollover revokes the next-start edit grant taken from the old Config mirror', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   // Stage the confirmation through the page's own ladder (zero writes so far).
   await h.key('\x1b[B')
@@ -518,7 +514,7 @@ test('PAGE: a Host rollover revokes the next-start edit grant taken from the old
   h.close()
 })
 
-test('PAGE: a throwing commit is an honest unconfirmed outcome', async () => {
+test('a throwing commit is an honest unconfirmed outcome', async () => {
   const h = await mount({ status: { state: 'enabled' }, commitFailure: 'the writer crashed' })
   await h.key('\x1b[B')
   await h.key('\x1b[B')
