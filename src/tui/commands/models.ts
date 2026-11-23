@@ -937,7 +937,11 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // subject owns the surface, and a superseded refresh must not repaint.
             if (token !== presetOperationToken) return { kind: 'superseded' }
             if (!ownerCurrent()) return { kind: 'superseded' }
-            if (refreshed.kind !== 'superseded') runner.updateWelcomeCard()
+            // The coordinator returns a settled failure instead of throwing;
+            // the Host switch stays committed and the refresh problem is
+            // carried beside it, never swallowed as a clean success.
+            if (refreshed.kind === 'failed') refreshError = refreshed.error
+            else if (refreshed.kind === 'applied') runner.updateWelcomeCard()
           } catch (error) {
             if (token !== presetOperationToken) return { kind: 'superseded' }
             if (!ownerCurrent()) return { kind: 'superseded' }

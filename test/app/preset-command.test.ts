@@ -2013,3 +2013,53 @@ test('a proven Host rejection remains a distinct not-switched sync outcome', asy
   assert.ok(!/uncertain|may have committed/iu.test(result.text), 'a proven rejection must not be worded as uncertain')
   t.app.dispose()
 })
+
+test('default sync carries a RETURNED post-commit refresh failure beside the committed switch', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+      defaultId: () => 'minimal',
+      selectSessionPreset: async (_sessionId, id) => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { preset: id } },
+      }) as never,
+    },
+    settings: { get: () => undefined, mutate: async () => {} },
+    refreshCatalog: async (request) => request.target.kind === 'agent'
+      ? { kind: 'failed', error: 'catalog read failed after commit' }
+      : { kind: 'applied', snapshot: {} as never },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /current blank session switched to minimal, but the catalog refresh failed: catalog read failed after commit/u)
+  assert.ok(!/catalog refresh failed: undefined/iu.test(result.text))
+  t.app.dispose()
+})
+
+test('explicit Use carries a RETURNED post-commit refresh failure beside the committed switch', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal' }], defaultId: 'standard' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      defaultId: () => 'standard',
+      selectSessionPreset: async (_sessionId, id) => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { preset: id } },
+      }) as never,
+    },
+    refreshCatalog: async (request) => request.target.kind === 'agent'
+      ? { kind: 'failed', error: 'catalog read failed after commit' }
+      : { kind: 'applied', snapshot: {} as never },
+  })
+  const result = await t.runCommand('preset', 'minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /session preset switched to minimal; catalog refresh failed: catalog read failed after commit/u)
+  assert.ok(!/catalog refresh failed: undefined/iu.test(result.text))
+  t.app.dispose()
+})

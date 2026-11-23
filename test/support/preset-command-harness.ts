@@ -316,7 +316,10 @@ function stubRunner(options: {
         agent,
       }
       refreshes.push(request)
-      return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
+      // The mounted Session refresh is normally a successful no-op here; a
+      // scripted failure must be explicit so a committed switch's catalog
+      // refresh is not silently reported as broken in every unrelated test.
+      return options.refreshCatalog?.(request) ?? { kind: 'applied', snapshot: {} as never }
     },
     refreshStandingCatalog: async (presetId, source) => {
       const request: CatalogRefreshRequest = { source, target: { kind: 'preset', presetId } }
