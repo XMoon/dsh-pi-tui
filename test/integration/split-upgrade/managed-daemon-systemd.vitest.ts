@@ -654,18 +654,25 @@ test(TEST_TITLE, async () => {
       assert.equal(systemctlUser(foreignShowArgs, environment), showBefore, 'the refused foreign unit manager state changed')
     } finally {
       let removeForeign = false
+      let cleanupError: unknown
       try {
         const current = lstatSync(targetUnitPath)
         removeForeign = current.dev === statBefore.dev
           && current.ino === statBefore.ino
           && (current.mode & 0o7777) === (statBefore.mode & 0o7777)
           && readFileSync(targetUnitPath).equals(foreignBytes)
+        if (removeForeign) unlinkSync(targetUnitPath)
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code
-        if (code !== 'ENOENT') throw error
+        if (code !== 'ENOENT') cleanupError = error
       }
-      if (removeForeign) unlinkSync(targetUnitPath)
-      systemctlUser(['daemon-reload'], environment)
+      try {
+        systemctlUser(['daemon-reload'], environment)
+      } catch (reloadError) {
+        if (cleanupError === undefined) throw reloadError
+        throw new AggregateError([cleanupError, reloadError], 'the foreign unit cleanup and manager reload both failed')
+      }
+      if (cleanupError !== undefined) throw cleanupError
     }
     assert.equal(existsSync(targetUnitPath), false, 'the foreign unit was not removed')
     assert.match(systemctlUser(['show', targetUnitName, '-p', 'LoadState'], environment), /^LoadState=not-found$/mu,
