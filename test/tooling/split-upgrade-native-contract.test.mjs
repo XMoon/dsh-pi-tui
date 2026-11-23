@@ -33,12 +33,12 @@ import {
   classifyNativeCleanup,
   classifyNativeCliFence,
   classifyNativeClientOwnership,
+  classifyRegisteredProcessLiveness,
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
   isAcceptedCustomizedObservation,
   isNativeDaemonUnquiesced,
-  isTerminatedKernelIdentity,
   LAUNCHD_CUSTOMIZATION,
   loadNativeManagerAdapter,
   MANAGED_DAEMON_OUTPUT_LIMIT_BYTES,
@@ -1809,15 +1809,60 @@ test('a native Client is reclaimable only with the same uid, kernel birth, scrat
   }), { owned: false, reason: 'REGISTERED_SCRATCH_FOREIGN' })
 })
 
-test('a same-birth Linux zombie is terminated instead of an unreadable live Client', () => {
+test('registered process liveness re-reads once and never signals an unverifiable live Client', () => {
+  const linux = (state, startTicks = '777') => ({
+    kind: 'alive',
+    identity: { platform: 'linux', state, startTicks },
+  })
+  const snapshot = { uid: 501, birth: 'linux:777', command: 'client' }
+  const run = (kernel, readSnapshot, rereadKernel) => {
+    let snapshotReads = 0
+    let kernelReads = 0
+    const result = classifyRegisteredProcessLiveness({
+      kernel,
+      birth: 'linux:777',
+      readSnapshot: () => {
+        snapshotReads += 1
+        return readSnapshot
+      },
+      rereadKernel: () => {
+        kernelReads += 1
+        return rereadKernel
+      },
+    })
+    return { result, snapshotReads, kernelReads }
+  }
   for (const state of ['Z', 'X', 'x']) {
-    assert.equal(isTerminatedKernelIdentity({ platform: 'linux', state, startTicks: '777' }), true)
+    assert.deepEqual(run(linux(state), null, linux('S')), {
+      result: { state: 'gone', reason: 'TERMINATED' }, snapshotReads: 0, kernelReads: 0,
+    })
   }
+  assert.deepEqual(run(linux('S'), snapshot, linux('S')), {
+    result: { state: 'alive', snapshot }, snapshotReads: 1, kernelReads: 0,
+  })
   for (const state of ['R', 'S', 'D', 'T', 't', 'I']) {
-    assert.equal(isTerminatedKernelIdentity({ platform: 'linux', state, startTicks: '777' }), false)
+    assert.deepEqual(run(linux(state), snapshot, linux(state)), {
+      result: { state: 'alive', snapshot }, snapshotReads: 1, kernelReads: 0,
+    })
   }
-  assert.equal(isTerminatedKernelIdentity({ platform: 'darwin', state: 'Z' }), false)
-  assert.equal(isTerminatedKernelIdentity(null), false)
+  assert.deepEqual(run(linux('S'), null, linux('S')), {
+    result: { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run(linux('S'), null, linux('Z')), {
+    result: { state: 'gone', reason: 'TERMINATED' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run(linux('S'), null, { kind: 'gone' }), {
+    result: { state: 'gone' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run(linux('S'), null, linux('S', '999')), {
+    result: { state: 'gone', reason: 'PID_REUSED' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run({ kind: 'unknown' }, null, linux('S')), {
+    result: { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }, snapshotReads: 0, kernelReads: 0,
+  })
+  assert.deepEqual(run(linux('S'), null, { kind: 'unknown' }), {
+    result: { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }, snapshotReads: 1, kernelReads: 1,
+  })
 })
 
 test('the tui-test shell is proven by uid, kernel birth and command without a Client scratch', () => {

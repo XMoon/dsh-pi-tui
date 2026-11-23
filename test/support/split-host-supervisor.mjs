@@ -38,12 +38,12 @@ import {
   classifyManagedInspection,
   classifyNativeCliFence,
   classifyNativeClientOwnership,
+  classifyRegisteredProcessLiveness,
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
   isAcceptedCustomizedObservation,
   isNativeDaemonUnquiesced,
-  isTerminatedKernelIdentity,
   loadNativeManagerAdapter,
   mergeHostIdentityLedger,
   nativeIdentityRecordMatches,
@@ -1291,28 +1291,14 @@ function nativeRegisteredProcessState(registered) {
   } catch {
     return { state: 'unknown', reason: 'KERNEL_READ_FAILED' }
   }
-  if (kernel.kind === 'gone') return { state: 'gone' }
-  if (kernel.kind === 'unknown') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
-  if (serializeKernelIdentity(kernel.identity) !== registered.birth) return { state: 'gone', reason: 'PID_REUSED' }
-  if (isTerminatedKernelIdentity(kernel.identity)) return { state: 'gone', reason: 'TERMINATED' }
-  const snapshot = nativeProcessSnapshot(registered.pid)
-  if (snapshot === null) {
-    // The process can transition to zombie/gone between the identity read and
-    // the snapshot read. Re-read the same kernel identity once: a same-birth
-    // zombie is terminated, while a same-birth live process whose cmdline is
-    // still unreadable remains unverifiable and must not be signalled.
-    let after
-    try {
-      after = readKernelProcess(registered.pid)
-    } catch {
-      return { state: 'unknown', reason: 'KERNEL_READ_FAILED' }
-    }
-    if (after.kind === 'gone') return { state: 'gone' }
-    if (after.kind === 'unknown') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
-    if (serializeKernelIdentity(after.identity) !== registered.birth) return { state: 'gone', reason: 'PID_REUSED' }
-    if (isTerminatedKernelIdentity(after.identity)) return { state: 'gone', reason: 'TERMINATED' }
-    return { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }
-  }
+  const liveness = classifyRegisteredProcessLiveness({
+    kernel,
+    birth: registered.birth,
+    readSnapshot: () => nativeProcessSnapshot(registered.pid),
+    rereadKernel: () => readKernelProcess(registered.pid),
+  })
+  if (liveness.state !== 'alive') return liveness
+  const snapshot = liveness.snapshot
   const observed = {
     pid: registered.pid,
     uid: snapshot.uid,

@@ -1297,10 +1297,55 @@ export function serializeKernelIdentity(identity) {
  * never receive another signal. Darwin zombies are invisible to libproc and
  * already read as gone.
  */
-export function isTerminatedKernelIdentity(identity) {
+function isTerminatedKernelIdentity(identity) {
   if (identity === null || typeof identity !== 'object') return false
   if (identity.platform !== 'linux') return false
   return identity.state === 'Z' || identity.state === 'X' || identity.state === 'x'
+}
+
+/** The kernel-only liveness decision for one registered process. */
+function classifyKernelObservation(kernel, birth) {
+  if (kernel === null || typeof kernel !== 'object') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  if (kernel.kind === 'gone') return { state: 'gone' }
+  if (kernel.kind === 'unknown') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  if (kernel.kind !== 'alive' || kernel.identity === null || typeof kernel.identity !== 'object') {
+    return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  }
+  if (serializeKernelIdentity(kernel.identity) !== birth) return { state: 'gone', reason: 'PID_REUSED' }
+  if (isTerminatedKernelIdentity(kernel.identity)) return { state: 'gone', reason: 'TERMINATED' }
+  return { state: 'alive' }
+}
+
+/**
+ * Classify one registered process before any ownership signal. The first
+ * kernel read must agree with the registered birth. The snapshot is read only
+ * after a live identity; when it is unreadable, the same kernel identity is
+ * re-read ONCE: a same-birth live process remains unverifiable, while a
+ * same-birth zombie or a reused PID is definitively gone and is never
+ * signalled.
+ */
+export function classifyRegisteredProcessLiveness({ kernel, birth, readSnapshot, rereadKernel } = {}) {
+  if (typeof readSnapshot !== 'function' || typeof rereadKernel !== 'function') {
+    fail('NATIVE_CLIENT_IDENTITY_INVALID', 'registered process liveness requires both snapshot readers')
+  }
+  const first = classifyKernelObservation(kernel, birth)
+  if (first.state !== 'alive') return first
+  let snapshot
+  try {
+    snapshot = readSnapshot()
+  } catch {
+    return { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }
+  }
+  if (snapshot !== null && snapshot !== undefined) return { state: 'alive', snapshot }
+  let after
+  try {
+    after = rereadKernel()
+  } catch {
+    return { state: 'unknown', reason: 'KERNEL_READ_FAILED' }
+  }
+  const second = classifyKernelObservation(after, birth)
+  if (second.state !== 'alive') return second
+  return { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }
 }
 
 /**
