@@ -2110,3 +2110,107 @@ test('a multi-batch first import stays a truthful loading until the final offici
     await ctx.fiber.dispose()
   }
 })
+
+test('the cold-start pending drain is admitted by the ONE serial writer', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-cold-writer-')
+  const source = mutableSource('/repo/cold-writer')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    enqueueWrite(task: () => void | Promise<void>): Promise<'committed' | 'failed'>
+    drainPendingSession(sessionId: string): void
+  }
+  // Instrument the production writer admission: a drain call made from the
+  // cold-start async owner (instead of a writeTail callback) records `false`.
+  let insideWriter = false
+  const drainAdmissions: boolean[] = []
+  const realEnqueue = internals.enqueueWrite
+  const realDrain = internals.drainPendingSession
+  internals.enqueueWrite = function (task) {
+    return realEnqueue.call(this, () => {
+      const previous = insideWriter
+      insideWriter = true
+      try {
+        return task()
+      } finally {
+        insideWriter = previous
+      }
+    })
+  }
+  internals.drainPendingSession = function (sessionId) {
+    drainAdmissions.push(insideWriter)
+    return realDrain.call(this, sessionId)
+  }
+  try {
+    await waitDirectReady(service)
+    assert.ok(drainAdmissions.length > 0, 'the cold pass must reach its buffered-batch drain')
+    assert.ok(
+      drainAdmissions.every(admitted => admitted === true),
+      `every cold-start drain must be admitted by writeTail: ${JSON.stringify(drainAdmissions)}`,
+    )
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a same-ID live replacement right after enumeration cannot inherit a stale ready epoch', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-post-enumeration-')
+  const source = mutableSource('/repo/post-enumeration')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    deps: { sessions(): HistorySearchSessionsLike | undefined }
+    index: { checkpointOf(id: string): { dirty: boolean; sourceState: string } | undefined }
+    verifySources(): Promise<void>
+  }
+  const checkpoint = () => internals.index.checkpointOf('mutable-session')
+  try {
+    await waitDirectReady(service)
+    const liveObject: HistorySearchLiveSessionLike = { id: source.header.id, header: source.header }
+    // Model the official registry replacement that happens immediately AFTER
+    // the pass's live `sessions.list()` snapshot: the list stays stale (the
+    // Session was not live then), while `get` already returns the new object.
+    // No live event is delivered, so no drain/pending can mask the race.
+    let enumerated = false
+    const lateRegistry: HistorySearchSessionsLike = {
+      list: () => {
+        enumerated = true
+        return []
+      },
+      get: (id) => (enumerated && String(source.header.id) === id ? liveObject : undefined),
+    }
+    const originalSessions = internals.deps.sessions
+    internals.deps.sessions = () => lateRegistry
+    try {
+      await internals.verifySources()
+    } finally {
+      internals.deps.sessions = originalSessions
+    }
+
+    const stale = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(stale.kind, 'incomplete', JSON.stringify(stale))
+    assert.equal(checkpoint()?.sourceState, 'persisted', 'the fence must not fabricate a live/persisted transition')
+    assert.equal(checkpoint()?.dirty, false, 'the fence must not rewrite content it did not read')
+
+    // The next official pass sees the same live object; the verified rows stay
+    // searchable and the index returns to ready only through that real check.
+    source.live = true
+    await internals.verifySources()
+    await waitDirectReady(service)
+    const first = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    const second = await service.search({ scope: 'all', query: 'mutable second', limit: 25 }, new AbortController().signal)
+    assert.equal(first.kind, 'ready', JSON.stringify(first))
+    assert.equal(second.kind, 'ready', JSON.stringify(second))
+    if (first.kind !== 'ready' || second.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(first.items.length, 1)
+    assert.equal(second.items.length, 1)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})

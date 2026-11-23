@@ -206,6 +206,8 @@ interface PendingSession {
 interface OfficialSession {
   readonly header: HistorySearchSessionHeaderLike
   readonly live: boolean
+  /** The exact live entry observed with this enumeration (undefined when persisted-only). */
+  readonly liveObject?: HistorySearchLiveSessionLike
   readonly eventCount?: number
   readonly revision?: unknown
 }
@@ -674,6 +676,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     persistence: HistorySearchPersistenceLike,
     sessions: HistorySearchSessionsLike,
     expected: HistorySessionCheckpointRow | undefined,
+    enforcedLiveObject?: HistorySearchLiveSessionLike,
+    enforceLiveObject = false,
   ): HistoryCandidateWitness {
     const witness: HistoryCandidateWitness = {
       sessionId,
@@ -681,7 +685,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       persistenceIdentity: serviceIdentity(persistence),
       sessions,
       sessionsIdentity: serviceIdentity(sessions),
-      liveObject: sessions.get(sessionId),
+      liveObject: enforceLiveObject ? enforcedLiveObject : sessions.get(sessionId),
       expected,
       invalidated: false,
     }
@@ -1296,14 +1300,24 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // so cold start always rebuilds from the official source.
       const outcome = await this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
       if (outcome === 'failed') return
-      if (outcome === 'complete') this.drainPendingSession(sessionId)
+      if (outcome === 'complete') {
+        // The pending live batch is a SHORT commit: it must use the ONE serial
+        // writer and settle before the cold pass continues.
+        const drained = await this.enqueueWrite(() => {
+          this.drainPendingSession(sessionId)
+        })
+        if (drained === 'failed') return
+      }
       await yieldEventLoop()
     }
     // Sessions born during the warmup window were buffered by the listener
     // before they could appear in the persisted enumeration.
     for (const sessionId of [...this.pending.keys()]) {
       if (this.index?.checkpointOf(sessionId) !== undefined) {
-        this.drainPendingSession(sessionId)
+        const drained = await this.enqueueWrite(() => {
+          this.drainPendingSession(sessionId)
+        })
+        if (drained === 'failed') return
         continue
       }
       counters.sessionsVisited += 1
@@ -1364,6 +1378,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         union.set(sessionId, {
           header: structuredClone(session.header),
           live: true,
+          liveObject: session,
           // The persisted snapshot's durable facts survive the live precedence:
           // an unchanged-revision check must never lose its only official token.
           ...(existing?.eventCount === undefined ? {} : { eventCount: existing.eventCount }),
@@ -1406,11 +1421,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.reconcilePending.add(sessionId)
     this.markReconcileNeeded('reconciling')
     const signal = this.lifecycle.signal
-    const witness = this.createWitness(sessionId, persistence, sessions, this.index?.checkpointOf(sessionId))
+    const witness = this.createWitness(
+      sessionId,
+      persistence,
+      sessions,
+      this.index?.checkpointOf(sessionId),
+      record.liveObject,
+      true,
+    )
     try {
-      // The enumerated live/persisted classification must still describe the
-      // SAME live source; a source change here is stale, never merged blindly.
-      if (record.live !== (witness.liveObject !== undefined)) return 'stale'
+      // The enumeration's exact live identity must still describe the SAME
+      // source; a replacement here is stale, never merged blindly.
+      if (sessions.get(sessionId) !== record.liveObject) return 'stale'
       if (options.rebuild && witness.expected !== undefined) {
         const reset = await this.resetWitness(witness)
         if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
@@ -1763,6 +1785,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const drained = await this.enqueueWrite(() => {
         this.drainAllPendingNow()
       })
+      // A Session replaced during the pass may not have been re-read (no new
+      // event): re-validate the EXACT enumerated live identity for every record
+      // before this pass is allowed to publish ready.
+      for (const sessionId of this.staleOfficialIdentities(official, sessions)) {
+        this.reconcilePending.add(sessionId)
+        this.markReconcileNeeded('reconciling')
+      }
       this.dropSettledReconcilePending(official)
       this.refreshCompleteness()
       if (drained === 'committed') this.sourceFaulted = false
@@ -1864,6 +1893,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return settled === 'failed' ? 'failed' : 'stale'
       }
     }
+    // The no-read path publishes the previous verified epoch. It is only current
+    // while the SAME enumerated live object (or its absence) and no buffered
+    // accepted event still hold: a post-enumeration same-ID replacement must
+    // keep the index incomplete, never inherit a stale ready claim.
+    if (this.pending.has(sessionId) || sessions.get(sessionId) !== record.liveObject) {
+      this.reconcilePending.add(sessionId)
+      this.markReconcileNeeded('reconciling')
+      return 'stale'
+    }
     this.reconcilePending.delete(sessionId)
     return 'complete'
   }
@@ -1931,6 +1969,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
     }
     return allApplied ? 'complete' : 'stale'
+  }
+
+  /** Official records whose exact enumerated live source identity no longer holds. */
+  private staleOfficialIdentities(
+    official: ReadonlyMap<string, OfficialSession>,
+    sessions: HistorySearchSessionsLike,
+  ): string[] {
+    const stale: string[] = []
+    for (const [sessionId, record] of official) {
+      if (this.pending.has(sessionId) || sessions.get(sessionId) !== record.liveObject) stale.push(sessionId)
+    }
+    return stale
   }
 
   /** IDs that are neither official nor derivable no longer keep the barrier up. */
