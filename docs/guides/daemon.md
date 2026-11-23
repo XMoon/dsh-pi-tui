@@ -190,7 +190,11 @@ enabled; never guess a socket from the home/profile path.
 
 From an attached Split Client, `/acp` can inspect or change the current
 listener state without creating a Session or updating the next-launch
-preference. The Direct backend refuses that runtime control.
+preference. The headless `acp status|enable|disable` commands do the same from
+an ordinary terminal without opening a TUI or starting a Host; the
+[daemon management contract](../architecture/host-daemon.md#headless-acp-cli)
+owns their exact stdout/exit behavior. The Direct backend refuses that runtime
+control.
 
 ### External ACP client over stdio
 
@@ -214,7 +218,8 @@ during Profile Boot can contaminate the stream. If the Host is absent, the
 listener is disabled or the target is unavailable, the command exits without
 starting anything and writes a fixed `ACP_STDIO_*` diagnostic to stderr. The
 bridge never auto-starts the Host; run `dsh --profile pi-tui daemon start` and
-enable ACP from a connected TUI first.
+enable ACP from a connected TUI (`/acp`) or with
+`dsh --profile pi-tui acp enable` first.
 
 For contributor-level process, authentication, ACP admission and Client
 detach guarantees, see [Host/Client](../architecture/host-client.md),

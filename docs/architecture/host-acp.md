@@ -96,6 +96,48 @@ profile's independent `autoStart` preference enables it (see below).
   controller and returns no path itself; the CLI derives the public endpoint
   from the authenticated profile scope.
 
+- **One Owner-only authenticated management write.** The SAME Host publication
+  registers ONE additional Owner-only route,
+  `POST /api/pi-tui.acp-control`, beside that read with the same official
+  Connection admission and the same publication/teardown lifetime. It is the
+  ONLY remote management write of the runtime listener and it exists for the
+  headless `acp enable|disable` CLI; there is no second controller, state store,
+  listener owner or TCP/HTTP ACP ingress.
+  - **Request.** `content-type: application/json` and the exact body
+    `{"schema":1,"instanceId":"<current authenticated instance>","op":"enable"|"disable"}`
+    with no extra keys and no other operation. The official Connection
+    registration advertises exactly `POST`, so the Connection dispatcher
+    refuses any other method before this handler runs (the handler still
+    answers a fixed `405` if it is ever invoked with one). A non-JSON media
+    type is `415`, an unparsable/oversize (over 512 bytes)
+    body, unknown schema/op or extra field is `400`, and all of them return the
+    fixed `ACP_INVALID_REQUEST` error before any business side effect. A body
+    `instanceId` that is not the closure's published instance is
+    `ACP_INSTANCE_MISMATCH` (`409`), compared BEFORE the controller call.
+  - **One call, one owner.** Only after that instance admission does the
+    handler call the existing Host-entry `AcpControlController.setEnabled()`
+    exactly ONCE per accepted request. The controller's own serialized
+    bind/close chain remains the single socket lifecycle authority, so
+    concurrent toggles stay serialized there and nowhere else. The handler
+    reads no status first, owns no state and derives no endpoint from the
+    request.
+  - **Reply.** A success is exactly
+    `{"schema":1,"instanceId","state":"enabled"|"disabled"|"changing"|"unavailable"}`
+    taken from the controller's reached state; the Host `unavailable` reason is
+    dropped. Every reply carries `application/json`, `cache-control: no-store`,
+    `referrer-policy: no-referrer` and `x-content-type-options: nosniff`, and
+    never carries an exception message, socket path, Cookie, token or profile
+    path. A controller throw is the fixed `ACP_CLI_UNAVAILABLE` (`503`); the
+    CLI must treat that post-dispatch failure as an UNKNOWN outcome (the
+    mutation may have committed) and never replay it.
+  - **Boundary.** This route does not change the existing
+    `GET /api/pi-tui.acp-status` DTO/observer, the private `piTuiAcpAccess`
+    Typert descriptors, the `daemon status` projection or the ACP stdio byte
+    stream. It grants no cross-Profile, cross-instance or unauthenticated
+    control: the official Connection Owner admission refuses an unauthenticated
+    request before the handler, and a wrong-instance body is refused before the
+    controller.
+
 - **One owner, one scope, two independent control facts.** A single
   Host-entry-owned runtime controller is the ONLY socket owner per Host profile.
   It is not a business Fiber, so a profile settings recomposition cannot dispose

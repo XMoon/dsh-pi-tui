@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **无 TUI 的 ACP 管理命令**：`dsh --profile pi-tui acp status|enable|disable` 可在不打开 TUI、不启动 Host 的情况下查看并切换当前 Profile 已运行 Host 的本地 ACP Listener。`status` 只读并输出 Host 的真实状态；`enable` / `disable` 各自只发送一次写入，状态未确认或响应丢失时明确报告结果未知，不会猜测成功。它们不改变下次冷启动的自动启动设置，也不会停止 Host、Agent、Session 或 TUI。
+
 ## [0.5.8] - 2026-11-22
 
 ### 新增
