@@ -1149,6 +1149,12 @@ async function runSelectedCases(selection) {
       // Backstop only: the case kills its own detached processes first.
       trackDetachedPid: (pid, identity) => trackedProcesses.set(pid, identity),
       untrackDetachedPid: pid => trackedProcesses.delete(pid),
+      // A selected case may drive a process through a PUBLIC command instead of
+      // this lane's constructors (for example the installed `daemon start`).
+      // Such a case reports the authoritative identity facts here so the
+      // machine-readable SELECTED_FACTS line and the quiescence check cover that
+      // process exactly like a lane-created child.
+      recordProcessIdentity: identity => { createdProcesses.push({ identityFacts: () => identity }) },
       // The current selected case id + the shared boundary reporter: a selected
       // case must be able to publish the same NOT_VERIFIED line as a full-lane
       // scene, and the line has to name the case it belongs to.

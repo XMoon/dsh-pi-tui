@@ -153,6 +153,23 @@ function readRecord(dshHome) {
   return JSON.parse(readFileSync(paths[0].instancePath, 'utf8'))
 }
 
+/**
+ * Report one public-CLI-created Host's authoritative identity to the selected
+ * lane, so its machine-readable FACTS line and its quiescence check cover the
+ * real Host process (the lane never created it through its own constructors).
+ * The identity comes from the Host's own published record, never a guess.
+ */
+function recordHostIdentity(context, record) {
+  if (typeof context.recordProcessIdentity !== 'function') return
+  context.recordProcessIdentity({
+    role: 'host',
+    pid: record.hostPid,
+    instanceId: record.instanceId,
+    scopeId: record.scopeId,
+    kernelUniqueId: record.schema === 2 ? record.hostKernelIdentity.uniqueId : record.hostStarttime,
+  })
+}
+
 function readLaunch(dshHome, instanceId) {
   const paths = recordPaths(dshHome)
   const path = paths.find(candidate => JSON.parse(readFileSync(candidate.instancePath, 'utf8')).instanceId === instanceId)
@@ -366,6 +383,7 @@ export async function runAcpCli(context) {
     const startFields = statusFields(started)
     assert(startFields.host === 'ready', `daemon start did not reach host=ready: ${JSON.stringify(startFields)}`)
     const record = readRecord(dshHome)
+    recordHostIdentity(context, record)
     const hostPid = record.hostPid
     const instanceId = record.instanceId
     const scopeId = record.scopeId
@@ -482,11 +500,13 @@ export async function runAcpCli(context) {
     assert(extraField.status === 400, `an extra-field POST returned HTTP ${String(extraField.status)}`)
     const oversize = await authenticated(JSON.stringify({ schema: 1, instanceId, op: 'disable', padding: 'x'.repeat(600) }), 'POST', 'oversize POST')
     assert(oversize.status === 400, `an oversize POST returned HTTP ${String(oversize.status)}`)
-    // The official Connection registration advertises exactly POST, so the
-    // dispatcher refuses any other method before the handler; the handler's own
-    // 405 branch stays covered by the route unit lane.
+    // The route owns exactly POST (`methods: ['POST']`). The official
+    // Connection contract says a method the route does not own "continue[s]
+    // through normal shared-channel dispatch", so an authenticated GET is the
+    // deterministic 404 here; the handler's own fixed 405 branch is covered by
+    // the route unit lane (the official registry cannot express PUT/DELETE).
     const wrongMethod = await authenticated(undefined, 'GET', 'GET ACP control')
-    assert([404, 405].includes(wrongMethod.status), `a GET on the ACP control route returned HTTP ${String(wrongMethod.status)}`)
+    assert(wrongMethod.status === 404, `a GET on the ACP control route returned HTTP ${String(wrongMethod.status)}, expected the official dispatcher's 404`)
     // The strict refusals provably dispatched no Controller write.
     assertExactLine(await runCli(installation, ['acp', 'status']), 'acp=enabled', 'acp status after strict refusals')
     assert(scopeDirectories(dshHome).length === 1, `the Host published ${String(scopeDirectories(dshHome).length)} ACP scopes`)
@@ -508,6 +528,7 @@ export async function runAcpCli(context) {
     const peerFields = statusFields(peerStart)
     assert(peerFields.host === 'ready', `the second Profile Host is not ready: ${JSON.stringify(peerFields)}`)
     const peerRecord = recordForProfile(dshHome, PEER_PROFILE)
+    recordHostIdentity(context, peerRecord)
     const peerInstance = peerRecord.instanceId
     const peerPid = peerRecord.hostPid
     const peerSocketPath = publicAcpSocketPath(dshHome, peerRecord.scopeId)
