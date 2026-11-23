@@ -274,10 +274,22 @@ function projectUserMessage(
     projectMessageBlocks(message, units, 'user_message_chunk', false)
     return
   }
-  const senderSessionId = message.source?.senderSessionId
-  if (message.source?.kind !== 'agent-message' || typeof senderSessionId !== 'string') return
   if (!capabilities.subagents) return
-  units.push({ kind: 'session-message', message: agentMessageOf(message, senderSessionId) })
+  const agentMessage = durableAgentMessageOf(data)
+  if (agentMessage !== undefined) units.push({ kind: 'session-message', message: agentMessage })
+}
+
+/**
+ * The official `agent-message` facts of one durable user message, or `undefined`
+ * when this message is not an inter-agent message. Unsupported content throws
+ * the same fail-closed projection error the rest of the history conversion uses.
+ */
+export function durableAgentMessageOf(data: unknown): AcpHistoryAgentMessage | undefined {
+  const message = bareMessageOf(data)
+  if (message === undefined) throw unsupportedBlock()
+  const senderSessionId = message.source?.senderSessionId
+  if (message.source?.kind !== 'agent-message' || typeof senderSessionId !== 'string') return undefined
+  return agentMessageOf(message, senderSessionId)
 }
 
 /** The official `agent-message` facts of one durable user message. */

@@ -5399,10 +5399,12 @@ test('G-ACP2-PR2 COMPACT-01/SUB-01/MESSAGE-01 negatives: an unnegotiated client 
     'compaction, session_message and subagent updates require their negotiated capability')
 })
 
-test('G-ACP2-PR2 MESSAGE-01: a real agent-message becomes session_message while the runtime settlement notice never does', async () => {
+test('G-ACP2-PR2 MESSAGE-01: a verified child message is announced by its association first, while the runtime settlement notice never is', async () => {
   const view = projectionView('A1')
   await view.resume()
   view.notifications.length = 0
+  // The sender's OFFICIAL header proves it is a subagent child of this Session.
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'A1', cwd: '/w' }
   // A durable `user/message` event's data IS the message object.
   view.commit('user/message', {
     id: 'am1',
@@ -5416,15 +5418,74 @@ test('G-ACP2-PR2 MESSAGE-01: a real agent-message becomes session_message while 
     content: [{ type: 'text', text: 'runtime account' }],
     role: 'user',
   })
-  await waitUntil(() => view.notifications.length >= 1, 'the agent message is projected')
+  await waitUntil(() => view.notifications.length >= 2, 'the association and the agent message are projected')
   await new Promise(resolve => setTimeout(resolve, 10))
-  assert.deepEqual(view.notifications, [{
-    sessionUpdate: 'session_message',
-    messageId: 'am1',
-    senderSessionId: 'SENDER',
-    recipientSessionId: 'A1',
-    content: [{ type: 'text', text: 'the child says hi' }],
-  }])
+  // Stable v1: `subagent_update` announces the child BEFORE its traffic, and it
+  // never invents an activity snapshot the Host did not report.
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'subagent_update', sessionId: 'SENDER', cwd: '/w' },
+    {
+      sessionUpdate: 'session_message',
+      messageId: 'am1',
+      senderSessionId: 'SENDER',
+      recipientSessionId: 'A1',
+      content: [{ type: 'text', text: 'the child says hi' }],
+    },
+  ])
+  // A second message from the SAME child never re-announces it.
+  view.commit('user/message', {
+    id: 'am2',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'and again' }],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 3, 'the second agent message is projected')
+  assert.deepEqual(view.notifications.slice(2).map(update => update.sessionUpdate), ['session_message'])
+})
+
+test('G-ACP2-PR2 MESSAGE-01 negative: an unprovable author never fabricates a session_message or a child association', async () => {
+  const view = projectionView('A3')
+  await view.resume()
+  view.notifications.length = 0
+  // No official header at all: a forged sender cannot be proven to be a child.
+  view.access.headerFacts = undefined
+  view.commit('user/message', {
+    id: 'am9',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'FORGED' },
+    content: [{ type: 'text', text: 'from nowhere' }],
+    role: 'user',
+  })
+  // A real Session that is neither this Session's child nor its parent.
+  view.access.headerFacts = { sessionId: 'STRANGER', cwd: '/w' }
+  view.commit('user/message', {
+    id: 'am10',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'STRANGER' },
+    content: [{ type: 'text', text: 'from a sibling' }],
+    role: 'user',
+  })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.deepEqual(view.notifications, [], 'an unproven author projects nothing')
+})
+
+test('G-ACP2-PR2 MESSAGE-02: a child Session receives its verified parent author without inventing a child association', async () => {
+  const view = projectionView('CHILD1')
+  await view.resume()
+  view.notifications.length = 0
+  // This View's Session is itself a subagent child of PARENT; the author is the
+  // parent, which is a real Session but never an announced child.
+  view.access.headerFactsImpl = async sessionId => {
+    if (sessionId === 'CHILD1') return { sessionId: 'CHILD1', origin: 'subagent', parentSessionId: 'PARENT' }
+    if (sessionId === 'PARENT') return { sessionId: 'PARENT', cwd: '/w' }
+    return undefined
+  }
+  view.commit('user/message', {
+    id: 'am20',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'PARENT' },
+    content: [{ type: 'text', text: 'instructions from the parent' }],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 1, 'the parent message is projected')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['session_message'])
 })
 
 test('G-ACP2-PR2 SUB-01 negative: an ordinary fork (parentSession without origin=subagent) never announces a child', async () => {
@@ -5465,14 +5526,20 @@ test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message as 
       }],
     },
   })
+  // The canonical history replays the verified child association first, exactly
+  // like the live path: stable v1 announces a child before its traffic.
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'H1', cwd: '/w' }
   await view.load()
-  assert.deepEqual(view.notifications, [{
-    sessionUpdate: 'session_message',
-    messageId: 'am1',
-    senderSessionId: 'SENDER',
-    recipientSessionId: 'H1',
-    content: [{ type: 'text', text: 'from the child' }],
-  }])
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'subagent_update', sessionId: 'SENDER', cwd: '/w' },
+    {
+      sessionUpdate: 'session_message',
+      messageId: 'am1',
+      senderSessionId: 'SENDER',
+      recipientSessionId: 'H1',
+      content: [{ type: 'text', text: 'from the child' }],
+    },
+  ])
   // A baseline client never receives the supplemental frame.
   const baseline = projectionView('H2', {
     capabilities: PR2_BASELINE,
@@ -5487,6 +5554,67 @@ test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message as 
   })
   await baseline.load()
   assert.deepEqual(baseline.notifications, [])
+})
+
+test('G-ACP2-PR2 LOAD-03: a turn committed while the snapshot is read replays completely and once', async () => {
+  const view = projectionView('L3', {
+    history: {
+      header: { sessionId: 'L3', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'before the snapshot' }], role: 'user' } }],
+    },
+  })
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  // A DIFFERENT surface (the TUI) commits a whole real turn while the canonical
+  // snapshot is being read: it is NOT part of the snapshot and NOT live flight
+  // output of this View, but it IS that Session's durable history.
+  view.commit('user/message', { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'during the read' }], role: 'user' })
+  view.commit('assistant/message', { message: { id: 'a1', content: [{ type: 'text', text: 'while reading' }] } })
+  view.commit('tool/call', { callId: 'c2', name: 'bash', arguments: '{"cmd":"ls"}' })
+  view.commit('tool/result', { message: { toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'ok' }] } })
+  readRelease.resolve({
+    header: { sessionId: 'L3', cwd: '/w' },
+    events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'before the snapshot' }], role: 'user' } }],
+  })
+  await loading
+  const kinds = view.notifications.map(update => update.sessionUpdate)
+  assert.deepEqual(kinds, [
+    'user_message_chunk',
+    'user_message_chunk',
+    'agent_message_chunk',
+    'tool_call',
+    'tool_call_update',
+  ], 'the snapshot history then the buffered turn, each transcript fact exactly once')
+  assert.equal((view.notifications[2] as { content?: { text?: string } }).content?.text, 'while reading')
+})
+
+test('G-ACP2-PR2 SUB-02: an official child edge observed inside a load barrier never precedes the canonical history', async () => {
+  const view = projectionView('S7')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  view.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'S7', cwd: '/w' }
+  const loading = view.load()
+  await readStarted.promise
+  view.registry.onSubagentStart({ runId: 'run-barrier', id: 'CHILD', parentSessionId: 'S7', local: true })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(view.notifications.length, 0, 'a child edge cannot overtake the history it must follow')
+  readRelease.resolve({
+    header: { sessionId: 'S7', cwd: '/w' },
+    events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'history first' }], role: 'user' } }],
+  })
+  await loading
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['user_message_chunk', 'subagent_update'],
+    'the canonical history comes first, then the child association announced inside the same tail')
 })
 
 test('G-ACP2-PR2 LOAD-02: buffered live events join in seq order, once per seq, even when delivered out of order', async () => {

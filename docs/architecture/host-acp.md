@@ -491,8 +491,12 @@ profile's independent `autoStart` preference enables it (see below).
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - `session/list`, MCP prompts and ACP file/artifact transfer are NOT provided
-    by this View and fail closed with their stable `LOCAL_ACP_*` code.
+  - MCP prompts and ACP file/artifact transfer are NOT provided by this View and
+    fail closed with their stable `LOCAL_ACP_*` code. `session/list` is served by
+    the local ACP front door when the official authorized roster read seam is
+    bound (see “Official session facts on the stable v1 wire” below); without
+    that seam it is not advertised and fails closed with
+    `LOCAL_ACP_LIST_UNAVAILABLE`.
   - **Scoped cancellation (PO-3B).** `session/cancel` addresses ONLY this
     connection's own unsettled prompt flight, decided from authoritative Host
     facts — never an Agent-global cancel, a status/timing guess or an

@@ -336,6 +336,7 @@ export async function runAcpProtocolProjection(context) {
     assert(!baselineKinds.includes('plan_update'), 'PP-06: no plan_update without the client capability')
 
     // ── G) LIST: the authorized root roster, from real Host facts.
+    const rootEventsBeforeList = eventsOf(sessionP).length
     const firstPage = await capable.request(acp.methods.agent.session.list, {})
     const listedIds = (firstPage?.sessions ?? []).map(session => session.sessionId)
     assert(listedIds.includes(sessionP), `PP-07: the real root Session is listed (${JSON.stringify(listedIds)})`)
@@ -353,13 +354,20 @@ export async function runAcpProtocolProjection(context) {
     const repeatPage = await capable.request(acp.methods.agent.session.list, {})
     assert(JSON.stringify((repeatPage?.sessions ?? []).map(session => session.sessionId)) === JSON.stringify(listedIds),
       'PP-07: the same roster read is deterministic')
-    // Listing is a pure read: the child Session was never attached to this
-    // connection (a claim would refuse a later load of it as already attached).
+    // Listing is a pure read, measured on the real Host: the authorized root
+    // Session's canonical log gained NO event for the roster reads, and the
+    // child Session was never claimed by this connection (it would have been
+    // refused as already attached).
+    const rootEventsAfterList = eventsOf(sessionP).length
+    assert(rootEventsAfterList === rootEventsBeforeList,
+      `PP-07: listing appends no Session event (${String(rootEventsBeforeList)} -> ${String(rootEventsAfterList)})`)
     const childLoadRefusal = await capable.request(acp.methods.agent.session.load, {
       sessionId: childId, cwd: hostCwd, mcpServers: [],
     }).then(() => undefined, error => error)
     assert(childLoadRefusal !== undefined && childLoadRefusal?.data?.code !== 'LOCAL_ACP_VIEW_BUSY',
       'PP-07: listing created no View/claim for the child Session')
+    const listReadsWithoutSideEffects = rootEventsAfterList === rootEventsBeforeList
+      && childLoadRefusal?.data?.code !== 'LOCAL_ACP_VIEW_BUSY'
 
     // ── H) LOAD: the complete canonical history replays before the response.
     await capable.request(acp.methods.agent.session.close, { sessionId: sessionP })
@@ -397,7 +405,13 @@ export async function runAcpProtocolProjection(context) {
 
     // The capable loader receives the SAME history plus its negotiated frames.
     const loadCapableUpdates = []
-    const capableLoader = await openSdkClient(endpoint, params => { loadCapableUpdates.push(params) })
+    // The connection records the REAL wire order: every decoded update, then the
+    // load response when it finally settles.
+    const loadWireOrder = []
+    const capableLoader = await openSdkClient(endpoint, params => {
+      loadCapableUpdates.push(params)
+      loadWireOrder.push('update')
+    })
     clients.push(capableLoader)
     await capableLoader.request(acp.methods.agent.initialize, {
       protocolVersion: 1,
@@ -406,6 +420,7 @@ export async function runAcpProtocolProjection(context) {
     const capableLoad = await capableLoader.request(acp.methods.agent.session.load, {
       sessionId: sessionP, cwd: hostCwd, mcpServers: [],
     })
+    loadWireOrder.push('load-response')
     assert(capableLoad !== undefined, 'PP-09: the capable load must answer')
     const capableHistory = updatesOf(loadCapableUpdates, sessionP)
     const capableHistoryKinds = kindsOf(capableHistory)
@@ -416,12 +431,21 @@ export async function runAcpProtocolProjection(context) {
       'PP-09: start/summary/end all replay from the canonical log')
     assert(capableHistoryKinds.every(kind => kind !== 'notice'),
       'PP-09: no notice is ever fabricated')
-    // The response is the LAST frame: the history was fully drained first.
-    const loadResponseOrder = capableHistory.length > 0
-    assert(loadResponseOrder, 'PP-09: the loaded history is nonempty')
+    // The response is the LAST frame on the wire: every replayed update was
+    // already decoded by the official client before the response settled.
+    assert(loadWireOrder.length > 1 && loadWireOrder.at(-1) === 'load-response'
+      && loadWireOrder.slice(0, -1).every(entry => entry === 'update'),
+    `PP-09: the load response follows every replayed update (${JSON.stringify(loadWireOrder)})`)
+    const loadAnsweredAfterDrain = loadWireOrder.at(-1) === 'load-response'
+      && loadWireOrder.slice(0, -1).every(entry => entry === 'update')
+      && capableHistory.length > 0
 
     // ── I) The Host and the Session authority are untouched.
-    await scene.assertHostIdentityKept(host, hostIdentity, 'PP-10 Host identity')
+    const hostAfter = await scene.hostIdentityFacts(host)
+    const hostIdentityKept = hostAfter?.pid === hostIdentity.hostPid
+      && hostAfter?.instanceId === hostIdentity.instanceId
+    assert(hostIdentityKept,
+      `PP-10: the same Host instance serves every read (${JSON.stringify({ before: hostIdentity, after: hostAfter })})`)
     assert(eventsOf(sessionP).length > 0, 'PP-10: the durable Session log stays readable')
 
     const durableKinds = eventsOf(sessionP).map(event => event.type)
@@ -473,9 +497,9 @@ export async function runAcpProtocolProjection(context) {
       status: 'PASS',
       scope: 'REAL_SPLIT_PROCESS_L6',
       listAuthorizedRoster: listedIds.includes(sessionP) && !listedIds.includes(childId),
-      listReadsWithoutActivation: true,
+      listReadsWithoutSideEffects,
       loadReplayedCanonicalHistory: baselineHistoryKinds.includes('user_message_chunk'),
-      loadAnsweredAfterDrain: true,
+      loadAnsweredAfterDrain,
       resumeReplayedNothing: updatesOf(resumeUpdates, sessionP).length === 0,
       planFromOfficialTodos: firstPlan.plan.entries.length === 2,
       usageFromOfficialContext: pressureUsage.size === PROJECTION_CONTEXT_WINDOW,
@@ -484,7 +508,7 @@ export async function runAcpProtocolProjection(context) {
       compactionReplayed: capableHistoryKinds.includes('compaction_update'),
       baselineGating: !baselineHistoryKinds.includes('compaction_update') && !baselineHistoryKinds.includes('plan_update'),
       noticeNeverFabricated: !capableHistoryKinds.includes('notice'),
-      hostIdentityKept: true,
+      hostIdentityKept,
       acpProtocolVersion: capableInit.protocolVersion,
       evidence,
     }

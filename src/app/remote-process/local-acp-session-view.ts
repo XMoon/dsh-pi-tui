@@ -99,6 +99,7 @@ import {
 import {
   AcpProjectionError,
   compactionUpdate,
+  durableAgentMessageOf,
   imageRef,
   planEntriesFromTodos,
   planEntriesOf,
@@ -106,6 +107,7 @@ import {
   projectSessionHistory,
   sessionInfoUpdateOf,
   usageUpdateOf,
+  type AcpHistoryAgentMessage,
   type AcpHistoryEvent,
   type AcpHistoryHeader,
   type AcpHistoryImage,
@@ -925,6 +927,16 @@ interface ViewClaim {
    * in order. A duplicated or out-of-order callback never re-projects it.
    */
   compactions?: Map<string, 'started' | 'summarized' | 'ended'>
+  /** Child Session ids whose association this View already announced. */
+  announcedChildren?: Set<string>
+  /** This Session's own official header, read once for inter-agent lineage. */
+  selfHeader?: AcpHistoryHeader
+}
+
+/** One official subagent lifecycle edge observed by the Host fact source. */
+interface AcpSubagentEdge {
+  readonly edge: 'start' | 'end'
+  readonly info: AcpSubagentRunInfo
 }
 
 /** The bounded load replay fence of one View. */
@@ -934,6 +946,12 @@ interface ViewReplay {
    * Bounded: an overflow aborts the replay instead of growing without limit.
    */
   readonly buffered: AcpHistoryEvent[]
+  /**
+   * Official subagent lifecycle edges observed inside the same barrier. They
+   * are NOT Session events (they carry no seq), so they are released in arrival
+   * order after the canonical history and before the buffered turn.
+   */
+  readonly subagents: AcpSubagentEdge[]
   /** Aborts the history read and its ordered Store reads on close/EOF/Off. */
   readonly abort: AbortController
   /** Set when the bounded buffer could not hold the live window. */
@@ -1668,7 +1686,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     // REPLAY_BARRIER_OPEN: committed BEFORE the View becomes attached, so no
     // live update of this Session can ever precede the canonical snapshot.
-    const replay: ViewReplay = { buffered: [], abort: new AbortController(), overflowed: false, stopped: false }
+    const replay: ViewReplay = { buffered: [], subagents: [], abort: new AbortController(), overflowed: false, stopped: false }
     claim.replay = replay
     this.commitAttached(state, op, claim, access, agent, channels)
     if (claim.notifyProjection === undefined) {
@@ -1684,6 +1702,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       : AbortSignal.any([requestSignal, replay.abort.signal])
     try {
       const history = await access.readSessionHistory(sessionId, signal)
+      // The loaded Session's own official header is the ONLY authority for its
+      // lineage when it is itself a subagent child.
+      claim.selfHeader = history.header
       // The pure converter validates the WHOLE canonical order and every
       // committed block BEFORE a single notification is sent.
       const units = projectSessionHistory(history.events, claim.capabilities ?? NO_PROJECTION_CAPABILITIES, sessionId)
@@ -1704,11 +1725,33 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         if (event.seq > cut && !uniqueLive.has(event.seq)) uniqueLive.set(event.seq, event)
       }
       const live = [...uniqueLive.values()].sort((left, right) => left.seq - right.seq)
+      const bufferedEdges = [...replay.subagents]
       replay.buffered.length = 0
+      replay.subagents.length = 0
       claim.replay = undefined
       await this.enqueueProjectionTask(claim, async () => {
-        await this.sendHistoryUnits(claim, replay, units)
-        for (const event of live) await this.sendLiveEvent(claim, replay, event)
+        await this.sendHistoryUnits(claim, replay, units, access)
+        // Official child edges were NOT Session events: announce them before the
+        // buffered turn, so a child's association precedes any buffered message
+        // that names it (stable v1 `subagent_update` ordering).
+        for (const edge of bufferedEdges) await this.releaseSubagent(claim, access, replay, edge)
+        // The buffered window is still canonical HISTORY: every transcript fact
+        // converts through the SAME pure converter, so a turn committed while
+        // the snapshot was read is neither dropped nor re-invented. The live-only
+        // read-only classes keep their own projection (a durable title arrives
+        // only as a live event; provider usage needs the live projection read).
+        for (const event of live) {
+          if (event.type === 'session/title') {
+            await this.sendLiveEvent(claim, replay, event)
+            continue
+          }
+          await this.sendHistoryUnits(
+            claim, replay,
+            projectSessionHistory([event], claim.capabilities ?? NO_PROJECTION_CAPABILITIES, claim.sessionId),
+            access,
+          )
+          if (event.type === 'assistant/message') await this.sendLiveEvent(claim, replay, event)
+        }
       })
       if (this.claims.get(sessionId) !== claim || replay.stopped) {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
@@ -1863,7 +1906,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         return
       }
       case 'user/message': {
-        await this.projectAgentMessage(claim, replay, event)
+        const access = this.access
+        if (access === undefined) return
+        let message: AcpHistoryAgentMessage | undefined
+        try {
+          message = durableAgentMessageOf(event.data)
+        } catch {
+          this.diag.warn('local-acp.projection.unsupported', { key: 'user/message' })
+          return
+        }
+        if (message === undefined) return
+        await this.projectSessionMessage(claim, access, replay, message)
         return
       }
       default:
@@ -1871,47 +1924,36 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
   }
 
-  /** Project one official `agent-message` durable user message as `session_message`. */
-  private async projectAgentMessage(claim: ViewClaim, replay: ViewReplay | undefined, event: AcpSessionEventLike): Promise<void> {
-    // A durable `user/message` event data IS the message (id/source/content);
-    // only `assistant/message`/`tool/result` wrap theirs.
-    if (event.data === null || typeof event.data !== 'object') return
-    const message = event.data as {
-      readonly id?: unknown
-      readonly source?: { readonly kind?: unknown; readonly senderSessionId?: unknown }
-      readonly content?: unknown
-    }
-    const source = message.source
-    if (typeof message.id !== 'string'
-      || source?.kind !== 'agent-message' || typeof source.senderSessionId !== 'string') {
+  /**
+   * Send ONE durable inter-agent message as a standard `session_message`.
+   *
+   * Provenance is proven from OFFICIAL Session headers before anything is sent:
+   * either the sender is a subagent child of this Session (its header carries
+   * `origin:'subagent'` and this exact durable parent), or this Session is
+   * itself a subagent child and the sender is its immediate parent (a real
+   * author that is not a child association to announce). Any other author is
+   * Host-internal or fabricated and projects NOTHING.
+   *
+   * When the sender IS a child, its association is announced with a
+   * `subagent_update` first — at most once per claim — because the stable v1
+   * contract has `subagent_update` announce a child before the Client sees that
+   * child's traffic. The announcement omits `state`: this View never invents an
+   * activity snapshot the Host did not report.
+   */
+  private async projectSessionMessage(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    replay: ViewReplay | undefined,
+    message: AcpHistoryAgentMessage,
+  ): Promise<void> {
+    const lineage = await this.sessionMessageLineage(claim, access, message.senderSessionId)
+    if (lineage === 'unproven') {
+      this.diag.warn('local-acp.projection.session-message-unverified', { key: 'session_message' })
       return
     }
-    const content: ({ readonly type: 'text'; readonly text: string } | { readonly type: 'image'; readonly ref: AcpStoredImageRef })[] = []
-    for (const block of Array.isArray(message.content) ? message.content : []) {
-      const type = (block as { readonly type?: unknown } | null)?.type
-      if (type === 'text') {
-        const text = (block as { readonly text?: unknown } | null)?.text
-        if (typeof text !== 'string') {
-          this.diag.warn('local-acp.projection.unsupported', { key: 'user/message' })
-          return
-        }
-        content.push({ type: 'text', text })
-        continue
-      }
-      if (type === 'image') {
-        try {
-          content.push({ type: 'image', ref: imageRef(block) })
-        } catch {
-          this.diag.warn('local-acp.projection.unsupported', { key: 'user/message' })
-          return
-        }
-        continue
-      }
-      this.diag.warn('local-acp.projection.unsupported', { key: 'user/message' })
-      return
-    }
+    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return
     const blocks: AcpWireContentBlock[] = []
-    for (const part of content) {
+    for (const part of message.content) {
       if (part.type === 'text') {
         if (part.text.length === 0) continue
         blocks.push({ type: 'text', text: part.text })
@@ -1927,11 +1969,58 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (blocks.length === 0) return
     await this.sendProjection(claim, {
       sessionUpdate: 'session_message',
-      messageId: message.id,
-      senderSessionId: source.senderSessionId,
+      messageId: message.messageId,
+      senderSessionId: message.senderSessionId,
       recipientSessionId: claim.sessionId,
       content: blocks,
     })
+  }
+
+  /**
+   * Classify one inter-agent author with the official header facts: `child`
+   * (a verified subagent child of this Session), `parent` (this Session is the
+   * verified child), or `unproven`.
+   */
+  private async sessionMessageLineage(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    senderSessionId: string,
+  ): Promise<'child' | 'parent' | 'unproven'> {
+    if (senderSessionId === claim.sessionId) return 'unproven'
+    const sender = await access.sessionHeaderFacts(senderSessionId)
+    if (sender?.sessionId !== senderSessionId) return 'unproven'
+    if (sender.origin === 'subagent' && sender.parentSessionId === claim.sessionId) return 'child'
+    const self = claim.selfHeader ??= await access.sessionHeaderFacts(claim.sessionId)
+    if (self?.origin === 'subagent' && self.parentSessionId === senderSessionId) return 'parent'
+    return 'unproven'
+  }
+
+  /**
+   * Announce ONE verified child association at most once per claim, without a
+   * fabricated state. An unprovable child projects nothing.
+   */
+  private async announceChildAssociation(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    childId: string,
+  ): Promise<boolean> {
+    const announced = claim.announcedChildren ??= new Set()
+    if (announced.has(childId)) return true
+    const facts = await access.sessionHeaderFacts(childId)
+    if (facts?.sessionId !== childId || facts.origin !== 'subagent' || facts.parentSessionId !== claim.sessionId) {
+      this.diag.warn('local-acp.projection.subagent-unverified', {
+        edge: 'message',
+        reason: facts === undefined ? 'header-unavailable' : 'lineage-mismatch',
+      })
+      return false
+    }
+    await this.sendProjection(claim, {
+      sessionUpdate: 'subagent_update',
+      sessionId: childId,
+      ...(facts.cwd === undefined ? {} : { cwd: facts.cwd }),
+    })
+    announced.add(childId)
+    return true
   }
 
   /**
@@ -2036,7 +2125,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * verified by the official Host Attachment Store inside this tail, so one
    * event keeps its FIFO position and no fabricated placeholder is ever sent.
    */
-  private async sendHistoryUnits(claim: ViewClaim, replay: ViewReplay, units: readonly AcpHistoryUnit[]): Promise<void> {
+  private async sendHistoryUnits(
+    claim: ViewClaim,
+    replay: ViewReplay,
+    units: readonly AcpHistoryUnit[],
+    access: HostAcpSessionAccess,
+  ): Promise<void> {
     for (const unit of units) {
       if (replay.stopped || !this.projectionCurrent(claim)) {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
@@ -2055,22 +2149,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       if (unit.kind === 'session-message') {
-        const blocks: AcpWireContentBlock[] = []
-        for (const part of unit.message.content) {
-          if (part.type === 'text') {
-            blocks.push({ type: 'text', text: part.text })
-            continue
-          }
-          blocks.push(await this.readProjectionImage(replay, part.ref))
-        }
-        if (blocks.length === 0) continue
-        await this.sendProjection(claim, {
-          sessionUpdate: 'session_message',
-          messageId: unit.message.messageId,
-          senderSessionId: unit.message.senderSessionId,
-          recipientSessionId: claim.sessionId,
-          content: blocks,
-        })
+        await this.projectSessionMessage(claim, access, replay, unit.message)
         continue
       }
       const content: ToolCallContent[] = []
@@ -2128,41 +2207,69 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.capabilities?.subagents !== true || claim.notifyProjection === undefined) continue
       const access = this.access
       if (access === undefined) continue
+      const replay = claim.replay
+      if (replay !== undefined) {
+        // Inside a load barrier this official edge is NOT a Session event, so it
+        // is held with the history and released after it — never before the
+        // canonical snapshot it must follow.
+        if (replay.subagents.length >= MAX_REPLAY_BUFFERED_EVENTS) {
+          replay.overflowed = true
+          return
+        }
+        replay.subagents.push({ edge, info })
+        continue
+      }
       const task = this.enqueueProjectionTask(claim, async () => {
-        // The official runId joins the end edge to the association the start
-        // edge already verified on THIS claim. Both edges are resolved INSIDE
-        // one FIFO tail, so an end published while the start notification is
-        // still held sees the start's verified entry. The child Agent is
-        // disposed before `end` is published, so a second lineage read would
-        // race that disposal; an end whose start this View never projected
-        // announces NOTHING — a lone idle snapshot would create an association
-        // this connection never observed.
-        const known = edge === 'end' ? claim.subagentRuns?.get(info.runId) : undefined
-        if (edge === 'end' && (known === undefined || known.childId !== info.id)) {
-          this.diag.warn('local-acp.projection.subagent-unverified', { edge, reason: 'run-unknown' })
-          return
-        }
-        const verified = known !== undefined && known.childId === info.id
-          ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }
-          : await this.verifySubagentChild(access, info, edge)
-        if (verified === undefined) return
-        await this.sendProjection(claim, {
-          sessionUpdate: 'subagent_update',
-          sessionId: verified.childId,
-          state: edge === 'start'
-            ? { state: 'running' }
-            : { state: 'idle', stopReason: subagentStopReason(info.stopReason) },
-          ...(verified.cwd === undefined ? {} : { cwd: verified.cwd }),
-        })
-        if (edge === 'start') {
-          const runs = claim.subagentRuns ??= new Map()
-          runs.set(info.runId, { childId: verified.childId, ...(verified.cwd === undefined ? {} : { cwd: verified.cwd }) })
-          return
-        }
-        claim.subagentRuns?.delete(info.runId)
+        await this.releaseSubagent(claim, access, undefined, { edge, info })
       })
       task.catch(error => { this.reportProjectionFailure(error) })
     }
+  }
+
+  /**
+   * Release ONE official child edge inside this claim's ordered tail: verify
+   * the child lineage, send the lifecycle update and keep the runId join.
+   */
+  private async releaseSubagent(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    replay: ViewReplay | undefined,
+    buffered: AcpSubagentEdge,
+  ): Promise<void> {
+    const { edge, info } = buffered
+    if (replay?.stopped === true) return
+    // The official runId joins the end edge to the association the start
+    // edge already verified on THIS claim. Both edges are resolved INSIDE
+    // one FIFO tail, so an end published while the start notification is
+    // still held sees the start's verified entry. The child Agent is
+    // disposed before `end` is published, so a second lineage read would
+    // race that disposal; an end whose start this View never projected
+    // announces NOTHING — a lone idle snapshot would create an association
+    // this connection never observed.
+    const known = edge === 'end' ? claim.subagentRuns?.get(info.runId) : undefined
+    if (edge === 'end' && (known === undefined || known.childId !== info.id)) {
+      this.diag.warn('local-acp.projection.subagent-unverified', { edge, reason: 'run-unknown' })
+      return
+    }
+    const verified = known !== undefined && known.childId === info.id
+      ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }
+      : await this.verifySubagentChild(access, info, edge)
+    if (verified === undefined) return
+    await this.sendProjection(claim, {
+      sessionUpdate: 'subagent_update',
+      sessionId: verified.childId,
+      state: edge === 'start'
+        ? { state: 'running' }
+        : { state: 'idle', stopReason: subagentStopReason(info.stopReason) },
+      ...(verified.cwd === undefined ? {} : { cwd: verified.cwd }),
+    })
+    if (edge === 'start') {
+      const runs = claim.subagentRuns ??= new Map()
+      runs.set(info.runId, { childId: verified.childId, ...(verified.cwd === undefined ? {} : { cwd: verified.cwd }) })
+      ;(claim.announcedChildren ??= new Set()).add(verified.childId)
+      return
+    }
+    claim.subagentRuns?.delete(info.runId)
   }
 
   /**
