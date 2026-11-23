@@ -1578,6 +1578,7 @@ async function cleanupNativeManagedService(reason) {
         recordOperation: false,
       }),
       writeRecord: record => writeNativeRecord(record),
+      readRecord: () => runtime.record,
       probeKernel: async pid => (pid === null ? null : nativeKernelFacts(pid)),
       probeHostKernel: pid => nativeKernelFacts(pid).status,
       probeClients: async () => (receipt.clients ?? []).map(client => ({

@@ -723,6 +723,7 @@ export async function cleanupNativeService({
   observe,
   runOfficialVerb,
   writeRecord,
+  readRecord = null,
   probeKernel,
   probeHostKernel,
   probeClients,
@@ -740,10 +741,24 @@ export async function cleanupNativeService({
   for (const [name, callback] of Object.entries({ observe, runOfficialVerb, writeRecord, probeKernel, probeHostKernel, probeClients })) {
     if (typeof callback !== 'function') fail('NATIVE_CONTRACT_INVALID', `cleanupNativeService requires ${name}`)
   }
+  if (readRecord !== null && typeof readRecord !== 'function') {
+    fail('NATIVE_CONTRACT_INVALID', 'cleanupNativeService readRecord must be a function or null')
+  }
   const at = () => (verifiedAt === undefined ? new Date().toISOString() : verifiedAt)
   const cleanup = { attempted: true, officialStop: 'skipped', officialUninstall: 'skipped', fallback: 'skipped' }
   let current = { ...source, lifecycle: 'cleaning', cleanup }
   await writeRecord(current)
+  // The Supervisor may have advanced the live receipt while the helper was
+  // observed (a committed-but-unacknowledged install, a legal unit rewrite).
+  // Adopt those facts; never downgrade the record to its pre-observation state.
+  const adopt = observation => {
+    const live = typeof readRecord === 'function' ? readRecord() : null
+    if (live !== null && typeof live === 'object') {
+      current = { ...current, ...live, lifecycle: current.lifecycle, cleanup: current.cleanup, observed: observation }
+    } else {
+      current = { ...current, observed: observation }
+    }
+  }
   const failCleanup = async code => {
     current = { ...current, lifecycle: 'unverifiable', cleanup: { ...cleanup, reason: code } }
     await writeRecord(current)
@@ -752,6 +767,7 @@ export async function cleanupNativeService({
   let observation
   try {
     observation = validateServiceObservation(await observe())
+    adopt(observation)
   } catch {
     return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
   }
@@ -768,6 +784,7 @@ export async function cleanupNativeService({
     cleanup.officialStop = await runVerb('stop')
     try {
       observation = validateServiceObservation(await observe())
+      adopt(observation)
     } catch {
       return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
     }
@@ -776,6 +793,7 @@ export async function cleanupNativeService({
     cleanup.officialUninstall = await runVerb('uninstall')
     try {
       observation = validateServiceObservation(await observe())
+      adopt(observation)
     } catch {
       return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
     }
@@ -785,9 +803,9 @@ export async function cleanupNativeService({
     try {
       reclaimed = await helper.reclaimManagedService({
         ...facts,
-        fileIdentity: source.fileIdentity ?? null,
-        verifiedHostIdentities: source.hostIdentities ?? [],
-        generation: source.generation,
+        fileIdentity: current.fileIdentity ?? null,
+        verifiedHostIdentities: current.hostIdentities ?? [],
+        generation: current.generation,
       })
     } catch {
       return await failCleanup('NATIVE_SERVICE_RECLAIM_FAILED')
@@ -799,7 +817,7 @@ export async function cleanupNativeService({
       const kernel = inspection.mainPid === null ? null : await probeKernel(inspection.mainPid)
       observation = classifyManagedInspection({
         reservation: facts,
-        history: { everObservedInstalled: source.everObservedInstalled === true },
+        history: { everObservedInstalled: current.everObservedInstalled === true },
         inspection,
         kernel,
         verifiedAt: at(),
@@ -811,6 +829,10 @@ export async function cleanupNativeService({
   current = {
     ...current,
     lifecycle: observation.state === 'unverifiable' ? 'unverifiable' : 'removed',
+    // The terminal record keeps the last REAL file identity: a removed/unverifiable
+    // service clears it; a still-owned observation replaces it with the raw facts.
+    fileIdentity: observation.file === 'owned' ? fileIdentityOf(observation) : null,
+    everObservedInstalled: current.everObservedInstalled === true || observation.file === 'owned',
     observed: observation,
     cleanup,
   }

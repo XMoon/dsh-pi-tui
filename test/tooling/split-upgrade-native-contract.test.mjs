@@ -787,7 +787,72 @@ test('a failed official uninstall falls back to helper reclamation and records b
   assert.equal(result.record.observed.state, 'removed')
 })
 
-// ── daemon CLI primitive// ── daemon CLI primitive ───────────────────────────────────────────────────
+test('cleanup never reports a committed-but-unacked install as never installed', async () => {
+  const facts = reservation()
+  const base = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
+  const identity = { device: '16777220', inode: '7654321', sha256: 'f'.repeat(64) }
+  const installedInactive = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: ownedInspection(facts, {
+      fileFacts: ownedFileFacts({ inode: identity.inode, sha256: identity.sha256 }),
+    }),
+    verifiedAt: '2026-11-23T00:00:00.000Z',
+  })
+  const removed = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath }),
+    verifiedAt: '2026-11-23T00:00:02.000Z',
+  })
+  // The Supervisor's live receipt is still the pre-reservation record when the
+  // Worker dies; the very first cleanup observation proves the install committed.
+  let live = base
+  const observations = [installedInactive, installedInactive, removed]
+  let readIndex = 0
+  const helper = []
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record: base,
+    adapter: {
+      async inspectManagedService() {
+        return rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
+      },
+      async reclaimManagedService(input) {
+        helper.push(input)
+        return { clean: true, action: 'removed', reason: 'verified-owner', observation: rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath }) }
+      },
+    },
+    observe: async () => {
+      const observation = observations[readIndex]
+      readIndex += 1
+      live = observation.file === 'owned'
+        ? { ...live, everObservedInstalled: true, observed: observation, generation: 1, fileIdentity: identity }
+        : { ...live, everObservedInstalled: true, observed: observation, fileIdentity: null }
+      return observation
+    },
+    readRecord: () => live,
+    runOfficialVerb: async () => {
+      const error = new Error('official uninstall failed')
+      error.code = 'NATIVE_DAEMON_FAILED'
+      throw error
+    },
+    writeRecord: async written => { live = written },
+    probeKernel: async () => null,
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [],
+    verifiedAt: '2026-11-23T00:00:03.000Z',
+  })
+  assert.equal(helper.length, 1)
+  assert.deepEqual(helper[0].fileIdentity, identity, 'the helper receives the committed live file identity')
+  assert.equal(helper[0].generation, 1)
+  assert.equal(result.clean, true)
+  assert.equal(result.record.everObservedInstalled, true, 'a committed install is never recorded as never installed')
+  assert.equal(result.record.fileIdentity, null, 'the removed terminal record clears the current identity')
+  assert.equal(result.record.observed.state, 'removed')
+})
+
+// ── daemon CLI primitive ───────────────────────────────────────────────────
 
 function fakeChild({ closeOnSignal = true, emitStdout = '', emitStderr = '' } = {}) {
   const child = new EventEmitter()
