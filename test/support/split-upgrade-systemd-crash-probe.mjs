@@ -55,40 +55,59 @@ function fail(message) {
   throw error
 }
 
+function failInput(message) {
+  const error = new Error(`INPUT_UNQUALIFIED: ${message}`)
+  Object.assign(error, { code: 'INPUT_UNQUALIFIED' })
+  throw error
+}
+
+function failEnvironment(message) {
+  const error = new Error(`NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: ${message}`)
+  Object.assign(error, { code: 'NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE' })
+  throw error
+}
+
 function requireEnvironment(name) {
   const value = process.env[name]
-  if (typeof value !== 'string' || value === '') fail(`INPUT_UNQUALIFIED: ${name} is required`)
+  if (typeof value !== 'string' || value === '') failEnvironment(`${name} is required`)
   return value
 }
 
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
+function requireInput(name) {
+  const value = process.env[name]
+  if (typeof value !== 'string' || value === '') failInput(`${name} is required`)
+  return value
 }
 
-function readStartTicks(pid) {
+function readProcessObservation(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return { kind: 'unknown', code: 'INVALID_PID' }
+  let stat
   try {
-    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
-    const tail = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u)
-    return tail[19] ?? null
+    stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
   } catch (error) {
-    return error?.code === 'ENOENT' ? null : undefined
+    if (error?.code === 'ENOENT') return { kind: 'gone' }
+    if (error?.code === 'EACCES' || error?.code === 'EPERM') return { kind: 'unknown', code: 'ACCESS_DENIED' }
+    return { kind: 'unknown', code: 'READ_FAILED' }
   }
+  const close = stat.lastIndexOf(')')
+  if (close < 0) return { kind: 'unknown', code: 'READ_FAILED' }
+  const fields = stat.slice(close + 2).trim().split(/\s+/u)
+  const state = fields[0]
+  const startTicks = fields[19]
+  if (typeof state !== 'string' || !/^[A-Za-z]$/u.test(state)
+    || typeof startTicks !== 'string' || !/^\d+$/u.test(startTicks)) {
+    return { kind: 'unknown', code: 'READ_FAILED' }
+  }
+  return { kind: 'alive', state, startTicks }
 }
 
 function processState(pid, birth) {
   if (!Number.isInteger(pid) || pid <= 0) return 'unknown'
-  if (!pidAlive(pid)) return 'gone'
-  const ticks = readStartTicks(pid)
-  if (ticks === undefined) return 'unknown'
-  if (ticks === null) return 'gone'
+  const observation = readProcessObservation(pid)
+  if (observation.kind === 'gone') return 'gone'
+  if (observation.kind === 'unknown') return 'unknown'
   if (typeof birth !== 'string' || !birth.startsWith('linux:')) return 'unknown'
-  return `linux:${ticks}` === birth ? 'alive' : 'different'
+  return `linux:${observation.startTicks}` === birth ? 'alive' : 'different'
 }
 
 function hostProcessState(identity) {
@@ -97,15 +116,26 @@ function hostProcessState(identity) {
 }
 
 function requireAbsoluteDirectory(raw, label) {
-  if (typeof raw !== 'string' || !raw.startsWith('/')) fail(`INPUT_UNQUALIFIED: ${label} must be an absolute path`)
-  const real = realpathSync(raw)
-  const info = statSync(real)
-  if (!info.isDirectory()) fail(`INPUT_UNQUALIFIED: ${label} is not a directory`)
+  if (typeof raw !== 'string' || !raw.startsWith('/')) failInput(`${label} must be an absolute path`)
+  let real
+  try {
+    real = realpathSync(raw)
+  } catch (error) {
+    failInput(`${label} cannot be resolved (${error?.code ?? 'UNKNOWN'})`)
+  }
+  let info
+  try {
+    info = statSync(real)
+  } catch (error) {
+    failInput(`${label} cannot be inspected (${error?.code ?? 'UNKNOWN'})`)
+  }
+  if (!info.isDirectory()) failInput(`${label} is not a directory`)
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (info.uid !== uid) fail(`INPUT_UNQUALIFIED: ${label} is not owned by this user`)
-  if ((info.mode & 0o777) !== 0o700) fail(`INPUT_UNQUALIFIED: ${label} must have mode 0700`)
+  if (typeof uid !== 'number' || uid <= 0) failInput(`${label} requires a real uid`)
+  if (info.uid !== uid) failInput(`${label} is not owned by this user`)
+  if ((info.mode & 0o777) !== 0o700) failInput(`${label} must have mode 0700`)
   const rel = relative(REPO_ROOT, real)
-  if (rel !== '..' && !rel.startsWith(`..${sep}`)) fail(`INPUT_UNQUALIFIED: ${label} must be outside the checkout`)
+  if (rel !== '..' && !rel.startsWith(`..${sep}`)) failInput(`${label} must be outside the checkout`)
   return real
 }
 
@@ -152,10 +182,15 @@ async function waitForTerminalReceipt(path) {
   fail('the Supervisor receipt did not reach a terminal phase after the Worker SIGKILL')
 }
 
-async function waitForPidGone(pid, timeoutMs) {
+async function waitForSupervisorGone(pid, startTicks, timeoutMs) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (!pidAlive(pid)) return
+    const observation = readProcessObservation(pid)
+    if (observation.kind === 'gone') return true
+    if (observation.kind === 'alive') {
+      if (observation.startTicks !== startTicks) return true
+      if (observation.state === 'Z' || observation.state === 'X' || observation.state === 'x') return true
+    }
     await sleep(100)
   }
   return false
@@ -167,13 +202,28 @@ async function waitChildGone(child, timeoutMs) {
     new Promise(resolve => child.once('exit', () => resolve(true))),
     sleep(timeoutMs).then(() => false),
   ])
-  return exited
+  return exited || child.exitCode !== null || child.signalCode !== null
+}
+
+async function reclaimProbeChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  child.kill('SIGTERM')
+  if (await waitChildGone(child, CHILD_EXIT_WAIT_MS)) return true
+  child.kill('SIGKILL')
+  return await waitChildGone(child, 10_000)
 }
 
 function verifiedRuntimeDir(uid) {
   const runtimeDir = `/run/user/${String(uid)}`
-  const info = lstatSync(runtimeDir)
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid) fail('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the user runtime directory is unavailable')
+  let info
+  try {
+    info = lstatSync(runtimeDir)
+  } catch (error) {
+    failEnvironment(`the user runtime directory is unavailable (${error?.code ?? 'UNKNOWN'})`)
+  }
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid) {
+    failEnvironment('the user runtime directory is unavailable')
+  }
   return runtimeDir
 }
 
@@ -224,30 +274,70 @@ async function main() {
     process.exitCode = 2
     return
   }
-  if (process.platform !== 'linux') fail(`platform ${process.platform} is not Linux`)
+  if (process.platform !== 'linux') failEnvironment(`platform ${process.platform} is not Linux`)
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (typeof uid !== 'number' || uid <= 0) fail('a real non-root uid is required')
-  if (process.env.SPLIT_PROCESS_MANAGED_HOST_ISOLATED !== '1') fail('SPLIT_PROCESS_MANAGED_HOST_ISOLATED must be 1')
+  if (typeof uid !== 'number' || uid <= 0) failEnvironment('a real non-root uid is required')
+  if (process.env.SPLIT_PROCESS_MANAGED_HOST_ISOLATED !== '1') {
+    failEnvironment('SPLIT_PROCESS_MANAGED_HOST_ISOLATED must be 1')
+  }
   const isolatedHome = requireEnvironment('SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME')
-  const accountHome = realpathSync(userInfo().homedir)
-  if (accountHome !== realpathSync(isolatedHome)) fail('the real account home is not the provisioned isolated home')
-  if (!existsSync(join(accountHome, '.dsh-pi-tui-managed-host-isolated'))) fail('the isolated-home marker is missing')
+  let accountHome
+  try {
+    accountHome = realpathSync(userInfo().homedir)
+  } catch (error) {
+    failEnvironment(`the real account home cannot be resolved (${error?.code ?? 'UNKNOWN'})`)
+  }
+  let isolatedReal
+  try {
+    isolatedReal = realpathSync(isolatedHome)
+  } catch (error) {
+    failEnvironment(`the provisioned isolated home cannot be resolved (${error?.code ?? 'UNKNOWN'})`)
+  }
+  if (accountHome !== isolatedReal) failEnvironment('the real account home is not the provisioned isolated home')
+  if (!existsSync(join(accountHome, '.dsh-pi-tui-managed-host-isolated'))) {
+    failEnvironment('the isolated-home marker is missing')
+  }
   const tmpBase = requireAbsoluteDirectory(process.env.SPLIT_VITEST_TMP_BASE, 'SPLIT_VITEST_TMP_BASE')
-  const runId = requireEnvironment('SPLIT_VITEST_RUN_ID')
-  const oldTgz = requireEnvironment('SPLIT_VITEST_UPGRADE_OLD_TGZ')
-  const newTgz = requireEnvironment('SPLIT_VITEST_UPGRADE_NEW_TGZ')
+  const runId = requireInput('SPLIT_VITEST_RUN_ID')
+  const oldTgz = requireInput('SPLIT_VITEST_UPGRADE_OLD_TGZ')
+  const newTgz = requireInput('SPLIT_VITEST_UPGRADE_NEW_TGZ')
   inspectSplitUpgradePair(oldTgz, newTgz, { policy: 'native' })
   const runtimeDir = verifiedRuntimeDir(uid)
   const busPath = join(runtimeDir, 'bus')
   const managerEnv = { ...process.env, XDG_RUNTIME_DIR: runtimeDir }
-  if (existsSync(busPath)) managerEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
-  else delete managerEnv.DBUS_SESSION_BUS_ADDRESS
+  let busInfo
+  try {
+    busInfo = lstatSync(busPath)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      failEnvironment(`the session-bus path is unreadable (${error?.code ?? 'UNKNOWN'})`)
+    }
+    busInfo = undefined
+  }
+  if (busInfo !== undefined) {
+    if (busInfo.isSymbolicLink() || !busInfo.isSocket() || busInfo.uid !== uid) {
+      failEnvironment('the session-bus path is not a user-owned socket')
+    }
+    managerEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
+  } else {
+    delete managerEnv.DBUS_SESSION_BUS_ADDRESS
+  }
   const probe = spawnSync('/usr/bin/systemctl', [
     '--user', '--no-pager', '--no-ask-password', 'show-environment',
   ], { encoding: 'utf8', timeout: 15_000, env: managerEnv })
-  if (probe.status !== 0) fail('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: systemctl --user show-environment failed')
+  if (probe.error !== undefined || probe.status !== 0) {
+    failEnvironment('systemctl --user show-environment did not succeed')
+  }
+  const managerEnvironment = String(probe.stdout ?? '').split('\n')
+  if (!managerEnvironment.includes(`XDG_RUNTIME_DIR=${runtimeDir}`)) {
+    failEnvironment('the user manager does not expose the expected XDG_RUNTIME_DIR')
+  }
   const receiptDir = join(tmpBase, 'split-resources')
-  mkdirSync(receiptDir, { recursive: true, mode: 0o700 })
+  try {
+    mkdirSync(receiptDir, { recursive: true, mode: 0o700 })
+  } catch (error) {
+    failInput(`the receipt directory cannot be created (${error?.code ?? 'UNKNOWN'})`)
+  }
   const logPath = join(receiptDir, `${runId}-crash-probe.log`)
   const childEnv = {
     ...process.env,
@@ -279,10 +369,20 @@ async function main() {
     if (receipt?.worker?.ppid !== child.pid) {
       fail(`the Worker PPID ${String(receipt?.worker?.ppid)} does not match the spawned Vitest PID ${String(child.pid)}`)
     }
-    if (!pidAlive(workerPid)) fail('the Worker PID is not alive before the SIGKILL')
-    if (!Number.isInteger(supervisorPid) || supervisorPid <= 0 || !pidAlive(supervisorPid)) {
-      fail('the Supervisor PID is not alive before the SIGKILL')
+    const workerObservation = readProcessObservation(workerPid)
+    if (workerObservation.kind !== 'alive'
+      || workerObservation.state === 'Z' || workerObservation.state === 'X' || workerObservation.state === 'x') {
+      fail('the Worker PID is not a live kernel process before the SIGKILL')
     }
+    if (!Number.isInteger(supervisorPid) || supervisorPid <= 0) {
+      fail('the kill-ready receipt carries no real Supervisor PID')
+    }
+    const supervisorObservation = readProcessObservation(supervisorPid)
+    if (supervisorObservation.kind !== 'alive'
+      || supervisorObservation.state === 'Z' || supervisorObservation.state === 'X' || supervisorObservation.state === 'x') {
+      fail('the Supervisor PID is not a live kernel process before the SIGKILL')
+    }
+    const supervisorStartTicks = supervisorObservation.startTicks
     const reservation = receipt?.native?.reservation
     if (reservation === null || reservation === undefined) fail('the kill-ready receipt carries no native reservation')
     const before = await inspectManagedService(reservation)
@@ -320,7 +420,10 @@ async function main() {
     if (terminal.phase === 'NOT_QUIESCED') {
       problems.push(`the Supervisor reported NOT_QUIESCED (${String(terminal?.native?.cleanup?.reason ?? terminal?.errorName ?? 'unknown')})`)
     }
-    if (!(await waitForPidGone(supervisorPid, SUPERVISOR_EXIT_WAIT_MS))) {
+    if (!(await reclaimProbeChild(child))) {
+      problems.push('the probe-owned Vitest child did not exit after the terminal receipt')
+    }
+    if (!(await waitForSupervisorGone(supervisorPid, supervisorStartTicks, SUPERVISOR_EXIT_WAIT_MS))) {
       problems.push('the Supervisor is still alive after the terminal receipt')
     }
     if (problems.length > 0) {

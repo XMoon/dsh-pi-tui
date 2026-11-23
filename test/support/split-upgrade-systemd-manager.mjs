@@ -165,7 +165,21 @@ function inspectUnitFile(reservation) {
   } catch {
     return { kind: 'unverifiable', reason: 'UNIT_FILE_UNREADABLE', resolvedPath: null, fileFacts: null }
   }
-  const resolvedPath = realpathSync(targetPath)
+  let afterReadInfo
+  try {
+    afterReadInfo = lstatSync(targetPath)
+  } catch {
+    return { kind: 'unverifiable', reason: 'UNIT_FILE_UNREADABLE', resolvedPath: null, fileFacts: null }
+  }
+  if (String(afterReadInfo.dev) !== String(targetInfo.dev) || String(afterReadInfo.ino) !== String(targetInfo.ino)) {
+    return { kind: 'unverifiable', reason: 'UNIT_FILE_CHANGED_DURING_READ', resolvedPath: null, fileFacts: null }
+  }
+  let resolvedPath
+  try {
+    resolvedPath = realpathSync(targetPath)
+  } catch {
+    return { kind: 'unverifiable', reason: 'UNIT_FILE_UNREADABLE', resolvedPath: null, fileFacts: null }
+  }
   const lines = content.split('\n')
   const owner = readMetadata(lines, 'X-DshPiTuiOwner')
   const scopeId = readMetadata(lines, 'X-DshPiTuiScopeId')
@@ -393,24 +407,67 @@ export async function reclaimManagedService(input) {
       || recordedIdentity.sha256 !== beforeUnlink.fileFacts.sha256)) {
     return { clean: false, action: 'preserve', reason: 'FILE_IDENTITY_CHANGED', observation: beforeUnlink }
   }
-  let pathInfo
-  try {
-    pathInfo = lstatSync(input.unitPath)
-  } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      return { clean: false, action: 'preserve', reason: 'UNIT_FILE_UNREADABLE', observation: beforeUnlink }
+  const finalFile = inspectUnitFile(input)
+  if (finalFile.kind !== 'absent') {
+    if (finalFile.kind !== 'owned' || finalFile.fileFacts === null) {
+      return { clean: false, action: 'preserve', reason: finalFile.reason ?? 'OWNER_NOT_VERIFIED', observation: beforeUnlink }
     }
-    pathInfo = undefined
-  }
-  if (pathInfo !== undefined) {
-    if (pathInfo.uid !== input.uid) {
-      return { clean: false, action: 'preserve', reason: 'UNIT_FILE_FOREIGN_OWNER', observation: beforeUnlink }
+    const finalFacts = finalFile.fileFacts
+    if (recordedIdentity !== null && recordedIdentity !== undefined
+      && (recordedIdentity.device !== finalFacts.device
+        || recordedIdentity.inode !== finalFacts.inode
+        || recordedIdentity.sha256 !== finalFacts.sha256)) {
+      return { clean: false, action: 'preserve', reason: 'FILE_IDENTITY_CHANGED', observation: beforeUnlink }
     }
+    if (beforeUnlink.fileFacts !== null
+      && (beforeUnlink.fileFacts.device !== finalFacts.device
+        || beforeUnlink.fileFacts.inode !== finalFacts.inode
+        || beforeUnlink.fileFacts.sha256 !== finalFacts.sha256)) {
+      return { clean: false, action: 'preserve', reason: 'FILE_IDENTITY_CHANGED', observation: beforeUnlink }
+    }
+    let pathInfo
     try {
-      unlinkSync(input.unitPath)
+      pathInfo = lstatSync(input.unitPath)
     } catch (error) {
       if (error?.code !== 'ENOENT') {
-        return { clean: false, action: 'preserve', reason: 'UNIT_UNLINK_FAILED', observation: beforeUnlink }
+        return { clean: false, action: 'preserve', reason: 'UNIT_FILE_UNREADABLE', observation: beforeUnlink }
+      }
+      pathInfo = undefined
+    }
+    if (pathInfo !== undefined) {
+      if (pathInfo.uid !== input.uid) {
+        return { clean: false, action: 'preserve', reason: 'UNIT_FILE_FOREIGN_OWNER', observation: beforeUnlink }
+      }
+      let targetPath = input.unitPath
+      let targetInfo = pathInfo
+      if (pathInfo.isSymbolicLink()) {
+        try {
+          targetPath = realpathSync(input.unitPath)
+          targetInfo = lstatSync(targetPath)
+        } catch {
+          return { clean: false, action: 'preserve', reason: 'UNIT_FILE_LINK_UNREADABLE', observation: beforeUnlink }
+        }
+        if (!targetInfo.isFile()) {
+          return { clean: false, action: 'preserve', reason: 'UNIT_FILE_TARGET_NOT_REGULAR', observation: beforeUnlink }
+        }
+        if (targetInfo.uid !== input.uid) {
+          return { clean: false, action: 'preserve', reason: 'UNIT_FILE_FOREIGN_OWNER', observation: beforeUnlink }
+        }
+        if (targetPath !== finalFile.resolvedPath) {
+          return { clean: false, action: 'preserve', reason: 'FILE_IDENTITY_CHANGED', observation: beforeUnlink }
+        }
+      } else if (!pathInfo.isFile()) {
+        return { clean: false, action: 'preserve', reason: 'UNIT_FILE_NOT_REGULAR', observation: beforeUnlink }
+      }
+      if (String(targetInfo.dev) !== finalFacts.device || String(targetInfo.ino) !== finalFacts.inode) {
+        return { clean: false, action: 'preserve', reason: 'FILE_IDENTITY_CHANGED', observation: beforeUnlink }
+      }
+      try {
+        unlinkSync(input.unitPath)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          return { clean: false, action: 'preserve', reason: 'UNIT_UNLINK_FAILED', observation: beforeUnlink }
+        }
       }
     }
   }

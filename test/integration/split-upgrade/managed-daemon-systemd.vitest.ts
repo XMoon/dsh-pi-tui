@@ -120,28 +120,60 @@ function failEnvironment(message: string): never {
   throw error
 }
 
+function failInput(message: string): never {
+  const error = new TypeError(`INPUT_UNQUALIFIED: ${message}`)
+  Object.assign(error, { code: 'INPUT_UNQUALIFIED' })
+  throw error
+}
+
 function requireAbsoluteDirectory(path: string, label: string): string {
-  assert.ok(path.startsWith('/'), `INPUT_UNQUALIFIED: ${label} must be an absolute path`)
-  const real = realpathSync(path)
-  const info = statSync(real)
-  assert.ok(info.isDirectory(), `INPUT_UNQUALIFIED: ${label} is not a directory`)
+  if (typeof path !== 'string' || !path.startsWith('/')) failInput(`${label} must be an absolute path`)
+  let real: string
+  try {
+    real = realpathSync(path)
+  } catch (error) {
+    failInput(`${label} cannot be resolved (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  let info
+  try {
+    info = statSync(real)
+  } catch (error) {
+    failInput(`${label} cannot be inspected (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  if (!info.isDirectory()) failInput(`${label} is not a directory`)
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  assert.ok(uid !== undefined, `INPUT_UNQUALIFIED: ${label} requires a real uid`)
-  assert.equal(info.uid, uid, `INPUT_UNQUALIFIED: ${label} is not owned by this user`)
-  assert.equal(info.mode & 0o777, 0o700, `INPUT_UNQUALIFIED: ${label} must have mode 0700`)
+  if (uid === undefined) failInput(`${label} requires a real uid`)
+  if (info.uid !== uid) failInput(`${label} is not owned by this user`)
+  if ((info.mode & 0o777) !== 0o700) failInput(`${label} must have mode 0700`)
   const rel = relative(REPO_ROOT, real)
-  assert.ok(rel === '..' || rel.startsWith(`..${sep}`), `INPUT_UNQUALIFIED: ${label} must be outside the checkout`)
+  if (rel !== '..' && !rel.startsWith(`..${sep}`)) failInput(`${label} must be outside the checkout`)
   return real
 }
 
 function requireFrozenTarball(envName: string): void {
   const value = process.env[envName]
-  assert.ok(typeof value === 'string' && value.startsWith('/'), `INPUT_UNQUALIFIED: ${envName} must be an absolute path`)
-  const real = realpathSync(value)
-  const info = statSync(real)
-  assert.ok(info.isFile(), `INPUT_UNQUALIFIED: ${envName} is not a regular file`)
-  assert.equal(info.mode & 0o222, 0, `INPUT_UNQUALIFIED: ${envName} must be read-only/frozen`)
-  assert.equal(lstatSync(value).nlink, 1, `INPUT_UNQUALIFIED: ${envName} must have one hard link`)
+  if (typeof value !== 'string' || !value.startsWith('/')) failInput(`${envName} must be an absolute path`)
+  let real: string
+  try {
+    real = realpathSync(value)
+  } catch (error) {
+    failInput(`${envName} cannot be resolved (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  let info
+  try {
+    info = statSync(real)
+  } catch (error) {
+    failInput(`${envName} cannot be inspected (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  if (!info.isFile()) failInput(`${envName} is not a regular file`)
+  if ((info.mode & 0o222) !== 0) failInput(`${envName} must be read-only/frozen`)
+  let linkInfo
+  try {
+    linkInfo = lstatSync(value)
+  } catch (error) {
+    failInput(`${envName} cannot be inspected (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  if (linkInfo.nlink !== 1) failInput(`${envName} must have one hard link`)
 }
 
 function requireSystemdEnvironment(): SystemdEnvironment {
@@ -157,30 +189,66 @@ function requireSystemdEnvironment(): SystemdEnvironment {
   if (typeof isolatedHome !== 'string' || isolatedHome === '') {
     failEnvironment('SPLIT_PROCESS_MANAGED_HOST_ISOLATED_HOME is required')
   }
-  const accountHome = realpathSync(userInfo().homedir)
-  if (accountHome !== realpathSync(isolatedHome)) {
+  let accountHome: string
+  try {
+    accountHome = realpathSync(userInfo().homedir)
+  } catch (error) {
+    failEnvironment(`the real account home cannot be resolved (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  let isolatedReal: string
+  try {
+    isolatedReal = realpathSync(isolatedHome)
+  } catch (error) {
+    failEnvironment(`the provisioned isolated home cannot be resolved (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
+  if (accountHome !== isolatedReal) {
     failEnvironment('the real account home is not the provisioned isolated home')
   }
   if (!existsSync(join(accountHome, '.dsh-pi-tui-managed-host-isolated'))) {
     failEnvironment('the isolated-home marker is missing')
   }
   const runtimeDir = `/run/user/${String(uid)}`
-  const runtimeInfo = lstatSync(runtimeDir)
+  let runtimeInfo
+  try {
+    runtimeInfo = lstatSync(runtimeDir)
+  } catch (error) {
+    failEnvironment(`the real systemd user runtime directory is unavailable (${(error as NodeJS.ErrnoException).code ?? 'UNKNOWN'})`)
+  }
   if (!runtimeInfo.isDirectory() || runtimeInfo.isSymbolicLink() || runtimeInfo.uid !== uid) {
     failEnvironment('the real systemd user runtime directory is unavailable')
   }
   const managerEnv: NodeJS.ProcessEnv = { ...process.env, XDG_RUNTIME_DIR: runtimeDir }
   const busPath = join(runtimeDir, 'bus')
-  if (existsSync(busPath)) managerEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
-  else delete managerEnv.DBUS_SESSION_BUS_ADDRESS
+  let busInfo
+  try {
+    busInfo = lstatSync(busPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      failEnvironment(`the session-bus path is unreadable (${code ?? 'UNKNOWN'})`)
+    }
+    busInfo = undefined
+  }
+  if (busInfo !== undefined) {
+    if (busInfo.isSymbolicLink() || !busInfo.isSocket() || busInfo.uid !== uid) {
+      failEnvironment('the session-bus path is not a user-owned socket')
+    }
+    managerEnv.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
+  } else {
+    delete managerEnv.DBUS_SESSION_BUS_ADDRESS
+  }
   const managerProbe = spawnSync('/usr/bin/systemctl', [
     '--user', '--no-pager', '--no-ask-password', 'show-environment',
   ], { encoding: 'utf8', timeout: 15_000, env: managerEnv })
-  if (managerProbe.status !== 0) {
+  if (managerProbe.error !== undefined || managerProbe.status !== 0) {
     failEnvironment('systemctl --user show-environment did not succeed')
   }
+  const managerEnvironment = String(managerProbe.stdout ?? '').split('\n')
+  if (!managerEnvironment.includes(`XDG_RUNTIME_DIR=${runtimeDir}`)) {
+    failEnvironment('the user manager does not expose the expected XDG_RUNTIME_DIR')
+  }
   const tmpBaseRaw = process.env.SPLIT_VITEST_TMP_BASE
-  if (typeof tmpBaseRaw !== 'string' || tmpBaseRaw === '') failEnvironment('SPLIT_VITEST_TMP_BASE is required')
+  if (typeof tmpBaseRaw !== 'string' || tmpBaseRaw === '') failInput('SPLIT_VITEST_TMP_BASE is required')
   const tmpBase = requireAbsoluteDirectory(tmpBaseRaw, 'SPLIT_VITEST_TMP_BASE')
   requireFrozenTarball('SPLIT_VITEST_UPGRADE_OLD_TGZ')
   requireFrozenTarball('SPLIT_VITEST_UPGRADE_NEW_TGZ')
