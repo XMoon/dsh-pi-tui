@@ -22,17 +22,46 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
+
+import {
+  allowNativeMutation,
+  applyServiceObservation,
+  assertManagedReservationScene,
+  assertNativeManagedProfileInstall,
+  assertNativeRollbackAdmission,
+  classifyCurrentProfile,
+  classifyManagedInspection,
+  classifyNativeCliFence,
+  classifyNativeClientOwnership,
+  cleanupNativeService,
+  combineNativeFailures,
+  executeNativeServiceReservation,
+  isAcceptedCustomizedObservation,
+  isNativeDaemonUnquiesced,
+  loadNativeManagerAdapter,
+  mergeHostIdentityLedger,
+  nativeIdentityRecordMatches,
+  nativeObservationCommitAllowed,
+  runOwnedNativeCli,
+  nativeBootstrapAdmission,
+  parseManagedDaemonStatus,
+  requireLaunchdCustomization,
+  runFixedDaemonVerb,
+  serializeKernelIdentity,
+  waitForOwnedMutation,
+} from './split-upgrade-native-contract.mjs'
 
 const SUPERVISOR_STARTED_AT = new Date().toISOString()
 const HOST_READY_TIMEOUT_MS = 180_000
 const HOST_SHUTDOWN_GRACE_MS = 30_000
 const TERM_GRACE_MS = 3_000
 const KILL_GRACE_MS = 3_000
+const MUTATING_HELPER_GRACE_MS = 30_000
 const QUALIFICATION_PROOF_TIMEOUT_MS = 180_000
 const QUALIFICATION_SHUTDOWN_GRACE_MS = 30_000
 const RUN_ID = process.env.SPLIT_VITEST_RUN_ID ?? `supervisor-${String(process.pid)}-${String(Date.now())}`
@@ -76,8 +105,13 @@ let readProcessStarttime
 let safeIdentity
 let assertIdentityKept
 let seatIsFree
+let readKernelProcess
 let EXPECTED_PACKAGE_NAME
 let hostStatusSequence = 0
+/** The ONE native managed-service bridge state, or undefined for default/pilot scenes. */
+let nativeRuntime
+/** The one-shot native cleanup of this run (idempotent across FINALIZE/disconnect). */
+let nativeCleanupPromise
 
 // Register every parent-death / message / signal handler before loading the
 // heavy profile and fixture modules. A fork can deliver `disconnect` while the
@@ -152,7 +186,8 @@ const modulesReady = Promise.all([
   import('./split-upgrade-pair.mjs'),
   import('../../scripts/lib/split-upgrade-support.mjs'),
   import('../../scripts/lib/dsh-smoke-harness.mjs'),
-]).then(([profile, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness]) => {
+  import('../../src/runtime/native-process/identity.ts'),
+]).then(([profile, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness, nativeIdentity]) => {
   inspectSplitCandidate = profile.inspectSplitCandidate
   createSplitSmokeProfile = profile.createSplitSmokeProfile
   writeC1WorkFixture = fixtures.writeC1WorkFixture
@@ -170,6 +205,7 @@ const modulesReady = Promise.all([
   installPlugin = smokeHarness.installPlugin
   runDsh = smokeHarness.runDsh
   readJson = smokeHarness.readJson
+  readKernelProcess = nativeIdentity.readKernelProcess
 })
 
 function validateTmpBase(raw) {
@@ -1003,8 +1039,24 @@ async function cleanup(reason) {
       await terminateQualificationClient(reason)
       // A Scene Client's production discovery fallback can start a detached
       // Host this Supervisor never created. Audit and reclaim it before any
-      // terminal quiescence claim or root removal.
-      await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
+      // terminal quiescence claim or root removal. A native Scene skips this
+      // FIRST pass: the manager-owned Host legitimately runs local-host.mjs
+      // under the Scene root but belongs to the reserved service, not to a
+      // Client fallback; it is stopped by cleanupNativeManagedService below
+      // and the post-host audit then owns any true leftover.
+      if (isNativeScene()) {
+        // Native-only compensation runs BEFORE the Host generations are stopped:
+        // the registered Client/shell PIDs are validated against uid, kernel
+        // birth, command and the run-owned scratch, never by name or group.
+        try {
+          await reclaimNativeClients(`cleanup:${reason}`)
+        } catch (error) {
+          clean = false
+          appendNote('native-client-reclaim-failed', { reason: boundedError(error) })
+        }
+      } else {
+        await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
+      }
       for (const handle of [...hosts].reverse()) {
         if (handle.exited) await assertHostGroupGone(handle, reason)
         else await terminateHost(handle, reason)
@@ -1015,9 +1067,20 @@ async function cleanup(reason) {
         // tui-test Client behind; the official record files are re-read BEFORE
         // the root is removed so a live replacement child can never be hidden
         // by the Supervisor's own cleanup.
-        auditClientLedger(`cleanup:${reason}`)
+        if (isNativeScene()) {
+          const nativeCleanup = await cleanupNativeManagedService(reason)
+          if (!nativeCleanup.clean) {
+            clean = false
+            appendNote('native-service-cleanup-failed', { reason: nativeCleanup.reason })
+          }
+        } else {
+          auditClientLedger(`cleanup:${reason}`)
+        }
         await reclaimClientFallbackHosts(`cleanup:${reason}:post-host`)
         await assertSceneHostSeatFree(`cleanup:${reason}`)
+        if (!clean) {
+          throw new Error(`${reason}: the Scene is not quiesced; the root is preserved for diagnosis`)
+        }
         await cleanupSceneRoot(reason)
       }
       installInProgress = false
@@ -1038,6 +1101,676 @@ async function cleanup(reason) {
     return { clean }
   })()
   return await cleanupPromise
+}
+
+
+// ── native managed-service bridge helpers ─────────────────────────────────
+// The Supervisor owns every persistent native fact; the shared contract module
+// owns the classification decisions. These helpers only feed it real inputs.
+
+/** Whether this Scene is the native upgrade Scene. */
+function isNativeScene() {
+  return scene?.kind === 'upgrade' && scene.pair?.policy === 'native'
+}
+
+function requireNativeScene(label) {
+  if (!isNativeScene() || nativeRuntime === undefined) {
+    throw new Error(`${label}: this is not a native upgrade Scene`)
+  }
+  return nativeRuntime
+}
+
+function requireNativeRuntime(label) {
+  const runtime = requireNativeScene(label)
+  if (runtime.reservation === undefined) {
+    throw new Error(`${label}: no managed service was reserved`)
+  }
+  return runtime
+}
+
+function writeNativeRecord(record) {
+  nativeRuntime.record = record
+  writeReceipt({ native: record })
+}
+
+/** Read `/proc/<pid>/status` Uid (first/real column) on Linux. */
+function readLinuxProcessUid(pid) {
+  let raw
+  try {
+    raw = readFileSync(`/proc/${String(pid)}/status`, 'utf8')
+  } catch {
+    return undefined
+  }
+  const match = /^Uid:\s+(\d+)/mu.exec(raw)
+  return match === null ? undefined : Number(match[1])
+}
+
+/** The exact environment value of one live process, or undefined. */
+function processEnvironmentValue(pid, key) {
+  if (process.platform === 'linux') {
+    let raw
+    try {
+      raw = readFileSync(`/proc/${String(pid)}/environ`, 'utf8')
+    } catch {
+      return undefined
+    }
+    for (const entry of raw.split('\0')) {
+      if (entry.startsWith(`${key}=`)) return entry.slice(key.length + 1)
+    }
+    return undefined
+  }
+  let raw
+  try {
+    raw = execFileSync('ps', ['eww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+  } catch {
+    return undefined
+  }
+  const match = new RegExp(`(?:^|\\s)${key}=([^\\s]*)`, 'u').exec(raw)
+  return match?.[1]
+}
+
+/** One live process's kernel birth + real uid, or null when unprovable. */
+function nativeProcessSnapshot(pid) {
+  if (typeof readKernelProcess !== 'function') return null
+  let observation
+  try {
+    observation = readKernelProcess(pid)
+  } catch {
+    return null
+  }
+  if (observation.kind !== 'alive') return null
+  const identity = observation.identity
+  const uid = identity.platform === 'darwin' ? identity.uid : readLinuxProcessUid(pid)
+  if (!Number.isInteger(uid) || uid <= 0) return null
+  const command = processCommandLine(pid)
+  if (typeof command !== 'string' || command === '') return null
+  return { uid, birth: serializeKernelIdentity(identity), command }
+}
+
+/** The classifier's kernel fact for one manager-named Host main PID. */
+function nativeKernelFacts(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return { status: 'unknown', uid: null }
+  if (typeof readKernelProcess !== 'function') return { status: 'unknown', uid: null }
+  let observation
+  try {
+    observation = readKernelProcess(pid)
+  } catch {
+    return { status: 'unknown', uid: null }
+  }
+  if (observation.kind === 'gone') return { status: 'gone', uid: null }
+  if (observation.kind === 'unknown') return { status: 'unknown', uid: null }
+  const identity = observation.identity
+  if (identity.pid !== pid) return { status: 'different', uid: null }
+  const uid = identity.platform === 'darwin' ? identity.uid : readLinuxProcessUid(pid)
+  if (!Number.isInteger(uid) || uid <= 0) return { status: 'unknown', uid: null }
+  return { status: 'alive', uid }
+}
+
+/** The exact CLI child's fresh kernel birth for the sticky ownership fence. */
+function nativeCliKernelFacts(pid) {
+  if (!Number.isInteger(pid) || pid <= 0 || typeof readKernelProcess !== 'function') return { status: 'unknown' }
+  let observation
+  try {
+    observation = readKernelProcess(pid)
+  } catch {
+    return { status: 'unknown' }
+  }
+  if (observation.kind === 'gone') return { status: 'gone' }
+  if (observation.kind === 'unknown') return { status: 'unknown' }
+  return { status: 'alive', birth: serializeKernelIdentity(observation.identity) }
+}
+
+/**
+ * Record a sticky exact-child obligation. The in-memory single-CLI slot may be
+ * cleared when its promise settles, but this fence blocks every later manager
+ * command until the same kernel child is independently proved gone.
+ */
+function setNativeCliFence(verb, error, pending) {
+  const runtime = requireNativeScene('native CLI fence')
+  const pid = Number.isInteger(error?.pid)
+    ? error.pid
+    : (Number.isInteger(pending?.pid) ? pending.pid : null)
+  let kernelIdentity = pending?.kernelIdentity ?? null
+  if (pid !== null && kernelIdentity === null) {
+    const fresh = nativeCliKernelFacts(pid)
+    if (fresh.status === 'alive') kernelIdentity = fresh.birth
+  }
+  runtime.cliFence = { verb, pid, kernelIdentity, at: now(), reason: String(error?.message ?? 'NOT_QUIESCED') }
+  appendNote('native-cli-unquiesced', { verb, pid, reason: runtime.cliFence.reason })
+}
+
+/** Fresh terminal state of one recorded managed-Host kernel identity. */
+function nativeHostIdentityState(identity) {
+  const fresh = nativeCliKernelFacts(identity.pid)
+  if (fresh.status === 'gone') return 'gone'
+  if (fresh.status === 'unknown') return 'unknown'
+  return fresh.birth === identity.kernelIdentity ? 'alive' : 'different'
+}
+
+/** Fresh fence verdict; a proven gone/reused child is the only way to lift it. */
+function refreshNativeCliFence() {
+  const runtime = requireNativeScene('native CLI fence')
+  const fence = runtime.cliFence
+  if (fence === undefined) return { state: 'clear', pid: null }
+  const kernel = fence.pid === null ? null : nativeCliKernelFacts(fence.pid)
+  const decision = classifyNativeCliFence({ fence, kernel })
+  if (decision.state === 'clear') {
+    runtime.cliFence = undefined
+    appendNote('native-cli-fence-released', { pid: fence.pid, verb: fence.verb })
+  }
+  return decision
+}
+
+/** Capture the ownership facts of ONE Worker-owned Client/shell PID. */
+function captureNativeClientIdentity(pid, { requireScratch, scratch }) {
+  const snapshot = nativeProcessSnapshot(pid)
+  if (snapshot === null) {
+    throw new Error(`NATIVE_CLIENT_IDENTITY_UNPROVEN: process ${String(pid)} is not a readable live process`)
+  }
+  let observedScratch = null
+  if (requireScratch) {
+    observedScratch = processEnvironmentValue(pid, 'SPLIT_PROCESS_SCRATCH')
+    if (typeof observedScratch !== 'string' || observedScratch !== scratch) {
+      throw new Error(`NATIVE_CLIENT_IDENTITY_UNPROVEN: process ${String(pid)} does not carry this Scene's scratch`)
+    }
+  }
+  return { pid, uid: snapshot.uid, birth: snapshot.birth, command: snapshot.command, scratch: observedScratch }
+}
+
+/**
+ * Fresh ownership verdict for one registered native process. A different
+ * kernel birth means the numeric PID was reused: our process is gone and the
+ * new process is never signalled.
+ */
+function nativeRegisteredProcessState(registered) {
+  if (typeof readKernelProcess !== 'function') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNAVAILABLE' }
+  let kernel
+  try {
+    kernel = readKernelProcess(registered.pid)
+  } catch {
+    return { state: 'unknown', reason: 'KERNEL_READ_FAILED' }
+  }
+  if (kernel.kind === 'gone') return { state: 'gone' }
+  if (kernel.kind === 'unknown') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  if (serializeKernelIdentity(kernel.identity) !== registered.birth) return { state: 'gone', reason: 'PID_REUSED' }
+  const snapshot = nativeProcessSnapshot(registered.pid)
+  if (snapshot === null) return { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }
+  const observed = {
+    pid: registered.pid,
+    uid: snapshot.uid,
+    birth: snapshot.birth,
+    scratch: registered.scratch === null ? null : processEnvironmentValue(registered.pid, 'SPLIT_PROCESS_SCRATCH'),
+    entry: snapshot.command,
+  }
+  const decision = classifyNativeClientOwnership({
+    registered: {
+      pid: registered.pid,
+      uid: registered.uid,
+      birth: registered.birth,
+      scratch: registered.scratch,
+      entry: registered.command,
+    },
+    observed,
+    sceneRoot: scene.workDir,
+    uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
+  })
+  return decision.owned ? { state: 'owned' } : { state: 'unowned', reason: decision.reason }
+}
+
+/** The complete (newline-terminated) official Client records; a half line is ignored. */
+function readCompleteClientRecords(recordFile) {
+  const text = readFileSync(recordFile, 'utf8')
+  const end = text.endsWith('\n') ? text.length - 1 : text.lastIndexOf('\n')
+  if (end < 0) return []
+  const records = []
+  for (const [index, line] of text.slice(0, end).split('\n').entries()) {
+    if (line === '') continue
+    try {
+      records.push(JSON.parse(line))
+    } catch (error) {
+      throw new Error(`the official Client record line ${String(index + 1)} is invalid JSON: ${boundedError(error)}`)
+    }
+  }
+  return records
+}
+
+/** The fixed instance registry path of this reservation's scope. */
+function nativeInstanceRegistryPath(reservation) {
+  return join(reservation.dshHome, 'run', 'dsh-pi-tui', reservation.scopeId, 'instance.json')
+}
+
+/** Strictly read this scope's instance registry; malformed data is unverifiable. */
+function readNativeInstanceRegistry(reservation) {
+  const path = nativeInstanceRegistryPath(reservation)
+  let value
+  try {
+    value = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
+  }
+  if (value === null || typeof value !== 'object') return null
+  if (value.scopeId !== reservation.scopeId) return null
+  if (!Number.isInteger(value.hostPid) || value.hostPid <= 0) return null
+  if (typeof value.instanceId !== 'string' || value.instanceId === '') return null
+  if (typeof value.buildId !== 'string' || value.buildId === '') return null
+  return value
+}
+
+/**
+ * Bind one manager-named Host PID to the official authenticated identity. A
+ * Client's own `host-authenticated` record is preferred; the official instance
+ * registry plus a fresh kernel re-read is the fallback. An unknown identity is
+ * never converted into an owned one.
+ */
+function findNativeHostIdentity(pid, reservation) {
+  let kernel
+  try {
+    kernel = readKernelProcess(pid)
+  } catch {
+    return null
+  }
+  if (kernel.kind !== 'alive') return null
+  const kernelIdentity = serializeKernelIdentity(kernel.identity)
+  for (const client of receipt.clients ?? []) {
+    if (typeof client.recordFile !== 'string' || client.recordFile === '') continue
+    let records
+    try {
+      records = readCompleteClientRecords(client.recordFile)
+    } catch {
+      continue
+    }
+    for (const record of records) {
+      if (record?.m4a0 !== 'host-authenticated') continue
+      const host = record.host
+      if (host === null || typeof host !== 'object') continue
+      if (host.hostPid !== pid || host.scopeId !== reservation.scopeId) continue
+      // An old host-authenticated record must not authenticate a new process
+      // that reused the numeric PID. Compare the schema-specific kernel birth.
+      if (!nativeIdentityRecordMatches(host, kernel.identity)) continue
+      if (typeof host.instanceId !== 'string' || host.instanceId === '') continue
+      if (typeof host.buildId !== 'string' || host.buildId === '') continue
+      return {
+        pid,
+        scopeId: host.scopeId,
+        instanceId: host.instanceId,
+        kernelIdentity,
+        buildId: host.buildId,
+        source: 'official-client-auth-record',
+      }
+    }
+  }
+  const registry = readNativeInstanceRegistry(reservation)
+  if (registry !== null && registry.hostPid === pid && nativeIdentityRecordMatches(registry, kernel.identity)) {
+    return {
+      pid,
+      scopeId: registry.scopeId,
+      instanceId: registry.instanceId,
+      kernelIdentity,
+      buildId: registry.buildId,
+      source: 'official-registry-and-kernel-verified',
+    }
+  }
+  return null
+}
+
+/** The real Linux user runtime, proven by lstat before any daemon CLI uses it. */
+function verifiedLinuxRuntimeDir(uid) {
+  const path = `/run/user/${String(uid)}`
+  let info
+  try {
+    info = lstatSync(path)
+  } catch {
+    return undefined
+  }
+  if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== uid) return undefined
+  return path
+}
+
+/** The real session-bus socket of the verified runtime, or undefined. */
+function verifiedLinuxBusPath(runtimeDir, uid) {
+  const path = join(runtimeDir, 'bus')
+  let info
+  try {
+    info = lstatSync(path)
+  } catch {
+    return undefined
+  }
+  if (info.uid !== uid || !info.isSocket()) return undefined
+  return path
+}
+
+/** The exact official daemon CLI installation this run may call. */
+function nativeDaemonInstallation() {
+  const runtime = requireNativeRuntime('daemon')
+  const reservation = runtime.reservation
+  if (process.platform === 'linux') {
+    const runtimeDir = verifiedLinuxRuntimeDir(reservation.uid)
+    if (runtimeDir === undefined) {
+      throw new Error('NATIVE_SYSTEMD_USER_ENV_UNAVAILABLE: the verified /run/user/<uid> runtime directory is unavailable')
+    }
+    return {
+      dshInvocation: scene.installation.dshInvocation,
+      profileDir: scene.installation.profileDir,
+      env: scene.installation.env,
+      platform: 'linux',
+      runtimeDir,
+      busPath: verifiedLinuxBusPath(runtimeDir, reservation.uid) ?? null,
+    }
+  }
+  return {
+    dshInvocation: scene.installation.dshInvocation,
+    profileDir: scene.installation.profileDir,
+    env: scene.installation.env,
+    platform: 'darwin',
+    runtimeDir: null,
+    busPath: null,
+  }
+}
+
+/** The commit-point hooks of ONE official daemon CLI child. */
+function nativeCliHooks(verb, { mutating = true, recordOperation = true } = {}) {
+  if (!recordOperation) return {}
+  return {
+    onIssued: ({ at }) => {
+      const record = nativeRuntime.record
+      nativeRuntime.record = {
+        ...record,
+        lifecycle: mutating ? 'mutating' : record.lifecycle,
+        lastOperation: { verb, phase: 'ISSUED', pid: null, exitCode: null, signal: null, at },
+      }
+      writeReceipt({ native: nativeRuntime.record })
+    },
+    onSpawned: ({ pid, at }) => {
+      if (nativeRuntime?.cliPending !== undefined) {
+        nativeRuntime.cliPending.pid = pid
+        const kernel = nativeCliKernelFacts(pid)
+        if (kernel.status === 'alive') nativeRuntime.cliPending.kernelIdentity = kernel.birth
+      }
+      const record = nativeRuntime.record
+      nativeRuntime.record = {
+        ...record,
+        lastOperation: { ...(record.lastOperation ?? { verb, at }), verb, pid },
+      }
+      writeReceipt({ native: nativeRuntime.record })
+    },
+    onExited: ({ exitCode, signal, at }) => {
+      const record = nativeRuntime.record
+      nativeRuntime.record = {
+        ...record,
+        lastOperation: {
+          verb,
+          phase: 'EXITED',
+          pid: record.lastOperation?.pid ?? null,
+          exitCode,
+          signal,
+          at,
+        },
+      }
+      writeReceipt({ native: nativeRuntime.record })
+    },
+    onNotQuiesced: ({ pid, at }) => {
+      const record = nativeRuntime.record
+      nativeRuntime.record = {
+        ...record,
+        lastOperation: {
+          verb,
+          phase: 'UNKNOWN',
+          pid,
+          exitCode: null,
+          signal: null,
+          at,
+        },
+      }
+      writeReceipt({ native: nativeRuntime.record })
+    },
+  }
+}
+
+/** Execute ONE fixed daemon verb through the scene-level cancellation scope. */
+async function executeNativeDaemonVerb(verb, { mutating = true, abortSignal, recordOperation = true } = {}) {
+  const runtime = requireNativeRuntime(`daemon ${verb}`)
+  return await runFixedDaemonVerb({
+    installation: nativeDaemonInstallation(),
+    verb,
+    // Business commands share the Scene cancellation scope; the dedicated
+    // cleanup sequence owns its own scope so an earlier abort cannot silently
+    // skip the official stop/uninstall.
+    abortSignal: abortSignal ?? runtime.abortController.signal,
+    hooks: nativeCliHooks(verb, { mutating, recordOperation }),
+  })
+}
+
+/**
+ * The ONE official CLI owner. Every real child (including read-only `status`)
+ * enters the same in-flight slot and the same sticky terminal fence before it
+ * spawns. A closed lifecycle is re-checked after every async precondition;
+ * cleanup verbs may pass `allowClosed` because the cleanup itself is the owner
+ * of the closing lifecycle.
+ */
+async function runNativeCli(verb, { mutating = true, abortSignal, recordOperation = true, allowClosed = false } = {}) {
+  const runtime = requireNativeRuntime(`daemon ${verb}`)
+  return await runOwnedNativeCli({
+    slot: runtime,
+    verb,
+    allowClosed,
+    lifecycleClosed,
+    refreshFence: () => refreshNativeCliFence(),
+    setFence: (failedVerb, error) => setNativeCliFence(failedVerb, error, runtime.cliPending),
+    execute: async action => await executeNativeDaemonVerb(action, { mutating, abortSignal, recordOperation }),
+  })
+}
+
+/**
+ * Read the real manager/profile/Host facts and fold them into the ONE native
+ * receipt. A status query is only attempted when the raw observation is safe to
+ * query; helper unverifiability never authorizes a manager mutation.
+ */
+async function observeNativeService({ runStatus = true, lifecycle } = {}) {
+  const runtime = requireNativeRuntime('verify')
+  const reservation = runtime.reservation
+  const inspection = await runtime.adapter.inspectManagedService(reservation)
+  const kernel = inspection.mainPid === null ? null : nativeKernelFacts(inspection.mainPid)
+  let status = null
+  const canQueryStatus = runStatus
+    && !lifecycleClosed
+    && inspection.file !== 'foreign'
+    && inspection.file !== 'unverifiable'
+    && inspection.managerState !== 'unknown'
+  if (canQueryStatus) {
+    try {
+      const result = await runNativeCli('status', { mutating: false, recordOperation: false })
+      status = parseManagedDaemonStatus(result.stdout)
+    } catch (error) {
+      appendNote('native-status-unavailable', { code: error?.code ?? boundedError(error) })
+    }
+  }
+  let identity = null
+  if (status !== null
+    && status.host === 'ready'
+    && status.manager === reservation.manager
+    && status.unit === reservation.unitName
+    && Number.isInteger(status.pid)) {
+    identity = findNativeHostIdentity(status.pid, reservation)
+  }
+  const authenticatedHost = identity === null
+    ? null
+    : { ready: true, pid: identity.pid, scopeId: identity.scopeId, instanceId: identity.instanceId }
+  const observation = classifyManagedInspection({
+    reservation,
+    history: { everObservedInstalled: runtime.record.everObservedInstalled },
+    inspection,
+    authenticatedHost,
+    kernel,
+    verifiedAt: now(),
+  })
+  let record = applyServiceObservation(runtime.record, observation, lifecycle === undefined ? {} : { lifecycle })
+  if (identity !== null && observation.authenticatedHostReady) {
+    record = { ...record, hostIdentities: mergeHostIdentityLedger(record.hostIdentities, identity) }
+  }
+  // A business pre-cleanup observation that completes after the lifecycle
+  // closed must not overwrite the cleanup-owned live receipt. The cleanup
+  // observation is the only late writer allowed.
+  if (!nativeObservationCommitAllowed({ lifecycleClosed, cleanupOwned: lifecycle === 'cleaning' })) {
+    return { reservation, observation: record.observed }
+  }
+  writeNativeRecord(record)
+  return { reservation, observation: record.observed }
+}
+
+/**
+ * The ONE idempotent native cleanup. Official stop/uninstall are attempted only
+ * for a strictly owned service of this run; unknown/foreign state goes straight
+ * to the helper, which must re-prove ownership before it acts.
+ */
+async function cleanupNativeManagedService(reason) {
+  if (nativeCleanupPromise !== undefined) return await nativeCleanupPromise
+  nativeCleanupPromise = (async () => {
+    if (!isNativeScene() || nativeRuntime === undefined || nativeRuntime.reservation === undefined) {
+      return { clean: true, reason: 'no-native-reservation' }
+    }
+    const runtime = nativeRuntime
+    const reservation = runtime.reservation
+    runtime.cleanupStarted = true
+    runtime.abortController.abort()
+    const pending = runtime.cliPending
+    if (pending !== undefined) {
+      let rejection
+      await pending.promise.catch(error => { rejection = error })
+      const unquiesced = isNativeDaemonUnquiesced(rejection)
+      if (unquiesced !== null) setNativeCliFence(pending.verb, unquiesced, pending)
+      runtime.cliPending = undefined
+      await Promise.resolve()
+    }
+    const mutationDrain = await waitForOwnedMutation({
+      mutation: runtime.mutationPending,
+      timeoutMs: MUTATING_HELPER_GRACE_MS,
+    })
+    if (!mutationDrain.settled) {
+      // The helper may still commit a manager file change. No manager cleanup
+      // and no root removal may run; keep the Scene NOT_QUIESCED.
+      writeNativeRecord({
+        ...runtime.record,
+        lifecycle: 'unverifiable',
+        cleanup: {
+          attempted: true,
+          officialStop: 'not-attempted',
+          officialUninstall: 'not-attempted',
+          fallback: 'not-attempted',
+          reason: 'NATIVE_MUTATION_NOT_QUIESCED',
+        },
+      })
+      return { clean: false, reason: 'NATIVE_MUTATION_NOT_QUIESCED' }
+    }
+    const fence = refreshNativeCliFence()
+    const cliFence = fence.state === 'clear' ? null : fence
+    const cleanupAbort = new AbortController()
+    const result = await cleanupNativeService({
+      reservation,
+      record: runtime.record,
+      adapter: runtime.adapter,
+      cliFence,
+      observe: async () => (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation,
+      runOfficialVerb: async verb => await runNativeCli(verb, {
+        mutating: false,
+        abortSignal: cleanupAbort.signal,
+        recordOperation: false,
+        allowClosed: true,
+      }),
+      writeRecord: record => writeNativeRecord(record),
+      readRecord: () => runtime.record,
+      probeKernel: async pid => (pid === null ? null : nativeKernelFacts(pid)),
+      probeHostKernel: identity => nativeHostIdentityState(identity),
+      probeClients: async () => (receipt.clients ?? []).map(client => ({
+        label: String(client.label),
+        gone: nativeRegisteredClientGone(client),
+      })),
+      verifiedAt: now(),
+    })
+    if (!result.clean) {
+      appendNote('native-cleanup-failed', { reason: result.reason })
+    }
+    return result
+  })()
+  return await nativeCleanupPromise
+}
+
+/** Whether one registered native Client process set is proven gone. */
+function nativeRegisteredClientGone(client) {
+  const identities = client.nativeOs
+  if (identities === undefined) return false
+  for (const registered of [...(identities.business ?? []), ...(identities.shell === null ? [] : [identities.shell])]) {
+    const state = nativeRegisteredProcessState(registered)
+    if (state.state === 'unknown' || state.state === 'owned' || state.state === 'unowned') return false
+  }
+  return true
+}
+
+/**
+ * Native-only compensation for a dead Worker: terminate ONLY registered PIDs
+ * whose uid, kernel birth, command and run-owned scratch still prove ownership.
+ * Never a process group, never a name pattern, never an unregistered PID.
+ */
+async function reclaimNativeClients(reason) {
+  if (!isNativeScene()) return
+  const problems = []
+  for (const client of receipt.clients ?? []) {
+    const identities = client.nativeOs
+    if (identities === undefined) {
+      problems.push(`${String(client.label)}: no native OS identity was registered`)
+      continue
+    }
+    const registered = [...(identities.business ?? []), ...(identities.shell === null ? [] : [identities.shell])]
+    for (const identity of registered) {
+      const state = nativeRegisteredProcessState(identity)
+      if (state.state === 'gone') continue
+      if (state.state !== 'owned') {
+        problems.push(`${String(client.label)}: PID ${String(identity.pid)} is not provably this run's process (${String(state.reason ?? state.state)})`)
+        continue
+      }
+      try {
+        process.kill(identity.pid, 'SIGTERM')
+      } catch {
+        continue
+      }
+      const deadline = Date.now() + TERM_GRACE_MS
+      while (Date.now() < deadline && nativeRegisteredProcessState(identity).state === 'owned') {
+        await sleep(50)
+      }
+      if (nativeRegisteredProcessState(identity).state === 'owned') {
+        try { process.kill(identity.pid, 'SIGKILL') } catch { /* already gone */ }
+        const killDeadline = Date.now() + KILL_GRACE_MS
+        while (Date.now() < killDeadline && nativeRegisteredProcessState(identity).state === 'owned') {
+          await sleep(50)
+        }
+      }
+      const after = nativeRegisteredProcessState(identity)
+      if (after.state === 'owned') {
+        problems.push(`${String(client.label)}: PID ${String(identity.pid)} survived TERM/KILL`)
+      } else if (after.state === 'unknown') {
+        problems.push(`${String(client.label)}: PID ${String(identity.pid)} cannot be proven gone (${String(after.reason)})`)
+      }
+    }
+    // Complete official JSONL records may name a replacement PID that never
+    // reached a REPORT. A live one is unproven ownership, never silently clean.
+    if (typeof client.recordFile === 'string' && existsSync(client.recordFile)) {
+      try {
+        const reported = new Set(registered.map(value => value.pid))
+        for (const record of readCompleteClientRecords(client.recordFile)) {
+          if (record?.m4a0 !== 'client-started' && record?.m4a0 !== 'ready') continue
+          if (!Number.isInteger(record.pid) || record.pid <= 0) continue
+          if (reported.has(record.pid)) continue
+          if (pidAlive(record.pid)) {
+            problems.push(`${String(client.label)}: live official record PID ${String(record.pid)} has no registered OS identity`)
+          }
+        }
+      } catch (error) {
+        problems.push(`${String(client.label)}: official records are unreadable (${boundedError(error)})`)
+      }
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`${reason}: native Client reclaim failed: ${problems.join('; ')}`)
+  }
 }
 
 function publicInstallation(installation) {
@@ -1219,23 +1952,47 @@ async function handleBootstrapUpgrade(message) {
   if (typeof message.sceneId !== 'string' || message.sceneId === '') {
     throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_UPGRADE requires a sceneId')
   }
+  const policy = message.policy ?? 'default'
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  const admission = nativeBootstrapAdmission({ policy, manager: message.manager, platform: process.platform, uid })
+  // The fixed platform helper is loaded BEFORE any Scene root, Profile install
+  // or manager call. A default Scene never reaches this branch or this import.
+  const nativeAdapter = admission.native
+    ? await loadNativeManagerAdapter(admission.manager)
+    : undefined
   installInProgress = true
   const tmpBase = validateTmpBase(message.tmpBase)
   initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid }, {
     kind: 'upgrade',
     sceneId: message.sceneId,
     parentRunId: typeof message.parentRunId === 'string' && message.parentRunId !== '' ? message.parentRunId : undefined,
+    native: null,
   })
   let root
   let pair
   let installation
   let c1Work
   let oldProfile
+  let currentProfile
   try {
-    pair = inspectSplitUpgradePair(message.oldTgz, message.newTgz, { policy: 'default' })
+    pair = inspectSplitUpgradePair(message.oldTgz, message.newTgz, { policy })
     assertPairReceipt(pair, message.expectedPairSha)
     root = createTestTempDir('upgrade-scene-', tmpBase)
     scene = { kind: 'upgrade', workDir: root, pair, sideOld: undefined, sideNew: undefined, profileInstall: undefined }
+    if (nativeAdapter !== undefined) {
+      nativeRuntime = {
+        manager: admission.manager,
+        adapter: nativeAdapter,
+        reservation: undefined,
+        record: undefined,
+        currentProfile: undefined,
+        cliPending: undefined,
+        cliFence: undefined,
+        mutationPending: undefined,
+        cleanupStarted: false,
+        abortController: new AbortController(),
+      }
+    }
     appendNote('bootstrap-root-created', { sceneRoot: root })
     writeReceipt({
       phase: 'UPGRADE_BOOTSTRAP_ROOT_CREATED',
@@ -1256,6 +2013,8 @@ async function handleBootstrapUpgrade(message) {
     })
     c1Work = writeC1WorkFixture(installation.profileDir, root)
     oldProfile = installedPackageFacts(installation.profilePackage, pair.old.version, pair.targetDshVersion, 'old profile')
+    currentProfile = { role: 'old', installGeneration: 1, ...oldProfile }
+    if (nativeRuntime !== undefined) nativeRuntime.currentProfile = currentProfile
     scene = { kind: 'upgrade', workDir: root, pair, installation, c1Work, sideOld: undefined, sideNew: undefined, profileInstall: oldProfile }
   } catch (error) {
     installInProgress = false
@@ -1280,7 +2039,7 @@ async function handleBootstrapUpgrade(message) {
   writeReceipt({
     phase: 'INSTALL_COMPLETE',
     install: { inProgress: false, completed: true, startedAt: receipt.install?.startedAt, completedAt: now() },
-    profile: { old: oldProfile },
+    profile: { old: oldProfile, current: currentProfile },
   })
   if (disconnected || process.connected !== true) {
     await cleanup('worker-disconnected-during-bootstrap')
@@ -1288,7 +2047,7 @@ async function handleBootstrapUpgrade(message) {
   }
   writeReceipt({
     phase: 'SCENE_READY',
-    profile: { old: oldProfile },
+    profile: { old: oldProfile, current: currentProfile },
   })
   return {
     workDir: root,
@@ -1296,6 +2055,7 @@ async function handleBootstrapUpgrade(message) {
     installation: publicInstallation(installation),
     c1Work: { patchPath: c1Work.patchPath },
     oldProfile,
+    ...(nativeRuntime === undefined ? {} : { native: { manager: nativeRuntime.manager } }),
   }
 }
 
@@ -1303,6 +2063,17 @@ async function handleUpgradeOldProfile() {
   if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_INSTALL_OLD_PROFILE: no upgrade scene')
   // BOOTSTRAP already performed the one real old-profile install; this is the
   // idempotent read-only result method, never a second pnpm transaction.
+  if (nativeRuntime !== undefined) {
+    // The native Scene's current install record is the ONLY authority. This
+    // read-only method must never overwrite a newer native install receipt.
+    const current = nativeRuntime.currentProfile
+    if (current?.role !== 'old') {
+      throw new Error('UPGRADE_INSTALL_OLD_PROFILE: the old Profile is not the current native install')
+    }
+    const recorded = receipt.profile?.old
+    if (recorded === undefined) throw new Error('UPGRADE_INSTALL_OLD_PROFILE: no old Profile install is recorded')
+    return recorded
+  }
   const facts = installedPackageFacts(scene.installation.profilePackage, scene.pair.old.version, scene.pair.targetDshVersion, 'old profile')
   scene.profileInstall = facts
   writeReceipt({ profile: { ...(receipt.profile ?? {}), old: facts } })
@@ -1358,6 +2129,9 @@ async function handleUpgradeInstallSide(message, role) {
 
 async function handleUpgradeInstallNewProfileForReload() {
   if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: no upgrade scene')
+  if (nativeRuntime !== undefined) {
+    throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: a native Scene installs Profiles through installManagedProfile')
+  }
   if (activeHost === undefined) throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: no active Host')
   if (activeHost.source !== 'side-old' || scene.sideOld === undefined) {
     throw new Error('UPGRADE_INSTALL_NEW_PROFILE_FOR_RELOAD: the active Host must run from the side-old package root')
@@ -1403,6 +2177,9 @@ async function handleUpgradeInstallNewProfileForReload() {
 
 async function handleUpgradeActivateNewProfileAfterStop() {
   if (scene?.kind !== 'upgrade') throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: no upgrade scene')
+  if (nativeRuntime !== undefined) {
+    throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: a native Scene installs Profiles through installManagedProfile')
+  }
   if (activeHost !== undefined) throw new Error('UPGRADE_ACTIVATE_NEW_PROFILE_AFTER_STOP: a Host is still active')
   const first = hosts[0]
   if (first === undefined || first.generation !== 1) {
@@ -1419,8 +2196,376 @@ async function handleUpgradeActivateNewProfileAfterStop() {
   return facts
 }
 
+
+/** The ONE durable native reservation, written BEFORE any native install/start. */
+async function handleNativeReserveManagedService() {
+  const runtime = requireNativeScene('NATIVE_RESERVE_MANAGED_SERVICE')
+  if (runtime.reservation !== undefined) {
+    throw new Error('NATIVE_RESERVE_MANAGED_SERVICE: the managed service is already reserved')
+  }
+  const seed = hosts[0]
+  const scopeId = seed?.ready?.localHost?.scopeId
+  if (typeof scopeId !== 'string' || scopeId === '') {
+    throw new Error('NATIVE_RESERVE_MANAGED_SERVICE: the seed Host published no official scope identity')
+  }
+  for (const handle of hosts) await assertHostGroupGone(handle, 'NATIVE_RESERVE_MANAGED_SERVICE')
+  await assertSceneHostSeatFree('NATIVE_RESERVE_MANAGED_SERVICE')
+  const current = runtime.currentProfile
+  if (current === undefined) throw new Error('NATIVE_RESERVE_MANAGED_SERVICE: the current Profile install is not recorded')
+  const packageRoot = realpathSync(scene.installation.profilePackage)
+  const installedBuildId = productionBuildId(packageRoot, scene.pair.targetDshVersion)
+  const installedPayload = installedPayloadHash(packageRoot)
+  const profileBuildIdMatch = installedBuildId === current.buildId && installedPayload === current.payloadHash
+  const sceneFacts = {
+    kind: scene.kind,
+    policy: scene.pair.policy,
+    manager: runtime.manager,
+    selectedManager: runtime.manager,
+    activeHost: activeHost !== undefined,
+    hosts: hosts.map(handle => ({
+      generation: handle.generation,
+      exited: handle.exited,
+      exitCode: handle.exitResult?.code ?? null,
+      exitSignal: handle.exitResult?.signal ?? null,
+      groupGone: !processGroupAlive(hostPgid(handle)),
+    })),
+    seatFree: true,
+    profileBuildIdMatch,
+  }
+  assertManagedReservationScene(sceneFacts)
+  // The shared transaction asks the helper, classifies the raw facts and then
+  // durably writes the single receipt BEFORE the Worker is acknowledged.
+  const result = await executeNativeServiceReservation({
+    reservationInput: {
+      manager: runtime.manager,
+      uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
+      accountHome: realpathSync(userInfo().homedir),
+      profileRealpath: realpathSync(scene.installation.profileDir),
+      dshHome: realpathSync(scene.installation.dshHome),
+      scopeId,
+      oldBuildId: current.buildId,
+      sceneId: receipt.sceneId,
+      parentRunId: receipt.parentRunId ?? null,
+    },
+    adapter: runtime.adapter,
+    writeDurable: async record => {
+      assertLifecycleOpen('NATIVE_RESERVE_MANAGED_SERVICE')
+      runtime.reservation = record.reservation
+      runtime.record = record
+      writeReceipt({ phase: 'NATIVE_SERVICE_RESERVED', native: record })
+    },
+    verifiedAt: now(),
+  })
+  return { reservation: result.reservation, observation: result.observation }
+}
+
+/** Read the real manager/Profile/Host facts; never a Worker-provided identity. */
+async function handleNativeVerifyManagedService() {
+  requireNativeRuntime('NATIVE_VERIFY_MANAGED_SERVICE')
+  return await observeNativeService({ runStatus: true })
+}
+
+/** Execute ONE fixed official daemon verb through the single CLI slot. */
+async function handleNativeRunProfileDaemon(message) {
+  const runtime = requireNativeRuntime('NATIVE_RUN_PROFILE_DAEMON')
+  const verb = message.verb
+  if (!['status', 'install', 'start', 'restart', 'stop', 'uninstall'].includes(verb)) {
+    throw new Error(`NATIVE_RUN_PROFILE_DAEMON: unsupported daemon verb ${String(verb)}`)
+  }
+  if (runtime.cliPending !== undefined) {
+    throw new Error(`NATIVE_CLI_BUSY: daemon ${String(runtime.cliPending.verb)} is still in flight`)
+  }
+  const previousFence = refreshNativeCliFence()
+  if (previousFence.state !== 'clear') {
+    throw new Error(`NATIVE_CLI_NOT_QUIESCED: a previous daemon child is not proven reaped (${previousFence.state}, pid ${String(previousFence.pid)})`)
+  }
+  if (verb !== 'status') {
+    const verified = await observeNativeService({ runStatus: false })
+    const decision = allowNativeMutation({
+      reservation: runtime.reservation,
+      observation: verified.observation,
+      verb,
+      cliBusy: false,
+    })
+    if (!decision.allowed) {
+      throw new Error(`NATIVE_DAEMON_NOT_ADMITTED: daemon ${verb} refused (${String(decision.reason)})`)
+    }
+  }
+  let result
+  try {
+    result = await runNativeCli(verb, { mutating: verb !== 'status' })
+    // Every successful official mutation is verified against the real manager
+    // before the Worker receives the exit facts; `status` already ran.
+    await observeNativeService({ runStatus: verb !== 'status' })
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+  } catch (error) {
+    const unquiesced = isNativeDaemonUnquiesced(error)
+    const topCode = unquiesced !== null ? 'NOT_QUIESCED' : error?.code
+    const terminalPhase = topCode === 'NATIVE_DAEMON_CANCELLED' && error?.issued !== false
+      ? 'CANCELLED'
+      : topCode === 'NATIVE_DAEMON_TIMEOUT' || topCode === 'NOT_QUIESCED'
+        || topCode === 'NATIVE_DAEMON_SPAWN_FAILED'
+        ? 'UNKNOWN'
+        : undefined
+    if (terminalPhase !== undefined && runtime.record?.lastOperation !== undefined && runtime.record.lastOperation !== null) {
+      runtime.record = {
+        ...runtime.record,
+        lastOperation: { ...runtime.record.lastOperation, phase: terminalPhase },
+      }
+      writeReceipt({ native: runtime.record })
+    }
+    // A committed-but-unacknowledged command is never called "not executed":
+    // re-read the real manager unless the CLI child itself is still unsettled.
+    if (!lifecycleClosed && unquiesced === null) {
+      let observeError
+      try {
+        await observeNativeService({ runStatus: false })
+      } catch (readError) {
+        observeError = readError
+      }
+      const combined = combineNativeFailures(error, observeError)
+      throw combined === error ? error : combined
+    }
+    throw error
+  }
+}
+
+/** Install the new or the old Profile through the official DSH command. */
+async function handleNativeInstallManagedProfile(message) {
+  const runtime = requireNativeRuntime('NATIVE_INSTALL_MANAGED_PROFILE')
+  const role = message.role
+  if (role !== 'new' && role !== 'old') {
+    throw new Error(`NATIVE_INSTALL_MANAGED_PROFILE: unknown role ${String(role)}`)
+  }
+  const current = runtime.currentProfile
+  if (current === undefined) throw new Error('NATIVE_INSTALL_MANAGED_PROFILE: the current Profile install is not recorded')
+  if (role === 'new' && current.role !== 'old') {
+    throw new Error('NATIVE_PROFILE_INSTALL_ORDER: a new Profile install requires the old Profile as current')
+  }
+  if (role === 'old' && current.role !== 'new') {
+    throw new Error('NATIVE_PROFILE_INSTALL_ORDER: a rollback install requires the new Profile as current')
+  }
+  if (role === 'old') {
+    const verified = await observeNativeService({ runStatus: false })
+    // Linux may roll back over a strictly verified installed-inactive unit:
+    // the product's verified restart adopts the current install. macOS must
+    // recreate the LaunchAgent plist, so an installed job is refused.
+    assertNativeRollbackAdmission({ manager: runtime.manager, observation: verified.observation })
+  }
+  // The lifecycle may have closed while the manager was read. Re-check
+  // synchronously at the official install boundary, not only at dispatch entry.
+  assertLifecycleOpen('NATIVE_INSTALL_MANAGED_PROFILE')
+  const facts = await installProfilePackage(scene.pair[role].path)
+  const installGeneration = current.installGeneration + 1
+  try {
+    assertNativeManagedProfileInstall({
+      role,
+      pair: scene.pair,
+      oldBuildId: runtime.reservation.oldBuildId,
+      installed: facts,
+    })
+  } catch (error) {
+    // The official package install committed. Record the REAL installed facts
+    // (never "not installed") and fail; the run cleanup reclaims the service.
+    const committed = { role, installGeneration, ...facts }
+    scene.profileInstall = facts
+    runtime.currentProfile = committed
+    writeReceipt({
+      profile: { ...(receipt.profile ?? {}), current: committed },
+      phase: 'NOT_QUIESCED',
+      errorName: boundedError(error),
+      notes: [...(receipt?.notes ?? []), { event: 'native-profile-install-committed', detail: { role, buildId: facts.buildId }, at: now() }],
+    })
+    throw error
+  }
+  const installed = { role, installGeneration, ...facts }
+  scene.profileInstall = facts
+  runtime.currentProfile = installed
+  writeReceipt({
+    profile: {
+      ...(receipt.profile ?? {}),
+      current: installed,
+      ...(role === 'new' ? { new: facts } : { rollback: facts }),
+    },
+    phase: role === 'new' ? 'NATIVE_NEW_PROFILE_INSTALLED' : 'NATIVE_OLD_PROFILE_REINSTALLED',
+  })
+  return facts
+}
+
+/** The launchd-only, fixed user customization transaction. */
+async function handleNativeCustomizeManagedService(message) {
+  const runtime = requireNativeRuntime('NATIVE_CUSTOMIZE_MANAGED_SERVICE')
+  if (runtime.manager !== 'launchd') {
+    throw new Error('NATIVE_CUSTOMIZE_NOT_LAUNCHD: managed-service customization is launchd-only')
+  }
+  const customization = requireLaunchdCustomization(message.customization)
+  if (typeof runtime.adapter.customizeManagedService !== 'function') {
+    throw new Error('NATIVE_MANAGER_ADAPTER_INVALID: the launchd helper exposes no customizeManagedService')
+  }
+  const verified = await observeNativeService({ runStatus: false })
+  const observation = verified.observation
+  if (observation.file !== 'owned' || observation.ownerVerified !== true || observation.fileFacts === null) {
+    throw new Error('NATIVE_CUSTOMIZE_UNOWNED: the managed plist is not strictly owned by this run')
+  }
+  if (observation.state !== 'installed-inactive' && observation.state !== 'managed-active') {
+    throw new Error(`NATIVE_CUSTOMIZE_UNOWNED: the managed plist is not an installed definition (${observation.state})`)
+  }
+  if (runtime.record.fileIdentity === null) {
+    throw new Error('NATIVE_CUSTOMIZE_UNOWNED: the managed plist has no recorded file identity')
+  }
+  assertLifecycleOpen('NATIVE_CUSTOMIZE_MANAGED_SERVICE')
+  /**
+   * The helper performs real manager/plist IO. Track the whole customize
+   * transaction so disconnect cleanup either waits for its terminal state or
+   * preserves the Scene as NOT_QUIESCED; it may never remove the root while the
+   * helper can still commit.
+   */
+  let settleMutation
+  const mutationTerminal = new Promise(resolve => { settleMutation = resolve })
+  runtime.mutationPending = { verb: 'customize', promise: mutationTerminal }
+  // If cleanup already timed out on this transaction, the late commit must not
+  // erase its NOT_QUIESCED terminal state; keep the mutation facts but preserve
+  // the cleanup reason and the unverifiable lifecycle.
+  const commitCustomizeRecord = (next) => {
+    const timedOut = runtime.cleanupStarted && runtime.record?.cleanup?.reason === 'NATIVE_MUTATION_NOT_QUIESCED'
+    writeNativeRecord(timedOut
+      ? { ...next, lifecycle: 'unverifiable', cleanup: runtime.record.cleanup }
+      : next)
+    return timedOut
+  }
+  /**
+   * The helper already replaced the plist. Any result that does not prove this
+   * run's owned definition and the returned file identity is an UNKNOWN commit,
+   * never an EXITED success. The live and persistent records carry that state.
+   */
+  const uncertainCommit = (errorName, record = runtime.record) => {
+    commitCustomizeRecord({
+      ...record,
+      lifecycle: 'unverifiable',
+      lastOperation: { verb: 'customize', phase: 'UNKNOWN', pid: null, exitCode: null, signal: null, at: now() },
+    })
+    writeReceipt({ phase: 'NOT_QUIESCED', errorName })
+  }
+  try {
+    let result
+    try {
+      result = await runtime.adapter.customizeManagedService({
+        ...runtime.reservation,
+        fileIdentity: runtime.record.fileIdentity,
+      }, customization)
+    } catch (error) {
+      // The helper failed at an unknown point: it may or may not have replaced
+      // the plist. Keep the live and persistent record uncertain.
+      uncertainCommit(boundedError(error))
+      throw error
+    }
+    const inspection = result?.observation
+    if (inspection === undefined || inspection === null) {
+      uncertainCommit('NATIVE_CUSTOMIZE_INVALID')
+      throw new Error('NATIVE_CUSTOMIZE_INVALID: the helper returned no observation')
+    }
+    let nextObservation
+    try {
+      const kernel = inspection.mainPid === null ? null : nativeKernelFacts(inspection.mainPid)
+      nextObservation = classifyManagedInspection({
+        reservation: runtime.reservation,
+        history: { everObservedInstalled: runtime.record.everObservedInstalled },
+        inspection,
+        kernel,
+        verifiedAt: now(),
+      })
+    } catch (error) {
+      // The raw helper observation cannot be classified at the commit boundary.
+      uncertainCommit(boundedError(error))
+      throw error
+    }
+    const record = applyServiceObservation(runtime.record, nextObservation)
+    // Only a proven owned target of this run may be acknowledged. A classified
+    // `unverifiable`/foreign/removed observation is a committed-but-unproven
+    // customization, even when the helper returned an owned file identity.
+    if (!isAcceptedCustomizedObservation(nextObservation)) {
+      uncertainCommit('NATIVE_CUSTOMIZE_UNVERIFIABLE', record)
+      throw new Error(`NATIVE_CUSTOMIZE_UNVERIFIABLE: the customized plist is not a proven owned definition (${nextObservation.state})`)
+    }
+    const returnedIdentity = result.fileIdentity
+    const invalidIdentity = (message) => {
+      // The helper may already have replaced the plist. Never present the old
+      // identity as current; the live and persistent record both carry the
+      // unverifiable committed state.
+      uncertainCommit('NATIVE_CUSTOMIZE_IDENTITY_MISMATCH', record)
+      throw new Error(`NATIVE_CUSTOMIZE_IDENTITY_MISMATCH: ${message}`)
+    }
+    if (returnedIdentity === null || returnedIdentity === undefined) {
+      invalidIdentity('the helper returned no customized file identity')
+    }
+    if (typeof returnedIdentity.device !== 'string' || typeof returnedIdentity.inode !== 'string'
+      || typeof returnedIdentity.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(returnedIdentity.sha256)) {
+      invalidIdentity('the helper returned an invalid file identity')
+    }
+    if (record.fileIdentity === null
+      || record.fileIdentity.device !== returnedIdentity.device
+      || record.fileIdentity.inode !== returnedIdentity.inode
+      || record.fileIdentity.sha256 !== returnedIdentity.sha256) {
+      invalidIdentity('the receipt identity is not the observed customized file')
+    }
+    const committed = {
+      ...record,
+      lastOperation: { verb: 'customize', phase: 'EXITED', pid: null, exitCode: 0, signal: null, at: now() },
+    }
+    // The updated real file identity is durable in BOTH the live record and the
+    // receipt before the Worker is acknowledged; a later status rebuild starts
+    // from the committed identity, never the previous one.
+    const timedOut = commitCustomizeRecord(committed)
+    if (!timedOut) writeReceipt({ phase: 'NATIVE_SERVICE_CUSTOMIZED' })
+    if (lifecycleClosed) {
+      // The helper transaction already committed. The record above is the truth;
+      // the Worker must not receive a success acknowledgement from a closing Scene.
+      throw new Error('NATIVE_SCENE_CLOSED: the managed-plist customization committed while the Scene was closing')
+    }
+    return { reservation: runtime.reservation, observation: committed.observed }
+  } finally {
+    settleMutation()
+    runtime.mutationPending = undefined
+  }
+}
+
+/** Re-bind the Client entry to the CURRENT install receipt before any spawn. */
+async function handleNativeCurrentProfile() {
+  const runtime = requireNativeScene('NATIVE_CURRENT_PROFILE')
+  const current = runtime.currentProfile
+  if (current === undefined) {
+    throw new Error('NATIVE_PROFILE_INSTALL_UNRECORDED: the current Profile install is not recorded')
+  }
+  const packageRoot = realpathSync(join(scene.installation.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'))
+  const manifest = readJson(join(packageRoot, 'package.json'), 'current profile package.json')
+  const onDisk = {
+    packageRoot,
+    version: manifest.version,
+    buildId: productionBuildId(packageRoot, scene.pair.targetDshVersion),
+    payloadHash: installedPayloadHash(packageRoot),
+    entries: {
+      host: realpathSync(join(packageRoot, 'dist', 'local-host.mjs')),
+      client: realpathSync(join(packageRoot, 'dist', 'local-client.mjs')),
+    },
+  }
+  const verdict = classifyCurrentProfile({ receipt: current, current: onDisk })
+  if (!verdict.current) {
+    throw new Error(`${verdict.reason}: the current Profile package does not match this run's install receipt`)
+  }
+  return {
+    packageRoot,
+    version: onDisk.version,
+    buildId: onDisk.buildId,
+    payloadHash: onDisk.payloadHash,
+    entries: onDisk.entries,
+  }
+}
+
 async function handleStartHost(message) {
   if (scene === undefined) throw new Error('START_HOST: no scene')
+  if (nativeRuntime?.reservation !== undefined) {
+    throw new Error('START_HOST: a native managed service owns this Scene; use runProfileDaemon')
+  }
   if (activeHost !== undefined) throw new Error('START_HOST: one active Host per scene is supported')
   if (scene.kind === 'pilot' && hosts.length > 0) throw new Error('START_HOST: one Host per scene is supported')
 
@@ -1936,12 +3081,21 @@ async function handleFinalize(message) {
         `FINALIZE: qualification Client PID ${String(handle.child.pid)} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
     }
   }
+  // Native leftover Clients/shells are reclaimed BEFORE any Host stop, using
+  // only their registered uid/kernel-birth/command/scratch ownership proof.
+  if (isNativeScene()) {
+    try {
+      await reclaimNativeClients('FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
+  }
   // A failed native Client close must not prevent the final Host reclaim.
   if (activeHost !== undefined) {
     try {
       await officialStopHost(activeHost)
     } catch (error) {
-      hostStopError = error
+      hostStopError = hostStopError ?? error
     }
   }
   for (const handle of hosts) {
@@ -1963,7 +3117,14 @@ async function handleFinalize(message) {
     writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENTS_NOT_CLOSED' })
     throw new Error('FINALIZE: worker did not confirm Clients closed')
   }
-  auditClientLedger('FINALIZE')
+  if (isNativeScene()) {
+    const nativeCleanup = await cleanupNativeManagedService('FINALIZE')
+    if (!nativeCleanup.clean) {
+      hostStopError = hostStopError ?? new Error(`FINALIZE: the native managed service is not reclaimed (${String(nativeCleanup.reason)})`)
+    }
+  } else {
+    auditClientLedger('FINALIZE')
+  }
   if (hostStopError !== undefined) throw hostStopError
   for (const handle of hosts) {
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
@@ -1979,6 +3140,17 @@ async function handleFinalize(message) {
   writeReceipt({ phase: 'FINALIZED', cleanup: { completedAt: now() } })
 }
 
+
+/** Capture the OS ownership facts of a native Client/shell report at report time. */
+function captureNativeReportIdentities({ shellPid, businessPids, scratch }) {
+  if (!Number.isInteger(shellPid) || shellPid <= 0) {
+    throw new Error('NATIVE_CLIENT_IDENTITY_UNPROVEN: REPORT client-started requires the real tui-test shell PID')
+  }
+  const shell = captureNativeClientIdentity(shellPid, { requireScratch: false })
+  const business = businessPids.map(pid => captureNativeClientIdentity(pid, { requireScratch: true, scratch }))
+  return { shell, business, recordedAt: now() }
+}
+
 async function handleReport(message) {
   const detail = message.detail === undefined ? undefined : message.detail
   if (message.event === 'client-started' && detail !== undefined) {
@@ -1991,18 +3163,23 @@ async function handleReport(message) {
     const recordFile = scene?.kind === 'upgrade'
       ? assertOwnedRecordFile(detail.recordFile, 'REPORT client-started')
       : (typeof detail.recordFile === 'string' ? detail.recordFile : undefined)
+    const clientScratch = scene?.kind === 'upgrade'
+      ? assertOwnedSceneDirectory(detail.scratch, 'REPORT client-started')
+      : undefined
+    const nativeOs = isNativeScene()
+      ? captureNativeReportIdentities({ shellPid: detail.shellPid, businessPids, scratch: clientScratch })
+      : undefined
     receipt.clients = [...(receipt.clients ?? []), {
       label: detail.label,
       session: detail.session,
       shellPid: detail.shellPid ?? null,
       recordFile,
-      ...(scene?.kind === 'upgrade'
-        ? { scratch: assertOwnedSceneDirectory(detail.scratch, 'REPORT client-started') }
-        : {}),
+      ...(scene?.kind === 'upgrade' ? { scratch: clientScratch } : {}),
       businessPids,
       ...(scene?.kind === 'upgrade'
         ? { businessPidFacts: businessPids.map(pid => ({ pid, starttime: readHostStarttimeOrUndefined(pid) })) }
         : {}),
+      ...(nativeOs === undefined ? {} : { nativeOs }),
       businessPid: businessPids.at(-1) ?? null,
       startedAt: now(),
     }]
@@ -2018,10 +3195,22 @@ async function handleReport(message) {
     }
     const merged = new Set(Array.isArray(client.businessPids) ? client.businessPids : [])
     const facts = new Map((client.businessPidFacts ?? []).map(value => [value.pid, value.starttime]))
+    const additions = []
     for (const pid of Array.isArray(detail.businessPids) ? detail.businessPids : []) {
       if (!Number.isInteger(pid) || pid <= 0) continue
+      if (merged.has(pid)) continue
+      additions.push(pid)
       merged.add(pid)
       if (!facts.has(pid)) facts.set(pid, readHostStarttimeOrUndefined(pid))
+    }
+    if (isNativeScene()) {
+      if (client.nativeOs === undefined) {
+        throw new Error(`REPORT client-pids: ${String(detail.label)} has no registered native OS identity`)
+      }
+      for (const pid of additions) {
+        client.nativeOs.business = [...(client.nativeOs.business ?? []),
+          captureNativeClientIdentity(pid, { requireScratch: true, scratch: client.scratch })]
+      }
     }
     client.businessPids = [...merged]
     client.businessPidFacts = [...facts].map(([pid, starttime]) => ({ pid, starttime }))
@@ -2101,6 +3290,36 @@ async function dispatch(message) {
       }
       case 'UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION': {
         const payload = await handleUpgradeProbeSideNewClientHostFoundation(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'NATIVE_RESERVE_MANAGED_SERVICE': {
+        const payload = await handleNativeReserveManagedService()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'NATIVE_VERIFY_MANAGED_SERVICE': {
+        const payload = await handleNativeVerifyManagedService()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'NATIVE_RUN_PROFILE_DAEMON': {
+        const payload = await handleNativeRunProfileDaemon(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'NATIVE_INSTALL_MANAGED_PROFILE': {
+        const payload = await handleNativeInstallManagedProfile(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'NATIVE_CUSTOMIZE_MANAGED_SERVICE': {
+        const payload = await handleNativeCustomizeManagedService(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'NATIVE_CURRENT_PROFILE': {
+        const payload = await handleNativeCurrentProfile()
         if (requestId !== undefined) reply(requestId, payload)
         break
       }
