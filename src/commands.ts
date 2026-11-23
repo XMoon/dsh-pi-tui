@@ -515,10 +515,11 @@ export interface TuiCommandRunner {  ctx: Context
    * mutates the Host's official Web frontend through this ONE semantic surface
    * and never reaches a Host service, Connection or Gateway directly. */
   readonly webAccess: WebAccessPort
-  /** The Split-Client local ACP listener control port (PO-1B): the `/settings →
-   *  Tools → ACP Server` runtime row reads/mutates the Host's private
-   *  `piTuiAcpAccess` service through this ONE semantic surface and never
-   *  reaches a Host service, Connection or Gateway directly. */
+  /** The Split-Client local ACP listener control port (PO-1B / PR-B): the ONE
+   *  `Settings → Host → ACP access` page (and the TSP native `/acp` picker)
+   *  reads/mutates the Host's private `piTuiAcpAccess` service through this ONE
+   *  semantic surface and never reaches a Host service, Connection or Gateway
+   *  directly. */
   readonly acpAccess: AcpAccessPort
   /** The ONE official Host MCP manager's management port (FR3): the Settings
    *  `Tools → MCP servers` page reads/probes/restarts through it and never a
@@ -2129,14 +2130,19 @@ export function registerTuiCommands(
     ...(webPresentation === undefined ? {} : { webPresentation }),
   }).registerWeb()
 
-  // PO-5E: the ONE Split-Client ACP listener quick control, immediately after
-  // `/web`. It is sessionless/local (see domain/command/policy.ts), takes ONE
-  // optional native TSP presenter, and every read/write stays here.
+  // PO-5E / PR-B: the ONE Split-Client ACP listener control entry, immediately
+  // after `/web`. It is sessionless/local (see domain/command/policy.ts) and
+  // takes ONE optional native TSP presenter, which keeps its read/action
+  // request in this command. On the PiTui renderer `/acp` is a typed deep link
+  // into the ONE `Settings · Host · ACP access` page (same lease, no second
+  // overlay), so the Settings registrar supplies that entry and the page's own
+  // port/writer factories own the Host reads and writes.
   createAcpAccessCommands({
     runner,
     app: app as TuiApp | undefined,
     notify,
     registerOne,
+    openSettings: () => settingsCommands.openAcpAccessWorkspace(),
     ...(acpPresentation === undefined ? {} : { acpPresentation }),
   }).registerAcp()
 

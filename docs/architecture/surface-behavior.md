@@ -667,68 +667,77 @@ the next launch. A non-current configuration backend offers no confirmable
 candidate, and the authoritative re-read confirms only the persisted
 preference.
 
-The local ACP v1 listener is exposed through TWO independent Settings rows that
-never share one authority. `ACP Server` stays in `/settings → Tools` and is the
-RUNTIME row: its value is the LIVE listener state read from the Host's
-private `piTuiAcpAccess` service (`On`/`Off`; a bind/close in flight is
-`Changing…` and offers no candidate; an unreadable/`unavailable`/non-Split
-Host is `Unavailable`, and a Direct backend states `Unavailable — Split Host
-only`). Confirming On/Off sends exactly ONE `setEnabled`, then re-reads the
-authoritative listener state; only an agreeing re-read is `Verified`, a
-rejected or unreadable outcome is classified from a fresh read and never
-replayed. `Start ACP automatically` lives in `/settings → Host` (the SAME row
-id and preference authority as before the migration) and is the PERSISTED row
-(`pi-tui-acp-preferences.autoStart`, default `Off (default)`, options On/Off,
-revision-checked user patch) that applies to the NEXT Split Host start; saving
-it never changes the current listener, and its Detail states that explicitly.
-On Direct the runtime row is a truthful Unavailable while the persisted
-preference stays editable for the Split Host the user may later start.
+The local ACP v1 listener and its next-start preference are edited in ONE
+place: `/settings → Host → ACP access`. That page owns the runtime state (the
+LIVE listener read through the Host's private `piTuiAcpAccess` service, one
+explicit `setEnabled`, one authoritative read-back) and the persisted
+`pi-tui-acp-preferences.autoStart` preference (default `Off (default)`, a
+revision-checked user patch that applies only to the NEXT Split Host start).
+The two authorities are never merged, saving the preference never changes the
+current listener, and a runtime toggle never writes it. On Direct the page
+states `Unavailable · Split Host only` and still offers the editable preference
+for the Split Host the user may start later. The page contract (phases, first
+focus, risk confirmation, Esc ladder, short/narrow behavior) is owned by
+[surface-settings.md](./surface-settings.md#acp-access-page-host); this document
+owns only the command entry and its TSP-native sibling.
 
 ## ACP quick control (`/acp`)
 
-`/acp` is ONE local, sessionless Client command that controls the Split Host's
-local ACP v1 Unix-socket listener. It never creates a Session or Agent, submits
-a prompt, opens a browser or a Host, changes the default backend or disconnects
-the TUI; on the Direct backend it answers
-`ACP server controls are available only in a Split Client.` and opens nothing.
-The menu is a SHORT operation list, never a second Settings workspace: the
-default PiTui presentation is one `app.openSettings` overlay, and the TSP
-renderer presents one native `ui.picker` plus ONE read-only Details Reading.
-Both consume the SAME application-level presentation request, so the action
-vocabulary cannot fork between renderers.
+`/acp` is ONE local, sessionless Client command that opens the Client's ACP
+listener control. It never creates a Session or Agent, submits a prompt, opens
+a browser or a Host, changes the default backend or disconnects the TUI. On the
+PiTui renderer it is a TYPED SETTINGS DEEPLINK: the command takes the SAME
+Settings workspace lease and mounts `Settings · Host · ACP access` on its first
+really-painted frame (Direct included). There is no PiTui overlay, no second
+settings screen and no silent Rows-level fallback: a mount failure closes the
+lease and is the command's real error. The TSP renderer keeps its ONE native
+`ui.picker` plus ONE read-only Details Reading over the ORIGINAL
+`AcpAccessRequest` presentation request. The two renderers do NOT share a
+presenter or an action vocabulary: the PiTui page adds Copy, the next-start
+preference and the risk confirmation, while the TSP picker keeps its own frozen
+status/enable/disable/Details actions. Their common authority is the ONE
+`AcpAccessPort` Host controller, and neither entry reaches a Host service
+directly.
 
-The menu reads the Host's current listener state on entry through the existing
-private `piTuiAcpAccess` port and offers exactly what that state admits:
+On the page the Host state admits exactly:
 
-| Host state | Menu actions | What an action really does |
+| Host state | Page actions | What an action really does |
 |---|---|---|
-| `disabled` | Enable ACP, Details | the Host's own `setEnabled(true)` |
-| `enabled` | Disable ACP, Details | the Host's own `setEnabled(false)` |
-| `changing` | Details (no write) | nothing concurrent is submitted |
-| `unavailable` | Details (the reason is shown) | no implicit recovery or retry |
-| connection unreadable | the explicit unavailable statement, esc | no guessed Off, no write |
+| `disabled` | Enable ACP, Copy client command, Refresh | the Host's own `setEnabled(true)` after ONE live preflight |
+| `enabled` | Copy client command, Disable ACP…, Refresh | the confirmation's own `setEnabled(false)` after ONE live preflight |
+| `changing` | Copy client command, Refresh (no write) | nothing concurrent is submitted |
+| `unavailable` | Copy client command, Refresh (the reason is shown) | no implicit recovery or retry |
+| connection unreadable / Direct | Copy (when the Profile is proven), Refresh | no guessed Off, no runtime write |
 
-Every operation is committed by the command, never by the presenter: one Host
-call, then ONE authoritative status re-read whose result is what the menu
-re-projects. The command binds the mutation to the Connection generation that
-produced the visible state, so an old menu cannot write to a newly connected
-Host; a refused write is stated once and never retried automatically. A
-dismissal retires the menu only and never undoes a Host-accepted change.
+Every runtime operation is committed by the page's command owner, never by a
+presenter or a cached projection: a current observation, one live preflight,
+at most ONE `setEnabled` and one authoritative re-read. The mutation is bound to
+the Connection generation that produced the visible state, so an old observation
+cannot write to a newly connected Host; a state that already reached the target
+(or is changing/unavailable) dispatches zero writes and states `Not changed`; a
+dispatched request whose receipt is lost is `Outcome unconfirmed` and is never
+retried automatically. Leaving the page or closing the workspace never undoes a
+Host-accepted change and never re-enables the listener.
 
-Details is read-only and states that the host is the local Split Host for the
-same OS user with no TCP/HTTP, the current state, that enable/disable serves or
-retires this Host's listener, that `Start ACP automatically` in
-`/settings → Host` applies on the next Host start, and that closing an ACP
-View only detaches it. No socket path, credential, cookie or private bind name
-enters the menu or Details; headless endpoint discovery stays `daemon status`.
+`Copy client command` is the ONE Client-local action: it copies the official
+`dsh --profile <proven-profile> acp stdio` command with POSIX-safe quoting from
+the Profile identity this composition proved, and it requests no Host socket,
+token or process. It also works while the listener is disabled, where the page
+states the listener must be enabled before a client can connect.
 
-`/acp` and `/settings → Tools → ACP Server` share the same Host controller but
-remain independent entries: `/acp` is the immediate quick control and the
-Settings row stays the runtime control inside Settings. The persisted
-`pi-tui-acp-preferences.autoStart` preference remains a DIFFERENT authority
-(`/settings → Host → Start ACP automatically`) and is never written by
-`/acp`. The TUI command never calls the daemon status HTTP route, and the daemon
-status command never opens a TUI.
+The page's `Client Setup` section carries the durable connection statement the
+retired PiTui Details overlay used to own (local Split Host, same OS user, no
+TCP/HTTP, closing an ACP View only detaches it). No socket path, credential,
+cookie or private bind name is painted or copied; headless endpoint discovery
+stays `daemon status`, and the TSP Details Reading keeps its own native text.
+
+`/acp` and `/settings → Host → ACP access` are the SAME surface on PiTui. The
+persisted `pi-tui-acp-preferences.autoStart` preference is a DIFFERENT
+authority edited inside that same page and is never written by the runtime
+toggle. The TUI command never calls the daemon status HTTP route, and the daemon
+status command never opens a TUI. The public headless `dsh --profile …
+acp status|enable|disable` CLI remains a separate entry over the same Host
+controller, not a TUI path.
 
 ## Save Location
 

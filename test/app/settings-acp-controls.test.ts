@@ -1,17 +1,18 @@
 /**
- * PO-1B — the two `/settings → Tools` ACP rows through the REAL `/settings`
- * composition on a `VirtualTerminal`.
+ * PR-B — the ONE `Settings · Host · ACP access` surface through the REAL
+ * `/settings` composition on a `VirtualTerminal`.
  *
- * `ACP Server` is the RUNTIME row in Tools (live listener state via the
- * `acpAccess` port); `Start ACP automatically` is the PERSISTED next-launch
- * preference in General (via `config.acpStartupPreference`). The cases prove: the row
- * values come from the authorities; only a settled enabled/disabled offers a
- * confirmable candidate; a Confirm routes exactly ONE Host mutation and paints
- * Verified only after an agreeing authoritative re-read; Direct shows a
- * truthful Unavailable runtime row while the preference stays editable.
+ * The cases prove the USER paths, not an isolated page: `Host` owns the frozen
+ * row order; `/acp` and the row mount the SAME page in the SAME lease; the
+ * runtime toggle reaches the ONE `AcpAccessPort` Host controller with the
+ * painted generation and repaints the authoritative read-back; the next-start
+ * preference reaches the EXISTING revision-checked `acp-autostart` writer; the
+ * Copy action is the proven Profile's exact stdio command and never touches the
+ * Host. Direct still opens the truthful page.
  *
  * FIXTURE: the real command registration + TuiApp + VirtualTerminal.
- * STAND-IN: the Host `acpAccess` port and the ConfigPort ACP preference.
+ * STAND-IN: the Host `acpAccess` port, the ConfigPort ACP preference and the
+ * Client clipboard.
  *
  * @module @xmoon76/dsh-pi-tui/settings-acp-controls.test
  */
@@ -35,7 +36,6 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const DOWN = '\x1b[B'
-const UP = '\x1b[A'
 const ENTER = '\r'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -57,23 +57,28 @@ const DEFAULT_DOC: TuiSettingsDoc = {
 
 interface Harness {
   readonly vt: VirtualTerminal
+  readonly app: TuiApp
   readonly view: () => string
-  readonly invoke: () => unknown
+  readonly invoke: (name: string) => unknown
   readonly acp: {
     status: AcpAccessStatus
     setEnabledCalls: boolean[]
-    failure: string | undefined
-    /** Throw BEFORE applying the reached state (a clean rejection / not-saved). */
-    failBeforeApply: boolean
-    /** Hold the dispatched write until released (a pending, unsettled operation). */
+    setEnabledGenerations: unknown[]
     gate: Promise<void> | undefined
     release: (() => void) | undefined
   }
-  readonly pref: { state: AcpStartupPreferenceState | undefined; writes: boolean[]; failNext: string | undefined }
+  readonly pref: {
+    state: AcpStartupPreferenceState | undefined
+    writes: boolean[]
+    revisions: number[]
+    failNext: string | undefined
+  }
+  readonly copied: string[]
   readonly setReadiness: (readiness: 'ready' | 'stale' | 'unavailable') => void
-  /** Simulate a Connection generation change (Host A -> Host B): replace the
-   *  opaque generation identity and notify the generation subscribers. */
+  /** Simulate a Connection generation change (Host A -> Host B). */
   readonly bumpGeneration: () => void
+  /** Release every held status read (the preflight and the new Host's read). */
+  readonly releaseAcpReads: () => void
   readonly dispose: () => void
 }
 
@@ -82,12 +87,14 @@ function setup(options: {
   readonly rows?: number
   readonly backendKind?: 'direct' | 'remote'
   readonly status?: AcpAccessStatus
-  readonly acpUnavailable?: boolean
   readonly pref?: AcpStartupPreferenceState | undefined
   readonly readiness?: 'ready' | 'stale' | 'unavailable'
+  readonly profile?: string | undefined
+  /** Hold every `getStatus` after the page-entry read (the live preflight). */
+  readonly holdSecondAcpRead?: boolean
 } = {}): Harness {
   const columns = options.columns ?? 200
-  const rows = options.rows ?? 40
+  const rows = options.rows ?? 44
   const vt = new VirtualTerminal(columns, rows)
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
   // A real owned runner: a Confirm write travels the production `runOwned`
@@ -115,23 +122,31 @@ function setup(options: {
   const acp = {
     status: options.status ?? { state: 'disabled' as const },
     setEnabledCalls: [] as boolean[],
-    failure: undefined as string | undefined,
-    failBeforeApply: false,
+    setEnabledGenerations: [] as unknown[],
     gate: undefined as Promise<void> | undefined,
     release: undefined as (() => void) | undefined,
+    reads: 0,
+    readGate: undefined as Promise<void> | undefined,
+    releaseRead: undefined as (() => void) | undefined,
   }
   const pref = {
     state: 'pref' in options ? options.pref : { autoStart: false, revision: 1, userOverridden: false },
     writes: [] as boolean[],
+    revisions: [] as number[],
     failNext: undefined as string | undefined,
   }
+  const copied: string[] = []
   // The opaque Connection generation identity (object) the ACP observation binds
   // to; a reconnect (Host A -> Host B) replaces it and notifies subscribers.
   let generation: object | undefined = { id: 1 }
   const generationListeners = new Set<() => void>()
   const acpAccess: AcpAccessPort = {
     getStatus: async () => {
-      if (options.acpUnavailable === true) throw new Error('the port is not mounted')
+      acp.reads += 1
+      if (options.holdSecondAcpRead === true && acp.reads >= 2) {
+        acp.readGate ??= new Promise<void>(resolve => { acp.releaseRead = resolve })
+        await acp.readGate
+      }
       return acp.status
     },
     setEnabled: async (enabled: boolean, expectedGeneration?: unknown) => {
@@ -139,17 +154,9 @@ function setup(options: {
         throw new Error('superseded: the Host generation changed before dispatch')
       }
       acp.setEnabledCalls.push(enabled)
+      acp.setEnabledGenerations.push(expectedGeneration)
       if (acp.gate !== undefined) await acp.gate
-      if (acp.failBeforeApply) throw new Error('rejected before apply')
-      // Apply the reached state BEFORE any fault, so a "dispatched but reply
-      // lost" fault models an INDETERMINATE outcome (the reread shows the
-      // target while the call still threw), distinct from a clean rejection.
       acp.status = enabled ? { state: 'enabled' } : { state: 'disabled' }
-      if (acp.failure !== undefined) {
-        const reason = acp.failure
-        acp.failure = undefined
-        throw new Error(reason)
-      }
       return acp.status
     },
     currentGeneration: () => generation,
@@ -199,6 +206,15 @@ function setup(options: {
     setSessionApprovalPolicy: () => 'applied',
     currentApprovalOverride: () => undefined,
     applyFooterSettings: () => {},
+    // The Client-local clipboard of the Copy action (never a Host call).
+    copyToClipboard: async (text: string) => { copied.push(text); return true },
+    // The official Profile identity the composition proved for THIS launch.
+    profileDaemonAdmin: 'profile' in options && options.profile === undefined
+      ? undefined
+      : {
+          profile: options.profile ?? 'pi-tui',
+          run: async () => ({ code: 0, stdout: '', stderr: '' }),
+        },
     acpAccess,
     config: settingsDirectPageConfig({
       configReadiness: () => readiness,
@@ -216,16 +232,29 @@ function setup(options: {
       },
       credentials: { available: () => true, describeReference: async () => ({ configured: true, source: 'file' }) },
       web: { available: () => false },
+      sessionLogUpload: {
+        read: () => ({
+          kind: 'ready' as const,
+          generation: {},
+          revision: 1,
+          effective: { enabled: true },
+          inherited: { enabled: true },
+          overridden: { enabled: false },
+        }),
+        refresh: async () => {},
+        mutate: async () => ({ kind: 'rejected' as const, reason: 'not mounted' }),
+      },
       acpStartupPreference: {
         read: () => pref.state,
-        setAutoStart: async (value: boolean) => {
+        setAutoStart: async (value: boolean, revision: number) => {
           pref.writes.push(value)
+          pref.revisions.push(revision)
           if (pref.failNext !== undefined) {
             const reason = pref.failNext
             pref.failNext = undefined
             throw new Error(reason)
           }
-          if (pref.state !== undefined) pref.state = { ...pref.state, autoStart: value, userOverridden: true }
+          if (pref.state !== undefined) pref.state = { autoStart: value, revision: revision + 1, userOverridden: true }
         },
       },
     }),
@@ -235,23 +264,26 @@ function setup(options: {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
   registerTuiCommandsWithDirectSeams(runner)
-  const invoke = (): unknown => {
-    const definition = defs.find(candidate => candidate.name === 'settings')
-    assert.ok(definition?.handler !== undefined, '/settings must be registered')
+  const invoke = (name: string): unknown => {
+    const definition = defs.find(candidate => candidate.name === name)
+    assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
     return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
   }
   const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/gu, '')).join('\n')
   return {
     vt,
+    app,
     view,
     invoke,
     acp,
     pref,
+    copied,
     setReadiness: next => { readiness = next },
     bumpGeneration: () => {
       generation = { id: ((generation as { id?: number } | undefined)?.id ?? 0) + 1 }
       for (const listener of [...generationListeners]) listener()
     },
+    releaseAcpReads: () => { acp.releaseRead?.(); acp.releaseRead = undefined },
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -269,25 +301,23 @@ async function settle(h: Harness, label: string, predicate: (frame: string) => b
   return h.view()
 }
 
-/** Open the Tools rows level and settle the async ACP runtime row. */
-async function openTools(h: Harness): Promise<void> {
-  h.invoke()
-  await settle(h, 'the Settings rail', frame => frame.includes('Settings ·'))
-  await selectSettingsCategory(h.vt, 'Tools')
-  await key(h, ENTER)
-  // The ACP runtime row starts at Loading… then settles from the port read.
-  await settle(h, 'the ACP runtime row to settle', frame => frame.includes('ACP Server') && !frame.includes('Loading…'))
-}
-
-/** Open the General rows level (FR5-B: the next-Split-Host preferences live there). */
-async function openGeneral(h: Harness): Promise<void> {
-  h.invoke()
+/** Open `/settings` on the `Host` Rows level. */
+async function openHostRows(h: Harness): Promise<void> {
+  h.invoke('settings')
   await settle(h, 'the Settings rail', frame => frame.includes('Settings ·'))
   await selectSettingsCategory(h.vt, 'Host')
   await key(h, ENTER)
+  await settle(h, 'the Host rows', frame => frame.includes('Backend'))
 }
 
-/** Move the current rows cursor onto a row whose label matches, then assert it is selected. */
+/** Open the ONE `Host → ACP access` page from the Host Rows level. */
+async function openAcpAccess(h: Harness): Promise<void> {
+  await highlightRow(h, 'ACP access')
+  await key(h, ENTER)
+  await settle(h, 'the ACP access page', frame => frame.includes('Current Host') && !frame.includes('Checking…'))
+}
+
+/** Move the Rows cursor onto a row whose label matches, then assert it is selected. */
 async function highlightRow(h: Harness, label: string): Promise<void> {
   for (let step = 0; step < 8; step += 1) {
     if (new RegExp(`> ${label}`, 'u').test(h.view())) return
@@ -296,263 +326,167 @@ async function highlightRow(h: Harness, label: string): Promise<void> {
   assert.fail(`the "${label}" row never owned the selection:\n${h.view()}`)
 }
 
-test('the ACP Server row reflects the live listener state and toggles through ONE Host write', async () => {
-  const h = setup({ status: { state: 'disabled' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    assert.match(h.view(), /ACP Server/u)
-    await key(h, ENTER) // L1 writable -> L2 inline choice
-    await settle(h, 'the ACP Server choice', frame => frame.includes('Choose value'))
-    assert.match(h.view(), /> Off/u, 'the current candidate is Off (the Host is disabled)')
-    await key(h, UP) // Off -> On
-    assert.match(h.view(), /> On/u)
-    assert.equal(h.acp.setEnabledCalls.length, 0, 'choosing never writes')
-    await key(h, ENTER)
-    await settle(h, 'the ACP toggle verdict', frame => frame.includes('Verified'))
-    assert.deepEqual(h.acp.setEnabledCalls, [true], 'exactly ONE setEnabled(true) reached the Host')
-    assert.match(h.view(), /Verified/u, 'an agreeing re-read is Verified')
-  } finally {
-    h.dispose()
+test('Host owns Backend, Web UI, ACP access and Session log in order; Tools has no ACP row left', async () => {
+  const h = setup({ columns: 200, rows: 50 })
+  await openHostRows(h)
+  const rows = h.view()
+  const hostOrder = ['Backend', 'Web UI', 'ACP access', 'Session log upload']
+    .map(label => rows.split('\n').findIndex(line => line.includes(label)))
+  for (const [index, position] of hostOrder.entries()) {
+    assert.ok(position >= 0, `Host paints ${JSON.stringify(hostOrder[index])}:\n${rows}`)
   }
+  assert.deepEqual([...hostOrder].sort((left, right) => left - right), hostOrder, 'Host keeps the frozen order')
+  assert.doesNotMatch(rows, /Start ACP automatically|ACP Server/u, 'the retired rows are gone, not duplicated')
+
+  await key(h, '\x1b') // rows -> the category rail
+  await key(h, '\x1b[H') // Home makes the walk absolute (the rail keeps its selection)
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+  await settle(h, 'the Tools rows', frame => frame.includes('Visual tools'))
+  const tools = h.view()
+  for (const label of ['Visual tools', 'Shell execution', 'Web Search / Fetch']) {
+    assert.ok(tools.includes(label), `Tools keeps ${label}`)
+  }
+  assert.doesNotMatch(tools, /ACP Server|Start ACP automatically/u, 'the retired ACP rows left Tools and Host')
+  h.dispose()
 })
 
-test('an enabled listener shows On and toggles Off', async () => {
+test('the /acp deep link mounts the ONE ACP access page in the SAME lease and writes nothing on open', async () => {
+  const h = setup({ status: { state: 'disabled' } })
+  const resultPromise = h.invoke('acp') as Promise<{ kind: string }>
+  await settle(h, 'the /acp deep link page', frame => frame.includes('Settings · Host · ACP access'))
+  const result = await resultPromise
+  assert.deepEqual(result, { kind: 'success' })
+  assert.match(h.view(), /^> Enable ACP/mu, 'the disabled Host offers its ONE runtime action')
+  assert.match(h.view(), /Client Setup/u)
+  assert.equal(h.app.overlayGraphState().handles, 0, 'ONE Settings lease: no second overlay is mounted')
+  assert.equal(h.acp.setEnabledCalls.length, 0, 'opening the page dispatches no Host write')
+  assert.deepEqual(h.pref.writes, [], 'opening the page writes no preference')
+  assert.deepEqual(h.copied, [], 'opening the page copies nothing')
+  h.dispose()
+})
+
+test('the typed /acp deep link reaches Direct and states Split Host only', async () => {
+  const h = setup({ backendKind: 'direct' })
+  const resultPromise = h.invoke('acp') as Promise<{ kind: string }>
+  await settle(h, 'the Direct /acp page', frame => frame.includes('Settings · Host · ACP access'))
+  assert.deepEqual(await resultPromise, { kind: 'success' })
+  assert.match(h.view(), /Listener\s+Unavailable · Split Host only/u)
+  assert.doesNotMatch(h.view(), /> (?:Enable ACP|Disable ACP…)/u)
+  h.dispose()
+})
+
+test('the page toggles the live listener through ONE Host write and repaints the read-back', async () => {
+  const h = setup({ status: { state: 'disabled' } })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /Listener\s+Disabled/u)
+  await key(h, ENTER) // Enable ACP
+  await settle(h, 'the verified enable', frame => /Status\s+Verified/u.test(frame))
+  assert.deepEqual(h.acp.setEnabledCalls, [true], 'exactly ONE Host toggle')
+  assert.match(h.view(), /Listener\s+Enabled/u)
+  assert.match(h.view(), /Copy client command/u)
+  assert.match(h.view(), /Disable ACP…/u)
+  await key(h, DOWN) // Copy -> Disable ACP…
+  assert.match(h.view(), /^> Disable ACP…/mu)
+  await key(h, ENTER) // stage the confirmation only
+  assert.match(h.view(), /Disable the local ACP listener\?/u)
+  assert.deepEqual(h.acp.setEnabledCalls, [true], 'the first step never writes')
+  await key(h, '\x1b') // cancel
+  assert.match(h.view(), /Listener\s+Enabled/u)
+  assert.deepEqual(h.acp.setEnabledCalls, [true])
+  h.dispose()
+})
+
+test('the next-start preference writes through the EXISTING acp-autostart revision writer', async () => {
   const h = setup({ status: { state: 'enabled' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    await key(h, ENTER)
-    await settle(h, 'the enabled choice', frame => frame.includes('Choose value'))
-    assert.match(h.view(), /> On/u, 'the enabled listener is the On candidate')
-    await key(h, DOWN) // On -> Off
-    await key(h, ENTER)
-    await settle(h, 'the disable verdict', frame => frame.includes('Verified'))
-    assert.deepEqual(h.acp.setEnabledCalls, [false])
-  } finally {
-    h.dispose()
-  }
+  await openHostRows(h)
+  await openAcpAccess(h)
+  await highlightRow(h, 'Start automatically')
+  await key(h, ENTER) // candidates
+  assert.match(h.view(), /Choose the value the next Host start applies:/u)
+  await key(h, ENTER) // stage the opposite (On)
+  assert.match(h.view(), /Save the next Host start preference as On\?/u)
+  assert.deepEqual(h.pref.writes, [], 'the ladder staged zero writes')
+  await key(h, ENTER) // Confirm save
+  await settle(h, 'the verified preference', frame => /Status\s+Verified/u.test(frame))
+  assert.deepEqual(h.pref.writes, [true], 'the existing writer received the value once')
+  assert.deepEqual(h.pref.revisions, [1], 'the captured revision is the decision fence')
+  assert.match(h.view(), /Start automatically\s+On · Change…/u, 'the persisted fact is re-read')
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'a preference save never toggles the running Host')
+  h.dispose()
 })
 
-test('a Direct backend paints the runtime row Unavailable — Split Host only with no candidate', async () => {
-  const h = setup({ backendKind: 'direct', status: { state: 'unavailable', reason: 'The local ACP listener is available only in a Split Host.' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    assert.match(h.view(), /Unavailable — Split Host only/u, `the Direct runtime row states the real gap:\n${h.view()}`)
-    await key(h, ENTER)
-    assert.doesNotMatch(h.view(), /Choose value/u, 'no candidate exists on Direct')
-    assert.equal(h.acp.setEnabledCalls.length, 0)
-  } finally {
-    h.dispose()
-  }
+test('a non-current configuration leaves the next-start preference read-only with zero writes', async () => {
+  const h = setup({ status: { state: 'enabled' }, readiness: 'stale' })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /Start automatically\s+Off \(default\) · last known/u)
+  assert.doesNotMatch(h.view(), /Change…/u, 'no edit affordance under a non-current authority')
+  assert.match(h.view(), /The Host configuration is stale; the next-start preference is read-only\./u)
+  await key(h, ENTER)
+  assert.deepEqual(h.pref.writes, [])
+  assert.deepEqual(h.acp.setEnabledCalls, [])
+  h.dispose()
 })
 
-test('the Start ACP automatically row shows the schema default and writes On through the ConfigPort', async () => {
-  const h = setup()
-  try {
-    await openGeneral(h)
-    await highlightRow(h, 'Start ACP automatically')
-    assert.match(h.view(), /Off \(default\)/u, 'the default OFF is marked as not user-overridden')
-    assert.match(h.view(), /the current ACP listener is unchanged/u,
-      'the row states the next-launch lifetime')
-    await key(h, ENTER)
-    await settle(h, 'the ACP autostart choice', frame => frame.includes('Choose value'))
-    await key(h, UP) // Off -> On
-    await key(h, ENTER)
-    await settle(h, 'the ACP autostart verdict', frame => frame.includes('Verified'))
-    assert.deepEqual(h.pref.writes, [true], 'exactly one preference write reached the ConfigPort')
-    assert.equal(h.acp.setEnabledCalls.length, 0, 'the preference write never toggles the runtime listener')
-  } finally {
-    h.dispose()
-  }
+test('the Copy action is the proven Profile command and never reaches the Host', async () => {
+  const h = setup({ status: { state: 'enabled' }, profile: 'work profile' })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /^> Copy client command/mu)
+  assert.match(h.view(), /dsh --profile 'work profile' acp stdio/u)
+  await key(h, ENTER)
+  await settle(h, 'the copied client command', frame => /Status\s+Client command copied/u.test(frame))
+  assert.deepEqual(h.copied, ["dsh --profile 'work profile' acp stdio"])
+  assert.deepEqual(h.acp.setEnabledCalls, [])
+  h.dispose()
 })
 
-test('a changing listener shows Changing… and offers no confirmable candidate', async () => {
-  const h = setup({ status: { state: 'changing' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    assert.match(h.view(), /Changing…/u, 'an in-flight transition is stated, not a fabricated On/Off')
-    await key(h, ENTER)
-    assert.doesNotMatch(h.view(), /Choose value/u, 'a changing listener offers no second Confirm')
-    assert.equal(h.acp.setEnabledCalls.length, 0)
-  } finally {
-    h.dispose()
-  }
+test('without a proven Profile the page states the limitation and offers no Copy target', async () => {
+  const h = setup({ status: { state: 'enabled' }, profile: undefined })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.doesNotMatch(h.view(), /Copy client command/u)
+  assert.match(h.view(), /Client command unavailable · Profile identity not verified/u)
+  await key(h, ENTER) // the enabled first focus is the ONE runtime action
+  await settle(h, 'the staged disable confirmation', frame => frame.includes('Disable the local ACP listener?'))
+  await key(h, '\x1b')
+  assert.deepEqual(h.copied, [])
+  h.dispose()
 })
 
-test('a dispatched toggle whose reply is lost stays indeterminate and is never replayed', async () => {
+test('a Host replacement during the live preflight is a definitive zero-write Not changed', async () => {
+  const h = setup({ status: { state: 'disabled' }, holdSecondAcpRead: true })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /^> Enable ACP/mu)
+  await key(h, ENTER) // Enable ACP: the live preflight read is held unresolved
+  assert.match(h.view(), /Waiting for the answer…/u)
+  // Host A is replaced by Host B while the preflight has NOT invoked a write.
+  h.acp.status = { state: 'enabled' }
+  h.bumpGeneration()
+  await settle(h, 'the definitive pre-dispatch word', frame => /Status\s+Not changed/u.test(frame))
+  assert.match(h.view(), /the Host changed before the request was sent/u)
+  assert.doesNotMatch(h.view(), /Outcome unconfirmed/u)
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'no Host write was invoked before the preflight settled')
+  h.releaseAcpReads()
+  await settle(h, 'the replacement Host fact', frame => /Listener\s+Enabled/u.test(frame))
+  assert.match(h.view(), /^> Copy client command/mu, 'the replacement Host state owns the action')
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'the stale preflight reply never dispatches')
+  h.dispose()
+})
+
+test('a Host generation change repaints the new Host fact and never reuses the old action', async () => {
   const h = setup({ status: { state: 'disabled' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    await key(h, ENTER)
-    await settle(h, 'the ACP choice', frame => frame.includes('Choose value'))
-    await key(h, UP) // Off -> On
-    h.acp.failure = 'connection lost after dispatch'
-    await key(h, ENTER)
-    await settle(h, 'the indeterminate verdict', frame => frame.includes('Outcome unknown'))
-    assert.deepEqual(h.acp.setEnabledCalls, [true], 'the write was dispatched exactly once and never replayed')
-    assert.equal(h.acp.status.state, 'enabled', 'the reread shows the reached state while the outcome stays unprovable')
-  } finally {
-    h.dispose()
-  }
-})
-
-test('the refresh key re-reads the ACP runtime state from the Host', async () => {
-  const h = setup({ status: { state: 'disabled' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    assert.match(h.view(), /> ACP Server\s+Off\b/u, 'the row starts on the Host\'s Off state')
-    // Another Client enables the listener on the Host while this page is open.
-    h.acp.status = { state: 'enabled' }
-    await key(h, 'r')
-    await settle(h, 'the ACP row to reflect a fresh read', frame => /> ACP Server\s+On\b/u.test(frame))
-    assert.equal(h.acp.setEnabledCalls.length, 0, 'r is read-only and never toggles the listener')
-  } finally {
-    h.dispose()
-  }
-})
-
-test('a stale Host is never presented as the current ACP listener state', async () => {
-  const h = setup({ status: { state: 'enabled' } })
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    assert.match(h.view(), /> ACP Server\s+On\b/u, 'the current Host state is shown')
-    // The Host disconnects; the configuration plane goes stale.
-    h.setReadiness('stale')
-    await key(h, 'r') // re-reads/re-paints through the one ACP read owner
-    await settle(h, 'the stale row to stop claiming On', frame => /Checking…/u.test(frame))
-    assert.doesNotMatch(h.view(), /> ACP Server\s+On\b/u, 'a stale Host must not present a cached On as the current fact')
-    await key(h, ENTER)
-    assert.doesNotMatch(h.view(), /Choose value/u, 'a stale Host offers no confirmable candidate')
-    assert.equal(h.acp.setEnabledCalls.length, 0)
-  } finally {
-    h.dispose()
-  }
-})
-
-test('a reconnect to a DIFFERENT Host revokes the prior ACP state without a key press', async () => {
-  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    assert.match(h.view(), /> ACP Server\s+On\b/u, 'Host A shows its real On state')
-    // Host A drops (config goes stale), then a DIFFERENT Host B reconnects and is
-    // ready with ACP Off. The generation changes and notifies subscribers — the
-    // real reconnect path — WITHOUT the user pressing `r`.
-    h.setReadiness('stale')
-    h.acp.status = { state: 'disabled' }
-    h.setReadiness('ready')
-    h.bumpGeneration()
-    await settle(h, 'the row to reflect Host B without r', frame => /> ACP Server\s+Off\b/u.test(frame))
-    assert.doesNotMatch(h.view(), /> ACP Server\s+On\b/u,
-      'the previous Host A On must never be revived as Host B\'s current fact')
-    assert.equal(h.acp.setEnabledCalls.length, 0, 'the generation-change repaint is a READ, never a write')
-  } finally {
-    h.dispose()
-  }
-})
-
-test('an OPEN ACP choice is revoked on a Host generation change and cannot write to the new Host', async () => {
-  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    await key(h, ENTER) // open the inline choice (current On)
-    await settle(h, 'the ACP choice to open', frame => frame.includes('Choose value'))
-    await key(h, DOWN) // On -> Off: the user's PENDING selection, not yet confirmed
-    assert.equal(h.acp.setEnabledCalls.length, 0, 'choosing a candidate never writes')
-    // Host A -> Host B (also On); the Connection generation changes and notifies.
-    h.setReadiness('stale')
-    h.acp.status = { state: 'enabled' }
-    h.setReadiness('ready')
-    h.bumpGeneration()
-    // The stale choosing phase must be REVOKED (not merely re-painted).
-    await settle(h, 'the stale choice to be revoked', frame => !frame.includes('Choose value'))
-    // The old Enter must NOT dispatch the stale Off to Host B.
-    await key(h, ENTER)
-    await h.vt.waitForRender()
-    assert.equal(h.acp.setEnabledCalls.length, 0,
-      'the old Host-A Off selection must never be written to Host B')
-  } finally {
-    h.dispose()
-  }
-})
-
-test('a settled not-saved ACP retry is revoked on generation change (no cross-Host write)', async () => {
-  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    await key(h, ENTER)
-    await settle(h, 'the ACP choice to open', frame => frame.includes('Choose value'))
-    await key(h, DOWN) // On -> Off
-    h.acp.failBeforeApply = true // a clean rejection (nothing applied) -> Not saved
-    await key(h, ENTER)
-    await settle(h, 'the not-saved verdict', frame => /Not saved/u.test(frame))
-    // Host A -> Host B (also On). The settled Retry must be revoked.
-    h.acp.failBeforeApply = false
-    h.setReadiness('stale')
-    h.acp.status = { state: 'enabled' }
-    h.setReadiness('ready')
-    h.bumpGeneration()
-    await settle(h, 'the stale not-saved retry to be revoked', frame => !/Not saved|Retry save/u.test(frame))
-    const before = h.acp.setEnabledCalls.length
-    await key(h, ENTER)
-    await h.vt.waitForRender()
-    assert.equal(h.acp.setEnabledCalls.length, before, 'the old Host-A retry must never be written to Host B')
-  } finally {
-    h.dispose()
-  }
-})
-
-test('a pending ACP write that settles after a generation change leaves no cross-Host retry', async () => {
-  const h = setup({ status: { state: 'enabled' } }) // Host A: ACP On
-  try {
-    await openTools(h)
-    await highlightRow(h, 'ACP Server')
-    await key(h, ENTER)
-    await settle(h, 'the ACP choice to open', frame => frame.includes('Choose value'))
-    await key(h, DOWN) // On -> Off
-    let releaseGate: (() => void) | undefined
-    h.acp.gate = new Promise<void>(resolve => { releaseGate = resolve })
-    h.acp.failBeforeApply = true // after release the dispatched write rejects (not-saved)
-    await key(h, ENTER) // dispatch -> pending (setEnabled awaits the gate)
-    // Host A -> Host B (also On) WHILE the write is still pending.
-    h.setReadiness('stale')
-    h.acp.status = { state: 'enabled' }
-    h.setReadiness('ready')
-    h.bumpGeneration()
-    // Release the pending old-Host write; its late settlement must be inert.
-    h.acp.gate = undefined
-    releaseGate?.()
-    await h.vt.waitForRender()
-    await new Promise<void>(resolve => setTimeout(resolve, 25))
-    await h.vt.waitForRender()
-    assert.doesNotMatch(h.view(), /Retry save|Not saved/u, 'a cross-generation pending settlement must not create a retry')
-    const before = h.acp.setEnabledCalls.length
-    await key(h, ENTER)
-    await h.vt.waitForRender()
-    assert.equal(h.acp.setEnabledCalls.length, before, 'no additional write to Host B after the stale pending settlement')
-  } finally {
-    h.dispose()
-  }
-})
-
-test('an unreadable ACP preference offers no confirmable candidate', async () => {
-  const h = setup({ pref: undefined })
-  try {
-    await openGeneral(h)
-    await highlightRow(h, 'Start ACP automatically')
-    assert.match(h.view(), /Unavailable/u, 'an absent section is reported, never the schema default')
-    await key(h, ENTER)
-    assert.doesNotMatch(h.view(), /Choose value/u)
-    assert.equal(h.pref.writes.length, 0)
-  } finally {
-    h.dispose()
-  }
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /^> Enable ACP/mu)
+  // The Host is replaced while the page is open; the new Host's listener is ON.
+  h.acp.status = { state: 'enabled' }
+  h.bumpGeneration()
+  await settle(h, 'the new Host fact', frame => /Listener\s+Enabled/u.test(frame))
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'the rollover itself writes nothing')
+  assert.match(h.view(), /^> Copy client command/mu, 'the new Host offers its own enabled-state action')
+  h.dispose()
 })

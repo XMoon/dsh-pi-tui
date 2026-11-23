@@ -139,6 +139,8 @@ Also available: `web disable` / `web open`. The commands do **not** start a Host
 
 In a connected Daemon TUI, `/web` opens **`Settings → Host → Web UI`** directly: the same page shows the running Host's live state and actions (Open in browser / Copy access link / Enable / Disable, with a confirmation before disabling) and the `Start automatically` preference that applies **only to the next Host start**. Neither changes the other, and the launch link is read only by an explicit Open/Copy and never painted.
 
+In a connected Daemon TUI, `/acp` opens **`Settings → Host → ACP access`** directly: the same page shows the running Host's local ACP listener state (Enabled / Disabled / Changing / Unavailable; on Direct it states `Unavailable · Split Host only`), `Enable ACP` and a two-step-confirmed `Disable ACP…`, `Copy client command` — the exact `dsh --profile … acp stdio` command of the proven Profile, read only by that explicit copy — the `Start automatically` preference that applies **only to the next Host start**, and the `Client Setup` guidance. The runtime state and the next-start preference are separate authorities: toggling the running Host never changes the preference, saving the preference never starts or stops the current listener, and leaving the page or the TUI never undoes an accepted Host change.
+
 **ACP v1** is a default-off, same-user local interface. An external ACP client joins through the current Profile's public `dsh --profile pi-tui acp stdio` command: it relays that client's stdio to the existing Host's local ACP listener. It creates **no** second Host, Agent, Session or Writer and never starts the Host or enables the listener by itself. It is the stdio command you configure in an ACP client, not a command whose interactive terminal is expected to show a TUI.
 
 The listener's runtime state can also be read and toggled without opening a TUI (these commands never start a Host either):
@@ -151,7 +153,7 @@ dsh --profile pi-tui acp disable
 
 `acp status` is read-only and prints one `acp=enabled|disabled|changing|unavailable` line; `acp enable` / `acp disable` send exactly one write and print the state the Host actually reached — a `changing` state or a lost response is never guessed as success. They manage only the running Host of the current Profile: they do not change the next-launch `autoStart`, do not stop the Host/Agent/Session/TUI, and `disable` closes existing ACP peers and stops accepting new ones.
 
-Preparation: start and confirm the Host, then switch the listener to **Enabled** from a connected Daemon TUI with `/acp` (or with the headless `acp enable`), confirm `acp=enabled` with `daemon status` or `acp status`, and only then put the command into the external ACP client's stdio command configuration:
+Preparation: start and confirm the Host, then switch the listener to **Enabled** from a connected Daemon TUI with `/acp` (or with the headless `acp enable`) — its next-start-only `Start automatically` preference lives in `/settings → Host → ACP access` — confirm `acp=enabled` with `daemon status` or `acp status`, and only then put the command into the external ACP client's stdio command configuration:
 
 ~~~sh
 dsh --profile pi-tui daemon start

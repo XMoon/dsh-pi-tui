@@ -98,8 +98,7 @@ export type SettingsWorkspaceRowId =
   | 'visual-tools'
   | 'web-ui'
   | 'startup-backend'
-  | 'acp-runtime'
-  | 'acp-autostart'
+  | 'acp-access'
   | 'web-settings'
   | 'approval'
   | 'default-permission'
@@ -137,7 +136,7 @@ export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'u
  */
 export type SettingsWorkspaceWritableField =
   | 'theme' | 'display-preset' | 'visual-tools' | 'web-autostart' | 'startup-backend'
-  | 'acp-runtime' | 'acp-autostart'
+  | 'acp-autostart'
   | 'icon-style' | 'expand' | 'thinking'
   | 'progress-updates' | 'response-style'
   | 'busy-enter' | 'git-attribution'
@@ -241,7 +240,7 @@ export interface SettingsWorkspaceRow {
    *  specialist page. */
   readonly specialist?:
     | 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
-    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings' | 'web-ui'
+    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings' | 'web-ui' | 'acp-access'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -486,6 +485,14 @@ export interface SettingsWorkspacePanelIntents {
    * Host RPC.
    */
   readonly createWebUiPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
+  /**
+   * PR-B: the ONE `Host → ACP access` page factory. It returns the per-open
+   * page over the EXISTING ACP runtime port and the existing
+   * `acp-autostart` Config writer; `done` returns to the row that opened it.
+   * The page reads the current Host status itself (only on the first frame
+   * that can really paint it), so the workspace snapshot starts no Host RPC.
+   */
+  readonly createAcpAccessPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -560,9 +567,9 @@ type SettingsWorkspaceEditPhase =
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
 
 /** The typed deeplink pages mounted inside the ONE Settings screen lease
- *  instead of a second overlay: the two professional editors (C2-R5) and the
- *  `Host → Web UI` page (PR-A). */
-export type SettingsWorkspaceSpecialistRoute = 'footer-configurator' | 'keybindings' | 'web-ui'
+ *  instead of a second overlay: the two professional editors (C2-R5), the
+ *  `Host → Web UI` page (PR-A) and the `Host → ACP access` page (PR-B). */
+export type SettingsWorkspaceSpecialistRoute = 'footer-configurator' | 'keybindings' | 'web-ui' | 'acp-access'
 
 /** The settlement of ONE typed deeplink page: `ok` only after the page was
  *  really created on the leased screen; a failure is the command owner's real
@@ -577,6 +584,7 @@ export const SETTINGS_SPECIALIST_ROUTE_ROW: Readonly<Record<SettingsWorkspaceSpe
   'footer-configurator': 'footer-configurator',
   keybindings: 'keyboard-shortcuts',
   'web-ui': 'web-ui',
+  'acp-access': 'acp-access',
 }
 
 /** The ONE per-frame row allocation the root paints (header, metadata, rule,
@@ -893,8 +901,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'agent-loop'
     || id === 'shell-execution'
     || id === 'session-log-upload'
-    || id === 'acp-runtime'
-    || id === 'acp-autostart'
+    || id === 'acp-access'
     || id === 'local-shell-sandbox'
     || id === 'footer-mode'
     || id === 'footer-configurator'
@@ -3492,6 +3499,8 @@ export class SettingsWorkspacePanel implements Component {
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Shell execution…' }
       case 'web-ui':
         return this.intents.createWebUiPage === undefined ? undefined : { label: 'Open Web UI…' }
+      case 'acp-access':
+        return this.intents.createAcpAccessPage === undefined ? undefined : { label: 'Open ACP access…' }
     }
   }
 
@@ -4056,7 +4065,7 @@ export class SettingsWorkspacePanel implements Component {
       || row.specialist === 'shell-execution-settings'
       ? 1
       : row.specialist === 'web-settings' || row.specialist === 'mcp-servers' || row.specialist === 'computer-use'
-        || row.specialist === 'web-ui'
+        || row.specialist === 'web-ui' || row.specialist === 'acp-access'
         ? 1
         : 0
     if (this.bodyFloor() < floor) return
@@ -4072,7 +4081,8 @@ export class SettingsWorkspacePanel implements Component {
       // on a Detail summary the user never asked for. The other embedded pages
       // keep their documented `Detail → row` ladder.
       if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings' || row.specialist === 'subagent-settings'
-        || row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings' || row.specialist === 'web-ui')
+        || row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings' || row.specialist === 'web-ui'
+        || row.specialist === 'acp-access')
         && this.focus === 'detail') {
         this.leaveDetailTo('rows')
       }
@@ -4101,6 +4111,9 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'web-ui':
         page = this.intents.createWebUiPage?.(done)
+        break
+      case 'acp-access':
+        page = this.intents.createAcpAccessPage?.(done)
         break
       case 'agent-loop-settings':
         page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)

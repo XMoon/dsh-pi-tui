@@ -204,9 +204,9 @@ export interface RemoteM3ARuntimeSource {
      *  it; `/web` is its only consumer. */
     readonly piTuiWebAccess: RemoteWebAccessNamespace
     /** The PRIVATE `piTuiAcpAccess` namespace (PO-1B): the Split-Client local
-     *  ACP listener control (`/settings → Tools → ACP Server`). The SAME
-     *  mounted contribution publishes it; its only consumer is the Settings
-     *  runtime row through the `RemoteAcpAccessPort` adapter. */
+     *  ACP listener control. The SAME mounted contribution publishes it; its
+     *  only consumers are the `Settings → Host → ACP access` page and the TSP
+     *  native picker, both through the `RemoteAcpAccessPort` adapter. */
     readonly piTuiAcpAccess: RemoteAcpAccessNamespace
     readonly commands: RemoteCommandsSource
     readonly subagents: RemoteSubagentSource

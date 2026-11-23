@@ -139,6 +139,8 @@ dsh --profile pi-tui web status
 
 已连接的 Daemon TUI 里，`/web` 直接打开 **`Settings → Host → Web UI`** 页面：同一页面分别展示**当前 Host** 的实时状态与操作（Open in browser / Copy access link / Enable / Disable，关闭前需二次确认），以及**只对下次 Host 启动生效**的 `Start automatically` 偏好。两者不会互相改变；链接只在显式 Open/Copy 时读取，从不显示在界面上。
 
+已连接的 Daemon TUI 里，`/acp` 直接打开 **`Settings → Host → ACP access`** 页面：同一页面展示**当前 Host** 的本地 ACP Listener 实时状态（监听中 / 未监听 / 切换中 / 不可用，Direct 下明确为 `Unavailable · Split Host only`）、`Enable ACP` 与需二次确认的 `Disable ACP…`、只在显式复制时才读取的 `Copy client command`（即当前已证 Profile 的 `dsh --profile … acp stdio`），以及**只对下次 Host 启动生效**的 `Start automatically` 偏好和 `Client Setup` 接入说明。运行状态与下次启动偏好是两个独立权威：开关当前 Host 不会改动偏好，保存偏好也不会启停当前 Listener；退出页面或断开 TUI 不会撤销已生效的 Host 变更。
+
 **ACP v1** 是默认关闭的、同机同用户本地接口。外部 ACP 客户端通过当前安装 Profile 的官方命令 `dsh --profile pi-tui acp stdio` 接入：它把该客户端的 stdio 原样转发给现有 Host 的本地 ACP Listener，**不会**另建 Host、Agent、Session 或 Writer，也**不会**自动启动 Host 或启用 Listener。它是填给 ACP 客户端的 stdio command，不是让用户在交互终端里期待 TUI 画面的命令。
 
 Listener 的运行状态也可以用不打开 TUI 的 headless 命令读取和切换（同样**不会启动 Host**）：
@@ -151,7 +153,7 @@ dsh --profile pi-tui acp disable
 
 `acp status` 只读，输出一行 `acp=enabled|disabled|changing|unavailable`；`acp enable` / `acp disable` 只发送一次写入并打印 Host 真实达到的状态——`changing` 或响应丢失不会被猜成成功。它们只管理**当前 Profile 已运行 Host** 的运行时 Listener，不改变下次冷启动的 `autoStart`，也不会停止 Host、Agent、Session 或 TUI；`disable` 会断开已有 ACP 连接并停止接受新连接。
 
-准备步骤：先启动并确认 Host，再从已连接的 Daemon TUI 用 `/acp`（或 headless 的 `acp enable`）把 Listener 切到 **Enabled**（`/settings → Host → Start ACP automatically` 只控制下次 Host 冷启动），用 `daemon status` 或 `acp status` 确认 `acp=enabled`，然后才在外部 ACP 客户端的 stdio command 配置里填写该命令：
+准备步骤：先启动并确认 Host，再从已连接的 Daemon TUI 用 `/acp`（或 headless 的 `acp enable`）把 Listener 切到 **Enabled**（`/settings → Host → ACP access` 里的 `Start automatically` 只控制下次 Host 冷启动），用 `daemon status` 或 `acp status` 确认 `acp=enabled`，然后才在外部 ACP 客户端的 stdio command 配置里填写该命令：
 
 ~~~sh
 dsh --profile pi-tui daemon start

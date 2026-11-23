@@ -1649,8 +1649,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // layer owns every read/write through this ONE port; the presenters never
       // reach the Host.
       webAccess: deps.backend.webAccess,
-      // PO-1B: the Split-Client local ACP listener control for the Settings
-      // `ACP Server` runtime row.
+      // PO-1B / PR-B: the Split-Client local ACP listener control for the
+      // `Settings → Host → ACP access` page (and the TSP native picker).
       acpAccess: deps.backend.acpAccess,
       // FR3: the ONE official Host MCP manager port for the Settings page.
       mcpServers: deps.backend.mcpServers,

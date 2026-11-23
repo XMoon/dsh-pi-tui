@@ -217,8 +217,8 @@ specialist-page contract below).
   three-level browse (L0 categories, L1 rows, L2 detail). `About`, `Models`,
   `Account` and `Plugins` remain direct content pages. `Host` is the USER-facing
   title of the internal `general` category: it holds the startup backend, the
-  `Web UI` page entry, the ACP next-Split-Host startup preference and the
-  official session-log upload switch in one frozen order.
+  `Web UI` page entry, the `ACP access` page entry and the official
+  session-log upload switch in one frozen order.
 - Configuration rows keep their distinct writer kinds: the configured theme,
   transcript display preset, icon style, mid-turn progress-updates cadence,
   response style, Git attribution, Home/End keys, Mouse wheel lines,
@@ -405,26 +405,24 @@ specialist-page contract below).
   is edited by its own native row, row choice, embedded page or typed deeplink,
   so no category carries a transition launcher and no Settings gesture hands
   the user off to a second editor. The retired complete settings editor (and
-  its Web rows, phase map and credential hand-off) no longer exists. The
-  `SettingsList` component itself remains for the independent Split-backend
-  `/acp` command, which opens it with its own row list through
-  `TuiApp.openSettings` — not a Settings workspace path. `/web` is NOT one of
-  them any more: the PiTui `/web` is a typed deep link into this workspace's
-  `Host · Web UI` page (see below). `/preset` is its own independent root
-  capturing overlay (`TuiApp.openPresetPicker`), never a `SettingsList` row
-  list and never part of this workspace's lease. `/keybindings conflicts` is
-  NOT one of them: it enters the same Keyboard shortcuts specialist page in
-  this workspace.
+  its Web rows, phase map and credential hand-off) no longer exists, and the
+  retired PiTui `/acp` short `SettingsList` menu is gone too. `/web` and `/acp`
+  are NOT independent overlays any more: both are typed deep links into this
+  workspace's `Host · Web UI` and `Host · ACP access` pages (see below).
+  `/preset` is its own independent root capturing overlay
+  (`TuiApp.openPresetPicker`), never a `SettingsList` row list and never part
+  of this workspace's lease. `/keybindings conflicts` is NOT one of them: it
+  enters the same Keyboard shortcuts specialist page in this workspace.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On), the
-  `Shell execution` specialist entry, the `ACP Server` runtime row, the
-  `Web Search / Fetch` page entry, when the official manager is mounted
-  `MCP servers`, and when the official Computer Use provider and Plugin
-  Manager roster are mounted `Computer Use`, in that frozen order. The
-  next-Split-Host ACP startup preference is NOT in Tools: it lives in `Host`
-  under the SAME `acp-autostart` row id with no duplicate Tools entry. The Web
-  preference has no standalone row at all — it is edited inside the `Web UI`
-  page (see below).
+  `Shell execution` specialist entry, the `Web Search / Fetch` page entry, when
+  the official manager is mounted `MCP servers`, and when the official
+  Computer Use provider and Plugin Manager roster are mounted `Computer Use`,
+  in that frozen order. Neither the ACP listener nor its next-Split-Host
+  startup preference is in `Tools` any more: both live inside the ONE
+  `Host → ACP access` page (see below), with no second row. The Web preference
+  has no standalone row at all — it is edited inside the `Web UI` page (see
+  below).
   Its stated value is the effective Host form value; `[default]` marks a value
   the USER layer does not declare. Confirm writes that ONE field through the
   official revision-checked settings mutation and re-reads the Host. Off
@@ -718,9 +716,11 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   timeout. This is not the `!`/`!!` user-shell sandbox policy.
 - The category's USER-visible title is `Host`; the internal category id stays
   `general` (routing, serialization and every row id are unchanged). `Host`
-  paints `Backend`, `Web UI`, `Start ACP automatically` and `Session log
-  upload` in that frozen order. `Web UI` is a NAVIGATION row: it carries no
-  inline candidate and opens the `Web UI` page described below. `Session log
+  paints `Backend`, `Web UI`, `ACP access` and `Session log upload` in that
+  frozen order. `Web UI` and `ACP access` are NAVIGATION rows: they carry no
+  inline candidate and open the `Web UI` and `ACP access` pages described
+  below. The ACP listener runtime state and the persisted next-split-Host
+  startup preference are raised by that ONE page, never by two rows. `Session log
   upload` is the official `session-log-deepseek.enabled` scalar row and is
   absent entirely when the current Host does not serve that namespace. Its
   candidate row offers `On`, `Off` and `Reset` only on a current authority;
@@ -801,10 +801,97 @@ a fresh read. The preference write reports the four existing writer outcomes
 scrolls ONE column; the page never drops the `Esc` affordance, never paints a
 partial verb and never exposes a pointer target for an unpainted control.
 
+### ACP access page (Host)
+
+`/settings → Host → ACP access` — and the PiTui `/acp` deep link — open ONE
+EMBEDDED SPECIALIST PAGE inside this same Settings lease. It is the ONE PiTui
+ACP surface: the retired short `SettingsList` menu no longer exists, there is no
+second screen, and the TSP-native `/acp` picker keeps its own native contract
+(see [surface-behavior.md](./surface-behavior.md#acp-quick-control-acp)).
+
+Three authorities are painted side by side and are NEVER merged:
+
+- `Current Host` is the LIVE listener state of the running Split Host, read
+  through the semantic `AcpAccessPort` and bound to the Connection generation it
+  was read under. Every runtime action needs a CURRENT observation plus ONE live
+  preflight read under the SAME generation; a generation change revokes the
+  actions, the confirmation and the pointer map, paints `Checking…` and re-reads.
+  A resolved `enabled`/`disabled` is the only state that admits Enable/Disable;
+  `changing` and `unavailable` admit none. The runtime write dispatches at most
+  ONE `setEnabled(target, generation)` and then ONE authoritative read-back; a
+  preflight that already reached the target (or a changing/unavailable Host)
+  dispatches ZERO writes and states `Not changed`. A dispatched request whose
+  receipt/read-back is lost (transport failure, Host replacement, unreadable
+  read-back) is `Outcome unconfirmed` and is never retried; a `changing`
+  read-back is unconfirmed too. On Direct the page states
+  `Unavailable · Split Host only` and `Access Unavailable`, offers no runtime
+  action and reads no fake Host.
+- `Next Host Start` is the persisted PROFILE preference
+  (`pi-tui-acp-preferences.autoStart`, default Off) for the NEXT Split Host
+  start, read through the ConfigPort and written ONLY by the existing
+  revision-checked `acp-autostart` settings writer. It never toggles the running
+  Host, and a runtime toggle never changes it. `Off (default)` marks the schema
+  default the USER layer does not declare; a non-ready configuration, a missing
+  revision or an unreadable section is `Unavailable`/read-only and never a
+  guessed default. The revision that opened the choice is the decision fence: a
+  moved revision refuses the staged confirmation with `Not saved` and ZERO
+  writes, and the user must review and choose again. The writer's four outcomes
+  (`Verified`, `Not saved`, `Unverified`, `Outcome unconfirmed`) are painted as
+  its own `Status`.
+- `Client Setup` is Client-local: it states the local Unix socket /
+  same-OS-user / stdio bridge facts and the ONE copyable command
+  `dsh --profile <proven-profile> acp stdio`, composed from the OFFICIAL Profile
+  identity the composition proved (`runner.profileDaemonAdmin?.profile`) with
+  POSIX-safe quoting. `Copy client command` is an explicit clipboard action: it
+  reads no socket, requests no Host URL/token, starts no stdio process and works
+  whether or not the listener is enabled (the page states that the listener must
+  be enabled before a client can connect). A `false`/throwing clipboard is
+  `Clipboard unavailable`; only `true` paints `Client command copied`. When the
+  composition cannot prove the Profile identity, the page paints
+  `Client command unavailable · Profile identity not verified` and publishes no
+  Copy row/target, and never guesses a profile name from argv/cwd/env.
+
+The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
+`choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config`,
+`pending-copy` or `settled`. The enabled Host's first focus is
+`Copy client command` (else `Disable ACP…`), the disabled Host's is
+`Enable ACP`; with no runtime action the editable `Start automatically` or
+`Refresh` owns it. `Disable ACP…` only enters the risk confirmation whose exact
+sentence is `Disable the local ACP listener? All connected ACP clients will be
+disconnected. Host sessions, Agents and this TUI will keep running.`; only the
+phase's own `Disable ACP` row or the painted `Confirm [Enter]` segment dispatches
+the ONE disable, and `Cancel`/`Esc` performs zero writes. `Esc` steps
+`confirm-save → choose-autostart → ready → Host Rows`, and
+`confirm-disable → ready`; a `pending-*` write keeps settling in its own owner
+after the page is left (a late result is diagnosed, never repainted, never
+replayed). A retired page never revives a closed Settings screen.
+
+The Action Bar paints `Refresh [R] · Back [Esc]`,
+`Confirm [Enter] · Cancel [Esc]`, `Select [Enter] · Cancel [Esc]` or
+`Confirm save [Enter] · Cancel [Esc]` as the phase decides; only the ROOT owns the
+physical last row and every segment is dropped WHOLE. Every pointer-capable
+target is the last-painted row/bar geometry under the same admission as `Enter`,
+so a stale press/release, a resize, a generation change or a phase change can
+never activate an old control. A short frame scrolls ONE column and never drops
+the `Esc` affordance; the page never paints a partial verb and never exposes a
+target for an unpainted control.
+
+Authority: `src/tui/panels/acp-access-settings-page.ts`,
+`src/tui/commands/settings.ts` (`createAcpAccessPage`,
+`commitSettingsWorkspaceField`'s `acp-autostart` field, `openAcpAccessWorkspace`),
+the `AcpAccessPort`, `ConfigPort.acpStartupPreference` and
+`runner.profileDaemonAdmin?.profile`.
+
+Must-not: read or invent a socket path, start/stop a Host or stdio process from
+Copy, write `autoStart` from the runtime toggle (or vice versa), retry a
+dispatched write, attribute an unknown outcome from a fresh read, treat a stale
+Config mirror as a current preference, offer a Confirm the writer must refuse,
+guess the Profile name, or mount a second overlay/lease/Settings screen.
+
 ### Startup backend (Host)
 
 `/settings → Host → Backend` is the FIRST of the four `Host` rows; the `Web
-UI` page entry, `Start ACP automatically` and the `Session log upload` switch
+UI` page entry, the `ACP access` page entry and the `Session log upload` switch
 follow it in that order. Its candidates are `Direct` and `Daemon`, persisted to the official
 Profile Config `tui-startup.backend` (`direct`/`daemon`) through the same
 revision-checked Settings mutation the other Host form rows use; an explicit

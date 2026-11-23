@@ -652,6 +652,9 @@ interface Harness {
   /** PR-A: every `Host · Web UI` page the factory really built. */
   readonly webUiPages: FakeSpecialistPage[]
   readonly webUiBuilds: () => number
+  /** PR-B: every `Host · ACP access` page the factory really built. */
+  readonly acpAccessPages: FakeSpecialistPage[]
+  readonly acpAccessBuilds: () => number
 }
 
 function setup(options: {
@@ -677,6 +680,8 @@ function setup(options: {
   readonly duringSpecialistBuild?: (harness: { readonly panel: SettingsWorkspacePanel }) => void
   /** PR-A: build the embedded `Host · Web UI` page for the row/deeplink. */
   readonly webUiPage?: boolean
+  /** PR-B: build the embedded `Host · ACP access` page for the row/deeplink. */
+  readonly acpAccessPage?: boolean
   /** The panel's construction options (a typed deeplink row/specialist pair). */
   readonly initial?: {
     readonly initialRowId?: SettingsWorkspaceRowId
@@ -775,6 +780,16 @@ function setup(options: {
         return page
       },
     } : {},
+    ...options.acpAccessPage === true ? {
+      createAcpAccessPage: (done: () => void) => {
+        acpAccessBuilds += 1
+        const page = new FakeSpecialistPage()
+        ;(page as unknown as { title: string }).title = 'ACP access'
+        ;(page as unknown as { done: () => void }).done = done
+        acpAccessPages.push(page)
+        return page
+      },
+    } : {},
     ...options.specialistPage === true ? {
       createComputerUsePage: (done: () => void) => {
         computerUseBuilds += 1
@@ -801,6 +816,8 @@ function setup(options: {
   let computerUseBuilds = 0
   const webUiPages: FakeSpecialistPage[] = []
   let webUiBuilds = 0
+  const acpAccessPages: FakeSpecialistPage[] = []
+  let acpAccessBuilds = 0
   const readSnapshot = options.snapshot ?? ((): SettingsWorkspaceSnapshot => SNAPSHOT)
   const panel = new SettingsWorkspacePanel(
     options.directory === undefined
@@ -832,6 +849,8 @@ function setup(options: {
     computerUseBuilds: () => computerUseBuilds,
     webUiPages,
     webUiBuilds: () => webUiBuilds,
+    acpAccessPages,
+    acpAccessBuilds: () => acpAccessBuilds,
     specialistRefreshes: () => specialistRefreshes,
   }
 }
@@ -3671,6 +3690,66 @@ test('the Web UI page is retired once, and reopening mounts ONE new instance in 
   h.panel.handleInput('\r')
   assert.equal(h.webUiBuilds(), 2)
   assert.equal(h.webUiPages[1]!.disposed, false)
+  assert.equal(h.closes(), 0, 'the workspace never closed for a same-lease page switch')
+})
+
+// ── PR-B: the `Host → ACP access` / `/acp` typed deeplink ──────────────────
+
+/** The snapshot the ACP access deeplink needs: the static fixture plus the ONE
+ *  navigation row in its frozen `Host` position (after `Web UI`). */
+function acpAccessSnapshot(): SettingsWorkspaceSnapshot {
+  const rows = [...SNAPSHOT.rows]
+  const row: SettingsWorkspaceRow = {
+    id: 'acp-access',
+    category: 'general',
+    label: 'ACP access',
+    summary: 'Live listener · next Host start · client setup',
+    scope: 'local Split Host ACP listener · next-start Profile preference',
+    freshness: 'runtime',
+    description: 'runtime, next-start and client setup',
+    specialist: 'acp-access',
+  }
+  const anchor = rows.findIndex(candidate => candidate.id === 'web-ui')
+  const backend = rows.findIndex(candidate => candidate.id === 'startup-backend')
+  const at = anchor >= 0 ? anchor + 1 : backend >= 0 ? backend + 1 : rows.length
+  rows.splice(at, 0, row)
+  return { ...SNAPSHOT, rows }
+}
+
+test('the /acp deeplink mounts the ACP access page on the FIRST real frame and settles ok', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    acpAccessPage: true,
+    snapshot: () => acpAccessSnapshot(),
+    initial: { initialRowId: 'acp-access', initialSpecialist: 'acp-access' },
+  })
+  assert.equal(h.acpAccessBuilds(), 0, 'no page is built before a real frame can paint it')
+  const painted = plain(h)
+  assert.equal(h.acpAccessBuilds(), 1, 'the page factory ran on the rendered frame')
+  assert.match(painted, /Settings · Host · ACP access/u, 'the breadcrumb is the row identity')
+  assert.deepEqual(await h.panel.whenInitialSpecialistSettled(), { ok: true })
+  h.panel.render(120)
+  assert.equal(h.acpAccessBuilds(), 1, 'a repaint never mounts a second page')
+})
+
+test('the ACP access page returns to the Host Rows level and reopening mounts ONE new instance', () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    acpAccessPage: true,
+    snapshot: () => acpAccessSnapshot(),
+    initial: { initialRowId: 'acp-access', initialSpecialist: 'acp-access' },
+  })
+  plain(h)
+  assert.equal(h.acpAccessBuilds(), 1)
+  const first = h.acpAccessPages[0]!
+  ;(first as unknown as { done: () => void }).done()
+  assert.equal(first.disposed, true, 'the retired page is disposed exactly once')
+  assert.match(plain(h), /Settings · Host · Rows/u, 'Esc returns the Host Rows level, keeping the screen')
+  h.panel.handleInput('\r')
+  assert.equal(h.acpAccessBuilds(), 2)
+  assert.equal(h.acpAccessPages[1]!.disposed, false)
   assert.equal(h.closes(), 0, 'the workspace never closed for a same-lease page switch')
 })
 

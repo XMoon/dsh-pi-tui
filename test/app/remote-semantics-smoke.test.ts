@@ -2073,8 +2073,8 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
     await fixture.open()
     await fixture.selectCategory('Tools')
+    // Tools rows: Visual tools -> Shell execution -> Web Search / Fetch.
     await fixture.key('\r')
-    await fixture.key('\x1b[B')
     await fixture.key('\x1b[B')
     await fixture.key('\x1b[B')
     await fixture.key('\r')
@@ -2111,8 +2111,8 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
     await fixture.open()
     await fixture.selectCategory('Tools')
+    // Tools rows: Visual tools -> Shell execution -> Web Search / Fetch.
     await fixture.key('\r')
-    await fixture.key('\x1b[B')
     await fixture.key('\x1b[B')
     await fixture.key('\x1b[B')
     await fixture.key('\r')
@@ -2273,8 +2273,8 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     const page = fixture
     await page.open()
     await page.selectCategory('Tools')
+    // Tools rows: Visual tools -> Shell execution -> Web Search / Fetch.
     await page.key('\r')
-    await page.key('\x1b[B')
     await page.key('\x1b[B')
     await page.key('\x1b[B')
     await page.key('\r')

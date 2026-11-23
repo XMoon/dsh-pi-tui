@@ -1,24 +1,33 @@
 /**
- * The `/acp` command (PO-5E): the ONE Client quick control of the Split Host's
- * local ACP v1 Unix-socket listener.
+ * The `/acp` command (PO-5E / PR-B): the ONE Client entry to the local ACP v1
+ * Unix-socket listener of the Split Host.
  *
- * The command owns EVERY read and write:
+ * On PiTui it is a TYPED SETTINGS DEEP LINK: `/acp` forwards to the ONE
+ * `Settings · Host · ACP access` page (the same lease, the same runtime port
+ * and the same `acp-autostart` writer the Host row opens), and returns that
+ * command's real result. The TSP renderer keeps its own native path:
  *
  * ```text
- * /acp → presentation.open(request)
- *      → request.readStatus()            one Host status read (no polling)
- *      → request.act(action)             one explicit user intent
- *          Enable/Disable                SAME Host piTuiAcpAccess.setEnabled
- *                                        with the generation bound to the read
+ * /acp → presentation.open(request)          (TSP native presenter only)
+ *      → request.readStatus()                one Host status read (no polling)
+ *      → request.act(action)                 one explicit user intent
+ *          Enable/Disable                    SAME Host piTuiAcpAccess.setEnabled
+ *                                            with the generation bound to the read
  *      → one authoritative status re-read → the menu is reprojected
  * ```
  *
- * It is a SESSIONLESS, LOCAL command: typing `/acp` never creates a Session,
- * never submits a prompt, never starts a second Host, never changes the default
- * backend and never persists the next-launch `autoStart` preference. The
- * presenters (default PiTui short menu, experimental TSP native picker) hold
- * only their own local UI state and receive the SAME request, so there is
- * exactly one business authority for both renderers.
+ * It is a SESSIONLESS, LOCAL command: typing `/acp` itself creates no Session,
+ * submits no prompt, starts no second Host, changes no default backend and
+ * issues no direct Host mutation. On PiTui the handler only takes the ONE
+ * Settings lease and opens the page; that page's first really-painted frame
+ * performs ONE authoritative status read, and every runtime/preference write
+ * still requires an explicit page action. The next-launch `autoStart`
+ * preference is never written by the runtime toggle; on PiTui it is reachable
+ * as an explicit, revision-checked action inside the same page. Both
+ * presentation entries share ONE business authority across their different
+ * renderer UX: the `AcpAccessPort` Host controller (the TSP picker keeps its
+ * own frozen presentation request). A PiTui composition never falls back to
+ * the retired short SettingsList overlay.
  *
  * @module tui/commands/acp-access
  */
@@ -36,7 +45,6 @@ import type { RegisterOne, TuiCommandRunner } from '../../commands.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
 import type { TuiApp } from '../../tui-app.ts'
-import { pituiAcpAccessPresentation } from '../pickers/acp-access-presentation-pitui.ts'
 
 /** The exact Direct/unavailable statement (the command's own product copy). */
 const DIRECT_UNSUPPORTED = 'ACP server controls are available only in a Split Client.'
@@ -62,6 +70,10 @@ export interface AcpAccessCommandDeps {
   readonly registerOne: RegisterOne
   /** The TSP native presenter (absent on a PiTui/headless mount). */
   readonly acpPresentation?: AcpAccessPresentation | undefined
+  /** PR-B: the ONE PiTui typed deep link into `Settings · Host · ACP access`.
+   *  It is used ONLY when a mounted PiTui app exists and no native presenter was
+   *  supplied, and its own real result is the command's result. */
+  readonly openSettings: () => Promise<CommandResult>
 }
 
 export interface AcpAccessCommands {
@@ -96,13 +108,21 @@ export function createAcpAccessCommands(deps: AcpAccessCommandDeps): AcpAccessCo
     registerOne({
       name: 'acp',
       description: 'Control the Split Host local ACP listener (status, enable/disable)',
-      handler: (): CommandResult => {
+      handler: (): CommandResult | Promise<CommandResult> => {
+        // PR-B: the PiTui renderer owns ONE ACP surface — the typed Settings
+        // page. A mounted PiTui app without a native presenter forwards
+        // UNCONDITIONALLY (Direct included): the page states its own truthful
+        // Direct/Unavailable facts instead of a command-level refusal.
+        if (deps.app !== undefined && deps.acpPresentation === undefined) {
+          return deps.openSettings()
+        }
+        // The TSP/native path keeps its original contract: Direct is refused
+        // explicitly and a non-Split renderer needs its own presenter.
         if (runner.backendKind !== 'remote') {
           deps.notify(DIRECT_UNSUPPORTED, 'error')
           return { kind: 'error', text: DIRECT_UNSUPPORTED }
         }
-        const presentation: AcpAccessPresentation | undefined = deps.acpPresentation
-          ?? (deps.app === undefined ? undefined : pituiAcpAccessPresentation(deps.app))
+        const presentation = deps.acpPresentation
         if (presentation === undefined) {
           const text = 'the ACP server controls are unavailable in this renderer'
           deps.notify(text, 'error')

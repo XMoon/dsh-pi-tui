@@ -52,8 +52,7 @@ import { HostNumericSettingsPage } from '../panels/host-numeric-settings-page.ts
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { commitPersistedSetting, readPersistedSetting, resolvePersistedSettingOwner, type PersistedSettingCommitOutcome, type PersistedSettingRecord } from '../../app/client-extensions/persisted-setting.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type AcpStartupPreferenceState, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
-import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type VisualToolsState, type WebProviderSettings, type WebStartupPreferenceState, type BackendStartupPreferenceState, type PublicBackendValue, type SectionRead, type SectionMutationOutcome, type SessionLogUpload, type AgentLoopSettings, type ShellExecutionSettings } from '../../runtime/config-port.ts'
 import { isWebApiBilling } from '../../domain/web-provider-settings.ts'
 import {
   WEB_FETCH_PROVIDER_CANDIDATES,
@@ -74,6 +73,7 @@ import { McpServersPage } from '../panels/mcp-servers-page.ts'
 import { McpServersController } from '../../app/command/mcp-servers.ts'
 import { ComputerUseSettingsPage, COMPUTER_USE_PAGE_TITLE } from '../panels/computer-use-settings-page.ts'
 import { WebUiSettingsPage } from '../panels/web-ui-settings-page.ts'
+import { AcpAccessSettingsPage } from '../panels/acp-access-settings-page.ts'
 import { CuaAccessSettingsController } from '../../app/command/cua-access-settings.ts'
 import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
 import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
@@ -261,6 +261,15 @@ export interface SettingsCommandRegistrars {
    * navigation to the Rows level or a second overlay.
    */
   openWebUiWorkspace(): Promise<CommandResult>
+  /**
+   * PR-B `/acp`: the ONE PiTui deep link into `Settings · Host · ACP access`.
+   * It takes the SAME Settings workspace lease, mounts the page on its first
+   * really-painted frame and resolves only after that mount settled — a
+   * failure closes the lease and is the command's real error, never a silent
+   * navigation to the Rows level or a second overlay. Direct and Remote both
+   * land on the truthful page.
+   */
+  openAcpAccessWorkspace(): Promise<CommandResult>
 }
 
 /**
@@ -432,12 +441,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const MCP_SERVERS_ROW_LABEL = 'MCP servers'
   const COMPUTER_USE_ROW_SUMMARY = 'Permissions · applications · PTC'
   const MCP_SERVERS_ROW_SUMMARY = 'Inspect · probe · restart'
-  /** The ACP listener runtime row's fixed description (one string so the async
-   *  `refreshRow` repaint and the initial paint stay identical). */
-  const ACP_RUNTIME_DESCRIPTION = 'Enable or disable the local ACP v1 Unix socket listener on THIS Split Host. '
-    + 'This toggles the running Host only; it never changes the persisted auto-start preference and never starts, '
-    + 'stops or reconfigures any Session, Agent or other Host service. Off removes the socket and disconnects any '
-    + 'connected ACP peer; On re-binds the same socket through the same safety checks.'
   /** The SAME official candidate identities the Web page renders and the ONE
    *  commit entry accepts (one source, so the page and the writer can never
    *  disagree). */
@@ -521,206 +524,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return await readWebSettings()
   }
 
-  // ── PO-1B: the ACP listener RUNTIME row (async Host read) ───────────────
-  //
-  // The row's value is the LIVE listener state, read from the Host through the
-  // `acpAccess` port. It is the same async pattern as the Web provider page: a
-  // serial numbers the LATEST read so an earlier settlement can never overwrite
-  // a newer observation, the committed fact repaints whichever panel generation
-  // owns the surface, and every read is (re)started on workspace open / `r` so a
-  // reopened workspace never sits on a pre-read snapshot.
-  let acpRuntimeStatus: AcpAccessStatus | undefined
-  /** The Connection generation the CURRENT `acpRuntimeStatus` was read under. A
-   *  cached observation is only current while this identity still matches the
-   *  live Host generation — `configReadiness()==='ready'` alone cannot prove a
-   *  reconnected Host B is the one that produced an earlier Host A state. */
-  let acpRuntimeGeneration: unknown
-  let acpRuntimeFailure: string | undefined
-  let acpRuntimeReadSerial = 0
-  let acpRuntimeReadSettled = false
-
-  const readAcpRuntimeStatus = async (): Promise<{ status: AcpAccessStatus | undefined; fresh: boolean }> => {
-    const serial = ++acpRuntimeReadSerial
-    // The generation is captured BEFORE dispatch; the port's own fence turns a
-    // read that races a generation change into a failure, and this captured
-    // identity is what the settled fact is bound to.
-    const generation = acpCurrentGeneration()
-    const promise = (async (): Promise<AcpAccessStatus | undefined> => await runner.acpAccess.getStatus())()
-    let status: AcpAccessStatus | undefined
-    let failure: string | undefined
-    try {
-      status = await promise
-    } catch (error) {
-      failure = safeErrorMessage(error)
-    }
-    const fresh = serial === acpRuntimeReadSerial
-    if (fresh) {
-      // A resolved read (including an `unavailable` status) REPLACES the value;
-      // a thrown failure is UNKNOWN and drops it. The generation binds the fact.
-      acpRuntimeStatus = failure === undefined ? status : undefined
-      acpRuntimeGeneration = generation
-      acpRuntimeFailure = failure
-      acpRuntimeReadSettled = true
-      activeSettingsWorkspace?.refreshAcpRuntimeRow()
-    }
-    return { status: failure === undefined ? status : undefined, fresh }
-  }
-
-  /**
-   * The CURRENT Host generation identity, read through the port's observation
-   * capability. A structural runner double that does not model the Split-Host
-   * generation reports `undefined` (treated as Direct-like: no cross-Host risk).
-   */
-  const acpCurrentGeneration = (): unknown =>
-    typeof runner.acpAccess?.currentGeneration === 'function' ? runner.acpAccess.currentGeneration() : undefined
-
-  /**
-   * Whether the cached ACP observation still belongs to the CURRENT Host
-   * generation. A generation change (Host A → Host B) revokes both the cached
-   * state AND any user selection derived from it, before any new Confirm.
-   */
-  const acpRuntimeGenerationCurrent = (): boolean =>
-    Object.is(acpRuntimeGeneration, acpCurrentGeneration())
-
-  /** Enter the pending state synchronously so no snapshot presents a stale value. */
-  const beginAcpRuntimeRead = (): void => {
-    acpRuntimeStatus = undefined
-    acpRuntimeGeneration = undefined
-    acpRuntimeFailure = undefined
-    acpRuntimeReadSettled = false
-  }
-
-  /** Start ONE authoritative ACP listener read; the settled fact repaints the row. */
-  const startAcpRuntimeRead = (): void => {
-    beginAcpRuntimeRead()
-    activeSettingsWorkspace?.refreshAcpRuntimeRow()
-    detach('acp listener status read', async () => {
-      await readAcpRuntimeStatus()
-    }, { notify: false })
-  }
-
-  /**
-   * The currentness of the ACP listener observation. The Direct process owns no
-   * Split-Host listener (`unavailable`); a Remote whose configuration plane is
-   * reconnecting (`stale`) or gone (`unavailable`) must NOT keep presenting a
-   * cached On/Off as the current Host fact.
-   */
-  const acpReadiness = (): 'ready' | 'stale' | 'unavailable' =>
-    runner.backendKind === 'direct' ? 'unavailable' : runner.config.configReadiness()
-
-  /** The row's human summary for the CURRENT listener state. */
-  const acpRuntimeSummaryOf = (): string => {
-    if (runner.backendKind === 'direct') return 'Unavailable — Split Host only'
-    const readiness = acpReadiness()
-    // A non-current Host never presents a cached On/Off as the current fact.
-    if (readiness === 'stale') return 'Checking…'
-    if (readiness === 'unavailable') return 'Unavailable'
-    if (acpRuntimeFailure !== undefined) return 'Unavailable'
-    if (!acpRuntimeReadSettled) return 'Loading…'
-    // A settled fact from a PRIOR Host generation is not a current fact.
-    if (!acpRuntimeGenerationCurrent()) return 'Checking…'
-    const status = acpRuntimeStatus
-    if (status === undefined) return 'Unavailable'
-    switch (status.state) {
-      case 'enabled': return 'On'
-      case 'disabled': return 'Off'
-      case 'changing': return 'Changing…'
-      case 'unavailable': return 'Unavailable'
-    }
-  }
-
-  /** The live runtime fact painted as the Detail `Runtime` line. */
-  const acpRuntimeFactOf = (): string => {
-    if (runner.backendKind === 'direct') return 'unavailable (Split Host only)'
-    const readiness = acpReadiness()
-    if (readiness === 'stale') return 'the Host is not current (reconnecting); the last ACP state is not shown as current'
-    if (readiness === 'unavailable') return 'the Host is unavailable'
-    if (acpRuntimeFailure !== undefined) return 'status could not be read'
-    if (!acpRuntimeReadSettled) return 'checking…'
-    if (!acpRuntimeGenerationCurrent()) return 'the Host changed; re-checking the current ACP state…'
-    const status = acpRuntimeStatus
-    if (status === undefined) return 'unavailable'
-    switch (status.state) {
-      case 'enabled': return 'Listening on this Host'
-      case 'disabled': return 'Not listening'
-      case 'changing': return 'Applying a change…'
-      case 'unavailable': return `unavailable (${status.reason})`
-    }
-  }
-
-  const acpRuntimeFreshnessOf = (): SettingsWorkspaceFreshness => {
-    if (runner.backendKind === 'direct') return 'unavailable'
-    const readiness = acpReadiness()
-    if (readiness === 'stale') return 'last-known'
-    if (readiness === 'unavailable') return 'unavailable'
-    if (acpRuntimeFailure !== undefined) return 'read-error'
-    if (!acpRuntimeReadSettled) return 'runtime'
-    if (!acpRuntimeGenerationCurrent()) return 'last-known'
-    const status = acpRuntimeStatus
-    if (status === undefined || status.state === 'unavailable') return 'unavailable'
-    if (status.state === 'changing') return 'runtime'
-    return 'ready'
-  }
-
-  /** A settled On/Off on a CURRENT Host is the only confirmable state; a stale/
-   *  unavailable Host, `changing`, or an unread authority offers NO candidate so
-   *  Confirm is impossible. */
-  const acpRuntimeEditOf = (): SettingsWorkspaceEdit => {
-    const status = acpRuntimeStatus
-    const confirmable = acpReadiness() === 'ready'
-      && acpRuntimeReadSettled
-      && acpRuntimeGenerationCurrent()
-      && acpRuntimeFailure === undefined
-      && (status?.state === 'enabled' || status?.state === 'disabled')
-    return {
-      field: 'acp-runtime',
-      primary: 'runtime',
-      options: confirmable
-        ? [
-            { value: 'On', label: 'On', available: true, current: status?.state === 'enabled' },
-            { value: 'Off', label: 'Off', available: true, current: status?.state === 'disabled' },
-          ]
-        : [],
-      runtime: acpRuntimeFactOf(),
-      persisted: 'Not applicable · runtime control',
-    }
-  }
-
-  // ── PO-1B: the ACP STARTUP preference row (persisted, next launch) ───────
-  const acpAutostartSummaryOf = (state: AcpStartupPreferenceState | undefined): string => {
-    if (state === undefined) return 'Unavailable'
-    // `Off (default)` marks the schema default the USER layer does not declare.
-    if (state.autoStart) return 'On'
-    return state.userOverridden ? 'Off' : 'Off (default)'
-  }
-
-  const acpAutostartEditOf = (
-    state: AcpStartupPreferenceState | undefined,
-    readiness: 'ready' | 'stale' | 'unavailable',
-  ): SettingsWorkspaceEdit => {
-    const editable = state !== undefined && readiness === 'ready'
-    return {
-      field: 'acp-autostart',
-      primary: 'persisted',
-      ...(state === undefined ? {} : { revision: state.revision }),
-      options: editable
-        ? [
-            { value: 'On', label: 'On', available: true, current: state.autoStart },
-            { value: 'Off', label: 'Off', available: true, current: !state.autoStart },
-          ]
-        : [],
-      runtime: 'applies on the next Split Host start; the current ACP listener is unchanged',
-      persisted: acpAutostartSummaryOf(state),
-    }
-  }
-
-  const acpAutostartFreshnessOf = (
-    state: AcpStartupPreferenceState | undefined,
-    readiness: 'ready' | 'stale' | 'unavailable',
-  ): SettingsWorkspaceFreshness => state === undefined
-    ? 'unavailable'
-    : readiness === 'ready' ? 'ready' : 'last-known'
-
   const acpAutostartValueOf = (value: string): boolean | undefined =>
     value === 'On' ? true : value === 'Off' ? false : undefined
 
@@ -786,62 +589,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return classifyRejectedAcpAutostart(base.autoStart, safeErrorMessage(error))
     }
     return verifyCommittedAcpAutostart(autoStart)
-  }
-
-  /** Commit the live listener toggle. It reads the authority BEFORE dispatch,
-   *  sends exactly ONE `setEnabled`, and reuses the authoritative reread for the
-   *  verdict. A rejected/dispatched-but-unreadable write is classified from a
-   *  fresh read and never replayed. */
-  const commitAcpRuntime = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
-    const target = value === 'On' ? true : value === 'Off' ? false : undefined
-    if (target === undefined) return { outcome: 'not-saved', reason: `"${value}" is not an ACP listener candidate` }
-    const targetState = target ? 'enabled' : 'disabled'
-    const isDirect = runner.backendKind === 'direct'
-    // Bind the user's choice to the Host generation it was DISPLAYED under. A
-    // reconnected Host B must never receive a write derived from Host A's state.
-    const choiceGeneration = acpRuntimeGeneration
-    const dispatchGeneration = acpCurrentGeneration()
-    if (!isDirect && !Object.is(choiceGeneration, dispatchGeneration)) {
-      return { outcome: 'not-saved', reason: 'the Host changed since this setting was read; the change was not sent' }
-    }
-    const sameGeneration = (): boolean => Object.is(dispatchGeneration, acpCurrentGeneration())
-    const pre = await readAcpRuntimeStatus()
-    if (!sameGeneration()) {
-      return { outcome: 'not-saved', reason: 'the Host changed while reading the ACP state; the change was not sent' }
-    }
-    if (!pre.fresh || pre.status === undefined) {
-      return { outcome: 'indeterminate', reason: 'the authoritative ACP listener state could not be read' }
-    }
-    const before = pre.status
-    if (before.state === 'changing') return { outcome: 'not-saved', reason: 'an ACP listener transition is already in progress' }
-    if (before.state === 'unavailable') return { outcome: 'not-saved', reason: 'the ACP listener is unavailable' }
-    if (before.state === targetState) return { outcome: 'verified' }
-    try {
-      // Pass the expected generation so the port refuses to dispatch to a Host
-      // that changed after the user's choice was made (no cross-Host write).
-      await runner.acpAccess.setEnabled(target, dispatchGeneration)
-    } catch (error) {
-      if (!sameGeneration()) {
-        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the Host changed during the write, so its outcome cannot be attributed` }
-      }
-      const after = await readAcpRuntimeStatus()
-      if (!sameGeneration() || !after.fresh || after.status === undefined) {
-        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the authoritative ACP listener state could not be re-read` }
-      }
-      if (after.status.state === targetState) {
-        return { outcome: 'indeterminate', reason: `${safeErrorMessage(error)}; the listener now reports ${after.status.state}, so this outcome cannot be attributed` }
-      }
-      return { outcome: 'not-saved', reason: safeErrorMessage(error) }
-    }
-    if (!sameGeneration()) {
-      return { outcome: 'indeterminate', reason: 'the Host changed during the write; its outcome cannot be attributed' }
-    }
-    const settled = await readAcpRuntimeStatus()
-    if (!sameGeneration() || !settled.fresh || settled.status === undefined) {
-      return { outcome: 'indeterminate', reason: 'the write was dispatched but the ACP listener state could not be re-read for this Host' }
-    }
-    if (settled.status.state === targetState) return { outcome: 'verified' }
-    return { outcome: 'not-saved', reason: `the write reported success, but the ACP listener reads ${settled.status.state}` }
   }
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
@@ -1307,7 +1054,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  settles. A newer/closed generation never receives the result. The repaint is
    *  ROW-scoped: the Web authority changed, so the TUI settings document is never
    *  read a second time (one guarded document read per surface). */
-  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void; readonly refreshAcpRuntimeRow: () => void; readonly invalidateAcpChoice: () => void } | undefined
+  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
   /** The MOUNTED Web Search / Fetch page (C2-R4). It is created by the root's
    *  explicit activation, dies with the workspace, and is never a second
    *  settings authority: a fact settlement repaints the root, whose frame
@@ -1376,7 +1123,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
     if (webSettingsAvailable()) beginWebSettingsRead()
-    beginAcpRuntimeRead()
     // M6-1 F8: the initial session-policy read starts only after this
     // workspace's lease was granted. The panel's FIRST snapshot (constructor,
     // inside the granted open) already starts the observation's controlled
@@ -1419,10 +1165,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
      *  runtime-facts re-read seam (never a second observation state). Released
      *  with the workspace lease. */
     let disposePolicyWatch: (() => void) | undefined
-    /** PO-1B: the ACP listener observation lease. A Connection generation change
-     *  revokes the previous Host's ACP state/selection and re-reads the new Host
-     *  before any new Confirm; released with the workspace. */
-    let disposeAcpGenerationWatch: (() => void) | undefined
     // C2-R2: the per-open VERIFIED fullscreen intent. A Fullscreen confirm that
     // really stored its preference records the target here; the post-close
     // hand-off applies the LAST verified choice of THIS open only. It is not a
@@ -1454,7 +1196,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         onRefresh: () => {
           startWebSettingsRead()
-          startAcpRuntimeRead()
           startPolicyRead(true)
           // R8-E PR-4: an explicit refresh re-reads the Host per-package Config
           // mirror for the persisted extension rows of THIS open.
@@ -1674,6 +1415,43 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             done,
           })
         },
+        // PR-B: the ONE `Host · ACP access` page. It paints the CURRENT Host
+        // listener facts (through the semantic AcpAccessPort) beside the
+        // persisted next-start preference and the Client Setup command, and
+        // writes each through its OWN existing owner: `runner.acpAccess`
+        // (one Host controller) and the revision-checked `acp-autostart` field
+        // of `commitSettingsWorkspaceField`. The page starts its authoritative
+        // Host read on THIS factory call (the first frame that can really paint
+        // it), never while a snapshot is built.
+        createAcpAccessPage: (done) => {
+          const requestRender = (): void => { if (!app.isDisposed()) app.requestRender() }
+          return new AcpAccessSettingsPage({
+            backendKind: runner.backendKind === 'remote' ? 'remote' : 'direct',
+            readStatus: () => runner.acpAccess.getStatus(),
+            setEnabled: (enabled, expectedGeneration) => runner.acpAccess.setEnabled(enabled, expectedGeneration),
+            readPreference: () => runner.config.acpStartupPreference.read(),
+            configReadiness: () => runner.config.configReadiness(),
+            commitAutostart: (value, revision) =>
+              commitSettingsWorkspaceField({ field: 'acp-autostart', value, revision }, undefined),
+            // The Client command is a pure Client-local clipboard operation: it
+            // never reaches the Host, reads no socket path and starts no stdio.
+            copyToClipboard: (text) => runner.copyToClipboard(text),
+            // The OFFICIAL current Profile identity, already proven by the
+            // composition (Direct profileContext / verified Split Profile). A
+            // composition that cannot prove it offers no Copy target at all.
+            profileName: runner.profileDaemonAdmin?.profile,
+            currentGeneration: () => runner.acpAccess.currentGeneration(),
+            subscribeGeneration: (listener) => runner.acpAccess.subscribeGeneration(listener),
+            runOwned: (label, task, onError) => runOwned(label, task, {
+              diag: runner.diag,
+              sessionId: () => runner.currentSessionId,
+              onError,
+            }),
+            diagnose: (label, detail) => runner.diag.warn(label, detail),
+            requestRender,
+            done,
+          })
+        },
         // C2-R5: the two same-lease professional pages. Each factory returns
         // the EXISTING editor over its ONE authority; the root mounts it in this
         // workspace's body and never opens a second overlay.
@@ -1759,9 +1537,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           // The policy observation subscription dies with this workspace.
           disposePolicyWatch?.()
           disposePolicyWatch = undefined
-          // The ACP generation observation dies with this workspace too.
-          disposeAcpGenerationWatch?.()
-          disposeAcpGenerationWatch = undefined
           // C2-R4: the mounted Web page's command reference dies with this open
           // (the panel itself disposes the instance on teardown). A late fact
           // settlement then repaints nothing.
@@ -1798,7 +1573,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
       },
     )
-    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()), refreshAcpRuntimeRow: () => handle?.refreshRow('acp-runtime', { summary: acpRuntimeSummaryOf(), freshness: acpRuntimeFreshnessOf(), description: ACP_RUNTIME_DESCRIPTION }), invalidateAcpChoice: () => handle?.invalidateChoice('acp-runtime') }
+    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
     // R8-E PR-4: the FIRST authoritative per-package Config read for the
     // persisted extension rows of this open (never a background poll).
     startExtensionConfigRefresh()
@@ -1814,22 +1589,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       app.refreshSettingsWorkspaceRuntimeFacts()
     })
     startWebSettingsRead()
-    startAcpRuntimeRead()
-    // A Connection generation change (Host A -> Host B) must revoke the previous
-    // Host's ACP observation and any selection derived from it, and re-read the
-    // new Host before a new Confirm is allowed. This subscription repaints even
-    // without a key press, so a cached On can never be revived as Host B's fact.
-    const subscribeAcpGeneration = runner.acpAccess?.subscribeGeneration
-    if (typeof subscribeAcpGeneration === 'function') {
-      disposeAcpGenerationWatch = subscribeAcpGeneration.call(runner.acpAccess, () => {
-        if (activeSettingsWorkspace?.token !== token) return
-        // Revoke the OLD Host's open selection FIRST (synchronously) so a stale
-        // choice can never be confirmed into the new Host, then re-read the new
-        // Host state. The user re-enters the choice against the new authority.
-        activeSettingsWorkspace?.invalidateAcpChoice()
-        startAcpRuntimeRead()
-      })
-    }
     // M6-1 F8: the initial session-policy read starts only now that the
     // workspace lease was granted (a refused open captures no scope and
     // starts no read); the panel's first snapshot already started it.
@@ -2933,7 +2692,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'web-autostart': return commitWebAutostart(request.value, request.revision)
         case 'session-log-upload': return commitSessionLogUpload(request.value, request.revision, request.generation)
         case 'startup-backend': return commitBackendStartup(request.value, request.revision)
-        case 'acp-runtime': return commitAcpRuntime(request.value)
         case 'acp-autostart': return commitAcpAutostart(request.value, request.revision)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
@@ -4112,8 +3870,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // Profile value is never presented as the shipped `direct` default.
     const backendStartup = runner.config.backendStartupPreference.read()
     const backendStartupFreshness = backendStartupFreshnessOf(backendStartup, configReadiness)
-    const acpAutostart = runner.config.acpStartupPreference.read()
-    const acpAutostartFreshness = acpAutostartFreshnessOf(acpAutostart, configReadiness)
     // FR5-B: the official Agent-loop, active-shell and session-log sections.
     // Each read reports its own unavailable/unreadable state; no schema default
     // is ever substituted for a failed read.
@@ -4768,35 +4524,24 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           specialist: 'web-ui',
         },
         {
-          // PO-1B: the NEXT-Split-Host-start ACP preference. A persisted profile
-          // fact independent of the running listener; saving it never binds or
-          // tears down the current socket. FR5-B moved the row to General (same
-          // id, same port); the ACP Server runtime row stays in Tools.
-          id: 'acp-autostart',
+          // PR-B: the ONE ACP access row. It is a NAVIGATION row whose page
+          // owns BOTH ACP authorities: the CURRENT Host listener (runtime
+          // controls) and the persisted next-Split-Host-start preference. The
+          // summary is a fixed statement of that shape, not a Host read: the
+          // workspace snapshot starts no RPC, and the page reads the Host on
+          // its first really-painted frame.
+          id: 'acp-access',
           category: 'general',
-          label: 'Start ACP automatically',
-          summary: acpAutostartSummaryOf(acpAutostart),
-          scope: 'DSH Host profile · next Split Host start',
-          freshness: acpAutostartFreshness,
-          description: 'Automatically binds the local ACP v1 Unix socket listener when a new Split Host starts. '
-            + 'Affects the next Split Host start; the current ACP listener is unchanged. Use the ACP Server row for immediate control.',
-          edit: acpAutostartEditOf(acpAutostart, configReadiness),
+          label: 'ACP access',
+          summary: 'Live listener · next Host start · client setup',
+          scope: 'local Split Host ACP listener · next-start Profile preference',
+          freshness: 'runtime',
+          description: 'Control the local ACP v1 Unix socket listener of the running Split Host, copy the ACP stdio '
+            + 'client command, and set whether a new Split Host starts the listener automatically. The runtime controls '
+            + 'change only the current Host; the preference changes only the next start.',
+          specialist: 'acp-access',
         },
         ...sessionLogUploadRowOf(sessionLogUpload, configReadiness),
-        {
-          // PO-1B: the local ACP listener RUNTIME row. Its value is the LIVE
-          // Host listener state read through the `acpAccess` port (async); the
-          // row never reports the persisted preference. On Direct it is a
-          // truthful Unavailable (Split Host only) and offers no candidate.
-          id: 'acp-runtime',
-          category: 'tools',
-          label: 'ACP Server',
-          summary: acpRuntimeSummaryOf(),
-          scope: 'DSH Host · running Split Host ACP listener',
-          freshness: acpRuntimeFreshnessOf(),
-          description: ACP_RUNTIME_DESCRIPTION,
-          edit: acpRuntimeEditOf(),
-        },
         {
           // C2-R4: the ONE discoverable entry to the Web provider settings
           // page. It opens the embedded `WebSettingsPage` in THIS workspace's
@@ -5388,6 +5133,29 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return { kind: 'success' }
   }
 
+  /**
+   * PR-B `/acp`: the ONE typed deep link into `Settings · Host · ACP access`.
+   * The SAME Settings lease is taken (no overlay, no second screen); the
+   * command awaits the page's first really-painted mount and reports the real
+   * failure instead of falling back to the Rows level. Direct and Remote both
+   * reach the page: on Direct the page states the real
+   * `Unavailable · Split Host only` capability and offers no runtime action.
+   */
+  const openAcpAccessWorkspace = async (): Promise<CommandResult> => {
+    let handle: import('../../tui-app.ts').SettingsWorkspaceHandle
+    try {
+      handle = openSettingsWorkspaceWith({ initialRowId: 'acp-access', initialSpecialist: 'acp-access' })
+    } catch (error) {
+      return { kind: 'error', text: `could not open the settings workspace: ${safeErrorMessage(error)}` }
+    }
+    const settlement = await handle.whenInitialSpecialistSettled()
+    if (!settlement.ok) {
+      handle.close()
+      return { kind: 'error', text: `could not open ACP access: ${settlement.reason}` }
+    }
+    return { kind: 'success' }
+  }
+
   const openAuthWorkspace = (destination: AuthDestination): CommandResult => {    if (destination.kind === 'error') return { kind: 'error', text: destination.message }
     if ((app as unknown as import('../../tui-app.ts').TuiApp | undefined) === undefined) {
       return {
@@ -5425,6 +5193,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     openAuthWorkspace,
     openPluginsWorkspace,
     openWebUiWorkspace,
+    openAcpAccessWorkspace,
   }
 }
 
