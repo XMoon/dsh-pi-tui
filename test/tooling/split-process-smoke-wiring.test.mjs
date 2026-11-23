@@ -40,6 +40,7 @@ import {
   selectedNotVerifiedLine,
   selectedPassLine,
 } from '../../scripts/lib/split-smoke-selection.mjs'
+import { pinnedSdkVersion } from '../../scripts/lib/split-smoke-sdk.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import { encodeUnitValue } from '../../src/app/remote-process/local-host-manager.ts'
 import { cleanupOutcomeError, killVerifiedHost, managedHostGateReason, stopAndRemoveManagedUnit, unitBelongsToRun, unitFileSafetyError } from '../../scripts/smoke/split-process/managed-host-m6-2b.mjs'
@@ -173,6 +174,7 @@ test('the extracted split-smoke modules import without starting a lane', (t) => 
     'scripts/lib/split-smoke-fixtures.mjs',
     'scripts/lib/split-smoke-profile.mjs',
     'scripts/lib/split-smoke-selection.mjs',
+    'scripts/lib/split-smoke-sdk.mjs',
     'scripts/smoke/split-process/host-runtime-disabled.mjs',
     'scripts/smoke/split-process/account-composition.mjs',
     'scripts/smoke/split-process/subagent-settings-fr5a.mjs',
@@ -1441,7 +1443,7 @@ function sdkInteropVerdict() {
     tuiHostSurvivedClientClose: true,
     evidence: {
       candidateSha256: '1'.repeat(64),
-      sdkVersion: '1.4.0',
+      sdkVersion: pinnedSdkVersion(),
       protocolVersion: 1,
       input: {
         hostPid: 4242,

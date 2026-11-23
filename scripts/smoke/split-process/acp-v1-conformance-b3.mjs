@@ -27,6 +27,7 @@ import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
+import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import {
   hostAssistantHasText,
   hostSessionEvents,
@@ -634,7 +635,7 @@ export async function runAcpV1ConformanceB3(context) {
       candidate_sha256: context.candidateSha256,
       dsh_version: context.targetDshVersion,
       bundle_version: installation.manifest.version,
-      sdk_version: '1.4.0',
+      sdk_version: installedSdkVersion(),
       host: { pid: hostIdentity.hostPid, instanceId: hostIdentity.instanceId, scopeId: hostIdentity.scopeId },
       protocol: {
         requestedVersions: [65535, 1],

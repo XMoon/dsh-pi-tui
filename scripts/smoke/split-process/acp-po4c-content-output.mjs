@@ -33,6 +33,7 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 function assert(condition, message) {
@@ -700,8 +701,12 @@ export async function runAcpPo4cContentOutput(context) {
     const capacityResponses = capacity.entries.filter(entry => entry.message?.id === capacityPromptId)
     assert(capacityResponses.length === 0,
       `PO-4C: an over-budget frame never fabricates a StopReason (got ${String(capacityResponses.length)})`)
-    assert(capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'),
-      `PO-4C: an over-budget frame delivers no result content (got ${JSON.stringify(capacityUpdates.map(update => update?.sessionUpdate))})`)
+    // The capacity connection owns its own new Session, whose first prompt also
+    // projects that Session's durable title; what must NEVER appear is RESULT
+    // content or an image from the over-budget frame.
+    assert(capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'
+      || READ_ONLY_PROJECTION_KINDS.has(update?.sessionUpdate)),
+    `PO-4C: an over-budget frame delivers no result content (got ${JSON.stringify(capacityUpdates.map(update => update?.sessionUpdate))})`)
     assert(!JSON.stringify(capacity.entries).includes('"type":"image"'),
       'PO-4C: an over-budget frame never delivers any image content')
     const afterOverflow = await runPrompt(sibling, siblingSession, MARKERS.health,
@@ -731,7 +736,7 @@ export async function runAcpPo4cContentOutput(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       candidateSha256: context.candidateSha256,
       dshVersion: context.targetDshVersion,
-      acpSdkVersion: '1.4.0',
+      acpSdkVersion: installedSdkVersion(),
       hostPid: hostIdentity.hostPid,
       hostInstanceId: hostIdentity.instanceId,
       scopeId: ready.localHost.scopeId,

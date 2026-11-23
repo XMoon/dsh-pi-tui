@@ -20,6 +20,7 @@ import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
+import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 const CASE_ID = 'acp.native-question-form'
@@ -326,7 +327,7 @@ export async function runAcpNativeQuestionForm(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       candidateSha256: context.candidateSha256,
       dshVersion: context.targetDshVersion,
-      acpSdkVersion: '1.4.0',
+      acpSdkVersion: installedSdkVersion(),
       hostPid: hostIdentity.hostPid,
       hostInstanceId: hostIdentity.instanceId,
       scopeId,

@@ -10,6 +10,7 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 function assert(condition, message) {
@@ -261,7 +262,7 @@ export async function runAcpPo4aContentInput(context) {
       nodeVersion: process.version,
       dshVersion: context.targetDshVersion,
       bundleVersion: context.installation.manifest.version,
-      acpSdkVersion: '1.4.0',
+      acpSdkVersion: installedSdkVersion(),
       hostPid: hostIdentity.hostPid,
       hostInstanceId: hostIdentity.instanceId,
       scopeId: ready.localHost.scopeId,
@@ -541,7 +542,7 @@ export async function runAcpPo4aContentInput(context) {
     const evidence = {
       status: 'PASS', scope: 'REAL_SPLIT_PROCESS_L6', hostPid: hostIdentity.hostPid,
       hostInstanceId: hostIdentity.instanceId, sessionId, candidateSha256: context.candidateSha256,
-      dshVersion: context.targetDshVersion, acpSdkVersion: '1.4.0', imageCapability: true,
+      dshVersion: context.targetDshVersion, acpSdkVersion: installedSdkVersion(), imageCapability: true,
       resourceLinkExact: true, imageOnly: true, mixedOrder: true, largeFrameBytes: largeWire.length,
       largeImageBytes: pngLarge.length, invalidImagesRejectedWithoutMessage: true,
       imageCancelRemovalProven: true, tuiTurnPreserved: true, reattachSameHost: true,
