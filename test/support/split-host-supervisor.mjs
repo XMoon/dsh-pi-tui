@@ -35,6 +35,7 @@ import {
   assertNativeManagedProfileInstall,
   assertNativeRollbackAdmission,
   classifyCurrentProfile,
+  classifyKernelLiveness,
   classifyManagedInspection,
   classifyNativeCliFence,
   classifyNativeClientOwnership,
@@ -51,6 +52,7 @@ import {
   runOwnedNativeCli,
   nativeBootstrapAdmission,
   parseManagedDaemonStatus,
+  readNativeClientSnapshot,
   requireLaunchdCustomization,
   runFixedDaemonVerb,
   serializeKernelIdentity,
@@ -1294,7 +1296,12 @@ function nativeRegisteredProcessState(registered) {
   const liveness = classifyRegisteredProcessLiveness({
     kernel,
     birth: registered.birth,
-    readSnapshot: () => nativeProcessSnapshot(registered.pid),
+    readSnapshot: () => readNativeClientSnapshot({
+      pid: registered.pid,
+      requireScratch: registered.scratch !== null,
+      readSnapshot: nativeProcessSnapshot,
+      readEnvironment: processEnvironmentValue,
+    }),
     rereadKernel: () => readKernelProcess(registered.pid),
   })
   if (liveness.state !== 'alive') return liveness
@@ -1303,7 +1310,7 @@ function nativeRegisteredProcessState(registered) {
     pid: registered.pid,
     uid: snapshot.uid,
     birth: snapshot.birth,
-    scratch: registered.scratch === null ? null : processEnvironmentValue(registered.pid, 'SPLIT_PROCESS_SCRATCH'),
+    scratch: snapshot.scratch,
     entry: snapshot.command,
   }
   const decision = classifyNativeClientOwnership({
@@ -1763,8 +1770,19 @@ async function reclaimNativeClients(reason) {
           if (record?.m4a0 !== 'client-started' && record?.m4a0 !== 'ready') continue
           if (!Number.isInteger(record.pid) || record.pid <= 0) continue
           if (reported.has(record.pid)) continue
-          if (pidAlive(record.pid)) {
+          let kernel = { kind: 'unknown' }
+          if (typeof readKernelProcess === 'function') {
+            try {
+              kernel = readKernelProcess(record.pid)
+            } catch {
+              kernel = { kind: 'unknown' }
+            }
+          }
+          const recordLiveness = classifyKernelLiveness(kernel)
+          if (recordLiveness.state === 'alive') {
             problems.push(`${String(client.label)}: live official record PID ${String(record.pid)} has no registered OS identity`)
+          } else if (recordLiveness.state === 'unknown') {
+            problems.push(`${String(client.label)}: official record PID ${String(record.pid)} cannot be proven terminated (${String(recordLiveness.reason)})`)
           }
         }
       } catch (error) {

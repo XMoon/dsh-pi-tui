@@ -1303,6 +1303,18 @@ function isTerminatedKernelIdentity(identity) {
   return identity.state === 'Z' || identity.state === 'X' || identity.state === 'x'
 }
 
+/** The kernel-only liveness decision for a PID without a registered birth. */
+export function classifyKernelLiveness(kernel) {
+  if (kernel === null || typeof kernel !== 'object') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  if (kernel.kind === 'gone') return { state: 'gone' }
+  if (kernel.kind === 'unknown') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  if (kernel.kind !== 'alive' || kernel.identity === null || typeof kernel.identity !== 'object') {
+    return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
+  }
+  if (isTerminatedKernelIdentity(kernel.identity)) return { state: 'gone', reason: 'TERMINATED' }
+  return { state: 'alive' }
+}
+
 /** The kernel-only liveness decision for one registered process. */
 function classifyKernelObservation(kernel, birth) {
   if (kernel === null || typeof kernel !== 'object') return { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }
@@ -1346,6 +1358,26 @@ export function classifyRegisteredProcessLiveness({ kernel, birth, readSnapshot,
   const second = classifyKernelObservation(after, birth)
   if (second.state !== 'alive') return second
   return { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }
+}
+
+/**
+ * Read the complete live snapshot required by one registered Client. A
+ * business Client's scratch is part of the SAME snapshot decision: a missing
+ * or unreadable scratch makes the snapshot unavailable so liveness can use its
+ * one-shot kernel re-read instead of passing undefined to the ownership
+ * classifier. The tui-test shell has no scratch and is proven by uid, birth
+ * and command only.
+ */
+export function readNativeClientSnapshot({ pid, requireScratch, readSnapshot, readEnvironment } = {}) {
+  if (typeof readSnapshot !== 'function' || typeof readEnvironment !== 'function') {
+    fail('NATIVE_CLIENT_IDENTITY_INVALID', 'native Client snapshot requires both readers')
+  }
+  const snapshot = readSnapshot(pid)
+  if (snapshot === null || snapshot === undefined) return null
+  if (!requireScratch) return { ...snapshot, scratch: null }
+  const scratch = readEnvironment(pid, 'SPLIT_PROCESS_SCRATCH')
+  if (typeof scratch !== 'string' || scratch === '') return null
+  return { ...snapshot, scratch }
 }
 
 /**
