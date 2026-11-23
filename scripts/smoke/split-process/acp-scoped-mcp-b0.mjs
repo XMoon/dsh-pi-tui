@@ -618,7 +618,9 @@ export async function runAcpScopedMcpB0(context) {
     const acpResume = openedResume.client
     acpClients.push(acpResume)
     const resumeAgain = await acpResume.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
-    assert(JSON.stringify(resumeAgain) === '{}', `Q09: A must stay resumable after the retire (got ${JSON.stringify(resumeAgain)})`)
+    assert(Object.keys(resumeAgain ?? {}).filter(key => key !== 'configOptions').length === 0
+      && (resumeAgain?.configOptions === undefined || Array.isArray(resumeAgain.configOptions)),
+    `Q09: A must stay resumable after the retire without a business payload (got ${JSON.stringify(resumeAgain)})`)
     const beforePlain = eventsOf(sessionA).length
     await sendTuiPrompt(tuiA, `B0_PLAIN_A ${nonceEcho}`, 'Q09 tui A plain')
     await waitForTurnEnd(sessionA, beforePlain, 'Q09 TUI A turn/end')

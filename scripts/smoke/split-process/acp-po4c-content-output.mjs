@@ -463,9 +463,18 @@ export async function runAcpPo4cContentOutput(context) {
     assertImageContent(resultUpdate.content[1].content, toolRef, 'PO-4C tool image')
     assertStrict.equal(resultUpdate.content[2].content.text, TOOL_TAIL)
     const finalToolChunk = tool.settled.updates[2].message.params.update
-    assertStrict.equal(finalToolChunk.messageId, tool.turnEvents
-      .filter(event => event.type === 'assistant/message').at(-1)?.data.message.id)
+    const finalToolMessage = tool.turnEvents.filter(event => event.type === 'assistant/message').at(-1)?.data.message
     assertStrict.equal(finalToolChunk.content.text, TOOL_ANSWER)
+    // The tool answer streamed as provisional text under the attempt's opaque
+    // ACP message id: the proof is that the delivered bytes equal the committed
+    // answer and were never re-sent after the durable append.
+    assertStrict.equal(typeof finalToolChunk.messageId, 'string')
+    assertStrict.equal((finalToolMessage?.content ?? [])
+      .filter(block => block.type === 'text').map(block => block.text).join(''), TOOL_ANSWER,
+    'PO-4C: the committed tool answer equals the delivered text')
+    assertStrict.equal(tool.settled.updates
+      .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk').length, 1,
+    'PO-4C: the streamed tool answer is never re-sent')
     assertStrict.equal(tool.settled.updates.filter(entry => entry.message.params.update.sessionUpdate === 'tool_call').length, 1,
       'PO-4C: the assistant tool-call block never duplicates the durable tool/call start')
     const toolStored = await waitForC1WorkEvent(workRoot,

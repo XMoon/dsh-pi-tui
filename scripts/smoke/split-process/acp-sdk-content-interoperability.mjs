@@ -207,12 +207,16 @@ function assistantMessage(flight) {
 }
 
 /** Compare complete typed text envelopes without printing private text on failure. */
-function assertTextChunks(updates, message, sessionId, messageId = message.id) {
+function assertTextChunks(updates, message, sessionId, messageId = updates[0]?.update?.messageId) {
   requireFact(message.content.every(block => block.type === 'text'), 'committed assistant text blocks')
+  // A streamed message is delivered under the attempt's own opaque ACP message
+  // id (the durable message id is not a wire id), so the stable identity is
+  // read from the delivered attempt and must hold for every chunk of it.
+  requireFact(typeof messageId === 'string' && messageId !== '', 'one stable ACP message id for the attempt')
   const expected = message.content.map(content => ({
     sessionId, update: { sessionUpdate: 'agent_message_chunk', messageId, content },
   }))
-  requireFact(isDeepStrictEqual(updates, expected), 'complete ordered typed text chunks equal the committed text bytes and the attempt message id')
+  requireFact(isDeepStrictEqual(updates, expected), 'complete ordered typed text chunks equal the committed text bytes and one stable attempt message id')
 }
 
 function imageRef(block) {
