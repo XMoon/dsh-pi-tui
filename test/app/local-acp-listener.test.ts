@@ -35,8 +35,12 @@ import {
 } from '../../src/app/remote-process/local-acp-listener.ts'
 import {
   AcpSessionViewRegistry,
+  LocalAcpViewError,
+  type AcpContinuedAnswerOutcome,
   type AcpCreateSessionOutcome,
   type AcpImageLimits,
+  type AcpQuestionAnswer,
+  type AcpQuestionSnapshot,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
   type AcpStoredImage,
@@ -295,8 +299,13 @@ function newScope(t: TestContext): { dir: string; scope: LocalScope } {
   return { dir, scope }
 }
 
-function initialize(client: RawClient, id: number, protocolVersion = 1): void {
-  client.send({ jsonrpc: '2.0', id, method: 'initialize', params: { protocolVersion, clientCapabilities: {} } })
+function initialize(
+  client: RawClient,
+  id: number,
+  protocolVersion = 1,
+  clientCapabilities: Record<string, unknown> = {},
+): void {
+  client.send({ jsonrpc: '2.0', id, method: 'initialize', params: { protocolVersion, clientCapabilities } })
 }
 
 async function expectClose(client: RawClient): Promise<void> {
@@ -1138,6 +1147,15 @@ function makeFakeAccess(options: {
     signal?: AbortSignal,
   ) => Promise<AcpScopedMcpLease | undefined>
   readonly requestRetireScopedMcp?: (lease: AcpScopedMcpLease) => Promise<void>
+  readonly questionService?: boolean
+  readonly questionSnapshot?: (sessionId: string, agent: LiveAgentViewIdentity, session: object) => AcpQuestionSnapshot
+  readonly answerContinued?: (
+    sessionId: string,
+    agent: LiveAgentViewIdentity,
+    session: object,
+    callId: string,
+    answer: AcpQuestionAnswer,
+  ) => AcpContinuedAnswerOutcome
 } = {}): {
   access: HostAcpSessionAccess
   seed: (id: string, cwd: string) => LiveAgentViewIdentity
@@ -1151,6 +1169,7 @@ function makeFakeAccess(options: {
   turnFence: { openTurnStartSeq: number | null; lastTurn: number }
   staleCancel: { value: boolean }
   pendingInbox: Set<string>
+  continuedAnswers: Array<{ readonly callId: string; readonly answer: AcpQuestionAnswer }>
 } {
   const agents = new Map<string, { id: string; session: { id: string; header: { cwd: string } } }>()
   const prompts: AcpSessionPromptRequest[] = []
@@ -1158,6 +1177,7 @@ function makeFakeAccess(options: {
   const removedMessageIds: string[] = []
   const cancelledTurns: Array<{ readonly turn: number; readonly keepInbox: boolean }> = []
   const pendingInbox = new Set<string>()
+  const continuedAnswers: Array<{ readonly callId: string; readonly answer: AcpQuestionAnswer }> = []
   const turnFence = { openTurnStartSeq: null as number | null, lastTurn: 0 }
   let facts: AcpPromptFactListener | undefined
   let observeCalls = 0
@@ -1165,6 +1185,26 @@ function makeFakeAccess(options: {
   let counter = 0
   return {
     access: {
+      hasQuestionService() {
+        return options.questionService === true
+      },
+      questionSnapshot(sessionId: string, agent: LiveAgentViewIdentity, session: object) {
+        return options.questionSnapshot === undefined
+          ? { kind: 'unavailable' as const }
+          : options.questionSnapshot(sessionId, agent, session)
+      },
+      answerContinued(
+        sessionId: string,
+        agent: LiveAgentViewIdentity,
+        session: object,
+        callId: string,
+        answer: AcpQuestionAnswer,
+      ) {
+        if (options.answerContinued === undefined) return { kind: 'unavailable' as const }
+        const outcome = options.answerContinued(sessionId, agent, session, callId, answer)
+        if (outcome.kind === 'queued') continuedAnswers.push({ callId, answer })
+        return outcome
+      },
       async createWorkspace(path: string) {
         return { kind: 'created' as const, workspaceId: `ws-${path}`, path }
       },
@@ -1271,6 +1311,9 @@ function makeFakeAccess(options: {
           onAgentError: (agent, turn) => listener.onAgentError(agent, turn),
           onAgentDisposed: agent => listener.onAgentDisposed(agent),
           onApprovalRequest: (request, next) => listener.onApprovalRequest(request, next),
+          onAssistantStream: (agent, frame) => listener.onAssistantStream(agent, frame),
+          onQuestionRequest: (request, next) => listener.onQuestionRequest(request, next),
+          onQuestionProjection: (session, key) => listener.onQuestionProjection(session, key),
         }
         return () => { facts = undefined }
       },
@@ -1288,6 +1331,7 @@ function makeFakeAccess(options: {
     cancelledTurns,
     modelSelections,
     pendingInbox,
+    continuedAnswers,
     turnFence,
     staleCancel,
   }
@@ -1356,10 +1400,11 @@ test('a Host Session View advertises resume/close and serves new/close over the 
     fake.turnFence.lastTurn = 2
     facts.onInboxClaimed(agentB, messageB, 2)
     facts.onSessionEvent(agentB.session, {
+      seq: 2,
       type: 'assistant/message',
       data: { turn: 2, message: { id: 'm-b', content: [{ type: 'text', text: 'B answer' }] } },
     })
-    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, { seq: 3, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
     let answerB: { id?: number; result?: { stopReason?: string } } | undefined
     for (;;) {
       const message = (await client.next()) as { id?: number; result?: { stopReason?: string } }
@@ -1463,10 +1508,11 @@ test('one ACP socket routes concurrent prompts and close to their exact Session'
 
     // B settles independently first; only B's sessionId is on its notifications.
     facts.onSessionEvent(agentB.session, {
+      seq: 4,
       type: 'assistant/message',
       data: { turn: 12, message: { id: 'm-b', content: [{ type: 'text', text: 'answer B' }] } },
     })
-    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 12, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, { seq: 5, type: 'turn/end', data: { turn: 12, reason: { kind: 'completed' } } })
     let responseB: { id?: number; result?: { stopReason?: string } } | undefined
     let updateB: { params?: { sessionId?: string } } | undefined
     for (;;) {
@@ -1479,10 +1525,11 @@ test('one ACP socket routes concurrent prompts and close to their exact Session'
 
     // A still settles on its own facts and never receives B's response or update.
     facts.onSessionEvent(agentA.session, {
+      seq: 6,
       type: 'assistant/message',
       data: { turn: 11, message: { id: 'm-a', content: [{ type: 'text', text: 'answer A' }] } },
     })
-    facts.onSessionEvent(agentA.session, { type: 'turn/end', data: { turn: 11, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentA.session, { seq: 7, type: 'turn/end', data: { turn: 11, reason: { kind: 'completed' } } })
     let responseA: { id?: number; result?: { stopReason?: string } } | undefined
     let updateA: { params?: { sessionId?: string } } | undefined
     for (;;) {
@@ -1503,10 +1550,11 @@ test('one ACP socket routes concurrent prompts and close to their exact Session'
     fake.turnFence.lastTurn = 13
     facts.onInboxClaimed(agentB, messageBAgain, 13)
     facts.onSessionEvent(agentB.session, {
+      seq: 8,
       type: 'assistant/message',
       data: { turn: 13, message: { id: 'm-b-2', content: [{ type: 'text', text: 'B again answer' }] } },
     })
-    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 13, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, { seq: 9, type: 'turn/end', data: { turn: 13, reason: { kind: 'completed' } } })
     for (;;) {
       const message = (await client.next()) as { id?: number; result?: { stopReason?: string } }
       if (message.id === 7) {
@@ -1833,10 +1881,11 @@ test('an Agent disposal releases only its own View and leaves the sibling Sessio
     facts.onInboxInserted(agentB, message)
     facts.onInboxClaimed(agentB, message, 1)
     facts.onSessionEvent(agentB.session, {
+      seq: 10,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-after-a', content: [{ type: 'text', text: 'B survives' }] } },
     })
-    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, { seq: 11, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     for (;;) {
       const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
       if (response.id === 4) {
@@ -1853,6 +1902,15 @@ test('an Agent disposal releases only its own View and leaves the sibling Sessio
 test('session/new carries the authoritative created session id in JSON-RPC error data on published-with-error', async t => {
   const { scope } = newScope(t)
   const access: HostAcpSessionAccess = {
+    hasQuestionService() {
+      return false
+    },
+    questionSnapshot() {
+      return { kind: 'unavailable' as const }
+    },
+    answerContinued() {
+      return { kind: 'unavailable' as const }
+    },
     async createWorkspace() {
       return { kind: 'created', workspaceId: 'ws-po2', path: '/host' }
     },
@@ -2028,10 +2086,11 @@ test('session/prompt admits one attached text prompt and answers the real stop r
     facts.onInboxInserted(agent, timeContext)
     facts.onInboxClaimed(agent, timeContext, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 12,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-uds', content: [{ type: 'text', text: 'wire answer' }] } },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 13, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
 
     const update = (await client.next()) as {
       method?: string
@@ -2152,10 +2211,11 @@ test('a physical connection end with an in-flight prompt never affects an indepe
     facts.onInboxInserted(agent, message)
     facts.onInboxClaimed(agent, message, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 14,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-b', content: [{ type: 'text', text: 'b answer' }] } },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 15, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     const update = (await b.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
     assert.equal(update.method, 'session/update')
     assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
@@ -2201,10 +2261,11 @@ test('session/cancel over the real socket removes the exact queued message and a
     facts.onInboxInserted(agent, { id: 'm-next', source: { kind: 'user', rpcId: secondRequest.requestId } })
     facts.onInboxClaimed(agent, { id: 'm-next', source: { kind: 'user', rpcId: secondRequest.requestId } }, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 16,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-next', content: [{ type: 'text', text: 'next answer' }] } },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 17, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     const update = (await client.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
     assert.equal(update.method, 'session/update')
     assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
@@ -2253,10 +2314,11 @@ test('an approval of the ACP-owned turn arrives as a REVERSE session/request_per
     assert.equal(await decided, 'allowed-once')
     // The turn settles and the prompt completes normally.
     facts.onSessionEvent(agent.session, {
+      seq: 18,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-ap', content: [{ type: 'text', text: 'approved answer' }] } },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 19, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     // The committed answer arrives first as a session/update notification.
     const update = (await client.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
     assert.equal(update.method, 'session/update')
@@ -2321,13 +2383,15 @@ test('permission requests on one socket stay on their exact Session', async t =>
     assert.equal(await decidedB, 'rejected')
 
     facts.onSessionEvent(agentA.session, {
+      seq: 20,
       type: 'assistant/message', data: { turn: 1, message: { id: 'm-permission-a', content: [{ type: 'text', text: 'A answer' }] } },
     })
-    facts.onSessionEvent(agentA.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentA.session, { seq: 21, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     facts.onSessionEvent(agentB.session, {
+      seq: 22,
       type: 'assistant/message', data: { turn: 2, message: { id: 'm-permission-b', content: [{ type: 'text', text: 'B answer' }] } },
     })
-    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, { seq: 23, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
     const responses = new Map<number, { result?: { stopReason?: string } }>()
     for (let remaining = 2; remaining > 0;) {
       const message = (await client.next()) as { id?: number; method?: string; result?: { stopReason?: string } }
@@ -2465,7 +2529,7 @@ test('R701-01b: retirement returns promptly while a shared turn is still running
     // The subscription is STILL alive for the running turn's facts.
     assert.ok(fake.facts() !== undefined, 'the Host fact subscription outlives the network entry')
     // The turn ends for real: the subscription is disposed after that fact.
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 24, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     for (let guard = 0; guard < 200 && fake.facts() !== undefined; guard += 1) {
       await new Promise(resolveTick => setImmediate(resolveTick))
     }
@@ -2523,6 +2587,7 @@ test('R701-03: an Off -> On overlap keeps exactly ONE Host fact/approval subscri
         facts.onInboxInserted(newAgent, { id: 'm-new', source: { kind: 'user', rpcId: newRequest.requestId } })
         facts.onInboxClaimed(newAgent, { id: 'm-new', source: { kind: 'user', rpcId: newRequest.requestId } }, 2)
         facts.onSessionEvent(newAgent.session, {
+          seq: 25,
           type: 'assistant/message',
           data: { turn: 2, message: { id: 'm-new', content: [{ type: 'text', text: 'one update' }] } },
         })
@@ -2531,7 +2596,7 @@ test('R701-03: an Off -> On overlap keeps exactly ONE Host fact/approval subscri
         assert.equal(update.method, 'session/update')
         assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
         assert.equal(await clientB.silent(500), true, 'no duplicate update arrived from a second subscription')
-        facts.onSessionEvent(newAgent.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+        facts.onSessionEvent(newAgent.session, { seq: 26, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
         const response = (await clientB.next()) as { id?: number; result?: { stopReason?: string } }
         assert.equal(response.id, 3)
         assert.equal(response.result?.stopReason, 'end_turn')
@@ -2542,7 +2607,7 @@ test('R701-03: an Off -> On overlap keeps exactly ONE Host fact/approval subscri
       // settles the registry.
       const oldFacts = fake.facts()
       assert.ok(oldFacts !== undefined)
-      oldFacts.onSessionEvent(oldAgent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } } })
+      oldFacts.onSessionEvent(oldAgent.session, { seq: 27, type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } } })
       await registry.whenHostWorkSettled()
       assert.equal(fake.observeCalls(), 1)
     } finally {
@@ -2665,7 +2730,7 @@ test('a same-id edit stays pending over UDS, true removal settles, and a later b
     const barrier = (await client.next()) as { id?: number }
     assert.equal(barrier.id, 6, 'no ACP permission or prompt settlement was sent for the TUI-owned running turn')
     assert.deepEqual(fake.cancelledTurns, [], 'the shared TUI turn is never cancelled')
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 28, type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
     const mixed = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
     assert.equal(mixed.id, 5)
     assert.equal(mixed.error?.data?.code, 'LOCAL_ACP_PROMPT_MIXED_TURN')
@@ -2709,10 +2774,11 @@ test('an unconfirmed A close stays fail-closed while B continues on the same soc
     facts.onInboxInserted(agentB, messageB)
     facts.onInboxClaimed(agentB, messageB, 1)
     facts.onSessionEvent(agentB.session, {
+      seq: 29,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-unconfirmed-b', content: [{ type: 'text', text: 'B settled' }] } },
     })
-    facts.onSessionEvent(agentB.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agentB.session, { seq: 30, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     for (;;) {
       const response = (await client.next()) as { id?: number; result?: { stopReason?: string } }
       if (response.id === 6) {
@@ -2969,10 +3035,11 @@ test('a fragmented image prompt frame above 1 MiB reaches the attached View inta
     facts.onInboxInserted(agent, message)
     facts.onInboxClaimed(agent, message, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 31,
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-image', content: [{ type: 'text', text: 'large frame accepted' }] } },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 32, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     const update = (await client.next()) as { method?: string; params?: { update?: { sessionUpdate?: string } } }
     assert.equal(update.method, 'session/update')
     assert.equal(update.params?.update?.sessionUpdate, 'agent_message_chunk')
@@ -3147,6 +3214,7 @@ test('PO-4C C-L5-01: committed output images are delivered even when the connect
     facts.onInboxInserted(agent, message)
     facts.onInboxClaimed(agent, message, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 33,
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -3159,7 +3227,7 @@ test('PO-4C C-L5-01: committed output images are delivered even when the connect
         },
       },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 34, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
 
     const update = (await client.next()) as {
       method?: string
@@ -3238,6 +3306,7 @@ test('PO-4C C-L5-02: a derived outbound budget carries one complete ACP image fr
     facts.onInboxInserted(agent, message)
     facts.onInboxClaimed(agent, message, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 35,
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -3250,7 +3319,7 @@ test('PO-4C C-L5-02: a derived outbound budget carries one complete ACP image fr
         },
       },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 36, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
 
     const update = (await client.next(30_000)) as {
       method?: string
@@ -3306,6 +3375,7 @@ test('PO-4C C-L5-02: a frame above the derived budget closes only that connectio
     facts.onInboxInserted(agent, message)
     facts.onInboxClaimed(agent, message, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 37,
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -3318,7 +3388,7 @@ test('PO-4C C-L5-02: a frame above the derived budget closes only that connectio
         },
       },
     })
-    facts.onSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    facts.onSessionEvent(agent.session, { seq: 38, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     await withTimeout(client.closed, 20_000, 'the over-budget frame must close its own connection')
     assert.ok(recorded.warnings.some(warning => warning.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'),
       `the over-budget frame keeps its own class; saw ${JSON.stringify(recorded.warnings.map(warning => warning.code))}`)
@@ -3375,6 +3445,7 @@ test('PO-4C C-L5-03: a slow reader is closed by the bounded chunked drain while 
     facts.onInboxInserted(agent, message)
     facts.onInboxClaimed(agent, message, 1)
     facts.onSessionEvent(agent.session, {
+      seq: 39,
       type: 'assistant/message',
       data: {
         turn: 1,
@@ -3466,7 +3537,7 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     const agent = fake.agentOf(sessionId)
     const facts = fake.facts()
     assert.ok(agent !== undefined && facts !== undefined)
-    facts.onSessionEvent(agent.session, { type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+    facts.onSessionEvent(agent.session, { seq: 40, type: 'model/selection', data: { provider: 'p1', model: 'b' } })
     const notification = (await client.next()) as {
       method?: string
       params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
@@ -3569,11 +3640,11 @@ test('model options and config updates stay scoped to their Session on one socke
     const agentA = fake.agentOf('session-model-a')
     const agentB = fake.agentOf(sessionB)
     assert.ok(facts !== undefined && agentA !== undefined && agentB !== undefined)
-    facts.onSessionEvent(agentA.session, { type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
+    facts.onSessionEvent(agentA.session, { seq: 41, type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
     const notificationA = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } } }
     assert.equal(notificationA.params?.sessionId, 'session-model-a')
     assert.deepEqual(notificationA.params?.update?.configOptions, optionsA)
-    facts.onSessionEvent(agentB.session, { type: 'model/selection', data: { provider: 'p1', model: 'b2' } })
+    facts.onSessionEvent(agentB.session, { seq: 42, type: 'model/selection', data: { provider: 'p1', model: 'b2' } })
     const notificationB = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { configOptions?: SessionConfigOption[] } } }
     assert.equal(notificationB.params?.sessionId, sessionB)
     assert.deepEqual(notificationB.params?.update?.configOptions, optionsB)
@@ -3693,6 +3764,282 @@ test('an unexpected optional-model-read error never becomes a successful attach'
     assert.equal(response.id, 2)
     assert.ok(response.error !== undefined, 'an unexpected Host read error must not be swallowed')
     assert.equal(response.result, undefined, 'the Session must not be reported as successfully attached')
+  } finally {
+    client.close()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// G-ACP2-PR1: the standard ACP v1 form elicitation channel over the real socket.
+// ---------------------------------------------------------------------------
+
+/** Read wire messages until BOTH named observations arrived (bounded). */
+async function nextUntil(
+  client: RawClient,
+  matches: (message: Record<string, unknown>) => string | undefined,
+  expected: readonly string[],
+): Promise<Record<string, Record<string, unknown>>> {
+  const seen: Record<string, Record<string, unknown>> = {}
+  for (let attempt = 0; attempt < 24 && Object.keys(seen).length < expected.length; attempt += 1) {
+    const message = (await client.next()) as Record<string, unknown>
+    const key = matches(message)
+    if (key !== undefined && expected.includes(key)) seen[key] = message
+  }
+  assert.deepEqual(Object.keys(seen).sort(), [...expected].sort(), `all expected wire messages arrived: ${JSON.stringify(seen)}`)
+  return seen
+}
+
+/** The standard JSON-RPC method name of one reverse elicitation request. */
+const ELICITATION_CREATE = 'elicitation/create'
+
+test('G-ACP2-PR1 QU-01 wire: an owned question becomes ONE standard form elicitation/create and the accepted answer returns to the waterfall', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    questionService: true,
+    questionSnapshot: () => ({ kind: 'current', continued: [], settled: new Set() }),
+    answerContinued: () => ({ kind: 'queued' }),
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1, 1, { elicitation: { form: {} } })
+    assert.equal(((await client.next()) as { result?: { protocolVersion?: number } }).result?.protocolVersion, 1)
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId
+    assert.equal(typeof sessionId, 'string')
+    const agent = fake.agentOf(sessionId!)!
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'ask me' }] } })
+    const dispatched = await waitForFact(() => fake.prompts[0], 'the owned prompt dispatch')
+    assert.equal(dispatched.sessionId, sessionId)
+    const facts = fake.facts()
+    assert.ok(facts !== undefined)
+    const message = { id: 'm-owned', source: { kind: 'user', rpcId: dispatched.requestId } }
+    facts.onInboxInserted(agent, message)
+    fake.turnFence.openTurnStartSeq = 40
+    fake.turnFence.lastTurn = 4
+    facts.onInboxClaimed(agent, message, 4)
+
+    const answerPromise = facts.onQuestionRequest(
+      {
+        agent,
+        questions: [
+          { id: 'native-one', question: 'Which one?', header: 'Choice', options: [{ label: 'A' }, { label: 'B' }] },
+          { id: 'native-two', question: 'Anything else?' },
+        ],
+        wait: { callId: 'call-question' },
+      },
+      async () => ({ answers: [] }),
+    )
+    const wire = (await client.next()) as {
+      readonly id?: number
+      readonly method?: string
+      readonly params?: Record<string, unknown>
+    }
+    assert.equal(wire.method, ELICITATION_CREATE)
+    assert.equal(wire.params?.['mode'], 'form')
+    assert.equal(wire.params?.['sessionId'], sessionId)
+    assert.equal(wire.params?.['toolCallId'], 'call-question')
+    assert.equal(typeof wire.params?.['message'], 'string')
+    const schema = wire.params?.['requestedSchema'] as {
+      readonly type?: string
+      readonly required?: readonly string[]
+      readonly properties?: Record<string, Record<string, unknown>>
+    }
+    assert.equal(schema.type, 'object')
+    assert.deepEqual(schema.required, [])
+    assert.deepEqual(Object.keys(schema.properties ?? {}), ['q0', 'q0__other', 'q1'])
+    assert.deepEqual(schema.properties?.['q0']?.['oneOf'], [{ const: 'A', title: 'A' }, { const: 'B', title: 'B' }])
+    assert.equal(schema.properties?.['q1']?.['type'], 'string')
+    // The client's standard response travels back to the ORIGINAL waterfall.
+    client.send({ jsonrpc: '2.0', id: wire.id, result: { action: 'accept', content: { q0: 'B', q1: 'late text' } } })
+    assert.deepEqual(await answerPromise, {
+      answers: [
+        { id: 'native-one', selected: ['B'] },
+        { id: 'native-two', selected: [], custom: 'late text' },
+      ],
+    })
+    // The owned prompt then settles on its own durable facts.
+    facts.onSessionEvent(agent.session, {
+      seq: 1,
+      type: 'assistant/message',
+      data: { turn: 4, step: 1, message: { id: 'm-answer', content: [{ type: 'text', text: 'done' }] } },
+    })
+    facts.onSessionEvent(agent.session, { seq: 2, type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } })
+    const settled = await nextUntil(client, message => {
+      if (message['id'] === 3) return 'prompt'
+      if (message['method'] === 'session/update') return 'update'
+      return undefined
+    }, ['prompt'])
+    assert.deepEqual((settled['prompt'] as { result?: { stopReason?: string } }).result, { stopReason: 'end_turn' })
+  } finally {
+    client.close()
+  }
+})
+
+test('G-ACP2-PR1 QU-01 wire: a connection WITHOUT form capability never receives an elicitation/create and the owned question fails closed', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({ questionService: true })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1) // no elicitation capability negotiated
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const sessionId = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId
+    const agent = fake.agentOf(sessionId!)!
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'ask me' }] } })
+    const dispatched = await waitForFact(() => fake.prompts[0], 'the owned prompt dispatch')
+    const facts = fake.facts()!
+    const message = { id: 'm-owned', source: { kind: 'user', rpcId: dispatched.requestId } }
+    facts.onInboxInserted(agent, message)
+    fake.turnFence.openTurnStartSeq = 41
+    fake.turnFence.lastTurn = 5
+    facts.onInboxClaimed(agent, message, 5)
+    let delegated = 0
+    await assert.rejects(
+      facts.onQuestionRequest(
+        { agent, questions: [{ id: 'native', question: 'q?', options: [{ label: 'A' }] }] },
+        async () => { delegated += 1; return { answers: [] } },
+      ),
+      (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_QUESTION_UNAVAILABLE',
+    )
+    assert.equal(delegated, 0, 'an ACP-owned question is never delegated to another answerer')
+    assert.equal(await client.silent(250), true, 'no reverse elicitation request was ever sent on this connection')
+  } finally {
+    client.close()
+  }
+})
+
+test('G-ACP2-PR1 QU-04 wire: session/resume offers the official continued question on the SAME connection after the response', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    questionService: true,
+    questionSnapshot: () => ({
+      kind: 'current',
+      continued: [{ callId: 'call-resumed', questions: [{ id: 'native', question: 'still answerable?', options: [{ label: 'yes' }] }] }],
+      settled: new Set(),
+    }),
+    answerContinued: () => ({ kind: 'queued' }),
+  })
+  fake.seed('S-resume', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1, 1, { elicitation: { form: {} } })
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'S-resume', cwd: '/host/proj' } })
+    const observed = await nextUntil(client, message => {
+      if (message['id'] === 2) return 'resume'
+      if (message['method'] === ELICITATION_CREATE) return 'form'
+      return undefined
+    }, ['resume', 'form'])
+    assert.deepEqual((observed['resume'] as { result?: unknown }).result, {})
+    const form = observed['form'] as { readonly id?: number; readonly params?: Record<string, unknown> }
+    assert.equal(form.params?.['sessionId'], 'S-resume')
+    assert.equal(form.params?.['toolCallId'], 'call-resumed')
+    client.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { q0: 'yes' } } })
+    for (let wait = 0; wait < 20 && fake.continuedAnswers.length === 0; wait += 1) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 10))
+    }
+    assert.deepEqual(fake.continuedAnswers, [{
+      callId: 'call-resumed',
+      answer: { answers: [{ id: 'native', selected: ['yes'] }] },
+    }])
+  } finally {
+    client.close()
+  }
+})
+
+test('G-ACP2-PR1 LC-01 wire: a physical socket end releases the outstanding form of that connection only', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    questionService: true,
+    questionSnapshot: () => ({ kind: 'current', continued: [], settled: new Set() }),
+    answerContinued: () => ({ kind: 'queued' }),
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  initialize(client, 1, 1, { elicitation: { form: {} } })
+  await client.next()
+  client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+  const sessionId = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId
+  const agent = fake.agentOf(sessionId!)!
+  client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'ask me' }] } })
+  const dispatched = await waitForFact(() => fake.prompts[0], 'the owned prompt dispatch')
+  const facts = fake.facts()!
+  const message = { id: 'm-owned', source: { kind: 'user', rpcId: dispatched.requestId } }
+  facts.onInboxInserted(agent, message)
+  fake.turnFence.openTurnStartSeq = 42
+  fake.turnFence.lastTurn = 6
+  facts.onInboxClaimed(agent, message, 6)
+  const answerPromise = facts.onQuestionRequest(
+    { agent, questions: [{ id: 'native', question: 'q?', options: [{ label: 'A' }] }] },
+    async () => ({ answers: [] }),
+  )
+  const wire = (await client.next()) as { readonly method?: string }
+  assert.equal(wire.method, ELICITATION_CREATE)
+  // The connection dies with the form outstanding: the reverse request is
+  // aborted with this claim, and nothing is fabricated as an answer.
+  client.close()
+  await assert.rejects(answerPromise)
+  assert.deepEqual(fake.continuedAnswers, [])
+})
+
+test('G-ACP2-PR1 ST-01 wire: transient deltas reach the ACP client before the durable commit and are never re-sent', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const sessionId = ((await client.next()) as { result?: { sessionId?: string } }).result?.sessionId
+    const agent = fake.agentOf(sessionId!)!
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'stream' }] } })
+    const dispatched = await waitForFact(() => fake.prompts[0], 'the owned prompt dispatch')
+    const facts = fake.facts()!
+    const message = { id: 'm-stream', source: { kind: 'user', rpcId: dispatched.requestId } }
+    facts.onInboxInserted(agent, message)
+    fake.turnFence.openTurnStartSeq = 60
+    fake.turnFence.lastTurn = 7
+    facts.onInboxClaimed(agent, message, 7)
+
+    const attemptId = 'wire:1'
+    facts.onAssistantStream(agent, { type: 'start', attemptId, revision: 1, turn: 7, step: 1 })
+    facts.onAssistantStream(agent, { type: 'chunk', attemptId, revision: 2, index: 0, time: 1, chunk: { type: 'text-delta', index: 0, text: 'a' } })
+    facts.onAssistantStream(agent, { type: 'chunk', attemptId, revision: 3, index: 1, time: 2, chunk: { type: 'text-delta', index: 0, text: 'b' } })
+    const first = (await client.next()) as { readonly method?: string; readonly params?: { readonly update?: { readonly sessionUpdate?: string; readonly content?: { readonly text?: string }; readonly messageId?: string } } }
+    const second = (await client.next()) as typeof first
+    assert.equal(first.method, 'session/update')
+    assert.equal(first.params?.update?.sessionUpdate, 'agent_message_chunk')
+    assert.equal(first.params?.update?.content?.text, 'a')
+    assert.equal(second.params?.update?.content?.text, 'b')
+    const streamedId = first.params?.update?.messageId
+    assert.equal(typeof streamedId, 'string')
+    assert.equal(second.params?.update?.messageId, streamedId)
+    assert.equal(await client.silent(120), true, 'the durable message has not committed yet')
+
+    facts.onSessionEvent(agent.session, {
+      seq: 1,
+      type: 'assistant/message',
+      data: { turn: 7, step: 1, message: { id: 'm-durable', content: [{ type: 'text', text: 'ab' }] } },
+    })
+    facts.onAssistantStream(agent, {
+      type: 'end', attemptId, revision: 4, index: 2,
+      outcome: { kind: 'committed', eventType: 'assistant/message', seq: 1 },
+    })
+    assert.equal(await client.silent(120), true, 'the durable text was already delivered: no duplicate update')
+    facts.onSessionEvent(agent.session, { seq: 2, type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } })
+    const settled = (await client.next()) as { readonly id?: number; readonly result?: { readonly stopReason?: string } }
+    assert.equal(settled.id, 3)
+    assert.deepEqual(settled.result, { stopReason: 'end_turn' })
   } finally {
     client.close()
   }

@@ -363,10 +363,21 @@ export async function runAcpPo4cContentOutput(context) {
     const sessionId = openedSession.openSessionId
 
     const acp = await openConnection(scopeDir, 'PO-4C primary ACP connection')
-    assertStrict.deepEqual((await resume(acp, sessionId, 'PO-4C attach the TUI Session')).result, {})
+    const attached = await resume(acp, sessionId, 'PO-4C attach the TUI Session')
+    assertStrict.equal(attached.error, undefined,
+      `PO-4C: attaching the TUI Session must succeed (got ${JSON.stringify(attached.error)})`)
+    // Current contract: an attached View answers the connection-owned model
+    // options; no business payload of the Session may ride along.
+    const attachedResult = attached.result ?? {}
+    assertStrict.deepEqual(Object.keys(attachedResult).filter(key => key !== 'configOptions'), [],
+      `PO-4C: resume must not carry a business payload (got ${JSON.stringify(attachedResult)})`)
+    assert(attachedResult.configOptions === undefined || Array.isArray(attachedResult.configOptions),
+      'PO-4C: only the optional connection-owned config options may accompany resume')
 
-    // L6-C01: committed assistant text/image/text in exact order, same message
-    // id, and a standard ACP image frame above the legacy 256 KiB cap.
+    // L6-C01: committed assistant text/image/text. The transient contract sends
+    // the two standard text deltas as they arrive and appends the never-streamed
+    // durable IMAGE at the exact-seq join, under one stable ACP message id and
+    // with a standard image frame above the legacy 256 KiB cap.
     const mixed = await runPrompt(acp, sessionId, MARKERS.assistantMixed, 'PO-4C assistant text/image/text')
     assertEndTurn(mixed.settled, 'PO-4C assistant text/image/text')
     const mixedMessages = mixed.turnEvents.filter(event => event.type === 'assistant/message')
@@ -377,15 +388,16 @@ export async function runAcpPo4cContentOutput(context) {
     assertStrict.equal(mixedCommitted.content[0].text, TEXT_BEFORE)
     assertStrict.equal(mixedCommitted.content[2].text, TEXT_AFTER)
     const mixedRef = imageRefOf(mixedCommitted.content[1])
-    assertStrict.equal(mixed.settled.updates.length, 3, 'PO-4C: one ACP chunk per committed assistant block, no more')
+    assertStrict.equal(mixed.settled.updates.length, 3, 'PO-4C: two streamed text deltas plus the durable image, no more')
     const mixedKinds = mixed.settled.updates.map(entry => entry.message.params.update.sessionUpdate)
     assertStrict.deepEqual(mixedKinds, ['agent_message_chunk', 'agent_message_chunk', 'agent_message_chunk'])
-    assert(mixed.settled.updates.every(entry => entry.message.params.update.messageId === mixedCommitted.id),
-      'PO-4C: every assistant chunk keeps the committed message id')
+    const mixedMessageIds = new Set(mixed.settled.updates.map(entry => entry.message.params.update.messageId))
+    assertStrict.equal(mixedMessageIds.size, 1,
+      `PO-4C: one attempt uses ONE stable ACP message id (got ${JSON.stringify([...mixedMessageIds])})`)
     assertStrict.equal(mixed.settled.updates[0].message.params.update.content.text, TEXT_BEFORE)
-    assertStrict.equal(mixed.settled.updates[2].message.params.update.content.text, TEXT_AFTER)
-    const mixedImage = assertImageContent(mixed.settled.updates[1].message.params.update.content, mixedRef, 'PO-4C assistant image')
-    const mixedFrameBytes = mixed.settled.updates[1].rawBytes
+    assertStrict.equal(mixed.settled.updates[1].message.params.update.content.text, TEXT_AFTER)
+    const mixedImage = assertImageContent(mixed.settled.updates[2].message.params.update.content, mixedRef, 'PO-4C assistant image')
+    const mixedFrameBytes = mixed.settled.updates[2].rawBytes
     assert(mixedFrameBytes > LEGACY_FRAME_BYTES,
       `PO-4C: the delivered image frame must exceed the legacy 256 KiB cap (got ${String(mixedFrameBytes)})`)
     const mixedStored = await waitForC1WorkEvent(workRoot,
@@ -451,9 +463,18 @@ export async function runAcpPo4cContentOutput(context) {
     assertImageContent(resultUpdate.content[1].content, toolRef, 'PO-4C tool image')
     assertStrict.equal(resultUpdate.content[2].content.text, TOOL_TAIL)
     const finalToolChunk = tool.settled.updates[2].message.params.update
-    assertStrict.equal(finalToolChunk.messageId, tool.turnEvents
-      .filter(event => event.type === 'assistant/message').at(-1)?.data.message.id)
+    const finalToolMessage = tool.turnEvents.filter(event => event.type === 'assistant/message').at(-1)?.data.message
     assertStrict.equal(finalToolChunk.content.text, TOOL_ANSWER)
+    // The tool answer streamed as provisional text under the attempt's opaque
+    // ACP message id: the proof is that the delivered bytes equal the committed
+    // answer and were never re-sent after the durable append.
+    assertStrict.equal(typeof finalToolChunk.messageId, 'string')
+    assertStrict.equal((finalToolMessage?.content ?? [])
+      .filter(block => block.type === 'text').map(block => block.text).join(''), TOOL_ANSWER,
+    'PO-4C: the committed tool answer equals the delivered text')
+    assertStrict.equal(tool.settled.updates
+      .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk').length, 1,
+    'PO-4C: the streamed tool answer is never re-sent')
     assertStrict.equal(tool.settled.updates.filter(entry => entry.message.params.update.sessionUpdate === 'tool_call').length, 1,
       'PO-4C: the assistant tool-call block never duplicates the durable tool/call start')
     const toolStored = await waitForC1WorkEvent(workRoot,

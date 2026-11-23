@@ -80,13 +80,17 @@ import {
   startLocalAcpListener,
   type LocalAcpListener,
 } from './local-acp-listener.ts'
+import type { AcpQuestionSpec } from './local-acp-question-form.ts'
 import {
   AcpSessionViewRegistry,
   ACP_IMAGE_MEDIA_TYPES,
   type AcpImageLimits,
+  type AcpContinuedAnswerOutcome,
   type AcpCreateSessionOutcome,
   type AcpCreateWorkspaceOutcome,
   type AcpPromptFactListener,
+  type AcpQuestionAnswer,
+  type AcpQuestionSnapshot,
   type AcpSessionPromptRequest,
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
@@ -590,6 +594,49 @@ interface ToolsServiceLike {
   definitions(scope?: object): readonly { readonly name: string }[]
 }
 
+/** The official one-item answer shape (`AskUserQuestionAnswerItem`). */
+interface UserQuestionAnswerItemLike {
+  readonly id: string
+  readonly selected: readonly string[]
+  readonly custom?: string
+}
+
+/** The structural seam of the official `userQuestions` service. */
+interface UserQuestionServiceLike {
+  /**
+   * Commit ONE late answer for a continued timed call. `true` means the reply
+   * was accepted into the Agent inbox; `false` that the call is no longer
+   * answerable. A rejection keeps its official code (`REPLY_QUEUED`,
+   * `BAD_ANSWER`, `CALLER_NOT_LIVE`, …).
+   */
+  answer(
+    agent: LiveAgentViewIdentity,
+    callId: string,
+    answer: { readonly answers: readonly UserQuestionAnswerItemLike[] },
+  ): boolean
+}
+
+/** One official continued timed question (`PendingUserQuestion`). */
+interface PendingUserQuestionLike {
+  readonly callId: string
+  readonly questions: readonly AcpQuestionSpec[]
+  readonly state: 'open' | 'continued'
+}
+
+/** The official `userQuestions` projection state as this seam reads it. */
+interface UserQuestionProjectionStateLike {
+  readonly questions: {
+    readonly active: readonly PendingUserQuestionLike[]
+    readonly settled: readonly { readonly callId: string }[]
+  }
+}
+
+/** The structural seam of the official `sessionProjections` registry. */
+interface SessionProjectionServiceLike {
+  stateOf(session: object, key: string): unknown
+  onChanged(listener: (session: object, key: string) => void): () => void
+}
+
 /**
  * The synchronous cancel seam of one live Agent. PO-3B calls these two official
  * methods only, always on the EXACT attached object and in the same Host
@@ -632,6 +679,11 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
   const llm = context.reflect.get('llm') as LlmServiceLike | undefined
   const agentDefaultModel = context.reflect.get('agentDefaultModel') as DefaultModelServiceLike | undefined
   const tools = context.reflect.get('tools') as ToolsServiceLike | undefined
+  // Question capability is OPTIONAL: an environment without the official
+  // `userQuestions`/`sessionProjections` services never pretends to answer an
+  // ACP-owned question (the View fails it closed instead).
+  const userQuestions = context.reflect.get('userQuestions') as UserQuestionServiceLike | undefined
+  const sessionProjections = context.reflect.get('sessionProjections') as SessionProjectionServiceLike | undefined
   if (
     workspaceController === undefined
     || sessionController === undefined
@@ -828,6 +880,52 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       const boundary = agents.turnBoundaryOf(session)
       return { kind: 'current', openTurn: boundary.openTurnStartSeq === null ? null : boundary.lastTurn }
     },
+    hasQuestionService: () => userQuestions !== undefined && sessionProjections !== undefined,
+    questionSnapshot: (sessionId, agent, session): AcpQuestionSnapshot => {
+      // The EXACT live identity is re-verified: a projection read for a
+      // replaced Agent or a different Session object is never a question fact.
+      const liveAgent = agents.get(sessionId)
+      const liveSession = sessions.get(sessionId)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) return { kind: 'stale' }
+      if (sessionProjections === undefined) return { kind: 'unavailable' }
+      const state = sessionProjections.stateOf(session, 'userQuestions') as UserQuestionProjectionStateLike | undefined
+      // The unit is registered by the official question service; an absent key
+      // is capability absence, never an authoritative empty projection.
+      if (state === undefined) return { kind: 'unavailable' }
+      return {
+        kind: 'current',
+        continued: state.questions.active
+          .filter(question => question.state === 'continued')
+          .map(question => ({ callId: question.callId, questions: question.questions })),
+        settled: new Set(state.questions.settled.map(question => question.callId)),
+      }
+    },
+    answerContinued: (sessionId, agent, session, callId, answer, stillCurrent): AcpContinuedAnswerOutcome => {
+      // The VIEW ownership fence comes first and is read synchronously: a late
+      // answer of a closed/detached/re-bound View must never reach the shared
+      // Session even when the Agent/Session objects are still live.
+      if (!stillCurrent()) return { kind: 'stale' }
+      const liveAgent = agents.get(sessionId)
+      const liveSession = sessions.get(sessionId)
+      if (liveAgent !== agent || liveSession !== session || agent.session !== session) return { kind: 'stale' }
+      if (userQuestions === undefined) return { kind: 'unavailable' }
+      try {
+        // The official service owns the whole taxonomy: `true` is a queued
+        // reply, `false` is "no longer continued", and its rejections keep
+        // their exact code (REPLY_QUEUED / BAD_ANSWER / CALLER_NOT_LIVE).
+        return userQuestions.answer(agent, callId, {
+          answers: answer.answers.map(item => ({
+            id: item.id,
+            selected: [...item.selected],
+            ...item.custom === undefined ? {} : { custom: item.custom },
+          })),
+        })
+          ? { kind: 'queued' }
+          : { kind: 'not-continued' }
+      } catch (error) {
+        return { kind: 'rejected', code: remoteErrorCode(error) ?? 'question/answer-failed' }
+      }
+    },
     /**
      * Subscribe the View owner to the exact Host facts a prompt flight is
      * correlated against. The Host Context, registries and Agent/Session objects
@@ -853,12 +951,44 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         context.on('session/event', (session, event) => {
           listener.onSessionEvent(session, event)
         }),
+        // The transient provisional output of one emitting Agent. It is the
+        // SAME official frame the Direct TUI consumes; here it is correlated to
+        // an owned prompt flight and never persisted.
+        context.on('agent/assistant-stream', payload => {
+          listener.onAssistantStream(payload.agent, payload.frame)
+        }),
+        // The OFFICIAL question projection change feed. It is the only
+        // continued-answerability source; the View re-reads the exact Session.
+        ...sessionProjections === undefined
+          ? []
+          : [sessionProjections.onChanged((session, key) => {
+            listener.onQuestionProjection(session, key)
+          })],
         context.on('agent/error', payload => {
           listener.onAgentError(payload.agent, payload.turn)
         }),
         context.on('agent/disposed', payload => {
           listener.onAgentDisposed(payload.agent)
         }),
+        // The ONE question classification seat of the shared waterfall. It is
+        // prepended for the same reason as the approval seat: a proven
+        // ACP-owned question is answered (or fails closed) here and never
+        // delegated to the TUI, while a foreign question calls `next()` once.
+        context.on('user-questions/request', async (request, next) => {
+          const answer = await listener.onQuestionRequest(
+            {
+              ...request.agent === undefined ? {} : { agent: request.agent },
+              questions: request.questions,
+              ...request.signal === undefined ? {} : { signal: request.signal },
+              ...request.wait === undefined ? {} : { wait: request.wait },
+            },
+            // A foreign (TUI/autonomous) question keeps its existing seat: the
+            // downstream answerer runs exactly once, and the View never rewrites
+            // the batch it returns.
+            async () => await next(),
+          )
+          return detachAnswerBatch(answer)
+        }, { prepend: true }),
         context.on('approval/request', (request, next) => {
           return listener.onApprovalRequest(
             {
@@ -876,6 +1006,17 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         for (const dispose of disposers) dispose()
       }
     },
+  }
+}
+
+/** Detach one official answer batch into the mutable wire shape consumers expect. */
+function detachAnswerBatch(answer: AcpQuestionAnswer): { answers: Array<{ id: string; selected: string[]; custom?: string }> } {
+  return {
+    answers: answer.answers.map(item => ({
+      id: item.id,
+      selected: [...item.selected],
+      ...item.custom === undefined ? {} : { custom: item.custom },
+    })),
   }
 }
 

@@ -207,12 +207,16 @@ function assistantMessage(flight) {
 }
 
 /** Compare complete typed text envelopes without printing private text on failure. */
-function assertTextChunks(updates, message, sessionId) {
+function assertTextChunks(updates, message, sessionId, messageId = updates[0]?.update?.messageId) {
   requireFact(message.content.every(block => block.type === 'text'), 'committed assistant text blocks')
+  // A streamed message is delivered under the attempt's own opaque ACP message
+  // id (the durable message id is not a wire id), so the stable identity is
+  // read from the delivered attempt and must hold for every chunk of it.
+  requireFact(typeof messageId === 'string' && messageId !== '', 'one stable ACP message id for the attempt')
   const expected = message.content.map(content => ({
-    sessionId, update: { sessionUpdate: 'agent_message_chunk', messageId: message.id, content },
+    sessionId, update: { sessionUpdate: 'agent_message_chunk', messageId, content },
   }))
-  requireFact(isDeepStrictEqual(updates, expected), 'complete ordered typed text chunks equal committed text bytes and message id')
+  requireFact(isDeepStrictEqual(updates, expected), 'complete ordered typed text chunks equal the committed text bytes and one stable attempt message id')
 }
 
 function imageRef(block) {
@@ -280,7 +284,11 @@ async function runScene(context, kind, env, operation) {
     assert.equal(capabilities.promptCapabilities.audio, false)
     assert.equal(capabilities.promptCapabilities.embeddedContext, false)
     requireFact(capabilities.loadSession !== true, 'session/load remains unadvertised')
-    assert.deepEqual(await sdk.request(acp.methods.agent.session.resume, { sessionId, cwd: workspace }), {})
+    const resumed = await sdk.request(acp.methods.agent.session.resume, { sessionId, cwd: workspace })
+    // Current contract: the attached View answers the connection-owned model
+    // options; no business payload of the Session may ride along.
+    requireFact(isDeepStrictEqual(Object.keys(resumed ?? {}).filter(key => key !== 'configOptions'), []),
+      `resume must not carry a business payload (got ${JSON.stringify(resumed)})`)
     const session = { context, scene, sdk, sessionId, workRoot, identity, workspace }
     result = await operation(session)
     sdk.assertWindow()
@@ -432,11 +440,18 @@ async function outputScene(context) {
     requireFact(isDeepStrictEqual(message.content.map(block => block.type), ['text', 'image', 'text']), 'committed assistant text/image/text')
     const ref = imageRef(message.content[1])
     const proof = await storeProof('mixed.png')
-    requireFact(mixed.updates.length === 3 && mixed.updates.every(params => params.update.sessionUpdate === 'agent_message_chunk'
-      && params.update.messageId === message.id), 'three ordered chunks of the exact committed message')
-    for (const index of [0, 2]) assertTextChunks([mixed.updates[index]], { id: message.id, content: [message.content[index]] }, sessionId)
-    const mixedBytes = assertImage(mixed.updates[1].update.content, ref, proof)
-    requireFact(Buffer.byteLength(mixed.updates[1].update.content.data) > 256 * 1024, 'typed image logical payload exceeds 256 KiB')
+    // Transient contract: the two standard text deltas arrive as they stream and
+    // the never-streamed durable image is appended at the exact-seq join, all
+    // under ONE stable ACP message id (which may differ from the durable id).
+    requireFact(mixed.updates.length === 3 && mixed.updates.every(params => params.update.sessionUpdate === 'agent_message_chunk'),
+      'two streamed text deltas plus the durable image, no more')
+    requireFact(new Set(mixed.updates.map(params => params.update.messageId)).size === 1,
+      `one attempt uses one stable ACP message id (got ${JSON.stringify(mixed.updates.map(params => params.update.messageId))})`)
+    for (const index of [0, 1]) {
+      assertTextChunks([mixed.updates[index]], { content: [message.content[index === 0 ? 0 : 2]] }, sessionId, mixed.updates[0].update.messageId)
+    }
+    const mixedBytes = assertImage(mixed.updates[2].update.content, ref, proof)
+    requireFact(Buffer.byteLength(mixed.updates[2].update.content.data) > 256 * 1024, 'typed image logical payload exceeds 256 KiB')
 
     const imageOnly = await run('po4c:assistant-image-only:v1', 'assistant image only with image input disabled')
     const onlyMessage = assistantMessage(imageOnly)

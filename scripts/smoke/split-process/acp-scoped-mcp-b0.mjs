@@ -412,7 +412,11 @@ export async function runAcpScopedMcpB0(context) {
     assert(openedA.initialized?.protocolVersion === 1, 'Q02: initialize must answer protocolVersion 1')
     assert(openedA.initialized?.agentInfo?.name === 'dsh-pi-tui', 'Q02: initialize must name dsh-pi-tui')
     const resumeA = await acpA.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
-    assert(JSON.stringify(resumeA) === '{}', `Q02: session/resume(A) must return {} (got ${JSON.stringify(resumeA)})`)
+    // Current contract: the attached View answers the connection-owned model
+    // options; no business payload of the Session may ride along.
+    assert(Object.keys(resumeA ?? {}).filter(key => key !== 'configOptions').length === 0
+      && (resumeA?.configOptions === undefined || Array.isArray(resumeA.configOptions)),
+    `Q02: session/resume(A) must attach without a business payload (got ${JSON.stringify(resumeA)})`)
     assert(surfaceSessionId(tuiA) === sessionA, 'Q02: the real TUI A must keep Session A after the ACP resume')
     await assertSameHost(hostIdentity, 'Q02 Host after ACP resume')
 
@@ -614,7 +618,9 @@ export async function runAcpScopedMcpB0(context) {
     const acpResume = openedResume.client
     acpClients.push(acpResume)
     const resumeAgain = await acpResume.request(acp.methods.agent.session.resume, { sessionId: sessionA, cwd: hostCwd })
-    assert(JSON.stringify(resumeAgain) === '{}', `Q09: A must stay resumable after the retire (got ${JSON.stringify(resumeAgain)})`)
+    assert(Object.keys(resumeAgain ?? {}).filter(key => key !== 'configOptions').length === 0
+      && (resumeAgain?.configOptions === undefined || Array.isArray(resumeAgain.configOptions)),
+    `Q09: A must stay resumable after the retire without a business payload (got ${JSON.stringify(resumeAgain)})`)
     const beforePlain = eventsOf(sessionA).length
     await sendTuiPrompt(tuiA, `B0_PLAIN_A ${nonceEcho}`, 'Q09 tui A plain')
     await waitForTurnEnd(sessionA, beforePlain, 'Q09 TUI A turn/end')

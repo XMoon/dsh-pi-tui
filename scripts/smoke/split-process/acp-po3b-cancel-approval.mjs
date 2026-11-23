@@ -539,9 +539,18 @@ export async function runAcpPo3bCancelApproval(context) {
       && abortedEnd.data?.reason?.kind === 'aborted'
       && abortedEnd.data?.reason?.reason?.kind === 'user'
       && runningResponse?.result?.stopReason === 'cancelled'
+    // Transient contract: the delivered provisional bytes ARE the interrupted
+    // committed block (one provider delta, no re-sent commit), and they were
+    // drained BEFORE the cancelled answer.
+    const runningChunkText = runningChunks.map(chunk => chunk?.update?.content?.text ?? '').join('')
+    const interruptedText = (interruptedCommitted[0]?.data?.message?.content ?? [])
+      .filter(block => block?.type === 'text' && typeof block.text === 'string')
+      .map(block => block.text)
+      .join('')
     const cancelDrainBeforeStop = runningCancelExactTurn
-      && runningChunks.length === interruptedCommitted.length
+      && interruptedCommitted.length === 1
       && runningChunks.length > 0
+      && runningChunkText === interruptedText
 
     // C05's aborted turn never consumed the barrier; release it so the natural
     // turn below runs to completion.

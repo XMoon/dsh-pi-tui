@@ -47,12 +47,23 @@
  * content conversion failure fails the request instead of sending a partial
  * event as success.
  *
+ * G-ACP2-PR1 adds the provisional/question halves of the SAME owned flight:
+ * the official transient `agent/assistant-stream` frames become ordered
+ * `agent_message_chunk`/`agent_thought_chunk` updates BEFORE their durable
+ * `assistant/message` commits, and the durable event then only reconciles the
+ * exact `seq` (never re-sending text already delivered); the official scoped
+ * `user-questions/request` waterfall becomes a standard ACP v1
+ * `elicitation/create` form whose accepted answer returns to the SAME official
+ * `userQuestions` service, including the timed `continued` hand-off that
+ * outlives the prompt flight but not this connection's claim.
+ *
  * @module app/remote-process/local-acp-session-view
  */
 
 import { randomUUID } from 'node:crypto'
 import type {
   ContentBlock as AcpWireContentBlock,
+  ElicitationSchema,
   SessionConfigOption,
   SessionUpdate,
   StopReason,
@@ -60,6 +71,19 @@ import type {
 } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runDetached } from '../../runtime/process/tasks.ts'
+import {
+  AcpAssistantStream,
+  joinStreamedMessage,
+  readAssistantStreamFrame,
+  type AcpStreamBlock,
+} from './local-acp-live-stream.ts'
+import {
+  answerQuestionForm,
+  buildQuestionForm,
+  type AcpQuestionAnswerItem,
+  type AcpQuestionForm,
+  type AcpQuestionSpec,
+} from './local-acp-question-form.ts'
 import {
   AcpModelError,
   type AcpModelCurrentness,
@@ -195,6 +219,35 @@ export interface HostAcpSessionAccess {
     signal: AbortSignal,
     stillCurrent: () => AcpModelCurrentness,
   ): Promise<SessionConfigOption[]>
+  /**
+   * Whether the exact Host installed the official `userQuestions` service. An
+   * absent service is a capability absence: an ACP-owned question then fails
+   * closed instead of being answered by a second/durable answer store.
+   */
+  hasQuestionService(): boolean
+  /**
+   * Read the official `userQuestions` projection of the exact Session. The
+   * View never derives continued state itself: `unavailable` is a capability
+   * absence (no projection registry) and `stale` a lost exact identity.
+   */
+  questionSnapshot(sessionId: string, agent: LiveAgentViewIdentity, session: object): AcpQuestionSnapshot
+  /**
+   * Submit ONE official late answer for a continued call. The official
+   * `userQuestions.answer` result is preserved exactly: `queued` accepts the
+   * reply into the inbox, `not-continued` is its `false`, and `rejected` keeps
+   * the official error code instead of becoming a fabricated success. The
+   * SYNCHRONOUS `stillCurrent` fence is re-read immediately before the write so
+   * a View that lost ownership can never inject a late reply into the shared
+   * Session.
+   */
+  answerContinued(
+    sessionId: string,
+    agent: LiveAgentViewIdentity,
+    session: object,
+    callId: string,
+    answer: AcpQuestionAnswer,
+    stillCurrent: () => boolean,
+  ): AcpContinuedAnswerOutcome
 }
 
 /** One transient per-connection config-options notification callback. */
@@ -264,11 +317,12 @@ export type LocalAcpPromptErrorCode =
   /** The exact live Agent/Session changed since this View attached. */
   | 'LOCAL_ACP_PROMPT_STALE_AGENT'
   /**
-   * The owned turn ended without ANY visible assistant output: no non-empty
-   * committed assistant text and no verified assistant image block. The historical
-   * external code is preserved; its meaning is the visible-output requirement.
+   * A durable `assistant/message` could not be proven identical to the
+   * provisional text already delivered for the same attempt/seq. ACP v1
+   * chunks are append-only, so the View fails closed instead of re-sending a
+   * "correction" (or pretending the failed attempt was committed).
    */
-  | 'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT'
+  | 'LOCAL_ACP_PROMPT_STREAM_DIVERGENCE'
   /** The owned turn ended blocked/error/aborted/interrupted or the Agent died. */
   | 'LOCAL_ACP_PROMPT_TURN_FAILED'
   /**
@@ -278,8 +332,26 @@ export type LocalAcpPromptErrorCode =
    */
   | 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
 
+/**
+ * The stable question classifications. They never carry an answer, a client
+ * name or a fallback: a question this View cannot legitimately serve fails
+ * closed instead of being silently answered by the TUI or by a default option.
+ */
+export type LocalAcpQuestionErrorCode =
+  /** The ACP connection did not negotiate the standard Form capability, or the
+   * exact Host question service/projection is absent for an ACP-owned turn. */
+  | 'LOCAL_ACP_QUESTION_UNAVAILABLE'
+  /** The client's elicitation response was not a legal answer to THIS form. */
+  | 'LOCAL_ACP_QUESTION_BAD_ANSWER'
+  /** The human declined or cancelled the Form: a refusal, never an empty answer. */
+  | 'LOCAL_ACP_QUESTION_DECLINED'
+
 /** Every stable local ACP classification the View owner can raise. */
-export type LocalAcpSessionErrorCode = LocalAcpViewErrorCode | LocalAcpPromptErrorCode | AcpModelErrorCode
+export type LocalAcpSessionErrorCode =
+  | LocalAcpViewErrorCode
+  | LocalAcpPromptErrorCode
+  | LocalAcpQuestionErrorCode
+  | AcpModelErrorCode
 
 /**
  * One classified View rejection. `rpcCode` is the JSON-RPC error code the
@@ -407,6 +479,26 @@ export interface AcpPromptFactListener {
    * delegated through `next()`; only a proven TUI-owned request calls `next()`.
    */
   onApprovalRequest(request: AcpApprovalRequest, next: () => Promise<AcpApprovalOutcome>): Promise<AcpApprovalOutcome>
+  /**
+   * One transient process-local assistant-stream frame of an emitting Agent.
+   * It is the ONLY provisional output source; it never becomes a durable fact
+   * and is dropped for every agent that is not the exact attached one.
+   */
+  onAssistantStream(agent: LiveAgentViewIdentity, frame: unknown): void
+  /**
+   * The official Agent-scoped question waterfall. It is registered with
+   * `prepend: true` for the SAME reason as the approval seat: a proven
+   * ACP-owned question is answered from THIS connection (or fails closed) and
+   * is never delegated through `next()`; only a proven foreign/TUI question
+   * calls `next()` exactly once.
+   */
+  onQuestionRequest(request: AcpQuestionRequest, next: () => Promise<AcpQuestionAnswer>): Promise<AcpQuestionAnswer>
+  /**
+   * One official `sessionProjections` change. The View re-reads the official
+   * question snapshot of the exact Session; it never derives continued state
+   * from a timer or from a client's still-open form.
+   */
+  onQuestionProjection(session: object, key: string): void
 }
 
 /** The official `approval/request` facts the View reads. */
@@ -421,6 +513,95 @@ export interface AcpApprovalRequest {
 /** The official closed approval outcome vocabulary (fail-closed union). */
 export type AcpApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
+/**
+ * The official `user-questions/request` facts the View reads. An agentless
+ * programmatic request has no ACP-owned turn to attribute and is never
+ * intercepted.
+ */
+export interface AcpQuestionRequest {
+  readonly agent?: LiveAgentViewIdentity
+  readonly questions: readonly AcpQuestionSpec[]
+  readonly signal?: AbortSignal
+  /** The official foreground/timed wait identity, when the producer supplied one. */
+  readonly wait?: { readonly callId: string; readonly timed?: boolean }
+}
+
+/** The official answer batch shape (`AskUserQuestionAnswer` is structurally equal). */
+export interface AcpQuestionAnswer {
+  readonly answers: readonly AcpQuestionAnswerItem[]
+}
+
+/**
+ * ONE standard ACP v1 `elicitation/create` request as this View sends it. It
+ * carries no client-specific field: `mode:'form'` is the only form of the
+ * standard request DSH native questions map onto.
+ */
+export interface AcpElicitationRequest {
+  readonly message: string
+  readonly sessionId: string
+  /** Present only when the official wait named a tool call. */
+  readonly toolCallId?: string
+  readonly requestedSchema: ElicitationSchema
+}
+
+/** The client's standard response, read structurally (`action` is a wider union). */
+export interface AcpElicitationResponse {
+  readonly action: string
+  readonly content?: unknown
+}
+
+/**
+ * The ONE connection-scoped reverse-elicitation channel of an attached View.
+ * It is created from the SAME SDK client as the `session/new|resume` request,
+ * dies with that connection and is never a second SDK Connection.
+ */
+export type AcpElicitationRequester = (
+  request: AcpElicitationRequest,
+  options: { readonly signal: AbortSignal },
+) => Promise<AcpElicitationResponse>
+
+/** The transient per-connection channels bound at attach time. */
+export interface AcpViewChannels {
+  /** The config-options notification sink of this connection. */
+  readonly notifyConfigOptions?: AcpConfigOptionsNotifier
+  /** The reverse elicitation channel of this connection (absent = no Form). */
+  readonly requestElicitation?: AcpElicitationRequester
+}
+
+/**
+ * One official continued timed question this View may still offer as a Form.
+ * It is a READ of the official projection, never a durable answer store.
+ */
+export interface AcpPendingQuestion {
+  readonly callId: string
+  readonly questions: readonly AcpQuestionSpec[]
+}
+
+/** One read of the official continued-question projection of an exact Session. */
+export type AcpQuestionSnapshot =
+  | {
+    readonly kind: 'current'
+    /** Continued calls in official ask order. */
+    readonly continued: readonly AcpPendingQuestion[]
+    /** Calls this Session already settled (any answer, any owner). */
+    readonly settled: ReadonlySet<string>
+  }
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'stale' }
+
+/**
+ * One official late-answer submission. `queued` means the official service
+ * accepted the reply into the Agent inbox (not that the model used it);
+ * `not-continued` is the official `false`; `rejected` keeps the official
+ * error code (`REPLY_QUEUED`, `BAD_ANSWER`, `CALLER_NOT_LIVE`, …).
+ */
+export type AcpContinuedAnswerOutcome =
+  | { readonly kind: 'queued' }
+  | { readonly kind: 'not-continued' }
+  | { readonly kind: 'rejected'; readonly code: string }
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'stale' }
+
 /** The inbox message facts the View reads (`UserMessage` is structurally wider). */
 export interface AcpUserMessageLike {
   readonly id: string
@@ -430,6 +611,12 @@ export interface AcpUserMessageLike {
 /** The committed Session event facts the View reads (`SessionEvent` is structurally wider). */
 export interface AcpSessionEventLike {
   readonly type: string
+  /**
+   * The official monotonic Session sequence number. It is the ONLY join key a
+   * transient stream attempt may use to reconcile its provisional text with
+   * the durable message the Host committed.
+   */
+  readonly seq: number
   readonly data: unknown
 }
 
@@ -542,6 +729,55 @@ interface ViewClaim {
   notifyConfigOptions?: AcpConfigOptionsNotifier
   /** The ordered per-claim config-notification chain; later updates never overtake earlier ones. */
   configNotifyTail?: Promise<void>
+  /**
+   * The ONE reverse-elicitation channel of this claim's connection. It is
+   * bound at attach time from the SAME SDK client as `session/new|resume`,
+   * dies with that connection and is never a second SDK Connection.
+   */
+  requestElicitation?: AcpElicitationRequester
+  /**
+   * Every outstanding reverse Form this claim owns (one per in-flight native
+   * question, plus the single continued offer). Close/EOF/Off/Agent disposal
+   * abort them here — one release hook, no second owner.
+   */
+  questionForms?: Set<QuestionFormAbort>
+  /**
+   * The continued timed questions this connection may still answer after their
+   * original foreground waterfalls ended, keyed by their OFFICIAL tool-call id.
+   * The official projection allows several simultaneous continued calls, so a
+   * second timeout must never overwrite the first obligation: every answer is
+   * watched and applied under its own call identity and never becomes another
+   * call's answer.
+   */
+  continuedQuestions?: Map<string, ContinuedQuestionObligation>
+  /**
+   * The continued calls this EXACT connection already offered as a Form. It is
+   * a connection-local dedupe fact, never a durable answer/state store.
+   */
+  offeredQuestions?: Set<string>
+  /** Serializes the resumed continued-question offers of this claim (one Form at a time). */
+  questionOfferTail?: Promise<void>
+}
+
+/** The abort handle of ONE outstanding reverse Form. */
+interface QuestionFormAbort {
+  /** `blocking` forms serve a live waterfall; `continued` forms are resumable offers. */
+  readonly kind: 'blocking' | 'continued'
+  /** The official tool call id this Form was keyed by, when the producer named one. */
+  readonly callId?: string
+  abort(): void
+}
+
+/** One continued-question obligation: the timed Form outlived its waterfall. */
+interface ContinuedQuestionObligation {
+  readonly callId: string
+  readonly form: AcpQuestionForm
+  /** Aborts the client-side Form when the obligation ends. */
+  readonly abort: QuestionFormAbort
+  /** The single legal answer already received, if any (applied at most once). */
+  answer?: AcpQuestionAnswer
+  /** Whether `answer` was already submitted to the official service. */
+  applied?: boolean
 }
 
 /** The maximum number of not-yet-written notifications ONE prompt flight may queue. */
@@ -564,8 +800,8 @@ type CommittedOutputEntry =
  * One unsettled prompt flight. Each field is a DIFFERENT authoritative fact:
  * `requestId` is View-minted, `messageId` comes from the official
  * `agent/inbox/inserted`, `turn` from the official `agent/inbox/claimed`, and
- * `assistantVisibleOutput` only from a committed non-empty assistant text or a
- * committed assistant image block.
+ * `stream` only from the official transient `agent/assistant-stream` frames of
+ * that exact claimed turn.
  */
 interface InflightPrompt {
   readonly requestId: string
@@ -581,8 +817,21 @@ interface InflightPrompt {
   /** The official open turn and its approval origin before Host admission. */
   turnProvenance?: TurnProvenance
   mixed: boolean
-  /** A committed assistant message carried visible output (non-empty text or image). */
-  assistantVisibleOutput: boolean
+  /**
+   * The ONE open transient attempt this flight streams. It belongs to THIS
+   * flight (never to the Agent or a second store) and is cleared at its
+   * durable reconciliation, its flight settlement or a framing violation.
+   */
+  stream?: AcpAssistantStream
+  /**
+   * The attempt id of provisional bytes this flight delivered and can NEVER
+   * prove committed (an official retry/replacement/abandoned attempt, or an
+   * `end` that never arrived). ACP v1 output is append-only, so those bytes
+   * cannot be retracted: once set, no terminal of this flight may report
+   * success, because the client would keep an answer that no durable message
+   * owns. Set at most once and never cleared.
+   */
+  unprovenProvisional?: string
   pendingUpdates: number
   outputTail: Promise<void>
   readonly sendUpdate: (update: SessionUpdate) => Promise<void>
@@ -670,6 +919,16 @@ interface PendingPermissionRequest {
 const JSONRPC_INVALID_PARAMS = -32602
 const JSONRPC_INTERNAL_ERROR = -32603
 
+/**
+ * The official message-source discriminants that prove HUMAN inbox input.
+ * Everything else (`skill-invocation`, `time-context`, any context-form
+ * injection) is Host/plugin context: it can never make an owned turn MIXED.
+ */
+const HUMAN_INBOX_SOURCES: ReadonlySet<string> = new Set(['user', 'user-question-reply'])
+
+/** The official code a timed foreground wait aborts with when its deadline ends. */
+const QUESTION_TIMED_OUT_CODE = 'ASK_TIMED_OUT'
+
 /** One standard classified prompt failure. */
 function promptError(
   code: LocalAcpPromptErrorCode,
@@ -678,6 +937,29 @@ function promptError(
   data: Readonly<Record<string, unknown>> = {},
 ): LocalAcpViewError {
   return new LocalAcpViewError(code, message, rpcCode, data)
+}
+
+/** One standard classified question failure (never a fabricated answer). */
+function questionError(
+  code: LocalAcpQuestionErrorCode,
+  message: string,
+  data: Readonly<Record<string, unknown>> = {},
+): LocalAcpViewError {
+  return new LocalAcpViewError(code, message, JSONRPC_INTERNAL_ERROR, data)
+}
+
+/** Whether one abort reason is the official timed-wait deadline expiry. */
+function isTimedOutReason(reason: unknown): boolean {
+  return hostErrorCode(reason) === QUESTION_TIMED_OUT_CODE
+}
+
+/** The classified abort of one question request (the official reason, or a stable refusal). */
+function questionAborted(reason: unknown, signal: AbortSignal | undefined): unknown {
+  if (reason !== undefined) return reason
+  const signalReason = signal?.reason
+  return signalReason === undefined
+    ? questionError('LOCAL_ACP_QUESTION_UNAVAILABLE', 'the question request was aborted')
+    : signalReason
 }
 
 /** The stable rejection when an attached View/Agent/Session identity changed mid-request. */
@@ -988,7 +1270,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
     request: AcpNewSessionParams,
-    notifyConfigOptions?: AcpConfigOptionsNotifier,
+    channels?: AcpViewChannels,
     requestSignal?: AbortSignal,
   ): Promise<{ sessionId: string }> {
     const op = this.beginAttach(state)
@@ -1066,7 +1348,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         throw error
       }
     }
-    this.commitAttached(state, op, claim, access, agent, notifyConfigOptions)
+    this.commitAttached(state, op, claim, access, agent, channels)
     return { sessionId }
   }
 
@@ -1079,7 +1361,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
     request: AcpResumeSessionParams,
-    notifyConfigOptions?: AcpConfigOptionsNotifier,
+    channels?: AcpViewChannels,
     requestSignal?: AbortSignal,
   ): Promise<Record<string, never>> {
     const op = this.beginAttach(state)
@@ -1113,7 +1395,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         throw error
       }
     }
-    this.commitAttached(state, op, claim, access, agent, notifyConfigOptions)
+    this.commitAttached(state, op, claim, access, agent, channels)
+    // A resumed View re-reads the OFFICIAL continued projection: every call
+    // that is still answerable is offered once on THIS connection, in official
+    // ask order. A brand-new Session (`newSession`) has no such history.
+    if (claim.requestElicitation !== undefined && access.hasQuestionService()) {
+      this.offerContinuedQuestions(claim, claim.requestElicitation)
+    }
     return {}
   }
 
@@ -1391,8 +1679,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   /** Release one settled claim and record the idempotent close fact. */
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
     if (this.claims.get(sessionId) !== claim || claim.detachedWithFence || state.phase === 'closed') return {}
-    // A closed View owns no connection output any more.
+    // A closed View owns no connection output or reverse Form any more.
     claim.notifyConfigOptions = undefined
+    this.releaseQuestionForms(claim)
     // A transient terminal fact may still outlive the View: a retired-turn
     // approval fence (F2) or an unclaimed Host obligation (v1.1). The View
     // detaches, but the claim survives so a LATE approval of that exact
@@ -1656,7 +1945,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         },
       }),
       mixed: false,
-      assistantVisibleOutput: false,
       pendingUpdates: 0,
       outputTail: Promise.resolve(),
       sendUpdate,
@@ -1871,9 +2159,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         continue
       }
-      // A user-role context injection is not another user's prompt. Only
-      // distinct user-sourced claims can make this flight's turn MIXED.
-      if (message.source?.kind !== 'user') continue
+      // A user-role context injection is not another user's prompt. Only a
+      // claim carrying a proven HUMAN source discriminant can make this
+      // flight's turn MIXED: an ordinary user prompt and a late
+      // `user-question-reply` are both human input, whatever their text says.
+      if (!HUMAN_INBOX_SOURCES.has(message.source?.kind ?? '')) continue
       if (flight.turn !== undefined) {
         if (flight.turn === turn) this.markFlightMixed(flight)
         continue
@@ -1907,8 +2197,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (typeof data?.turn !== 'number' || flight.turn === undefined || data.turn !== flight.turn) continue
       // The durable terminal of the OWNED turn arrives before the async
       // settlement drains (mixed or not): record it so a later failPrompt
-      // never plants a retired-turn fence for a turn that already ended.
-      if (event.type === 'turn/end') flight.ownTurnEnded = true
+      // never plants a retired-turn fence for a turn that already ended, and
+      // release any provisional attempt whose own `end` frame never arrived —
+      // its durable message can then never be joined to the shown bytes.
+      if (event.type === 'turn/end') {
+        flight.ownTurnEnded = true
+        const open = flight.stream
+        if (open !== undefined) {
+          // Its `end` frame never arrived: whatever it already delivered can
+          // never be joined to a durable append.
+          if (!open.hasTerminal && open.hasSent()) flight.unprovenProvisional ??= open.attemptId
+          open.endWithoutTerminal()
+        }
+      }
       if (flight.mixed) {
         // A mixed turn projects NOTHING further; it can only settle as a
         // failure once the turn reaches its own terminal record.
@@ -1917,7 +2218,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       switch (event.type) {
         case 'assistant/message':
-          this.projectAssistantMessage(claim, flight, data)
+          this.projectAssistantMessage(claim, flight, event, data)
           break
         case 'tool/call':
           this.projectToolCall(claim, flight, data)
@@ -1932,6 +2233,524 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           break
       }
     }
+  }
+
+  /**
+   * One transient assistant-stream frame of an emitting Agent.
+   *
+   * Only THIS View's exact attached Agent and its already-claimed turn may
+   * stream: `start.turn` must be the official claimed turn of a live flight,
+   * every later chunk/end resolves through the attempt id the View opened, and
+   * a foreign/stale/settled/mixed/closed flight never emits anything. Deltas
+   * are handed to the flight's single bounded output tail in frame order, so a
+   * slow transport fails the one request instead of growing a second buffer.
+   */
+  onAssistantStream(agent: LiveAgentViewIdentity, frame: unknown): void {
+    const parsed = readAssistantStreamFrame(frame)
+    if (parsed === undefined) return
+    for (const claim of this.claims.values()) {
+      if (claim.exactAgent !== agent) continue
+      const flight = claim.inflight
+      if (flight === undefined || flight.settledDone) continue
+      if (flight.mixed || flight.deliveryClosed || flight.outputStopped) continue
+      // A stream frame is attributable ONLY through the flight's official
+      // claimed turn: nothing is inferred from Session status or the latest turn.
+      if (flight.turn === undefined) continue
+      // A flight that already delivered bytes no durable message can own never
+      // accepts another attempt: streaming more would only stack more
+      // unretractable output in front of the failure this flight must report.
+      if (flight.unprovenProvisional !== undefined) continue
+      if (parsed.type === 'start') {
+        if (parsed.turn !== flight.turn) continue
+        // A new attempt replaces a previous one whose terminal frame never
+        // arrived; the old attempt can then never join a durable message, so
+        // its delivered bytes poison this flight's success.
+        const previous = flight.stream
+        if (previous !== undefined) {
+          if (!previous.hasTerminal && previous.hasSent()) flight.unprovenProvisional ??= previous.attemptId
+          previous.endWithoutTerminal()
+        }
+        flight.stream = new AcpAssistantStream(parsed, randomUUID())
+        continue
+      }
+      const attempt = flight.stream
+      if (attempt === undefined || attempt.attemptId !== parsed.attemptId) continue
+      if (parsed.type === 'chunk') {
+        const action = attempt.acceptChunk(parsed)
+        if (action.kind !== 'delta') continue
+        const update: SessionUpdate = action.delta.kind === 'message'
+          ? { sessionUpdate: 'agent_message_chunk', messageId: attempt.messageId, content: { type: 'text', text: action.delta.text } }
+          : { sessionUpdate: 'agent_thought_chunk', messageId: attempt.messageId, content: { type: 'text', text: action.delta.text } }
+        this.enqueueOutputTask(claim, flight, 1, () => [update])
+        continue
+      }
+      attempt.acceptEnd(parsed)
+      // A committed assistant ATTEMPT (the official retry: `assistant/attempt`)
+      // or an abandoned attempt never owns a durable message, so provisional
+      // bytes already delivered under it can never be reconciled.
+      if (attempt.hasSent()
+        && !(parsed.outcome.kind === 'committed' && parsed.outcome.eventType === 'assistant/message')) {
+        flight.unprovenProvisional ??= attempt.attemptId
+      }
+    }
+  }
+
+  /**
+   * The ONE question classification seat of the shared `user-questions/request`
+   * waterfall. Registered with `prepend: true`, it decides from exact facts only:
+   * this View's exact attached Agent, the official current-turn fence and the
+   * flight/retired turn that already owns that turn.
+   *
+   * A proven foreign (TUI/autonomous) turn calls `next()` exactly once and never
+   * touches the existing TUI seat. A proven ACP-owned turn is answered HERE
+   * through the standard Form of THIS connection; when the Form capability, the
+   * Host question service or the attribution itself is unavailable it fails
+   * closed instead of handing an ACP question to the TUI or a permission flow.
+   */
+  async onQuestionRequest(
+    request: AcpQuestionRequest,
+    next: () => Promise<AcpQuestionAnswer>,
+  ): Promise<AcpQuestionAnswer> {
+    const agent = request.agent
+    // An agentless programmatic ask has no Session identity to attribute.
+    if (agent === undefined) return await next()
+    let claim: ViewClaim | undefined
+    for (const candidate of this.claims.values()) {
+      if (candidate.exactAgent === agent) {
+        claim = candidate
+        break
+      }
+    }
+    // Not an ACP-borrowed Agent: the TUI/other owner keeps its own seat.
+    if (claim === undefined) return await next()
+    const attribution = this.questionAttribution(claim, agent)
+    if (attribution === 'foreign') return await next()
+    const access = this.access
+    const requester = claim.requestElicitation
+    if (attribution !== 'acp' || access === undefined || requester === undefined || !access.hasQuestionService()) {
+      // Fail closed: never a stolen TUI answer, never a permission fallback and
+      // never a fabricated "skipped" batch.
+      throw questionError(
+        'LOCAL_ACP_QUESTION_UNAVAILABLE',
+        'this ACP view cannot serve an owned user question on this connection',
+      )
+    }
+    return request.wait?.timed === true
+      ? await this.askTimedQuestion(claim, requester, request)
+      : await this.askBlockingQuestion(claim, requester, request)
+  }
+
+  /**
+   * One official projection change. The View never derives continued state
+   * itself: it re-reads the official snapshot of the exact Session and either
+   * applies its single stored legal answer or stops a resumed Form whose call
+   * another owner already settled.
+   */
+  onQuestionProjection(session: object, key: string): void {
+    if (key !== 'userQuestions' && key !== 'inbox') return
+    for (const claim of this.claims.values()) {
+      if (claim.exactSession !== session) continue
+      for (const obligation of [...claim.continuedQuestions?.values() ?? []]) {
+        if (obligation.answer !== undefined && obligation.applied !== true) {
+          this.applyContinuedAnswer(claim, obligation)
+        }
+      }
+      for (const form of [...claim.questionForms ?? []]) {
+        if (form.kind !== 'continued' || form.callId === undefined) continue
+        if (this.callAnswerability(claim, form.callId) !== 'settled') continue
+        // Another human/client already settled this call: stop the Form AND
+        // reclaim the EXACT obligation it belongs to, so a long-lived View never
+        // accumulates dead obligations (Map entry + Form handle). A call that is
+        // merely not YET recorded as continued keeps its Form and its answer:
+        // the official `tool/result` may still be committing.
+        const obligation = claim.continuedQuestions?.get(form.callId)
+        form.abort()
+        if (obligation !== undefined && obligation.abort === form) {
+          this.dropContinuedQuestion(claim, obligation)
+        }
+      }
+    }
+  }
+
+  /**
+   * Read one call's answerability from the official `userQuestions` projection.
+   * `unknown` is a real fact too (the projection is unavailable, or it has not
+   * recorded the call yet because its durable result is still committing) and is
+   * NEVER the same as "settled".
+   */
+  private callAnswerability(claim: ViewClaim, callId: string): 'continued' | 'settled' | 'unknown' {
+    const access = this.access
+    const agent = claim.exactAgent
+    const session = claim.exactSession
+    if (access === undefined || agent === undefined || session === undefined) return 'unknown'
+    const snapshot = access.questionSnapshot(claim.sessionId, agent, session)
+    if (snapshot.kind !== 'current') return 'unknown'
+    if (snapshot.continued.some(question => question.callId === callId)) return 'continued'
+    return snapshot.settled.has(callId) ? 'settled' : 'unknown'
+  }
+
+  /**
+   * Attribute one question to this View's owned turn, or to another owner.
+   * The ORIGIN decision is the SAME one the approval seat makes: the exact
+   * Agent, the official current-turn fence, and the live flight or retained
+   * retired turn that already declared the responder of that turn. A turn this
+   * View did not open (a TUI-origin turn the ACP message was steered into)
+   * keeps its TUI responder even while this flight is mixed. `unknown` is a
+   * real fact (lost identity, unprovable turn, or a dead View) and must fail
+   * closed rather than delegate an ACP question to the TUI.
+   */
+  private questionAttribution(claim: ViewClaim, agent: LiveAgentViewIdentity): 'acp' | 'foreign' | 'unknown' {
+    const access = this.access
+    const session = claim.exactSession
+    if (access === undefined || session === undefined || claim.exactAgent !== agent) return 'unknown'
+    const fence = access.currentTurn(claim.sessionId, agent, session)
+    if (fence.kind === 'stale') return 'unknown'
+    const openTurn = fence.openTurn
+    if (openTurn === null) return 'unknown'
+    const flight = claim.inflight
+    const declared: TurnProvenance | undefined = claim.retiringTurn?.turn === openTurn
+      ? claim.retiringTurn
+      : flight !== undefined && !flight.settledDone && flight.turn === openTurn
+        ? { turn: openTurn, origin: flight.turnProvenance?.turn === openTurn ? flight.turnProvenance.origin : 'acp' }
+        : flight?.turnProvenance?.turn === openTurn
+          ? flight.turnProvenance
+          : undefined
+    if (declared === undefined) return 'foreign'
+    if (declared.origin === 'unknown') return 'unknown'
+    if (declared.origin === 'tui') return 'foreign'
+    // ACP-owned, but this View no longer serves the Session: a closed/detached
+    // claim must not answer from a dead connection.
+    if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return 'unknown'
+    return 'acp'
+  }
+
+  /**
+   * One blocking question of an owned turn: send ONE standard Form on THIS
+   * connection and return the human's answer to the original waterfall. The
+   * request's own abort (turn cancellation, disconnect, disposal) revokes the
+   * Form; the Form is never converted into a permission or a TUI question.
+   */
+  private async askBlockingQuestion(
+    claim: ViewClaim,
+    requester: AcpElicitationRequester,
+    request: AcpQuestionRequest,
+  ): Promise<AcpQuestionAnswer> {
+    const form = buildQuestionForm(request.questions)
+    if (form === undefined) {
+      throw questionError('LOCAL_ACP_QUESTION_UNAVAILABLE', 'the question batch cannot be represented as a standard form')
+    }
+    const abort = new AbortController()
+    const handle = this.addQuestionForm(claim, abort, 'blocking', request.wait?.callId)
+    // A blocking Form shares the official request lifetime: the turn's own
+    // cancellation (or this claim's release) revokes the reverse request.
+    const pending = requester(this.elicitationRequest(claim, form, request.wait?.callId), {
+      signal: combinedSignal(request.signal, abort.signal),
+    })
+    // Observe the reverse request BEFORE racing: an aborted Form can reject
+    // late, and a rejection with no handler would surface in the Host process.
+    observeSettled(pending, () => {})
+    try {
+      const raced = await raceQuestionResponse(pending, request.signal, abort.signal)
+      if (raced.kind === 'aborted') {
+        abort.abort()
+        throw questionAborted(raced.reason, request.signal)
+      }
+      return answerOutcome(form, raced.response)
+    } finally {
+      this.removeQuestionForm(claim, handle)
+    }
+  }
+
+  /**
+   * One TIMED question of an owned turn. The DSH `askTimed` deadline stays the
+   * only clock (this View never attaches a wait, so no Client countdown can
+   * extend it): when that deadline aborts the waterfall, the original request
+   * settles as pending immediately while the Form becomes this CONNECTION's
+   * continued obligation. Any other abort revokes the Form.
+   */
+  private async askTimedQuestion(
+    claim: ViewClaim,
+    requester: AcpElicitationRequester,
+    request: AcpQuestionRequest,
+  ): Promise<AcpQuestionAnswer> {
+    const signal = request.signal
+    const callId = request.wait?.callId
+    if (signal === undefined || callId === undefined) {
+      throw questionError('LOCAL_ACP_QUESTION_UNAVAILABLE', 'a timed question needs its official wait identity')
+    }
+    const form = buildQuestionForm(request.questions)
+    if (form === undefined) {
+      throw questionError('LOCAL_ACP_QUESTION_UNAVAILABLE', 'the question batch cannot be represented as a standard form')
+    }
+    const abort = new AbortController()
+    const handle = this.addQuestionForm(claim, abort, 'continued', callId)
+    // The Form follows ONLY this claim/connection lifetime, never the DSH
+    // deadline: when that deadline ends the foreground waterfall the Form is
+    // intentionally kept, and only a claim release/disposal aborts it.
+    const pending = requester(this.elicitationRequest(claim, form, callId), { signal: abort.signal })
+    observeSettled(pending, () => {})
+    const raced = await raceQuestionResponse(pending, signal)
+    if (raced.kind === 'aborted') {
+      if (!isTimedOutReason(raced.reason)) {
+        // Turn cancel/dispose/Close/Off: the Form is revoked with the turn.
+        abort.abort()
+        this.removeQuestionForm(claim, handle)
+        throw questionAborted(raced.reason, signal)
+      }
+      // The foreground wait expired. Hand the still-open Form to its OWN
+      // continued obligation (keyed by the official call id) and let the
+      // official `askTimed` answer `pending`. Other timed questions of the same
+      // claim keep their own obligations untouched.
+      const obligation: ContinuedQuestionObligation = { callId, form, abort: handle }
+      const obligations = claim.continuedQuestions ?? new Map<string, ContinuedQuestionObligation>()
+      claim.continuedQuestions = obligations
+      obligations.set(callId, obligation)
+      this.watchContinuedResponse(claim, obligation, pending)
+      throw raced.reason
+    }
+    this.removeQuestionForm(claim, handle)
+    return answerOutcome(form, raced.response)
+  }
+
+  /** The standard Form request of one exact attached View. */
+  private elicitationRequest(claim: ViewClaim, form: AcpQuestionForm, callId: string | undefined): AcpElicitationRequest {
+    return {
+      message: form.message,
+      sessionId: claim.sessionId,
+      ...callId === undefined ? {} : { toolCallId: callId },
+      requestedSchema: form.requestedSchema,
+    }
+  }
+
+  /** Register one outstanding reverse Form of this claim (aborted on release). */
+  private addQuestionForm(
+    claim: ViewClaim,
+    abort: AbortController,
+    kind: QuestionFormAbort['kind'],
+    callId: string | undefined,
+  ): QuestionFormAbort {
+    const handle: QuestionFormAbort = {
+      kind,
+      ...callId === undefined ? {} : { callId },
+      abort: () => abort.abort(),
+    }
+    const forms = claim.questionForms ?? new Set<QuestionFormAbort>()
+    claim.questionForms = forms
+    forms.add(handle)
+    return handle
+  }
+
+  private removeQuestionForm(claim: ViewClaim, handle: QuestionFormAbort): void {
+    claim.questionForms?.delete(handle)
+  }
+
+  /**
+   * A late Form response of a continued question: the original waterfall is
+   * already settled, so the answer may only reach the official
+   * `userQuestions.answer` once the projection proves the call is continued.
+   */
+  private watchContinuedResponse(
+    claim: ViewClaim,
+    obligation: ContinuedQuestionObligation,
+    pending: Promise<AcpElicitationResponse>,
+  ): void {
+    runDetached('local acp: continued question response', async () => {
+      let response: AcpElicitationResponse
+      try {
+        response = await pending
+      } catch {
+        // The reverse request died. A connection release already cleared every
+        // obligation; a Form the claim still lists must instead be reclaimed
+        // here by identity, so a rejected reverse request can never leave a dead
+        // obligation (and its Form handle) behind.
+        if (claim.continuedQuestions?.get(obligation.callId) === obligation) {
+          this.dropContinuedQuestion(claim, obligation)
+        }
+        return
+      }
+      // The response may have crossed a real await: only the claim that still
+      // owns this exact obligation on a LIVE attached View may act on it.
+      if (!this.continuedObligationCurrent(claim, obligation)) return
+      this.removeQuestionForm(claim, obligation.abort)
+      const outcome = answerQuestionForm(obligation.form, response)
+      if (outcome.kind !== 'answered') {
+        if (outcome.kind === 'invalid') {
+          this.diag.warn('local-acp.question', { code: 'LOCAL_ACP_QUESTION_BAD_ANSWER' })
+        }
+        // decline/cancel/invalid: never write a fabricated late answer.
+        this.dropContinuedQuestion(claim, obligation)
+        return
+      }
+      obligation.answer = { answers: outcome.answers }
+      this.applyContinuedAnswer(claim, obligation)
+    }, { diag: this.diag })
+  }
+
+  /**
+   * Apply the ONE stored legal late answer through the official service, at
+   * most once. The official projection is the answerability authority, and the
+   * official `answer()` result keeps its exact meaning: `true` is "queued into
+   * the inbox", `false` is "no longer continued", and a rejection keeps its own
+   * code (never retried, never converted into success).
+   */
+  private applyContinuedAnswer(claim: ViewClaim, obligation: ContinuedQuestionObligation): void {
+    if (obligation.answer === undefined || obligation.applied === true) return
+    if (!this.continuedObligationCurrent(claim, obligation)) return
+    const access = this.access
+    const agent = claim.exactAgent
+    const session = claim.exactSession
+    if (access === undefined || agent === undefined || session === undefined) {
+      this.dropContinuedQuestion(claim, obligation)
+      return
+    }
+    const answerability = this.callAnswerability(claim, obligation.callId)
+    if (answerability === 'settled') {
+      this.dropContinuedQuestion(claim, obligation)
+      return
+    }
+    if (answerability === 'unknown') {
+      // The durable `tool/result` that marks the call continued may not be
+      // committed yet: keep the single answer for the projection change.
+      return
+    }
+    // Nothing may await between this fence and the write: `answer()` is
+    // synchronous, so the claim that passed the fence is the one that writes.
+    if (!this.questionClaimCurrent(claim)) {
+      this.dropContinuedQuestion(claim, obligation)
+      return
+    }
+    obligation.applied = true
+    const outcome = access.answerContinued(
+      claim.sessionId,
+      agent,
+      session,
+      obligation.callId,
+      obligation.answer,
+      () => this.questionClaimCurrent(claim),
+    )
+    this.reportContinuedOutcome(outcome)
+    this.dropContinuedQuestion(claim, obligation)
+  }
+
+  /** Read one official continued-answer result without inventing a success. */
+  private reportContinuedOutcome(outcome: AcpContinuedAnswerOutcome): void {
+    if (outcome.kind === 'queued' || outcome.kind === 'not-continued' || outcome.kind === 'stale') return
+    const code = outcome.kind === 'rejected' ? outcome.code : 'LOCAL_ACP_QUESTION_UNAVAILABLE'
+    this.diag.warn('local-acp.question', { code })
+  }
+
+  /**
+   * The ONE ownership fence of every question write. It is re-read after each
+   * real await and immediately before the official submission: a View that was
+   * closed, detached, re-bound or disposed must never answer a shared-Session
+   * question, because its human is no longer the connection's human.
+   */
+  private questionClaimCurrent(claim: ViewClaim): boolean {
+    return this.claims.get(claim.sessionId) === claim
+      && claim.connectionIdentity.phase === 'attached'
+      && !claim.detachedWithFence
+      && this.access !== undefined
+  }
+
+  /** Whether this claim still owns THIS exact obligation on a live attached View. */
+  private continuedObligationCurrent(claim: ViewClaim, obligation: ContinuedQuestionObligation): boolean {
+    return claim.continuedQuestions?.get(obligation.callId) === obligation && this.questionClaimCurrent(claim)
+  }
+
+  /** Release one continued obligation and its reverse Form. */
+  private dropContinuedQuestion(claim: ViewClaim, obligation: ContinuedQuestionObligation): void {
+    this.removeQuestionForm(claim, obligation.abort)
+    const obligations = claim.continuedQuestions
+    if (obligations?.get(obligation.callId) === obligation) obligations.delete(obligation.callId)
+    this.notifyWorkSettled()
+  }
+
+  /**
+   * Release every reverse Form and continued obligation of one claim. It is
+   * the ONE release hook shared by close, disconnect/Off, Agent disposal and
+   * claim retirement: the Host durable question projection is never touched.
+   */
+  private releaseQuestionForms(claim: ViewClaim): void {
+    const forms = claim.questionForms
+    claim.questionForms = undefined
+    if (forms !== undefined) {
+      for (const form of forms) form.abort()
+    }
+    claim.continuedQuestions = undefined
+    claim.questionOfferTail = undefined
+    claim.offeredQuestions = undefined
+  }
+
+  /**
+   * Offer every still-answerable continued question of a resumed Session as
+   * ONE Form at a time, in official ask order. The offer is connection-local:
+   * `offeredQuestions` only dedupes THIS connection, and no durable answer
+   * state is created. A call another owner settles first stops its Form.
+   */
+  private offerContinuedQuestions(claim: ViewClaim, requester: AcpElicitationRequester): void {
+    const access = this.access
+    const agent = claim.exactAgent
+    const session = claim.exactSession
+    if (access === undefined || agent === undefined || session === undefined) return
+    const snapshot = access.questionSnapshot(claim.sessionId, agent, session)
+    if (snapshot.kind !== 'current') return
+    const offered = claim.offeredQuestions ?? new Set<string>()
+    claim.offeredQuestions = offered
+    for (const question of snapshot.continued) {
+      if (offered.has(question.callId)) continue
+      offered.add(question.callId)
+      const previous = claim.questionOfferTail ?? Promise.resolve()
+      claim.questionOfferTail = previous.then(async () => {
+        if (this.claims.get(claim.sessionId) !== claim || claim.detachedWithFence) return
+        if (claim.connectionIdentity.phase !== 'attached') return
+        const form = buildQuestionForm(question.questions)
+        if (form === undefined) return
+        const abort = new AbortController()
+        const handle = this.addQuestionForm(claim, abort, 'continued', question.callId)
+        try {
+          const response = await requester(this.elicitationRequest(claim, form, question.callId), {
+            signal: abort.signal,
+          })
+          const outcome = answerQuestionForm(form, response)
+          if (outcome.kind !== 'answered') return
+          const submission = this.submitContinuedAnswer(claim, question.callId, { answers: outcome.answers })
+          if (submission !== 'submitted') {
+            this.diag.warn('local-acp.question', { code: 'LOCAL_ACP_QUESTION_NOT_CONTINUED' })
+          }
+        } catch {
+          // The Form was aborted with its connection/claim or the call was
+          // settled elsewhere: this offer ends here, nothing is retried.
+        } finally {
+          this.removeQuestionForm(claim, handle)
+        }
+      }).catch(() => {})
+    }
+  }
+
+  /**
+   * Submit ONE already-received legal answer for a continued call exactly once.
+   * `wait` means the official projection has not yet recorded the call as
+   * continued (or settled) — the caller decides whether to keep the answer.
+   */
+  private submitContinuedAnswer(claim: ViewClaim, callId: string, answer: AcpQuestionAnswer): 'submitted' | 'not-continued' | 'wait' {
+    const access = this.access
+    const agent = claim.exactAgent
+    const session = claim.exactSession
+    if (access === undefined || agent === undefined || session === undefined) return 'not-continued'
+    if (!this.questionClaimCurrent(claim)) return 'not-continued'
+    const answerability = this.callAnswerability(claim, callId)
+    if (answerability === 'settled') return 'not-continued'
+    if (answerability === 'unknown') return 'wait'
+    const outcome = access.answerContinued(
+      claim.sessionId,
+      agent,
+      session,
+      callId,
+      answer,
+      () => this.questionClaimCurrent(claim),
+    )
+    this.reportContinuedOutcome(outcome)
+    return outcome.kind === 'queued' ? 'submitted' : 'not-continued'
   }
 
   /**
@@ -2022,6 +2841,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   onAgentDisposed(agent: LiveAgentViewIdentity): void {
     for (const claim of this.claims.values()) {
       if (claim.exactAgent !== agent) continue
+      // The disposed Agent can neither ask nor accept an answer any more: every
+      // reverse Form of this claim ends here.
+      this.releaseQuestionForms(claim)
       const flight = claim.inflight
       if (flight !== undefined && !flight.settledDone) {
         // Disposal ends this flight's Host work for good: the disposed Agent
@@ -2203,8 +3025,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     for (const [sessionId, claim] of this.claims) {
       if (claim.connectionIdentity !== state) continue
       // A physical teardown/Off/replacement ends this connection's notification
-      // capability immediately, even when the claim survives for a fence fact.
+      // capability and every reverse Form/continued obligation immediately,
+      // even when the claim survives for a fence fact. The Host's own durable
+      // `userQuestions` projection is never touched.
       claim.notifyConfigOptions = undefined
+      this.releaseQuestionForms(claim)
       const bound = access ?? this.access
       // An in-flight MCP admission is not cancellable synchronously; commit the
       // retirement intent and keep the reservation until its late result owns
@@ -2404,7 +3229,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim: ViewClaim,
     access: HostAcpSessionAccess,
     agent: LiveAgentViewIdentity,
-    notifyConfigOptions?: AcpConfigOptionsNotifier,
+    channels?: AcpViewChannels,
   ): void {
     if (state.op !== op || this.claims.get(claim.sessionId) !== claim || claim.connectionIdentity !== state) {
       // A newer op owns this connection or the claim was released; the late
@@ -2435,9 +3260,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // committed event is checked against; never a sessionId lookup.
     claim.exactAgent = agent
     claim.exactSession = agent.session
-    // The transient notifier is bound at the SAME moment the View becomes
-    // attached, so no model/selection event can slip between attach and wiring.
-    claim.notifyConfigOptions = notifyConfigOptions
+    // The transient per-connection channels are bound at the SAME moment the
+    // View becomes attached, so no model/selection event or owned question can
+    // slip between attach and wiring.
+    claim.notifyConfigOptions = channels?.notifyConfigOptions
+    claim.requestElicitation = channels?.requestElicitation
   }
 
   /**
@@ -2470,48 +3297,125 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * Clear the CURRENT attempt slot only when it still holds this attempt. A
+   * slower reconciliation must never erase the attempt a later step already
+   * opened, and the reconciliation itself is owned by its own attempt + seq,
+   * not by whichever attempt happens to be current.
+   */
+  private releaseAttempt(flight: InflightPrompt, attempt: AcpAssistantStream): void {
+    if (flight.stream === attempt) flight.stream = undefined
+  }
+
+  /**
    * Validate ONE committed assistant message synchronously and reserve its
    * ordered output units on this flight's single tail. Shapes are checked here
    * (a malformed/unsupported event fails before anything is queued); the image
    * reads and the sends happen inside the tail so no later event can overtake
    * this one.
+   *
+   * When this flight delivered provisional `agent/assistant-stream` text for
+   * the SAME attempt, the durable message is a RECONCILIATION, not a second
+   * delivery: its slot waits for the attempt's official `end`, proves the exact
+   * `seq` join and only then adds the durable blocks that were never streamed
+   * (images). Text already shown is never sent twice, and an unprovable join
+   * fails closed instead of re-sending a correction.
    */
-  private projectAssistantMessage(claim: ViewClaim, flight: InflightPrompt, data: unknown): void {
+  private projectAssistantMessage(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    event: AcpSessionEventLike,
+    data: unknown,
+  ): void {
     const message = (data as { readonly message?: { readonly id?: unknown; readonly content?: unknown } }).message
     if (message === undefined || typeof message.id !== 'string' || !Array.isArray(message.content)) {
       this.failPrompt(claim, flight, unsupportedContent())
       return
     }
-    const entries: CommittedOutputEntry[] = []
-    for (const block of message.content as readonly unknown[]) {
-      const type = (block as { readonly type?: unknown } | null)?.type
-      const text = (block as { readonly text?: unknown } | null)?.text
-      if (type === 'reasoning') {
-        if (typeof text !== 'string') {
-          this.failPrompt(claim, flight, unsupportedContent())
-          return
-        }
-        if (text.length > 0) entries.push({ kind: 'thought', text })
-        continue
+    const content = this.readAssistantContent(claim, flight, message.content)
+    if (content === undefined) return
+    const messageId = message.id
+    const attempt = flight.stream
+    if (attempt === undefined) {
+      // No live provisional attempt: the durable event IS the committed output.
+      this.enqueueCommittedEntries(claim, flight, messageId, content.entries)
+      return
+    }
+    const interrupted = (data as { readonly interrupted?: unknown }).interrupted === true
+    // Reserve only what the join may ACTUALLY send. A streamed attempt already
+    // delivered its text/thought under its own ACP message id, so the residual
+    // entries are the never-streamed durable images; an attempt that delivered
+    // nothing still falls back to the whole committed projection.
+    const residual = attempt.hasSent()
+      ? content.entries.filter(entry => entry.kind === 'message-image').length
+      : content.entries.length
+    this.enqueueOutputTask(claim, flight, residual, async () => {
+      // Delivered bytes that no durable append can own make every later
+      // outcome of this flight a failure, whatever this event proves.
+      if (flight.unprovenProvisional !== undefined) throw streamDivergence()
+      const end = await attempt.terminalFact
+      const joined = joinStreamedMessage(attempt.streamedBlocks(), content.text, {
+        sent: attempt.hasSent(),
+        interrupted,
+      })
+      if (joined.kind === 'divergence') throw streamDivergence()
+      if (joined.kind === 'unstreamed') {
+        // Nothing provisional was delivered: the ordinary committed projection
+        // is authoritative and must not be suppressed.
+        this.releaseAttempt(flight, attempt)
+        return await this.committedUpdates(flight, messageId, content.entries)
       }
-      if (type === 'text') {
-        if (typeof text !== 'string') {
+      // `joined` needs the official terminal fact of THIS attempt as well: the
+      // committed message and its `end` frame close in the same event loop, and
+      // only the exact durable `seq` proves both name the same append.
+      if (end === undefined || end.kind !== 'committed'
+        || end.eventType !== 'assistant/message' || end.seq !== event.seq) {
+        throw streamDivergence()
+      }
+      this.releaseAttempt(flight, attempt)
+      // Text/thought blocks were already delivered under the attempt's ACP
+      // message id; only durable blocks that were never streamed are added.
+      return await this.committedUpdates(
+        flight,
+        attempt.messageId,
+        content.entries.filter(entry => entry.kind === 'message-image'),
+      )
+    })
+  }
+
+  /**
+   * Validate one committed assistant block list synchronously. The returned
+   * `text` keeps EVERY text/thought block (including empty ones) because the
+   * official assembler keeps them too and the stream join compares the exact
+   * sequence; `entries` is the ACP projection, which skips empty text/thought
+   * blocks and the dedicated tool-call events.
+   */
+  private readAssistantContent(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    content: readonly unknown[],
+  ): { readonly entries: readonly CommittedOutputEntry[]; readonly text: readonly AcpStreamBlock[] } | undefined {
+    const entries: CommittedOutputEntry[] = []
+    const text: AcpStreamBlock[] = []
+    for (const block of content) {
+      const type = (block as { readonly type?: unknown } | null)?.type
+      const value = (block as { readonly text?: unknown } | null)?.text
+      if (type === 'reasoning' || type === 'text') {
+        if (typeof value !== 'string') {
           this.failPrompt(claim, flight, unsupportedContent())
-          return
+          return undefined
         }
-        if (text.length === 0) continue
-        entries.push({ kind: 'message', text })
-        flight.assistantVisibleOutput = true
+        const kind: AcpStreamBlock['kind'] = type === 'text' ? 'message' : 'thought'
+        text.push({ kind, text: value })
+        if (value.length > 0) entries.push({ kind: type === 'text' ? 'message' : 'thought', text: value })
         continue
       }
       if (type === 'image') {
         const ref = committedImageRef(block)
         if (ref === undefined) {
           this.failPrompt(claim, flight, unsupportedContent())
-          return
+          return undefined
         }
         entries.push({ kind: 'message-image', ref })
-        flight.assistantVisibleOutput = true
         continue
       }
       if (type === 'tool-call') {
@@ -2524,42 +3428,49 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // Audio/file/tool-change/unknown blocks have no standard ACP output form:
       // never truncate or fake one, and never claim the event was delivered.
       this.failPrompt(claim, flight, unsupportedContent())
-      return
+      return undefined
     }
-    const messageId = message.id
-    const toUpdates = async (): Promise<readonly SessionUpdate[]> => {
-      const updates: SessionUpdate[] = []
-      for (const entry of entries) {
-        if (entry.kind === 'thought') {
-          updates.push({ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: entry.text } })
-        } else if (entry.kind === 'message') {
-          updates.push({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: entry.text } })
-        } else if (entry.kind === 'message-image') {
-          const stored = await this.readOutputImage(flight, entry.ref)
-          updates.push({
-            sessionUpdate: 'agent_message_chunk',
-            messageId,
-            content: { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType },
-          })
-        }
-      }
-      return updates
-    }
+    return { entries, text }
+  }
+
+  /** Append one committed assistant projection to this flight's ordered tail. */
+  private enqueueCommittedEntries(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    messageId: string,
+    entries: readonly CommittedOutputEntry[],
+  ): void {
     if (entries.every(entry => entry.kind !== 'message-image')) {
-      this.enqueueOutputTask(claim, flight, entries.length, (): SessionUpdate[] => {
-        const updates: SessionUpdate[] = []
-        for (const entry of entries) {
-          if (entry.kind === 'thought') {
-            updates.push({ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: entry.text } })
-          } else if (entry.kind === 'message') {
-            updates.push({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: entry.text } })
-          }
-        }
-        return updates
-      })
+      this.enqueueOutputTask(claim, flight, entries.length, (): readonly SessionUpdate[] =>
+        committedTextUpdates(messageId, entries))
       return
     }
-    this.enqueueOutputTask(claim, flight, entries.length, toUpdates)
+    this.enqueueOutputTask(claim, flight, entries.length, async () =>
+      await this.committedUpdates(flight, messageId, entries))
+  }
+
+  /** Convert committed entries to standard updates, reading images through the Host Store. */
+  private async committedUpdates(
+    flight: InflightPrompt,
+    messageId: string,
+    entries: readonly CommittedOutputEntry[],
+  ): Promise<readonly SessionUpdate[]> {
+    const updates: SessionUpdate[] = []
+    for (const entry of entries) {
+      if (entry.kind === 'thought') {
+        updates.push({ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: entry.text } })
+      } else if (entry.kind === 'message') {
+        updates.push({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: entry.text } })
+      } else if (entry.kind === 'message-image') {
+        const stored = await this.readOutputImage(flight, entry.ref)
+        updates.push({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType },
+        })
+      }
+    }
+    return updates
   }
 
   /** Project one committed tool call of the owned turn as a standard start update. */
@@ -2685,17 +3596,24 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     reserve: number,
     build: () => readonly SessionUpdate[] | Promise<readonly SessionUpdate[]>,
   ): void {
-    if (reserve === 0 || flight.settledDone) return
+    if (flight.settledDone) return
     const taskIndex = flight.outputTasksQueued
     flight.outputTasksQueued += 1
-    flight.pendingUpdates += reserve
-    if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
-      this.failPrompt(claim, flight, promptError(
-        'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
-        'the ACP output queue exceeded its bounded capacity',
-        JSONRPC_INTERNAL_ERROR,
-      ))
-      return
+    // `reserve` is the number of updates this task will hand to the transport,
+    // charged BEFORE any await so a slow Store read cannot outgrow the budget.
+    // A reconciliation that will send nothing (every streamed block already
+    // delivered) reserves 0 and therefore occupies no output budget: it only
+    // owns a tail position.
+    if (reserve > 0) {
+      flight.pendingUpdates += reserve
+      if (flight.pendingUpdates > MAX_PENDING_OUTPUT_UPDATES) {
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE',
+          'the ACP output queue exceeded its bounded capacity',
+          JSONRPC_INTERNAL_ERROR,
+        ))
+        return
+      }
     }
     flight.outputTail = flight.outputTail.then(async () => {
       try {
@@ -2768,9 +3686,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         this.completePrompt(claim, flight, { stopReason: 'cancelled' })
         return
       }
-      // The REAL terminal reason decides first: a blocked/error/aborted/
-      // interrupted turn keeps its actual classification even when it produced
-      // no assistant text. Only a successful candidate needs the text check.
+      // The REAL terminal reason decides. A blocked/error/aborted/interrupted
+      // turn keeps its actual classification. A successful completion needs NO
+      // visible assistant output: ACP v1 has no such requirement, and a
+      // tool-only (or deliberately silent) completed turn is a real `end_turn`.
       const kind = turnEndReasonKind(data)
       if (kind !== 'completed' && kind !== 'max-tokens') {
         this.failPrompt(claim, flight, promptError(
@@ -2781,14 +3700,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ))
         return
       }
-      if (!flight.assistantVisibleOutput) {
-        // The historical external code is preserved; its fact is the visible
-        // output requirement, so text-only, image-only and mixed turns all pass.
-        this.failPrompt(claim, flight, promptError(
-          'LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT',
-          'the owned turn ended without any visible assistant output',
-          JSONRPC_INTERNAL_ERROR,
-        ))
+      // A successful terminal is possible ONLY when every delivered provisional
+      // byte was proven committed: unretractable bytes of a retried, replaced,
+      // abandoned or lost attempt can never be reported as this success.
+      if (flight.unprovenProvisional !== undefined) {
+        this.failPrompt(claim, flight, streamDivergence())
         return
       }
       this.completePrompt(claim, flight, { stopReason: kind === 'completed' ? 'end_turn' : 'max_tokens' })
@@ -2804,6 +3720,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private stopFlightOutput(flight: InflightPrompt): void {
     flight.outputStopped = true
     flight.outputStoppedAtTask ??= flight.outputTasksQueued
+    // A provisional attempt whose terminal can never be observed any more must
+    // not leave a reconciliation slot waiting forever.
+    flight.stream?.endWithoutTerminal()
     flight.outputAbort.abort()
   }
 
@@ -3023,6 +3942,94 @@ function unsupportedContent(): LocalAcpViewError {
     'a committed content block has no standard ACP projection in this phase',
     JSONRPC_INTERNAL_ERROR,
   )
+}
+
+/**
+ * The stable failure of one unprovable transient/durable join. ACP v1 chunks
+ * are append-only: once provisional bytes were delivered, a durable message
+ * that cannot be proven identical must fail the request instead of being
+ * re-sent (or silently dropped) as if the attempt had committed cleanly.
+ */
+function streamDivergence(): LocalAcpViewError {
+  return promptError(
+    'LOCAL_ACP_PROMPT_STREAM_DIVERGENCE',
+    'the committed assistant message could not be joined to the delivered provisional stream',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/** Convert already-validated committed entries with no image reads involved. */
+function committedTextUpdates(messageId: string, entries: readonly CommittedOutputEntry[]): readonly SessionUpdate[] {
+  const updates: SessionUpdate[] = []
+  for (const entry of entries) {
+    if (entry.kind === 'thought') {
+      updates.push({ sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: entry.text } })
+    } else if (entry.kind === 'message') {
+      updates.push({ sessionUpdate: 'agent_message_chunk', messageId, content: { type: 'text', text: entry.text } })
+    }
+  }
+  return updates
+}
+
+/** One abort signal that follows BOTH the official request lifetime and the Form's own abort. */
+function combinedSignal(request: AbortSignal | undefined, form: AbortSignal): AbortSignal {
+  return request === undefined ? form : AbortSignal.any([request, form])
+}
+
+/** The classified outcome of racing one reverse Form against its abort lifetimes. */
+type QuestionRace =
+  | { readonly kind: 'response'; readonly response: AcpElicitationResponse }
+  | { readonly kind: 'aborted'; readonly reason: unknown }
+
+/**
+ * Race one outstanding reverse Form against the abort signals that own it. The
+ * loser is never left unobserved: this promise resolves exactly once, the abort
+ * listeners are removed at that moment, and the caller keeps an observer on the
+ * request's own promise.
+ */
+function raceQuestionResponse(
+  pending: Promise<AcpElicitationResponse>,
+  request: AbortSignal | undefined,
+  form?: AbortSignal,
+): Promise<QuestionRace> {
+  const outcome = Promise.withResolvers<QuestionRace>()
+  const disposers: Array<() => void> = []
+  let settled = false
+  const settle = (value: QuestionRace): void => {
+    if (settled) return
+    settled = true
+    for (const dispose of disposers) dispose()
+    outcome.resolve(value)
+  }
+  for (const signal of [request, form]) {
+    if (signal === undefined) continue
+    const onAbort = (): void => { settle({ kind: 'aborted', reason: signal.reason }) }
+    if (signal.aborted) {
+      settle({ kind: 'aborted', reason: signal.reason })
+      return outcome.promise
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    disposers.push(() => signal.removeEventListener('abort', onAbort))
+  }
+  observeSettled(pending, () => {})
+  pending.then(
+    response => { settle({ kind: 'response', response }) },
+    () => { settle({ kind: 'aborted', reason: undefined }) },
+  )
+  return outcome.promise
+}
+
+/** Convert one client Form outcome into the official answer batch or a stable refusal. */
+function answerOutcome(form: AcpQuestionForm, response: AcpElicitationResponse): AcpQuestionAnswer {
+  const outcome = answerQuestionForm(form, response)
+  if (outcome.kind === 'answered') return { answers: outcome.answers }
+  if (outcome.kind === 'declined') {
+    throw questionError('LOCAL_ACP_QUESTION_DECLINED', 'the client declined the question form')
+  }
+  if (outcome.kind === 'cancelled') {
+    throw questionError('LOCAL_ACP_QUESTION_DECLINED', 'the client cancelled the question form')
+  }
+  throw questionError('LOCAL_ACP_QUESTION_BAD_ANSWER', 'the client response was not a legal answer to this form')
 }
 
 /** Preserve malformed model tool arguments as opaque input instead of dropping them. */

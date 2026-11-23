@@ -782,8 +782,11 @@ export async function runAcpPo2SessionView(context) {
     // I) uninitialized session/resume.
     const rawI = track(await openAcpClient(scopeDir))
     const uninit = await sendRequest(rawI, 5, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
-    assert(uninit?.error?.code === -32042,
-      `I: an uninitialized resume must be -32042 (got ${JSON.stringify(uninit?.error ?? uninit?.result)})`)
+    // A Session call before the handshake completes is a JSON-RPC invalid
+    // request (the listener answers it; the View's own initialize gate never
+    // runs), and its stable data code still names the uninitialized View.
+    assert(uninit?.error?.code === -32600,
+      `I: an uninitialized resume must be a JSON-RPC invalid request (got ${JSON.stringify(uninit?.error ?? uninit?.result)})`)
     assert(uninit?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_INITIALIZED',
       `I: an uninitialized resume must name LOCAL_ACP_VIEW_NOT_INITIALIZED (got ${JSON.stringify(uninit?.error?.data)})`)
     rawI.close()
@@ -849,10 +852,13 @@ export async function runAcpPo2SessionView(context) {
       cwd: hostCwdNew,
       mcpServers: [{ name: 'po2-mcp', command: '/bin/true', args: [], env: [] }],
     })
-    assert(mcpReject?.error?.code === -32602,
-      `L: non-empty mcpServers must be -32602 (got ${JSON.stringify(mcpReject?.error ?? mcpReject?.result)})`)
-    assert(mcpReject?.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
-      `L: non-empty mcpServers must name LOCAL_ACP_VIEW_INVALID_REQUEST (got ${JSON.stringify(mcpReject?.error?.data)})`)
+    // The current contract MOUNTS an ACP mcpServers declaration through the
+    // official Agent-scoped MCP client, so a declaration that cannot start is a
+    // real scoped-MCP failure (a stable code), never a silent success.
+    assert(mcpReject?.error?.code === -32603,
+      `L: a non-startable mcpServers declaration must fail closed (got ${JSON.stringify(mcpReject?.error ?? mcpReject?.result)})`)
+    assert(mcpReject?.error?.data?.code === 'LOCAL_ACP_MCP_START_FAILED',
+      `L: a non-startable mcpServers declaration must name LOCAL_ACP_MCP_START_FAILED (got ${JSON.stringify(mcpReject?.error?.data)})`)
     connL.close()
     await connL.closed
 

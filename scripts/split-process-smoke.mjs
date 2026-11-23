@@ -643,6 +643,35 @@ export function assertSelectedVerdict(caseId, result) {
     `selected ${caseId}: the trusted-profile ACP stdio verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
     return
   }
+  if (caseId === 'acp.native-question-form') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.acpProtocolVersion === 1
+      && result?.nativeQuestionToolResult === true
+      && result?.continuedReplySteered === true
+      && result?.declineFailsClosed === true
+      && result?.hostIdentityKept === true
+      && result?.forms === 3
+      && result?.l6EvidenceRecorded === true,
+    `selected ${caseId}: the native-question verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
+  if (caseId === 'acp.transient-stream-settlement') {
+    assert(result?.status === 'PASS'
+      && result?.scope === 'REAL_SPLIT_PROCESS_L6'
+      && result?.firstChunkBeforeCommit === true
+      && result?.noDuplicateAfterJoin === true
+      && result?.committedTextMatches === true
+      && result?.streamDivergenceFailClosed === true
+      && result?.noRewriteResend === true
+      && result?.siblingSessionIsolated === true
+      && result?.hostIdentityKept === true
+      && result?.acpProtocolVersion === 1
+      && result?.stopReason === 'end_turn'
+      && result?.l6EvidenceRecorded === true,
+    `selected ${caseId}: the transient-stream settlement verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)
+    return
+  }
   if (caseId === 'acp.po3a-turn-events') {
     assert(result?.status === 'PASS'
       && result?.scope === 'REAL_SPLIT_PROCESS_L6'

@@ -366,8 +366,12 @@ export async function runAcpPo4aContentInput(context) {
     acp.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
     acp.send({ jsonrpc: '2.0', id: ++caseId, method: 'session/new', params: { cwd: hostCwd, mcpServers: [] } })
     const afterCancel = await acp.next()
-    assert(afterCancel.id === caseId && afterCancel.error?.data?.code === 'LOCAL_ACP_VIEW_BUSY',
-      `PO-4A socket-order barrier must observe the active prompt: ${JSON.stringify(afterCancel)}`)
+    // Socket order: the response to a LATER request proves the earlier
+    // session/cancel was already dispatched on this connection. A second
+    // session/new is legal on the same connection (multi-Session contract), so
+    // the barrier fact is a real new Session, never a BUSY refusal.
+    assert(afterCancel.id === caseId && typeof afterCancel.result?.sessionId === 'string',
+      `PO-4A socket-order barrier must observe a later request processed after the cancel: ${JSON.stringify(afterCancel)}`)
     writeFileSync(imageAdmissionRelease, 'release\n', { mode: 0o600 })
     const canceled = await canceledPending
     assert(canceled.response.result?.stopReason === 'cancelled',
@@ -442,11 +446,20 @@ export async function runAcpPo4aContentInput(context) {
     // The complete standard envelopes, not only the selected fields: a matched
     // update or the prompt response could otherwise carry an extra
     // artifact/receipt field while the per-field and queue checks still pass.
+    // Transient contract: the provider's two deltas are delivered as they
+    // stream under ONE stable ACP attempt message id (which may differ from the
+    // durable message id), and the committed text is never appended twice.
+    assertStrict.equal(markdown.updates.length, 2,
+      `PO-4B: the marker must deliver exactly its two provider deltas (got ${String(markdown.updates.length)})`)
+    const attemptMessageIds = new Set(markdown.updates.map(entry => entry.update?.messageId))
+    assertStrict.equal(attemptMessageIds.size, 1,
+      `PO-4B: one attempt uses one stable ACP message id (got ${JSON.stringify([...attemptMessageIds])})`)
+    const attemptMessageId = markdown.updates[0].update.messageId
     const expectedUpdates = [PO4B_BLOCK_1, PO4B_BLOCK_2].map(text => ({
       sessionId,
       update: {
         sessionUpdate: 'agent_message_chunk',
-        messageId: committedMessage.id,
+        messageId: attemptMessageId,
         content: { type: 'text', text },
       },
     }))

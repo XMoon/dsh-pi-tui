@@ -223,13 +223,83 @@ profile's independent `autoStart` preference enables it (see below).
     — `source.rpcId` at `agent/inbox/inserted`, the claimed turn of that exact
     message id (`agent/inbox/claimed`), the committed `data.turn` events and
     `turn/end` — before answering a real ACP StopReason (`end_turn` /
-    `max_tokens`). Only the committed output of that claimed turn is projected as
-    standard `session/update` notifications, in durable order, and the answer is
-    sent after the turn's `turn/end` and the ordered notification drain. A turn
-    that also claims another user's message (e.g. a TUI steer) is a MIXED turn:
-    no further output is projected and the request fails closed with
+    `max_tokens`). The claimed turn's output reaches the client as standard
+    `session/update` notifications in one ordered chain per flight, and the
+    answer is sent after the turn's `turn/end` and the ordered notification
+    drain. A turn that also claims another user's message (e.g. a TUI steer) is a
+    MIXED turn: no further output is projected and the request fails closed with
     `LOCAL_ACP_PROMPT_MIXED_TURN`, never a fabricated success. The bounded
     per-connection output cap and the one-View-per-Session rule are unchanged.
+    - **Human inbox sources.** A claim makes the owned turn MIXED only when the
+      claimed message carries an official HUMAN source discriminant —
+      `user` (an ordinary prompt) or `user-question-reply` (a late answer to a
+      continued question, whichever owner submitted it). Every other source
+      (`skill-invocation`, `time-context`, and every other Host/plugin context
+      injection) is context, never a second person, and a `role: 'user'` field or
+      the message text never substitutes for the discriminant.
+    - **Provisional assistant stream.** The official process-local
+      `agent/assistant-stream` frames of the EXACT attached Agent are the only
+      provisional output source, and only for the flight's own already-claimed
+      turn: `start.turn` must equal that turn, and every later `chunk`/`end`
+      resolves through the attempt id the flight opened. `text-delta` becomes
+      `agent_message_chunk` and `reasoning-delta` becomes `agent_thought_chunk`
+      under ONE stable opaque ACP message id per attempt, handed to the same
+      bounded ordered tail as committed output — so the first delta reaches the
+      client BEFORE its durable `assistant/message` append, and a slow transport
+      fails the one request instead of growing a second buffer. The official
+      revision and per-attempt dense chunk index are validated strictly; a gap,
+      an unrecognized chunk kind or a mismatched `block-end` assembly stops that
+      attempt's deltas for good. `tool-call-delta` never fabricates a tool start:
+      the durable `tool/call` event stays the only authority.
+    - **Durable reconciliation by exact `seq`.** A committed `assistant/message`
+      whose attempt was still streaming is appended to the tail as a
+      reconciliation slot that waits for that attempt's official `end`. Only an
+      `end` with `outcome.kind === 'committed'`, `eventType === 'assistant/message'`
+      and the EXACT durable `seq` of that append may join; the committed
+      text/thought blocks must then equal what was already delivered, block for
+      block. A joined message adds only the durable blocks that were never
+      streamed (images), under the same ACP message id, and never re-sends text.
+      An attempt that delivered nothing falls back to the ordinary committed
+      projection. Everything else — a mismatch, a missing `end` at `turn/end`, a
+      replaced attempt, a retry, a provider that rewrites a block it already
+      streamed, or provisional bytes that no durable append can be proven to
+      match — fails closed with `LOCAL_ACP_PROMPT_STREAM_DIVERGENCE`. An `end` of
+      `assistant/attempt` or an abandoned attempt closes the attempt and is never
+      a turn terminal: the request still settles on the real `turn/end`.
+    - **Unretractable provisional bytes poison the flight.** ACP v1 output is
+      append-only, so bytes already shown cannot be withdrawn. The first attempt
+      of the flight that DELIVERED text/thought and can never be joined to a
+      durable message — an official retry (`assistant/attempt`), an abandoned
+      attempt, a replacement, or a lost `end` at the real terminal — therefore
+      ends this flight as `LOCAL_ACP_PROMPT_STREAM_DIVERGENCE`, even when a later
+      attempt would have completed successfully and even when that later attempt
+      streams nothing. No further attempt of a poisoned flight is streamed, and a
+      poisoned flight can never answer `end_turn`/`max_tokens`; the durable
+      message that a later attempt would have delivered is never reported. A
+      genuinely failed, cancelled or interrupted turn keeps its own real
+      classification instead of being rewritten as a divergence.
+    - **Budget accounting at the join.** The pending-update budget charges the
+      updates a task will actually hand to the transport, reserved before any
+      await. A reconciliation whose blocks were all streamed reserves nothing —
+      it only owns a tail position — while a message whose blocks were never
+      streamed reserves every block (and a joined message reserves its durable
+      images) before the first Store read.
+    - **Wire order and identity of a joined message.** One attempt's streamed
+      text/thought chunks and the residual durable blocks added at the join
+      share ONE stable opaque ACP message id (the durable message id is used only
+      for a message that was never streamed). Because ACP output is append-only,
+      a durable block that could not be streamed — an image between two text
+      blocks — is appended AFTER the text chunks that were already delivered, so
+      the wire order of such a mixed message can differ from its committed block
+      order. The committed order itself stays the durable log's and is never
+      rewritten by this projection.
+    - **Append-only limitation.** ACP v1 `agent_message_chunk` cannot be
+      retracted. Provisional bytes already handed to the client stay delivered
+      even when the attempt later fails or is retried; the View guarantees
+      ownership isolation, that uncommitted output is never reported as
+      committed, an accurate terminal classification, and no double delivery for
+      one successful attempt. Rolling back displayed provisional bytes is outside
+      the v1 protocol and is NOT claimed.
     - **Committed assistant/tool content.** An `assistant/message` keeps block
       order: non-empty text becomes `agent_message_chunk` text, reasoning becomes
       `agent_thought_chunk`, and an image becomes a standard `image` content
@@ -269,10 +339,14 @@ profile's independent `autoStart` preference enables it (see below).
       read is abandoned, notifications already handed to the transport stay
       delivered, a queued-but-unsent update is dropped, and the request fails
       closed with `LOCAL_ACP_PROMPT_MIXED_TURN`.
-    - A completed turn needs at least ONE visible assistant output: non-empty
-      committed text or a committed assistant image, so an image-only turn
-      succeeds. A turn with no visible output keeps the stable
-      `LOCAL_ACP_PROMPT_NO_ASSISTANT_TEXT` failure.
+    - A completed turn needs NO visible assistant output: a tool-only (or a
+      legitimately silent) `completed` turn answers `end_turn`, and any committed
+      text/thought/image it did produce is still projected. A `max-tokens` turn
+      answers `max_tokens`. Only a genuinely unsuccessful Host terminal answers a
+      failure: `blocked`/`error`/`interrupted`/`aborted` keep
+      `LOCAL_ACP_PROMPT_TURN_FAILED` (or the proven `cancelled`), and the Host
+      `TurnEndReason` vocabulary this phase cannot prove (`refusal`,
+      `max_turn_requests`) is never fabricated.
   - **Bounded input.** Text-only and unnegotiated connections retain the legacy
     1 MiB frame and 2 MiB unconsumed-input limits. An image-enabled connection
     derives its larger per-frame and unconsumed bounds from that Host's official
@@ -495,9 +569,89 @@ profile's independent `autoStart` preference enables it (see below).
     never bypassed. The official `approval/asked`/`approval/decided` audit
     pair stays the single decision record; this View adds no second audit
     writer.
+  - **Question ownership and the standard Form.** The official Agent-scoped
+    `user-questions/request` waterfall has exactly ONE classification seat ahead
+    of the TUI forwarding listener, registered for the SAME reason and with the
+    SAME exact-identity rule as the approval seat. It decides from facts only:
+    the request's exact Agent, the official current-turn fence, and the live
+    flight or retained retired turn that already owns that turn. A proven
+    foreign (TUI or autonomous) turn calls `next()` exactly once and keeps its
+    existing seat; a proven ACP-owned turn is answered HERE and never delegated.
+    An agentless programmatic ask is not a Session question and is never
+    intercepted. A question this View cannot attribute, or an ACP-owned question
+    on a connection that did not negotiate the standard capability, fails closed
+    with `LOCAL_ACP_QUESTION_UNAVAILABLE` — never a TUI answer, never a
+    `session/request_permission`, and never a fabricated empty answer.
+    - **Capability and channel.** A connection negotiates the standard client
+      capability `clientCapabilities.elicitation.form` at `initialize`; only such
+      a connection ever receives `elicitation/create`, and the channel is ONE
+      connection-scoped closure built from the SAME SDK client as
+      `session/new`/`session/resume` (exactly like the config-options notifier).
+      It stays usable after that request settles while the connection lives, and
+      a torn-down connection refuses instead of opening a second socket or
+      touching a Host Session.
+    - **Form shape.** Only the standard `mode: 'form'` request is produced:
+      `message`, `sessionId`, the optional official `toolCallId` and an
+      `object` schema whose keys are generated ASCII names (`q0`, `q1`, …), with
+      `required: []` so DSH's skip semantics stay expressible. A question with
+      options becomes `string` + `oneOf` (single) or `array` + `items.anyOf`
+      (multi); a question without options becomes a free-text `string`; a
+      question with options also gets ONE optional `qN__other` free-text
+      companion. Options are never reordered or renamed, and the original DSH
+      question id is restored from that request's own bindings — a wire key is
+      never an official id and no client-specific `_meta` is sent.
+    - **Answer conversion.** An `accept` builds the official batch with exactly
+      one item per official question, in ask order: a valid label is
+      `{selected:[label]}`, a multi selection is the duplicate-free label list, a
+      free-text value or the `__other` companion is `{custom:text}`, and an
+      omitted/empty value is `{selected:[]}` (the documented skip). A
+      single-select custom value replaces the selection; a multi-select custom
+      value accompanies it. An unknown key, a wrong primitive type, a label
+      outside the options, a duplicate multi value or an unknown action is
+      `LOCAL_ACP_QUESTION_BAD_ANSWER`, never a silent skip. `decline` and
+      `cancel` are `LOCAL_ACP_QUESTION_DECLINED`, never an empty answer and never
+      a permission decision. The Form carries no approval semantics: the official
+      `ctx.userQuestions.ask()` still validates the business answer, and
+      `intent.kind` presentation never grants execution.
+    - **Timed questions and continued answers.** This View never attaches a DSH
+      `TimedQuestionWait`, so DSH's own `askTimed` deadline remains the only
+      clock and no absent Client countdown can extend it. When that deadline
+      aborts the foreground wait, the original waterfall settles immediately as
+      pending while the still-open Form becomes the claim's continued
+      obligation for THAT official `callId`; any OTHER abort (turn cancellation,
+      Agent disposal, close/EOF/Off) revokes the Form. The official projection
+      allows several continued calls at once, so the View keeps one obligation
+      per call and a second timeout never replaces the first: every answer is
+      watched, validated and applied under the exact call/form it came from, and
+      no answer can ever become another call's answer. A late accepted answer is
+      held until the official `userQuestions` projection proves the call is
+      `continued` and is then submitted exactly once through the official
+      `userQuestions.answer(exactAgent, callId, batch)`. Every write is gated by
+      the same View-ownership fence (exact claim still in this registry, same
+      connection attached, not detached) re-read after each await and again
+      inside the Host seam immediately before the synchronous official call, so
+      a Form that outlives its View can never inject a reply into the shared
+      Session. When another owner settles a continued call first, that call's
+      Form is aborted AND the exact obligation (Form handle included) is
+      reclaimed, so a long-lived View never accumulates dead obligations.
+      That call's own result
+      keeps its meaning: `true` is a reply queued into the inbox (not "the model
+      used it"), `false` means the call is no longer answerable, and
+      `REPLY_QUEUED`/`BAD_ANSWER`/`CALLER_NOT_LIVE` keep their official code and
+      are never retried or converted into success. Nothing writes a durable
+      answer, a second question database or an Agent steer.
+    - **Resume and release.** `session/resume` re-reads the official continued
+      projection for the exact Session and offers each still-answerable call as
+      ONE Form at a time, in official ask order, deduped only by this
+      connection's own offered set. A call another owner settles first stops its
+      Form instead of leaving it open. Close, physical socket end, runtime Off,
+      Agent disposal and claim retirement go through ONE release hook that aborts
+      every reverse Form of that claim; the Host's durable question projection is
+      never modified, so another surface can still answer a continued question,
+      and a client disconnecting never cancels the Agent, Session or Turn.
   - **One prompt flight per View.** `session/prompt` is admitted only on an
     attached View that already holds the exact Session claim: the ONE flight, its
-    committed-output projection/drain and its StopReason settlement are owned by
+    committed/provisional output chain and its StopReason settlement are owned by
     the contract above. `session/close` and physical-dispatch release semantics
     are owned by the scoped-cancellation contract below.
 - **Bounded per Host and per connection.** The Host start-time

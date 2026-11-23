@@ -154,6 +154,27 @@ function sendRequest(client, id, method, params) {
   return client.next(120_000)
 }
 
+/**
+ * Read this connection's messages until the response for `id` arrives or the
+ * window is silent, keeping every notification. A held turn may legally stream
+ * transient updates, so "still held" means "no RESPONSE yet", never "no line".
+ */
+async function readUntilResponseOrSilence(client, id, notifications, windowMs) {
+  const deadline = Date.now() + windowMs
+  for (;;) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return undefined
+    let message
+    try {
+      message = await client.next(remaining)
+    } catch {
+      return undefined
+    }
+    if (message?.id === id && (message.result !== undefined || message.error !== undefined)) return message
+    notifications.push(message)
+  }
+}
+
 /** Read this connection's messages until the response for `id` arrives. */
 async function readUntilResponse(client, id, notifications) {
   for (;;) {
@@ -308,7 +329,7 @@ export async function runAcpPo3aTurnEvents(context) {
     mkdirSync(join(workDir, 'po3a-workspaces'), { recursive: true, mode: 0o700 })
     barrier = join(workDir, `po3a-hold-${String(process.pid)}.release`)
     rmSync(barrier, { force: true })
-    const started = await startC1Host('long-turn', 'po3a A host', {
+    const started = await startC1Host('long-turn-stream', 'po3a A host', {
       C1_HOLD_LONG_TURN: barrier,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
@@ -407,10 +428,15 @@ export async function runAcpPo3aTurnEvents(context) {
     assert(turnBResponse?.error === undefined, `C: the ACP prompt must settle successfully (got ${JSON.stringify(turnBResponse?.error)})`)
     assert(turnBResponse?.result?.stopReason === 'end_turn',
       `C: a completed turn must answer end_turn (got ${JSON.stringify(turnBResponse?.result)})`)
-    assert(bChunks.length === 1, `C: the ACP prompt must carry exactly one real assistant text chunk (got ${String(bChunks.length)})`)
-    const bChunkText = bChunks[0]?.update?.content?.text ?? ''
+    // The transient contract: the provider's two deltas ARE the committed
+    // block, so the connection receives exactly two text chunks under ONE ACP
+    // message id and the committed text is never appended a second time.
+    assert(bChunks.length === 2, `C: the ACP prompt must carry exactly its two provider deltas, never a re-sent commit (got ${String(bChunks.length)})`)
+    assert(new Set(bChunks.map(chunk => chunk?.update?.messageId)).size === 1,
+      `C: one attempt must use one stable ACP message id (got ${JSON.stringify(bChunks.map(chunk => chunk?.update?.messageId))})`)
+    const bChunkText = bChunks.map(chunk => chunk?.update?.content?.text ?? '').join('')
     assert(bChunkText.includes(`long-turn answer 2 long-turn-${sessionA}`),
-      `C: the ACP chunk must be the committed answer of its own turn (got ${JSON.stringify(bChunkText)})`)
+      `C: the ACP chunks must be the committed answer of its own turn (got ${JSON.stringify(bChunkText)})`)
     assert(!bChunkText.includes('long-turn answer 1'),
       'C: the ACP connection must never receive the earlier TUI turn output')
 
@@ -489,11 +515,14 @@ export async function runAcpPo3aTurnEvents(context) {
         && event.data?.target === 'next-step'
         && (event.data.inserted ?? []).some(message => message?.id === steerItem.id),
       'E: the existing Ctrl+S to steer the exact Host occurrence', 120_000)
-    assert(await conn1.silent(1_000),
+    // The held step legally streams its provisional text, so the proof is that
+    // its prompt request is still unanswered — not that the socket is silent.
+    const mixedNotifications = []
+    const heldResponse = await readUntilResponseOrSilence(conn1, 4, mixedNotifications, 1_000)
+    assert(heldResponse === undefined,
       'E: the ACP turn must still be held when the steer is claimed')
 
     releaseHeldTurn()
-    const mixedNotifications = []
     const mixedResponse = await readUntilResponse(conn1, 4, mixedNotifications)
     assert(mixedResponse?.error?.code === -32603,
       `E: a mixed turn must fail as a JSON-RPC internal failure (got ${JSON.stringify(mixedResponse?.result ?? mixedResponse?.error)})`)
@@ -629,7 +658,7 @@ export async function runAcpPo3aTurnEvents(context) {
       .filter(event => event.type === 'assistant/message' && event.data?.turn === largeTurn).length
     trace('acp-po3a/large-turn', { largeTurn, largeAssistantCount })
     const afterChunks = afterBackpressureNotifications.filter(notification => notification?.update?.sessionUpdate === 'agent_message_chunk')
-    assert(afterChunks.length === 1, 'H: the next prompt must deliver exactly its own answer chunk')
+    assert(afterChunks.length === 2, 'H: the next prompt must deliver exactly its own two provider deltas (never a re-sent commit)')
     assert(!JSON.stringify(afterBackpressureNotifications).includes('po3a-large-block-'),
       'H: no stale large-output notification may reach the next prompt')
     await waitForHostSessionHeader(dshHome, sessionB, 'H: Session B durable header')
