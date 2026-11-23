@@ -57,6 +57,17 @@ const SCENARIOS = new Set([
   // PO-4C committed output: the offline model emits standard assistant/tool
   // images that were first stored and re-verified by the official Host Store.
   'acp-po4c',
+  // G-ACP2 transient streaming: `long-turn`'s SELF-CONSISTENT twin. Its two
+  // deltas accumulate to exactly its durable block (attempt-labelled), so the
+  // ACP transient projection can settle without a divergence. `long-turn`
+  // itself keeps its original rewriting behaviour for the TUI cases that prove
+  // the authoritative-block-end supersede.
+  'long-turn-stream',
+  // G-ACP2 transient streaming: the ONLY scripted provider whose deltas and
+  // durable block agree. Its first delta is held so a case can prove the ACP
+  // chunk precedes the durable append, and one prompt selects a deliberately
+  // INCONSISTENT (provider-rewritten) block the View must fail closed on.
+  'acp-transient',
   // Host-liveness qualification scenarios. They only reach official Host
   // services (`goals`, `schedule`, `Agent.runMaintenance`) and record facts.
   'goal-armed',
@@ -1294,6 +1305,36 @@ class C1Model extends LlmAdapter {
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
 
+    if (this.scenario === 'acp-transient') {
+      // A provider whose streamed text IS its committed text: the two deltas
+      // accumulate to exactly the block-end block. The hold between them lets a
+      // case observe the first ACP chunk BEFORE the durable `assistant/message`
+      // append, which is the whole transient-stream settlement contract.
+      if (userText.includes('ts-inconsistent')) {
+        // Deliberate negative control: the provider rewrites the block it
+        // already streamed. ACP v1 cannot retract the provisional bytes, so the
+        // View must fail the request closed instead of pretending the rewritten
+        // committed text was delivered.
+        this.record('acp-transient-inconsistent', { sessionId })
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `acp-transient provisional ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `acp-transient committed ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const first = `acp-transient first ${token} `
+      const second = `acp-transient second ${token}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: first }
+      this.record('acp-transient-held', { sessionId, userText: userText.slice(0, 200) })
+      await waitForBarrier(process.env.C1_HOLD_ACP_TRANSIENT, signal)
+      this.record('acp-transient-released', { sessionId })
+      yield { type: 'text-delta', index: 0, text: second }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `${first}${second}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     if (this.scenario === 'acp-po4a') {
       // The Host appends its OWN user-role context (runtime/time context) after
       // the author's prompt, so the marker is matched against the newest
@@ -1454,6 +1495,38 @@ class C1Model extends LlmAdapter {
         yield { type: 'block-start', index, blockType: 'text' }
         yield { type: 'block-end', index, block: { type: 'text', text: `po3a-large-block-${String(index)}-${token}` } }
       }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'long-turn-stream') {
+      // Same hold/turn mechanics and text vocabulary as `long-turn`, but the
+      // streamed deltas ARE the committed block: the second delta carries the
+      // attempt label the original scenario only put in its block-end.
+      const token = `long-turn-${sessionId}`
+      if (afterTool) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `long-turn answer ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `long-turn answer ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const attempt = (this.longTurnCount.get(sessionId) ?? 0) + 1
+      this.longTurnCount.set(sessionId, attempt)
+      const first = `long-turn started ${String(attempt)} ${token} `
+      const second = `long-turn answer ${String(attempt)} ${token}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: first }
+      this.record('long-turn-held', {
+        sessionId,
+        attempt,
+        userText: userText.slice(0, 400),
+        agentStatus: this.agentStatusOf(sessionId),
+      })
+      await waitForBarrier(process.env.C1_HOLD_LONG_TURN, signal)
+      this.record('long-turn-released', { sessionId, attempt })
+      yield { type: 'text-delta', index: 0, text: second }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `${first}${second}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
@@ -1937,8 +2010,12 @@ class C1Model extends LlmAdapter {
       }
       const attempt = (this.longTurnCount.get(sessionId) ?? 0) + 1
       this.longTurnCount.set(sessionId, attempt)
+      // The two deltas ARE the committed block: the attempt label lives in the
+      // text that is really streamed, so an ACP transient join can prove it.
+      const first = `po3b started ${token} `
+      const second = `po3b answer ${String(attempt)} ${token}`
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: `po3b started ${token}` }
+      yield { type: 'text-delta', index: 0, text: first }
       this.record('long-turn-held', {
         sessionId,
         attempt,
@@ -1947,7 +2024,8 @@ class C1Model extends LlmAdapter {
       })
       await waitForBarrier(process.env.C1_HOLD_LONG_TURN, signal)
       this.record('long-turn-released', { sessionId, attempt })
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: `po3b answer ${String(attempt)} ${token}` } }
+      yield { type: 'text-delta', index: 0, text: second }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `${first}${second}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }

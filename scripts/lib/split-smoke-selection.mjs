@@ -85,6 +85,7 @@ import {
   runManagedHostSystemd,
   runManagedHostTwoProfileIsolation,
 } from '../smoke/split-process/managed-host-m6-2b.mjs'
+import { runAcpTransientStreamSettlement } from '../smoke/split-process/acp-transient-stream-settlement.mjs'
 import { runAcpPo3aTurnEvents } from '../smoke/split-process/acp-po3a-turn-events.mjs'
 import { runAcpPo3bCancelApproval } from '../smoke/split-process/acp-po3b-cancel-approval.mjs'
 import { runAcpPo4aContentInput } from '../smoke/split-process/acp-po4a-content-input.mjs'
@@ -560,6 +561,13 @@ const CASE_REGISTRY = Object.freeze([
     id: 'managed-host.m6-2b-manager-error',
     title: 'an installed profile unit beside a genuinely broken user manager makes the public start/install/status/logs fail closed with a manager error and starts no fallback Host',
     run: runManagedHostManagerError,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.transient-stream-settlement',
+    title: 'a real controlled provider streams deltas to the ACP client before the durable commit, the exact-seq settlement never re-sends them, a rewritten block fails closed and a sibling Session sees none of it',
+    platforms: LINUX_DARWIN,
+    run: runAcpTransientStreamSettlement,
   }),
   Object.freeze({
     suite: 'acp',

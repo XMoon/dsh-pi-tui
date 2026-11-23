@@ -48,7 +48,9 @@ import {
   AcpSessionViewRegistry,
   LocalAcpViewError,
   type AcpConfigOptionsNotifier,
+  type AcpElicitationRequester,
   type AcpImageLimits,
+  type AcpViewChannels,
   type ConnectionViewState,
   type HostAcpSessionAccess,
 } from './local-acp-session-view.ts'
@@ -59,6 +61,8 @@ const AGENT_NAME = 'dsh-pi-tui'
 const JSONRPC_INVALID_REQUEST = -32600
 /** JSON-RPC invalid-params code used by connection-local View admission refusals. */
 const JSONRPC_INVALID_PARAMS = -32602
+/** JSON-RPC internal-error code used by a fail-closed reverse capability refusal. */
+const JSONRPC_INTERNAL_ERROR = -32603
 
 /** One input line (a single NDJSON frame) may not exceed one mebibyte. */
 const MAX_INPUT_FRAME_BYTES = 1024 * 1024
@@ -323,6 +327,13 @@ interface ConnectionState {
   closed: boolean
   /** Whether THIS connection negotiated inline image prompts during its initialize. */
   imageEnabled: boolean
+  /**
+   * Whether THIS connection declared the standard ACP v1 form-based
+   * elicitation capability during its initialize. A connection that did not
+   * declare it never receives an `elicitation/create` request: an ACP-owned
+   * question then fails closed instead of being answered by another surface.
+   */
+  elicitationForm: boolean
   /** The input bounds derived from the Host image limits; text-only until negotiated. */
   inputBounds: ConnectionInputBounds
   /**
@@ -715,7 +726,7 @@ function buildAgentApp(
     else state.pendingRequests -= 1
   }
 
-  app.onRequest(methods.agent.initialize, async () => {
+  app.onRequest(methods.agent.initialize, async ({ params }) => {
     beginRequest()
     try {
       if (state.initialized) {
@@ -735,6 +746,10 @@ function buildAgentApp(
       // exact default route and attachment store decide it, and the connection
       // keeps this frozen result for every later session/prompt.
       state.initialized = true
+      // The client's standard form-based elicitation capability is negotiated
+      // ONCE for this connection. Supplying `{}` advertises it; an absent or
+      // null value does not, and no question Form is ever sent to such a client.
+      state.elicitationForm = params.clientCapabilities?.elicitation?.form != null
       if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
         const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
@@ -844,13 +859,45 @@ function buildAgentApp(
           update: { sessionUpdate: 'config_option_update', configOptions: [...configOptions] },
         })
       }
+    /**
+     * The ONE connection-scoped reverse elicitation channel of an attached View.
+     * It is built from the SAME SDK client context as the `session/new|resume`
+     * request (exactly like `configNotifierFor`), so it stays usable after that
+     * request settles while its connection lives — and only then: a torn-down
+     * connection refuses without touching a second socket or a Host Session.
+     */
+    const requestElicitationFor = (client: AgentContext): AcpElicitationRequester =>
+      async (request, options) => {
+        if (state.closed || !state.elicitationForm) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_QUESTION_UNAVAILABLE',
+            'this ACP connection cannot receive a question form',
+            JSONRPC_INTERNAL_ERROR,
+          )
+        }
+        const response = await client.request(methods.client.elicitation.create, {
+          mode: 'form',
+          message: request.message,
+          sessionId: request.sessionId,
+          ...request.toolCallId === undefined ? {} : { toolCallId: request.toolCallId },
+          requestedSchema: request.requestedSchema,
+        }, { cancellationSignal: options.signal })
+        return 'content' in response
+          ? { action: response.action, content: response.content }
+          : { action: response.action }
+      }
+    /** The per-connection transient channels an attached View may use. */
+    const viewChannelsFor = (client: AgentContext): AcpViewChannels => ({
+      notifyConfigOptions: configNotifierFor(client),
+      ...state.elicitationForm ? { requestElicitation: requestElicitationFor(client) } : {},
+    })
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
       beginRequest('control')
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
         view = createSessionViewSlot(slots, views)
-        const result = await views.newSession(view, access, params, configNotifierFor(client), signal)
+        const result = await views.newSession(view, access, params, viewChannelsFor(client), signal)
         const configOptions = await readConfigOptionsOrLog(result.sessionId, view)
         return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
@@ -875,7 +922,7 @@ function buildAgentApp(
           )
         }
         view = createSessionViewSlot(slots, views)
-        const result = await views.resumeSession(view, access, params, configNotifierFor(client), signal)
+        const result = await views.resumeSession(view, access, params, viewChannelsFor(client), signal)
         const configOptions = await readConfigOptionsOrLog(params.sessionId, view)
         return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
       } catch (error) {
@@ -991,6 +1038,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     pendingCloseRequests: 0,
     closed: false,
     imageEnabled: false,
+    elicitationForm: false,
     inputBounds: TEXT_ONLY_BOUNDS,
     maxOutputFrameBytes: deriveImageOutputBounds(context.sessionAccess?.imageLimits()) ?? MAX_OUTPUT_FRAME_BYTES,
     ...(viewRoster === undefined ? {} : { views: viewRoster }),

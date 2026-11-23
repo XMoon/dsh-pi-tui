@@ -308,7 +308,7 @@ export async function runAcpPo3aTurnEvents(context) {
     mkdirSync(join(workDir, 'po3a-workspaces'), { recursive: true, mode: 0o700 })
     barrier = join(workDir, `po3a-hold-${String(process.pid)}.release`)
     rmSync(barrier, { force: true })
-    const started = await startC1Host('long-turn', 'po3a A host', {
+    const started = await startC1Host('long-turn-stream', 'po3a A host', {
       C1_HOLD_LONG_TURN: barrier,
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '16',
     })
@@ -407,10 +407,15 @@ export async function runAcpPo3aTurnEvents(context) {
     assert(turnBResponse?.error === undefined, `C: the ACP prompt must settle successfully (got ${JSON.stringify(turnBResponse?.error)})`)
     assert(turnBResponse?.result?.stopReason === 'end_turn',
       `C: a completed turn must answer end_turn (got ${JSON.stringify(turnBResponse?.result)})`)
-    assert(bChunks.length === 1, `C: the ACP prompt must carry exactly one real assistant text chunk (got ${String(bChunks.length)})`)
-    const bChunkText = bChunks[0]?.update?.content?.text ?? ''
+    // The transient contract: the provider's two deltas ARE the committed
+    // block, so the connection receives exactly two text chunks under ONE ACP
+    // message id and the committed text is never appended a second time.
+    assert(bChunks.length === 2, `C: the ACP prompt must carry exactly its two provider deltas, never a re-sent commit (got ${String(bChunks.length)})`)
+    assert(new Set(bChunks.map(chunk => chunk?.update?.messageId)).size === 1,
+      `C: one attempt must use one stable ACP message id (got ${JSON.stringify(bChunks.map(chunk => chunk?.update?.messageId))})`)
+    const bChunkText = bChunks.map(chunk => chunk?.update?.content?.text ?? '').join('')
     assert(bChunkText.includes(`long-turn answer 2 long-turn-${sessionA}`),
-      `C: the ACP chunk must be the committed answer of its own turn (got ${JSON.stringify(bChunkText)})`)
+      `C: the ACP chunks must be the committed answer of its own turn (got ${JSON.stringify(bChunkText)})`)
     assert(!bChunkText.includes('long-turn answer 1'),
       'C: the ACP connection must never receive the earlier TUI turn output')
 
@@ -629,7 +634,7 @@ export async function runAcpPo3aTurnEvents(context) {
       .filter(event => event.type === 'assistant/message' && event.data?.turn === largeTurn).length
     trace('acp-po3a/large-turn', { largeTurn, largeAssistantCount })
     const afterChunks = afterBackpressureNotifications.filter(notification => notification?.update?.sessionUpdate === 'agent_message_chunk')
-    assert(afterChunks.length === 1, 'H: the next prompt must deliver exactly its own answer chunk')
+    assert(afterChunks.length === 2, 'H: the next prompt must deliver exactly its own two provider deltas (never a re-sent commit)')
     assert(!JSON.stringify(afterBackpressureNotifications).includes('po3a-large-block-'),
       'H: no stale large-output notification may reach the next prompt')
     await waitForHostSessionHeader(dshHome, sessionB, 'H: Session B durable header')

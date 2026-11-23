@@ -365,8 +365,10 @@ export async function runAcpPo4cContentOutput(context) {
     const acp = await openConnection(scopeDir, 'PO-4C primary ACP connection')
     assertStrict.deepEqual((await resume(acp, sessionId, 'PO-4C attach the TUI Session')).result, {})
 
-    // L6-C01: committed assistant text/image/text in exact order, same message
-    // id, and a standard ACP image frame above the legacy 256 KiB cap.
+    // L6-C01: committed assistant text/image/text. The transient contract sends
+    // the two standard text deltas as they arrive and appends the never-streamed
+    // durable IMAGE at the exact-seq join, under one stable ACP message id and
+    // with a standard image frame above the legacy 256 KiB cap.
     const mixed = await runPrompt(acp, sessionId, MARKERS.assistantMixed, 'PO-4C assistant text/image/text')
     assertEndTurn(mixed.settled, 'PO-4C assistant text/image/text')
     const mixedMessages = mixed.turnEvents.filter(event => event.type === 'assistant/message')
@@ -377,15 +379,16 @@ export async function runAcpPo4cContentOutput(context) {
     assertStrict.equal(mixedCommitted.content[0].text, TEXT_BEFORE)
     assertStrict.equal(mixedCommitted.content[2].text, TEXT_AFTER)
     const mixedRef = imageRefOf(mixedCommitted.content[1])
-    assertStrict.equal(mixed.settled.updates.length, 3, 'PO-4C: one ACP chunk per committed assistant block, no more')
+    assertStrict.equal(mixed.settled.updates.length, 3, 'PO-4C: two streamed text deltas plus the durable image, no more')
     const mixedKinds = mixed.settled.updates.map(entry => entry.message.params.update.sessionUpdate)
     assertStrict.deepEqual(mixedKinds, ['agent_message_chunk', 'agent_message_chunk', 'agent_message_chunk'])
-    assert(mixed.settled.updates.every(entry => entry.message.params.update.messageId === mixedCommitted.id),
-      'PO-4C: every assistant chunk keeps the committed message id')
+    const mixedMessageIds = new Set(mixed.settled.updates.map(entry => entry.message.params.update.messageId))
+    assertStrict.equal(mixedMessageIds.size, 1,
+      `PO-4C: one attempt uses ONE stable ACP message id (got ${JSON.stringify([...mixedMessageIds])})`)
     assertStrict.equal(mixed.settled.updates[0].message.params.update.content.text, TEXT_BEFORE)
-    assertStrict.equal(mixed.settled.updates[2].message.params.update.content.text, TEXT_AFTER)
-    const mixedImage = assertImageContent(mixed.settled.updates[1].message.params.update.content, mixedRef, 'PO-4C assistant image')
-    const mixedFrameBytes = mixed.settled.updates[1].rawBytes
+    assertStrict.equal(mixed.settled.updates[1].message.params.update.content.text, TEXT_AFTER)
+    const mixedImage = assertImageContent(mixed.settled.updates[2].message.params.update.content, mixedRef, 'PO-4C assistant image')
+    const mixedFrameBytes = mixed.settled.updates[2].rawBytes
     assert(mixedFrameBytes > LEGACY_FRAME_BYTES,
       `PO-4C: the delivered image frame must exceed the legacy 256 KiB cap (got ${String(mixedFrameBytes)})`)
     const mixedStored = await waitForC1WorkEvent(workRoot,
