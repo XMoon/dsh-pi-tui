@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 /**
- * Shared input qualification and failure diagnostics for the two split-process
- * smoke lanes: `split-process-smoke.mjs` and `split-process-upgrade-smoke.mjs`.
+ * Shared input qualification and failure diagnostics for the Split Process
+ * lane (`split-process-smoke.mjs`) and the surviving Upgrade support/scenes.
  *
- * Both lanes run against the ONE exact DSH runtime this checkout declares
- * (`npmDshVersion()`), so every packaged input must declare that same exact
- * pin. The production Client reexec preflight enforces the identical rule at
- * runtime and refuses a mismatching target; a lane that starts with a
+ * The Process lane runs against the ONE exact DSH runtime this checkout
+ * declares (`npmDshVersion()`), and every packaged input must declare that same
+ * exact pin. The production Client reexec preflight enforces the identical rule
+ * at runtime and refuses a mismatching target; a lane that starts with a
  * differently pinned artifact therefore fails on its NEGATIVE expectation and
  * reports it as a timeout. This module makes that pairing mistake a fast,
- * explicitly classified INPUT problem instead of a product-looking failure.
+ * explicitly classified INPUT problem instead of a product-looking failure. The
+ * Vitest Upgrade suite consumes the same guard through its own pair preflight.
  *
- * The rest of the module is the lanes' DEFAULT failure diagnostics: a bounded,
+ * The rest of the module is the lane's DEFAULT failure diagnostics: a bounded,
  * whitelisted projection of facts the lane already holds, written once to a
  * private report OUTSIDE the deletable qualification work root. It reads no
  * product service, owns no process or lifecycle, and never decides PASS — the
@@ -139,13 +140,6 @@ export const LANE_ERROR_CODES = Object.freeze([
   'PROCESS_EXITED_BEFORE_COMPOSER',
   'COMPOSER_WAIT_TIMEOUT',
   'COMPOSER_CLEAR_TIMEOUT',
-  'NOTICE_WAIT_TIMEOUT',
-  'PROCESS_EXITED_BEFORE_NOTICE',
-  'PAINTED_NOTICE_MISMATCH',
-  'PROCESS_REFUSED_RELOAD',
-  'PROCESS_IGNORED_RELOAD',
-  'HANDOFF_WAIT_TIMEOUT',
-  'PROCESS_EXITED_BEFORE_HANDOFF',
   'WORK_PROOF_WAIT_TIMEOUT',
   'SESSION_EVENT_WAIT_TIMEOUT',
   'HOST_SESSION_HEADER_TIMEOUT',
@@ -155,7 +149,6 @@ export const LANE_ERROR_CODES = Object.freeze([
   'READY_RACE_EXITED',
   'SEAT_RELEASE_TIMEOUT',
   'REGISTRY_COMMIT_EXITED',
-  'EVIDENCE_WRITE_FAILED',
   // The PR-A Web qualification's generic bounded condition wait (Browser
   // Session creation, client-hmr frames): declared here so its failure detail
   // survives the report projection instead of being dropped as unknown.
@@ -648,7 +641,7 @@ export function safeFailureSummary(error) {
  * message itself is printed by the default failure output and retained in the
  * report's `error`; `KEEP` only preserves the private scene.
  */
-const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEqual|assertMatch|laneAssertionError|SplitSmokeAssertionError)$/u
+const ASSERT_HELPER_FRAMES = /^(?:assert|SplitSmokeAssertionError)$/u
 
 /**
  * The ONLY files whose stack frames may become an `assertion` locator.
@@ -661,13 +654,8 @@ const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEq
  */
 const LANE_SOURCE_LIST = Object.freeze([
   'split-process-smoke.mjs',
-  'split-process-upgrade-smoke.mjs',
   // The extracted support modules that raise their own SplitSmokeAssertionError.
   // `split-smoke-sessions.mjs` is deliberately absent: it only classifies waits.
-  'cross-build-compatibility.mjs',
-  'manual-client-reload.mjs',
-  'reload-source-isolation.mjs',
-  'managed-daemon-upgrade.mjs',
   'split-upgrade-support.mjs',
   'host-runtime-disabled.mjs',
   'entry-admission.mjs',
