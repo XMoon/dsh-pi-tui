@@ -1871,6 +1871,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
         continue
       }
+      // A user-role context injection is not another user's prompt. Only
+      // distinct user-sourced claims can make this flight's turn MIXED.
+      if (message.source?.kind !== 'user') continue
       if (flight.turn !== undefined) {
         if (flight.turn === turn) this.markFlightMixed(flight)
         continue
