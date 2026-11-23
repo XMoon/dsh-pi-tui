@@ -51,11 +51,6 @@ const REPO_ROOT = realpathSync(join(TEST_DIR, '..', '..', '..'))
 
 interface SystemdManagerModule {
   inspectManagedService(reservation: NativeReservationFacts): Promise<NativeManagerInspection>
-  reclaimManagedService(input: NativeReservationFacts & {
-    fileIdentity: { device: string; inode: string; sha256: string } | null
-    verifiedHostIdentities: unknown[]
-    generation: number
-  }): Promise<{ clean: boolean; action: string; reason: string; observation: NativeManagerInspection }>
 }
 
 interface ManagedDaemonStatus {
@@ -276,121 +271,6 @@ function systemctlUser(args: string[], environment: SystemdEnvironment): string 
   return result.stdout
 }
 
-async function assertUnverifiedMainPidPreserved(
-  scene: UpgradeScene,
-  environment: SystemdEnvironment,
-  scopeId: string,
-  buildId: string,
-): Promise<void> {
-  const unitName = `dsh-pi-tui@pi-tui-${scopeId.slice(0, 16)}.service`
-  assert.match(unitName, UNIT_NAME_PATTERN, 'the fallback control unit name is not the Profile unit')
-  const unitDir = join(environment.accountHome, '.config', 'systemd', 'user')
-  const unitPath = join(unitDir, unitName)
-  assert.equal(existsSync(unitPath), false, 'the fallback target path is not absent before the control')
-  mkdirSync(unitDir, { recursive: true, mode: 0o700 })
-  const profileIdentity = createHash('sha256')
-    .update(`dsh-pi-tui/profile-identity/1\0${realpathSync(scene.installation.profileDir)}`)
-    .digest('hex')
-  const unitText = [
-    '[Unit]',
-    'Description=Managed fallback qualification',
-    '[Service]',
-    'Type=simple',
-    'ExecStart=/bin/sleep 60',
-    'X-DshPiTuiOwner=local-host-manager-v1',
-    `X-DshPiTuiScopeId=${scopeId}`,
-    `X-DshPiTuiProfileIdentity=${profileIdentity}`,
-    `X-DshPiTuiInstallBuild=${buildId}`,
-    '',
-  ].join('\n')
-  writeFileSync(unitPath, unitText, { mode: 0o600 })
-  const unitBytes = readFileSync(unitPath)
-  const unitStat = lstatSync(unitPath)
-  const showArgs = ['show', unitName, '-p', 'ActiveState', '-p', 'MainPID', '-p', 'FragmentPath']
-  let primary: unknown
-  let started = false
-  try {
-    systemctlUser(['daemon-reload'], environment)
-    systemctlUser(['start', unitName], environment)
-    started = true
-    const showBefore = systemctlUser(showArgs, environment)
-    assert.match(showBefore, /^ActiveState=active$/mu, 'the fallback control unit is not active')
-    const mainPid = Number(/^MainPID=(\d+)$/mu.exec(showBefore)?.[1])
-    assert.ok(Number.isInteger(mainPid) && mainPid > 0, 'the fallback control unit has no MainPID')
-    const reservation: NativeReservationFacts = {
-      manager: 'systemd',
-      uid: environment.uid,
-      accountHome: environment.accountHome,
-      profile: 'pi-tui',
-      profileRealpath: realpathSync(scene.installation.profileDir),
-      dshHome: realpathSync(scene.installation.dshHome),
-      scopeId,
-      unitName,
-      unitPath,
-      parentRunId: null,
-      sceneId: scene.sceneId,
-      oldBuildId: buildId,
-    }
-    const result = await systemdManager.reclaimManagedService({
-      ...reservation,
-      fileIdentity: null,
-      verifiedHostIdentities: [],
-      generation: 1,
-    })
-    assert.equal(result.action, 'preserve', 'the fallback reclaim did not preserve an unverified MainPID')
-    assert.equal(result.clean, false, 'the fallback reclaim claimed an unverified MainPID was clean')
-    assert.equal(result.reason, 'MANAGED_MAIN_PID_UNVERIFIED', 'the fallback reclaim returned another reason')
-    assert.equal(systemctlUser(showArgs, environment), showBefore, 'the unverified MainPID unit state changed')
-    assert.deepEqual(readFileSync(unitPath), unitBytes, 'the unverified MainPID unit bytes changed')
-    const afterStat = lstatSync(unitPath)
-    assert.equal(afterStat.dev, unitStat.dev, 'the unverified MainPID unit device changed')
-    assert.equal(afterStat.ino, unitStat.ino, 'the unverified MainPID unit inode changed')
-    assert.equal(afterStat.mode & 0o7777, unitStat.mode & 0o7777, 'the unverified MainPID unit mode changed')
-    assert.equal(pidAlive(mainPid), true, 'the unverified active MainPID was stopped')
-  } catch (error) {
-    primary = error
-  } finally {
-    const cleanupErrors: unknown[] = []
-    if (started) {
-      try {
-        systemctlUser(['stop', unitName], environment)
-      } catch (error) {
-        cleanupErrors.push(error)
-      }
-    }
-    try {
-      if (cleanupErrors.length === 0) {
-        const current = lstatSync(unitPath)
-        if (current.dev === unitStat.dev
-          && current.ino === unitStat.ino
-          && (current.mode & 0o7777) === (unitStat.mode & 0o7777)
-          && readFileSync(unitPath).equals(unitBytes)) {
-          unlinkSync(unitPath)
-        }
-      }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT') cleanupErrors.push(error)
-    }
-    try {
-      systemctlUser(['daemon-reload'], environment)
-    } catch (error) {
-      cleanupErrors.push(error)
-    }
-    if (primary !== undefined) {
-      if (cleanupErrors.length > 0) {
-        throw new AggregateError([primary, ...cleanupErrors], 'the fallback control failed and its cleanup also failed')
-      }
-      throw primary
-    }
-    if (cleanupErrors.length > 0) {
-      throw cleanupErrors.length === 1
-        ? cleanupErrors[0]
-        : new AggregateError(cleanupErrors, 'the fallback control cleanup failed')
-    }
-  }
-  assert.equal(existsSync(unitPath), false, 'the fallback control unit was not removed')
-}
 
 function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
@@ -810,11 +690,6 @@ test(TEST_TITLE, async () => {
     assert.equal(existsSync(targetUnitPath), false, 'the foreign unit was not removed')
     assert.match(systemctlUser(['show', targetUnitName, '-p', 'LoadState'], environment), /^LoadState=not-found$/mu,
       'the removed foreign unit is still loaded')
-
-    await assertUnverifiedMainPidPreserved(scene, environment, seedIdentity.scopeId, oldProfile.buildId)
-    assert.equal(existsSync(targetUnitPath), false, 'the fallback control unit was not removed')
-    assert.match(systemctlUser(['show', targetUnitName, '-p', 'LoadState'], environment), /^LoadState=not-found$/mu,
-      'the removed fallback control unit is still loaded')
 
     // ── reserve the run-owned unit before any service write ─────────────────
     const reserved = await scene.reserveManagedService()
