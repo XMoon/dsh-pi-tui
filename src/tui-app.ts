@@ -27862,13 +27862,25 @@ export class TuiApp {
       return () => {}
     }
     if (this.presetPickerComponent !== undefined) this.closePresetPicker()
+    // Retiring the previous panel can synchronously run a hide/dispose callback
+    // that mounts a NEWER panel. That newer owner already published its slot;
+    // this invocation must retire itself instead of overwriting it.
+    if (this.presetPickerComponent !== undefined) {
+      component.dispose?.()
+      return () => {}
+    }
     this.presetPickerComponent = component
     try {
       this.mountPresetPickerOverlay(component)
     } catch (error) {
-      this.presetPickerComponent = undefined
-      this.presetPickerOverlay = undefined
-      this.presetPickerFrame = undefined
+      // A synchronous focus/blur callback inside the mount may already have
+      // superseded this component with a newer panel. Only clear the slot this
+      // mount still owns; never retire the newer owner.
+      if (this.presetPickerComponent === component) {
+        this.presetPickerComponent = undefined
+        this.presetPickerOverlay = undefined
+        this.presetPickerFrame = undefined
+      }
       component.dispose?.()
       throw error
     }
@@ -27884,6 +27896,13 @@ export class TuiApp {
    *  preserved while the PHYSICAL frame is recreated at the live geometry. */
   private mountPresetPickerOverlay(component: Component & RowBudgetAware): void {
     const frame = this.createPresetPickerFrame(component)
+    if (this.presetPickerComponent !== component) {
+      // A synchronous setMaxRows/mount callback already superseded this panel
+      // before the physical mount: release the frame instead of stacking it
+      // over the newer owner.
+      frame.dispose?.()
+      return
+    }
     this.presetPickerFrame = frame
     const handle = this.showOverlayOnHost(
       frame,
@@ -27893,11 +27912,22 @@ export class TuiApp {
         remount: (logical) => {
           if (this.presetPickerComponent !== component) return
           const next = this.createPresetPickerFrame(component)
-          this.presetPickerFrame = next
           this.rebindOverlayRaw(logical, next, { width: 88, maxHeight: 28 })
+          // Rebinding can synchronously run focus/blur callbacks that start a
+          // newer Preset panel; never overwrite the newer frame slot.
+          if (this.presetPickerComponent === component) this.presetPickerFrame = next
         },
       },
     )
+    if (this.presetPickerComponent !== component) {
+      // A synchronous focus/blur callback during the physical mount started a
+      // newer Preset panel. This raw handle belongs to the retired one: drop its
+      // remount registration and hide it, but NEVER overwrite the newer
+      // owner's slot/close handle.
+      this.overlayRemounts.delete(handle)
+      handle.hide()
+      return
+    }
     this.presetPickerOverlay = handle
   }
 

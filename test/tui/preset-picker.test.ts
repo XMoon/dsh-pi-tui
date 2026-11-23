@@ -67,6 +67,7 @@ const LEFT = '\x1b[D'
 const RIGHT = '\x1b[C'
 const PAGE_DOWN = '\x1b[6~'
 const END = '\x1b[F'
+const HOME = '\x1b[H'
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void
@@ -1003,4 +1004,210 @@ test('a long read failure keeps its COMPLETE reason readable above the bar', asy
   const bottom = linesOf(h.vt).findIndex(line => line.includes('╰'))
   assert.ok(linesOf(h.vt)[bottom - 1]?.includes('Retry'), `the bar stays the last content row:\n${viewOf(h.vt)}`)
   h.app.dispose()
+})
+
+test('a newer panel mounted from a synchronous focus callback wins the mount window', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const stub = (body: string, onFirstFocus?: () => void, onDispose?: () => void) => {
+    let focusedValue = false
+    let disposed = 0
+    return {
+      get focused() { return focusedValue },
+      set focused(value: boolean) {
+        const was = focusedValue
+        focusedValue = value
+        if (value && !was) onFirstFocus?.()
+      },
+      get disposedCount() { return disposed },
+      render: () => [body],
+      invalidate: () => {},
+      setMaxRows: () => {},
+      dispose: () => {
+        disposed += 1
+        onDispose?.()
+      },
+    }
+  }
+  let panelB: ReturnType<typeof stub> | undefined
+  let closerB: (() => void) | undefined
+  const panelA = stub('A-mount-window-body', () => {
+    if (panelB !== undefined) return
+    panelB = stub('B-newer-mount-body')
+    closerB = app.openPresetPicker(panelB)
+  })
+  const closerA = app.openPresetPicker(panelA)
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('B-newer-mount-body'), `the newer mount must own the surface:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('A-mount-window-body'), `the retired mount must leave no ghost:\n${viewOf(vt)}`)
+  assert.equal(panelA.disposedCount, 1, 'the superseded mount disposes its own panel exactly once')
+  assert.equal(panelB?.focused, true, 'the newer mount owns the live focused seat')
+  closerA() // the stale mount's closer must be inert for the newer owner
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('B-newer-mount-body'),
+    `the retired mount's closer must not retire the newer owner:\n${viewOf(vt)}`)
+  closerB?.()
+  closerB?.() // idempotent: a repeated close never double-disposes or resurrects
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('B-newer-mount-body'), 'the current closer closes its own panel')
+  assert.ok(!viewOf(vt).includes('A-mount-window-body'), 'the retired mount never resurfaces')
+  assert.equal(panelB?.disposedCount, 1, 'the newer panel is disposed exactly once')
+  const panelC = stub('C-after-close-body')
+  const closerC = app.openPresetPicker(panelC)
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('C-after-close-body'), `the slot stays usable after the window:\n${viewOf(vt)}`)
+  closerC()
+  await vt.waitForRender()
+  assert.equal(panelC.disposedCount, 1, 'the follow-up mount closes exactly once')
+  app.dispose()
+})
+
+test('a throw after a synchronous newer mount leaves the newer panel live', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const stub = (body: string, onFirstFocus?: () => void, onDispose?: () => void) => {
+    let focusedValue = false
+    let disposed = 0
+    return {
+      get focused() { return focusedValue },
+      set focused(value: boolean) {
+        const was = focusedValue
+        focusedValue = value
+        if (value && !was) onFirstFocus?.()
+      },
+      get disposedCount() { return disposed },
+      render: () => [body],
+      invalidate: () => {},
+      setMaxRows: () => {},
+      dispose: () => {
+        disposed += 1
+        onDispose?.()
+      },
+    }
+  }
+  let panelB: ReturnType<typeof stub> | undefined
+  let closerB: (() => void) | undefined
+  const panelA = stub('A-throw-body', () => {
+    if (panelB !== undefined) return
+    panelB = stub('B-survives-body')
+    closerB = app.openPresetPicker(panelB)
+    throw new Error('qualification focus failure')
+  })
+  assert.throws(() => app.openPresetPicker(panelA), /qualification focus failure/u)
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('B-survives-body'),
+    `the newer mount survives the failed older mount:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('A-throw-body'), `the failed mount leaves no ghost:\n${viewOf(vt)}`)
+  assert.equal(panelB?.focused, true, 'the newer mount keeps the focused seat')
+  closerB?.()
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('B-survives-body'), 'the surviving panel closes normally')
+  assert.ok(!viewOf(vt).includes('A-throw-body'), 'the failed mount never resurfaces')
+  app.dispose()
+})
+
+
+test('a read failure taller than the status viewport scrolls to its complete last line', async () => {
+  const h = await openPanel({ hydrate: false, width: 44, rows: 20 })
+  const reason = Array.from({ length: 80 }, (_, index) => `cause-${index}`).join(' ')
+  h.error(reason)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('cause-0'), `the head must be readable first:\n${viewOf(h.vt)}`)
+  assert.ok(!viewOf(h.vt).includes('cause-79'), `the tail starts below the viewport:\n${viewOf(h.vt)}`)
+  assert.match(viewOf(h.vt), /rows 1-\d+\/\d+/u, `the scroll fact must state the position:\n${viewOf(h.vt)}`)
+
+  h.vt.sendInput(END)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('cause-79'), `End must reach the LAST error line:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Retry') && viewOf(h.vt).includes('Close [Esc]'),
+    `the real recovery actions must survive the scroll:\n${viewOf(h.vt)}`)
+
+  h.vt.sendInput(HOME)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('cause-0'), `Home returns to the first line:\n${viewOf(h.vt)}`)
+
+  // The search box stays editable in the error state: the error viewport owns
+  // only its navigation keys.
+  h.vt.sendInput('ptc')
+  await h.vt.waitForRender()
+  assert.ok(linesOf(h.vt).some(line => line.includes('> ptc')), `the search must stay live:\n${viewOf(h.vt)}`)
+  assert.deepEqual(h.applied, [], 'scrolling/typing an error writes nothing')
+  assert.equal(h.closes(), 0)
+  h.app.dispose()
+})
+
+test('a short grant still scrolls the complete read failure without losing the exit bar', async () => {
+  const h = await openPanel({ hydrate: false, width: 44, rows: 10 })
+  const reason = Array.from({ length: 80 }, (_, index) => `short-cause-${index}`).join(' ')
+  h.error(reason)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('short-cause-0'), `the head must be readable:\n${viewOf(h.vt)}`)
+  h.vt.sendInput(END)
+  await h.vt.waitForRender()
+  assert.ok(viewOf(h.vt).includes('short-cause-79'), `End must reach the last line on a short grant:\n${viewOf(h.vt)}`)
+  const bottom = linesOf(h.vt).findIndex(line => line.includes('╰'))
+  assert.ok(linesOf(h.vt)[bottom - 1]?.includes('Retry'), `the bar stays the last content row:\n${viewOf(h.vt)}`)
+  assert.ok(viewOf(h.vt).includes('Close [Esc]'), `Close stays reachable:\n${viewOf(h.vt)}`)
+  h.app.dispose()
+})
+
+
+test('a panel mounted by the previous close callback wins the new open request', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const stub = (body: string, onFirstFocus?: () => void, onDispose?: () => void) => {
+    let focusedValue = false
+    let disposed = 0
+    return {
+      get focused() { return focusedValue },
+      set focused(value: boolean) {
+        const was = focusedValue
+        focusedValue = value
+        if (value && !was) onFirstFocus?.()
+      },
+      get disposedCount() { return disposed },
+      render: () => [body],
+      invalidate: () => {},
+      setMaxRows: () => {},
+      dispose: () => {
+        disposed += 1
+        onDispose?.()
+      },
+    }
+  }
+  let panelC: ReturnType<typeof stub> | undefined
+  let closerC: (() => void) | undefined
+  let openedC = false
+  const panelA = stub('A-old-surface-body', undefined, () => {
+    if (openedC) return
+    openedC = true
+    panelC = stub('C-close-callback-body')
+    closerC = app.openPresetPicker(panelC)
+  })
+  const closerA = app.openPresetPicker(panelA)
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('A-old-surface-body'), viewOf(vt))
+
+  const panelB = stub('B-losing-open-body')
+  const closerB = app.openPresetPicker(panelB)
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('C-close-callback-body'),
+    `the panel opened by the close callback must stay the owner:\n${viewOf(vt)}`)
+  assert.ok(!viewOf(vt).includes('B-losing-open-body'),
+    `the late request must never mount over the newer owner:\n${viewOf(vt)}`)
+  assert.equal(panelB.disposedCount, 1, 'the losing request disposes itself exactly once')
+  closerB() // inert: it never owned the slot
+  closerA() // inert: its panel was already retired
+  await vt.waitForRender()
+  assert.ok(viewOf(vt).includes('C-close-callback-body'), 'inert closers never retire the newer owner')
+  closerC?.()
+  await vt.waitForRender()
+  assert.ok(!viewOf(vt).includes('C-close-callback-body'), 'the current closer closes its own panel')
+  app.dispose()
 })

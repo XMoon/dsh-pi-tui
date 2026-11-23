@@ -30,6 +30,7 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { customThemesDir } from '../../src/client/theme/files.ts'
 import { darkColors } from '../../src/domain/display/theme.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import type { PresetPickerHandle, PresetPresentation } from '../../src/app/command/preset-presentation.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
 import { disposeHarnessApps, fakeAgent, setup, SHIPPED_ROWS } from '../support/preset-command-harness.ts'
 
@@ -1716,4 +1717,55 @@ test('the navigation intent starts only for the final TUI-owned route and never 
     ['begin:new', 'invoke', 'finish:new'],
     'the TUI-owned /new route registers one intent and finishes it at the terminal sink',
   )
+})
+
+
+test('a newer /preset started inside the mount window owns the command slot', async () => {
+  let secondRun: Promise<unknown> | undefined
+  let invokeSecond: (() => void) | undefined
+  const opened: Array<{
+    loading: number
+    rosters: number
+    closed: number
+    request: import('../../src/app/command/preset-presentation.ts').PresetPickerRequest
+    handle: PresetPickerHandle
+  }> = []
+  let calls = 0
+  const presentation: PresetPresentation = {
+    notify: () => {},
+    open: (request) => {
+      calls += 1
+      if (calls === 1) invokeSecond!()
+      const record = { loading: 0, rosters: 0, closed: 0, request, handle: undefined as unknown as PresetPickerHandle }
+      const handle: PresetPickerHandle = {
+        setLoading: () => { record.loading += 1 },
+        setRoster: () => { record.rosters += 1 },
+        setLoadError: () => {},
+        isDisposed: () => record.closed > 0,
+        close: () => { record.closed += 1 },
+      }
+      record.handle = handle
+      opened.push(record)
+      return handle
+    },
+  }
+  const t = await setup({ presetPresentation: presentation })
+  invokeSecond = () => { secondRun = t.run('') }
+  const first = await t.run('')
+  await secondRun
+  await waitFor(async () => opened.some(o => o.rosters === 1))
+
+  assert.equal(opened.length, 2, 'both invocations reached their own presentation')
+  assert.deepEqual(first, { kind: 'success' })
+  const live = opened.filter(o => o.request.isCurrent())
+  assert.equal(live.length, 1, 'exactly ONE invocation owns the command surface')
+  const stale = opened.find(o => !o.request.isCurrent())!
+  assert.ok(stale !== undefined)
+  assert.equal(stale.loading, 0, 'the superseded invocation never starts its read')
+  assert.equal(stale.rosters, 0)
+  assert.equal(stale.closed, 1, 'the stale mount is released exactly once')
+  assert.equal(live[0]!.loading, 1, 'the newer invocation enters Loading through its own owner')
+  assert.equal(live[0]!.rosters, 1, 'the newer invocation hydrates the surface')
+  assert.equal(live[0]!.closed, 0, 'the newer mount stays the live owner')
+  t.app.dispose()
 })

@@ -22,6 +22,7 @@ import {
 } from '../../src/commands.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { PresetCatalog } from '../../src/runtime/catalog-port.ts'
+import type { PresetPresentation } from '../../src/app/command/preset-presentation.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../../src/app/command/catalog-refresh.ts'
 import type { SurfaceCommandSummary } from '../../src/domain/catalog/surface.ts'
 import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
@@ -404,6 +405,8 @@ export function setup(options: {
   presetsPort?: PresetCatalog
   /** The runner's displayed/current Session preset read. */
   currentPreset?: () => string | undefined
+  /** Replace the mounted PiTui Preset presenter (mount-window command fencing). */
+  presetPresentation?: PresetPresentation
   width?: number
   /** Viewport height. */
   height?: number
@@ -452,7 +455,7 @@ export function setup(options: {
     presetsPort: options.presetsPort,
     currentPreset: options.currentPreset,
   })
-  const surface = registerTuiCommandsWithDirectSeams(runner)
+  const surface = registerTuiCommandsWithDirectSeams(runner, undefined, options.presetPresentation)
   const def = commands.defs.find(entry => entry.name === 'preset')
   assert.ok(def?.handler !== undefined, 'preset handler missing')
   const run = async (rawInput: string): Promise<unknown> =>

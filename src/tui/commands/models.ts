@@ -990,6 +990,13 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           if (surfaceToken === presetSurfaceToken) activePresetPicker = undefined
           return { kind: 'error', text: `preset picker failed to open: ${presetErrorText(error)}` }
         }
+        if (surfaceToken !== presetSurfaceToken) {
+          // A synchronous mount callback (focus/blur) started a NEWER
+          // invocation that already owns the surface. Release this stale handle
+          // and never adopt it into the slot or start its read.
+          picker.close()
+          return { kind: 'success' }
+        }
         activePresetPicker = picker
         const closer = () => {
           if (activePresetPicker === picker) activePresetPicker = undefined

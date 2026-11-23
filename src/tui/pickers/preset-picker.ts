@@ -116,6 +116,10 @@ interface PresetFrame {
   readonly fittingActions: readonly PresetActionId[]
   /** The ENABLED actions the bar really painted this frame (pointer targets). */
   readonly paintedActions: readonly PresetActionId[]
+  /** How many wrapped status/error lines the whole message needs and how many
+   *  the current viewport really paints (0 outside a Catalog error). */
+  readonly statusTotalRows: number
+  readonly statusViewportRows: number
   readonly pageMarker: string
   readonly selectionMarker: string
   readonly generation: number
@@ -177,6 +181,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   private noticeIsError = false
   /** The single Details reader offset; one reading, one scroll. */
   private detailsScroll = 0
+  /** First wrapped error line painted by the Catalog error viewport. */
+  private errorScroll = 0
   private readerLines: string[] = []
   private detailsDocument: Markdown | undefined
   private rowGrant = Number.POSITIVE_INFINITY
@@ -266,6 +272,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.noticeIsError = false
     this.page = 'catalog'
     this.zone = 'list'
+    this.errorScroll = 0
     if (this.roster === undefined) {
       this.picker.setItems([])
       this.picker.setNoMatchText('  Loading agent presets…')
@@ -284,6 +291,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.pendingKind = undefined
     this.notice = ''
     this.noticeIsError = false
+    this.errorScroll = 0
     this.picker.setNoMatchText(rows.length === 0 ? '  No agent presets configured.' : '  No matching presets')
     // Seed the browse target from the REAL committed facts, then the first
     // roster row — never a fabricated "selected" flag.
@@ -311,6 +319,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.pendingKind = undefined
     this.page = 'catalog'
     this.zone = 'list'
+    this.errorScroll = 0
     const detail = sanitizedPhysicalLine(message)
     this.notice = detail
     this.noticeIsError = true
@@ -753,6 +762,27 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       || kb.matches(data, 'tui.select.pageDown')
   }
 
+  /** Scroll the read-only error viewport. Returns true when the key belonged to
+   *  the error (so it must not fall through to the search box or the picker). */
+  private scrollErrorStatus(data: string): boolean {
+    const frame = this.lastFrame
+    if (frame === undefined || frame.statusTotalRows <= frame.statusViewportRows) return false
+    const kb = getKeybindings()
+    const page = Math.max(1, frame.statusViewportRows)
+    const max = frame.statusTotalRows - frame.statusViewportRows
+    let next: number | undefined
+    if (matchesKey(data, 'up') || kb.matches(data, 'tui.select.up')) next = this.errorScroll - 1
+    else if (matchesKey(data, 'down') || kb.matches(data, 'tui.select.down')) next = this.errorScroll + 1
+    else if (matchesKey(data, 'pageUp') || kb.matches(data, 'tui.select.pageUp')) next = this.errorScroll - page
+    else if (matchesKey(data, 'pageDown') || kb.matches(data, 'tui.select.pageDown')) next = this.errorScroll + page
+    else if (matchesKey(data, 'home')) next = 0
+    else if (matchesKey(data, 'end')) next = max
+    if (next === undefined) return false
+    this.errorScroll = Math.min(Math.max(0, next), max)
+    this.deps.requestRender()
+    return true
+  }
+
   handleInput(data: string): void {
     if (this.disposed) return
     if (!this.ensureCurrent()) return
@@ -806,7 +836,9 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
         this.forwardSearchInput(data)
         return
       }
-      // A failed read owns no browsable list: only the search box stays live.
+      // A failed read owns no browsable list: only the search box stays live,
+      // plus the read-only error viewport's navigation keys.
+      if (this.scrollErrorStatus(data)) return
       if (this.isListNavigation(data) || matchesKey(data, 'enter')) return
       this.forwardSearchInput(data)
       return
@@ -1079,6 +1111,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
         barHits: bar.hits,
         fittingActions: bar.fitted,
         paintedActions: bar.painted,
+        statusTotalRows: 0,
+        statusViewportRows: 0,
         pageMarker: this.pageMarker(),
         selectionMarker: this.selectionMarker(),
         generation: this.gestureGeneration,
@@ -1086,14 +1120,36 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       return [bar.line]
     }
     const status = this.catalogStatus()
-    // The status area is ONE compacts line for a hint, but a READ failure keeps
-    // its COMPLETE reason: it wraps into as many rows as the grant can spare
-    // (always leaving the real exit bar and at least one list row).
+    // A hint is ONE compact row; a READ failure is a scrollable, read-only
+    // viewport of its COMPLETE wrapped reason above the real exit bar. When it
+    // overflows, a `rows a-b/n` fact states the position and Home/End/PageUp/
+    // PageDown/Up/Down reach every line — the tail is never silently
+    // unreachable.
     const statusText = status === undefined ? [] : wrapTextWithAnsi(`  ${sanitizedPhysicalLine(status.text)}`, width)
     const statusLimit = budget === Number.POSITIVE_INFINITY ? statusText.length : Math.max(0, budget - 2)
-    const statusLines = status === undefined || statusLimit === 0
-      ? []
-      : (status.error ? statusText.slice(0, statusLimit) : statusText.slice(0, 1)).map(line => this.paintStatusLine(line, status.error))
+    let statusLines: string[] = []
+    let statusViewportRows = 0
+    if (status !== undefined && statusLimit > 0) {
+      if (status.error) {
+        const scrollable = statusText.length > statusLimit
+        const factRows = scrollable && statusLimit >= 3 ? 1 : 0
+        statusViewportRows = Math.max(0, statusLimit - factRows)
+        const maxScroll = Math.max(0, statusText.length - statusViewportRows)
+        const start = Math.min(this.errorScroll, maxScroll)
+        this.errorScroll = start
+        statusLines = statusText
+          .slice(start, start + statusViewportRows)
+          .map(line => this.paintStatusLine(line, true))
+        if (factRows === 1) {
+          statusLines.push(color.textDim(truncateToWidth(
+            `  rows ${start + 1}-${start + statusViewportRows}/${statusText.length}`, width, '',
+          )))
+        }
+      } else {
+        statusViewportRows = 0
+        statusLines = [this.paintStatusLine(statusText[0] ?? '', false)]
+      }
+    }
     const listRows = budget === Number.POSITIVE_INFINITY
       ? Number.POSITIVE_INFINITY
       : Math.max(1, budget - 1 - statusLines.length)
@@ -1112,6 +1168,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       barHits: bar.hits,
       fittingActions: bar.fitted,
       paintedActions: bar.painted,
+      statusTotalRows: status?.error === true ? statusText.length : 0,
+      statusViewportRows: status?.error === true ? statusViewportRows : 0,
       pageMarker: this.pageMarker(),
       selectionMarker: this.selectionMarker(),
       generation: this.gestureGeneration,
@@ -1220,6 +1278,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       barHits: [],
       fittingActions: [],
       paintedActions: [],
+      statusTotalRows: 0,
+      statusViewportRows: 0,
       pageMarker: this.pageMarker(),
       selectionMarker: this.selectionMarker(),
       generation: this.gestureGeneration,
