@@ -730,6 +730,80 @@ export function validateHostIdentity(identity) {
 }
 
 /**
+ * Whether one official registry / `host-authenticated` record still names the
+ * SAME live kernel process. The record's schema-specific birth must match the
+ * fresh kernel observation; an old generation's record never authenticates a
+ * new process that reused the numeric PID.
+ */
+export function nativeIdentityRecordMatches(record, identity) {
+  if (record === null || typeof record !== 'object' || identity === null || typeof identity !== 'object') return false
+  if (identity.platform === 'linux') {
+    return record.schema === 1
+      && typeof record.hostStarttime === 'string'
+      && record.hostStarttime === identity.startTicks
+  }
+  if (identity.platform === 'darwin') {
+    const recorded = record.hostKernelIdentity
+    if (record.schema !== 2 || recorded === null || typeof recorded !== 'object') return false
+    return recorded.platform === 'darwin'
+      && recorded.pid === identity.pid
+      && recorded.bootUUID === identity.bootUUID
+      && recorded.uniqueId === identity.uniqueId
+      && recorded.processUUID === identity.processUUID
+      && recorded.startSec === identity.startSec
+      && recorded.startUsec === identity.startUsec
+  }
+  return false
+}
+
+/**
+ * Merge one verified managed-Host identity into the receipt ledger. The key is
+ * the proven kernel process identity, not the numeric PID: a reused PID is a
+ * different generation and must remain a separate terminal obligation.
+ */
+export function mergeHostIdentityLedger(identities, identity) {
+  const facts = validateHostIdentity(identity)
+  const merged = []
+  for (const value of identities ?? []) {
+    const existing = validateHostIdentity(value)
+    if (existing.pid === facts.pid && existing.kernelIdentity === facts.kernelIdentity) continue
+    merged.push(existing)
+  }
+  merged.push(facts)
+  return merged
+}
+
+/**
+ * The bounded terminal wait for one in-flight mutating manager helper. A helper
+ * that cannot be proved settled keeps the resource NOT_QUIESCED; the caller must
+ * not start manager cleanup or remove the Scene root.
+ */
+export async function waitForOwnedMutation({ mutation, timeoutMs, sleepImpl } = {}) {
+  if (mutation === null || mutation === undefined) return Object.freeze({ settled: true, reason: null })
+  const source = requireObject(mutation, 'owned mutation', 'NATIVE_CONTRACT_INVALID')
+  if (source.promise === null || typeof source.promise?.then !== 'function') {
+    fail('NATIVE_CONTRACT_INVALID', 'an owned mutation must carry a thenable promise')
+  }
+  const timeout = requirePositiveInteger(timeoutMs, 'timeoutMs', 'NATIVE_CONTRACT_INVALID')
+  const wait = sleepImpl ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+  const outcome = await Promise.race([
+    source.promise.then(() => 'settled', () => 'settled'),
+    wait(timeout).then(() => 'timeout'),
+  ])
+  return Object.freeze({
+    settled: outcome === 'settled',
+    reason: outcome === 'settled' ? null : 'NATIVE_MUTATION_NOT_QUIESCED',
+  })
+}
+
+/** A business (pre-cleanup) observation may not overwrite the cleanup receipt. */
+export function nativeObservationCommitAllowed({ lifecycleClosed, cleanupOwned = false } = {}) {
+  requireBoolean(lifecycleClosed, 'lifecycleClosed')
+  requireBoolean(cleanupOwned, 'cleanupOwned')
+  return cleanupOwned === true || lifecycleClosed !== true
+}
+
+/**
  * The native-only cleanup plan. Official stop/uninstall are used only for an
  * owned, verified definition of THIS run; unknown/foreign state goes straight
  * to the helper, which still has to re-prove ownership before it acts.
@@ -977,7 +1051,11 @@ export async function cleanupNativeService({
   const hostsGone = []
   for (const identity of hostIdentities) {
     const factsOfHost = validateHostIdentity(identity)
-    hostsGone.push({ pid: factsOfHost.pid, status: await probeHostKernel(factsOfHost.pid) })
+    hostsGone.push({
+      pid: factsOfHost.pid,
+      kernelIdentity: factsOfHost.kernelIdentity,
+      status: await probeHostKernel(factsOfHost),
+    })
   }
   const clientsGone = await probeClients()
   const verdict = classifyNativeCleanup({
@@ -1010,19 +1088,21 @@ export function classifyNativeCleanup({ observation, hostIdentities = [], hostsG
   const recorded = new Map()
   for (const identity of hostIdentities) {
     const facts = validateHostIdentity(identity)
-    recorded.set(facts.pid, facts)
+    recorded.set(`${facts.pid}:${facts.kernelIdentity}`, facts)
   }
   const covered = new Set()
   for (const host of hostsGone) {
     const source = requireObject(host, 'hostsGone entry', 'NATIVE_CONTRACT_INVALID')
     const pid = requirePositiveInteger(source.pid, 'hostsGone.pid', 'NATIVE_CONTRACT_INVALID')
+    const kernelIdentity = requireNonEmptyString(source.kernelIdentity, 'hostsGone.kernelIdentity', 'NATIVE_CONTRACT_INVALID')
     const status = requireOneOf(source.status, KERNEL_STATES, 'hostsGone.status', 'NATIVE_CONTRACT_INVALID')
-    if (!recorded.has(pid)) continue
-    covered.add(pid)
+    const key = `${pid}:${kernelIdentity}`
+    if (!recorded.has(key)) continue
+    covered.add(key)
     if (status !== 'gone' && status !== 'different') reasons.push('MANAGED_HOST_STILL_ALIVE')
   }
-  for (const pid of recorded.keys()) {
-    if (!covered.has(pid)) reasons.push('MANAGED_HOST_UNPROVEN')
+  for (const key of recorded.keys()) {
+    if (!covered.has(key)) reasons.push('MANAGED_HOST_UNPROVEN')
   }
   for (const client of clientsGone) {
     const source = requireObject(client, 'clientsGone entry', 'NATIVE_CONTRACT_INVALID')

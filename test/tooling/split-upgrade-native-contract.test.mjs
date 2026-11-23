@@ -40,8 +40,11 @@ import {
   LAUNCHD_CUSTOMIZATION,
   loadNativeManagerAdapter,
   MANAGED_DAEMON_OUTPUT_LIMIT_BYTES,
+  mergeHostIdentityLedger,
   nativeBootstrapAdmission,
+  nativeIdentityRecordMatches,
   nativeManagerHelperPath,
+  nativeObservationCommitAllowed,
   nativeReservationRecord,
   NATIVE_MANAGER_HELPER_FILES,
   allowNativeMutation,
@@ -55,6 +58,7 @@ import {
   serializeKernelIdentity,
   validateManagerInspection,
   validateReservationFacts,
+  waitForOwnedMutation,
 } from '../support/split-upgrade-native-contract.mjs'
 import {
   inspectSplitUpgradePair,
@@ -1617,14 +1621,14 @@ test('a terminal cleanup is clean only with a removed service and proven-gone Ho
   const clean = classifyNativeCleanup({
     observation: removed,
     hostIdentities: [hostIdentity()],
-    hostsGone: [{ pid: 4242, status: 'gone' }],
+    hostsGone: [{ pid: 4242, kernelIdentity: 'linux:12345', status: 'gone' }],
     clientsGone: [{ label: 'client-a', gone: true }],
   })
   assert.deepEqual(clean, { clean: true, reasons: [] })
   assert.deepEqual(classifyNativeCleanup({
     observation: removed,
     hostIdentities: [hostIdentity()],
-    hostsGone: [{ pid: 4242, status: 'alive' }],
+    hostsGone: [{ pid: 4242, kernelIdentity: 'linux:12345', status: 'alive' }],
     clientsGone: [],
   }).reasons, ['MANAGED_HOST_STILL_ALIVE'])
   assert.deepEqual(classifyNativeCleanup({
@@ -1645,6 +1649,76 @@ test('a terminal cleanup is clean only with a removed service and proven-gone Ho
     hostsGone: [],
     clientsGone: [],
   }).reasons, ['NATIVE_SERVICE_NOT_REMOVED'])
+})
+
+test('a reused PID is a different Host generation at entry and at the terminal ledger', () => {
+  const linux = { schema: 1, hostStarttime: '12345' }
+  assert.equal(nativeIdentityRecordMatches(linux, { platform: 'linux', pid: 4242, startTicks: '12345' }), true)
+  assert.equal(nativeIdentityRecordMatches(linux, { platform: 'linux', pid: 4242, startTicks: '99999' }), false,
+    'an old auth record birth must never authenticate the reused PID')
+  const darwin = {
+    schema: 2,
+    hostKernelIdentity: {
+      platform: 'darwin', pid: 4242, bootUUID: 'boot', uniqueId: 'unique', processUUID: 'process', startSec: 10, startUsec: 20,
+    },
+  }
+  const birth = { platform: 'darwin', pid: 4242, bootUUID: 'boot', uniqueId: 'unique', processUUID: 'process', startSec: 10, startUsec: 20 }
+  assert.equal(nativeIdentityRecordMatches(darwin, birth), true)
+  assert.equal(nativeIdentityRecordMatches(darwin, { ...birth, startUsec: 21 }), false)
+
+  const first = hostIdentity({ kernelIdentity: 'linux:111' })
+  const second = hostIdentity({ kernelIdentity: 'linux:222' })
+  assert.equal(mergeHostIdentityLedger([first], second).length, 2, 'the same PID with a new birth is a second generation')
+  assert.equal(mergeHostIdentityLedger([first, second], second).length, 2, 'the exact identity remains one ledger entry')
+  assert.equal(mergeHostIdentityLedger([first, second], first).length, 2)
+
+  const facts = reservation()
+  const removed = absentObservation(facts, { everObservedInstalled: true })
+  const bothGone = classifyNativeCleanup({
+    observation: removed,
+    hostIdentities: [first, second],
+    hostsGone: [
+      { pid: 4242, kernelIdentity: 'linux:111', status: 'gone' },
+      { pid: 4242, kernelIdentity: 'linux:222', status: 'gone' },
+    ],
+    clientsGone: [],
+  })
+  assert.equal(bothGone.clean, true)
+  const oneAlive = classifyNativeCleanup({
+    observation: removed,
+    hostIdentities: [first, second],
+    hostsGone: [
+      { pid: 4242, kernelIdentity: 'linux:111', status: 'gone' },
+      { pid: 4242, kernelIdentity: 'linux:222', status: 'alive' },
+    ],
+    clientsGone: [],
+  })
+  assert.deepEqual(oneAlive.reasons, ['MANAGED_HOST_STILL_ALIVE'])
+  const reused = classifyNativeCleanup({
+    observation: removed,
+    hostIdentities: [first, second],
+    hostsGone: [
+      { pid: 4242, kernelIdentity: 'linux:111', status: 'different' },
+      { pid: 4242, kernelIdentity: 'linux:222', status: 'gone' },
+    ],
+    clientsGone: [],
+  })
+  assert.equal(reused.clean, true, 'a fresh birth that no longer matches the recorded one is a replaced process')
+})
+
+test('an unsettled mutating helper keeps the cleanup NOT_QUIESCED', async () => {
+  let release
+  const pending = new Promise(resolve => { release = resolve })
+  const timed = await waitForOwnedMutation({ mutation: { verb: 'customize', promise: pending }, timeoutMs: 10 })
+  assert.deepEqual(timed, { settled: false, reason: 'NATIVE_MUTATION_NOT_QUIESCED' })
+  release()
+  const settled = await waitForOwnedMutation({ mutation: { verb: 'customize', promise: pending }, timeoutMs: 100 })
+  assert.deepEqual(settled, { settled: true, reason: null })
+  assert.deepEqual(await waitForOwnedMutation({ mutation: null, timeoutMs: 10 }), { settled: true, reason: null })
+  assert.equal(nativeObservationCommitAllowed({ lifecycleClosed: false }), true)
+  assert.equal(nativeObservationCommitAllowed({ lifecycleClosed: true }), false,
+    'a late business observation must not overwrite the cleanup receipt')
+  assert.equal(nativeObservationCommitAllowed({ lifecycleClosed: true, cleanupOwned: true }), true)
 })
 
 test('a failed primary operation and a failed cleanup keep both independent reasons', () => {

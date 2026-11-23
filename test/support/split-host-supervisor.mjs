@@ -43,12 +43,16 @@ import {
   executeNativeServiceReservation,
   isNativeDaemonUnquiesced,
   loadNativeManagerAdapter,
+  mergeHostIdentityLedger,
+  nativeIdentityRecordMatches,
+  nativeObservationCommitAllowed,
   runOwnedNativeCli,
   nativeBootstrapAdmission,
   parseManagedDaemonStatus,
   requireLaunchdCustomization,
   runFixedDaemonVerb,
   serializeKernelIdentity,
+  waitForOwnedMutation,
 } from './split-upgrade-native-contract.mjs'
 
 const SUPERVISOR_STARTED_AT = new Date().toISOString()
@@ -56,6 +60,7 @@ const HOST_READY_TIMEOUT_MS = 180_000
 const HOST_SHUTDOWN_GRACE_MS = 30_000
 const TERM_GRACE_MS = 3_000
 const KILL_GRACE_MS = 3_000
+const MUTATING_HELPER_GRACE_MS = 30_000
 const QUALIFICATION_PROOF_TIMEOUT_MS = 180_000
 const QUALIFICATION_SHUTDOWN_GRACE_MS = 30_000
 const RUN_ID = process.env.SPLIT_VITEST_RUN_ID ?? `supervisor-${String(process.pid)}-${String(Date.now())}`
@@ -1233,6 +1238,14 @@ function setNativeCliFence(verb, error, pending) {
   appendNote('native-cli-unquiesced', { verb, pid, reason: runtime.cliFence.reason })
 }
 
+/** Fresh terminal state of one recorded managed-Host kernel identity. */
+function nativeHostIdentityState(identity) {
+  const fresh = nativeCliKernelFacts(identity.pid)
+  if (fresh.status === 'gone') return 'gone'
+  if (fresh.status === 'unknown') return 'unknown'
+  return fresh.birth === identity.kernelIdentity ? 'alive' : 'different'
+}
+
 /** Fresh fence verdict; a proven gone/reused child is the only way to lift it. */
 function refreshNativeCliFence() {
   const runtime = requireNativeScene('native CLI fence')
@@ -1342,25 +1355,6 @@ function readNativeInstanceRegistry(reservation) {
   return value
 }
 
-/** Whether one registry record still names the SAME live kernel process. */
-function registryIdentityMatches(record, identity) {
-  if (identity.platform === 'linux') {
-    return record.schema === 1 && record.hostStarttime === identity.startTicks
-  }
-  if (identity.platform === 'darwin') {
-    const recorded = record.hostKernelIdentity
-    if (record.schema !== 2 || recorded === null || typeof recorded !== 'object') return false
-    return recorded.platform === 'darwin'
-      && recorded.pid === identity.pid
-      && recorded.bootUUID === identity.bootUUID
-      && recorded.uniqueId === identity.uniqueId
-      && recorded.processUUID === identity.processUUID
-      && recorded.startSec === identity.startSec
-      && recorded.startUsec === identity.startUsec
-  }
-  return false
-}
-
 /**
  * Bind one manager-named Host PID to the official authenticated identity. A
  * Client's own `host-authenticated` record is preferred; the official instance
@@ -1389,6 +1383,9 @@ function findNativeHostIdentity(pid, reservation) {
       const host = record.host
       if (host === null || typeof host !== 'object') continue
       if (host.hostPid !== pid || host.scopeId !== reservation.scopeId) continue
+      // An old host-authenticated record must not authenticate a new process
+      // that reused the numeric PID. Compare the schema-specific kernel birth.
+      if (!nativeIdentityRecordMatches(host, kernel.identity)) continue
       if (typeof host.instanceId !== 'string' || host.instanceId === '') continue
       if (typeof host.buildId !== 'string' || host.buildId === '') continue
       return {
@@ -1402,7 +1399,7 @@ function findNativeHostIdentity(pid, reservation) {
     }
   }
   const registry = readNativeInstanceRegistry(reservation)
-  if (registry !== null && registry.hostPid === pid && registryIdentityMatches(registry, kernel.identity)) {
+  if (registry !== null && registry.hostPid === pid && nativeIdentityRecordMatches(registry, kernel.identity)) {
     return {
       pid,
       scopeId: registry.scopeId,
@@ -1413,13 +1410,6 @@ function findNativeHostIdentity(pid, reservation) {
     }
   }
   return null
-}
-
-/** Merge one verified managed-Host identity into the receipt ledger (one per PID). */
-function mergeHostIdentities(identities, identity) {
-  const merged = (identities ?? []).filter(value => value.pid !== identity.pid)
-  merged.push(identity)
-  return merged
 }
 
 /** The real Linux user runtime, proven by lstat before any daemon CLI uses it. */
@@ -1614,7 +1604,13 @@ async function observeNativeService({ runStatus = true, lifecycle } = {}) {
   })
   let record = applyServiceObservation(runtime.record, observation, lifecycle === undefined ? {} : { lifecycle })
   if (identity !== null && observation.authenticatedHostReady) {
-    record = { ...record, hostIdentities: mergeHostIdentities(record.hostIdentities, identity) }
+    record = { ...record, hostIdentities: mergeHostIdentityLedger(record.hostIdentities, identity) }
+  }
+  // A business pre-cleanup observation that completes after the lifecycle
+  // closed must not overwrite the cleanup-owned live receipt. The cleanup
+  // observation is the only late writer allowed.
+  if (!nativeObservationCommitAllowed({ lifecycleClosed, cleanupOwned: lifecycle === 'cleaning' })) {
+    return { reservation, observation: record.observed }
   }
   writeNativeRecord(record)
   return { reservation, observation: record.observed }
@@ -1633,6 +1629,7 @@ async function cleanupNativeManagedService(reason) {
     }
     const runtime = nativeRuntime
     const reservation = runtime.reservation
+    runtime.cleanupStarted = true
     runtime.abortController.abort()
     const pending = runtime.cliPending
     if (pending !== undefined) {
@@ -1642,6 +1639,26 @@ async function cleanupNativeManagedService(reason) {
       if (unquiesced !== null) setNativeCliFence(pending.verb, unquiesced, pending)
       runtime.cliPending = undefined
       await Promise.resolve()
+    }
+    const mutationDrain = await waitForOwnedMutation({
+      mutation: runtime.mutationPending,
+      timeoutMs: MUTATING_HELPER_GRACE_MS,
+    })
+    if (!mutationDrain.settled) {
+      // The helper may still commit a manager file change. No manager cleanup
+      // and no root removal may run; keep the Scene NOT_QUIESCED.
+      writeNativeRecord({
+        ...runtime.record,
+        lifecycle: 'unverifiable',
+        cleanup: {
+          attempted: true,
+          officialStop: 'not-attempted',
+          officialUninstall: 'not-attempted',
+          fallback: 'not-attempted',
+          reason: 'NATIVE_MUTATION_NOT_QUIESCED',
+        },
+      })
+      return { clean: false, reason: 'NATIVE_MUTATION_NOT_QUIESCED' }
     }
     const fence = refreshNativeCliFence()
     const cliFence = fence.state === 'clear' ? null : fence
@@ -1661,7 +1678,7 @@ async function cleanupNativeManagedService(reason) {
       writeRecord: record => writeNativeRecord(record),
       readRecord: () => runtime.record,
       probeKernel: async pid => (pid === null ? null : nativeKernelFacts(pid)),
-      probeHostKernel: pid => nativeKernelFacts(pid).status,
+      probeHostKernel: identity => nativeHostIdentityState(identity),
       probeClients: async () => (receipt.clients ?? []).map(client => ({
         label: String(client.label),
         gone: nativeRegisteredClientGone(client),
@@ -1970,6 +1987,8 @@ async function handleBootstrapUpgrade(message) {
         currentProfile: undefined,
         cliPending: undefined,
         cliFence: undefined,
+        mutationPending: undefined,
+        cleanupStarted: false,
         abortController: new AbortController(),
       }
     }
@@ -2394,64 +2413,105 @@ async function handleNativeCustomizeManagedService(message) {
     throw new Error('NATIVE_CUSTOMIZE_UNOWNED: the managed plist has no recorded file identity')
   }
   assertLifecycleOpen('NATIVE_CUSTOMIZE_MANAGED_SERVICE')
-  const result = await runtime.adapter.customizeManagedService({
-    ...runtime.reservation,
-    fileIdentity: runtime.record.fileIdentity,
-  }, customization)
-  const inspection = result?.observation
-  if (inspection === undefined || inspection === null) {
-    throw new Error('NATIVE_CUSTOMIZE_INVALID: the helper returned no observation')
+  /**
+   * The helper performs real manager/plist IO. Track the whole customize
+   * transaction so disconnect cleanup either waits for its terminal state or
+   * preserves the Scene as NOT_QUIESCED; it may never remove the root while the
+   * helper can still commit.
+   */
+  let settleMutation
+  const mutationTerminal = new Promise(resolve => { settleMutation = resolve })
+  runtime.mutationPending = { verb: 'customize', promise: mutationTerminal }
+  // If cleanup already timed out on this transaction, the late commit must not
+  // erase its NOT_QUIESCED terminal state; keep the mutation facts but preserve
+  // the cleanup reason and the unverifiable lifecycle.
+  const commitCustomizeRecord = (next) => {
+    const timedOut = runtime.cleanupStarted && runtime.record?.cleanup?.reason === 'NATIVE_MUTATION_NOT_QUIESCED'
+    writeNativeRecord(timedOut
+      ? { ...next, lifecycle: 'unverifiable', cleanup: runtime.record.cleanup }
+      : next)
+    return timedOut
   }
-  const kernel = inspection.mainPid === null ? null : nativeKernelFacts(inspection.mainPid)
-  const nextObservation = classifyManagedInspection({
-    reservation: runtime.reservation,
-    history: { everObservedInstalled: runtime.record.everObservedInstalled },
-    inspection,
-    kernel,
-    verifiedAt: now(),
-  })
-  let record = applyServiceObservation(runtime.record, nextObservation)
-  const returnedIdentity = result.fileIdentity
-  const invalidIdentity = (message) => {
-    // The helper may already have replaced the plist. Never present the old
-    // identity as current; record the unverifiable committed state and fail.
-    writeReceipt({
-      phase: 'NOT_QUIESCED',
-      errorName: 'NATIVE_CUSTOMIZE_IDENTITY_MISMATCH',
-      notes: [...(receipt?.notes ?? []), { event: 'native-customize-unverified', detail: { reason: message }, at: now() }],
-      native: {
+  try {
+    let result
+    try {
+      result = await runtime.adapter.customizeManagedService({
+        ...runtime.reservation,
+        fileIdentity: runtime.record.fileIdentity,
+      }, customization)
+    } catch (error) {
+      // The helper failed at an unknown point: it may or may not have replaced
+      // the plist. Keep the live and persistent record uncertain.
+      commitCustomizeRecord({
+        ...runtime.record,
+        lifecycle: 'unverifiable',
+        lastOperation: { verb: 'customize', phase: 'UNKNOWN', pid: null, exitCode: null, signal: null, at: now() },
+      })
+      writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(error) })
+      throw error
+    }
+    const inspection = result?.observation
+    if (inspection === undefined || inspection === null) {
+      throw new Error('NATIVE_CUSTOMIZE_INVALID: the helper returned no observation')
+    }
+    const kernel = inspection.mainPid === null ? null : nativeKernelFacts(inspection.mainPid)
+    const nextObservation = classifyManagedInspection({
+      reservation: runtime.reservation,
+      history: { everObservedInstalled: runtime.record.everObservedInstalled },
+      inspection,
+      kernel,
+      verifiedAt: now(),
+    })
+    const record = applyServiceObservation(runtime.record, nextObservation)
+    const returnedIdentity = result.fileIdentity
+    const invalidIdentity = (message) => {
+      // The helper may already have replaced the plist. Never present the old
+      // identity as current; the live and persistent record both carry the
+      // unverifiable committed state.
+      const failedRecord = {
         ...record,
         lifecycle: 'unverifiable',
         lastOperation: { verb: 'customize', phase: 'UNKNOWN', pid: null, exitCode: null, signal: null, at: now() },
-      },
-    })
-    throw new Error(`NATIVE_CUSTOMIZE_IDENTITY_MISMATCH: ${message}`)
+      }
+      commitCustomizeRecord(failedRecord)
+      writeReceipt({
+        phase: 'NOT_QUIESCED',
+        errorName: 'NATIVE_CUSTOMIZE_IDENTITY_MISMATCH',
+      })
+      throw new Error(`NATIVE_CUSTOMIZE_IDENTITY_MISMATCH: ${message}`)
+    }
+    if (returnedIdentity === null || returnedIdentity === undefined) {
+      invalidIdentity('the helper returned no customized file identity')
+    }
+    if (typeof returnedIdentity.device !== 'string' || typeof returnedIdentity.inode !== 'string'
+      || typeof returnedIdentity.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(returnedIdentity.sha256)) {
+      invalidIdentity('the helper returned an invalid file identity')
+    }
+    if (record.fileIdentity === null
+      || record.fileIdentity.device !== returnedIdentity.device
+      || record.fileIdentity.inode !== returnedIdentity.inode
+      || record.fileIdentity.sha256 !== returnedIdentity.sha256) {
+      invalidIdentity('the receipt identity is not the observed customized file')
+    }
+    const committed = {
+      ...record,
+      lastOperation: { verb: 'customize', phase: 'EXITED', pid: null, exitCode: 0, signal: null, at: now() },
+    }
+    // The updated real file identity is durable in BOTH the live record and the
+    // receipt before the Worker is acknowledged; a later status rebuild starts
+    // from the committed identity, never the previous one.
+    const timedOut = commitCustomizeRecord(committed)
+    if (!timedOut) writeReceipt({ phase: 'NATIVE_SERVICE_CUSTOMIZED' })
+    if (lifecycleClosed) {
+      // The helper transaction already committed. The record above is the truth;
+      // the Worker must not receive a success acknowledgement from a closing Scene.
+      throw new Error('NATIVE_SCENE_CLOSED: the managed-plist customization committed while the Scene was closing')
+    }
+    return { reservation: runtime.reservation, observation: committed.observed }
+  } finally {
+    settleMutation()
+    runtime.mutationPending = undefined
   }
-  if (returnedIdentity === null || returnedIdentity === undefined) {
-    invalidIdentity('the helper returned no customized file identity')
-  }
-  if (typeof returnedIdentity.device !== 'string' || typeof returnedIdentity.inode !== 'string'
-    || typeof returnedIdentity.sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(returnedIdentity.sha256)) {
-    invalidIdentity('the helper returned an invalid file identity')
-  }
-  if (record.fileIdentity === null
-    || record.fileIdentity.device !== returnedIdentity.device
-    || record.fileIdentity.inode !== returnedIdentity.inode
-    || record.fileIdentity.sha256 !== returnedIdentity.sha256) {
-    invalidIdentity('the receipt identity is not the observed customized file')
-  }
-  record = {
-    ...record,
-    lastOperation: { verb: 'customize', phase: 'EXITED', pid: null, exitCode: 0, signal: null, at: now() },
-  }
-  // The updated real file identity is durable BEFORE the Worker is acknowledged.
-  writeReceipt({ phase: 'NATIVE_SERVICE_CUSTOMIZED', native: record })
-  if (lifecycleClosed) {
-    // The helper transaction already committed. The record above is the truth;
-    // the Worker must not receive a success acknowledgement from a closing Scene.
-    throw new Error('NATIVE_SCENE_CLOSED: the managed-plist customization committed while the Scene was closing')
-  }
-  return { reservation: runtime.reservation, observation: record.observed }
 }
 
 /** Re-bind the Client entry to the CURRENT install receipt before any spawn. */
