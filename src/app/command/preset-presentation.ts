@@ -37,8 +37,10 @@ export interface PresetPickerRoster {
 export type PresetApplyOutcome =
   /** Sessionless: staged as the run-local pending preset (no Session created). */
   | { readonly kind: 'pending'; readonly preset: string }
-  /** A still-blank live Session's durable preset selection committed. */
-  | { readonly kind: 'switched'; readonly preset: string }
+  /** A still-blank live Session's durable preset selection committed. A
+   *  post-commit catalog refresh failure is carried beside the committed fact;
+   *  it never turns the switch into a refusal. */
+  | { readonly kind: 'switched'; readonly preset: string; readonly refreshError?: string }
   /** A newer `/preset` or a moved subject owns the surface: nothing to report. */
   | { readonly kind: 'superseded' }
   /** The Host refused because the Session already started. */
@@ -55,6 +57,13 @@ export type PresetApplyOutcome =
 export type PresetDefaultSyncOutcome =
   | { readonly kind: 'not-applicable' }
   | { readonly kind: 'applied'; readonly preset: string }
+  /** Host committed the switch, but the post-commit catalog refresh failed. */
+  | { readonly kind: 'applied-unrefreshed'; readonly preset: string; readonly message: string }
+  /** The Host switch may have committed; never claim it did not. */
+  | { readonly kind: 'uncertain'; readonly message: string }
+  /** The Host-authoritative effective default no longer names the requested
+   *  ID (another Client/Host policy won); this operation did not switch. */
+  | { readonly kind: 'overridden'; readonly effectiveDefault: string | undefined }
   | { readonly kind: 'skipped-stale'; readonly reason: string }
   | { readonly kind: 'failed'; readonly message: string }
 

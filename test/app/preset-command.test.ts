@@ -1797,7 +1797,7 @@ test('typed /preset default saves Config and switches the captured blank session
   t.app.dispose()
 })
 
-test('typed /preset default reports a confirmed Config save when the blank-session sync fails', async () => {
+test('typed /preset default never claims a host-thrown blank-session sync did not switch', async () => {
   const mutated: { ns: string; patch: unknown[] }[] = []
   const t = setup({
     agent: fakeAgent('s1', []),
@@ -1812,7 +1812,8 @@ test('typed /preset default reports a confirmed Config save when the blank-sessi
   assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
   assert.deepEqual(t.presets.selected, [], 'the sync rejection never switches the session')
   assert.equal(result.kind, 'success', 'the Config save remains confirmed')
-  assert.match(result.text, /default preset set: minimal; current blank session was not switched: host refused the blank-session sync/u)
+  assert.match(result.text, /the current blank session switch is uncertain \(it may have committed\): host refused the blank-session sync — do not retry/u)
+  assert.ok(!/was not switched/iu.test(result.text), 'an ambiguous Host failure must not be reported as proven no-switch')
   t.app.dispose()
 })
 
@@ -1898,5 +1899,117 @@ test('a confirmed default stays saved when the optional standing refresh throws'
   assert.equal(result.kind, 'success', 'the Config save is not reclassified as unconfirmed')
   assert.match(result.text, /default preset set: minimal; current blank session switched to minimal/u)
   assert.ok(!/unconfirmed|rolled back/iu.test(result.text))
+  t.app.dispose()
+})
+
+test('default sync re-reads the Host-effective default instead of projecting a stale requested id', async () => {
+  const selected: string[] = []
+  const port: PresetCatalog = {
+    available: () => true,
+    roster: async () => ({
+      presets: [{ id: 'standard', isDefault: true }, { id: 'minimal' }],
+      defaultId: 'standard',
+    }) as never,
+    resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+    defaultId: () => 'standard',
+    selectSessionPreset: async (_sessionId, id) => {
+      selected.push(id)
+      return { ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never
+    },
+  }
+  const mutated: { ns: string; patch: unknown[] }[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: port,
+    settings: {
+      get: () => undefined,
+      mutate: async (ns, patch) => { mutated.push({ ns, patch }) },
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(mutated[0]?.patch, [{ op: 'set', path: ['selectedDefault'], value: 'minimal' }])
+  assert.deepEqual(selected, [], 'the stale requested id never reaches the Host session sink')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /default preset set: minimal; the effective default is now standard, so this session was not switched/u)
+  t.app.dispose()
+})
+
+test('default sync keeps a committed switch when the post-commit catalog refresh throws', async () => {
+  const selected: string[] = []
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+      defaultId: () => 'minimal',
+      selectSessionPreset: async (_sessionId, id) => {
+        selected.push(id)
+        return { ownership: 'current', outcome: { kind: 'committed', value: { preset: id } } } as never
+      },
+    },
+    settings: {
+      get: () => undefined,
+      mutate: async () => {},
+    },
+    refreshCatalog: async (request) => {
+      if (request.target.kind === 'agent') throw new Error('catalog refresh exploded after commit')
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.deepEqual(selected, ['minimal'], 'the Host switch committed exactly once')
+  assert.equal(result.kind, 'success', 'the confirmed Config save is not reclassified')
+  assert.match(result.text, /current blank session switched to minimal, but the catalog refresh failed: catalog refresh exploded after commit/u)
+  assert.ok(!/was not switched/iu.test(result.text), 'a committed post-refresh failure is not a no-switch claim')
+  t.app.dispose()
+})
+
+test('explicit Use keeps the committed switch beside a post-commit catalog refresh failure', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal' }], defaultId: 'standard' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      defaultId: () => 'standard',
+      selectSessionPreset: async (_sessionId, id) => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { preset: id } },
+      }) as never,
+    },
+    refreshCatalog: async (request) => {
+      if (request.target.kind === 'agent') throw new Error('catalog refresh exploded after commit')
+      return { kind: 'applied', snapshot: {} as never }
+    },
+  })
+  const result = await t.runCommand('preset', 'minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /session preset switched to minimal; catalog refresh failed: catalog refresh exploded after commit/u)
+  t.app.dispose()
+})
+
+test('a proven Host rejection remains a distinct not-switched sync outcome', async () => {
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'minimal', isDefault: true }], defaultId: 'minimal' }) as never,
+      resolve: async (id?: string) => ({ id: id ?? 'minimal' }),
+      defaultId: () => 'minimal',
+      selectSessionPreset: async () => ({
+        ownership: 'current',
+        outcome: { kind: 'rejected', error: { code: 'agent-preset/select-refused', message: 'the Host refused plainly' } },
+      }) as never,
+    },
+    settings: { get: () => undefined, mutate: async () => {} },
+  })
+  const result = await t.runCommand('preset', 'default minimal') as { kind: string; text: string }
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /current blank session was not switched: the Host refused plainly/u)
+  assert.ok(!/uncertain|may have committed/iu.test(result.text), 'a proven rejection must not be worded as uncertain')
   t.app.dispose()
 })

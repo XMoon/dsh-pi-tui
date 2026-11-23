@@ -738,28 +738,60 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           await runner.config.presetDefault.set(id)
           let sync: PresetDefaultSyncOutcome = { kind: 'not-applicable' }
           if (syncEligible) {
-            const stillEligible = defaultToken === presetDefaultOperationToken
+            const stillEligible = (): boolean => defaultToken === presetDefaultOperationToken
               && useTokenAtStart === presetOperationToken
               && runner.isSessionScopeCurrent(syncScope)
               && runner.sessionBlank() === true
-            if (!stillEligible) {
+            if (!stillEligible()) {
               sync = { kind: 'skipped-stale', reason: 'the session changed while the default was being saved' }
             } else {
+              // A process-local token cannot fence another Client. After the
+              // Config save is confirmed, re-read the Host-authoritative
+              // effective default and synchronize only that exact effective
+              // id; never blindly project the requested id over a newer
+              // default written elsewhere.
+              let effectiveDefault: string | undefined
+              let readbackFailed = false
               try {
-                // The ORIGINAL session-selection writer and Host transition
-                // gate; no second select path and no Session creation here.
-                const outcome = await applyPresetSelection(id, syncScope)
-                if (outcome.kind === 'switched') sync = { kind: 'applied', preset: outcome.preset }
-                else if (outcome.kind === 'superseded') sync = { kind: 'skipped-stale', reason: 'a newer selection won' }
-                else if (outcome.kind === 'locked') sync = { kind: 'skipped-stale', reason: 'the session had already started' }
-                else if (outcome.kind === 'rejected') sync = { kind: 'failed', message: outcome.message }
-                else if (outcome.kind === 'indeterminate') {
-                  sync = { kind: 'failed', message: `${outcome.message} (the switch may have committed)` }
-                } else {
-                  sync = { kind: 'failed', message: 'the blank session was no longer switchable' }
-                }
+                effectiveDefault = (await presets.roster(runner.signal)).defaultId
               } catch (error) {
-                sync = { kind: 'failed', message: presetErrorText(error) }
+                readbackFailed = true
+                sync = {
+                  kind: 'skipped-stale',
+                  reason: `the effective default could not be verified (${presetErrorText(error)})`,
+                }
+              }
+              if (!readbackFailed) {
+                if (effectiveDefault !== id) {
+                  sync = { kind: 'overridden', effectiveDefault }
+                } else if (!stillEligible()) {
+                  sync = { kind: 'skipped-stale', reason: 'the session changed while the effective default was being read' }
+                } else {
+                  try {
+                    // The ORIGINAL session-selection writer and Host transition
+                    // gate; no second select path and no Session creation here.
+                    const outcome = await applyPresetSelection(id, syncScope)
+                    if (outcome.kind === 'switched') {
+                      sync = outcome.refreshError === undefined
+                        ? { kind: 'applied', preset: outcome.preset }
+                        : { kind: 'applied-unrefreshed', preset: outcome.preset, message: outcome.refreshError }
+                    } else if (outcome.kind === 'superseded') {
+                      sync = { kind: 'skipped-stale', reason: 'a newer selection won' }
+                    } else if (outcome.kind === 'locked') {
+                      sync = { kind: 'skipped-stale', reason: 'the session had already started' }
+                    } else if (outcome.kind === 'rejected') {
+                      sync = { kind: 'failed', message: outcome.message }
+                    } else if (outcome.kind === 'indeterminate') {
+                      sync = { kind: 'uncertain', message: outcome.message }
+                    } else {
+                      sync = { kind: 'skipped-stale', reason: 'the session was no longer switchable' }
+                    }
+                  } catch (error) {
+                    // A thrown dispatch is ambiguous; never label it as a
+                    // proven no-switch. (Returned rejections stay `failed`.)
+                    sync = { kind: 'uncertain', message: presetErrorText(error) }
+                  }
+                }
               }
             }
           }
@@ -779,6 +811,15 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         }
         const defaultSyncSuffix = (sync: PresetDefaultSyncOutcome): string => {
           if (sync.kind === 'applied') return `; current blank session switched to ${sync.preset}`
+          if (sync.kind === 'applied-unrefreshed') {
+            return `; current blank session switched to ${sync.preset}, but the catalog refresh failed: ${sync.message}`
+          }
+          if (sync.kind === 'uncertain') {
+            return `; the current blank session switch is uncertain (it may have committed): ${sync.message} — do not retry`
+          }
+          if (sync.kind === 'overridden') {
+            return `; the effective default is now ${sync.effectiveDefault ?? 'unset'}, so this session was not switched`
+          }
           if (sync.kind === 'skipped-stale') return `; current session was not switched (${sync.reason})`
           if (sync.kind === 'failed') return `; current blank session was not switched: ${sync.message}`
           return ''
@@ -805,7 +846,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         const applyPresetSelection = async (id: string, pickerOwner?: SessionScope):
           Promise<
             | { kind: 'pending'; preset: string }
-            | { kind: 'switched'; preset: string }
+            | { kind: 'switched'; preset: string; refreshError?: string }
             | { kind: 'superseded' }
             | { kind: 'locked'; sessionId: string }
             | { kind: 'rejected'; message: string }
@@ -818,6 +859,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           // subject can never drift onto a Session that appeared later.
           const owner = pickerOwner ?? runner.captureSessionScope()
           const ownerCurrent = (): boolean => runner.isSessionScopeCurrent(owner)
+          let dispatched = false
           try {
           const sessionId = owner.sessionId
           if (sessionId === undefined) {
@@ -859,6 +901,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                 outcome: { kind: 'cancelled' },
               })
             }
+            dispatched = true
             return presets.selectSessionPreset(sessionId, id, runner.signal)
           })
           // Fence BEFORE classification: if the subject or operation ownership
@@ -884,13 +927,27 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           // catalog for the SAME owner (no transition — the old scoped
           // previews are being replaced by the new composition's). A late
           // commit from a replaced surface must not repaint it.
-          const refreshed = await runner.refreshSessionCatalog(owner, 'preset')
-          // Fence after the refresh await: a newer operation or a moved subject
-          // owns the surface, and a superseded refresh must not repaint.
-          if (token !== presetOperationToken) return { kind: 'superseded' }
-          if (!ownerCurrent()) return { kind: 'superseded' }
-          if (refreshed.kind !== 'superseded') runner.updateWelcomeCard()
-          return { kind: 'switched', preset: outcome.value.preset }
+          // The Host selection is COMMITTED. A post-commit catalog refresh
+          // failure must stay beside that fact, never turn the write into a
+          // refusal or a "not switched" claim.
+          let refreshError: string | undefined
+          try {
+            const refreshed = await runner.refreshSessionCatalog(owner, 'preset')
+            // Fence after the refresh await: a newer operation or a moved
+            // subject owns the surface, and a superseded refresh must not repaint.
+            if (token !== presetOperationToken) return { kind: 'superseded' }
+            if (!ownerCurrent()) return { kind: 'superseded' }
+            if (refreshed.kind !== 'superseded') runner.updateWelcomeCard()
+          } catch (error) {
+            if (token !== presetOperationToken) return { kind: 'superseded' }
+            if (!ownerCurrent()) return { kind: 'superseded' }
+            refreshError = presetErrorText(error)
+          }
+          return {
+            kind: 'switched',
+            preset: outcome.value.preset,
+            ...(refreshError === undefined ? {} : { refreshError }),
+          }
           } catch (error) {
             // A newer `/preset` operation — or a superseded/aborted read — owns
             // the surface: an error from this stale operation must not surface a
@@ -899,6 +956,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             if (error instanceof SupersededReadError || !ownerCurrent() || runner.signal.aborted) {
               return { kind: 'superseded' }
             }
+            // A throw after the Host dispatch may have committed: never let
+            // the caller turn it into a proven "not switched" refusal.
+            if (dispatched) return { kind: 'indeterminate', message: presetErrorText(error) }
             throw error
           }
         }
@@ -922,7 +982,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           if (outcome.kind === 'pending') {
             notifyOwned(`new sessions will start on preset ${outcome.preset}`, 'info')
           } else if (outcome.kind === 'switched') {
-            notifyOwned(`session preset switched to ${outcome.preset}`, 'info')
+            notifyOwned(
+              `session preset switched to ${outcome.preset}${outcome.refreshError === undefined
+                ? ''
+                : `; catalog refresh failed: ${outcome.refreshError}`}`,
+              'info',
+            )
           } else if (outcome.kind === 'superseded') {
             // A newer pick owns the surface: the notice would only describe an
             // already-superseded switch.
@@ -957,7 +1022,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               return { kind: 'success', text: `new sessions will start on preset ${outcome.preset}` }
             }
             if (outcome.kind === 'switched') {
-              return { kind: 'success', text: `session preset switched to ${outcome.preset}` }
+              return {
+                kind: 'success',
+                text: `session preset switched to ${outcome.preset}${outcome.refreshError === undefined
+                  ? ''
+                  : `; catalog refresh failed: ${outcome.refreshError}`}`,
+              }
             }
             if (outcome.kind === 'superseded') {
               // v2 §0.2.1: a superseded operation owns nothing — no notice, no
@@ -1074,7 +1144,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             return { kind: 'unconfirmed', message }
           }
           if (surfaceToken !== presetSurfaceToken) return { kind: 'superseded' }
-          notifyOwned(`new-session default set: ${id}${defaultSyncSuffix(sync)}`, sync.kind === 'failed' ? 'error' : 'info')
+          notifyOwned(
+            `new-session default set: ${id}${defaultSyncSuffix(sync)}`,
+            sync.kind === 'failed' || sync.kind === 'uncertain' ? 'error' : 'info',
+          )
           return { kind: 'saved', preset: id, sync }
         }
         /** Read (or re-read) the roster through the original owner. Never a

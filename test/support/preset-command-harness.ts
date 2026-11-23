@@ -97,18 +97,20 @@ function presetService(
 ) {
   const resolved: string[] = []
   const selected: string[] = []
+  const effectiveDefault = { value: defaultPresetId }
   return {
     resolved,
     selected,
+    effectiveDefault,
     service: {
-      defaultId: defaultPresetId,
+      get defaultId(): string { return effectiveDefault.value },
       // The PUBLIC official roster projection (the @Remote('list') method).
       remoteExportList: async () => rosterOverride !== undefined
         ? await rosterOverride()
         : {
             presets: rows.map(row => ({
               id: row.id,
-              isDefault: row.id === defaultPresetId,
+              isDefault: row.id === effectiveDefault.value,
               ...row.name === undefined ? {} : { name: row.name },
               ...row.description === undefined ? {} : { description: row.description },
             })),
@@ -117,7 +119,7 @@ function presetService(
         if (resolveOverride !== undefined) return resolveOverride(id)
         // Real-registry semantics: an omitted id resolves the deployment
         // default; an unknown id (explicit OR default) is refused.
-        const wanted = id ?? defaultPresetId
+        const wanted = id ?? effectiveDefault.value
         resolved.push(wanted)
         const row = rows.find(candidate => candidate.id === wanted)
         if (row === undefined) throw new Error(`agent-presets: preset "${wanted}" not found (available: standard)`)
@@ -418,10 +420,26 @@ export function setup(options: {
   startedApps.add(app)
   const commands = fakeCommands(options.commandsListRegistered === true, options.commandsPresetOverride)
   ctx.provide('commands', commands.service as never)
-  if (options.settings === undefined) ctx.provide('settings', { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] } as never)
   const presets = presetService(options.rows ?? SHIPPED_ROWS, options.defaultPresetId, options.selectFailure, options.selectLocked, options.roster, options.resolve, options.selectHook)
   if (options.noPresets !== true) ctx.provide('agentPresets', presets.service as never)
-  if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
+  const settingsService = options.settings === undefined
+    ? { describe: () => [{ ns: 'pi-tui-preferences', user: {} }] }
+    : {
+        ...options.settings,
+        mutate: async (ns: string, patch: unknown[]) => {
+          const result = await options.settings!.mutate(ns, patch)
+          // The real Host roster reads the persisted Config default: mirror a
+          // successful default mutation so the authoritative readback is not
+          // frozen at the pre-write fixture value.
+          for (const op of patch as { op?: string; path?: readonly unknown[]; value?: unknown }[]) {
+            if (ns === 'agent-preset-registry' && op.op === 'set' && op.path?.[0] === 'selectedDefault' && typeof op.value === 'string') {
+              presets.effectiveDefault.value = op.value
+            }
+          }
+          return result
+        },
+      }
+  ctx.provide('settings', settingsService as never)
   const ensureCalls: string[] = []
   const { runner, pending, refreshes } = stubRunner({
     ctx,

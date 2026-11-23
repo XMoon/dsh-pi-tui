@@ -567,14 +567,20 @@ common.
   and no second write.
 - **Set default (shared with dsh-web).** The writer validates through the
   roster, writes the Config default, and only after that write is CONFIRMED
-  attempts ONE switch of the exact Session captured at operation start, only
-  when it is still the current, still-proven blank Session and no newer Use or
-  default operation won. It never creates a Session, never switches a started
-  Session, never rewrites the run-local pending preset, and never retries or
-  rolls back after a confirmed Config save. The result separates
-  `applied` / `not-applicable` / `skipped-stale` / `failed` from a Config
-  `unconfirmed`; a sync failure is reported as a saved default plus the real
-  reason, and a raising Config write remains UNCONFIRMED.
+  re-reads the Host-authoritative effective default. It attempts ONE switch of
+  the exact Session captured at operation start only when that effective id
+  still equals the requested id, the Session is still the current,
+  still-proven blank one, and no newer Use/default operation won; a newer
+  effective default from another Client or Host policy wins and this operation
+  does not switch the Session. It never creates a Session, never switches a
+  started Session, never rewrites the run-local pending preset, and never
+  retries or rolls back after a confirmed Config save. The result separates
+  `applied` / `applied-unrefreshed` / `uncertain` / `overridden` /
+  `not-applicable` / `skipped-stale` / `failed` from a Config `unconfirmed`;
+  only a proven pre-dispatch refusal may be reported as not switched. A
+  committed switch whose post-commit catalog refresh failed, and an ambiguous
+  Host settlement, stay explicit and are never reworded as a non-switch; a
+  raising Config write remains UNCONFIRMED.
 - **Loading / Error / Retry.** The overlay mounts immediately in Loading and the
   command's single read owner hydrates it in place. A failed read paints the real
   reason with `Retry` + `Close`, and Retry re-enters Loading through that same

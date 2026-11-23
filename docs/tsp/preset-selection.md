@@ -122,14 +122,20 @@ current frame really built.
 `Set default` and the typed `/preset default <id>` verb call the SAME extracted
 writer: validate through `presets.resolve`, write through the existing Config
 owner, and refresh the standing catalog only when no higher-precedence override
-masks the new default. After that Config write is CONFIRMED, the writer may
-attempt ONE switch of the exact current blank Session captured when the
-operation started, using the existing session-selection path; it never creates a
-Session, never switches a started Session, never rewrites the run-local pending
-preset, and never retries or rolls back. The result separates the confirmed
-default save from the optional sync (`applied`, `not-applicable`,
-`skipped-stale`, `failed`); a newer Use wins. The Config write is an awaited
-settings mutation, not a `WriteOutcome`, so a raise is reported transparently as
+masks the new default. After that Config write is CONFIRMED, the writer re-reads
+the Host-authoritative effective default and may attempt ONE switch of the exact
+current blank Session captured when the operation started only when that
+effective id still equals the requested id, using the existing session-selection
+path; it never creates a Session, never switches a started Session, never
+rewrites the run-local pending preset, and never retries or rolls back. A newer
+default from another Client or Host policy wins instead of being overwritten.
+The result separates the confirmed default save from the optional sync
+(`applied`, `applied-unrefreshed`, `uncertain`, `overridden`, `not-applicable`,
+`skipped-stale`, `failed`); a newer Use wins. Only a proven pre-dispatch
+refusal may say the Session was not switched: a committed switch with a failed
+post-commit catalog refresh, and an ambiguous Host settlement, are reported
+explicitly and never as a non-switch. The Config write is an awaited settings
+mutation, not a `WriteOutcome`, so a raise is reported transparently as
 UNCONFIRMED — never as a proven rollback and never retried automatically; the
 panel dismisses and the next read is authoritative. This is the shared
 business semantics for every entry, including the TSP-native presenter; the TSP

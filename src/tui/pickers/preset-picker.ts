@@ -228,6 +228,8 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this._focused = false
+    this.picker.focused = false
     this.invalidateGestures()
     this.lastFrame = undefined
     this.readerLines = []
@@ -246,7 +248,24 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     // query, page/phase change, resize, roster refresh, disposal) bumps the
     // generation explicitly.
     this._focused = value
-    this.picker.focused = value
+    this.syncPickerFocus()
+  }
+
+  /** The ONE derivation of the child search Input's physical focus: the Input
+   *  owns typing (and the hardware cursor/IME marker) only while this panel is
+   *  physically focused, on the Catalog, OUTSIDE Pending, with the list focus.
+   *  A Details reader/action or Catalog action focus must blur it. */
+  private syncPickerFocus(): void {
+    if (this.disposed) return
+    this.picker.focused = this._focused
+      && this.page === 'catalog'
+      && this.phase !== 'pending'
+      && this.focusTarget === 'list'
+  }
+
+  private setFocusTarget(target: PresetFocus): void {
+    this.focusTarget = target
+    this.syncPickerFocus()
   }
 
   /** Host row-budget seam: the picker absorbs the remainder after the ONE
@@ -268,7 +287,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.notice = ''
     this.noticeIsError = false
     this.page = 'catalog'
-    this.focusTarget = 'list'
+    this.setFocusTarget('list')
     this.errorScroll = 0
     if (this.roster === undefined) {
       this.picker.setItems([])
@@ -301,9 +320,10 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     // it, fall back to the catalogue (query and target stay).
     if (this.page === 'details' && !this.rows.has(this.selectedId ?? '')) {
       this.page = 'catalog'
-      this.focusTarget = 'list'
+      this.setFocusTarget('list')
     }
     this.rebuildReader()
+    this.syncPickerFocus()
     this.deps.requestRender()
   }
 
@@ -315,7 +335,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.phase = 'error'
     this.pendingKind = undefined
     this.page = 'catalog'
-    this.focusTarget = 'list'
+    this.setFocusTarget('list')
     this.errorScroll = 0
     const detail = sanitizedPhysicalLine(message)
     this.notice = detail
@@ -327,6 +347,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       this.picker.setItems([])
       this.picker.setNoMatchText(`  ${color.error('Preset catalog unavailable')}`)
     }
+    this.syncPickerFocus()
     this.deps.requestRender()
   }
 
@@ -419,7 +440,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.selectedId = next
     // A moved browse target is a new context: no stale write focus and no old
     // refusal/outcome statement may describe it.
-    this.focusTarget = this.baseFocus()
+    this.setFocusTarget(this.baseFocus())
     this.notice = ''
     this.noticeIsError = false
     if (this.phase === 'ready') this.picker.setItems(this.buildItems())
@@ -582,13 +603,13 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     if (ring.length === 0) return
     const at = ring.indexOf(this.focusTarget)
     if (at === -1) {
-      this.focusTarget = ring[0]!
+      this.setFocusTarget(ring[0]!)
       this.invalidateGestures()
       this.deps.requestRender()
       return
     }
     if (ring.length === 1) return
-    this.focusTarget = ring[(at + delta + ring.length) % ring.length]!
+    this.setFocusTarget(ring[(at + delta + ring.length) % ring.length]!)
     this.invalidateGestures()
     this.deps.requestRender()
   }
@@ -600,7 +621,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     if (this.page !== 'details' || this.phase !== 'ready') return
     const first = this.paintedRing().find(id => id === 'use' || id === 'set-default')
     if (first === undefined || first === this.focusTarget) return
-    this.focusTarget = first
+    this.setFocusTarget(first)
     this.invalidateGestures()
     this.deps.requestRender()
   }
@@ -643,7 +664,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.notice = ''
     this.noticeIsError = false
     this.page = 'catalog'
-    this.focusTarget = 'list'
+    this.setFocusTarget('list')
     if (this.roster === undefined) {
       this.picker.setItems([])
       this.picker.setNoMatchText('  Loading agent presets…')
@@ -659,7 +680,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.noticeIsError = false
     this.phase = 'pending'
     this.pendingKind = 'use'
-    this.focusTarget = this.baseFocus()
+    this.setFocusTarget(this.baseFocus())
     this.invalidateGestures()
     this.rebuildReader()
     this.deps.requestRender()
@@ -698,7 +719,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.noticeIsError = false
     this.phase = 'pending'
     this.pendingKind = 'default'
-    this.focusTarget = this.baseFocus()
+    this.setFocusTarget(this.baseFocus())
     this.invalidateGestures()
     this.rebuildReader()
     this.deps.requestRender()
@@ -729,7 +750,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     this.pendingKind = undefined
     this.notice = notice
     this.noticeIsError = true
-    this.focusTarget = this.baseFocus()
+    this.setFocusTarget(this.baseFocus())
     this.invalidateGestures()
     if (this.page === 'details') {
       this.detailsScroll = 0
@@ -751,7 +772,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     if (row === undefined) return
     this.selectedId = row.id
     this.page = 'details'
-    this.focusTarget = 'reader'
+    this.setFocusTarget('reader')
     this.notice = ''
     this.noticeIsError = false
     this.detailsScroll = 0
@@ -763,7 +784,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   private backToCatalog(): void {
     if (this.page !== 'details') return
     this.page = 'catalog'
-    this.focusTarget = 'list'
+    this.setFocusTarget('list')
     // The query, selection and list window are the SAME list state: nothing to
     // restore, the picker was never unmounted.
     this.invalidateGestures()
@@ -879,7 +900,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
         const keep = this.picker.getSelectedItem()?.value
         this.picker.setFilter('')
         if (keep !== undefined) this.picker.setSelectedValue(keep)
-        this.focusTarget = 'list'
+        this.setFocusTarget('list')
         this.syncSelection()
         this.deps.requestRender()
         return
@@ -910,7 +931,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
           return
         }
         if (this.isSearchText(data)) {
-          this.focusTarget = 'list'
+          this.setFocusTarget('list')
           this.forwardSearchInput(data)
           return
         }
@@ -934,7 +955,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       if (this.isSearchText(data)) {
         // Typing/backspace exits the action focus and edits the search; the
         // printable character is not swallowed by the action ring.
-        this.focusTarget = 'list'
+        this.setFocusTarget('list')
         this.forwardSearchInput(data)
       }
       return
@@ -997,7 +1018,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
   private resetFocusToBase(): void {
     const base = this.baseFocus()
     if (this.focusTarget === base) return
-    this.focusTarget = base
+    this.setFocusTarget(base)
     this.deps.requestRender()
   }
 
@@ -1146,6 +1167,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
 
   render(width: number): string[] {
     if (this.disposed) return []
+    this.syncPickerFocus()
     this.syncPalette()
     const budget = Number.isFinite(this.rowGrant) ? Math.max(1, Math.floor(this.rowGrant)) : Number.POSITIVE_INFINITY
     if (this.page === 'details') return this.renderDetails(width, budget)
@@ -1261,7 +1283,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
     // cue or to become an Enter target.
     if (focus !== base && !this.focusActionEnabled(focus)) {
       focus = base
-      this.focusTarget = base
+      this.setFocusTarget(base)
     }
     for (;;) {
       const segments = this.barSegments(focus)
@@ -1289,7 +1311,7 @@ export class PresetPickerPanel implements Component, RowBudgetAware, Focusable {
       // The cue layout dropped the focused action: return to the page base.
       // Never silently retarget the keyboard at another business action.
       focus = base
-      this.focusTarget = base
+      this.setFocusTarget(base)
     }
   }
 
