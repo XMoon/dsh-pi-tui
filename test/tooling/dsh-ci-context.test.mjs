@@ -113,14 +113,31 @@ test('context uses the current DSH target in every mode and exposes the source p
 })
 
 
-test('Fresh Profile platform matrix derives DSH versions from the current compatibility row', () => {
+test('Fresh Profile platform matrix derives DSH versions from the current compatibility row', (t) => {
   const { versions, recommended } = currentDshQualification()
-  assert.deepEqual(resolveFreshProfileMatrix(), {
-    include: [
-      ...versions.map(dsh => ({ os: 'ubuntu-24.04', dsh })),
-      { os: 'macos-latest', dsh: recommended },
-    ],
-  })
+  const linux = versions.map(dsh => ({ os: 'ubuntu-24.04', dsh }))
+  const macos = { os: 'macos-latest', dsh: recommended }
+  for (const context of [
+    { eventName: 'push', ref: 'refs/heads/main' },
+    { eventName: 'push', ref: 'refs/heads/next' },
+    { eventName: 'pull_request', ref: 'refs/pull/856/merge', baseRef: 'main' },
+    { eventName: 'workflow_dispatch', ref: 'refs/heads/main' },
+  ]) {
+    assert.deepEqual(resolveDshContext(context).freshProfileMatrix, { include: linux },
+      `${context.eventName} ${context.ref} must qualify Linux without scheduling macOS`)
+  }
+  for (const ref of ['refs/tags/v0.6.0', 'refs/tags/next-v0.6.0-alpha.1']) {
+    assert.deepEqual(resolveDshContext({ eventName: 'push', ref }).freshProfileMatrix,
+      { include: [...linux, macos] }, `${ref} must require macOS before publishing`)
+  }
+  const manual = { eventName: 'workflow_dispatch', ref: 'refs/heads/main', runMacosFreshProfile: true }
+  assert.deepEqual(resolveDshContext(manual).freshProfileMatrix, { include: [...linux, macos] })
+  assert.deepEqual(resolveDshContext({ ...manual, eventName: 'pull_request' }).freshProfileMatrix,
+    { include: linux }, 'a manual opt-in must not be honoured on PRs')
+  assert.deepEqual(resolveFreshProfileMatrix(), { include: linux })
+  const { path } = tempModeConfig('source', testLifecycle(t))
+  assert.throws(() => resolveDshContext({ ...manual, ref: 'refs/heads/next', modeConfigPath: path }),
+    /manual macOS Fresh Profile qualification requires npm mode/u)
   const missingRecommended = structuredClone(COMPAT_MATRIX)
   missingRecommended.matrix.at(-1).versions = versions.filter(version => version !== recommended)
   assert.throws(() => resolveFreshProfileMatrix(missingRecommended), /current DSH compatibility row/u)

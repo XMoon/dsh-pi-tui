@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_macos_fresh_profile:
+        description: Include macOS Fresh Profile qualification on this npm-mode manual run
+        required: false
+        type: boolean
+        default: false
       split_process_case:
         description: Optional registered Split case id for the manual qualification (empty runs the full lane)
         required: false
@@ -29,7 +34,7 @@ permissions:
 
 # Cancel superseded branch/PR runs, but never cancel release-tag runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.run_split_process && '-split-manual' || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.run_split_process && '-split-manual' || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.run_macos_fresh_profile && '-macos-manual' || '' }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 # PARTIAL RE-RUNS. GitHub's "Re-run failed jobs" re-executes only the failed
@@ -98,6 +103,7 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          RUN_MACOS_FRESH_PROFILE: ${{ inputs.run_macos_fresh_profile }}
           CI_PRODUCT_SHARDS: ${{ vars.CI_PRODUCT_SHARDS }}
           CI_PRODUCT_MAX_PARALLEL: ${{ vars.CI_PRODUCT_MAX_PARALLEL }}
           CI_PRODUCT_TEST_CONCURRENCY: ${{ vars.CI_PRODUCT_TEST_CONCURRENCY }}
@@ -915,7 +921,8 @@ jobs:
   # platform packages; this job takes the raw candidate artifact and installs
   # the TUI package exactly ONCE into a brand-new isolated Profile where the
   # Client Shell's BUNDLED Store closure must carry the official /client
-  # factories. It runs on every npm-mode run (PR, branch, dispatch, tag).
+  # factories. Linux runs on every npm-mode run; native macOS runs only on
+  # release tags or explicitly requested npm-mode workflow_dispatch runs.
   #
   # PR1 controlled condition: the isolated TEST-OWNED profile records
   # `allowBuilds.koffi: false` before install; the report says
