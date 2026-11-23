@@ -31,20 +31,17 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import {
   allowNativeMutation,
   applyServiceObservation,
-  assertManagedReservationObservable,
   assertManagedReservationScene,
   assertNativeManagedProfileInstall,
-  buildReservationFacts,
   classifyCurrentProfile,
   classifyManagedInspection,
-  classifyNativeCleanup,
   classifyNativeClientOwnership,
+  cleanupNativeService,
   combineNativeFailures,
+  executeNativeServiceReservation,
   loadNativeManagerAdapter,
   nativeBootstrapAdmission,
-  nativeReservationRecord,
   parseManagedDaemonStatus,
-  planNativeCleanup,
   requireLaunchdCustomization,
   runFixedDaemonVerb,
   serializeKernelIdentity,
@@ -1569,98 +1566,30 @@ async function cleanupNativeManagedService(reason) {
         return { clean: false, reason: 'NATIVE_CLI_NOT_QUIESCED' }
       }
     }
-    const cleanup = { attempted: true, officialStop: 'skipped', officialUninstall: 'skipped', fallback: 'skipped' }
     const cleanupAbort = new AbortController()
-    writeNativeRecord({ ...runtime.record, lifecycle: 'cleaning', cleanup })
-    const failCleanup = async (code, error) => {
-      writeNativeRecord({ ...runtime.record, lifecycle: 'unverifiable', cleanup: { ...cleanup, reason: code } })
-      appendNote('native-cleanup-failed', { reason: code, error: error === undefined ? undefined : boundedError(error) })
-      return { clean: false, reason: code }
-    }
-    let observation
-    try {
-      observation = (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation
-    } catch (error) {
-      return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED', error)
-    }
-    const plan = planNativeCleanup({ reservation, observation })
-    const runCleanupVerb = async verb => {
-      try {
-        await executeNativeDaemonVerb(verb, { mutating: false, abortSignal: cleanupAbort.signal, recordOperation: false })
-        return 'exited-0'
-      } catch (error) {
-        return `failed:${String(error?.code ?? boundedError(error))}`
-      }
-    }
-    if (plan.actions.includes('official-stop')) {
-      cleanup.officialStop = await runCleanupVerb('stop')
-      try {
-        observation = (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation
-      } catch (error) {
-        return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED', error)
-      }
-    }
-    if (plan.actions.includes('official-uninstall')) {
-      cleanup.officialUninstall = await runCleanupVerb('uninstall')
-      try {
-        observation = (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation
-      } catch (error) {
-        return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED', error)
-      }
-    }
-    if (observation.state !== 'removed' && observation.state !== 'reserved-but-absent') {
-      try {
-        const reclaimed = await runtime.adapter.reclaimManagedService({
-          ...reservation,
-          fileIdentity: runtime.record.fileIdentity,
-          verifiedHostIdentities: runtime.record.hostIdentities,
-          generation: runtime.record.generation,
-        })
-        cleanup.fallback = `${String(reclaimed.action)}:${String(reclaimed.reason)}`
-        if (reclaimed.observation !== undefined && reclaimed.observation !== null) {
-          const kernel = reclaimed.observation.mainPid === null ? null : nativeKernelFacts(reclaimed.observation.mainPid)
-          observation = classifyManagedInspection({
-            reservation,
-            history: { everObservedInstalled: runtime.record.everObservedInstalled },
-            inspection: reclaimed.observation,
-            kernel,
-            verifiedAt: now(),
-          })
-        }
-        if (reclaimed.clean !== true) {
-          return await failCleanup('NATIVE_SERVICE_PRESERVED')
-        }
-      } catch (error) {
-        return await failCleanup('NATIVE_SERVICE_RECLAIM_FAILED', error)
-      }
-    }
-    writeNativeRecord({
-      ...runtime.record,
-      lifecycle: observation.state === 'unverifiable' ? 'unverifiable' : 'removed',
-      observed: observation,
-      cleanup,
+    const result = await cleanupNativeService({
+      reservation,
+      record: runtime.record,
+      adapter: runtime.adapter,
+      observe: async () => (await observeNativeService({ runStatus: false, lifecycle: 'cleaning' })).observation,
+      runOfficialVerb: async verb => await executeNativeDaemonVerb(verb, {
+        mutating: false,
+        abortSignal: cleanupAbort.signal,
+        recordOperation: false,
+      }),
+      writeRecord: record => writeNativeRecord(record),
+      probeKernel: async pid => (pid === null ? null : nativeKernelFacts(pid)),
+      probeHostKernel: pid => nativeKernelFacts(pid).status,
+      probeClients: async () => (receipt.clients ?? []).map(client => ({
+        label: String(client.label),
+        gone: nativeRegisteredClientGone(client),
+      })),
+      verifiedAt: now(),
     })
-    // The terminal verdict also requires every recorded managed Host kernel
-    // identity and every registered native Client to be proven gone.
-    const hostsGone = (runtime.record.hostIdentities ?? []).map(identity => ({
-      pid: identity.pid,
-      status: nativeKernelFacts(identity.pid).status,
-    }))
-    const clientsGone = (receipt.clients ?? []).map(client => ({
-      label: String(client.label),
-      gone: nativeRegisteredClientGone(client),
-    }))
-    const verdict = classifyNativeCleanup({
-      observation: runtime.record.observed,
-      hostIdentities: runtime.record.hostIdentities ?? [],
-      hostsGone,
-      clientsGone,
-    })
-    writeNativeRecord({
-      ...runtime.record,
-      cleanup: { ...cleanup, ...(verdict.clean ? {} : { reason: verdict.reasons.join(',') }) },
-    })
-    return { clean: verdict.clean, reason: verdict.clean ? reason : verdict.reasons.join(',') }
+    if (!result.clean) {
+      appendNote('native-cleanup-failed', { reason: result.reason })
+    }
+    return result
   })()
   return await nativeCleanupPromise
 }
@@ -2201,31 +2130,29 @@ async function handleNativeReserveManagedService() {
     profileBuildIdMatch,
   }
   assertManagedReservationScene(sceneFacts)
-  const reservation = buildReservationFacts({
-    manager: runtime.manager,
-    uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
-    accountHome: realpathSync(userInfo().homedir),
-    profileRealpath: realpathSync(scene.installation.profileDir),
-    dshHome: realpathSync(scene.installation.dshHome),
-    scopeId,
-    oldBuildId: current.buildId,
-    sceneId: receipt.sceneId,
-    parentRunId: receipt.parentRunId ?? null,
-  })
-  const inspection = await runtime.adapter.inspectManagedService(reservation)
-  assertManagedReservationObservable(inspection)
-  const observation = classifyManagedInspection({
-    reservation,
-    history: { everObservedInstalled: false },
-    inspection,
+  // The shared transaction asks the helper, classifies the raw facts and then
+  // durably writes the single receipt BEFORE the Worker is acknowledged.
+  const result = await executeNativeServiceReservation({
+    reservationInput: {
+      manager: runtime.manager,
+      uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
+      accountHome: realpathSync(userInfo().homedir),
+      profileRealpath: realpathSync(scene.installation.profileDir),
+      dshHome: realpathSync(scene.installation.dshHome),
+      scopeId,
+      oldBuildId: current.buildId,
+      sceneId: receipt.sceneId,
+      parentRunId: receipt.parentRunId ?? null,
+    },
+    adapter: runtime.adapter,
+    writeDurable: async record => {
+      runtime.reservation = record.reservation
+      runtime.record = record
+      writeReceipt({ phase: 'NATIVE_SERVICE_RESERVED', native: record })
+    },
     verifiedAt: now(),
   })
-  const record = nativeReservationRecord({ reservation, observation })
-  runtime.reservation = reservation
-  runtime.record = record
-  // Durable write BEFORE the Worker is allowed to issue any native command.
-  writeReceipt({ phase: 'NATIVE_SERVICE_RESERVED', native: record })
-  return { reservation, observation }
+  return { reservation: result.reservation, observation: result.observation }
 }
 
 /** Read the real manager/Profile/Host facts; never a Worker-provided identity. */

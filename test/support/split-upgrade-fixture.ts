@@ -1002,8 +1002,16 @@ class Scene implements UpgradeScene {
    * abnormally, left a NOT_QUIESCED receipt, or failed to reclaim the recorded
    * managed service. A default Scene keeps its historical evidence rules.
    */
-  #assertNativeTerminalReceipt(phases: readonly string[], exit: SupervisorExitResult): void {
+  #assertNativeTerminalReceipt(phases: readonly string[], exit: SupervisorExitResult | undefined): void {
     if (this.#native === undefined) return
+    if (exit === undefined) {
+      throw this.#nativeCleanupFailure('the Supervisor exit could not be confirmed', {
+        code: undefined,
+        signal: undefined,
+        phase: undefined,
+        reason: 'SUPERVISOR_EXIT_UNCONFIRMED',
+      })
+    }
     if (exit.code !== 0 || exit.signal !== null) {
       throw this.#nativeCleanupFailure('the Supervisor did not exit cleanly', {
         code: exit.code,
@@ -1052,6 +1060,28 @@ class Scene implements UpgradeScene {
     if (leftover.length > 0) errors.push(new Error(`native TUI sessions are still open: ${JSON.stringify(leftover)}`))
     if (errors.length > 0) throw new AggregateError(errors, 'finish(): owned Clients are not closed')
     await this.refreshClientBusinessPids()
+    if (this.#native !== undefined) {
+      // A native FINALIZE failure still owns the real Supervisor exit and the
+      // independent receipt. Check both, and keep the primary + cleanup errors.
+      let primaryError: Error | undefined
+      try {
+        await this.#supervisor.request('FINALIZE', { clientsClosed: true }, { timeoutMs: 180_000 })
+      } catch (error) {
+        primaryError = asError(error)
+      }
+      let cleanupError: Error | undefined
+      try {
+        const exit = await this.#supervisor.waitExit(30_000)
+        this.#assertNativeTerminalReceipt(['FINALIZED'], exit)
+      } catch (error) {
+        cleanupError = asError(error)
+      }
+      const combined = splitUpgradeNativeContract.combineNativeFailures(primaryError, cleanupError)
+      if (combined !== undefined) throw combined
+      assert(!existsSync(this.workRoot), `the Scene root still exists after FINALIZE: ${this.workRoot}`)
+      this.#finished = true
+      return
+    }
     await this.#supervisor.request('FINALIZE', { clientsClosed: true }, { timeoutMs: 180_000 })
     const exit = await this.#supervisor.waitExit(30_000)
     assert(exit.code === 0 && exit.signal === null, `Supervisor FINALIZE exit was ${JSON.stringify(exit)}`)
@@ -1075,18 +1105,20 @@ class Scene implements UpgradeScene {
     } catch (error) {
       errors.push(asError(error))
     }
-    let supervisorExit: SupervisorExitResult | undefined
     try {
       await this.#supervisor.close({ timeoutMs: 300_000, allowKill: false })
-      if (this.#native !== undefined) {
-        // A close() that does not throw is not a clean exit: a native Scene
-        // must prove the real child exit code and the independent receipt.
-        supervisorExit = await this.#supervisor.waitExit(30_000)
-      }
     } catch (error) {
       errors.push(asError(error))
     }
-    if (this.#native !== undefined && supervisorExit !== undefined) {
+    if (this.#native !== undefined) {
+      // A close() that throws (timeout, already-exited race) still owns a real
+      // Supervisor exit and an independent receipt. Check both independently.
+      let supervisorExit: SupervisorExitResult | undefined
+      try {
+        supervisorExit = await this.#supervisor.waitExit(30_000)
+      } catch (error) {
+        errors.push(asError(error))
+      }
       try {
         this.#assertNativeTerminalReceipt(['ABORTED_CLEAN', 'FINALIZED'], supervisorExit)
       } catch (error) {

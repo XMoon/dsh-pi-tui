@@ -641,6 +641,40 @@ export function applyServiceObservation(record, observation, { lifecycle } = {})
   })
 }
 
+/**
+ * The ONE reservation transaction: validate the Supervisor-owned inputs, ask
+ * the fixed helper for the real OS facts, classify them, then durably write the
+ * record BEFORE the caller may ACK the Worker. The function keeps no state; the
+ * callback is the Supervisor's single receipt writer.
+ */
+export async function executeNativeServiceReservation({
+  reservationInput,
+  adapter,
+  history = { everObservedInstalled: false },
+  writeDurable,
+  verifiedAt,
+} = {}) {
+  const reservation = buildReservationFacts(reservationInput)
+  const source = requireObject(adapter, 'adapter', 'NATIVE_MANAGER_ADAPTER_INVALID')
+  if (typeof source.inspectManagedService !== 'function') {
+    fail('NATIVE_MANAGER_ADAPTER_INVALID', 'the platform helper exports no inspectManagedService')
+  }
+  if (typeof writeDurable !== 'function') {
+    fail('NATIVE_RESERVATION_INVALID', 'the reservation requires a durable receipt writer')
+  }
+  const inspection = await source.inspectManagedService(reservation)
+  assertManagedReservationObservable(inspection)
+  const observation = classifyManagedInspection({
+    reservation,
+    history,
+    inspection,
+    verifiedAt: verifiedAt === undefined ? new Date().toISOString() : verifiedAt,
+  })
+  const record = nativeReservationRecord({ reservation, observation })
+  await writeDurable(record)
+  return Object.freeze({ reservation, observation, record })
+}
+
 /** Validate one recorded managed-Host identity before it authorizes cleanup. */
 export function validateHostIdentity(identity) {
   const source = requireObject(identity, 'host identity', 'NATIVE_HOST_IDENTITY_INVALID')
@@ -674,6 +708,132 @@ export function planNativeCleanup({ reservation, observation } = {}) {
     ? ['official-stop', 'official-uninstall', 'helper-reclaim']
     : ['official-uninstall', 'helper-reclaim']
   return Object.freeze({ actions: Object.freeze(actions), reason: observed.state })
+}
+
+/**
+ * The ONE native cleanup decision sequence. The Supervisor keeps the receipt
+ * writer, cancellation and CLI ownership; this function keeps the shared
+ * ordering: official stop/uninstall only for strictly owned state, helper
+ * reclaim only as the last resort, then the terminal quiescence verdict.
+ */
+export async function cleanupNativeService({
+  reservation,
+  record,
+  adapter,
+  observe,
+  runOfficialVerb,
+  writeRecord,
+  probeKernel,
+  probeHostKernel,
+  probeClients,
+  verifiedAt,
+} = {}) {
+  const facts = validateReservationFacts(reservation)
+  const source = requireObject(record, 'native record', 'NATIVE_OBSERVATION_INVALID')
+  if (source.reservation === undefined || validateReservationFacts(source.reservation).unitPath !== facts.unitPath) {
+    fail('NATIVE_RESERVATION_INVALID', 'the native record belongs to another reservation')
+  }
+  const helper = requireObject(adapter, 'adapter', 'NATIVE_MANAGER_ADAPTER_INVALID')
+  if (typeof helper.reclaimManagedService !== 'function') {
+    fail('NATIVE_MANAGER_ADAPTER_INVALID', 'the platform helper exports no reclaimManagedService')
+  }
+  for (const [name, callback] of Object.entries({ observe, runOfficialVerb, writeRecord, probeKernel, probeHostKernel, probeClients })) {
+    if (typeof callback !== 'function') fail('NATIVE_CONTRACT_INVALID', `cleanupNativeService requires ${name}`)
+  }
+  const at = () => (verifiedAt === undefined ? new Date().toISOString() : verifiedAt)
+  const cleanup = { attempted: true, officialStop: 'skipped', officialUninstall: 'skipped', fallback: 'skipped' }
+  let current = { ...source, lifecycle: 'cleaning', cleanup }
+  await writeRecord(current)
+  const failCleanup = async code => {
+    current = { ...current, lifecycle: 'unverifiable', cleanup: { ...cleanup, reason: code } }
+    await writeRecord(current)
+    return Object.freeze({ clean: false, reason: code, record: current })
+  }
+  let observation
+  try {
+    observation = validateServiceObservation(await observe())
+  } catch {
+    return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+  }
+  const plan = planNativeCleanup({ reservation: facts, observation })
+  const runVerb = async verb => {
+    try {
+      await runOfficialVerb(verb)
+      return 'exited-0'
+    } catch (error) {
+      return `failed:${String(error?.code ?? 'NATIVE_DAEMON_FAILED')}`
+    }
+  }
+  if (plan.actions.includes('official-stop')) {
+    cleanup.officialStop = await runVerb('stop')
+    try {
+      observation = validateServiceObservation(await observe())
+    } catch {
+      return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+    }
+  }
+  if (plan.actions.includes('official-uninstall')) {
+    cleanup.officialUninstall = await runVerb('uninstall')
+    try {
+      observation = validateServiceObservation(await observe())
+    } catch {
+      return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+    }
+  }
+  if (observation.state !== 'removed' && observation.state !== 'reserved-but-absent') {
+    let reclaimed
+    try {
+      reclaimed = await helper.reclaimManagedService({
+        ...facts,
+        fileIdentity: source.fileIdentity ?? null,
+        verifiedHostIdentities: source.hostIdentities ?? [],
+        generation: source.generation,
+      })
+    } catch {
+      return await failCleanup('NATIVE_SERVICE_RECLAIM_FAILED')
+    }
+    cleanup.fallback = `${String(reclaimed?.action)}:${String(reclaimed?.reason)}`
+    if (reclaimed?.clean !== true) return await failCleanup('NATIVE_SERVICE_PRESERVED')
+    const inspection = requireObject(reclaimed.observation, 'reclaim observation', 'NATIVE_INSPECTION_INVALID')
+    try {
+      const kernel = inspection.mainPid === null ? null : await probeKernel(inspection.mainPid)
+      observation = classifyManagedInspection({
+        reservation: facts,
+        history: { everObservedInstalled: source.everObservedInstalled === true },
+        inspection,
+        kernel,
+        verifiedAt: at(),
+      })
+    } catch {
+      return await failCleanup('NATIVE_MANAGER_OBSERVATION_FAILED')
+    }
+  }
+  current = {
+    ...current,
+    lifecycle: observation.state === 'unverifiable' ? 'unverifiable' : 'removed',
+    observed: observation,
+    cleanup,
+  }
+  await writeRecord(current)
+  const hostIdentities = Array.isArray(current.hostIdentities) ? current.hostIdentities : []
+  const hostsGone = []
+  for (const identity of hostIdentities) {
+    const factsOfHost = validateHostIdentity(identity)
+    hostsGone.push({ pid: factsOfHost.pid, status: await probeHostKernel(factsOfHost.pid) })
+  }
+  const clientsGone = await probeClients()
+  const verdict = classifyNativeCleanup({
+    observation: current.observed,
+    hostIdentities,
+    hostsGone,
+    clientsGone,
+  })
+  current = {
+    ...current,
+    cleanup: { ...cleanup, ...(verdict.clean ? {} : { reason: verdict.reasons.join(',') }) },
+  }
+  await writeRecord(current)
+  return Object.freeze({ clean: verdict.clean, reason: verdict.clean ? null : verdict.reasons.join(','), record: current })
 }
 
 /**
@@ -840,8 +1000,9 @@ export function buildNativeDaemonEnvironment({ baseEnv, platform = process.platf
 export function sanitizeDaemonOutput(text) {
   if (typeof text !== 'string') return ''
   return text
-    .replace(/((?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*)[^\r\n]+/giu, '$1[redacted]')
-    .replace(/(\btoken=)[^&\s]+/giu, '$1[redacted]')
+    .replace(/((?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*[:=]\s*)[^\r\n]+/giu, '$1[redacted]')
+    .replace(/([?&][A-Za-z0-9_.~-]*(?:token|secret|credential|password|api[_-]?key)[A-Za-z0-9_.~-]*=)[^&\s]+/giu, '$1[redacted]')
+    .replace(/(\b(?:token|secret|credential|password|api[_-]?key)=)[^&\s]+/giu, '$1[redacted]')
 }
 
 /** Serialize one product kernel identity into the receipt's stable string. */

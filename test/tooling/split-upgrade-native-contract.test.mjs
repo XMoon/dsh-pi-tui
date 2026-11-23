@@ -31,7 +31,9 @@ import {
   classifyManagedInspection,
   classifyNativeCleanup,
   classifyNativeClientOwnership,
+  cleanupNativeService,
   combineNativeFailures,
+  executeNativeServiceReservation,
   LAUNCHD_CUSTOMIZATION,
   loadNativeManagerAdapter,
   MANAGED_DAEMON_OUTPUT_LIMIT_BYTES,
@@ -409,15 +411,9 @@ test('the pre-registration absence check refuses a present, loaded or unqueryabl
   })), 'NATIVE_MANAGER_UNAVAILABLE')
 })
 
-test('the durable reservation is written before any native install and the ACK mirrors the receipt', async () => {
+test('the production reservation transaction writes the receipt before any native install', async () => {
   const facts = reservation()
   const inspection = rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
-  const observation = classifyManagedInspection({
-    reservation: facts,
-    history: { everObservedInstalled: false },
-    inspection,
-    verifiedAt: '2026-11-23T00:00:00.000Z',
-  })
   const order = []
   const mutations = []
   let durableRecord
@@ -431,31 +427,36 @@ test('the durable reservation is written before any native install and the ACK m
       throw new Error('reclaim must never run during reservation')
     },
   }
-  const writeDurable = async record => {
-    order.push('receipt')
-    durableRecord = record
-  }
-  const inspectionResult = await adapter.inspectManagedService(facts)
-  assertManagedReservationObservable(inspectionResult)
-  const record = nativeReservationRecord({ reservation: facts, observation })
-  await writeDurable(record)
-  const ack = { reservation: record.reservation, observation: record.observed }
+  const result = await executeNativeServiceReservation({
+    reservationInput: reservationInput(),
+    adapter,
+    writeDurable: async record => {
+      order.push('receipt')
+      durableRecord = record
+    },
+    verifiedAt: '2026-11-23T00:00:00.000Z',
+  })
+  // Only after the transaction resolves (and the receipt is durable) may the
+  // Worker issue an install.
+  const ack = { reservation: result.reservation, observation: result.observation }
   mutations.push('install')
   assert.deepEqual(order, ['inspect', 'receipt'])
   assert.deepEqual(ack.reservation, facts)
-  assert.deepEqual(ack.observation, observation)
-  assert.equal(record.lifecycle, 'reserved')
-  assert.equal(record.everObservedInstalled, false)
-  assert.equal(record.generation, 1)
-  assert.equal(record.fileIdentity, null)
-  assert.equal(record.lastOperation, null)
-  assert.deepEqual(record.hostIdentities, [])
-  assert.equal(record.cleanup, null)
-  assert.equal(allowNativeMutation({ reservation: facts, observation, verb: 'install' }).allowed, true)
+  assert.deepEqual(ack.observation, result.observation)
+  assert.deepEqual(durableRecord.reservation, ack.reservation)
+  assert.deepEqual(durableRecord.observed, ack.observation)
+  assert.equal(result.record.lifecycle, 'reserved')
+  assert.equal(result.record.everObservedInstalled, false)
+  assert.equal(result.record.generation, 1)
+  assert.equal(result.record.fileIdentity, null)
+  assert.equal(result.record.lastOperation, null)
+  assert.deepEqual(result.record.hostIdentities, [])
+  assert.equal(result.record.cleanup, null)
+  assert.equal(allowNativeMutation({ reservation: facts, observation: result.observation, verb: 'install' }).allowed, true)
   assert.deepEqual(mutations, ['install'])
 })
 
-test('a conflicting managed target is refused before the durable receipt and before install', () => {
+test('a conflicting managed target is refused before the durable receipt and before install', async () => {
   const facts = reservation()
   const inspection = rawInspection({
     unitName: facts.unitName,
@@ -463,21 +464,27 @@ test('a conflicting managed target is refused before the durable receipt and bef
     file: 'foreign',
     managerState: 'not-loaded',
   })
-  expectContractError(() => assertManagedReservationObservable(inspection), 'NATIVE_MANAGED_SERVICE_CONFLICT')
   const order = []
-  const durable = () => order.push('receipt')
   const mutations = []
-  const run = () => {
-    assertManagedReservationObservable(inspection)
-    durable()
-    mutations.push('install')
-  }
-  expectContractError(run, 'NATIVE_MANAGED_SERVICE_CONFLICT')
-  assert.deepEqual(order, [])
-  assert.deepEqual(mutations, [])
+  await assert.rejects(executeNativeServiceReservation({
+    reservationInput: reservationInput(),
+    adapter: {
+      async inspectManagedService() {
+        order.push('inspect')
+        return inspection
+      },
+      async reclaimManagedService() {
+        throw new Error('reclaim must never run during reservation')
+      },
+    },
+    writeDurable: async () => {
+      order.push('receipt')
+    },
+  }), error => error?.code === 'NATIVE_MANAGED_SERVICE_CONFLICT')
+  mutations.push('install')
+  assert.deepEqual(order, ['inspect'])
+  assert.deepEqual(mutations, ['install'])
 })
-
-// ── fake manager state classification ──────────────────────────────────────
 
 test('raw manager observations normalize into the five observation states from history', () => {
   const facts = reservation()
@@ -614,67 +621,73 @@ test('a foreign or unowned service state is never mutated but is still planned f
   assert.deepEqual(planNativeCleanup({ reservation: facts, observation: absent }).actions, [])
 })
 
-test('a committed fake install is reclaimed only through the shared plan and the reserved unit', async () => {
+test('the production cleanup transaction re-reads the manager and removes only this run\'s unit', async () => {
   const facts = reservation()
-  const installed = classifyManagedInspection({
-    reservation: facts,
-    history: { everObservedInstalled: true },
-    inspection: ownedInspection(facts),
-    verifiedAt: '2026-11-23T00:00:00.000Z',
-  })
-  const official = []
-  const helper = []
-  const removed = rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
-  const adapter = {
-    async inspectManagedService() {
-      return removed
-    },
-    async reclaimManagedService(input) {
-      helper.push(input)
-      return { clean: true, action: 'removed', reason: 'verified-owner', observation: removed }
-    },
-  }
-  // The worker died after the install committed; the Supervisor starts from the
-  // last real observation, never from "never installed".
-  const plan = planNativeCleanup({ reservation: facts, observation: installed })
-  assert.deepEqual(plan.actions, ['official-uninstall', 'helper-reclaim'])
-  for (const action of plan.actions) {
-    if (action === 'official-uninstall') {
-      // The official path re-reads the real manager and sees the file gone.
-      official.push(action)
-      continue
-    }
-    if (action === 'helper-reclaim') {
-      const inspection = await adapter.inspectManagedService(facts)
-      const observation = classifyManagedInspection({
-        reservation: facts,
-        history: { everObservedInstalled: true },
-        inspection,
-        verifiedAt: '2026-11-23T00:00:01.000Z',
-      })
-      assert.equal(observation.state, 'removed')
-      continue
-    }
-    helper.push(action)
-  }
-  assert.deepEqual(official, ['official-uninstall'])
-  assert.deepEqual(helper, [], 'a service already confirmed removed never needs the helper fallback')
-  const verdict = classifyNativeCleanup({
-    observation: classifyManagedInspection({
+  const reserved = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
+  const record = {
+    ...reserved,
+    everObservedInstalled: true,
+    observed: classifyManagedInspection({
       reservation: facts,
       history: { everObservedInstalled: true },
-      inspection: removed,
-      verifiedAt: '2026-11-23T00:00:02.000Z',
+      inspection: ownedInspection(facts),
+      verifiedAt: '2026-11-23T00:00:00.000Z',
     }),
-    hostIdentities: [hostIdentity()],
-    hostsGone: [{ pid: 4242, status: 'gone' }],
-    clientsGone: [{ label: 'client-a', gone: true }],
+    fileIdentity: { device: '16777220', inode: '1234567', sha256: 'e'.repeat(64) },
+  }
+  const installedInactive = record.observed
+  const removed = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath }),
+    verifiedAt: '2026-11-23T00:00:02.000Z',
   })
-  assert.deepEqual(verdict, { clean: true, reasons: [] })
+  const observations = [installedInactive, removed]
+  let readIndex = 0
+  const order = []
+  let helperCalled = false
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record,
+    adapter: {
+      async inspectManagedService() {
+        return rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
+      },
+      async reclaimManagedService() {
+        helperCalled = true
+        return { clean: false, action: 'preserve', reason: 'unexpected', observation: rawInspection() }
+      },
+    },
+    observe: async () => {
+      const observation = observations[readIndex]
+      readIndex += 1
+      order.push('observe')
+      return observation
+    },
+    runOfficialVerb: async verb => {
+      order.push(`official:${verb}`)
+    },
+    writeRecord: async written => {
+      order.push(`receipt:${written.lifecycle}`)
+    },
+    probeKernel: async pid => ({ status: 'alive', uid: facts.uid }),
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [{ label: 'client-a', gone: true }],
+    verifiedAt: '2026-11-23T00:00:03.000Z',
+  })
+  assert.deepEqual(order, ['receipt:cleaning', 'observe', 'official:uninstall', 'observe', 'receipt:removed', 'receipt:removed'])
+  assert.equal(helperCalled, false, 'an officially removed service never needs the helper fallback')
+  assert.equal(result.clean, true)
+  assert.equal(result.record.observed.state, 'removed')
+  assert.equal(result.record.cleanup.attempted, true)
+  assert.equal(result.record.cleanup.officialUninstall, 'exited-0')
+  assert.equal(result.record.cleanup.fallback, 'skipped')
+  assert.equal(result.record.cleanup.reason, undefined)
 })
 
 test('a foreign service state never drives an official stop and a helper preserve stays NOT_QUIESCED', async () => {
   const facts = reservation()
+  const reserved = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
   const foreign = classifyManagedInspection({
     reservation: facts,
     history: { everObservedInstalled: true },
@@ -683,30 +696,98 @@ test('a foreign service state never drives an official stop and a helper preserv
   })
   const official = []
   const helper = []
-  const preserved = rawInspection({
-    unitName: facts.unitName,
-    unitPath: facts.unitPath,
-    file: 'foreign',
-    managerState: 'not-loaded',
-    reason: 'FOREIGN_SERVICE_FILE',
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record: { ...reserved, everObservedInstalled: true, observed: foreign },
+    adapter: {
+      async inspectManagedService() {
+        return ownedInspection(facts, { file: 'foreign' })
+      },
+      async reclaimManagedService(input) {
+        helper.push(input)
+        return {
+          clean: false,
+          action: 'preserve',
+          reason: 'OWNER_UNPROVEN',
+          observation: rawInspection({
+            unitName: facts.unitName,
+            unitPath: facts.unitPath,
+            file: 'foreign',
+            managerState: 'not-loaded',
+            reason: 'FOREIGN_SERVICE_FILE',
+          }),
+        }
+      },
+    },
+    observe: async () => foreign,
+    runOfficialVerb: async verb => {
+      official.push(verb)
+    },
+    writeRecord: async () => {},
+    probeKernel: async () => null,
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [],
+    verifiedAt: '2026-11-23T00:00:01.000Z',
   })
-  const plan = planNativeCleanup({ reservation: facts, observation: foreign })
-  assert.deepEqual(plan.actions, ['helper-reclaim'])
-  for (const action of plan.actions) {
-    if (action === 'official-stop' || action === 'official-uninstall') {
-      official.push(action)
-      continue
-    }
-    helper.push(await Promise.resolve({ clean: false, action: 'preserve', reason: 'OWNER_UNPROVEN', observation: preserved }))
-  }
   assert.deepEqual(official, [], 'unknown/foreign state must never reach a mutating official verb')
-  assert.deepEqual(helper.map(result => result.action), ['preserve'])
-  const verdict = classifyNativeCleanup({ observation: foreign, hostIdentities: [], hostsGone: [], clientsGone: [] })
-  assert.equal(verdict.clean, false)
-  assert.ok(verdict.reasons.includes('NATIVE_SERVICE_NOT_REMOVED'))
+  assert.equal(helper.length, 1)
+  assert.equal(helper[0].fileIdentity, null)
+  assert.equal(result.clean, false)
+  assert.equal(result.reason, 'NATIVE_SERVICE_PRESERVED')
+  assert.equal(result.record.lifecycle, 'unverifiable')
+  assert.equal(result.record.cleanup.reason, 'NATIVE_SERVICE_PRESERVED')
 })
 
-// ── daemon CLI primitive ───────────────────────────────────────────────────
+test('a failed official uninstall falls back to helper reclamation and records both facts', async () => {
+  const facts = reservation()
+  const reserved = nativeReservationRecord({ reservation: facts, observation: absentObservation(facts) })
+  const installedInactive = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: ownedInspection(facts),
+    verifiedAt: '2026-11-23T00:00:00.000Z',
+  })
+  const removed = classifyManagedInspection({
+    reservation: facts,
+    history: { everObservedInstalled: true },
+    inspection: rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath }),
+    verifiedAt: '2026-11-23T00:00:03.000Z',
+  })
+  const observations = [installedInactive, installedInactive, removed]
+  let readIndex = 0
+  const helper = []
+  const result = await cleanupNativeService({
+    reservation: facts,
+    record: { ...reserved, everObservedInstalled: true, observed: installedInactive },
+    adapter: {
+      async inspectManagedService() {
+        return rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath })
+      },
+      async reclaimManagedService(input) {
+        helper.push(input)
+        return { clean: true, action: 'removed', reason: 'verified-owner', observation: rawInspection({ unitName: facts.unitName, unitPath: facts.unitPath }) }
+      },
+    },
+    observe: async () => observations[readIndex++],
+    runOfficialVerb: async () => {
+      const error = new Error('official uninstall failed')
+      error.code = 'NATIVE_DAEMON_FAILED'
+      throw error
+    },
+    writeRecord: async () => {},
+    probeKernel: async () => null,
+    probeHostKernel: () => 'gone',
+    probeClients: async () => [],
+    verifiedAt: '2026-11-23T00:00:04.000Z',
+  })
+  assert.equal(helper.length, 1)
+  assert.equal(result.clean, true)
+  assert.equal(result.record.cleanup.officialUninstall, 'failed:NATIVE_DAEMON_FAILED')
+  assert.equal(result.record.cleanup.fallback, 'removed:verified-owner')
+  assert.equal(result.record.observed.state, 'removed')
+})
+
+// ── daemon CLI primitive// ── daemon CLI primitive ───────────────────────────────────────────────────
 
 function fakeChild({ closeOnSignal = true, emitStdout = '', emitStderr = '' } = {}) {
   const child = new EventEmitter()
@@ -819,6 +900,11 @@ test('daemon output is bounded and credential material is redacted', async () =>
   assert.match(result.stdout, /host=ready/u)
   assert.match(result.stderr, /Cookie: \[redacted\]/u)
   assert.equal(sanitizeDaemonOutput('https://user:pass@host/connect?token=abc'), 'https://user:pass@host/connect?token=[redacted]')
+  assert.equal(
+    sanitizeDaemonOutput('https://host/connect?access_token=secret&launchToken=other&acp=enabled'),
+    'https://host/connect?access_token=[redacted]&launchToken=[redacted]&acp=enabled',
+  )
+  assert.equal(sanitizeDaemonOutput('x-api-key: private-key\nstatus=ready'), 'x-api-key: [redacted]\nstatus=ready')
 })
 
 test('an over-limit child is still drained and the real OUTPUT_LIMIT_EXCEEDED failure is raised', async () => {
