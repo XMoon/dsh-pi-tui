@@ -625,13 +625,21 @@ test('the qualified job uploads the artifact the publish path reads', () => {
   assert.equal((jobs.qualified.steps ?? []).some(step => typeof step.run === 'string' && /pnpm (pack|build)\b/u.test(step.run)), false)
 })
 
-test('the fresh-profile job is the npm-mode dual-platform DSH matrix gate', () => {
+test('the fresh-profile job consumes the event-selected DSH matrix and preserves release qualification', () => {
   const jobs = workflow().jobs
   const job = jobs['fresh-profile']
   assert.ok(job, 'the fresh-profile job must exist in ci.yml')
   assert.equal(jobs['dsh-context'].outputs.fresh_profile_matrix, '${{ steps.context.outputs.fresh_profile_matrix }}')
   assert.equal(job.strategy.matrix, '${{ fromJSON(needs.dsh-context.outputs.fresh_profile_matrix) }}',
     'the Fresh gate must consume the matrix resolved from the current compatibility row')
+  const manualInput = (workflow().on ?? workflow()['on'])?.workflow_dispatch?.inputs?.run_macos_fresh_profile
+  assert.equal(manualInput?.type, 'boolean')
+  assert.equal(manualInput.default, false)
+  assert.equal(manualInput.required, false)
+  const contextStep = jobs['dsh-context'].steps.find(step => step.id === 'context')
+  assert.equal(contextStep.env.RUN_MACOS_FRESH_PROFILE, '${{ inputs.run_macos_fresh_profile }}')
+  assert.match(workflow().concurrency.group, /inputs\.run_macos_fresh_profile.*-macos-manual/u,
+    'manual macOS qualification must have a different concurrency group from ordinary pushes')
   assert.equal(job['continue-on-error'], undefined,
     'a cancelled/failed Fresh platform can never be treated as green')
   assert.match(job.if, /needs\.dsh-context\.result == 'success'/u)

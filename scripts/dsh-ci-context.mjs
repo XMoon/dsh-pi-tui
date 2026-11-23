@@ -147,14 +147,13 @@ export function resolveCiConfig({ shards, maxParallel, testConcurrency } = {}) {
 }
 
 /** Derive Linux's full current DSH window and macOS's recommended pairing. */
-export function resolveFreshProfileMatrix(matrix = COMPAT_MATRIX) {
+export function resolveFreshProfileMatrix(matrix = COMPAT_MATRIX, { eventName = '', ref = '', runMacosFreshProfile = false } = {}) {
   const { versions, recommended } = currentDshQualification(matrix)
-  return {
-    include: [
-      ...versions.map(dsh => ({ os: 'ubuntu-24.04', dsh })),
-      { os: 'macos-latest', dsh: recommended },
-    ],
-  }
+  const include = versions.map(dsh => ({ os: 'ubuntu-24.04', dsh }))
+  const releaseTag = eventName === 'push' && ref.startsWith('refs/tags/')
+  const manualMacos = eventName === 'workflow_dispatch' && runMacosFreshProfile
+  if (releaseTag || manualMacos) include.push({ os: 'macos-latest', dsh: recommended })
+  return { include }
 }
 
 /** Resolve and validate all context outputs. */
@@ -166,9 +165,13 @@ export function resolveDshContext({
   forcedMode,
   modeConfigPath = MODE_CONFIG,
   ciConfig = {},
+  runMacosFreshProfile = false,
 } = {}) {
   const config = loadDshSourceConfig(configPath)
   const mode = resolveDshMode({ eventName, ref, baseRef, forcedMode, modeConfigPath })
+  if (eventName === 'workflow_dispatch' && runMacosFreshProfile && mode !== 'npm') {
+    fail('manual macOS Fresh Profile qualification requires npm mode')
+  }
   const ci = resolveCiConfig(ciConfig)
   return {
     mode,
@@ -177,7 +180,7 @@ export function resolveDshContext({
     sourceExpectedVersion: mode === 'source' ? config.expectedVersion : '',
     sourceConfig: config.path,
     ci,
-    freshProfileMatrix: resolveFreshProfileMatrix(),
+    freshProfileMatrix: resolveFreshProfileMatrix(COMPAT_MATRIX, { eventName, ref, runMacosFreshProfile }),
   }
 }
 
@@ -233,6 +236,7 @@ function cli() {
     baseRef,
     configPath: values.config ?? DEFAULT_SOURCE_CONFIG,
     forcedMode: values['force-mode'],
+    runMacosFreshProfile: process.env.RUN_MACOS_FRESH_PROFILE === 'true',
     // The variables come from the environment the job passes them in, never
     // from `${{ }}` interpolation into shell source.
     ciConfig: {
