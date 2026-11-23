@@ -2214,3 +2214,212 @@ test('a same-ID live replacement right after enumeration cannot inherit a stale 
     await ctx.fiber.dispose()
   }
 })
+
+test('a dirty rebuild that becomes cold replays the complete durable source', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r201-')
+  const source = mutableSource('/repo/r201')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    observeDisposedSession(session: unknown): void
+  }
+  const query = deps.sessionQuery()
+  assert.ok(query !== undefined)
+  const realObserve = query.observeSession
+  let observeEntered!: () => void
+  const entered = new Promise<void>(resolve => { observeEntered = resolve })
+  let releaseObserve!: () => void
+  const gate = new Promise<void>(resolve => { releaseObserve = resolve })
+  try {
+    await waitDirectReady(service)
+    query.observeSession = async (id, options) => {
+      const observation = await realObserve.call(query, id, options)
+      observeEntered()
+      await gate
+      return observation
+    }
+    // A live gap marks the checkpoint dirty and starts a rebuild that is held.
+    const gapEvent = {
+      type: 'agent/inbox/spliced',
+      seq: 5,
+      time: 5000,
+      data: {
+        target: 'next-turn',
+        start: 5,
+        inserted: [{
+          id: 'r201-gap-five',
+          role: 'user',
+          content: [{ type: 'text', text: 'r201 gap five' }],
+          source: { kind: 'user', rpcId: 'rpc-r201-5' },
+        }],
+      },
+    }
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), gapEvent)
+    await entered
+
+    // The Session is disposed BEFORE the held rebuild can commit, and the
+    // durable log now contains accepted events beyond the old checkpoint.
+    source.live = false
+    source.events.push(
+      {
+        type: 'agent/inbox/spliced',
+        seq: 3,
+        time: 3000,
+        data: { target: 'next-turn', start: 3, inserted: [{ id: 'r201-three', role: 'user', content: [{ type: 'text', text: 'r201 durable three' }], source: { kind: 'user', rpcId: 'rpc-r201-3' } }] },
+      },
+      {
+        type: 'agent/inbox/spliced',
+        seq: 4,
+        time: 4000,
+        data: { target: 'next-turn', start: 4, inserted: [{ id: 'r201-four', role: 'user', content: [{ type: 'text', text: 'r201 durable four' }], source: { kind: 'user', rpcId: 'rpc-r201-4' } }] },
+      },
+      gapEvent,
+    )
+    source.revision += 1
+    internals.observeDisposedSession({ id: source.header.id })
+    releaseObserve()
+
+    await waitDirectReady(service, 10_000)
+    const three = await service.search({ scope: 'all', query: 'r201 durable three', limit: 25 }, new AbortController().signal)
+    const four = await service.search({ scope: 'all', query: 'r201 durable four', limit: 25 }, new AbortController().signal)
+    assert.equal(three.kind, 'ready', JSON.stringify(three))
+    assert.equal(four.kind, 'ready', JSON.stringify(four))
+    if (three.kind !== 'ready' || four.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(three.items.length, 1)
+    assert.equal(four.items.length, 1)
+    assert.equal(internals.index.occurrenceCount(), 5, 'the rebuilt history must include every accepted durable message')
+  } finally {
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a rebuild requested during an active repair is coalesced and retried', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r202-')
+  const source = mutableSource('/repo/r202')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const query = deps.sessionQuery()
+  assert.ok(query !== undefined)
+  const realObserve = query.observeSession
+  let firstObserve = true
+  let observeEntered!: () => void
+  const entered = new Promise<void>(resolve => { observeEntered = resolve })
+  let releaseFirst!: () => void
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+  const inbox = (seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 6000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{ id: `r202-${String(seq)}`, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user', rpcId: `rpc-r202-${String(seq)}` } }],
+    },
+  })
+  try {
+    await waitDirectReady(service)
+    query.observeSession = async (id, options) => {
+      if (firstObserve) {
+        firstObserve = false
+        const observation = await realObserve.call(query, id, options)
+        observeEntered()
+        await firstGate
+        return observation
+      }
+      return realObserve.call(query, id, options)
+    }
+    // Gap => rebuild starts and holds inside observeSession.
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), inbox(5, 'r202 gap five'))
+    await entered
+
+    // The missing durable events exist, and a second live event invalidates the
+    // held observation while the first repair flight is still active.
+    source.events.push(inbox(3, 'r202 durable three'), inbox(4, 'r202 durable four'), inbox(5, 'r202 gap five'), inbox(6, 'r202 follow-up six'))
+    source.revision += 1
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), inbox(6, 'r202 follow-up six'))
+    // Let the queued drain observe the gap and coalesce its rebuild request.
+    await new Promise(resolve => setTimeout(resolve, 25))
+    releaseFirst()
+
+    // The first observation is stale; the coalesced follow-up must repair now,
+    // without any 30 s full pass.
+    await waitDirectReady(service, 10_000)
+    const six = await service.search({ scope: 'all', query: 'r202 follow-up six', limit: 25 }, new AbortController().signal)
+    assert.equal(six.kind, 'ready', JSON.stringify(six))
+    if (six.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(six.items.length, 1)
+  } finally {
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a live burst larger than the read batch commits in bounded ordered chunks', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r203-')
+  const source = mutableSource('/repo/r203')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    writeBatch(input: { readonly events: readonly unknown[] }, witness?: unknown): unknown
+  }
+  const realWriteBatch = internals.writeBatch
+  const commitSizes: number[] = []
+  internals.writeBatch = function (input, witness) {
+    commitSizes.push(input.events.length)
+    return realWriteBatch.call(this, input, witness)
+  }
+  const inbox = (seq: number) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 7000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `burst-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text: `r203 burst text ${String(seq)}` }],
+        source: { kind: 'user', rpcId: `rpc-r203-${String(seq)}` },
+      }],
+    },
+  })
+  try {
+    await waitDirectReady(service)
+    const baseline = commitSizes.length
+    for (let seq = 3; seq < 603; seq += 1) {
+      ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+        .observeLiveEvent(liveSessionOf(source), inbox(seq))
+    }
+    await waitDirectReady(service, 10_000)
+    const burstCommits = commitSizes.slice(baseline)
+    assert.ok(burstCommits.length >= 3, `a 600-event burst needs bounded chunks: ${JSON.stringify(burstCommits)}`)
+    assert.ok(burstCommits.every(size => size <= 256), `every live commit is at most 256 events: ${JSON.stringify(burstCommits)}`)
+    assert.equal(burstCommits.reduce((sum, size) => sum + size, 0), 600)
+    assert.equal(internals.index.occurrenceCount(), 602, 'every accepted burst message must be indexed')
+    const last = await service.search({ scope: 'all', query: 'r203 burst text 602', limit: 25 }, new AbortController().signal)
+    assert.equal(last.kind, 'ready', JSON.stringify(last))
+    if (last.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(last.items.length, 1)
+  } finally {
+    internals.writeBatch = realWriteBatch
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})

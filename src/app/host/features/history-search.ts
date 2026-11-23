@@ -438,6 +438,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private readonly sessionRepairFlights = new Map<string, HistorySessionRepairFlight>()
   /** A disposal proof requested while another same-id repair is in flight. */
   private readonly disposalRequests = new Set<string>()
+  /** A rebuild requested while another same-id repair is in flight (coalesced). */
+  private readonly rebuildRequests = new Set<string>()
   /** Active read candidates by exact Session id (source/identity/checkpoint witness). */
   private readonly activeCandidates = new Map<string, Set<HistoryCandidateWitness>>()
   /**
@@ -645,6 +647,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.reconcilePending.clear()
       this.sessionRepairFlights.clear()
       this.disposalRequests.clear()
+      this.rebuildRequests.clear()
       const index = this.index
       this.index = undefined
       index?.close()
@@ -880,21 +883,66 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.disposed || this.lifecycle.signal.aborted) return
     this.reconcilePending.add(sessionId)
     this.markReconcileNeeded('reconciling')
+    // Coalesce intent even while a same-id flight is active: a newer event can
+    // invalidate the in-flight observation, so the follow-up must not be lost.
     if (kind === 'disposal') this.disposalRequests.add(sessionId)
+    else this.rebuildRequests.add(sessionId)
     if (this.sessionRepairFlights.has(sessionId)) return
-    const effectiveKind = this.disposalRequests.delete(sessionId) ? 'disposal' : kind
+    const effectiveKind: 'rebuild' | 'disposal' = this.disposalRequests.delete(sessionId)
+      ? 'disposal'
+      : this.rebuildRequests.delete(sessionId) ? 'rebuild' : kind
     const flight = this.runSessionRepair(sessionId, effectiveKind)
     this.sessionRepairFlights.set(sessionId, { promise: flight, kind: effectiveKind })
     runDetached('history search Session repair', () => flight, { diag: this.diag })
     observeSettled(flight, () => {
       const registered = this.sessionRepairFlights.get(sessionId)
       if (registered?.promise === flight) this.sessionRepairFlights.delete(sessionId)
-      if (this.disposalRequests.delete(sessionId) && !this.disposed && !this.lifecycle.signal.aborted) {
+      if (this.disposed || this.lifecycle.signal.aborted) return
+      // Disposal is the stronger obligation; the coalesced rebuild (if any)
+      // follows it on the next settlement.
+      if (this.disposalRequests.delete(sessionId)) {
         this.scheduleSessionRepair(sessionId, 'disposal')
+        return
+      }
+      if (this.rebuildRequests.delete(sessionId)) {
+        this.scheduleSessionRepair(sessionId, 'rebuild')
+        return
       }
       if (this.pending.size > 0) this.enqueueDrain()
       this.refreshCompleteness()
     })
+  }
+
+  /**
+   * Rebuild one now-persisted-only Session from the complete official durable
+   * snapshot under the same-instance revision fence. Used by rebuild repairs and
+   * by disposal repairs whose checkpoint is dirty/uncertain.
+   */
+  private async rebuildFromPersistence(
+    sessionId: string,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    query: HistorySearchQueryLike,
+  ): Promise<ReplayOutcome> {
+    const signal = this.lifecycle.signal
+    const snapshot = await persistence.stat(sessionId, { signal })
+    signal.throwIfAborted()
+    if (snapshot === undefined) return 'stale'
+    const record: OfficialSession = {
+      header: structuredClone(snapshot.header),
+      live: false,
+      ...(snapshot.eventCount === undefined ? {} : { eventCount: snapshot.eventCount }),
+      ...(snapshot.revision === undefined ? {} : { revision: snapshot.revision }),
+    }
+    return this.replayOfficialSession(
+      sessionId,
+      record,
+      persistence,
+      sessions,
+      query,
+      this.emptyPhaseCounters(),
+      { rebuild: true },
+    )
   }
 
   private async runSessionRepair(sessionId: string, kind: 'rebuild' | 'disposal'): Promise<void> {
@@ -919,34 +967,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (outcome === 'complete') this.reconcilePending.delete(sessionId)
         return
       }
-      const checkpoint = this.index.checkpointOf(sessionId)
-      if (checkpoint === undefined) {
-        // A missing row can be an interrupted rebuild or a now-persisted-only
-        // Session: the official durable snapshot decides whether it exists.
-        const signal = this.lifecycle.signal
-        const snapshot = await persistence.stat(sessionId, { signal })
-        signal.throwIfAborted()
-        if (snapshot === undefined) return
-        const record: OfficialSession = {
-          header: structuredClone(snapshot.header),
-          live: false,
-          ...(snapshot.eventCount === undefined ? {} : { eventCount: snapshot.eventCount }),
-          ...(snapshot.revision === undefined ? {} : { revision: snapshot.revision }),
-        }
-        const outcome = await this.replayOfficialSession(
-          sessionId,
-          record,
-          persistence,
-          sessions,
-          query,
-          this.emptyPhaseCounters(),
-          { rebuild: true },
-        )
-        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
-        return
-      }
-      await this.verifySessionAgainstPersistence(sessionId)
-      this.recordCompletedDisposal()
+      // A rebuild obligation is NOT a disposal prefix proof: read and replay
+      // the complete official durable source, including accepted events beyond
+      // the old checkpoint. A prefix proof would clear `dirty` while omitting
+      // exactly those events.
+      const outcome = await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
+      if (outcome === 'complete') this.reconcilePending.delete(sessionId)
     } catch (error) {
       if (this.lifecycle.signal.aborted || this.disposed) return
       this.sourceFaulted = true
@@ -1003,17 +1029,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   }
 
   private enqueueDrain(): void {
-    // A synchronous official batch may publish thousands of events before any
-    // microtask runs. ONE queued drain reads the bounded pending map when it
-    // starts; events that arrive while a drain is ACTIVE schedule the next
-    // drain (the flag is already reset by then), so no event is stranded and
-    // the Promise queue stays O(1) instead of O(events).
+    // A synchronous official burst may publish thousands of events. ONE queued
+    // step commits at most ONE Session's next <=256-event chunk; a remaining
+    // backlog schedules the next step after this writer turn. The queue stays
+    // O(1) and no single writer task grows with the burst size.
     if (this.drainScheduled) return
     this.drainScheduled = true
     this.drainSchedules += 1
     this.enqueueWrite(() => {
-      this.drainScheduled = false
-      this.drainPending()
+      this.drainPendingStep()
     })
   }
 
@@ -1050,49 +1074,68 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
   }
 
-  /**
-   * ONE synchronous drain of the bounded live buffer. Normal contiguous batches
-   * commit here; a missing/dirty checkpoint or a gap only marks the Session dirty
-   * and hands it to the per-id repair owner — never an official read in here.
-   */
-  private drainPending(): void {
+  /** One bounded live-commit step: ONE Session, at most ONE read-batch chunk. */
+  private drainOnePendingSession(): void {
     if (this.disposed || this.pending.size === 0) return
     if (this.state.kind === 'loading') return
     if (this.index === undefined) return
-    const batches = new Map(this.pending)
-    this.pending.clear()
-    this.pendingEventCount = 0
-    this.pendingBytes = 0
-    const repair: string[] = []
-    for (const [sessionId, batch] of batches) {
-      if (this.lifecycle.signal.aborted) return
-      const checkpoint = this.index.checkpointOf(sessionId)
-      if (checkpoint === undefined || checkpoint.dirty) {
-        repair.push(sessionId)
-        continue
-      }
-      try {
-        this.commitLiveBatch(sessionId, checkpoint, batch)
-      } catch (error) {
-        // The buffered events are already out of the queue: mark BEFORE
-        // handing the Session to the repair owner so the official source is
-        // re-read instead of permanently skipping the batch.
-        this.index.markSession({ sessionId, dirty: true })
-        if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
-          repair.push(sessionId)
-          continue
-        }
-        throw error
-      }
-    }
-    for (const sessionId of repair) {
+    const first = this.pending.entries().next()
+    if (first.done === true) return
+    const [sessionId, batch] = first.value
+    this.pending.delete(sessionId)
+    this.pendingEventCount -= batch.events.length
+    this.pendingBytes -= batch.bytes
+    const checkpoint = this.index.checkpointOf(sessionId)
+    if (checkpoint === undefined || checkpoint.dirty) {
       this.reconcilePending.add(sessionId)
       this.scheduleSessionRepair(sessionId, 'rebuild')
+      return
     }
+    try {
+      const remaining = this.commitLiveBatch(sessionId, checkpoint, batch)
+      if (remaining.length > 0) this.restorePendingSession(sessionId, batch, remaining)
+    } catch (error) {
+      // The buffered events are already out of the queue: mark BEFORE handing
+      // the Session to the repair owner so the official source is re-read
+      // instead of permanently skipping the batch.
+      this.index.markSession({ sessionId, dirty: true })
+      if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
+        this.reconcilePending.add(sessionId)
+        this.scheduleSessionRepair(sessionId, 'rebuild')
+        return
+      }
+      throw error
+    }
+  }
+
+  private drainPendingStep(): void {
+    this.drainScheduled = false
+    if (this.disposed) return
+    if (this.state.kind === 'loading') return
+    this.drainOnePendingSession()
+    if (this.pending.size > 0) this.enqueueDrain()
     this.refreshCompleteness()
   }
 
-  private commitLiveBatch(sessionId: string, checkpoint: HistorySessionCheckpointRow, batch: PendingSession): void {
+  /** Re-add the ordered remainder without losing the exact byte/event counters. */
+  private restorePendingSession(
+    sessionId: string,
+    batch: PendingSession,
+    events: readonly HostAdmissionEventLike[],
+  ): void {
+    if (events.length === 0) return
+    const bytes = events.reduce((sum, event) => sum + approximateEventBytes(event), 0)
+    this.pending.set(sessionId, { ...batch, events: [...events], bytes })
+    this.pendingEventCount += events.length
+    this.pendingBytes += bytes
+  }
+
+  /** Commit at most one bounded chunk; return the contiguous events left over. */
+  private commitLiveBatch(
+    sessionId: string,
+    checkpoint: HistorySessionCheckpointRow,
+    batch: PendingSession,
+  ): HostAdmissionEventLike[] {
     if (batch.inheritedEventCount !== checkpoint.inheritedCut) {
       throw new HistorySearchConflictError(sessionId, 'the fork-inherited cut changed')
     }
@@ -1111,7 +1154,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
     }
     const events = this.contiguousEvents(sessionId, checkpoint.nextSeq, eventList)
-    if (events.length === 0) return
+    if (events.length === 0) return []
+    // The SAME fixed read-batch bound as every official replay: a live burst
+    // must never become one unbounded synchronous SQL/fold transaction.
+    const head = events.slice(0, HISTORY_SEARCH_READ_BATCH)
     this.writeBatch({
       sessionId,
       headerHash: checkpoint.headerHash,
@@ -1120,8 +1166,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       baseNextSeq: checkpoint.nextSeq,
       effectiveCwd: checkpoint.effectiveCwd,
       sourceState: checkpoint.sourceState,
-      events,
+      events: head,
     })
+    return events.slice(HISTORY_SEARCH_READ_BATCH)
   }
 
   private contiguousEvents(sessionId: string, startSeq: number, events: readonly HostAdmissionEventLike[]): HostAdmissionEventLike[] {
@@ -1694,7 +1741,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       return
     }
     try {
-      this.commitLiveBatch(sessionId, checkpoint, batch)
+      const remaining = this.commitLiveBatch(sessionId, checkpoint, batch)
+      if (remaining.length > 0) {
+        this.restorePendingSession(sessionId, batch, remaining)
+        this.enqueueDrain()
+      }
     } catch (error) {
       if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
         this.index.markSession({ sessionId, dirty: true })
@@ -1781,10 +1832,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         }
       }
       // Accepted live events that arrived during the pass merge in order BEFORE
-      // the completeness decision; the writer only sees short commits.
-      const drained = await this.enqueueWrite(() => {
-        this.drainAllPendingNow()
-      })
+      // the completeness decision. Each writer turn commits at most one bounded
+      // chunk, so this wait never hides an unbounded live burst behind one task.
+      let drained: WriteReceipt = 'committed'
+      while (this.pending.size > 0) {
+        const pendingEventsBefore = this.pendingEventCount
+        drained = await this.enqueueWrite(() => {
+          this.drainOnePendingSession()
+        })
+        if (drained === 'failed') break
+        // A loading/closed edge can refuse to drain; never spin this pass.
+        if (this.pendingEventCount === pendingEventsBefore) break
+      }
       // A Session replaced during the pass may not have been re-read (no new
       // event): re-validate the EXACT enumerated live identity for every record
       // before this pass is allowed to publish ready.
@@ -2016,22 +2075,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     return tracked.revision === record.revision
   }
 
-  private drainAllPendingNow(): void {
-    if (this.pending.size === 0 || this.index === undefined) return
-    const sessions = [...this.pending.keys()]
-    for (const sessionId of sessions) {
-      try {
-        this.drainPendingSession(sessionId)
-      } catch (error) {
-        if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
-          this.index.markSession({ sessionId, dirty: true })
-          continue
-        }
-        throw error
-      }
-    }
-  }
-
   /**
    * Read-only proof that the official durable log contains the exact prefix a
    * checkpoint claims. `insufficient` means the source is shorter/unreadable
@@ -2081,7 +2124,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (this.disposed || this.index === undefined) return
       const persistence = this.deps.sessionPersistence()
       const sessions = this.deps.sessions()
-      if (persistence === undefined || sessions === undefined) {
+      const query = this.deps.sessionQuery()
+      if (persistence === undefined || sessions === undefined || query === undefined) {
         this.state = { kind: 'unavailable', reason: 'service-missing' }
         return
       }
@@ -2089,6 +2133,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // official read instead of observing a Session this index never held.
       const checkpoint = this.index.checkpointOf(sessionId)
       if (checkpoint === undefined) return
+      if (checkpoint.dirty || checkpoint.uncertainSources > 0) {
+        // The prefix proof below only proves the ALREADY INDEXED rows. A dirty
+        // or uncertain checkpoint has accepted events beyond that prefix, so a
+        // disposal/repair must replay the complete official source instead of
+        // settling `dirty=false` and publishing `ready` with missing history.
+        const outcome = await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
+        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+        return
+      }
       const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)
       try {
         const signal = this.lifecycle.signal
@@ -2258,6 +2311,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.state = { kind: 'incomplete', reason: 'reconciling' }
       return
     }
+    if (this.pending.size > 0) {
+      // Accepted live events are not yet fully committed: a ready answer would
+      // omit history the Owner already accepted. Keep the bounded drain moving.
+      this.state = { kind: 'incomplete', reason: 'reconciling' }
+      this.enqueueDrain()
+      return
+    }
     const checkpoints = this.index.listSessions()
     if (checkpoints.some(checkpoint => checkpoint.dirty)) {
       this.state = { kind: 'incomplete', reason: 'reconciling' }
@@ -2270,11 +2330,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.state.kind === 'loading' || this.state.kind === 'incomplete') {
       this.state = { kind: 'ready' }
     }
-    // A live batch that arrived while the state was still `loading` may have
-    // been skipped by its queued drain (the cold pass had not finished); once
-    // the index is complete, drain that stranded buffer instead of waiting for
-    // the next event or the next periodic verification.
-    if (this.pending.size > 0) this.enqueueDrain()
   }
 
   // ── answer helpers ───────────────────────────────────────────────────────
