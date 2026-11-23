@@ -4032,3 +4032,209 @@ test('any non-zero wheel on the bar revokes a painted open press (positive and c
   assert.doesNotMatch(afterCancel, /Computer Use ·|Computer Use\s+Permissions/u,
     `an immaterial wheel on the bar must revoke the open press:\n${afterCancel}`)
 })
+
+// ── UX-C / PR-D1: the Rows bar names and routes the row's REAL forward action ──
+//
+// The Rows bar used to paint `details`/`choose` from `row.edit` alone, while
+// Enter/Right on a specialist row mounts its page directly. These cases drive
+// the REAL last-painted bar target through `onCellPress`/`onCellClick` and prove
+// the painted word, the keyboard sink and the row-click boundary agree.
+
+/** The Host rows the forward-action cases need: writable Backend, then the two
+ *  specialist navigation rows the composition really paints. */
+function forwardActionSnapshot(options: { readonly webUiAvailable?: boolean } = {}): SettingsWorkspaceSnapshot {
+  return {
+    ...SNAPSHOT,
+    rows: [
+      ...SNAPSHOT.rows,
+      {
+        id: 'startup-backend',
+        category: 'general',
+        label: 'Backend',
+        summary: 'Direct (default)',
+        value: 'Direct (default)',
+        scope: 'DSH Host profile · next cold launch',
+        freshness: 'ready',
+        description: 'Which backend a new launch runs.',
+        edit: {
+          field: 'startup-backend',
+          primary: 'persisted',
+          runtime: 'Applies on next launch; current TUI/Host remains unchanged',
+          persisted: 'Direct (default)',
+          revision: 1,
+          options: [
+            { value: 'Direct', label: 'Direct', available: true, current: true },
+            { value: 'Daemon', label: 'Daemon', available: true, current: false },
+          ],
+        },
+      },
+      {
+        id: 'web-ui',
+        category: 'general',
+        label: 'Web UI',
+        summary: 'Live control · next Host start',
+        scope: 'DSH Host · running Split Host Web frontend',
+        freshness: 'runtime',
+        description: 'runtime and next-start',
+        specialist: 'web-ui',
+        ...(options.webUiAvailable === false ? { specialistAvailable: false } : {}),
+      },
+      {
+        id: 'acp-access',
+        category: 'general',
+        label: 'ACP access',
+        summary: 'Live listener · next Host start · client setup',
+        scope: 'local Split Host ACP listener',
+        freshness: 'runtime',
+        description: 'runtime and next-start',
+        specialist: 'acp-access',
+      },
+    ],
+  }
+}
+
+/** Open one legacy category's Rows level from the workspace entry. */
+const openForwardRows = (h: Harness, category: 'general' | 'tools'): void => {
+  // A narrow terminal opens on the About CONTENT; Esc returns to the rail.
+  if (h.columns() < 76) h.panel.handleInput('\u001b')
+  walkTo(h, category)
+  h.panel.handleInput('\r')
+}
+
+const paintedBar = (h: Harness): string => plain(h, h.columns()).split('\n').at(-1) ?? ''
+
+/** Press+release one whole painted Action-Bar hint on the physical last row. */
+const clickBarHint = (h: Harness, hint: string): void => {
+  const lines = plain(h, h.columns()).split('\n')
+  const y = lines.length - 1
+  const x = (lines[y] ?? '').indexOf(hint)
+  assert.ok(x >= 0, `the painted bar must contain ${JSON.stringify(hint)}:\n${lines.join('\n')}`)
+  h.panel.onCellPress(x + 1, y)
+  h.panel.onCellClick(x + 1, y)
+}
+
+test('the Rows bar routes the real forward action: writable chooses, specialist opens', () => {
+  const h = setup({ columns: 44, rows: 20, webUiPage: true, snapshot: () => forwardActionSnapshot() })
+  openForwardRows(h, 'general')
+  assert.match(paintedBar(h), /Left back · Right choose · Back \[Esc\]/u,
+    'a writable row advertises its real Choose action')
+  assert.doesNotMatch(paintedBar(h), /Enter choose/u,
+    'the dropped Enter half is absent; the painted Right half is the ONE target')
+
+  // The painted Choose is the pointer analogue of the keyboard Enter.
+  clickBarHint(h, 'Right choose')
+  assert.match(header(h), /Settings · Host · Backend/u)
+  assert.match(plain(h, 44), /Choose value/u, 'the painted hint starts the same L2 choice')
+  assert.equal(h.commits(), 0, 'opening the choice writes nothing')
+  h.panel.handleInput('\u001b') // choice -> Rows
+
+  h.panel.handleInput('\u001b[B') // Backend -> Web UI
+  const bar = paintedBar(h)
+  assert.match(bar, /Left back · Right open · Back \[Esc\]/u,
+    'a mountable specialist advertises Open, not the old Details lie')
+  assert.doesNotMatch(bar, /details|Enter open/u,
+    'no false Details and no target for the dropped Enter half')
+
+  // The row click stays select-only: it can never mount the page.
+  const lines = plain(h, 44).split('\n')
+  const row = lines.findIndex(line => line.includes('Web UI'))
+  const col = (lines[row] ?? '').indexOf('Web UI') + 1
+  h.panel.onCellPress(col, row)
+  h.panel.onCellClick(col, row)
+  assert.equal(h.webUiBuilds(), 0, 'clicking the Web UI row only selects it')
+  assert.match(header(h), /Settings · Host · Rows/u)
+
+  // The painted Open is the ONE new pointer route into the SAME page.
+  clickBarHint(h, 'Right open')
+  assert.equal(h.webUiBuilds(), 1, 'the painted Open mounts the SAME-lease page')
+  assert.match(header(h), /Settings · Host · Web UI/u)
+  assert.equal(h.commits(), 0, 'opening the page writes nothing')
+  assert.equal(h.closes(), 0, 'opening the page never closes the workspace')
+})
+
+test('the wide Rows bar publishes both forward hints and the same one-step Enter sink', () => {
+  const h = setup({ columns: 120, rows: 40, snapshot: () => forwardActionSnapshot() })
+  openForwardRows(h, 'general')
+  assert.match(paintedBar(h), /Right choose · Enter choose/u,
+    'the wide bar paints both complete forward hints')
+  clickBarHint(h, 'Enter choose')
+  assert.match(header(h), /Settings · Host · Backend/u)
+  assert.match(plain(h), /Choose value/u, 'the wide pointer hint enters the same one-step choice')
+  assert.equal(h.commits(), 0, 'the wide pointer route writes nothing before Confirm')
+})
+
+test('a read-only Rows row advertises Details and its painted hint enters the Detail', () => {
+  const h = setup({ columns: 44, rows: 20 })
+  openForwardRows(h, 'tools')
+  assert.match(paintedBar(h), /Left back · Right details · Back \[Esc\]/u)
+  clickBarHint(h, 'Right details')
+  assert.match(header(h), /Settings · Tools · Visual tools/u, 'the painted Details enters the read-only Detail')
+  assert.doesNotMatch(plain(h, 44), /Choose value/u, 'a read-only row never starts a choice')
+  assert.equal(h.commits(), 0)
+  assert.equal(h.closes(), 0)
+})
+
+test('an unavailable specialist keeps Details and never promises Open', () => {
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    webUiPage: true,
+    snapshot: () => forwardActionSnapshot({ webUiAvailable: false }),
+  })
+  openForwardRows(h, 'general')
+  h.panel.handleInput('\u001b[B') // Backend -> Web UI
+  const bar = paintedBar(h)
+  assert.match(bar, /Right details/u, 'an unavailable page keeps the truthful Detail route')
+  assert.doesNotMatch(bar, /Right open|Enter open/u, 'no page is promised when it cannot open')
+  clickBarHint(h, 'Right details')
+  assert.equal(h.webUiBuilds(), 0, 'the unavailable page is never mounted')
+  assert.match(header(h), /Settings · Host · Web UI/u, 'Enter still reaches the truthful Detail')
+})
+
+test('a pending Rows commit advertises Details, never a second Choose or write', () => {
+  const h = setup({ columns: 120, rows: 40, snapshot: () => forwardActionSnapshot() })
+  openForwardRows(h, 'general')
+  h.panel.handleInput('\r') // Rows -> the L2 choice
+  plain(h) // the visible candidate is what admits the confirm
+  h.panel.handleInput('\r') // explicit Confirm -> pending
+  assert.equal(h.commits(), 1, 'the explicit confirm dispatched the ONE write')
+  h.panel.handleInput('\u001b') // Detail -> Rows; the pending write survives
+  const bar = paintedBar(h)
+  assert.match(bar, /Saving…/u, 'the pending write stays painted')
+  assert.match(bar, /Right details/u, 'pending cannot start a second choice')
+  assert.doesNotMatch(bar, /choose/u)
+  clickBarHint(h, 'Right details')
+  assert.match(header(h), /Settings · Host · Backend/u, 'the pending hint enters the Detail')
+  assert.equal(h.commits(), 1, 'the pending hint never dispatches a second write')
+  assert.doesNotMatch(plain(h), /Choose value/u)
+  h.settlements[0]!({ outcome: 'verified' })
+})
+
+test('a Rows forward hint dropped for width publishes no pointer target', () => {
+  const h = setup({ columns: 30, rows: 20, snapshot: () => forwardActionSnapshot() })
+  openForwardRows(h, 'general')
+  const lines = plain(h, 30).split('\n')
+  const bar = lines.at(-1) ?? ''
+  assert.doesNotMatch(bar, /Right (?:open|choose|details)|Enter (?:open|choose|details)/u,
+    `the too-narrow bar drops the forward hint whole:\n${bar}`)
+  // The remaining bar cells are not a hidden forward target.
+  h.panel.onCellPress(4, lines.length - 1)
+  h.panel.onCellClick(4, lines.length - 1)
+  assert.match(header(h), /Settings · Host · Rows/u)
+  assert.doesNotMatch(plain(h, 30), /Choose value/u)
+})
+
+test('a Rows forward press whose row changed before release activates nothing', () => {
+  const h = setup({ columns: 72, rows: 24, webUiPage: true, snapshot: () => forwardActionSnapshot() })
+  openForwardRows(h, 'general')
+  const lines = plain(h, 72).split('\n')
+  const y = lines.length - 1
+  const x = (lines[y] ?? '').indexOf('Right choose') + 1
+  assert.ok(x > 0, `the Backend bar paints Right choose:\n${lines.at(-1)}`)
+  h.panel.onCellPress(x, y)
+  h.panel.handleInput('\u001b[B') // selection: Backend -> Web UI (bumps the revision)
+  h.panel.onCellClick(x, y)
+  assert.match(header(h), /Settings · Host · Rows/u, 'the stale release stays on Rows')
+  assert.equal(h.webUiBuilds(), 0, 'the stale release never activates the newer Open')
+  assert.doesNotMatch(plain(h, 72), /Choose value/u)
+})

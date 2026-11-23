@@ -12,6 +12,10 @@
 - **ACP 设置统一到 Host · ACP access 页**：PiTui 的 `/acp` 与 `/settings → Host → ACP access` 现在打开同一个 Settings 页面，集中展示当前 Host 的本地 ACP Listener 状态、Enable/Disable（关闭前二次确认）、一键复制当前已验证 Profile 的 `acp stdio` 客户端命令、下次 Host 启动的 `Start automatically` 偏好以及客户端接入说明。运行状态只影响当前 Host，偏好只影响下次启动，两者互不改变；原 `/settings → Tools → ACP Server` 与 `Host → Start ACP automatically` 两行以及旧 `/acp` 弹出菜单已退役。
 - **无 TUI 的 ACP 管理命令**：`dsh --profile pi-tui acp status|enable|disable` 可在不打开 TUI、不启动 Host 的情况下查看并切换当前 Profile 已运行 Host 的本地 ACP Listener。`status` 只读并输出 Host 的真实状态；`enable` / `disable` 各自只发送一次写入，状态未确认或响应丢失时明确报告结果未知，不会猜测成功。它们不改变下次冷启动的自动启动设置，也不会停止 Host、Agent、Session 或 TUI。
 
+### 改进
+
+- **Settings 行的真实动作可直接点击**：设置页 Rows 底栏现在按当前行显示真实的 `Open` / `Choose` / `Details` 前进动作，已完整绘出的提示可直接点击，并与键盘 Enter 走同一条路径；不可用或未装配的专业页面不会被误标为 `Open`。点击行本身仍只选中，不改变原有窄屏行为。
+
 ## [0.5.8] - 2026-11-22
 
 ### 新增
