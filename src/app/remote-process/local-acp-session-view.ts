@@ -2355,14 +2355,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           this.applyContinuedAnswer(claim, obligation)
         }
       }
-      for (const form of claim.questionForms ?? []) {
+      for (const form of [...claim.questionForms ?? []]) {
         if (form.kind !== 'continued' || form.callId === undefined) continue
         if (this.callAnswerability(claim, form.callId) !== 'settled') continue
-        // Another human/client already settled this call: stop the Form now
-        // instead of leaving a stale prompt on the client. A call that is
-        // merely not YET recorded as continued keeps its Form: the official
-        // `tool/result` may still be committing.
+        // Another human/client already settled this call: stop the Form AND
+        // reclaim the EXACT obligation it belongs to, so a long-lived View never
+        // accumulates dead obligations (Map entry + Form handle). A call that is
+        // merely not YET recorded as continued keeps its Form and its answer:
+        // the official `tool/result` may still be committing.
+        const obligation = claim.continuedQuestions?.get(form.callId)
         form.abort()
+        if (obligation !== undefined && obligation.abort === form) {
+          this.dropContinuedQuestion(claim, obligation)
+        }
       }
     }
   }
@@ -2554,8 +2559,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       try {
         response = await pending
       } catch {
-        // The reverse request was aborted with its connection/claim: the
-        // obligation was already released by the same hook.
+        // The reverse request died. A connection release already cleared every
+        // obligation; a Form the claim still lists must instead be reclaimed
+        // here by identity, so a rejected reverse request can never leave a dead
+        // obligation (and its Form handle) behind.
+        if (claim.continuedQuestions?.get(obligation.callId) === obligation) {
+          this.dropContinuedQuestion(claim, obligation)
+        }
         return
       }
       // The response may have crossed a real await: only the claim that still

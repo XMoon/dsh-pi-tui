@@ -631,7 +631,10 @@ profile's independent `autoStart` preference enables it (see below).
       connection attached, not detached) re-read after each await and again
       inside the Host seam immediately before the synchronous official call, so
       a Form that outlives its View can never inject a reply into the shared
-      Session. That call's own result
+      Session. When another owner settles a continued call first, that call's
+      Form is aborted AND the exact obligation (Form handle included) is
+      reclaimed, so a long-lived View never accumulates dead obligations.
+      That call's own result
       keeps its meaning: `true` is a reply queued into the inbox (not "the model
       used it"), `false` means the call is no longer answerable, and
       `REPLY_QUEUED`/`BAD_ANSWER`/`CALLER_NOT_LIVE` keep their official code and

@@ -4945,3 +4945,60 @@ test('G-ACP2-PR1 ST-07: a reconciliation that sends nothing never charges the pe
   assert.equal(view.notifications.filter(update => updateKind(update) === 'agent_message_chunk').length, 1,
     'the streamed text stays delivered exactly once')
 })
+
+/** Read one claim's question resources. The leak this guards is the RESOURCE
+ * (a dead obligation and its Form handle), not any private field's shape. */
+function registryClaim(view: ReturnType<typeof promptView>, sessionId: string): {
+  continuedQuestions?: Map<string, unknown>
+  questionForms?: Set<unknown>
+} {
+  const registry = view.registry as unknown as {
+    claims: Map<string, { continuedQuestions?: Map<string, unknown>; questionForms?: Set<unknown> }>
+  }
+  const claim = registry.claims.get(sessionId)
+  assert.ok(claim !== undefined, 'the View holds its claim')
+  return claim
+}
+
+test('G-ACP2-PR1 QU-06: another owner settling a continued call reclaims the exact obligation and its Form', async () => {
+  const channel = formChannel()
+  const view = promptView('P1', { channels: { requestElicitation: channel.requester } })
+  view.access.questionService = true
+  await view.attach()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-other-settled')
+  view.access.turnFence = { openTurnStartSeq: 1050, lastTurn: 70 }
+  view.claim('m-other-settled', 70, request.requestId)
+  const qa: AcpQuestionSpec[] = [{ id: 'qa', question: 'A?', options: [{ label: 'yes' }, { label: 'no' }] }]
+  // The projection has not recorded the call yet: the Form stays open.
+  view.access.questionSnapshotImpl = () => ({ kind: 'current', continued: [], settled: new Set() })
+  const deadline = new AbortController()
+  const ask = view.registry.onQuestionRequest(
+    { agent: view.agent, questions: qa, signal: deadline.signal, wait: { callId: 'call-other', timed: true } },
+    async () => ({ answers: [] }),
+  )
+  await flushOutput()
+  deadline.abort(Object.assign(new Error('timeout'), { name: 'UserQuestionError', code: 'ASK_TIMED_OUT' }))
+  await assert.rejects(ask)
+  const claim = registryClaim(view, 'P1')
+  assert.equal(claim.continuedQuestions?.size, 1, 'the timed question owns one obligation')
+  assert.equal(claim.questionForms?.size, 1)
+  // ANOTHER owner answers it: the official projection moves the call to settled.
+  view.access.questionSnapshotImpl = () => ({ kind: 'current', continued: [], settled: new Set(['call-other']) })
+  view.registry.onQuestionProjection(view.agent.session, 'userQuestions')
+  await flushOutput()
+  assert.equal(channel.forms[0]!.signal.aborted, true, 'the stale Form is stopped')
+  assert.equal(claim.continuedQuestions?.size, 0, 'the dead obligation is reclaimed, not accumulated')
+  assert.equal(claim.questionForms?.size, 0, 'its Form handle is reclaimed with it')
+  assert.equal(view.access.answerContinuedCalls.length, 0,
+    'nothing is written for a call another owner already settled')
+  // A later projection change is a bounded no-op: no second abort, no re-add.
+  view.registry.onQuestionProjection(view.agent.session, 'userQuestions')
+  view.registry.onQuestionProjection(view.agent.session, 'inbox')
+  await flushOutput()
+  assert.equal(claim.continuedQuestions?.size, 0)
+  assert.equal(claim.questionForms?.size, 0)
+  view.commit('turn/end', { turn: 70, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
