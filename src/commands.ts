@@ -2131,11 +2131,12 @@ export function registerTuiCommands(
   }).registerWeb()
 
   // PO-5E / PR-B: the ONE Split-Client ACP listener control entry, immediately
-  // after `/web`. It is sessionless/local (see domain/command/policy.ts), takes
-  // ONE optional native TSP presenter, and every read/write stays here. On the
-  // PiTui renderer `/acp` is a typed deep link into the ONE
-  // `Settings · Host · ACP access` page (same lease, no second overlay), so the
-  // Settings registrar supplies that entry.
+  // after `/web`. It is sessionless/local (see domain/command/policy.ts) and
+  // takes ONE optional native TSP presenter, which keeps its read/action
+  // request in this command. On the PiTui renderer `/acp` is a typed deep link
+  // into the ONE `Settings · Host · ACP access` page (same lease, no second
+  // overlay), so the Settings registrar supplies that entry and the page's own
+  // port/writer factories own the Host reads and writes.
   createAcpAccessCommands({
     runner,
     app: app as TuiApp | undefined,

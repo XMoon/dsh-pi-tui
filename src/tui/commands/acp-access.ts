@@ -18,9 +18,12 @@
  *
  * It is a SESSIONLESS, LOCAL command: typing `/acp` itself creates no Session,
  * submits no prompt, starts no second Host, changes no default backend and
- * performs no Host read or write. The next-launch `autoStart` preference is
- * never written by the runtime toggle; on PiTui that preference is reachable
- * as an EXPLICIT, revision-checked action inside the page `/acp` opens. Both
+ * issues no direct Host mutation. On PiTui the handler only takes the ONE
+ * Settings lease and opens the page; that page's first really-painted frame
+ * performs ONE authoritative status read, and every runtime/preference write
+ * still requires an explicit page action. The next-launch `autoStart`
+ * preference is never written by the runtime toggle; on PiTui it is reachable
+ * as an explicit, revision-checked action inside the same page. Both
  * presentation entries share ONE business authority across their different
  * renderer UX: the `AcpAccessPort` Host controller (the TSP picker keeps its
  * own frozen presentation request). A PiTui composition never falls back to
