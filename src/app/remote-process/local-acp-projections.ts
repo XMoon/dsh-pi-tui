@@ -497,8 +497,10 @@ function isPlanStatus(value: unknown): value is PlanEntryStatus {
 /**
  * The one plan replacement update for one exact Session: the stable baseline
  * `plan` for a client without the `plan_update` capability, and the negotiated
- * `plan_update` (one stable planId) for a client that declared it. DSH has no
- * official "remove this plan" operation, so `plan_removed` is never sent.
+ * `plan_update` (one stable planId) for a client that declared it. A REMOVAL is
+ * not a `todo/write`: the official `todos` fold resets to null at every
+ * `turn/start`, and `planRemoval` below is the only path that emits
+ * `plan_removed` (an empty whole-list replacement for the baseline client).
  *
  * @param entries - the complete official entry list (empty is a real clear).
  * @param negotiated - whether the client froze `clientCapabilities.plan`.
