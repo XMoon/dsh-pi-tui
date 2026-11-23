@@ -440,6 +440,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private readonly disposalRequests = new Set<string>()
   /** A rebuild requested while another same-id repair is in flight (coalesced). */
   private readonly rebuildRequests = new Set<string>()
+  /**
+   * Accepted live batches retained because the official source cannot prove
+   * them yet (dirty/absent checkpoint, gap, or a short durable prefix). They are
+   * the only copy of those accepted events and must never be discarded on a
+   * short source; the index stays incomplete until the official source covers
+   * them. Held ids are excluded from the automatic drain loop to avoid a spin.
+   */
+  private readonly heldPending = new Set<string>()
   /** Active read candidates by exact Session id (source/identity/checkpoint witness). */
   private readonly activeCandidates = new Map<string, Set<HistoryCandidateWitness>>()
   /**
@@ -648,6 +656,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.sessionRepairFlights.clear()
       this.disposalRequests.clear()
       this.rebuildRequests.clear()
+      this.heldPending.clear()
       const index = this.index
       this.index = undefined
       index?.close()
@@ -723,7 +732,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (persistence === undefined || serviceIdentity(persistence) !== witness.persistenceIdentity) return false
     const sessions = this.deps.sessions()
     if (sessions === undefined || serviceIdentity(sessions) !== witness.sessionsIdentity) return false
-    if (this.pending.has(witness.sessionId)) return false
+    if (this.pending.has(witness.sessionId) && !this.heldPending.has(witness.sessionId)) return false
     if (witness.sessions.get(witness.sessionId) !== witness.liveObject) return false
     return sameCheckpoint(this.index?.checkpointOf(witness.sessionId), witness.expected)
   }
@@ -832,11 +841,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.handleOverflow()
       return
     }
+    // A new accepted event may fill the gap a held batch is waiting for; let
+    // the bounded drain retry it. If the gap persists it is re-held.
+    this.heldPending.delete(sessionId)
     this.enqueueDrain()
   }
 
   /** Drop one buffered Session batch and keep the byte/event counters exact. */
   private discardPendingSession(sessionId: string): void {
+    this.heldPending.delete(sessionId)
     const pending = this.pending.get(sessionId)
     if (pending === undefined) return
     this.pending.delete(sessionId)
@@ -865,6 +878,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.pending.clear()
     this.pendingEventCount = 0
     this.pendingBytes = 0
+    this.heldPending.clear()
     this.markReconcileNeeded('resource-limit')
     this.diag.warn('history search live buffer reached its bound', { sessions: affected.length })
     // Merge the affected ids into the per-id repair map: no writer callback
@@ -928,6 +942,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const snapshot = await persistence.stat(sessionId, { signal })
     signal.throwIfAborted()
     if (snapshot === undefined) return 'stale'
+    // A source shorter than (or unprovable about) the committed checkpoint is
+    // append lag, not a rollback: never reset accepted rows from it. Keep the
+    // rows/pending and stay incomplete until the official source advances.
+    const checkpoint = this.index?.checkpointOf(sessionId)
+    if (checkpoint !== undefined) {
+      if (snapshot.eventCount === undefined) return 'stale'
+      if (snapshot.eventCount < checkpoint.nextSeq) return 'stale'
+    }
     const record: OfficialSession = {
       header: structuredClone(snapshot.header),
       live: false,
@@ -1079,14 +1101,23 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.disposed || this.pending.size === 0) return
     if (this.state.kind === 'loading') return
     if (this.index === undefined) return
-    const first = this.pending.entries().next()
-    if (first.done === true) return
-    const [sessionId, batch] = first.value
+    // Prefer an ordinary batch; a held batch is retried only by an explicit
+    // event/pass, never by the automatic drain loop (which would spin on a gap).
+    let selected: [string, PendingSession] | undefined
+    for (const entry of this.pending.entries()) {
+      if (!this.heldPending.has(entry[0])) {
+        selected = entry
+        break
+      }
+    }
+    if (selected === undefined) return
+    const [sessionId, batch] = selected
     this.pending.delete(sessionId)
     this.pendingEventCount -= batch.events.length
     this.pendingBytes -= batch.bytes
     const checkpoint = this.index.checkpointOf(sessionId)
     if (checkpoint === undefined || checkpoint.dirty) {
+      this.restoreHeldBatch(sessionId, batch)
       this.reconcilePending.add(sessionId)
       this.scheduleSessionRepair(sessionId, 'rebuild')
       return
@@ -1095,15 +1126,23 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const remaining = this.commitLiveBatch(sessionId, checkpoint, batch)
       if (remaining.length > 0) this.restorePendingSession(sessionId, batch, remaining)
     } catch (error) {
-      // The buffered events are already out of the queue: mark BEFORE handing
-      // the Session to the repair owner so the official source is re-read
-      // instead of permanently skipping the batch.
+      // A gap/burst prefix is not a rollback: the accepted batch is the only
+      // copy until the official source advances, so retain it as held.
       this.index.markSession({ sessionId, dirty: true })
-      if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
+      if (error instanceof HistorySearchGapError) {
+        this.restoreHeldBatch(sessionId, batch)
         this.reconcilePending.add(sessionId)
         this.scheduleSessionRepair(sessionId, 'rebuild')
         return
       }
+      if (error instanceof HistorySearchConflictError) {
+        // A replaced/repaired source is authoritative; the repair re-reads it.
+        this.reconcilePending.add(sessionId)
+        this.scheduleSessionRepair(sessionId, 'rebuild')
+        return
+      }
+      // A DB failure must not silently drop accepted events either.
+      this.restoreHeldBatch(sessionId, batch)
       throw error
     }
   }
@@ -1113,8 +1152,44 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.disposed) return
     if (this.state.kind === 'loading') return
     this.drainOnePendingSession()
-    if (this.pending.size > 0) this.enqueueDrain()
+    if (this.hasUnheldPending()) this.enqueueDrain()
     this.refreshCompleteness()
+  }
+
+  private hasUnheldPending(): boolean {
+    for (const sessionId of this.pending.keys()) {
+      if (!this.heldPending.has(sessionId)) return true
+    }
+    return false
+  }
+
+  /** Put a batch back and mark it held (its accepted events stay preserved). */
+  private restoreHeldBatch(sessionId: string, batch: PendingSession): void {
+    this.pending.set(sessionId, batch)
+    this.pendingEventCount += batch.events.length
+    this.pendingBytes += batch.bytes
+    this.heldPending.add(sessionId)
+  }
+
+  /**
+   * Drop a held batch only once the committed checkpoint proves it (its last
+   * seq is strictly inside the checkpoint). A short source keeps both the batch
+   * and the incomplete barrier; a later event/pass retries.
+   */
+  private settleHeldBatch(sessionId: string): void {
+    if (!this.heldPending.has(sessionId)) return
+    const batch = this.pending.get(sessionId)
+    if (batch === undefined) {
+      this.heldPending.delete(sessionId)
+      return
+    }
+    const lastSeq = batch.events.reduce((max, event) => Math.max(max, event.seq), -1)
+    const checkpoint = this.index?.checkpointOf(sessionId)
+    if (checkpoint === undefined || checkpoint.nextSeq <= lastSeq) return
+    this.pending.delete(sessionId)
+    this.pendingEventCount -= batch.events.length
+    this.pendingBytes -= batch.bytes
+    this.heldPending.delete(sessionId)
   }
 
   /** Re-add the ordered remainder without losing the exact byte/event counters. */
@@ -1510,6 +1585,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (outcome === 'complete') outcome = await this.proveCurrentSource(sessionId, record, persistence)
       }
       if (outcome === 'complete') {
+        this.settleHeldBatch(sessionId)
         this.reconcilePending.delete(sessionId)
         counters.replayCompleted += 1
       } else {
@@ -1717,8 +1793,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const inherited = Number(observation.inheritedEventCount)
         const events = eventsOf(observation.events, sessionId)
         const outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, true)
-        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
-        else await this.markSessionDirty(sessionId)
+        if (outcome === 'complete') {
+          this.settleHeldBatch(sessionId)
+          this.reconcilePending.delete(sessionId)
+        } else {
+          await this.markSessionDirty(sessionId)
+        }
         return outcome
       } finally {
         observation[Symbol.dispose]()
@@ -1736,6 +1816,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.pendingBytes -= batch.bytes
     const checkpoint = this.index.checkpointOf(sessionId)
     if (checkpoint === undefined || checkpoint.dirty) {
+      this.restoreHeldBatch(sessionId, batch)
       this.reconcilePending.add(sessionId)
       this.scheduleSessionRepair(sessionId, 'rebuild')
       return
@@ -1747,12 +1828,19 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         this.enqueueDrain()
       }
     } catch (error) {
-      if (error instanceof HistorySearchGapError || error instanceof HistorySearchConflictError) {
-        this.index.markSession({ sessionId, dirty: true })
+      this.index.markSession({ sessionId, dirty: true })
+      if (error instanceof HistorySearchGapError) {
+        this.restoreHeldBatch(sessionId, batch)
         this.reconcilePending.add(sessionId)
         this.scheduleSessionRepair(sessionId, 'rebuild')
         return
       }
+      if (error instanceof HistorySearchConflictError) {
+        this.reconcilePending.add(sessionId)
+        this.scheduleSessionRepair(sessionId, 'rebuild')
+        return
+      }
+      this.restoreHeldBatch(sessionId, batch)
       throw error
     }
   }
@@ -2013,6 +2101,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
             return
           }
           this.requireIndex().deleteSession(sessionId)
+          // The official roster no longer owns this session; an accepted batch
+          // must not keep a deleted session's barrier alive forever.
+          this.discardPendingSession(sessionId)
         })
         if (receipt === 'failed') return 'failed'
         if (stale) {
@@ -2313,9 +2404,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     if (this.pending.size > 0) {
       // Accepted live events are not yet fully committed: a ready answer would
-      // omit history the Owner already accepted. Keep the bounded drain moving.
+      // omit history the Owner already accepted. Move ordinary pending work;
+      // a held batch waits for an explicit event/pass (never a self-spin).
       this.state = { kind: 'incomplete', reason: 'reconciling' }
-      this.enqueueDrain()
+      if (this.hasUnheldPending()) this.enqueueDrain()
       return
     }
     const checkpoints = this.index.listSessions()

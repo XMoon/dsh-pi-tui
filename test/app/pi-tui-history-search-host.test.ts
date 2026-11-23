@@ -2423,3 +2423,75 @@ test('a live burst larger than the read batch commits in bounded ordered chunks'
     await ctx.fiber.dispose()
   }
 })
+
+test('a gapped accepted batch is retained until the official source covers it', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r204-')
+  const source = mutableSource('/repo/r204')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    pendingEventCount: number
+    heldPending: Set<string>
+    verifySources(): Promise<void>
+  }
+  const inbox = (seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 8000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{ id: `r204-${String(seq)}`, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user', rpcId: `rpc-r204-${String(seq)}` } }],
+    },
+  })
+  try {
+    await waitDirectReady(service)
+    const gap = inbox(5, 'r204 accepted gap five')
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), gap)
+    // The Session is disposed BEFORE its accepted gap event is durable: the
+    // durable source is still short (0..2). The accepted batch must survive.
+    source.live = false
+    const heldStarted = Date.now()
+    while (!internals.heldPending.has('mutable-session') && Date.now() - heldStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    // Wait for the short-source repair to settle before inspecting the index:
+    // a rebuild may transiently reset rows while it remains incomplete.
+    for (;;) {
+      const flights = [...(service as unknown as {
+        sessionRepairFlights: Map<string, { promise: Promise<void> }>
+      }).sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) break
+      await Promise.allSettled(flights)
+    }
+    const settled = await waitDirectSettled(service)
+    assert.equal(settled.kind, 'incomplete', JSON.stringify(settled))
+    assert.equal(internals.index.occurrenceCount(), 2, 'a short source must not fabricate accepted rows')
+    assert.equal(internals.pendingEventCount, 1, 'the accepted batch must be retained, never dropped')
+    assert.equal(internals.heldPending.has('mutable-session'), true)
+    const hidden = await service.search({ scope: 'all', query: 'r204 accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(hidden.kind, 'incomplete', 'the unproven accepted row is never exposed as an authoritative hit')
+
+    // The same official source now contains 3..5; the next pass replays it,
+    // proves the held batch is covered, and only then returns ready.
+    source.events.push(inbox(3, 'r204 durable three'), inbox(4, 'r204 durable four'), gap)
+    source.revision += 1
+    await internals.verifySources()
+    await waitDirectReady(service)
+    const five = await service.search({ scope: 'all', query: 'r204 accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(five.kind, 'ready', JSON.stringify(five))
+    if (five.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(five.items.length, 1)
+    assert.equal(internals.index.occurrenceCount(), 5)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.heldPending.size, 0)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
