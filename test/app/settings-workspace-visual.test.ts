@@ -175,6 +175,9 @@ interface HarnessOptions {
   backendKind?: 'direct' | 'remote'
   /** PR-A: the LIVE Split Host Web frontend the `webAccess` port serves. */
   webStatus?: WebAccessStatus
+  /** PR-A: start with NO Connection generation (a Client before the Split Host
+   *  connects). The port rejects a status read exactly like the real adapter. */
+  webDisconnected?: boolean
   /** Make the Host status read throw (a disconnected / superseded Client). */
   webStatusReadFailure?: string
   /** Make the toggle reject with this reason (a refused/disconnected Host). */
@@ -482,6 +485,8 @@ interface Harness {
   readonly bumpWebGeneration: () => void
   /** PR-A: release a held official URL reply. */
   readonly releaseWebUrl: () => void
+  /** PR-A: the Split Host connects (a fresh generation is observed). */
+  readonly connectWeb: () => void
   /** PR-A: the current fake Host state. */
   readonly webStatus: () => WebAccessStatus | undefined
   /** Every `backendStartupPreference.setBackend` value the UI dispatched. */
@@ -650,7 +655,7 @@ function setup(options: HarnessOptions = {}): Harness {
   // PR-A: the LIVE Split Host Web frontend the `webAccess` port serves. The
   // generation identity is a real object so a state observation is bound to
   // the Host that produced it; `bumpWebGeneration()` replaces it.
-  let webGeneration: object | undefined = {}
+  let webGeneration: object | undefined = options.webDisconnected === true ? undefined : {}
   const webGenerationListeners = new Set<() => void>()
   let webStatus: WebAccessStatus | undefined = options.webStatus ?? { state: 'enabled' }
   const webStatusReads = { count: 0 }
@@ -892,6 +897,8 @@ function setup(options: HarnessOptions = {}): Harness {
     webAccess: {
       getStatus: async () => {
         webStatusReads.count += 1
+        // The real adapter's single-call fence: no Host generation = no read.
+        if (webGeneration === undefined) throw new Error('the Client is not connected to a Host')
         if (options.webStatusReadFailure !== undefined) throw new Error(options.webStatusReadFailure)
         if (webStatus === undefined) throw new Error('the Client is not connected to a Host')
         return webStatus
@@ -1454,6 +1461,10 @@ function setup(options: HarnessOptions = {}): Harness {
       for (const listener of [...webGenerationListeners]) listener()
     },
     releaseWebUrl: () => { heldWebUrl?.(); heldWebUrl = undefined },
+    connectWeb: () => {
+      webGeneration = {}
+      for (const listener of [...webGenerationListeners]) listener()
+    },
     webStatus: () => webStatus,
     backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
@@ -10186,6 +10197,26 @@ test('a Host A → B replacement revokes the old actions before any click can re
   release(h, rowOf(h, 'Disable Web…'), 3)
   await settle(h)
   assert.equal(h.webEnabledWrites().length, 0, 'no write reached the new Host from the old observation')
+  h.dispose()
+})
+
+test('/web opened while the Client is DISCONNECTED settles Unavailable and recovers on connect', async () => {
+  const h = setup({ columns: 120, rows: 40, backendKind: 'remote', webDisconnected: true })
+  void h.invoke('web')
+  await settle(h)
+  const disconnected = webUiPlain(h)
+  assert.match(disconnected, /Settings · Host · Web UI/u, 'the page is reachable before the Host connects')
+  assert.match(disconnected, /Serving\s+Unavailable/u)
+  assert.match(disconnected, /the Client is not connected to a Host/u, 'the real read failure is stated')
+  assert.doesNotMatch(disconnected, /Reading the Host Web state…/u, 'no endless loading frame')
+  assert.match(disconnected, /Refresh/u, 'the settled page offers Refresh')
+  assert.equal(h.webStatusReads(), 1)
+  assert.equal(h.webEnabledWrites().length, 0, 'a disconnected page offers no Host action')
+  h.connectWeb()
+  await settle(h)
+  assert.equal(h.webStatusReads(), 2, 'the reconnection drives ONE authoritative re-read')
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u, 'the current Host fact settles the page')
+  assert.equal(h.webEnabledWrites().length, 0)
   h.dispose()
 })
 

@@ -374,20 +374,38 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
 
   private commitStatusRead(generation: unknown, status: WebAccessStatus | undefined, failure: string | undefined): void {
     const live = this.intents.currentGeneration()
+    if (generation === undefined && live === undefined) {
+      // The read was dispatched while the Client was DISCONNECTED and it still
+      // is: there is no generation to compare, so this is NOT a superseded
+      // reply — its own failure is the current fact. Settle to Unreadable with
+      // a Refresh instead of an endless `Checking…`/`Reading…` frame; a real
+      // reconnection still drives its own authoritative re-read through the
+      // generation subscription.
+      this.host = { kind: 'unreadable', message: failure ?? 'the Host connection is unavailable' }
+      this.settleReadPhase()
+      return
+    }
     if (generation === undefined || !Object.is(generation, live)) {
       // The observation belongs to a Host that is no longer current. Revoke it
       // and let the generation subscription's own re-read speak for the new
       // Host (a settled stale read never re-arms an action).
       this.host = { kind: 'checking' }
-      if (this.phase === 'confirm-disable') this.phase = 'ready'
-      this.changed()
+      this.settleReadPhase()
       return
     }
     this.host = failure !== undefined || status === undefined
       ? { kind: 'unreadable', message: failure ?? 'the Host Web state could not be read' }
       : { kind: 'current', status, generation }
+    this.settleReadPhase()
+  }
+
+  /** Every settled status read leaves the `loading` phase. A frame that waited
+   *  for a reply must offer the honest state — or `Checking…` plus Refresh
+   *  while a generation-driven re-read is pending — never an endless
+   *  `Reading…`; a confirmation derived from a non-current observation is
+   *  revoked here too. */
+  private settleReadPhase(): void {
     if (this.phase === 'loading') this.phase = 'ready'
-    // A confirm derived from a now-unreadable observation must be revoked.
     if (this.phase === 'confirm-disable' && this.host.kind !== 'current') this.phase = 'ready'
     this.changed()
   }

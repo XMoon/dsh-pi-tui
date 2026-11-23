@@ -38,6 +38,11 @@ interface PageHarnessOptions {
   /** Hold the official URL reply until `releaseUrl()`: the Host-replacement
    *  window between the RPC settling and the Client sink. */
   readonly holdUrl?: boolean
+  /** Start DISCONNECTED (no Connection generation): the port rejects a status
+   *  read, exactly like the real Remote adapter. */
+  readonly disconnected?: boolean
+  /** Hold every status read; the case resolves each one by index. */
+  readonly holdRead?: boolean
 }
 
 interface PageHarness {
@@ -56,6 +61,10 @@ interface PageHarness {
   readonly doneCalls: () => number
   readonly generation: { value: object | undefined }
   readonly bumpGeneration: () => void
+  /** The Split Host connects: a fresh generation is committed and observed. */
+  readonly connect: () => void
+  /** Resolve (or reject) the N-th held status read. */
+  readonly resolveRead: (index: number, result: WebAccessStatus | { readonly error: string }) => void
   readonly releaseToggle: () => void
   readonly releaseUrl: () => void
   readonly key: (data: string) => Promise<void>
@@ -65,7 +74,7 @@ interface PageHarness {
 
 async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   const vt = new VirtualTerminal(options.columns ?? 100, options.rows ?? 30)
-  const generation = { value: {} as object | undefined }
+  const generation = { value: (options.disconnected === true ? undefined : {}) as object | undefined }
   const listeners = new Set<() => void>()
   let status: WebAccessStatus = options.status ?? { state: 'enabled' }
   let preference = 'preference' in options
@@ -83,11 +92,20 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   let pageRef: WebUiSettingsPage | undefined
   let heldToggle: (() => void) | undefined
   let heldUrl: (() => void) | undefined
+  const heldReads: Array<(result: WebAccessStatus | Error) => void> = []
   const tasks: Promise<void>[] = []
   const intents: WebUiSettingsPageIntents = {
     backendKind: options.backendKind ?? 'remote',
     readStatus: async () => {
       reads += 1
+      // The real Remote adapter's single-call fence rejects a read while no
+      // Host generation exists.
+      if (generation.value === undefined) throw new Error('the Client is not connected to a Host')
+      if (options.holdRead === true) {
+        return await new Promise<WebAccessStatus>((resolve, reject) => {
+          heldReads.push(result => { if (result instanceof Error) reject(result); else resolve(result) })
+        })
+      }
       if (options.readFailure !== undefined) throw new Error(options.readFailure)
       return status
     },
@@ -160,6 +178,15 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     bumpGeneration: () => {
       generation.value = {}
       for (const listener of [...listeners]) listener()
+    },
+    connect: () => {
+      generation.value = {}
+      for (const listener of [...listeners]) listener()
+    },
+    resolveRead: (index, result) => {
+      const settle = heldReads[index]
+      if (settle === undefined) throw new Error(`no held read at index ${index}`)
+      settle(typeof result === 'object' && 'error' in result ? new Error(result.error) : result)
     },
     releaseToggle: () => { heldToggle?.(); heldToggle = undefined },
     releaseUrl: () => { heldUrl?.(); heldUrl = undefined },
@@ -388,6 +415,45 @@ test('PAGE: a URL reply from a REPLACED Host never reaches the clipboard', async
   assert.deepEqual(h.copied(), [], 'the replaced Host\'s token never reached the clipboard')
   assert.match(h.frame(), /Status\s+Clipboard unavailable/u)
   assert.match(h.frame(), /the Host changed before the link was handed over/u)
+  h.close()
+})
+
+test('PAGE: a /web opened while DISCONNECTED settles Unreadable and recovers on connect', async () => {
+  const h = await mount({ status: { state: 'enabled' }, disconnected: true })
+  // The initial read really failed with the port's own disconnected error and
+  // settled as a usable, truthful frame — not an endless Reading/Checking.
+  assert.match(h.frame(), /Serving\s+Unavailable/u)
+  assert.match(h.frame(), /the Client is not connected to a Host/u)
+  assert.doesNotMatch(h.frame(), /Reading the Host Web state…/u)
+  assert.match(h.frame(), /Actions\s*\n\s+Refresh/u, 'the settled page offers Refresh')
+  assert.match(h.bar(), /Refresh \[R\] · Back \[Esc\]/u)
+  assert.equal(h.reads(), 1)
+  assert.equal(h.writes().length, 0, 'a disconnected page offers no Host action')
+  // The real reconnection drives exactly ONE authoritative re-read.
+  h.connect()
+  await h.flush()
+  assert.equal(h.reads(), 2)
+  assert.match(h.frame(), /Serving\s+Enabled/u)
+  assert.match(h.frame(), /Open in browser/u, 'the recovered Host really offers its actions')
+  assert.match(h.frame(), /> Start automatically/u,
+    'the established focus is kept across the reconnection, never yanked to another row')
+  assert.equal(h.writes().length, 0)
+  h.close()
+})
+
+test('PAGE: a status reply from a superseded generation is never painted as current', async () => {
+  const h = await mount({ status: { state: 'disabled' }, holdRead: true })
+  // Read #1 is in flight for Host A; the Host is then replaced and read #2
+  // starts. The OLD reply settles first and must not speak for Host B.
+  h.bumpGeneration()
+  await h.flush()
+  h.resolveRead(0, { state: 'enabled' })
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Serving\s+Enabled/u, 'the replaced Host\'s reply is never painted')
+  assert.match(h.frame(), /Serving\s+Checking…/u)
+  h.resolveRead(1, { state: 'disabled' })
+  await h.flush()
+  assert.match(h.frame(), /Serving\s+Disabled/u, 'only the current Host\'s reply settles the fact')
   h.close()
 })
 
