@@ -47,8 +47,9 @@ import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createDirectSettingsFixture } from '../support/direct-settings-fixture.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
 import { themePickerRows } from '../../src/app/surface/theme-selection.ts'
-import type { CredentialProviderOption, ExtensionConfigsConfig, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue } from '../../src/runtime/config-port.ts'
+import type { CredentialProviderOption, ExtensionConfigsConfig, TuiSettingsDoc, VisualToolsState, WebStartupPreferenceState, BackendStartupPreferenceState, PublicBackendValue, AcpStartupPreferenceState } from '../../src/runtime/config-port.ts'
 import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
+import type { AcpAccessStatus } from '../../src/runtime/acp-access-port.ts'
 import { serializeTuiSettingsMutation } from '../../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -183,6 +184,8 @@ interface HarnessOptions {
   /** The state the Host reports AFTER a successful toggle (default: the
    *  requested target). */
   webSettledStatus?: WebAccessStatus
+  /** PR-B: the LIVE Split Host ACP listener the `acpAccess` port serves. */
+  acpStatus?: AcpAccessStatus
   /** Hold the official URL reply until `releaseWebUrl()`: the window between
    *  the URL RPC settling and the Client sink. */
   holdWebUrl?: boolean
@@ -469,6 +472,8 @@ interface Harness {
   readonly visualState: () => VisualToolsState | undefined
   /** Every `webStartupPreference.setAutoStart` value the UI dispatched. */
   readonly webAutoStartWrites: () => readonly boolean[]
+  /** Every `acpStartupPreference.setAutoStart` value the UI dispatched. */
+  readonly acpAutoStartWrites: () => readonly boolean[]
   /** PR-A: every `webAccess.getStatus` read the Web UI page performed. */
   readonly webStatusReads: () => number
   /** PR-A: every `webAccess.setEnabled` value the Web UI page dispatched. */
@@ -479,6 +484,14 @@ interface Harness {
   readonly openedUrls: () => readonly string[]
   /** PR-A: replace the LIVE Host generation (a Host A -> B replacement). */
   readonly bumpWebGeneration: () => void
+  /** PR-B: every `acpAccess.getStatus` read the ACP page performed. */
+  readonly acpStatusReads: () => number
+  /** PR-B: every `acpAccess.setEnabled` value the ACP page dispatched. */
+  readonly acpEnabledWrites: () => readonly boolean[]
+  /** PR-B: replace the LIVE Connection generation (a Host A -> B replacement). */
+  readonly bumpAcpGeneration: () => void
+  /** PR-B: set the fake Host ACP listener state (the Host's own answer). */
+  readonly setAcpStatus: (status: AcpAccessStatus) => void
   /** PR-A: release a held official URL reply. */
   readonly releaseWebUrl: () => void
   /** PR-A: the Split Host connects (a fresh generation is observed). */
@@ -584,6 +597,8 @@ function setup(options: HarnessOptions = {}): Harness {
   let webStartupState: WebStartupPreferenceState | undefined = options.webStartupUnavailable === true
     ? undefined
     : options.webStartupPreference ?? { autoStart: false, revision: 1, userOverridden: false }
+  let acpStartupState: AcpStartupPreferenceState | undefined = { autoStart: false, revision: 1, userOverridden: false }
+  const acpAutoStartWrites: boolean[] = []
   const backendStartupWrites: PublicBackendValue[] = []
   let backendStartupState: BackendStartupPreferenceState | undefined = options.backendStartupUnavailable === true
     ? undefined
@@ -658,6 +673,13 @@ function setup(options: HarnessOptions = {}): Harness {
   const webGenerationListeners = new Set<() => void>()
   let webStatus: WebAccessStatus | undefined = options.webStatus ?? { state: 'enabled' }
   const webStatusReads = { count: 0 }
+  // PR-B: the LIVE Split Host ACP listener + the Connection generation its
+  // observation is bound to. The page never reads a cached bool.
+  let acpGeneration: object | undefined = {}
+  const acpGenerationListeners = new Set<() => void>()
+  let acpStatus: AcpAccessStatus = options.acpStatus ?? { state: 'disabled' }
+  const acpStatusReads = { count: 0 }
+  const acpEnabledWrites: boolean[] = []
   const webEnabledWrites: boolean[] = []
   const webUrlReads = { count: 0 }
   const openedUrls: string[] = []
@@ -926,6 +948,32 @@ function setup(options: HarnessOptions = {}): Harness {
         return () => { webGenerationListeners.delete(listener) }
       },
     },
+    // PR-B: the ONE semantic AcpAccessPort the `Host · ACP access` page
+    // consumes. It owns NO truth: every call answers from the live fake Host
+    // and a generation change really notifies its subscribers.
+    acpAccess: {
+      getStatus: async () => {
+        acpStatusReads.count += 1
+        if (acpGeneration === undefined) throw new Error('the Client is not connected to a Host')
+        return acpStatus
+      },
+      setEnabled: async (enabled: boolean, expectedGeneration?: unknown) => {
+        if (expectedGeneration !== undefined && !Object.is(expectedGeneration, acpGeneration)) {
+          throw new Error('acp access toggle superseded: the Host generation changed before dispatch')
+        }
+        acpEnabledWrites.push(enabled)
+        acpStatus = enabled ? { state: 'enabled' } : { state: 'disabled' }
+        return acpStatus
+      },
+      currentGeneration: () => acpGeneration,
+      subscribeGeneration: (listener: () => void) => {
+        acpGenerationListeners.add(listener)
+        return () => { acpGenerationListeners.delete(listener) }
+      },
+    },
+    // The official Profile identity the composition proved (the ACP page's ONE
+    // Copy source; never an argv/cwd/env guess).
+    profileDaemonAdmin: { profile: 'pi-tui', run: async () => ({ code: 0, stdout: '', stderr: '' }) },
     refreshStatus: () => { calls.push('refreshStatus') },
     // M6-1 F8: the ONE session-policy observation + the transport-neutral
     // async exact-session write, on the SAME captured scope. The observation
@@ -1066,12 +1114,19 @@ function setup(options: HarnessOptions = {}): Harness {
           }
         },
       },
-      // PO-1B: the profile-owned ACP startup preference. This suite does not
-      // exercise ACP controls (they live in settings-acp-controls.test.ts); a
-      // default-OFF stub keeps the Tools category complete without a write path.
+      // PR-B: the profile-owned ACP startup preference read/written ONLY by
+      // the `Host · ACP access` page through its own revision-checked writer.
       acpStartupPreference: {
-        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
-        setAutoStart: async (_value: boolean, _revision: number) => {},
+        read: () => acpStartupState,
+        setAutoStart: async (value: boolean, revision: number) => {
+          acpAutoStartWrites.push(value)
+          if (acpStartupState !== undefined && acpStartupState.revision !== revision) {
+            throw new Error(`settings namespace "pi-tui-acp-preferences" changed since it was read (expected revision ${revision}, now ${acpStartupState.revision})`)
+          }
+          if (acpStartupState !== undefined) {
+            acpStartupState = { autoStart: value, revision: acpStartupState.revision + 1, userOverridden: true }
+          }
+        },
       },
       footerCustomItems: {
         rawForPersistence: () => ({ kind: 'available' as const, value: options.footerCustomItemsRaw }),
@@ -1450,6 +1505,7 @@ function setup(options: HarnessOptions = {}): Harness {
     warnings: () => warnings,
     visualWrites: () => visualWrites,
     webAutoStartWrites: () => webAutoStartWrites,
+    acpAutoStartWrites: () => acpAutoStartWrites,
     webStatusReads: () => webStatusReads.count,
     webEnabledWrites: () => webEnabledWrites,
     webUrlReads: () => webUrlReads.count,
@@ -1464,6 +1520,13 @@ function setup(options: HarnessOptions = {}): Harness {
       for (const listener of [...webGenerationListeners]) listener()
     },
     webStatus: () => webStatus,
+    acpStatusReads: () => acpStatusReads.count,
+    acpEnabledWrites: () => acpEnabledWrites,
+    bumpAcpGeneration: () => {
+      acpGeneration = {}
+      for (const listener of [...acpGenerationListeners]) listener()
+    },
+    setAcpStatus: (status: AcpAccessStatus) => { acpStatus = status },
     backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
     writes: () => writes,
@@ -10391,6 +10454,255 @@ test('the Web UI page stays complete and operable across the frozen size matrix'
     assert.equal(h.webEnabledWrites().length, 0, `${columns}x${rows}: Escape wrote nothing`)
     h.dispose()
   }
+})
+
+// ── PR-B: the `Host · ACP access` page and the `/acp` typed deeplink ───────
+
+/** Walk `Host → ACP access` through the real composition and land on the page. */
+async function openAcpAccess(h: Harness): Promise<void> {
+  await h.open('Host')
+  await key(h, '\r') // L0 -> L1 (Rows, on Backend)
+  await highlightRow(h, 'ACP access')
+  await key(h, '\r') // the row opens its embedded page in THIS lease
+  await settle(h, 10)
+}
+
+const acpAccessPlain = (h: Harness): string => h.rowsPlain().join('\n')
+
+test('/acp opens the ACP access page on the ONE Settings lease, with no overlay and no write', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' } })
+  void h.invoke('acp')
+  await settle(h, 10)
+  assert.match(h.view(), /Settings · Host · ACP access/u, 'the breadcrumb names the page')
+  assert.match(h.view(), /Current Host/u, 'the page owns the settings body')
+  assert.match(h.view(), /> Enable ACP/u, 'the disabled Host focuses its ONE runtime action')
+  assert.match(acpAccessPlain(h), /dsh --profile pi-tui acp stdio/u, 'the proven Profile command is painted')
+  assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay is mounted')
+  assert.equal(h.acpStatusReads(), 1, 'exactly one Host status read on the first frame')
+  assert.deepEqual(h.acpEnabledWrites(), [], 'opening the page never writes the Host')
+  assert.deepEqual(h.copied, [], 'opening the page copies nothing')
+  h.dispose()
+})
+
+test('Host → ACP access reaches the same page and its Esc ladder returns Rows → rail → close', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  assert.match(h.view(), /Settings · Host · ACP access/u)
+  assert.match(h.view(), /> Copy client command/u, 'the enabled Host focuses Copy first')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'page Esc returns the Host Rows level')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /^> Host/mu, 'Rows Esc returns the category rail')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'rail Esc closes the Settings workspace')
+  assert.equal(h.app.overlayGraphState().handles, 0)
+  h.dispose()
+})
+
+test('an enabled Host paints the runtime actions, the preference and the client setup separately', async () => {
+  const h = setup({ columns: 200, rows: 50, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  const frame = acpAccessPlain(h)
+  assert.match(frame, /Current Host/u)
+  assert.match(frame, /Listener\s+Enabled/u)
+  assert.match(frame, /Access\s+Local Unix socket · Same OS user/u)
+  assert.match(frame, /Actions/u)
+  assert.match(frame, /> Copy client command/u)
+  assert.match(frame, /Disable ACP…\s+Disconnects active ACP clients/u)
+  assert.match(frame, /Next Host Start/u)
+  assert.match(frame, /Start automatically\s+Off \(default\) · Change…/u)
+  assert.match(frame, /Client Setup/u)
+  assert.match(frame, /Configure an ACP stdio command in your external client\/IDE\./u)
+  assert.match(frame, /dsh --profile pi-tui acp stdio/u)
+  assert.match(frame, /The Host listener must be enabled before the client can connect\./u)
+  assert.match(frame, /Closing an ACP View detaches it; Host Sessions, Agents and TUI remain\./u)
+  assert.doesNotMatch(frame, /127\.0\.0\.1|token|acp\.sock/u, 'no private endpoint or token is painted')
+  assert.equal(h.acpStatusReads(), 1, 'one read; the page never polls')
+  h.dispose()
+})
+
+test('a disabled Host offers Enable ACP plus the Client-local Copy, and the preference stays editable', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' } })
+  await openAcpAccess(h)
+  const frame = acpAccessPlain(h)
+  assert.match(frame, /Listener\s+Disabled/u)
+  assert.match(frame, /Access\s+Not listening/u)
+  assert.match(frame, /> Enable ACP/u)
+  assert.match(frame, /Copy client command/u, 'Copy does not depend on the listener being enabled')
+  assert.match(frame, /Start automatically\s+Off \(default\) · Change…/u)
+  assert.doesNotMatch(frame, /Disable ACP…/u)
+  h.dispose()
+})
+
+test('changing, unavailable and unreadable Hosts offer no runtime write and keep the honest fact', async () => {
+  const changing = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'changing' } })
+  await openAcpAccess(changing)
+  assert.match(acpAccessPlain(changing), /Listener\s+Changing…/u)
+  assert.match(acpAccessPlain(changing), /Copy client command/u)
+  assert.doesNotMatch(acpAccessPlain(changing), /Enable ACP|Disable ACP…/u)
+  await key(changing, '\r')
+  await settle(changing, 10)
+  assert.deepEqual(changing.acpEnabledWrites(), [])
+  changing.dispose()
+
+  const unavailable = setup({
+    columns: 200, rows: 40, backendKind: 'remote',
+    acpStatus: { state: 'unavailable', reason: 'the listener cannot be proven healthy' },
+  })
+  await openAcpAccess(unavailable)
+  assert.match(acpAccessPlain(unavailable), /Listener\s+Unavailable/u)
+  assert.match(acpAccessPlain(unavailable), /the listener cannot be proven healthy/u)
+  assert.doesNotMatch(acpAccessPlain(unavailable), /Enable ACP|Disable ACP…/u)
+  unavailable.dispose()
+})
+
+test('Direct states the Split-Host-only capability, offers no toggle and still edits the preference', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await openAcpAccess(h)
+  const frame = acpAccessPlain(h)
+  assert.match(frame, /Listener\s+Unavailable · Split Host only/u, 'Direct names the real missing capability')
+  assert.match(frame, /Access\s+Unavailable/u)
+  assert.equal(h.acpStatusReads(), 0, 'Direct never reads a fabricated Host')
+  assert.doesNotMatch(frame, /Enable ACP|Disable ACP…/u, 'Direct offers no runtime action')
+  assert.equal(h.copied.length, 0, 'opening the page copies nothing')
+  h.dispose()
+})
+
+test('Enable ACP dispatches ONE Host write and paints the authoritative re-read', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' } })
+  await openAcpAccess(h)
+  await key(h, '\r') // Enable ACP (first focus)
+  await settle(h, 10)
+  assert.deepEqual(h.acpEnabledWrites(), [true], 'exactly one Host toggle')
+  assert.match(acpAccessPlain(h), /Listener\s+Enabled/u, 'the authoritative re-read settles the fact')
+  assert.match(acpAccessPlain(h), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('Disable ACP… requires the in-page risk confirmation; Cancel performs zero writes', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  await highlightPageRow(h, 'Disable ACP…')
+  await key(h, '\r')
+  await settle(h, 10)
+  assert.match(acpAccessPlain(h), /Disable the local ACP listener\? All connected ACP clients will be disconnected\./u)
+  assert.match(acpAccessPlain(h), /Host sessions, Agents and this TUI will keep running\./u)
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u)
+  assert.deepEqual(h.acpEnabledWrites(), [], 'the first step dispatches nothing')
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Listener\s+Enabled/u)
+  assert.deepEqual(h.acpEnabledWrites(), [], 'Cancel performs zero writes')
+  await highlightPageRow(h, 'Disable ACP…')
+  await key(h, '\r')
+  await settle(h, 10)
+  await key(h, '\r') // the SECOND explicit confirmation
+  await settle(h, 10)
+  assert.deepEqual(h.acpEnabledWrites(), [false], 'only the confirmation dispatches the ONE disable')
+  assert.match(acpAccessPlain(h), /Listener\s+Disabled/u)
+  assert.match(acpAccessPlain(h), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('the next-start preference writes ONLY after Confirm save and never toggles the Host', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h, 10)
+  assert.match(h.rowsPlain().join('\n'), /Choose the value the next Host start applies:/u)
+  assert.match(h.rowsPlain().join('\n'), /Off\s+\[current\]/u)
+  assert.equal(h.webAutoStartWrites().length, 0, 'the ladder staged zero preference writes')
+  await key(h, '\r') // stage the opposite candidate (On)
+  await settle(h)
+  assert.match(h.rowsPlain().join('\n'), /Save the next Host start preference as On\?/u)
+  await key(h, '\r') // Confirm save
+  await settle(h, 10)
+  assert.deepEqual(h.acpAutoStartWrites(), [true], 'the EXISTING acp-autostart writer received the value once')
+  assert.deepEqual(h.acpEnabledWrites(), [], 'saving the preference never toggles the running Host')
+  h.dispose()
+})
+
+test('a pointer-only user completes Enable → Disable/Cancel → Back without a hidden keyboard step', async () => {
+  const h = setup({ columns: 120, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' } })
+  await openAcpAccess(h)
+  await clickPainted(h, 'Enable ACP')
+  await settle(h, 10)
+  assert.deepEqual(h.acpEnabledWrites(), [true], 'the painted row really dispatched the toggle')
+  await clickPainted(h, 'Disable ACP…')
+  await settle(h, 10)
+  await clickPainted(h, 'Cancel')
+  await settle(h)
+  assert.deepEqual(h.acpEnabledWrites(), [true], 'the pointer Cancel performed zero writes')
+  await clickPainted(h, 'Disable ACP…')
+  await settle(h, 10)
+  await clickPainted(h, 'Disable ACP') // the confirmation's own button
+  await settle(h, 10)
+  assert.deepEqual(h.acpEnabledWrites(), [true, false], 'the pointer confirmation dispatched exactly once')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the pointer Back is the real Esc ladder')
+  h.dispose()
+})
+
+test('the ACP access page stays complete and operable across the frozen size matrix', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8]] as const) {
+    const h = setup({ columns, rows, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+    await openAcpAccess(h)
+    const frame = acpAccessPlain(h)
+    assert.match(frame, /Settings · Host · ACP access/u, `${columns}x${rows}: page identity`)
+    if (rows >= 20) {
+      assert.match(frame, /Current Host/u, `${columns}x${rows}: the runtime facts survive`)
+    } else {
+      await key(h, '\x1b[H')
+      assert.match(acpAccessPlain(h), /Current Host/u, `${columns}x${rows}: Home reveals the runtime facts`)
+    }
+    // A short grant scrolls ONE column instead of dropping the setup section.
+    await key(h, '\x1b[F')
+    assert.match(acpAccessPlain(h), /Sessions, Agents and TUI remain/u, `${columns}x${rows}: End reveals the client setup tail`)
+    const bar = h.rowsPlain().at(-1) ?? ''
+    assert.match(bar, /Back \[Esc\]/u, `${columns}x${rows}: the complete Esc affordance is the last row`)
+    assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
+    assertNoHalfSegmentInBar(h.rowsPlain(), rows - 1, ' · ')
+    for (const [index, line] of h.vt.getViewport().entries()) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: row ${index} fits the width`)
+    }
+    // The primary journey is reachable at EVERY size (scrolled if needed).
+    await highlightPageRow(h, 'Disable ACP…')
+    await key(h, '\r')
+    await settle(h, 10)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Cancel \[Esc\]/u, `${columns}x${rows}: the confirmation keeps its Cancel affordance`)
+    // The complete risk sentence is a scrollable first-class fact: a short
+    // frame reveals it by scrolling, never by dropping it.
+    await key(h, '\x1b[H')
+    for (let page = 0; page < 4 && !/Disable the local ACP listener\?/u.test(acpAccessPlain(h)); page += 1) {
+      await key(h, '\x1b[6~')
+    }
+    assert.match(acpAccessPlain(h), /Disable the local ACP listener\?/u, `${columns}x${rows}: the risk sentence is readable`)
+    await key(h, '\x1b')
+    await settle(h)
+    assert.deepEqual(h.acpEnabledWrites(), [], `${columns}x${rows}: Escape wrote nothing`)
+    h.dispose()
+  }
+})
+
+test('a Host A → B replacement repaints the new listener fact and re-reads before any action', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' } })
+  await openAcpAccess(h)
+  assert.match(acpAccessPlain(h), /> Enable ACP/u, 'the old Host fact was really painted first')
+  const readsBefore = h.acpStatusReads()
+  // The replacement Host's listener is already ON.
+  h.setAcpStatus({ state: 'enabled' })
+  h.bumpAcpGeneration()
+  await settle(h, 12)
+  assert.ok(h.acpStatusReads() > readsBefore, 'the replacement Host is re-read')
+  assert.match(acpAccessPlain(h), /Listener\s+Enabled/u, 'the new Host fact replaces the old one')
+  assert.match(acpAccessPlain(h), /> Copy client command/u, 'only the new Host\'s state admits its action')
+  assert.deepEqual(h.acpEnabledWrites(), [], 'the rollover itself writes nothing')
+  h.dispose()
 })
 
 // ── M6-2A A5: the startup backend preference (`startup-backend`) ───────────
