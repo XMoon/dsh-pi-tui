@@ -107,7 +107,9 @@ function processState(pid, birth) {
   if (observation.kind === 'gone') return 'gone'
   if (observation.kind === 'unknown') return 'unknown'
   if (typeof birth !== 'string' || !birth.startsWith('linux:')) return 'unknown'
-  return `linux:${observation.startTicks}` === birth ? 'alive' : 'different'
+  if (`linux:${observation.startTicks}` !== birth) return 'different'
+  if (observation.state === 'Z' || observation.state === 'X' || observation.state === 'x') return 'gone'
+  return 'alive'
 }
 
 function hostProcessState(identity) {
