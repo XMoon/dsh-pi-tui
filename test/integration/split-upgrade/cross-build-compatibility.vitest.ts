@@ -1,5 +1,5 @@
 /**
- * U2 PR-B: the ONE old→new packed cross-build Upgrade Scene.
+ * Packed cross-build compatibility: a real old-to-new Upgrade Scene.
  *
  * One real business `test()` keeps the eight independent failure classes of the
  * historical `upgrade.cross-build-compatibility` case: a live old Host and
@@ -55,14 +55,15 @@ interface SplitUpgradeSupportModule {
 
 const TEST_DIR = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = realpathSync(join(TEST_DIR, '..', '..', '..'))
-// U1 owns this dynamic-import pattern: this file declares only the two function
-// shapes it reads and never copies the payload-hash/build-identity algorithm.
+// This mirrors the dynamic-import pattern used by the reload-client
+// observation module: this file declares only the two function shapes it reads
+// and never copies the payload-hash/build-identity algorithm.
 const support = (await import(
   pathToFileURL(join(REPO_ROOT, 'scripts', 'lib', 'split-upgrade-support.mjs')).href
 )) as SplitUpgradeSupportModule
 
 const ZERO_OWNERS = { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 }
-const HOLD_PROMPT = 'u2-cross-hold'
+const HOLD_PROMPT = 'cross-build-held-turn'
 const COMPLETED_ANSWER = 'long-turn answer 1'
 const HOST_HANDOFF_FAILURE = 'Client handoff failed'
 
@@ -193,7 +194,7 @@ async function runScene(run: (scene: UpgradeScene) => Promise<void>): Promise<vo
 
 test('different packaged Client builds preserve one live Host and durable Session through reexec, refusals and a cold Host generation', async () => {
   await runScene(async scene => {
-    // ── S1: old Host A, one admitted old Client and one held durable Turn ─────
+    // ── old Host A, one admitted old Client and one held durable Turn ─────
     assert.equal(sha256File(scene.pair.old.path), scene.pair.old.sha256,
       'the frozen old tarball changed before the Scene started')
     assert.equal(sha256File(scene.pair.new.path), scene.pair.new.sha256,
@@ -241,7 +242,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     const sessionLogsAtStart = sessionLogFiles(scene)
     assert.ok(sessionLogsAtStart.length > 0, 'the held Session has no durable Session log')
 
-    // ── S2: the new packed build arrives while Host A keeps working ───────────
+    // ── the new packed build arrives while Host A keeps working ───────────
     const sideNew = await scene.installNewSideBySide()
     assert.equal(sideNew.version, scene.pair.new.version, 'the side-new install does not carry the new version')
     assert.notEqual(sideNew.buildId, oldProfile.buildId, 'the two packaged builds produced the same build identity')
@@ -262,7 +263,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.equal(turnEndCount(scene, sessionId), 0, 'the side-by-side install released the held Turn')
     assert.equal(userPromptCount(scene, sessionId, HOLD_PROMPT), 1, 'the side-by-side install replayed the prompt')
 
-    // ── S3: the old Host credential is a real positive control ────────────────
+    // ── the old Host credential is a real positive control ────────────────
     const oldLaunch = parseLaunchConnect(beforeA.launchBytes)
     const oldConnectUrl = new URL(oldLaunch.connectUrl.href)
     oldConnectUrl.searchParams.set('interactions', 'answer')
@@ -276,7 +277,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     })
     assert.equal(oldCookieIdentity.status, 200, 'the old Host did not accept its own minted Cookie')
 
-    // ── S4: one live old Client reexecutes onto the SAME Host A and Session ───
+    // ── one live old Client reexecutes onto the SAME Host A and Session ───
     const sessionLogsBeforeReexec = sessionLogFiles(scene)
     const boundary = recordIndex(clientA)
     const signalPid = await scene.signalClientForQualification(clientA)
@@ -318,7 +319,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assertNoSecret('reexec records', JSON.stringify(clientA.readRecords()), [oldLaunch.token, oldCookie])
     assertNoSecret('reexec frame', await clientA.text(true), [oldLaunch.token, oldCookie])
 
-    // ── S5: the one real terminal exits the parent and the replacement ───────
+    // ── the one real terminal exits the parent and the replacement ───────
     const replacementPid = replacement.pid
     await clientA.close()
     assert.equal(clientA.closed, true, 'the reexec Client did not close its native PTY session')
@@ -329,7 +330,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.equal(c1WorkHadRelease(hostA.workRoot), false, 'the reexec Client exit released the held Turn')
     assert.equal(turnEndCount(scene, sessionId), 0, 'the reexec Client exit settled the held Turn')
 
-    // ── S6: a wrong expected Host instance is refused before authentication ──
+    // ── a wrong expected Host instance is refused before authentication ──
     const wrongInstanceId = randomUUID()
     assert.notEqual(wrongInstanceId, identityA.instanceId,
       'the random wrong-instance expectation equals the live Host instance')
@@ -375,7 +376,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.deepEqual(sessionLogFiles(scene), sessionLogsAtStart, 'the wrong-instance refusal created another Session log')
     assert.equal(userPromptCount(scene, sessionId, HOLD_PROMPT), 1, 'the wrong-instance refusal replayed the prompt')
 
-    // ── S7: the replacement child fails after a REAL reexec of the old PID ───
+    // ── the replacement child fails after a REAL reexec of the old PID ───
     const fault = await scene.startClient({
       source: 'profile',
       label: 'cross-old-fault',
@@ -440,7 +441,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.deepEqual(sessionLogFiles(scene), sessionLogsAtStart, 'the failed replacement created another Session log')
     assert.equal(userPromptCount(scene, sessionId, HOLD_PROMPT), 1, 'the failed replacement replayed the prompt')
 
-    // ── S8: the new build proves the official/private RPC path to old Host A ──
+    // ── the new build proves the official/private RPC path to old Host A ──
     const rpc = await scene.probeSideNewClientHostFoundation(hostA)
     assert.ok(Number.isInteger(rpc.clientPid) && rpc.clientPid > 0,
       'the qualification proof names no real one-shot Client PID')
@@ -459,7 +460,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.equal(c1WorkHadRelease(hostA.workRoot), false, 'the qualification proof released the held Turn')
     assert.equal(userPromptCount(scene, sessionId, HOLD_PROMPT), 1, 'the qualification proof replayed the prompt')
 
-    // ── S9: the new build's REAL surface opens the running old Session ───────
+    // ── the new build's REAL surface opens the running old Session ───────
     const newSurface = await scene.startClient({
       source: 'side-new',
       label: 'cross-new-surface',
@@ -493,7 +494,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.equal(c1WorkHadRelease(hostA.workRoot), false, 'the new-surface exit released the held Turn')
     assert.deepEqual(sessionLogFiles(scene), sessionLogsAtStart, 'the new surface created another Session log')
 
-    // ── S10: settle the Turn, refuse the pre-stop upgrade, then stop Host A ──
+    // ── settle the Turn, refuse the pre-stop upgrade, then stop Host A ──
     const releaseBoundary = hostSessionEvents(scene, sessionId)?.length ?? 0
     await scene.releaseHeldTurn(hostA)
     await waitForC1Event(
@@ -535,7 +536,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
       'the old Host left its launch material behind')
     assert.equal(c1WorkHadRelease(hostA.workRoot), true, 'the old Host stopped before its Turn settled')
 
-    // ── S11: a cold NEW Host generation reads the Session and rejects old keys ─
+    // ── a cold NEW Host generation reads the Session and rejects old keys ─
     const newProfile = await scene.activateNewProfileAfterOldStopped()
     assert.equal(newProfile.version, sideNew.version, 'the activated Profile does not carry the new version')
     assert.equal(newProfile.buildId, sideNew.buildId, 'the activated Profile does not carry the new build identity')
@@ -628,7 +629,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.equal(existsSync(join(afterB.scopeDir, 'launch.json')), false,
       'the cold new Host left its launch material behind')
 
-    // ── S12: true quiescence and frozen-input identity ──────────────────────
+    // ── true quiescence and frozen-input identity ──────────────────────
     for (const [label, client] of [
       ['old Client', clientA],
       ['wrong-instance Client', wrong],
@@ -648,7 +649,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
       ['cold new Client', coldPid],
       ['qualification proof Client', rpc.clientPid],
     ] as const) {
-      await waitForPidGone(pid, `U2 ${label}`)
+      await waitForPidGone(pid, `cross-build ${label}`)
     }
     assert.equal(processGroupAlive(hostAPgid), false, 'the old Host process group is still visible at finish')
     assert.equal(processGroupAlive(hostBPgid), false, 'the cold new Host process group is still visible at finish')

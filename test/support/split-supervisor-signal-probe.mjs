@@ -14,7 +14,7 @@
  *   --mode worker-kill --at two-clients-ready|host-spawned-before-ack
  *   --mode bootstrap-main-sigterm
  *
- * Modes (Upgrade U0):
+ * Upgrade lifecycle probe modes:
  *   --mode upgrade-sequential-hosts
  *   --mode upgrade-live-profile-refusal
  *   --mode upgrade-live-host-exit

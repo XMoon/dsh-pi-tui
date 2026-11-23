@@ -1,5 +1,5 @@
 /**
- * The exact receipt selector for the U0 side-build-install interruption probe.
+ * The exact receipt selector for an interrupted side-build installation.
  *
  * A current `install.inProgress` flag alone is not enough: the same Supervisor
  * writes it for the old profile bootstrap and for both side installs. The

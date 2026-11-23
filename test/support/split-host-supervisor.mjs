@@ -1432,7 +1432,7 @@ async function handleStartHost(message) {
   if (scene.kind === 'upgrade') {
     source = message.source ?? 'profile'
     if (source !== 'profile' && source !== 'side-old') {
-      throw new Error(`START_HOST: U0 only starts profile or side-old Hosts, got ${String(source)}`)
+      throw new Error(`START_HOST: upgrade scenes only start profile or side-old Hosts, got ${String(source)}`)
     }
     if (source === 'side-old') {
       if (scene.sideOld === undefined) throw new Error('START_HOST: side-old has not been installed')
