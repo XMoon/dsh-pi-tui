@@ -1751,8 +1751,12 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
     })
     writeReceipt({ phase: 'QUALIFICATION_PRE_SPAWN_HOLD' })
     await waitForWorkerKillBarrier()
+    // The ONLY stop here is the shared lifecycle admission gate. When the
+    // Worker died, the gate rejects and no Client exists. The handler then
+    // continues along the real production path (spawn and register) whenever
+    // the gate does not reject, so the external negative observes a real late
+    // registration or leak instead of a fabricated short-circuit PASS.
     assertLifecycleOpen('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION after the pre-spawn barrier')
-    throw new Error('UPGRADE_PROBE_SIDE_NEW_CLIENT_HOST_FOUNDATION: the worker died before the qualification Client was created')
   }
   if (process.env.SPLIT_VITEST_UPGRADE_QUALIFICATION_HOST_DEATH === '1') {
     // Controlled negative control for the reported window: the old Host A
