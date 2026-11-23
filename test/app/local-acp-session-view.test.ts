@@ -5087,6 +5087,7 @@ function projectionView(
     readonly capabilities?: AcpNegotiatedCapabilities
     readonly history?: AcpSessionHistory
     readonly mcpServers?: readonly unknown[]
+    readonly channels?: Partial<AcpViewChannels>
   } = {},
 ): {
   access: FakeAccess
@@ -5116,6 +5117,7 @@ function projectionView(
   let failureDrain: (() => void) | undefined
   const channels: AcpViewChannels = {
     capabilities: options.capabilities ?? PR2_CAPABILITIES,
+    ...(options.channels ?? {}),
     notifyProjection: async (_sessionId, update) => {
       if (gate !== undefined) {
         entered?.()
@@ -5478,6 +5480,129 @@ test('G-ACP2-PR2 LOAD-09: a close during a history Store read is a cancellation,
   readRelease.resolve()
   await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
     'the abort class wins over the attachment error')
+})
+
+test('G-ACP2-PR2 LIVE-01: a live close aborts an in-flight cold header read and leaves another View alive', async () => {
+  const view = projectionView('L15')
+  await view.resume()
+  view.notifications.length = 0
+  const entered = Promise.withResolvers<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.headerFactsImpl = async (_sessionId, signal) => {
+    readSignal = signal
+    entered.resolve()
+    // Settles ONLY through the claim's cancellation owner: no manual release.
+    await new Promise<void>(resolve => {
+      if (signal?.aborted === true) { resolve(); return }
+      signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    return undefined
+  }
+  view.commit('user/message', {
+    id: 'am-live',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'COLD-CHILD' },
+    role: 'user',
+    content: [{ type: 'text', text: 'from a cold child' }],
+  })
+  await entered.promise
+  await view.registry.closeSession(view.conn, view.access, 'L15')
+  assert.equal(readSignal?.aborted, true, 'close aborts the live cold header read')
+  await flushOutput()
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'no late frame from the cancelled live projection')
+  // Another View is untouched by this claim's cancellation.
+  const other = projectionView('L17')
+  await other.resume()
+  other.commit('session/title', { title: 'still alive', messageSeqs: [], source: 'user' })
+  await flushOutput()
+  assert.equal(other.notifications.some(update => update.sessionUpdate === 'session_info_update'), true,
+    'the sibling View keeps projecting')
+})
+
+test('G-ACP2-PR2 LIVE-02: a live close aborts an in-flight attachment Store read', async () => {
+  const view = projectionView('L16')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'L16', cwd: '/w' }
+  const entered = Promise.withResolvers<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readSignal = signal
+    entered.resolve()
+    await new Promise<void>(resolve => {
+      if (signal?.aborted === true) { resolve(); return }
+      signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    throw new Error('store read aborted')
+  }
+  view.commit('user/message', {
+    id: 'am-live-image',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+    role: 'user',
+    content: [
+      { type: 'text', text: 'with an image' },
+      { type: 'image', attachment: { attachmentId: 'img-live', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } },
+    ],
+  })
+  await entered.promise
+  await view.registry.closeSession(view.conn, view.access, 'L16')
+  assert.equal(readSignal?.aborted, true, 'close aborts the live Store read')
+  await flushOutput()
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'the aborted read never publishes a partial message')
+})
+
+test('G-ACP2-PR2 LOAD-12: load offers the official continued question after its history drained', async () => {
+  const channel = formChannel()
+  const view = projectionView('LD12', {
+    channels: { requestElicitation: channel.requester },
+    history: {
+      header: { sessionId: 'LD12', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  view.access.questionService = true
+  const continued = [{ callId: 'call-first', questions: [{ id: 'q0', question: 'first?', options: [{ label: 'yes' }] }] }]
+  view.access.questionSnapshotImpl = () => ({ kind: 'current', continued, settled: new Set() })
+  const answered: string[] = []
+  view.access.answerContinuedImpl = (_sessionId, _agent, _session, callId) => {
+    answered.push(callId)
+    return { kind: 'queued' }
+  }
+  await view.load()
+  await flushOutput()
+  assert.equal(channel.forms.length, 1, 'load offers the pending continued question exactly once')
+  assert.equal(channel.forms[0]!.request.toolCallId, 'call-first')
+  assert.equal(view.notifications.at(0)?.sessionUpdate, 'user_message_chunk',
+    'the canonical history is delivered before the reverse Form')
+  channel.forms[0]!.respond({ action: 'accept', content: { q0: 'yes' } })
+  await flushOutput()
+  assert.deepEqual(answered, ['call-first'], 'the answer returns to the official owner')
+})
+
+test('G-ACP2-PR2 LOAD-12 negative: a load without continued questions or Form capability offers nothing', async () => {
+  {
+    const channel = formChannel()
+    const view = projectionView('LD13', { channels: { requestElicitation: channel.requester } })
+    view.access.questionService = true
+    view.access.questionSnapshotImpl = () => ({ kind: 'current', continued: [], settled: new Set() })
+    await view.load()
+    await flushOutput()
+    assert.equal(channel.forms.length, 0, 'no pending question means no Form')
+  }
+  {
+    let snapshots = 0
+    // No `requestElicitation`: the client did not declare the Form capability.
+    const view = projectionView('LD14')
+    view.access.questionService = true
+    view.access.questionSnapshotImpl = () => {
+      snapshots += 1
+      return { kind: 'current', continued: [{ callId: 'call-x', questions: [{ id: 'q', question: 'x?', options: [{ label: 'yes' }] }] }], settled: new Set() }
+    }
+    await view.load()
+    await flushOutput()
+    assert.equal(snapshots, 0, 'a client without the Form capability never asks for continued questions')
+  }
 })
 
 test('G-ACP2-PR2 LOAD-10: a title committed during the replay keeps its official durable time', async () => {

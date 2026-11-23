@@ -809,6 +809,13 @@ interface UnclaimedHostObligation {
 interface ViewClaim {
   readonly connectionIdentity: ConnectionViewState
   readonly sessionId: string
+  /**
+   * The ONE cancellation owner of this claim's read-only IO: a cold header read
+   * or an attachment Store read. It covers BOTH the replay window and ordinary
+   * live projection; Close/EOF/Off/dispose abort it, and a replay overflow
+   * aborts it too because that replay can never answer.
+   */
+  readonly readAbort: AbortController
   /** The exact live Agent object verified at `commitAttached`; `undefined` until attached. */
   exactAgent?: LiveAgentViewIdentity
   /** The exact live Session object verified at `commitAttached`; `undefined` until attached. */
@@ -1555,7 +1562,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
 
     // Reserve the brand-new id synchronously BEFORE the identity await.
-    const claim: ViewClaim = { connectionIdentity: state, sessionId }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
     this.claims.set(sessionId, claim)
     // resolveForView carries the authoritative { sessionId } on failure, so a
     // failed Agent borrow after a CONFIRMED create still preserves the identity.
@@ -1599,7 +1606,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
     }
-    const claim: ViewClaim = { connectionIdentity: state, sessionId }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
     this.claims.set(sessionId, claim)
     const agent = await this.resolveForView(access, state, op, claim)
     // cwd is a claim proposal only; a difference is a fixed non-sensitive note,
@@ -1674,7 +1681,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
     }
-    const claim: ViewClaim = { connectionIdentity: state, sessionId }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
     this.claims.set(sessionId, claim)
     const agent = await this.resolveForView(access, state, op, claim)
     if (agent.session.header.cwd !== request.cwd) {
@@ -1774,6 +1781,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (this.claims.get(sessionId) !== claim || replay.stopped) {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
       }
+      // A loaded View resumes the SAME official continued questions a resume
+      // would offer. It happens only AFTER the complete history drained and the
+      // exact claim is still current: `load` is not a history-only variant of
+      // `resume` that forgets the pending human question.
+      if (claim.requestElicitation !== undefined && access.hasQuestionService()) {
+        this.offerContinuedQuestions(claim, claim.requestElicitation)
+      }
       return {}
     } catch (error) {
       // The cancellation class must be read BEFORE the release marks the replay
@@ -1867,6 +1881,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (replay !== undefined) {
       if (replay.buffered.length >= MAX_REPLAY_BUFFERED_EVENTS) {
         replay.overflowed = true
+        if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
         replay.abort.abort()
         return
       }
@@ -2016,7 +2031,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       try {
-        blocks.push(await this.readProjectionImage(replay, part.ref))
+        blocks.push(await this.readProjectionImage(claim, replay, part.ref))
       } catch (error) {
         // A CANONICAL HISTORY read is fail-closed: a committed image the Store
         // cannot produce must fail the load (the same rule as any other
@@ -2050,8 +2065,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   ): Promise<'child' | 'parent' | 'unproven'> {
     if (senderSessionId === claim.sessionId) return 'unproven'
     // A header read is a real official (possibly cold) read: it must be
-    // cancellable with THIS replay, so close/EOF never waits on it.
-    const signal = replay?.abort.signal
+    // cancellable with THIS claim, for the replay AND for the ordinary live
+    // projection, so close/EOF/Off never waits on it.
+    const signal = claim.readAbort.signal
     signal?.throwIfAborted()
     const sender = await access.sessionHeaderFacts(senderSessionId, signal)
     signal?.throwIfAborted()
@@ -2075,7 +2091,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   ): Promise<boolean> {
     const announced = claim.announcedChildren ??= new Set()
     if (announced.has(childId)) return true
-    const signal = replay?.abort.signal
+    const signal = claim.readAbort.signal
     signal?.throwIfAborted()
     const facts = await access.sessionHeaderFacts(childId, signal)
     signal?.throwIfAborted()
@@ -2143,6 +2159,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private stopProjectionOutput(claim: ViewClaim): void {
     claim.notifyProjection = undefined
     claim.projectionStalled = true
+    if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
     const replay = claim.replay
     claim.replay = undefined
     if (replay === undefined) return
@@ -2228,7 +2245,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         await this.sendProjection(claim, {
           sessionUpdate: unit.image.sessionUpdate,
           messageId: unit.image.messageId,
-          content: await this.readProjectionImage(replay, unit.image.ref),
+          content: await this.readProjectionImage(claim, replay, unit.image.ref),
         })
         continue
       }
@@ -2242,7 +2259,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           content.push({ type: 'content', content: { type: 'text', text: part.text } })
           continue
         }
-        content.push({ type: 'content', content: await this.readProjectionImage(replay, part.ref) })
+        content.push({ type: 'content', content: await this.readProjectionImage(claim, replay, part.ref) })
       }
       await this.sendProjection(claim, {
         sessionUpdate: 'tool_call_update',
@@ -2255,18 +2272,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Read ONE committed image through the official Store and encode its verified bytes. */
   private async readProjectionImage(
+    claim: ViewClaim,
     replay: ViewReplay | undefined,
     ref: AcpStoredImageRef,
   ): Promise<AcpWireContentBlock> {
     const access = this.access
     if (access === undefined) throw attachmentLoadFailed()
     try {
-      const stored = await access.readOutputImage(ref, replay?.abort.signal ?? UNABORTED_SIGNAL)
+      const stored = await access.readOutputImage(ref, claim.readAbort.signal)
       return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType }
     } catch {
       // A close/EOF/Off during the Store read is NOT a corrupt attachment: it
-      // is the replay being cancelled.
-      if (replay?.stopped === true || replay?.abort.signal.aborted === true) {
+      // is THIS claim's read being cancelled (replay or live).
+      if (claim.readAbort.signal.aborted || replay?.stopped === true) {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
       }
       throw attachmentLoadFailed()
@@ -2342,7 +2360,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const verified = known !== undefined && known.childId === info.id
       ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }
-      : await this.verifySubagentChild(access, info, edge, replay)
+      : await this.verifySubagentChild(claim, access, info, edge)
     if (verified === undefined) return
     await this.sendProjection(claim, {
       sessionUpdate: 'subagent_update',
@@ -2367,12 +2385,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * announces nothing and leaves a bounded diagnostic.
    */
   private async verifySubagentChild(
+    claim: ViewClaim,
     access: HostAcpSessionAccess,
     info: AcpSubagentRunInfo,
     edge: 'start' | 'end',
-    replay?: ViewReplay,
   ): Promise<{ readonly childId: string; readonly cwd?: string } | undefined> {
-    const signal = replay?.abort.signal
+    const signal = claim.readAbort.signal
     signal?.throwIfAborted()
     const facts = await access.sessionHeaderFacts(info.id, signal)
     signal?.throwIfAborted()
