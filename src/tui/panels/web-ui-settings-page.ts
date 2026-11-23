@@ -255,6 +255,13 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   private configOutcome: OutcomeNote | undefined
   /** The staged next-launch candidate; presentation only, never a write. */
   private autostartCandidate: boolean | undefined
+  /**
+   * The revision the staged next-start choice was OPENED at. It is the decision
+   * fence, never a parameter refreshed at commit time: a same-generation
+   * external write that moved the revision refuses the old confirmation
+   * instead of silently rebasing the CAS onto the newer revision.
+   */
+  private autostartFence: number | undefined
   private selectedId: string | undefined
   private scrollOffset = 0
   private revealSelection = true
@@ -451,11 +458,31 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   private reconcilePreference(): void {
     this.preferenceReadiness = this.intents.configReadiness()
     this.preference = this.intents.readPreference()
-    if (this.preferenceEditable()) return
+    if (!this.preferenceEditable()) {
+      // The authority is no longer current: revoke the staged step, zero writes.
+      this.autostartCandidate = undefined
+      this.autostartFence = undefined
+      if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
+        this.phase = 'ready'
+        this.revealSelection = true
+      }
+      return
+    }
+  }
+
+  /** The staged next-start choice lost its decision fence: settle it visibly
+   *  without writing and let the user review the CURRENT value. */
+  private settleStaleAutostartChoice(): void {
     this.autostartCandidate = undefined
+    this.autostartFence = undefined
     if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
-      this.phase = 'ready'
+      this.phase = 'settled'
       this.revealSelection = true
+    }
+    this.configOutcome = {
+      word: 'Not saved',
+      tone: 'error',
+      detail: 'the configuration changed since this choice was opened; review the new value and confirm again',
     }
   }
 
@@ -511,11 +538,14 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
         return
       case 'refresh': this.refreshAll(); return
       case 'autostart':
-        if (!this.preferenceEditable()) return
+        if (!this.preferenceEditable() || this.preference === undefined) return
         // Stage the OPPOSITE of the persisted value: the row was activated to
         // change it, and the current candidate stays visible (marked below).
+        // The revision is captured HERE, at choice entry, and travels with the
+        // staged decision.
         this.phase = 'choose-autostart'
-        this.autostartCandidate = this.preference?.autoStart === true ? false : true
+        this.autostartFence = this.preference.revision
+        this.autostartCandidate = this.preference.autoStart ? false : true
         this.selectedId = this.candidateId(this.autostartCandidate)
         this.revealSelection = true
         this.changed()
@@ -559,6 +589,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
         return
       case 'choose-autostart':
         this.autostartCandidate = undefined
+        this.autostartFence = undefined
         this.phase = 'ready'
         this.selectedId = 'autostart'
         this.changed()
@@ -782,8 +813,17 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.reconcilePreference()
     const candidate = this.autostartCandidate
     const state = this.preference
-    if (candidate === undefined || state === undefined || !this.preferenceEditable()) return
-    const revision = state.revision
+    const fence = this.autostartFence
+    if (candidate === undefined || state === undefined || fence === undefined || !this.preferenceEditable()) return
+    // The captured revision is the ONE revision this decision may submit; a
+    // moved authority refuses the stale confirmation instead of CAS-rebasing
+    // it onto the intervening write.
+    if (state.revision !== fence) {
+      this.settleStaleAutostartChoice()
+      this.changed()
+      return
+    }
+    const revision = fence
     const serial = ++this.writeSerial
     this.phase = 'pending-config'
     this.configOutcome = undefined
@@ -805,6 +845,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote(outcome)
       this.autostartCandidate = undefined
+      this.autostartFence = undefined
       this.phase = 'settled'
       this.revealSelection = true
       this.changed()
@@ -813,6 +854,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.reconcilePreference()
       this.configOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
       this.autostartCandidate = undefined
+      this.autostartFence = undefined
       this.phase = 'settled'
       this.revealSelection = true
       this.changed()

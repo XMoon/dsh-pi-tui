@@ -514,6 +514,38 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
   h.close()
 })
 
+test('a same-generation Config update refuses the staged confirmation instead of rebasing its revision', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  // Stage the confirmation at revision 1.
+  await h.key('\x1b[B')
+  await h.key('\x1b[B')
+  await h.key('\x1b[B')
+  await h.key('\r') // candidates
+  await h.key('\r') // -> confirm-save
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  // Another Config owner writes the profile on the SAME Host generation.
+  h.setAuthority('ready', { autoStart: true, revision: 2, userOverridden: true })
+  await h.key('\r') // Confirm save
+  await h.flush()
+  assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
+  assert.deepEqual(h.commitRevisions(), [], 'no revision was ever submitted')
+  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /the configuration changed since this choice was opened; review the new value and confirm again/u)
+  assert.doesNotMatch(h.frame(), /Confirm save/u, 'the stale confirmation is retired')
+  assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
+  // A NEW choice is opened at the CURRENT revision and succeeds.
+  for (let step = 0; step < 8 && !/^> Open in browser/mu.test(h.frame()); step += 1) await h.key('\x1b[B')
+  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B')
+  await h.key('\r') // candidates: the OPPOSITE of On is staged (Off)
+  await h.key('\r') // -> confirm-save
+  await h.key('\r') // Confirm save
+  await h.flush()
+  assert.deepEqual(h.commitRevisions(), [2], 'the fresh decision carries the CURRENT revision')
+  assert.deepEqual(h.commits(), ['Off'])
+  assert.match(h.frame(), /Status\s+Verified/u)
+  h.close()
+})
+
 test('a throwing commit is an honest unconfirmed outcome', async () => {
   const h = await mount({ status: { state: 'enabled' }, commitFailure: 'the writer crashed' })
   await h.key('\x1b[B')

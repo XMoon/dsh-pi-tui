@@ -10219,6 +10219,39 @@ test('/web opened while the Client is DISCONNECTED settles Unavailable and recov
   h.dispose()
 })
 
+test('a same-generation Config update refuses the painted confirmation with zero writes', async () => {
+  const h = setup({ columns: 120, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  // Stage the confirmation through the real page at revision 1.
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\r')
+  await settle(h)
+  assert.match(webUiPlain(h), /Save the next Host start preference as On\?/u)
+  // An external Config owner writes the SAME generation: revision 1 -> 2.
+  h.setWebStartupPreference({ autoStart: true, revision: 2, userOverridden: true })
+  await key(h, '\r') // Confirm save
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [], 'the stale confirmation wrote nothing')
+  assert.match(webUiPlain(h), /Status\s+Not saved/u)
+  assert.match(webUiPlain(h), /changed since this choice was opened/u)
+  assert.doesNotMatch(webUiPlain(h), /Confirm save/u)
+  assert.match(webUiPlain(h), /Start automatically\s+On · Change…/u, 'the current value is painted for review')
+  // A NEW choice at the current revision really writes (the fixture refuses
+  // any other revision), so the success path stays proven.
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\r')
+  await settle(h)
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [false])
+  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  h.dispose()
+})
+
 test('a Host rollover downgrades the next-start preference until the new Config mirror is current', async () => {
   const h = setup({ columns: 120, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
   await openWebUi(h)
