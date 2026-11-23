@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -403,18 +403,30 @@ test('different packaged Client builds preserve one live Host and durable Sessio
     assert.deepEqual(faultClosed.owners, ZERO_OWNERS, 'the child-fault Client did not release every owned resource')
     assert.equal(faultClosed.sessionOpen, false, 'the child-fault Client still reported its old Session open')
     assert.equal(faultClosed.surfaceMounted, false, 'the child-fault Client still reported its old surface mounted')
-    const childFailure = faultRecords.find(record => record.m4a0 === 'failure' && record.pid !== faultPid)
+    // Bind the failure to the REAL post-boundary replacement process, not merely
+    // to "a PID that is not the parent": a malformed record with no PID must
+    // fail here instead of making the later waitForPidGone vacuous.
+    const faultChildStarts = faultRecords.slice(faultBoundary)
+      .filter(record => record.m4a0 === 'client-started' && record.pid !== faultPid)
+    assert.equal(faultChildStarts.length, 1,
+      'the failed reexec did not start exactly one replacement Client process')
+    const faultChildPid = faultChildStarts[0]!.pid
+    assert.ok(Number.isInteger(faultChildPid) && faultChildPid > 0,
+      'the failed replacement Client carries no real business PID')
+    assert.notEqual(faultChildPid, faultPid, 'the failed replacement reused the old parent PID')
+    const childFailure = faultRecords.slice(faultBoundary)
+      .find(record => record.m4a0 === 'failure' && record.pid === faultChildPid)
     assert.ok(childFailure !== undefined, 'the failed replacement published no official failure record')
     assert.match(String(childFailure.error), /qualification forced client bootstrap failure/u,
       'the replacement child failed for another reason than the injected bootstrap fault')
-    assert.ok(!faultRecords.some(record => record.m4a0 === 'ready' && record.pid !== faultPid),
-      'a failed replacement Client published ready')
+    assert.ok(!faultRecords.some(record => record.m4a0 === 'ready' && record.pid === faultChildPid),
+      'the failed replacement Client published ready')
     const parentExit = faultRecords.find(record => record.m4r === 'handoff-parent-exit' && record.pid === faultPid)
     assert.ok(parentExit !== undefined, 'the old parent never reported the replacement exit')
     assert.equal(parentExit.code, 1, 'the old parent reported another replacement exit code')
     assert.equal(parentExit.signal, null, 'the old parent reported a signal instead of exit code 1')
     await waitForPidGone(faultPid, 'the child-fault old parent')
-    await waitForPidGone(childFailure.pid, 'the failed replacement child')
+    await waitForPidGone(faultChildPid, 'the failed replacement child')
     const faultFrame = await fault.text(true)
     const faultFailureLines = faultFrame.split('\n').filter(line => line.includes(HOST_HANDOFF_FAILURE))
     assert.equal(faultFailureLines.length, 1, 'the failed replacement did not paint exactly one handoff failure line')
@@ -626,7 +638,7 @@ test('different packaged Client builds preserve one live Host and durable Sessio
       ['replacement Client', replacementPid],
       ['wrong-instance Client', wrongPid],
       ['child-fault parent', faultPid],
-      ['failed replacement child', childFailure.pid],
+      ['failed replacement child', faultChildPid],
       ['new surface', newSurfacePid],
       ['cold new Client', coldPid],
       ['qualification proof Client', rpc.clientPid],
@@ -641,5 +653,19 @@ test('different packaged Client builds preserve one live Host and durable Sessio
       'the frozen old tarball changed during the Scene')
     assert.equal(sha256File(scene.pair.new.path), scene.pair.new.sha256,
       'the frozen new tarball changed during the Scene')
+    // The fixture's finish() already proves the Supervisor exit and root removal;
+    // this reads the Supervisor's OWN durable receipt so S12 also proves the
+    // FINALIZED phase and that no unattributed fallback Host survived.
+    const tmpBase = process.env.SPLIT_VITEST_TMP_BASE
+    if (typeof tmpBase !== 'string' || tmpBase === '') {
+      throw new Error('SPLIT_VITEST_TMP_BASE is absent after the Scene finished')
+    }
+    const receiptDir = join(tmpBase, 'split-resources')
+    const receiptName = readdirSync(receiptDir).find(name => name.endsWith(`-${scene.sceneId}.json`))
+    assert.ok(receiptName !== undefined, 'the Supervisor wrote no final receipt for this Scene')
+    const finalReceipt = JSON.parse(readFileSync(join(receiptDir, receiptName), 'utf8')) as Record<string, any>
+    assert.equal(finalReceipt.phase, 'FINALIZED', 'the Supervisor did not reach FINALIZED')
+    assert.deepEqual(finalReceipt.fallbackHosts ?? [], [],
+      'the Scene left an unattributed fallback Host')
   })
 })
