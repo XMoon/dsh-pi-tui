@@ -1117,11 +1117,11 @@ test('DSH internal inbox injections do not make the ACP-owned turn MIXED', async
     view.insert(request.requestId, 'm-owned')
     view.registry.onInboxClaimed(view.agent, {
       id: 'm-skill',
-      source: { kind: 'skill-invocation', name: 'review-fix-loop', form: 'instructions' },
+      source: { kind: 'skill-invocation' },
     }, 5)
     view.registry.onInboxClaimed(view.agent, {
       id: 'm-time',
-      source: { kind: 'time-context', form: 'snapshot' },
+      source: { kind: 'time-context' },
     }, 5)
     view.claim('m-owned', 5, request.requestId)
     view.commit('assistant/message', assistantData(5, 'm-answer', [{ type: 'text', text: 'answer' }]))
@@ -1143,11 +1143,11 @@ test('DSH internal inbox injections do not make the ACP-owned turn MIXED', async
     await flushOutput()
     view.registry.onInboxClaimed(view.agent, {
       id: 'm-subagent',
-      source: { kind: 'subagent-settled', form: 'notice' },
+      source: { kind: 'subagent-settled' },
     }, 6)
     view.registry.onInboxClaimed(view.agent, {
       id: 'm-time',
-      source: { kind: 'time-context', form: 'snapshot' },
+      source: { kind: 'time-context' },
     }, 6)
     view.commit('assistant/message', assistantData(6, 'm-after', [{ type: 'text', text: 'after' }]))
     view.commit('turn/end', { turn: 6, reason: { kind: 'completed' } })
