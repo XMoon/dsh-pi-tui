@@ -23,6 +23,11 @@
  * The child's official `send_message` produces the real durable `agent-message`
  * that becomes `session_message` with the verified author lineage.
  *
+ * A second real Host on the same profile serves a persisted root Session that
+ * the FIRST Host created before it was fully stopped: the roster still reports
+ * it with its official title/cwd, appends no event and leaves no claim, while
+ * the live Agent count is reported as NOT_VERIFIED (no official seam).
+ *
  * Anything the minimal real Host in this scene cannot produce is reported as an
  * explicit `NOT_OBSERVED` fact in the evidence, never as a fabricated PASS.
  *
@@ -509,6 +514,89 @@ export async function runAcpProtocolProjection(context) {
       `PP-10: the same Host instance serves every read (${JSON.stringify({ before: hostIdentity, after: hostAfter })})`)
     assert(eventsOf(sessionP).length > 0, 'PP-10: the durable Session log stays readable')
 
+    // ── J) COLD LIST after a FULL Host restart. The Session below is created and
+    // persisted by this Host's official Controller, then the whole Host process
+    // stops; a fresh Host on the same profile must serve it from disk. The
+    // roster read must not create a claim and must not append any durable event.
+    // The live Agent count is NOT observable from outside (no official seam;
+    // `session/close` does not dispose an Agent), so that sub-fact is reported
+    // as NOT_VERIFIED instead of being inferred from "no write".
+    const restartSession = (await capable.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })).sessionId
+    assert(typeof restartSession === 'string' && restartSession !== sessionP, 'PP-11: the cold candidate is a real root Session')
+    const restartTurn = await capable.request(acp.methods.agent.session.prompt, {
+      sessionId: restartSession,
+      prompt: [{ type: 'text', text: FIRST_PROMPT }],
+    })
+    assert(restartTurn?.stopReason === 'end_turn', 'PP-11: the cold candidate completes one real turn')
+    const restartTitle = (await capable.request(acp.methods.agent.session.list, {})).sessions
+      .find(session => session.sessionId === restartSession)?.title
+    assert(typeof restartTitle === 'string' && restartTitle.length > 0, 'PP-11: the cold candidate has its durable title')
+    await capable.request(acp.methods.agent.session.close, { sessionId: restartSession })
+    for (const client of clients) await client.close()
+    clients.length = 0
+    if (peer !== undefined) {
+      await peer.shutdown()
+      peer = undefined
+    }
+    await scene.stopC1Host(host)
+    host = undefined
+    const second = await scene.startC1Host('acp-projection', 'projection cold host', {
+      DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
+      C1_PROJECTION_CONTEXT_WINDOW: String(PROJECTION_CONTEXT_WINDOW),
+      C1_PROJECTION_PRESSURE_TOKENS: String(PROJECTION_PRESSURE_TOKENS),
+    })
+    host = second.host
+    const scopeIdB = second.ready.localHost.scopeId
+    assert(typeof scopeIdB === 'string' && scopeIdB.length === 64, 'PP-11: the cold Host publishes its own scope id')
+    peer = new EntryProcess('peer', entries.client, {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+    })
+    peer.qualificationLabel = 'projection cold peer'
+    await peer.waitFor(record => record.m4a0 === 'ready', 'PP-11 cold peer ready', 180_000)
+    const restartRequestId = `projection-cold-access-${String(Date.now())}-${String(process.pid)}`
+    peer.send({ op: 'qualification-acp-access', requestId: restartRequestId, acpEnabled: true })
+    const restartAccess = await peer.waitFor(entry => entry.op === 'acp-access' && entry.requestId === restartRequestId,
+      'PP-11 cold ACP access', 120_000)
+    assert(restartAccess.ok === true && restartAccess.status?.state === 'enabled',
+      `PP-11: the cold Host enables its ACP front door (${JSON.stringify(restartAccess)})`)
+    const endpointB = process.platform === 'darwin'
+      ? { path: `/private/tmp/dpt-${String(process.getuid())}-${scopeIdB.slice(0, 40)}/acp.sock` }
+      : { path: join(scopeDirOf(scopeIdB), 'acp.sock'), dir: scopeDirOf(scopeIdB) }
+    assert(existsSync(endpointB.path), `PP-11: the cold Host publishes ${endpointB.path}`)
+    const restartEventsBeforeList = await stableEventCount(restartSession)
+    const restartConnUpdates = []
+    const restartConn = await openSdkClient(endpointB, params => { restartConnUpdates.push(params) })
+    clients.push(restartConn)
+    await restartConn.request(acp.methods.agent.initialize, {
+      protocolVersion: 1,
+      clientCapabilities: { plan: {}, subagents: {} },
+    })
+    const restartPage = await restartConn.request(acp.methods.agent.session.list, {})
+    const restartRow = (restartPage?.sessions ?? []).find(session => session.sessionId === restartSession)
+    assert(restartRow !== undefined, 'PP-11: the cold Session is in the authorized roster of the NEW Host')
+    assert(restartRow.cwd === hostCwd && restartRow.title === restartTitle,
+      `PP-11: the cold row keeps its official cwd/title (${JSON.stringify(restartRow)})`)
+    const restartEventsAfterList = eventsOf(restartSession).length
+    assert(restartEventsAfterList === restartEventsBeforeList,
+      `PP-11: the cold list appends no durable event (${String(restartEventsBeforeList)} -> ${String(restartEventsAfterList)})`)
+    const restartLoader = await openSdkClient(endpointB, () => {})
+    clients.push(restartLoader)
+    await restartLoader.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    const restartLoad = await restartLoader.request(acp.methods.agent.session.load, {
+      sessionId: restartSession, cwd: hostCwd, mcpServers: [],
+    })
+    assert(restartLoad !== undefined, 'PP-11: the cold Session loads from a fresh connection (no claim was left)')
+    await restartLoader.request(acp.methods.agent.session.close, { sessionId: restartSession })
+    const restartList = {
+      sessionId: restartSession,
+      title: restartTitle,
+      listedOnNewHost: true,
+      appendedNoEvent: restartEventsAfterList === restartEventsBeforeList,
+      freshLoadSucceeded: restartLoad !== undefined,
+      liveAgentCount: 'NOT_VERIFIED',
+    }
+
     const durableKinds = eventsOf(sessionP).map(event => event.type)
     const evidence = {
       schema: 'gacp2-protocol-projection/1',
@@ -542,6 +630,7 @@ export async function runAcpProtocolProjection(context) {
         compaction: { id: compactionId, updates: compactionUpdates.length },
       },
       durableEventKinds: durableKinds,
+      coldRestart: restartList,
       sessionMessage: { sender: childId, recipient: sessionP, projected: true },
       notice: 'NO_OFFICIAL_PRODUCER',
       verdict: 'PASS',
@@ -573,6 +662,7 @@ export async function runAcpProtocolProjection(context) {
       baselineGating: !baselineHistoryKinds.includes('compaction_update') && !baselineHistoryKinds.includes('plan_update'),
       noticeNeverFabricated: !capableHistoryKinds.includes('notice'),
       hostIdentityKept,
+      coldListAfterRestart: restartList.listedOnNewHost && restartList.appendedNoEvent && restartList.freshLoadSucceeded,
       acpProtocolVersion: capableInit.protocolVersion,
       evidence,
     }
