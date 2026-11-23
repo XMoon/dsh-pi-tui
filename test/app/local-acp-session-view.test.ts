@@ -5806,6 +5806,21 @@ test('G-ACP2-PR2 PLAN-05: a turn/start reset arriving while the plan send is sti
   assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'])
 })
 
+test('G-ACP2-PR2 PLAN-06: a HELD legacy plan send followed by the official reset yields one empty replacement', async () => {
+  const view = projectionView('P6', { capabilities: PR2_BASELINE })
+  await view.resume()
+  view.notifications.length = 0
+  const hold = view.holdProjection()
+  view.commit('todo/write', { todos: [{ content: 'held legacy plan', status: 'pending' }] })
+  await hold.entered
+  view.commit('turn/start', { turn: 2 })
+  hold.release()
+  await waitUntil(() => view.notifications.length >= 2, 'the held legacy plan then exactly one reset')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan', 'plan'])
+  assert.deepEqual((view.notifications[1] as { entries?: unknown[] }).entries, [],
+    'a baseline client gets the complete empty replacement, never a fabricated plan_removed')
+})
+
 test('G-ACP2-PR2 LOAD-06: an unreadable agent-message image fails the load instead of dropping the message', async () => {
   const event = (image: unknown) => [{
     seq: 0,

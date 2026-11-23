@@ -1223,7 +1223,7 @@ function createScopedMcpB1Workload(ctx, { root, record }) {
 }
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -1233,6 +1233,7 @@ class C1Model extends LlmAdapter {
     this.imageProbe = imageProbe
     this.markdownFileProbe = markdownFileProbe
     this.po4c = po4c
+    this.probeRegistry = probeRegistry
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
@@ -1322,6 +1323,11 @@ class C1Model extends LlmAdapter {
       return
     }
     recordPromptFacts(options)
+    // QUALIFICATION-ONLY read of the official live registry for ONE watched
+    // Session id (`C1_WATCH_SESSION`). It never mutates anything and exists only
+    // in this fixture: the pack does not ship it.
+    const registry = this.probeRegistry?.()
+    if (registry !== undefined) this.record('live-registry', registry)
     const userText = allUserText(options.messages ?? [])
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
@@ -2438,10 +2444,18 @@ export async function apply(ctx) {
     ? await createPo4cOutputProbe(ctx, record)
     : undefined
 
+  const watchSession = process.env.C1_WATCH_SESSION
+  const probeRegistry = watchSession === undefined || watchSession === ''
+    ? undefined
+    : () => ({
+      watched: watchSession,
+      sessionLive: ctx.get('sessions')?.get(watchSession) !== undefined,
+      agentLive: ctx.get('agents')?.get(watchSession) !== undefined,
+    })
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe, markdownFileProbe, po4c)
+  }, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 

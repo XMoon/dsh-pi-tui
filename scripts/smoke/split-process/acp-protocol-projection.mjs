@@ -42,6 +42,7 @@ import { Readable, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { readC1WorkEvents } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, hostSessionHeader } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
@@ -541,7 +542,17 @@ export async function runAcpProtocolProjection(context) {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
       C1_PROJECTION_CONTEXT_WINDOW: String(PROJECTION_CONTEXT_WINDOW),
       C1_PROJECTION_PRESSURE_TOKENS: String(PROJECTION_PRESSURE_TOKENS),
+      // QUALIFICATION-ONLY fixture watch: the fixture records the official live
+      // Session/Agent registry for this ONE id on every provider call.
+      C1_WATCH_SESSION: restartSession,
     })
+    const registryBeforeAfter = async index => {
+      const events = readC1WorkEvents(second.workRoot).filter(event => event.kind === 'live-registry')
+      const event = events[index]
+      if (event === undefined) fail(`PP-11: the registry observation #${String(index)} is missing`)
+      assert(event.watched === restartSession, 'PP-11: the watch targets the cold Session')
+      return event
+    }
     host = second.host
     const scopeIdB = second.ready.localHost.scopeId
     assert(typeof scopeIdB === 'string' && scopeIdB.length === 64, 'PP-11: the cold Host publishes its own scope id')
@@ -569,6 +580,16 @@ export async function runAcpProtocolProjection(context) {
       protocolVersion: 1,
       clientCapabilities: { plan: {}, subagents: {} },
     })
+    // A real provider turn on ANOTHER Session is the fixture-only trigger for
+    // the official registry observation; it happens BEFORE the roster read.
+    const watchSession = (await restartConn.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })).sessionId
+    const watchBefore = await restartConn.request(acp.methods.agent.session.prompt, {
+      sessionId: watchSession, prompt: [{ type: 'text', text: FIRST_PROMPT }],
+    })
+    assert(watchBefore?.stopReason === 'end_turn', 'PP-11: the registry-watch turn completes')
+    const registryBefore = await registryBeforeAfter(0)
+    assert(registryBefore.sessionLive === false && registryBefore.agentLive === false,
+      `PP-11: the cold Session is NOT live before the roster read (${JSON.stringify(registryBefore)})`)
     const restartPage = await restartConn.request(acp.methods.agent.session.list, {})
     const restartRow = (restartPage?.sessions ?? []).find(session => session.sessionId === restartSession)
     assert(restartRow !== undefined, 'PP-11: the cold Session is in the authorized roster of the NEW Host')
@@ -577,6 +598,13 @@ export async function runAcpProtocolProjection(context) {
     const restartEventsAfterList = eventsOf(restartSession).length
     assert(restartEventsAfterList === restartEventsBeforeList,
       `PP-11: the cold list appends no durable event (${String(restartEventsBeforeList)} -> ${String(restartEventsAfterList)})`)
+    const watchAfter = await restartConn.request(acp.methods.agent.session.prompt, {
+      sessionId: watchSession, prompt: [{ type: 'text', text: SECOND_PROMPT }],
+    })
+    assert(watchAfter?.stopReason === 'end_turn', 'PP-11: the second registry-watch turn completes')
+    const registryAfter = await registryBeforeAfter(1)
+    assert(registryAfter.sessionLive === false && registryAfter.agentLive === false,
+      `PP-11: the roster read did NOT activate the cold Session/Agent (${JSON.stringify(registryAfter)})`)
     const restartLoader = await openSdkClient(endpointB, () => {})
     clients.push(restartLoader)
     await restartLoader.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
@@ -591,7 +619,9 @@ export async function runAcpProtocolProjection(context) {
       listedOnNewHost: true,
       appendedNoEvent: restartEventsAfterList === restartEventsBeforeList,
       freshLoadSucceeded: restartLoad !== undefined,
-      liveAgentCount: 'NOT_VERIFIED',
+      registryBefore: { sessionLive: registryBefore.sessionLive, agentLive: registryBefore.agentLive },
+      registryAfter: { sessionLive: registryAfter.sessionLive, agentLive: registryAfter.agentLive },
+      liveAgentCount: 'OBSERVED_ABSENT_BEFORE_AND_AFTER',
     }
 
     const durableKinds = eventsOf(sessionP).map(event => event.type)
