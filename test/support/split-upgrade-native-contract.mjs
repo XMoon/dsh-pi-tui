@@ -535,6 +535,19 @@ export function validateServiceObservation(observation) {
 }
 
 /**
+ * Whether the post-customize observation proves this run's owned, installed
+ * service target. A classified `unverifiable`/foreign/removed observation is a
+ * committed-but-unproven customization, even when its raw file is owned.
+ */
+export function isAcceptedCustomizedObservation(observation) {
+  const observed = validateServiceObservation(observation)
+  return observed.file === 'owned'
+    && observed.ownerVerified === true
+    && observed.fileFacts !== null
+    && (observed.state === 'installed-inactive' || observed.state === 'managed-active')
+}
+
+/**
  * The ONE admission/terminal decision for one daemon verb. Every mutating verb
  * requires a reservation and a strict, owner-verified observation; unknown,
  * foreign or unverifiable service state never authorizes a manager mutation.

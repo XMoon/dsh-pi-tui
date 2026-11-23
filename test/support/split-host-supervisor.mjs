@@ -41,6 +41,7 @@ import {
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
+  isAcceptedCustomizedObservation,
   isNativeDaemonUnquiesced,
   loadNativeManagerAdapter,
   mergeHostIdentityLedger,
@@ -2432,6 +2433,19 @@ async function handleNativeCustomizeManagedService(message) {
       : next)
     return timedOut
   }
+  /**
+   * The helper already replaced the plist. Any result that does not prove this
+   * run's owned definition and the returned file identity is an UNKNOWN commit,
+   * never an EXITED success. The live and persistent records carry that state.
+   */
+  const uncertainCommit = (errorName, record = runtime.record) => {
+    commitCustomizeRecord({
+      ...record,
+      lifecycle: 'unverifiable',
+      lastOperation: { verb: 'customize', phase: 'UNKNOWN', pid: null, exitCode: null, signal: null, at: now() },
+    })
+    writeReceipt({ phase: 'NOT_QUIESCED', errorName })
+  }
   try {
     let result
     try {
@@ -2442,42 +2456,43 @@ async function handleNativeCustomizeManagedService(message) {
     } catch (error) {
       // The helper failed at an unknown point: it may or may not have replaced
       // the plist. Keep the live and persistent record uncertain.
-      commitCustomizeRecord({
-        ...runtime.record,
-        lifecycle: 'unverifiable',
-        lastOperation: { verb: 'customize', phase: 'UNKNOWN', pid: null, exitCode: null, signal: null, at: now() },
-      })
-      writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(error) })
+      uncertainCommit(boundedError(error))
       throw error
     }
     const inspection = result?.observation
     if (inspection === undefined || inspection === null) {
+      uncertainCommit('NATIVE_CUSTOMIZE_INVALID')
       throw new Error('NATIVE_CUSTOMIZE_INVALID: the helper returned no observation')
     }
-    const kernel = inspection.mainPid === null ? null : nativeKernelFacts(inspection.mainPid)
-    const nextObservation = classifyManagedInspection({
-      reservation: runtime.reservation,
-      history: { everObservedInstalled: runtime.record.everObservedInstalled },
-      inspection,
-      kernel,
-      verifiedAt: now(),
-    })
+    let nextObservation
+    try {
+      const kernel = inspection.mainPid === null ? null : nativeKernelFacts(inspection.mainPid)
+      nextObservation = classifyManagedInspection({
+        reservation: runtime.reservation,
+        history: { everObservedInstalled: runtime.record.everObservedInstalled },
+        inspection,
+        kernel,
+        verifiedAt: now(),
+      })
+    } catch (error) {
+      // The raw helper observation cannot be classified at the commit boundary.
+      uncertainCommit(boundedError(error))
+      throw error
+    }
     const record = applyServiceObservation(runtime.record, nextObservation)
+    // Only a proven owned target of this run may be acknowledged. A classified
+    // `unverifiable`/foreign/removed observation is a committed-but-unproven
+    // customization, even when the helper returned an owned file identity.
+    if (!isAcceptedCustomizedObservation(nextObservation)) {
+      uncertainCommit('NATIVE_CUSTOMIZE_UNVERIFIABLE', record)
+      throw new Error(`NATIVE_CUSTOMIZE_UNVERIFIABLE: the customized plist is not a proven owned definition (${nextObservation.state})`)
+    }
     const returnedIdentity = result.fileIdentity
     const invalidIdentity = (message) => {
       // The helper may already have replaced the plist. Never present the old
       // identity as current; the live and persistent record both carry the
       // unverifiable committed state.
-      const failedRecord = {
-        ...record,
-        lifecycle: 'unverifiable',
-        lastOperation: { verb: 'customize', phase: 'UNKNOWN', pid: null, exitCode: null, signal: null, at: now() },
-      }
-      commitCustomizeRecord(failedRecord)
-      writeReceipt({
-        phase: 'NOT_QUIESCED',
-        errorName: 'NATIVE_CUSTOMIZE_IDENTITY_MISMATCH',
-      })
+      uncertainCommit('NATIVE_CUSTOMIZE_IDENTITY_MISMATCH', record)
       throw new Error(`NATIVE_CUSTOMIZE_IDENTITY_MISMATCH: ${message}`)
     }
     if (returnedIdentity === null || returnedIdentity === undefined) {

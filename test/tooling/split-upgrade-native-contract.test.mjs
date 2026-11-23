@@ -36,6 +36,7 @@ import {
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
+  isAcceptedCustomizedObservation,
   isNativeDaemonUnquiesced,
   LAUNCHD_CUSTOMIZATION,
   loadNativeManagerAdapter,
@@ -573,6 +574,14 @@ test('ambiguous, foreign or unqueryable manager observations never become owners
   const managedActive = classifyActive({ status: 'alive', uid: facts.uid })
   assert.equal(managedActive.state, 'managed-active')
   assert.equal(managedActive.authenticatedHostReady, false, 'manager activity alone is never product Ready')
+  assert.equal(isAcceptedCustomizedObservation(classify(ownedInspection(facts))), true)
+  assert.equal(isAcceptedCustomizedObservation(managedActive), true)
+  const ownedButUnverified = classify(ownedInspection(facts, { ownerVerified: false }))
+  assert.equal(ownedButUnverified.state, 'unverifiable')
+  assert.equal(ownedButUnverified.file, 'owned')
+  assert.notEqual(ownedButUnverified.fileFacts, null)
+  assert.equal(isAcceptedCustomizedObservation(ownedButUnverified), false,
+    'an owned raw file whose owner is unverifiable must never be acknowledged as a customize success')
 })
 
 test('a managed-active host is Ready only with a matching authenticated Host identity', () => {
