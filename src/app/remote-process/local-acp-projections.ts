@@ -52,6 +52,8 @@ export interface AcpHistoryEvent {
   readonly seq: number
   readonly type: string
   readonly data: unknown
+  /** The event's own durable time (epoch ms), when the log recorded one. */
+  readonly time?: number
 }
 
 /** The official header facts a loaded Session carries. */

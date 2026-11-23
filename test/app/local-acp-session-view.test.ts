@@ -312,9 +312,12 @@ class FakeAccess implements HostAcpSessionAccess {
     return await this.readSessionHistoryImpl(sessionId, signal)
   }
   headerFacts: AcpHistoryHeader | undefined
-  headerFactsImpl: (sessionId: string) => Promise<AcpHistoryHeader | undefined> = async () => this.headerFacts
-  async sessionHeaderFacts(sessionId: string): Promise<AcpHistoryHeader | undefined> {
-    return await this.headerFactsImpl(sessionId)
+  /** Every signal the View handed to a header read (the cold-read cancel seam). */
+  headerFactsSignals: (AbortSignal | undefined)[] = []
+  headerFactsImpl: (sessionId: string, signal?: AbortSignal) => Promise<AcpHistoryHeader | undefined> = async () => this.headerFacts
+  async sessionHeaderFacts(sessionId: string, signal?: AbortSignal): Promise<AcpHistoryHeader | undefined> {
+    this.headerFactsSignals.push(signal)
+    return await this.headerFactsImpl(sessionId, signal)
   }
   pressureValue: unknown
   contextPressure(): unknown {
@@ -978,7 +981,7 @@ function promptView(sessionId = 'P1', options: { readonly mcp?: boolean; readonl
   start: (text?: string, signal?: AbortSignal, prompt?: readonly unknown[], imageEnabled?: boolean) => Promise<{ stopReason: string }>
   insert: (rpcId: string, messageId: string, text?: string) => void
   claim: (messageId: string, turn: number, rpcId?: string) => void
-  commit: (type: string, data: Record<string, unknown>) => void
+  commit: (type: string, data: Record<string, unknown>, time?: number) => void
   /** The committed sequence of the LAST `commit()` (the durable join key). */
   lastSeq: () => number
   /** One official transient assistant-stream frame of the attached Agent. */
@@ -5095,7 +5098,7 @@ function projectionView(
   resume: () => Promise<Record<string, never>>
   holdProjection: () => { readonly entered: Promise<void>; readonly release: () => void }
   failProjection: (times: number) => Promise<void>
-  commit: (type: string, data: Record<string, unknown>) => void
+  commit: (type: string, data: Record<string, unknown>, time?: number) => void
   nextSeq: () => number
 } {
   const access = new FakeAccess()
@@ -5163,9 +5166,9 @@ function projectionView(
       failureDrain = settled.resolve
       return settled.promise
     },
-    commit: (type: string, data: Record<string, unknown>) => {
+    commit: (type: string, data: Record<string, unknown>, time?: number) => {
       seq += 1
-      registry.onSessionEvent(agent.session, { seq, type, data })
+      registry.onSessionEvent(agent.session, { seq, type, data, ...(time === undefined ? {} : { time }) })
     },
     nextSeq: () => seq + 1,
   }
@@ -5475,6 +5478,63 @@ test('G-ACP2-PR2 LOAD-09: a close during a history Store read is a cancellation,
   readRelease.resolve()
   await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
     'the abort class wins over the attachment error')
+})
+
+test('G-ACP2-PR2 LOAD-10: a title committed during the replay keeps its official durable time', async () => {
+  const view = projectionView('LD10', {
+    history: {
+      header: { sessionId: 'LD10', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  const hold = view.holdProjection()
+  const loading = view.load()
+  await hold.entered
+  // The official durable event carries its own time; the buffered window must
+  // keep it so the replay projects the same `updatedAt` the live path would.
+  view.commit('session/title', { title: 'Committed mid-replay', messageSeqs: [], source: 'user' }, 1_750_000_000_000)
+  hold.release()
+  await loading
+  const info = view.notifications.find(update => update.sessionUpdate === 'session_info_update')
+  assert.equal((info as { title?: string } | undefined)?.title, 'Committed mid-replay')
+  assert.equal((info as { updatedAt?: string } | undefined)?.updatedAt,
+    new Date(1_750_000_000_000).toISOString(),
+    'the replayed title carries the event time, never a fabricated one')
+})
+
+test('G-ACP2-PR2 LOAD-11: a close aborts an in-flight cold header read instead of waiting for it', async () => {
+  const view = projectionView('LD11', {
+    history: {
+      header: { sessionId: 'LD11', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: {
+          id: 'am1',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+          role: 'user',
+          content: [{ type: 'text', text: 'from the child' }],
+        },
+      }],
+    },
+  })
+  const entered = Promise.withResolvers<void>()
+  const releaseRead = Promise.withResolvers<void>()
+  view.access.headerFactsImpl = async () => {
+    entered.resolve()
+    await releaseRead.promise
+    return undefined
+  }
+  const loading = view.load()
+  await entered.promise
+  const signal = view.access.headerFactsSignals[0]
+  assert(signal !== undefined, 'the header read receives a cancellation signal')
+  await view.registry.closeSession(view.conn, view.access, 'LD11')
+  assert.equal(signal?.aborted, true, 'close aborts the waiting official header read')
+  releaseRead.resolve()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'no late session_message from the cancelled replay')
 })
 
 test('G-ACP2-PR2 MESSAGE-01: a verified child message is announced by its association first, while the runtime settlement notice never is', async () => {

@@ -1870,7 +1870,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         replay.abort.abort()
         return
       }
-      replay.buffered.push({ seq: event.seq, type: event.type, data: event.data })
+      // Keep the official durable time: a title buffered during the replay must
+      // later project the same `updatedAt` the live path would.
+      replay.buffered.push({ seq: event.seq, type: event.type, data: event.data, time: event.time })
       return
     }
     if (!this.projectionEventRelevant(claim, event)) return
@@ -2000,12 +2002,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     replay: ViewReplay | undefined,
     message: AcpHistoryAgentMessage,
   ): Promise<void> {
-    const lineage = await this.sessionMessageLineage(claim, access, message.senderSessionId)
+    const lineage = await this.sessionMessageLineage(claim, access, replay, message.senderSessionId)
     if (lineage === 'unproven') {
       this.diag.warn('local-acp.projection.session-message-unverified', { key: 'session_message' })
       return
     }
-    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return
+    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, replay, message.senderSessionId)) return
     const blocks: AcpWireContentBlock[] = []
     for (const part of message.content) {
       if (part.type === 'text') {
@@ -2043,13 +2045,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private async sessionMessageLineage(
     claim: ViewClaim,
     access: HostAcpSessionAccess,
+    replay: ViewReplay | undefined,
     senderSessionId: string,
   ): Promise<'child' | 'parent' | 'unproven'> {
     if (senderSessionId === claim.sessionId) return 'unproven'
-    const sender = await access.sessionHeaderFacts(senderSessionId)
+    // A header read is a real official (possibly cold) read: it must be
+    // cancellable with THIS replay, so close/EOF never waits on it.
+    const signal = replay?.abort.signal
+    signal?.throwIfAborted()
+    const sender = await access.sessionHeaderFacts(senderSessionId, signal)
+    signal?.throwIfAborted()
     if (sender?.sessionId !== senderSessionId) return 'unproven'
     if (sender.origin === 'subagent' && sender.parentSessionId === claim.sessionId) return 'child'
-    const self = claim.selfHeader ??= await access.sessionHeaderFacts(claim.sessionId)
+    const self = claim.selfHeader ??= await access.sessionHeaderFacts(claim.sessionId, signal)
+    signal?.throwIfAborted()
     if (self?.origin === 'subagent' && self.parentSessionId === senderSessionId) return 'parent'
     return 'unproven'
   }
@@ -2061,11 +2070,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private async announceChildAssociation(
     claim: ViewClaim,
     access: HostAcpSessionAccess,
+    replay: ViewReplay | undefined,
     childId: string,
   ): Promise<boolean> {
     const announced = claim.announcedChildren ??= new Set()
     if (announced.has(childId)) return true
-    const facts = await access.sessionHeaderFacts(childId)
+    const signal = replay?.abort.signal
+    signal?.throwIfAborted()
+    const facts = await access.sessionHeaderFacts(childId, signal)
+    signal?.throwIfAborted()
     if (facts?.sessionId !== childId || facts.origin !== 'subagent' || facts.parentSessionId !== claim.sessionId) {
       this.diag.warn('local-acp.projection.subagent-unverified', {
         edge: 'message',
@@ -2329,7 +2342,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const verified = known !== undefined && known.childId === info.id
       ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }
-      : await this.verifySubagentChild(access, info, edge)
+      : await this.verifySubagentChild(access, info, edge, replay)
     if (verified === undefined) return
     await this.sendProjection(claim, {
       sessionUpdate: 'subagent_update',
@@ -2357,8 +2370,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     info: AcpSubagentRunInfo,
     edge: 'start' | 'end',
+    replay?: ViewReplay,
   ): Promise<{ readonly childId: string; readonly cwd?: string } | undefined> {
-    const facts = await access.sessionHeaderFacts(info.id)
+    const signal = replay?.abort.signal
+    signal?.throwIfAborted()
+    const facts = await access.sessionHeaderFacts(info.id, signal)
+    signal?.throwIfAborted()
     if (facts === undefined || facts.sessionId !== info.id
       || facts.origin !== 'subagent' || facts.parentSessionId !== info.parentSessionId) {
       this.diag.warn('local-acp.projection.subagent-unverified', {

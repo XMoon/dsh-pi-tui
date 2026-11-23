@@ -693,7 +693,7 @@ export type SessionTitleObservationLike =
 interface SessionQueryReadLike {
   readSession(sessionId: string): Promise<{
     readonly session: SessionHeaderFactsLike
-    readonly events: readonly { readonly seq: number; readonly type: string; readonly data: unknown }[]
+    readonly events: readonly { readonly seq: number; readonly type: string; readonly data: unknown; readonly time?: number }[]
   }>
   readTitleSnapshots(sessionIds: readonly string[], signal?: AbortSignal): Promise<readonly SessionTitleObservationLike[]>
 }
@@ -832,7 +832,7 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       signal?.throwIfAborted()
       return {
         header: headerFactsOf(snapshot.session),
-        events: snapshot.events.map(event => ({ seq: event.seq, type: event.type, data: event.data })),
+        events: snapshot.events.map(event => ({ seq: event.seq, type: event.type, data: event.data, time: event.time })),
       } satisfies AcpSessionHistory
     },
     sessionHeaderFacts: async (sessionId, signal) => {
