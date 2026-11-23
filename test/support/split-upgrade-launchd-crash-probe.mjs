@@ -300,7 +300,7 @@ function auditResources(receipt) {
   }
 }
 
-function makeFakeIo({ decoded, launchctl, content }) {
+function makeFakeIo({ decoded, launchctl, content, readKernelProcess: probeKernel }) {
   const calls = { bootout: [], unlink: [] }
   let currentContent = content
   const stats = { isFile: () => true, isSymbolicLink: () => false, uid: 501, mode: 0o600, dev: 1, ino: 2 }
@@ -312,6 +312,7 @@ function makeFakeIo({ decoded, launchctl, content }) {
       if (args[0] === 'bootout') calls.bootout.push(args)
       return await launchctl(args)
     },
+    readKernelProcess: pid => probeKernel === undefined ? { kind: 'gone' } : probeKernel(pid),
     decodePlist: () => decoded,
     lintPlist: () => {},
     writeTempFile: () => { fail('the negative IO seam must never write a plist') },
@@ -370,6 +371,22 @@ async function negativeIoSeamAudit() {
     '\t\tSPLIT_PROCESS_PROFILE => pi-tui',
     '\t}',
   ].join('\n')
+  const printActive = [
+    '\ttype = LaunchAgent',
+    `\tpath = ${reservation.unitPath}`,
+    '\tstate = running',
+    '\tpid = 4242',
+    '\tprogram = /usr/bin/node',
+    '\targuments = {',
+    '\t\t/usr/bin/node',
+    '\t\t/tmp/entry/local-host.mjs',
+    '\t}',
+    '\tenvironment = {',
+    '\t\tDSH_HOME => /tmp/dsh-home',
+    '\t\tSPLIT_PROCESS_DSH_ANCHOR => /tmp/anchor',
+    '\t\tSPLIT_PROCESS_PROFILE => pi-tui',
+    '\t}',
+  ].join('\n')
   const recorded = { device: '1', inode: '2', sha256: 'c'.repeat(64) }
   const cases = []
 
@@ -398,6 +415,22 @@ async function negativeIoSeamAudit() {
       launchctl: async () => ({ kind: 'timeout' }),
       recorded: null,
     },
+    {
+      // Same run-owned file and same active job PID, but the live process
+      // behind that PID no longer has the recorded Host kernel identity.
+      name: 'active-host-pid-reused',
+      decoded,
+      launchctl: async () => ({ kind: 'exited', code: 0, stdout: printActive, stderr: '' }),
+      recorded: null,
+      readKernelProcess: () => readKernelProcess(process.pid),
+      verifiedHostIdentities: [{
+        pid: 4242,
+        scopeId,
+        kernelIdentity: 'a'.repeat(64),
+        instanceId: 'instance-recorded',
+        buildId: 'b'.repeat(64),
+      }],
+    },
   ]) {
     const { io, calls } = makeFakeIo({ ...testCase, content })
     let inspection
@@ -413,7 +446,7 @@ async function negativeIoSeamAudit() {
     const reclaimed = await reclaimManagedServiceWithIo({
       ...reservation,
       fileIdentity: testCase.recorded === null ? current : testCase.recorded,
-      verifiedHostIdentities: [],
+      verifiedHostIdentities: testCase.verifiedHostIdentities ?? [],
     }, io)
     const ownerRefusal = testCase.name === 'foreign-owner-marker'
       || testCase.name === 'loaded-source-is-another-plist'
@@ -460,15 +493,24 @@ function startVitest({ env }) {
 }
 
 async function waitForChildExit(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const settled = new Promise(resolve => child.once('exit', resolve))
-  const timeout = new Promise(resolve => setTimeout(resolve, timeoutMs, 'timeout'))
-  const result = await Promise.race([settled, timeout])
-  if (result === 'timeout' && (child.exitCode === null && child.signalCode === null)) {
-    child.kill('SIGTERM')
-    return await Promise.race([new Promise(resolve => child.once('exit', resolve)), sleep(5_000)])
-  }
-  return result
+  const exited = () => child.exitCode !== null || child.signalCode !== null
+  if (exited()) return true
+  const waitWithin = ms => new Promise(resolve => {
+    if (exited()) {
+      resolve(true)
+      return
+    }
+    const timer = setTimeout(() => resolve(false), ms)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolve(true)
+    })
+  })
+  if (await waitWithin(timeoutMs)) return true
+  child.kill('SIGTERM')
+  if (await waitWithin(5_000)) return true
+  child.kill('SIGKILL')
+  return await waitWithin(5_000)
 }
 
 async function main() {
@@ -513,6 +555,8 @@ async function main() {
     const negative = await negativeIoSeamAudit()
     const failures = [...resources.failures]
     if (!negative.pass) failures.push('the platform helper IO-seam negative controls did not preserve')
+    const childExited = await waitForChildExit(child, CHILD_EXIT_TIMEOUT_MS)
+    if (!childExited) failures.push('the Vitest probe child did not exit after the TERM/SIGKILL grace')
     const pass = terminal.phase === 'ABORTED_CLEAN' && failures.length === 0
     const report = {
       schemaVersion: 1,
@@ -531,13 +575,13 @@ async function main() {
         scopeId: ready.reservation.scopeId,
       },
       terminalPhase: terminal.phase,
+      childExited,
       resources,
       negativeIoSeam: negative,
       failures,
       pass,
     }
     const reportPath = writeReport(tmpBase, runId, args.at, report)
-    await waitForChildExit(child, CHILD_EXIT_TIMEOUT_MS)
     process.stdout.write(`${JSON.stringify({
       probe: report.probe,
       at: report.at,
@@ -550,6 +594,7 @@ async function main() {
     if (!pass && output().trim() !== '') process.stderr.write(`\n${output().trim()}\n`)
     return pass ? 0 : 1
   } catch (error) {
+    const childExited = await waitForChildExit(child, CHILD_EXIT_TIMEOUT_MS)
     const receipt = ready !== undefined ? readReceipt(ready.path) : (() => {
       const found = findReceipt(tmpBase, runId)
       return found?.receipt
@@ -563,6 +608,7 @@ async function main() {
       completedAt: new Date().toISOString(),
       account: { uid: preflight.uid, accountHome: preflight.accountHome },
       error: String(error?.message ?? error),
+      childExited,
       terminalPhase: receipt?.phase ?? null,
       workerPid: receipt?.worker?.pid ?? null,
       supervisorPid: receipt?.supervisor?.pid ?? null,

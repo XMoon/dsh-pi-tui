@@ -47,10 +47,12 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import { parseLaunchctlPrint, runLaunchctl } from '../../src/app/remote-process/local-host-launchd.ts'
 import { profileIdentityDigest } from '../../src/app/remote-process/local-host-manager.ts'
+import { readKernelProcess } from '../../src/runtime/native-process/identity.ts'
 import {
   LAUNCHD_CUSTOMIZATION,
   NativeContractError,
   requireLaunchdCustomization,
+  serializeKernelIdentity,
   validateReservationFacts,
 } from './split-upgrade-native-contract.mjs'
 
@@ -172,6 +174,7 @@ const defaultIo = Object.freeze({
   readFile: path => readFileSync(path, 'utf8'),
   realpath: path => realpathSync(path),
   launchctl: (args, options) => runLaunchctl(args, options),
+  readKernelProcess: pid => readKernelProcess(pid),
   decodePlist: content => decodePlistJson(content),
   lintPlist: path => lintPlist(path),
   writeTempFile: (path, content) => writeNewFile(path, content),
@@ -533,8 +536,9 @@ async function waitForJobRemoval(io, reservation) {
 /**
  * The LAST-RESORT cleanup of one run-owned service. It is used only after the
  * Supervisor's official stop/uninstall did not confirm removal, and only when
- * the recorded file identity and (for a live job) an authenticated Host PID
- * still prove this run's exact service. Every unknown/foreign/changed state is
+ * the recorded file identity and, for a live job, the recorded full Host
+ * identity plus a fresh kernel identity probe still prove this run's exact
+ * service before any bootout/unlink. Every unknown/foreign/changed state is
  * preserved for `NOT_QUIESCED`.
  */
 export async function reclaimManagedService(reservationWithHistory) {
@@ -563,11 +567,26 @@ export async function reclaimManagedServiceWithIo(reservationWithHistory, io = d
   }
   if (before.managerState === 'active') {
     const pid = before.mainPid
-    const proven = Number.isInteger(pid)
-      && Array.isArray(reservationWithHistory.verifiedHostIdentities)
-      && reservationWithHistory.verifiedHostIdentities.some(identity =>
-        identity?.pid === pid && identity?.scopeId === reservation.scopeId)
-    if (!proven) return { action: 'preserve', reason: 'NATIVE_HOST_UNPROVEN', clean: false, observation: before }
+    const recorded = Number.isInteger(pid) && Array.isArray(reservationWithHistory.verifiedHostIdentities)
+      ? reservationWithHistory.verifiedHostIdentities.find(identity =>
+          identity?.pid === pid && identity?.scopeId === reservation.scopeId)
+      : undefined
+    const fullIdentity = recorded !== undefined
+      && typeof recorded.kernelIdentity === 'string' && recorded.kernelIdentity !== ''
+      && typeof recorded.instanceId === 'string' && recorded.instanceId !== ''
+      && typeof recorded.buildId === 'string' && recorded.buildId !== ''
+    if (!fullIdentity) {
+      return { action: 'preserve', reason: 'NATIVE_HOST_UNPROVEN', clean: false, observation: before }
+    }
+    try {
+      const observed = io.readKernelProcess(pid)
+      if (observed.kind !== 'alive'
+        || serializeKernelIdentity(observed.identity) !== recorded.kernelIdentity) {
+        return { action: 'preserve', reason: 'NATIVE_HOST_UNPROVEN', clean: false, observation: before }
+      }
+    } catch {
+      return { action: 'preserve', reason: 'NATIVE_HOST_UNPROVEN', clean: false, observation: before }
+    }
   }
   if (before.managerState === 'active' || before.managerState === 'inactive') {
     const booted = await io.launchctl(['bootout', `gui/${String(reservation.uid)}/${reservation.unitName}`])
