@@ -72,7 +72,7 @@ test('the production /reload-client command keeps the peer Session and held Turn
       const artifactsBefore = await hostArtifacts(current, host)
       const hostIdentity = artifactsBefore.identity
 
-      const holdPrompt = 'u1-reload-client-hold'
+      const holdPrompt = 'reload-client-held-turn'
       const clientA = await current.startClient({ source: 'side-old', label: 'reload-a' })
       const aPid = (await clientA.businessPid())!
       assert.ok(Number.isInteger(aPid), 'Client A has no real business PID')
@@ -100,7 +100,7 @@ test('the production /reload-client command keeps the peer Session and held Turn
       assert.equal(c1WorkHadRelease(host.workRoot), false, 'the already-current refusal released the held Turn')
 
       // A staged, unreferenced image must block the same command without a stop.
-      const imagePath = join(current.workRoot, 'u1-staged-reload.png')
+      const imagePath = join(current.workRoot, 'staged-reload-attachment.png')
       writeMinimalPng(imagePath)
       await clientA.submit(`/image ${imagePath}`)
       await waitForPaintedText(clientA, 'attached [image', 'Client A staged the image')
@@ -196,13 +196,13 @@ test('the production /reload-client command keeps the peer Session and held Turn
       await waitForPaintedText(clientB, 'long-turn answer 1', 'Client B read the original Turn settlement')
 
       const writeBoundary = hostSessionEvents(current, sessionId)?.length ?? 0
-      await clientB.submit('u1-reload-b-after')
+      await clientB.submit('peer-client-post-reload')
       await waitForHostSessionEventAfter(current, sessionId, writeBoundary,
-        event => event.type === 'user/message' && JSON.stringify(event.data?.content ?? []).includes('u1-reload-b-after'),
+        event => event.type === 'user/message' && JSON.stringify(event.data?.content ?? []).includes('peer-client-post-reload'),
         'Client B committed its own prompt')
       await waitForHostSessionEventAfter(current, sessionId, writeBoundary,
         event => event.type === 'turn/end', 'Client B settled its own Turn')
-      assert.equal(userPromptCount(current, sessionId, 'u1-reload-b-after'), 1,
+      assert.equal(userPromptCount(current, sessionId, 'peer-client-post-reload'), 1,
         'Client B committed its own prompt more than once')
       assert.equal(await clientB.isAlive(), true, 'Client B died after its own write')
       assert.equal((await clientB.businessPid()), bPid, 'Client B changed its business PID')
@@ -225,7 +225,7 @@ test('the destructive target-invalid refusal keeps the live old Host, Session an
     const host = await scene.startHost({ source: 'side-old', scenario: 'long-turn' })
     const artifactsBefore = await hostArtifacts(scene, host)
 
-    const holdPrompt = 'u1-target-invalid-hold'
+    const holdPrompt = 'reload-missing-target-held-turn'
     const client = await scene.startClient({ source: 'side-old', label: 'target-invalid-client' })
     const clientPid = (await client.businessPid())!
     assert.ok(Number.isInteger(clientPid), 'the target-invalid Client has no real business PID')

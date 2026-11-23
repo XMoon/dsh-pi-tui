@@ -1,5 +1,5 @@
 /**
- * Read-only observations shared by the two U1 `/reload-client` business files.
+ * Read-only observations shared by the two reload-client business files.
  *
  * This module owns no Host, Client, profile or Scene. It reads the official
  * Client JSONL sink, the durable Host Session log and the Host-owned C1 proof

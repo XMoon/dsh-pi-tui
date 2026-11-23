@@ -64,7 +64,7 @@ test('one Client PID resolves the manual command from the Profile and the qualif
       const artifactsBefore = await hostArtifacts(scene, host)
       const hostIdentity = artifactsBefore.identity
 
-      const holdPrompt = 'u1-reload-source-hold'
+      const holdPrompt = 'reload-source-isolation-held-turn'
       const client = await scene.startClient({
         source: 'profile',
         label: 'reload-source',

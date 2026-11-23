@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * External OS-probe worker for the Upgrade U0 foundation.
+ * External OS-probe worker for split-process upgrade lifecycle qualification.
  *
  * This is a narrow process entry, not a second test runner: it executes the
  * ONE `UpgradeScene` from `split-upgrade-fixture.ts` so the existing
@@ -164,7 +164,7 @@ async function runReloadChildActive(scene, point = 'reload-child-active') {
   const client = await scene.startClient({ source: 'side-old', label: 'reload-child-active-client' })
   const oldPid = await client.businessPid()
   if (!Number.isInteger(oldPid)) throw new Error('reload-child-active: the initial Client has no real business PID')
-  const holdPrompt = 'u1-kill-reload-hold'
+  const holdPrompt = 'reload-child-interrupted-held-turn'
   await client.submit(holdPrompt)
   await waitForPaintedText(client, holdPrompt, 'reload-child-active: painted the admitted prompt')
   const sessionId = (await waitForSurfaceSession(client, 'reload-child-active: opened the Session')).openSessionId
@@ -249,7 +249,7 @@ async function runSiblingLive(scene) {  const stopFile = process.env.SPLIT_UPGRA
   await scene.installOldProfile()
   const host = await scene.startHost({ source: 'profile', scenario: 'long-turn' })
   const client = await scene.startClient({ source: 'profile', label: 'sibling-live-client' })
-  const holdPrompt = 'u1-sibling-live-hold'
+  const holdPrompt = 'concurrent-sibling-held-turn'
   await client.submit(holdPrompt)
   await waitForPaintedText(client, holdPrompt, 'upgrade-sibling-live: painted the admitted prompt')
   const sessionId = (await waitForSurfaceSession(client, 'upgrade-sibling-live: opened the Session')).openSessionId
