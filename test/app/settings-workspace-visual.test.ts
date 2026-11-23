@@ -184,6 +184,9 @@ interface HarnessOptions {
   webSettledStatus?: WebAccessStatus
   /** The official launch URL the Host hands to an explicit Open/Copy. */
   webUrl?: string
+  /** Hold the official URL reply until `releaseWebUrl()`: the window between
+   *  the URL RPC settling and the Client sink. */
+  holdWebUrl?: boolean
   /** M6-2A A5: the profile-owned startup backend the ConfigPort reads. */
   backendStartupPreference?: BackendStartupPreferenceState
   /** The startup backend section is absent/unreadable. */
@@ -477,6 +480,8 @@ interface Harness {
   readonly openedUrls: () => readonly string[]
   /** PR-A: replace the LIVE Host generation (a Host A -> B replacement). */
   readonly bumpWebGeneration: () => void
+  /** PR-A: release a held official URL reply. */
+  readonly releaseWebUrl: () => void
   /** PR-A: the current fake Host state. */
   readonly webStatus: () => WebAccessStatus | undefined
   /** Every `backendStartupPreference.setBackend` value the UI dispatched. */
@@ -652,6 +657,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const webEnabledWrites: boolean[] = []
   const webUrlReads = { count: 0 }
   const openedUrls: string[] = []
+  let heldWebUrl: (() => void) | undefined
   const webToggleRefusal = options.webToggleFailure
   const webUrl = options.webUrl ?? 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'
   const notifyPolicyListeners = (event: 'committed' | 'invalidated'): void => {
@@ -906,6 +912,7 @@ function setup(options: HarnessOptions = {}): Harness {
           throw new Error('web access link superseded: the Host generation changed before dispatch')
         }
         webUrlReads.count += 1
+        if (options.holdWebUrl === true) await new Promise<void>(resolve => { heldWebUrl = resolve })
         return { url: webUrl }
       },
       currentGeneration: () => webGeneration,
@@ -1446,6 +1453,7 @@ function setup(options: HarnessOptions = {}): Harness {
       webGeneration = {}
       for (const listener of [...webGenerationListeners]) listener()
     },
+    releaseWebUrl: () => { heldWebUrl?.(); heldWebUrl = undefined },
     webStatus: () => webStatus,
     backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
@@ -10178,6 +10186,25 @@ test('a Host A → B replacement revokes the old actions before any click can re
   release(h, rowOf(h, 'Disable Web…'), 3)
   await settle(h)
   assert.equal(h.webEnabledWrites().length, 0, 'no write reached the new Host from the old observation')
+  h.dispose()
+})
+
+test('an official URL from a REPLACED Host never reaches the Client opener or clipboard', async () => {
+  const h = setup({ columns: 120, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' }, holdWebUrl: true })
+  await openWebUi(h)
+  await key(h, '\r') // Open in browser: the URL RPC is held
+  await settle(h)
+  assert.equal(h.webUrlReads(), 1)
+  h.bumpWebGeneration()
+  await settle(h)
+  h.releaseWebUrl()
+  await settle(h)
+  assert.deepEqual(h.openedUrls(), [], 'the replaced Host\'s token never reached the Client opener')
+  assert.equal(h.webUrlReads(), 1, 'the URL was never requested a second time')
+  assert.equal(h.webStatusReads(), 2, 'exactly ONE generation re-read (the subscription), never a duplicate')
+  assert.match(webUiPlain(h), /Status\s+Open failed/u)
+  assert.doesNotMatch(webUiPlain(h), /SECRET-LAUNCH-TOKEN/u)
+  assert.equal(h.webEnabledWrites().length, 0, 'no Host write was involved')
   h.dispose()
 })
 

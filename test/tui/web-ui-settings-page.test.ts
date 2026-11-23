@@ -35,6 +35,9 @@ interface PageHarnessOptions {
   readonly commitFailure?: string
   readonly copy?: boolean
   readonly urlFailure?: string
+  /** Hold the official URL reply until `releaseUrl()`: the Host-replacement
+   *  window between the RPC settling and the Client sink. */
+  readonly holdUrl?: boolean
 }
 
 interface PageHarness {
@@ -54,6 +57,7 @@ interface PageHarness {
   readonly generation: { value: object | undefined }
   readonly bumpGeneration: () => void
   readonly releaseToggle: () => void
+  readonly releaseUrl: () => void
   readonly key: (data: string) => Promise<void>
   readonly flush: () => Promise<void>
   readonly close: () => void
@@ -78,6 +82,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   let doneCalls = 0
   let pageRef: WebUiSettingsPage | undefined
   let heldToggle: (() => void) | undefined
+  let heldUrl: (() => void) | undefined
   const tasks: Promise<void>[] = []
   const intents: WebUiSettingsPageIntents = {
     backendKind: options.backendKind ?? 'remote',
@@ -99,6 +104,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     getAuthenticatedUrl: async () => {
       urlReads.count += 1
       if (options.urlFailure !== undefined) throw new Error(options.urlFailure)
+      if (options.holdUrl === true) await new Promise<void>(resolve => { heldUrl = resolve })
       return { url: 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN' }
     },
     openUrl: (url) => { opened.push(url); return true },
@@ -156,6 +162,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       for (const listener of [...listeners]) listener()
     },
     releaseToggle: () => { heldToggle?.(); heldToggle = undefined },
+    releaseUrl: () => { heldUrl?.(); heldUrl = undefined },
     key,
     flush: () => settleAll(vt),
     close: () => mountRef.close(),
@@ -347,6 +354,40 @@ test('PAGE: a committed preference re-reads the persisted value, never the reque
   assert.deepEqual(h.commits(), ['On'], 'the EXISTING writer received the staged candidate')
   assert.match(h.frame(), /Status\s+Verified/u)
   assert.equal(h.writes().length, 0, 'the preference write never toggles the running Host')
+  h.close()
+})
+
+test('PAGE: a URL reply from a REPLACED Host never reaches the opener', async () => {
+  const h = await mount({ status: { state: 'enabled' }, holdUrl: true })
+  await h.key('\r') // Open in browser: the URL RPC is held
+  await h.flush()
+  assert.equal(h.urlReads(), 1)
+  h.bumpGeneration()
+  await h.flush()
+  h.releaseUrl()
+  await h.flush()
+  assert.deepEqual(h.opened(), [], 'the replaced Host\'s token never reached the Client opener')
+  assert.match(h.frame(), /Status\s+Open failed/u, 'the cancelled hand-off is stated')
+  assert.match(h.frame(), /the Host changed before the link was handed over/u)
+  assert.doesNotMatch(h.frame(), /SECRET-LAUNCH-TOKEN/u)
+  assert.equal(h.urlReads(), 1, 'the URL is never requested a second time')
+  assert.equal(h.reads(), 2, 'exactly ONE generation re-read (the subscription), never a duplicate')
+  h.close()
+})
+
+test('PAGE: a URL reply from a REPLACED Host never reaches the clipboard', async () => {
+  const h = await mount({ status: { state: 'enabled' }, holdUrl: true })
+  await h.key('\x1b[B') // Open -> Copy
+  await h.key('\r')
+  await h.flush()
+  assert.equal(h.urlReads(), 1)
+  h.bumpGeneration()
+  await h.flush()
+  h.releaseUrl()
+  await h.flush()
+  assert.deepEqual(h.copied(), [], 'the replaced Host\'s token never reached the clipboard')
+  assert.match(h.frame(), /Status\s+Clipboard unavailable/u)
+  assert.match(h.frame(), /the Host changed before the link was handed over/u)
   h.close()
 })
 

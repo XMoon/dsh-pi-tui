@@ -532,11 +532,17 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.runtimeOutcome = undefined
     this.intents.runOwned('web ui open browser', async () => {
       const { url } = await this.intents.getAuthenticatedUrl(generation)
+      if (this.disposed) return
+      // The URL belongs to the Host that produced it: a replacement between the
+      // reply and the sink revokes it BEFORE it can reach the Client opener.
+      if (!Object.is(generation, this.intents.currentGeneration())) {
+        this.refuseReplacedLink('open', generation)
+        return
+      }
       // The Client-local opener is the ONLY consumer of the launch URL: it is
       // never painted, stored or logged. Success only claims the request, and
       // only when an opener really exists.
       const requested = this.intents.openUrl(url)
-      if (this.disposed) return
       this.runtimeOutcome = requested
         ? { word: 'Browser open requested', tone: 'muted' }
         : { word: 'Browser opener unavailable', tone: 'error' }
@@ -555,6 +561,13 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.runtimeOutcome = undefined
     this.intents.runOwned('web ui copy link', async () => {
       const { url } = await this.intents.getAuthenticatedUrl(generation)
+      if (this.disposed) return
+      // Same sink fence as Open: an old Host's token never reaches the
+      // clipboard of the replacement Host's session.
+      if (!Object.is(generation, this.intents.currentGeneration())) {
+        this.refuseReplacedLink('copy', generation)
+        return
+      }
       const copied = await this.intents.copyToClipboard(url)
       if (this.disposed) return
       this.runtimeOutcome = copied
@@ -566,6 +579,25 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.runtimeOutcome = { word: 'Clipboard unavailable', tone: 'error', detail: safeErrorMessage(error) }
       this.changed()
     })
+  }
+
+  /** An official URL produced by a REPLACED Host is dropped, never handed to
+   *  the Client opener/clipboard. The generation subscription has ALREADY
+   *  revoked the observation and started the ONE re-read, so this only paints
+   *  the cancelled hand-off; only a source that never notified leaves the old
+   *  observation in place, and that one is revoked here. */
+  private refuseReplacedLink(kind: 'open' | 'copy', generation: unknown): void {
+    if (this.host.kind === 'current' && Object.is(this.host.generation, generation)) {
+      this.readSerial += 1
+      this.host = { kind: 'checking' }
+      this.startStatusRead()
+    }
+    this.runtimeOutcome = {
+      word: kind === 'open' ? 'Open failed' : 'Clipboard unavailable',
+      tone: 'error',
+      detail: 'the Host changed before the link was handed over',
+    }
+    this.changed()
   }
 
   /** Re-read the eligible authorities. It never writes and never enables a
