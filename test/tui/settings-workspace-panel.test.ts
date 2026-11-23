@@ -21,7 +21,9 @@ import {
   type SettingsWorkspaceCommitRequest,
   type SettingsWorkspacePanelIntents,
   type SettingsWorkspaceRow,
+  type SettingsWorkspaceRowId,
   type SettingsWorkspaceSnapshot,
+  type SettingsWorkspaceSpecialistRoute,
 } from '../../src/tui/panels/settings-workspace-panel.ts'
 import type { AboutStatusController } from '../../src/app/command/about-status.ts'
 import type { ModelsInitialView } from '../../src/tui/panels/models-workspace-page.ts'
@@ -647,6 +649,9 @@ interface Harness {
   readonly specialistRefreshes: () => number
   readonly computerUsePages: FakeSpecialistPage[]
   readonly computerUseBuilds: () => number
+  /** PR-A: every `Host · Web UI` page the factory really built. */
+  readonly webUiPages: FakeSpecialistPage[]
+  readonly webUiBuilds: () => number
 }
 
 function setup(options: {
@@ -670,6 +675,13 @@ function setup(options: {
   readonly webPage?: boolean
   /** Runs while the specialist factory builds its page (the reentrancy seam). */
   readonly duringSpecialistBuild?: (harness: { readonly panel: SettingsWorkspacePanel }) => void
+  /** PR-A: build the embedded `Host · Web UI` page for the row/deeplink. */
+  readonly webUiPage?: boolean
+  /** The panel's construction options (a typed deeplink row/specialist pair). */
+  readonly initial?: {
+    readonly initialRowId?: SettingsWorkspaceRowId
+    readonly initialSpecialist?: SettingsWorkspaceSpecialistRoute
+  }
 } = {}): Harness {
   let columns = options.columns ?? 120
   let rows = options.rows ?? 40
@@ -753,6 +765,16 @@ function setup(options: {
       specialistPages.push(page)
       return page
     },
+    ...options.webUiPage === true ? {
+      createWebUiPage: (done: () => void) => {
+        webUiBuilds += 1
+        const page = new FakeSpecialistPage()
+        ;(page as unknown as { title: string }).title = 'Web UI'
+        ;(page as unknown as { done: () => void }).done = done
+        webUiPages.push(page)
+        return page
+      },
+    } : {},
     ...options.specialistPage === true ? {
       createComputerUsePage: (done: () => void) => {
         computerUseBuilds += 1
@@ -777,12 +799,15 @@ function setup(options: {
   }
   const computerUsePages: FakeSpecialistPage[] = []
   let computerUseBuilds = 0
+  const webUiPages: FakeSpecialistPage[] = []
+  let webUiBuilds = 0
   const readSnapshot = options.snapshot ?? ((): SettingsWorkspaceSnapshot => SNAPSHOT)
   const panel = new SettingsWorkspacePanel(
     options.directory === undefined
       ? { readSnapshot }
       : { readSnapshot, extensionDirectory: options.directory },
     intents,
+    options.initial,
   )
   return {
     panel,
@@ -805,6 +830,8 @@ function setup(options: {
     specialistBuilds: () => specialistBuilds,
     computerUsePages,
     computerUseBuilds: () => computerUseBuilds,
+    webUiPages,
+    webUiBuilds: () => webUiBuilds,
     specialistRefreshes: () => specialistRefreshes,
   }
 }
@@ -838,8 +865,8 @@ const walkTo = (h: Harness, category: (typeof CATEGORY_ORDER)[number]): void => 
 
 test('the wide rail mounts the selected direct page exactly once', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   assert.equal(h.built.length, 1, 'the rail mounted the Models page once')
   assert.equal(h.built[0]?.id, 'models:list', 'the rail mounted the Models list')
   h.panel.handleInput('\u001b[B') // Models -> Account
@@ -876,8 +903,8 @@ test('a page built for a superseded selection is disposed instead of mounted', (
       root.handleInput('\u001b[B')
     },
   })
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models (the factory reenters here)
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models (the factory reenters here)
   assert.equal(h.built.length, 2, 'the reentrant selection built its own page')
   assert.equal(h.built[0]?.disposed, true, 'the superseded page was disposed')
   assert.equal(h.built[1]?.disposed, false, 'the current page stays mounted')
@@ -886,8 +913,8 @@ test('a page built for a superseded selection is disposed instead of mounted', (
 
 test('the content focus hands the keyboard to the page, and Esc returns it to the rail', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   h.panel.handleInput('\u001b[B') // Models -> Account
   h.panel.handleInput('\r')
   const page = h.built[1]
@@ -905,8 +932,8 @@ test('the content focus hands the keyboard to the page, and Esc returns it to th
 
 test('a page that owns a pending Host mutation keeps the keyboard and the lease', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   h.panel.handleInput('\u001b[B') // Models -> Account
   h.panel.handleInput('\r') // the content takes the focus
   const page = h.built[1]
@@ -942,8 +969,8 @@ test('a page that owns a pending Host mutation keeps the keyboard and the lease'
 
 test('a pending Host mutation keeps the workspace open even when the rail owns the keyboard', () => {
   const h = setup()
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models: the rail keeps the focus
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models: the rail keeps the focus
   assert.equal(h.closes(), 0, 'the workspace is open')
   // The page now owns an in-flight Host operation (the page's own owner
   // started it); the close must be refused whatever the focus is.
@@ -959,8 +986,8 @@ test('a narrow rail selection is mounted when the terminal grows and the content
   const h = setup({ columns: 44, rows: 20 })
   // The narrow first frame is the About content: Esc returns to the list.
   h.panel.handleInput('\u001b')
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   h.panel.handleInput('\u001b[B') // Models -> Account
   assert.equal(h.built.length, 0, 'the narrow rail browsed an invisible category: no page was created')
 
@@ -993,8 +1020,8 @@ test('Tab enters each direct content page and returns About/Account content to t
 
     // Models: the rail Tab hands the keyboard over; inside the page both
     // region keys are forwarded unchanged.
-    h.panel.handleInput('\u001b[B') // About -> General
-    h.panel.handleInput('\u001b[B') // General -> Models
+    h.panel.handleInput('\u001b[B') // About -> Host
+    h.panel.handleInput('\u001b[B') // Host -> Models
     plain(h)
     assert.equal(h.built.length, 1, 'the rail mounted the Models page once')
     h.panel.handleInput('\t')
@@ -1098,8 +1125,8 @@ test('a narrow frame keeps the root Tab inert and its existing drill-down path',
   assert.match(header(h), /Settings · Categories/u, 'Esc still returns to the narrow rail')
 
   // Models: browsing the rail mounts nothing; Tab grants no hidden page key.
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   assert.equal(h.built.length, 0, 'the narrow rail selected Models without mounting it')
   h.panel.handleInput('\t')
   h.panel.handleInput('\u001b[Z')
@@ -1131,9 +1158,9 @@ test('a narrow frame keeps the root Tab inert and its existing drill-down path',
 test('Account content keeps the keyboard while a confirmation or an operation is live', () => {
   const h = setup({ columns: 120 })
   plain(h)
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
-  h.panel.handleInput('\u001b[B') // Models -> Account (via General)
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
+  h.panel.handleInput('\u001b[B') // Models -> Account (via Host)
   h.panel.handleInput('\t') // rail -> content
   const account = h.built[1]!
   assert.equal(account.id, 'account:page')
@@ -1843,8 +1870,8 @@ test('the legacy 90-column bars keep refresh when the region hints drop and neve
 test('the pane header names the keyboard owner at 80 and 120 columns', () => {
   for (const columns of [120, 80] as const) {
     const h = setup({ columns, rows: 24 })
-    h.panel.handleInput('\u001b[B') // About -> General
-    h.panel.handleInput('\u001b[B') // General -> Models: the rail keeps the keys
+    h.panel.handleInput('\u001b[B') // About -> Host
+    h.panel.handleInput('\u001b[B') // Host -> Models: the rail keeps the keys
     const preview = plain(h, columns).split('\n')
     const previewPane = preview.findIndex(line => line.includes('[Categories (10)]'))
     assert.ok(previewPane >= 0, `the direct pane header paints at ${columns}:\n${preview.join('\n')}`)
@@ -1877,8 +1904,8 @@ test('the pane header names the keyboard owner at 80 and 120 columns', () => {
 test('the pane header publishes no hit target and a focus key reuses the mounted page', () => {
   const h = setup({ columns: 120, rows: 24 })
   plain(h, 120)
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   const page = h.built[0]
   assert.ok(page !== undefined)
   plain(h, 120)
@@ -1910,8 +1937,8 @@ test('the pane header publishes no hit target and a focus key reuses the mounted
 test('render and pre-repaint input hand the page the identical body grant', () => {
   const h = setup({ columns: 100, rows: 24 })
   plain(h, 100)
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   const page = h.built[0]
   assert.ok(page !== undefined)
   plain(h, 100)
@@ -1959,8 +1986,8 @@ test('one- and two-row frames paint only the truthful bar and publish no body ta
 test('below the body floor the content focus forwards only Esc, never a hidden page action', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h, 120)
-  h.panel.handleInput('\u001b[B') // About -> General
-  h.panel.handleInput('\u001b[B') // General -> Models
+  h.panel.handleInput('\u001b[B') // About -> Host
+  h.panel.handleInput('\u001b[B') // Host -> Models
   h.panel.handleInput('\r') // the content takes the keyboard
   const page = h.built[0]
   assert.ok(page !== undefined)
@@ -2106,7 +2133,7 @@ test('the directory is the ten fixed categories with no Other settings and no Ex
   const frame = plain(h)
   assert.match(frame, /Categories \(10\)/u, 'the rail states the real category count')
   assert.deepEqual(railLabels(h), [
-    'About', 'General', 'Models', 'Account', 'Agent', 'Appearance',
+    'About', 'Host', 'Models', 'Account', 'Agent', 'Appearance',
     'Conversation', 'Input & Terminal', 'Tools', 'Plugins',
   ], 'the fixed order is the frozen ten')
   assert.doesNotMatch(frame, /Other settings/u, 'no Other settings category exists')
@@ -3511,6 +3538,140 @@ test('the Web row paints the ONE Configure Web… entry and never a second surfa
   h.panel.handleInput('\r')
   assert.equal(h.webBuilds(), 1, 'Enter opens the SAME-lease page')
   assert.equal(h.closes(), 0, 'Enter never closes the workspace')
+})
+
+// ── PR-A: the `Host → Web UI` / `/web` typed deeplink ──────────────────────
+
+/** The snapshot the Web UI deeplink needs: the static fixture plus the ONE
+ *  navigation row, in its frozen `Host` position (after `Backend`). */
+function webUiSnapshot(row: SettingsWorkspaceRow = {
+  id: 'web-ui',
+  category: 'general',
+  label: 'Web UI',
+  summary: 'Live control · next Host start',
+  scope: 'DSH Host · running Split Host Web frontend',
+  freshness: 'runtime',
+  description: 'runtime and next-start',
+  specialist: 'web-ui',
+}): SettingsWorkspaceSnapshot {
+  const rows = [...SNAPSHOT.rows]
+  const backend = rows.findIndex(candidate => candidate.id === 'startup-backend')
+  rows.splice(backend < 0 ? rows.length : backend + 1, 0, row)
+  return { ...SNAPSHOT, rows }
+}
+
+test('the /web deeplink mounts the Web UI page on the FIRST real frame and settles ok', async () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    webUiPage: true,
+    snapshot: () => webUiSnapshot(),
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  assert.equal(h.webUiBuilds(), 0, 'no page is built before a real frame can paint it')
+  const painted = plain(h)
+  assert.equal(h.webUiBuilds(), 1, 'the page factory ran on the rendered frame')
+  assert.match(painted, /Settings · Host · Web UI/u, 'the breadcrumb is the row identity')
+  assert.deepEqual(await h.panel.whenInitialSpecialistSettled(), { ok: true })
+  h.panel.render(120)
+  assert.equal(h.webUiBuilds(), 1, 'a repaint never mounts a second page')
+})
+
+test('a snapshot without the web-ui row settles a real failure and opens no page', async () => {
+  const h = setup({
+    webUiPage: true,
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  plain(h)
+  const settlement = await h.panel.whenInitialSpecialistSettled()
+  assert.equal(settlement.ok, false)
+  assert.match(settlement.ok === false ? settlement.reason : '', /no longer selected/u)
+  assert.equal(h.webUiBuilds(), 0)
+})
+
+test('a web-ui row carrying another specialist settles a real failure', async () => {
+  const h = setup({
+    webUiPage: true,
+    snapshot: () => webUiSnapshot({
+      id: 'web-ui',
+      category: 'general',
+      label: 'Web UI',
+      summary: 'x',
+      scope: 'x',
+      freshness: 'runtime',
+      description: 'x',
+      specialist: 'web-settings',
+    }),
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  plain(h)
+  const settlement = await h.panel.whenInitialSpecialistSettled()
+  assert.equal(settlement.ok, false)
+  assert.match(settlement.ok === false ? settlement.reason : '', /not available in this snapshot/u)
+  assert.equal(h.webUiBuilds(), 0)
+})
+
+test('a Web UI factory refusal is a real settlement and never a silent row fallback', async () => {
+  const h = setup({
+    webUiPage: false,
+    snapshot: () => webUiSnapshot(),
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  plain(h)
+  const settlement = await h.panel.whenInitialSpecialistSettled()
+  assert.equal(settlement.ok, false)
+  assert.match(settlement.ok === false ? settlement.reason : '', /could not be created/u)
+  assert.match(plain(h), /Settings · Host · Rows/u, 'the command layer owns closing the lease')
+})
+
+test('a terminal that cannot grant one real body row refuses to mount the page', async () => {
+  const h = setup({
+    columns: 80,
+    rows: 2,
+    webUiPage: true,
+    snapshot: () => webUiSnapshot(),
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  plain(h)
+  const settlement = await h.panel.whenInitialSpecialistSettled()
+  assert.equal(settlement.ok, false)
+  assert.match(settlement.ok === false ? settlement.reason : '', /could not be created/u)
+  assert.equal(h.webUiBuilds(), 0, 'no page is built without a paintable body')
+})
+
+test('a panel disposed before the first frame settles a real failure', async () => {
+  const h = setup({
+    webUiPage: true,
+    snapshot: () => webUiSnapshot(),
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  h.panel.dispose()
+  const settlement = await h.panel.whenInitialSpecialistSettled()
+  assert.equal(settlement.ok, false)
+  assert.match(settlement.ok === false ? settlement.reason : '', /closed before the page opened/u)
+  assert.equal(h.webUiBuilds(), 0)
+})
+
+test('the Web UI page is retired once, and reopening mounts ONE new instance in the same lease', () => {
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    webUiPage: true,
+    snapshot: () => webUiSnapshot(),
+    initial: { initialRowId: 'web-ui', initialSpecialist: 'web-ui' },
+  })
+  plain(h)
+  assert.equal(h.webUiBuilds(), 1)
+  const first = h.webUiPages[0]!
+  // The page's own Esc closes THIS instance and returns to the Host Rows level.
+  ;(first as unknown as { done: () => void }).done()
+  assert.equal(first.disposed, true, 'the retired page is disposed exactly once')
+  assert.match(plain(h), /Settings · Host · Rows/u, 'Esc returns the Host Rows level, keeping the screen')
+  // Re-entering the row mounts a NEW page instance in the SAME lease.
+  h.panel.handleInput('\r')
+  assert.equal(h.webUiBuilds(), 2)
+  assert.equal(h.webUiPages[1]!.disposed, false)
+  assert.equal(h.closes(), 0, 'the workspace never closed for a same-lease page switch')
 })
 
 // ── C2-R7: the row contract has no legacy action left ─────────────────────

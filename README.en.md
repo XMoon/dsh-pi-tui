@@ -70,7 +70,7 @@ dsh --profile pi-tui
 | Exit | Ends the Direct application | Normally detaches only the Client; does not stop Host |
 | Service | No separate management | Optional Linux systemd --user / macOS LaunchAgent |
 
-You can also save `Daemon` under `/settings → General → Backend` for the **next cold launch**. `DSH_PI_TUI_BACKEND` overrides that preference for one launch without saving it. Selecting a backend does not hot-migrate a Host. Installing an OS user service is optional, not a prerequisite. Sessions and Agents remain Host-owned.
+You can also save `Daemon` under `/settings → Host → Backend` for the **next cold launch**. `DSH_PI_TUI_BACKEND` overrides that preference for one launch without saving it. Selecting a backend does not hot-migrate a Host. Installing an OS user service is optional, not a prerequisite. Sessions and Agents remain Host-owned.
 
 ### Agents, tasks and sessions
 
@@ -136,6 +136,8 @@ dsh --profile pi-tui web status
 ~~~
 
 Also available: `web disable` / `web open`. The commands do **not** start a Host or create a Session. The `web url` output contains an authentication token: handle it as a secret. The official Web page lets users select sessions held by that Host.
+
+In a connected Daemon TUI, `/web` opens **`Settings → Host → Web UI`** directly: the same page shows the running Host's live state and actions (Open in browser / Copy access link / Enable / Disable, with a confirmation before disabling) and the `Start automatically` preference that applies **only to the next Host start**. Neither changes the other, and the launch link is read only by an explicit Open/Copy and never painted.
 
 **ACP v1** is a default-off, same-user local interface. An external ACP client joins through the current Profile's public `dsh --profile pi-tui acp stdio` command: it relays that client's stdio to the existing Host's local ACP listener. It creates **no** second Host, Agent, Session or Writer and never starts the Host or enables the listener by itself. It is the stdio command you configure in an ACP client, not a command whose interactive terminal is expected to show a TUI.
 

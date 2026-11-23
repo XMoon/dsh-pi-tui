@@ -287,6 +287,8 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     getStatus: async () => ({ state: 'unavailable', reason: 'test' }),
     setEnabled: async () => ({ state: 'unavailable', reason: 'test' }),
     getAuthenticatedUrl: async () => { throw new Error('test') },
+    currentGeneration: () => undefined,
+    subscribeGeneration: () => () => {},
   }
   const acpAccess: import('../../src/runtime/acp-access-port.ts').AcpAccessPort = {
     getStatus: async () => ({ state: 'unavailable', reason: 'test' }),

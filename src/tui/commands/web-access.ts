@@ -1,24 +1,28 @@
 /**
- * The `/web` command (M5-W PR-C): the ONE Client control entry of the Split
- * Host's official Web frontend.
+ * The `/web` command (M5-W PR-C / PR-A): the ONE Client control entry of the
+ * Split Host's official Web frontend.
  *
- * The command owns EVERY read and write:
+ * Two renderers, ONE business authority:
  *
  * ```text
- * /web → presentation.open(request)
- *      → request.readStatus()            one Host status read (no polling)
- *      → request.act(action)             one explicit user intent
- *          Enable/Disable                SAME Host piTuiWebAccess.setEnabled
- *          Open Browser / Copy Link      official authenticated URL, Client-local
- *                                        opener/clipboard ONLY
- *      → one authoritative status re-read → the menu is reprojected
+ * PiTui    /web → the Settings registrar's typed deep link
+ *                → `Settings · Host · Web UI` page (the SAME Settings lease)
+ * TSP      /web → presentation.open(request)
+ *                → request.readStatus()          one Host status read (no polling)
+ *                → request.act(action)           one explicit user intent
+ *                    Enable/Disable              SAME Host piTuiWebAccess.setEnabled
+ *                    Open Browser / Copy Link    official authenticated URL,
+ *                                                Client-local opener/clipboard ONLY
+ *                → one authoritative status re-read → the menu is reprojected
  * ```
+ *
+ * The TSP presenter holds only its own local UI state and receives this
+ * command's request; the PiTui page reaches the SAME `WebAccessPort` through
+ * the Settings command owner. There is deliberately no PiTui overlay any more.
  *
  * It is a SESSIONLESS, LOCAL command: typing `/web` never creates a Session,
  * never submits a prompt, never starts a second Host and never changes the
- * default backend. The presenters (default PiTui short menu, experimental TSP
- * native picker) hold only their own local UI state and receive the SAME
- * request, so there is exactly one business authority for both renderers.
+ * default backend.
  *
  * @module tui/commands/web-access
  */
@@ -37,7 +41,6 @@ import { openExternalUrl } from '../../client/url/open.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
 import type { TuiApp } from '../../tui-app.ts'
-import { pituiWebAccessPresentation } from '../pickers/web-access-presentation-pitui.ts'
 
 /** The exact Direct/unavailable statement (the command's own product copy). */
 const DIRECT_UNSUPPORTED = 'Web frontend controls are available only in a Split Client.'
@@ -62,6 +65,10 @@ export interface WebAccessCommandDeps {
   /** The renderer-neutral notice sink (the same one the other commands use). */
   readonly notify: (text: string, kind?: 'info' | 'error') => void
   readonly registerOne: RegisterOne
+  /** PR-A: the ONE PiTui deep link into `Settings · Host · Web UI`. It takes
+   *  the existing Settings lease (no second overlay) and resolves only after
+   *  the page mounted on its first really-painted frame. */
+  readonly openSettings: () => Promise<CommandResult>
   /** The TSP native presenter (absent on a PiTui/headless mount). */
   readonly webPresentation?: WebAccessPresentation | undefined
   /** The Client-local URL opener (production: the platform opener). */
@@ -92,13 +99,21 @@ export function createWebAccessCommands(deps: WebAccessCommandDeps): WebAccessCo
     registerOne({
       name: 'web',
       description: 'Control the Split Host Web frontend (status, enable/disable, open, copy link)',
-      handler: (): CommandResult => {
+      handler: (): CommandResult | Promise<CommandResult> => {
+        // PR-A: the PiTui renderer has NO Web overlay. `/web` is a TYPED DEEP
+        // LINK into the ONE `Settings · Host · Web UI` page (Direct and Remote
+        // alike: the page tells the truth about a Direct process, which owns
+        // no Split Host frontend, and offers no runtime action).
+        if (deps.app !== undefined && deps.webPresentation === undefined) {
+          return deps.openSettings()
+        }
+        // TSP native presenter (and any non-PiTui mount): the EXISTING path is
+        // unchanged, including the truthful Direct unsupported receipt.
         if (runner.backendKind !== 'remote') {
           deps.notify(DIRECT_UNSUPPORTED, 'error')
           return { kind: 'error', text: DIRECT_UNSUPPORTED }
         }
         const presentation: WebAccessPresentation | undefined = deps.webPresentation
-          ?? (deps.app === undefined ? undefined : pituiWebAccessPresentation(deps.app))
         if (presentation === undefined) {
           const text = 'the Web frontend controls are unavailable in this renderer'
           deps.notify(text, 'error')

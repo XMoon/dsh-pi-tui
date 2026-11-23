@@ -695,7 +695,7 @@ that grant instead of the whole terminal height.
   degradation and adds no second scrollport; "every render branch fits the
   grant" holds for the panel's own assemblies, not for the recorder view.
 - `SettingsList` limits are retained deliberately for the remaining independent
-  consumers (`/web` / `/acp` on the Split backend): the list keeps
+  consumer (`/acp` on the Split backend): the list keeps
   `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so its overlay
   frame grants at most 26 content rows on any terminal taller than 30 rows. This
   is a viewport/grant rule of that component, NOT the Settings Workspace:
@@ -1065,7 +1065,7 @@ owns only the lease, focus and write-lifecycle mechanics.
   complete settings editor and its compatibility bridge no longer exist: no
   Settings level hands the user off to another editor, so nothing can mount a
   `SettingsList` under or after this lease. The independent `SettingsList`
-  consumers (`/web` and `/acp` on the Split backend), together with the
+  consumer (`/acp` on the Split backend), together with the
   independent `/preset` capturing overlay, are their OWN overlays opened by
   their own commands, never a continuation of a Settings workspace.
 - **Read projection, not a second store.** The panel holds no ConfigPort and no

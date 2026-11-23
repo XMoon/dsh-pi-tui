@@ -96,7 +96,7 @@ export type SettingsWorkspaceRowId =
   | 'notification-method'
   | 'terminal-progress'
   | 'visual-tools'
-  | 'web-autostart'
+  | 'web-ui'
   | 'startup-backend'
   | 'acp-runtime'
   | 'acp-autostart'
@@ -241,7 +241,7 @@ export interface SettingsWorkspaceRow {
    *  specialist page. */
   readonly specialist?:
     | 'subagent-settings' | 'web-settings' | 'footer-configurator' | 'keybindings' | 'mcp-servers'
-    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings'
+    | 'computer-use' | 'agent-loop-settings' | 'shell-execution-settings' | 'web-ui'
   /** Whether the row's specialist page may be opened RIGHT NOW. Absent = yes.
    *  A non-current authority (a stale/unavailable backend) paints the row and
    *  its last-known facts but offers no Manage action, because the page could
@@ -478,6 +478,14 @@ export interface SettingsWorkspacePanelIntents {
     done: () => void,
     openPlugins: () => void,
   ) => EmbeddedSpecialistPage | undefined
+  /**
+   * PR-A: the ONE `Host → Web UI` page factory. It returns the per-open page
+   * over the EXISTING Web/runtime and Config writers; `done` returns to the row
+   * that opened it. The page reads the current Host status itself (only on the
+   * first frame that can really paint it), so the workspace snapshot starts no
+   * Host RPC.
+   */
+  readonly createWebUiPage?: (done: () => void) => EmbeddedSpecialistPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -551,9 +559,10 @@ type SettingsWorkspaceEditPhase =
 
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
 
-/** The C2-R5 typed deeplink pages: the two professional editors that are
- *  mounted inside the ONE Settings screen lease instead of a second overlay. */
-export type SettingsWorkspaceSpecialistRoute = 'footer-configurator' | 'keybindings'
+/** The typed deeplink pages mounted inside the ONE Settings screen lease
+ *  instead of a second overlay: the two professional editors (C2-R5) and the
+ *  `Host → Web UI` page (PR-A). */
+export type SettingsWorkspaceSpecialistRoute = 'footer-configurator' | 'keybindings' | 'web-ui'
 
 /** The settlement of ONE typed deeplink page: `ok` only after the page was
  *  really created on the leased screen; a failure is the command owner's real
@@ -567,6 +576,7 @@ export type SettingsInitialSpecialistSettlement =
 export const SETTINGS_SPECIALIST_ROUTE_ROW: Readonly<Record<SettingsWorkspaceSpecialistRoute, SettingsWorkspaceRowId>> = {
   'footer-configurator': 'footer-configurator',
   keybindings: 'keyboard-shortcuts',
+  'web-ui': 'web-ui',
 }
 
 /** The ONE per-frame row allocation the root paints (header, metadata, rule,
@@ -822,7 +832,9 @@ const FIXED_CATEGORY_ORDER = [
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   about: 'About',
-  general: 'General',
+  // PR-A: the USER-visible title is `Host`; the internal category id stays
+  // `general` (serialization, ordering and every route keep speaking it).
+  general: 'Host',
   models: 'Models',
   account: 'Account',
   agent: 'Agent',
@@ -872,7 +884,7 @@ function isWorkspaceRowId(id: string): id is SettingsWorkspaceRowId {
     || id === 'notification-method'
     || id === 'terminal-progress'
     || id === 'visual-tools'
-    || id === 'web-autostart'
+    || id === 'web-ui'
     || id === 'startup-backend'
     || id === 'web-settings'
     || id === 'approval'
@@ -3478,6 +3490,8 @@ export class SettingsWorkspacePanel implements Component {
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Agent loop…' }
       case 'shell-execution-settings':
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Shell execution…' }
+      case 'web-ui':
+        return this.intents.createWebUiPage === undefined ? undefined : { label: 'Open Web UI…' }
     }
   }
 
@@ -4042,6 +4056,7 @@ export class SettingsWorkspacePanel implements Component {
       || row.specialist === 'shell-execution-settings'
       ? 1
       : row.specialist === 'web-settings' || row.specialist === 'mcp-servers' || row.specialist === 'computer-use'
+        || row.specialist === 'web-ui'
         ? 1
         : 0
     if (this.bodyFloor() < floor) return
@@ -4057,7 +4072,7 @@ export class SettingsWorkspacePanel implements Component {
       // on a Detail summary the user never asked for. The other embedded pages
       // keep their documented `Detail → row` ladder.
       if ((row.specialist === 'footer-configurator' || row.specialist === 'keybindings' || row.specialist === 'subagent-settings'
-        || row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings')
+        || row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings' || row.specialist === 'web-ui')
         && this.focus === 'detail') {
         this.leaveDetailTo('rows')
       }
@@ -4083,6 +4098,9 @@ export class SettingsWorkspacePanel implements Component {
         break
       case 'computer-use':
         page = this.intents.createComputerUsePage?.(done, () => this.navigateComputerUseToPlugins())
+        break
+      case 'web-ui':
+        page = this.intents.createWebUiPage?.(done)
         break
       case 'agent-loop-settings':
         page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)

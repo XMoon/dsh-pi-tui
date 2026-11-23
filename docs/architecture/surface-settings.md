@@ -11,7 +11,7 @@ This is the sole owning document for the following surface-specific behavior. Se
 `/settings` and its real alias `/status` open ONE fullscreen lease with ONE
 navigation focus state. The category rail is the selection owner; the right
 column is the content. Width only projects panes (≥108 three, 76–107 two, <76
-one). The category order is the fixed `About, General, Models, Account, Agent,
+one). The category order is the fixed `About, Host, Models, Account, Agent,
 Appearance, Conversation, Input & Terminal, Tools, Plugins`, and ONE conditional
 `Extensions` is appended while the extension settings registry reports live
 rows (ten vs eleven painted categories; no hardcoded count anywhere). Both
@@ -212,18 +212,19 @@ specialist-page contract below).
   A transient choice, a pending write and the in-place Plugin Manager keep their
   own keys; every region jump lands on the destination's first candidate and
   bumps the pointer-press revision, so a straddling click cannot activate it.
-- The configuration categories (`General`, `Agent`, `Appearance`, `Conversation`,
+- The configuration categories (`Host`, `Agent`, `Appearance`, `Conversation`,
   `Input & Terminal`, `Tools`, and the conditional `Extensions`) keep their
   three-level browse (L0 categories, L1 rows, L2 detail). `About`, `Models`,
-  `Account` and `Plugins` remain direct content pages. `General` holds the
-  startup backend, the two next-Split-Host startup preferences and the official
-  session-log upload switch in one frozen order.
+  `Account` and `Plugins` remain direct content pages. `Host` is the USER-facing
+  title of the internal `general` category: it holds the startup backend, the
+  `Web UI` page entry, the ACP next-Split-Host startup preference and the
+  official session-log upload switch in one frozen order.
 - Configuration rows keep their distinct writer kinds: the configured theme,
   transcript display preset, icon style, mid-turn progress-updates cadence,
   response style, Git attribution, Home/End keys, Mouse wheel lines,
   Notifications, Notification method, Terminal progress and `Agent` user-shell
   sandbox policy are persisted through the ONE serialized TUI settings document;
-  the profile-wide `Visual tools` switch and `General` startup backend
+  the profile-wide `Visual tools` switch and `Host` startup backend
   (`Direct`/`Daemon`) selector are the Host profile's revision-checked form
   sections (`pi-tui-visual-tools` and `tui-startup.backend`); `Agent`'s
   `Approval policy` is the official per-Session durable policy event,
@@ -405,21 +406,25 @@ specialist-page contract below).
   so no category carries a transition launcher and no Settings gesture hands
   the user off to a second editor. The retired complete settings editor (and
   its Web rows, phase map and credential hand-off) no longer exists. The
-  `SettingsList` component itself remains: independent commands (`/web` /
-  `/acp` on the Split backend) open it
-  with their own row lists through `TuiApp.openSettings`, which is not a
-  Settings workspace path. `/preset` is its own independent root capturing
-  overlay (`TuiApp.openPresetPicker`), never a `SettingsList` row list and
-  never part of this workspace's lease. `/keybindings conflicts` is NOT one of them: it
-  enters the same Keyboard shortcuts specialist page in this workspace.
+  `SettingsList` component itself remains for the independent Split-backend
+  `/acp` command, which opens it with its own row list through
+  `TuiApp.openSettings` — not a Settings workspace path. `/web` is NOT one of
+  them any more: the PiTui `/web` is a typed deep link into this workspace's
+  `Host · Web UI` page (see below). `/preset` is its own independent root
+  capturing overlay (`TuiApp.openPresetPicker`), never a `SettingsList` row
+  list and never part of this workspace's lease. `/keybindings conflicts` is
+  NOT one of them: it enters the same Keyboard shortcuts specialist page in
+  this workspace.
 - `Tools` holds the built-in `Visual tools` row (backed by the Host profile's
   `pi-tui-visual-tools.enabled` volatile Config, schema default On), the
   `Shell execution` specialist entry, the `ACP Server` runtime row, the
   `Web Search / Fetch` page entry, when the official manager is mounted
   `MCP servers`, and when the official Computer Use provider and Plugin
-  Manager roster are mounted `Computer Use`, in that frozen order. The next-Split-Host Web/ACP startup
-  preferences are NOT in Tools: they live in `General` under the SAME row ids
-  (`web-autostart`, `acp-autostart`) with no duplicate Tools entry.
+  Manager roster are mounted `Computer Use`, in that frozen order. The
+  next-Split-Host ACP startup preference is NOT in Tools: it lives in `Host`
+  under the SAME `acp-autostart` row id with no duplicate Tools entry. The Web
+  preference has no standalone row at all — it is edited inside the `Web UI`
+  page (see below).
   Its stated value is the effective Host form value; `[default]` marks a value
   the USER layer does not declare. Confirm writes that ONE field through the
   official revision-checked settings mutation and re-reads the Host. Off
@@ -670,7 +675,7 @@ specialist-page contract below).
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 
-### Host numeric pages, Session log upload and General
+### Host numeric pages, Session log upload and the Host category
 
 `/settings → Agent → Agent loop` and `/settings → Tools → Shell execution` are
 two SPECIALIST pages sharing ONE numeric renderer inside the existing Settings
@@ -711,8 +716,11 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   the other served row refuses the write. The caps
   affect the NEXT shell execution; a running subprocess keeps its current
   timeout. This is not the `!`/`!!` user-shell sandbox policy.
-- `General` paints `Backend`, `Start Web automatically`, `Start ACP
-  automatically` and `Session log upload` in that frozen order. `Session log
+- The category's USER-visible title is `Host`; the internal category id stays
+  `general` (routing, serialization and every row id are unchanged). `Host`
+  paints `Backend`, `Web UI`, `Start ACP automatically` and `Session log
+  upload` in that frozen order. `Web UI` is a NAVIGATION row: it carries no
+  inline candidate and opens the `Web UI` page described below. `Session log
   upload` is the official `session-log-deepseek.enabled` scalar row and is
   absent entirely when the current Host does not serve that namespace. Its
   candidate row offers `On`, `Off` and `Reset` only on a current authority;
@@ -736,11 +744,68 @@ neither USER-field deletion nor `overridden=false` is a success criterion.
   is a TUI presentation choice, not a requirement of the official namespace
   lifecycle.
 
-### Startup backend (General)
+### Web UI page (Host)
 
-`/settings → General → Backend` is the FIRST of the four `General` rows; the
-migrated `Start Web automatically`, `Start ACP automatically` and the
-`Session log upload` switch follow it in that order. Its candidates are `Direct` and `Daemon`, persisted to the official
+`/settings → Host → Web UI` — and the PiTui `/web` deep link — open ONE
+EMBEDDED SPECIALIST PAGE inside this same Settings lease. The page is the ONE
+Web frontend surface on PiTui: there is no separate Web overlay, no second
+screen and no second Settings workspace. The breadcrumb is
+`Settings · Host · Web UI`, the page owns its own body, and the Root keeps the
+shared chrome, the ONE physical last-row Action Bar and the `Esc` pointer
+target.
+
+Two authorities are painted side by side and are NEVER merged:
+
+- `Current Host` is the LIVE listener state of the running Split Host, read
+  through the semantic `WebAccessPort` and bound to the Connection generation
+  it was read under. Every runtime action is qualified by a CURRENT
+  observation; a generation change revokes the actions, the link request and
+  the pointer map, paints `Checking…` and re-reads before a new action is
+  offered. The authenticated launch URL is requested only by an explicit
+  `Open in browser` / `Copy access link`, handed straight to the Client-local
+  opener or clipboard, and never painted, stored, logged or attached to a
+  diagnostic. On Direct the page states `Unavailable · Split Host only` and
+  offers no runtime action; it never reads a fake Host.
+- `Next Host Start` is the persisted PROFILE preference
+  (`pi-tui-web-preferences.autoStart`, default Off) for the NEXT Split Host
+  start, read through the ConfigPort and written ONLY by the existing
+  revision-checked `web-autostart` settings writer. It never toggles the
+  running Host, and a runtime toggle never changes it. `Off (default)` marks
+  the schema default the USER layer does not declare; a non-ready
+  configuration, a missing revision or an unreadable section is
+  `Unavailable`/read-only and never a guessed default.
+
+The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
+`choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config` or
+`settled`. Only the phase decides what the body and the Action Bar offer:
+
+| Phase | Body / actions | Confirm and `Esc` |
+|---|---|---|
+| enabled Host | `Open in browser`, `Copy access link` (`Contains a sign-in token`), `Disable Web…` (`Stops serving; does not revoke access`) | `Esc` returns to the Host Rows |
+| disabled Host | `Enable Web` | `Esc` returns to the Host Rows |
+| changing / unavailable / unreadable | `Refresh` only, never a Host write | `Esc` returns to the Host Rows |
+| `confirm-disable` | the exact sentence `Stop serving the Web UI? Existing browser credentials and sessions are not revoked.` plus `Disable Web` and `Cancel` | only the second confirmation dispatches; `Cancel`/`Esc` performs zero writes |
+| `Next Host Start` edit | the in-page `On`/`Off` candidates (the current one carries `[current]`), then `Confirm save` and `Cancel` | only `Confirm save` calls the writer; `Esc` steps back one stage at a time with zero writes |
+| `pending-*` | `Waiting for the answer…`, no second action | `Esc` leaves the page; the dispatched write settles in its OWN owner and its late result is diagnosed, never cancelled and never repainted |
+
+The first focus is the enabled Host's `Open in browser`, the disabled Host's
+`Enable Web`, otherwise the editable `Start automatically` row when a
+preference can really be written, else `Refresh`. A write settlement is
+painted as its own `Status` word: the runtime write reports `Verified` only
+when the authoritative re-read agrees, `Not saved` when the request reported
+success but the Host reads otherwise, and `Outcome unconfirmed` when the
+receipt was lost, the Host changed during the request or the read-back could
+not be performed; it is never retried automatically and never attributed from
+a fresh read. The preference write reports the four existing writer outcomes
+(`Verified`, `Not saved`, `Unverified`, `Outcome unconfirmed`). A short frame
+scrolls ONE column; the page never drops the `Esc` affordance, never paints a
+partial verb and never exposes a pointer target for an unpainted control.
+
+### Startup backend (Host)
+
+`/settings → Host → Backend` is the FIRST of the four `Host` rows; the `Web
+UI` page entry, `Start ACP automatically` and the `Session log upload` switch
+follow it in that order. Its candidates are `Direct` and `Daemon`, persisted to the official
 Profile Config `tui-startup.backend` (`direct`/`daemon`) through the same
 revision-checked Settings mutation the other Host form rows use; an explicit
 `Direct` or `Daemon` choice is the sole persisted authority and the current

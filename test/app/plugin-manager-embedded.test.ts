@@ -621,7 +621,7 @@ test('an App notice between press and release refuses the Host mutation', async 
   await yieldToRail(railWheel)
   railWheel.vt.sendInput('\u001b[H') // Home -> the rail window starts at About
   await railWheel.waitForFrame()
-  const railLabels = ['About', 'General', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins', 'Extensions']
+  const railLabels = ['About', 'Host', 'Models', 'Account', 'Agent', 'Appearance', 'Conversation', 'Input & Terminal', 'Tools', 'Plugins', 'Extensions']
   const visibleRail = (): string[] => frameRows(railWheel)
     .map(line => line.slice(0, 22).trim())
     .map(cell => cell.replace(/^> /u, ''))

@@ -21,6 +21,8 @@ export function unavailableWebAccess(): WebAccessPort {
     getAuthenticatedUrl: async () => {
       throw new Error(reason)
     },
+    currentGeneration: () => undefined,
+    subscribeGeneration: () => () => {},
   }
 }
 
