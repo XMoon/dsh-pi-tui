@@ -310,6 +310,32 @@ export async function runAcpPo1bOptInControl(context) {
       }
       assert(false, `${label}: the expected frame never appeared:\n${(await frameOf(target)).slice(-2500)}`)
     }
+    /**
+     * The FROZEN Disable risk sentence. The real page wraps it at the terminal
+     * width, so the witness whitespace-normalizes the painted frame (physical
+     * line breaks become single spaces) and requires the COMPLETE sentence —
+     * a truncated or rewritten tail must fail here, not only in a structural
+     * page test.
+     */
+    const RISK_SENTENCE = 'Disable the local ACP listener? All connected ACP clients will be disconnected. '
+      + 'Host sessions, Agents and this TUI will keep running.'
+    const flatFrameOf = async target => (await frameOf(target)).replace(/\s+/gu, ' ').trim()
+    /** Wait for the WHOLE fixed sentence (wrapping allowed; scroll to read). */
+    const waitRiskSentence = async (target, label, timeoutMs = 30_000) => {
+      const prefix = 'Disable the local ACP listener?'
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline && !(await frameOf(target)).includes(prefix)) await sleep(100)
+      assert((await frameOf(target)).includes(prefix), `${label}: the risk confirmation never appeared:\n${(await frameOf(target)).slice(-2500)}`)
+      // The sentence is a scrollable first-class fact on a short grant: reveal
+      // it, then require the complete fixed text (never a prefix-only witness).
+      for (let step = 0; step < 6; step += 1) {
+        if ((await flatFrameOf(target)).includes(RISK_SENTENCE)) return
+        target.send(step === 0 ? '\x1b[H' : '\x1b[6~')
+        await sleep(160)
+      }
+      assert((await flatFrameOf(target)).includes(RISK_SENTENCE),
+        `${label}: the risk sentence is NOT complete:\n${(await frameOf(target)).slice(-2500)}`)
+    }
     /** Down until the pattern's row owns the cursor (never a fixed key count). */
     const selectRow = async (target, pattern, label, maxSteps = 14) => {
       for (let step = 0; step < maxSteps; step += 1) {
@@ -367,13 +393,13 @@ export async function runAcpPo1bOptInControl(context) {
     // confirmation dispatches the ONE Host disable.
     await selectRow(tuiSettings, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
     tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Disable the local ACP listener?', 'b0 disable: risk confirmation', 30_000)
+    await waitRiskSentence(tuiSettings, 'b0 disable: risk confirmation')
     tuiSettings.send('\x1b')
     const afterCancel = await waitFrame(tuiSettings, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
     assert(/Listener\s+Enabled/u.test(afterCancel), 'b0: Cancel must keep the listener enabled')
     assert(exists(tuiSocket), 'b0: the staged (cancelled) Disable must not touch the live socket')
     tuiSettings.send('\r')
-    await tuiSettings.waitForScreen('Disable the local ACP listener?', 'b0 disable: risk confirmation again', 30_000)
+    await waitRiskSentence(tuiSettings, 'b0 disable: risk confirmation again')
     tuiSettings.send('\r') // the SECOND explicit confirmation
     await tuiSettings.waitForScreen('Verified', 'b0 disable: Verified', 60_000)
     await waitUntil(() => !exists(tuiSocket), 'b0: acp.sock to retire after the confirmed page disable')
@@ -503,7 +529,7 @@ export async function runAcpPo1bOptInControl(context) {
     assert(slashInit?.result?.protocolVersion === 1, 'acp command: the held peer must initialize')
     await selectRow(tui2, /^> Disable ACP…(?:\s|$)/mu, 'acp command: disable action')
     tui2.send('\r')
-    await tui2.waitForScreen('Disable the local ACP listener?', 'acp command: risk confirmation', 30_000)
+    await waitRiskSentence(tui2, 'acp command: risk confirmation')
     tui2.send('\r') // the ONE explicit confirmation
     await tui2.waitForScreen('Verified', 'acp command: authoritative read-back', 60_000)
     await waitUntil(() => !exists(socketPath), 'b: the /acp disable retires acp.sock')
