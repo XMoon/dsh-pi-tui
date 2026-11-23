@@ -2014,8 +2014,19 @@ test('session/prompt admits one attached text prompt and answers the real stop r
     const agent = fake.agentOf(sessionId)
     assert.ok(agent !== undefined, 'session/new attached the exact live Agent')
     const message = { id: 'm-uds', source: { kind: 'user', rpcId: request.requestId } }
+    const skillContext = { id: 'm-skill', source: { kind: 'skill-invocation', form: 'instructions' } }
     facts.onInboxInserted(agent, message)
+    facts.onInboxInserted(agent, skillContext)
+    // The next-step skill context is claimed before the ACP next-turn message.
+    facts.onInboxClaimed(agent, skillContext, 1)
     facts.onInboxClaimed(agent, message, 1)
+    const subagentContext = { id: 'm-subagent', source: { kind: 'subagent-settled', form: 'notice' } }
+    const timeContext = { id: 'm-time', source: { kind: 'time-context', form: 'snapshot' } }
+    // Runtime context arriving in the same running turn is also not a user steer.
+    facts.onInboxInserted(agent, subagentContext)
+    facts.onInboxClaimed(agent, subagentContext, 1)
+    facts.onInboxInserted(agent, timeContext)
+    facts.onInboxClaimed(agent, timeContext, 1)
     facts.onSessionEvent(agent.session, {
       type: 'assistant/message',
       data: { turn: 1, message: { id: 'm-uds', content: [{ type: 'text', text: 'wire answer' }] } },
