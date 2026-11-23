@@ -421,7 +421,23 @@ export async function runAcpPo3aTurnEvents(context) {
     assert((hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
       !(event.type === 'user/message' && userMessageText(event) === turnBPrompt)),
     'C: the accepted ACP message must NOT have been claimed while the TUI turn runs')
-    assert(await conn1.silent(1_500), 'C: an accepted ACP prompt must not answer before its turn settles')
+    // The absence under test is the RESPONSE, not every frame: this connection
+    // now also receives the shared Session's legitimate read-only projections
+    // (its durable title/plan), so the window drains frames and requires that
+    // none is the answer to this request.
+    const earlyC = []
+    const earlyCDeadline = Date.now() + 1_500
+    for (;;) {
+      const remaining = earlyCDeadline - Date.now()
+      if (remaining <= 0) break
+      try {
+        earlyC.push(await conn1.next(remaining))
+      } catch {
+        break
+      }
+    }
+    assert(earlyC.every(frame => frame?.id !== 3),
+      `C: an accepted ACP prompt must not answer before its turn settles (got ${JSON.stringify(earlyC.find(frame => frame?.id === 3))})`)
 
     releaseHeldTurn()
     const bNotifications = []
