@@ -366,8 +366,12 @@ export async function runAcpPo4aContentInput(context) {
     acp.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
     acp.send({ jsonrpc: '2.0', id: ++caseId, method: 'session/new', params: { cwd: hostCwd, mcpServers: [] } })
     const afterCancel = await acp.next()
-    assert(afterCancel.id === caseId && afterCancel.error?.data?.code === 'LOCAL_ACP_VIEW_BUSY',
-      `PO-4A socket-order barrier must observe the active prompt: ${JSON.stringify(afterCancel)}`)
+    // Socket order: the response to a LATER request proves the earlier
+    // session/cancel was already dispatched on this connection. A second
+    // session/new is legal on the same connection (multi-Session contract), so
+    // the barrier fact is a real new Session, never a BUSY refusal.
+    assert(afterCancel.id === caseId && typeof afterCancel.result?.sessionId === 'string',
+      `PO-4A socket-order barrier must observe a later request processed after the cancel: ${JSON.stringify(afterCancel)}`)
     writeFileSync(imageAdmissionRelease, 'release\n', { mode: 0o600 })
     const canceled = await canceledPending
     assert(canceled.response.result?.stopReason === 'cancelled',
