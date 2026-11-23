@@ -29,10 +29,12 @@ import {
   buildNativeDaemonEnvironment,
   buildReservationFacts,
   classifyCurrentProfile,
+  classifyKernelLiveness,
   classifyManagedInspection,
   classifyNativeCleanup,
   classifyNativeCliFence,
   classifyNativeClientOwnership,
+  classifyRegisteredProcessLiveness,
   cleanupNativeService,
   combineNativeFailures,
   executeNativeServiceReservation,
@@ -51,6 +53,7 @@ import {
   allowNativeMutation,
   parseManagedDaemonStatus,
   planNativeCleanup,
+  readNativeClientSnapshot,
   requireLaunchdCustomization,
   requireManagedDaemonVerb,
   runFixedDaemonVerb,
@@ -1806,6 +1809,122 @@ test('a native Client is reclaimable only with the same uid, kernel birth, scrat
     sceneRoot: SCENE_ROOT,
     uid: 501,
   }), { owned: false, reason: 'REGISTERED_SCRATCH_FOREIGN' })
+})
+
+test('registered process liveness re-reads once and never signals an unverifiable live Client', () => {
+  const linux = (state, startTicks = '777') => ({
+    kind: 'alive',
+    identity: { platform: 'linux', state, startTicks },
+  })
+  const snapshot = { uid: 501, birth: 'linux:777', command: 'client' }
+  const run = (kernel, readSnapshot, rereadKernel) => {
+    let snapshotReads = 0
+    let kernelReads = 0
+    const result = classifyRegisteredProcessLiveness({
+      kernel,
+      birth: 'linux:777',
+      readSnapshot: () => {
+        snapshotReads += 1
+        return readSnapshot
+      },
+      rereadKernel: () => {
+        kernelReads += 1
+        return rereadKernel
+      },
+    })
+    return { result, snapshotReads, kernelReads }
+  }
+  for (const state of ['Z', 'X', 'x']) {
+    assert.deepEqual(run(linux(state), null, linux('S')), {
+      result: { state: 'gone', reason: 'TERMINATED' }, snapshotReads: 0, kernelReads: 0,
+    })
+  }
+  assert.deepEqual(run(linux('S'), snapshot, linux('S')), {
+    result: { state: 'alive', snapshot }, snapshotReads: 1, kernelReads: 0,
+  })
+  for (const state of ['R', 'S', 'D', 'T', 't', 'I']) {
+    assert.deepEqual(run(linux(state), snapshot, linux(state)), {
+      result: { state: 'alive', snapshot }, snapshotReads: 1, kernelReads: 0,
+    })
+  }
+  assert.deepEqual(run(linux('S'), null, linux('S')), {
+    result: { state: 'unknown', reason: 'PROCESS_FACTS_UNREADABLE' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run(linux('S'), null, linux('Z')), {
+    result: { state: 'gone', reason: 'TERMINATED' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run(linux('S'), null, { kind: 'gone' }), {
+    result: { state: 'gone' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run(linux('S'), null, linux('S', '999')), {
+    result: { state: 'gone', reason: 'PID_REUSED' }, snapshotReads: 1, kernelReads: 1,
+  })
+  assert.deepEqual(run({ kind: 'unknown' }, null, linux('S')), {
+    result: { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }, snapshotReads: 0, kernelReads: 0,
+  })
+  assert.deepEqual(run(linux('S'), null, { kind: 'unknown' }), {
+    result: { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' }, snapshotReads: 1, kernelReads: 1,
+  })
+})
+
+test('a business Client snapshot requires its scratch before ownership', () => {
+  const snapshot = { uid: 501, birth: 'linux:777', command: CLIENT_ENTRY }
+  let environmentReads = 0
+  const shell = readNativeClientSnapshot({
+    pid: 5151,
+    requireScratch: false,
+    readSnapshot: () => snapshot,
+    readEnvironment: () => {
+      environmentReads += 1
+      return CLIENT_SCRATCH
+    },
+  })
+  assert.deepEqual(shell, { ...snapshot, scratch: null })
+  assert.equal(environmentReads, 0)
+  const complete = readNativeClientSnapshot({
+    pid: 5151,
+    requireScratch: true,
+    readSnapshot: () => snapshot,
+    readEnvironment: () => {
+      environmentReads += 1
+      return CLIENT_SCRATCH
+    },
+  })
+  assert.deepEqual(complete, { ...snapshot, scratch: CLIENT_SCRATCH })
+  assert.equal(environmentReads, 1)
+  for (const missing of [undefined, '']) {
+    assert.equal(readNativeClientSnapshot({
+      pid: 5151,
+      requireScratch: true,
+      readSnapshot: () => snapshot,
+      readEnvironment: () => missing,
+    }), null)
+  }
+  let unusedReads = 0
+  assert.equal(readNativeClientSnapshot({
+    pid: 5151,
+    requireScratch: true,
+    readSnapshot: () => null,
+    readEnvironment: () => {
+      unusedReads += 1
+      return CLIENT_SCRATCH
+    },
+  }), null)
+  assert.equal(unusedReads, 0)
+})
+
+test('an unregistered official record PID uses kernel state, not kill(pid, 0)', () => {
+  const linux = state => ({ kind: 'alive', identity: { platform: 'linux', state, startTicks: '777' } })
+  assert.deepEqual(classifyKernelLiveness({ kind: 'gone' }), { state: 'gone' })
+  assert.deepEqual(classifyKernelLiveness(null), { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' })
+  assert.deepEqual(classifyKernelLiveness({ kind: 'unknown' }), { state: 'unknown', reason: 'KERNEL_IDENTITY_UNKNOWN' })
+  for (const state of ['Z', 'X', 'x']) {
+    assert.deepEqual(classifyKernelLiveness(linux(state)), { state: 'gone', reason: 'TERMINATED' })
+  }
+  for (const state of ['R', 'S', 'D']) {
+    assert.deepEqual(classifyKernelLiveness(linux(state)), { state: 'alive' })
+  }
+  assert.deepEqual(classifyKernelLiveness({ kind: 'alive', identity: { platform: 'darwin', state: 5 } }), { state: 'alive' })
 })
 
 test('the tui-test shell is proven by uid, kernel birth and command without a Client scratch', () => {
