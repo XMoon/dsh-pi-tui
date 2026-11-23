@@ -874,11 +874,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   private handleOverflow(): void {
     this.bufferOverflows += 1
-    const affected = [...this.pending.keys()]
-    this.pending.clear()
-    this.pendingEventCount = 0
-    this.pendingBytes = 0
-    this.heldPending.clear()
+    // Held batches are the only copy of accepted events the official source may
+    // still be too short to prove. An overflow owned by another Session must
+    // never discard them; only ordinary (re-readable) batches are cleared.
+    const affected = [...this.pending.keys()].filter(sessionId => !this.heldPending.has(sessionId))
+    for (const sessionId of affected) this.discardPendingSession(sessionId)
     this.markReconcileNeeded('resource-limit')
     this.diag.warn('history search live buffer reached its bound', { sessions: affected.length })
     // Merge the affected ids into the per-id repair map: no writer callback

@@ -156,25 +156,41 @@ function testHeader(id: string, cwd?: string, overrides: Partial<SessionHeader> 
   }
 }
 
-/** A live registry fake that keeps ONE exact Session object per header identity. */
-function liveRegistry(source: { live?: boolean; header: SessionHeader }): HistorySearchSessionsLike {
-  let cachedHeader: SessionHeader | undefined
-  let cached: HistorySearchLiveSessionLike | undefined
-  const liveObject = (): HistorySearchLiveSessionLike | undefined => {
+/** A live registry fake that keeps ONE exact Session object per id. */
+function liveRegistryMany(
+  sources: readonly { live?: boolean; header: SessionHeader }[],
+): HistorySearchSessionsLike {
+  const cached = new Map<string, { header: SessionHeader; object: HistorySearchLiveSessionLike }>()
+  const liveObject = (source: { live?: boolean; header: SessionHeader }): HistorySearchLiveSessionLike | undefined => {
     if (source.live !== true) return undefined
-    if (cachedHeader !== source.header) {
-      cachedHeader = source.header
-      cached = { id: source.header.id, header: source.header }
-    }
-    return cached
+    const id = String(source.header.id)
+    const entry = cached.get(id)
+    if (entry !== undefined && entry.header === source.header) return entry.object
+    const object = { id: source.header.id, header: source.header }
+    cached.set(id, { header: source.header, object })
+    return object
   }
   return {
-    list: () => (liveObject() === undefined ? [] : [liveObject()!]),
+    list: () => {
+      const objects: HistorySearchLiveSessionLike[] = []
+      for (const source of sources) {
+        const object = liveObject(source)
+        if (object !== undefined) objects.push(object)
+      }
+      return objects
+    },
     get: (id) => {
-      const object = liveObject()
-      return object !== undefined && String(object.id) === id ? object : undefined
+      for (const source of sources) {
+        const object = liveObject(source)
+        if (object !== undefined && String(object.id) === id) return object
+      }
+      return undefined
     },
   }
+}
+
+function liveRegistry(source: { live?: boolean; header: SessionHeader }): HistorySearchSessionsLike {
+  return liveRegistryMany([source])
 }
 
 test('an Owner search returns the exact accepted occurrence through the real Gateway', async (t) => {
@@ -820,7 +836,7 @@ interface MutableOfficialSource {
   live?: boolean
 }
 
-function mutableSource(headerCwd: string): MutableOfficialSource {
+function mutableSource(headerCwd: string, id = 'mutable-session'): MutableOfficialSource {
   const message = (text: string, index: number) => ({
     id: `msg-${String(index)}`,
     role: 'user',
@@ -829,7 +845,7 @@ function mutableSource(headerCwd: string): MutableOfficialSource {
   })
   return {
     present: true,
-    header: testHeader('mutable-session', headerCwd),
+    header: testHeader(id, headerCwd),
     events: [
       { type: 'agent/inbox/spliced', seq: 0, time: 1000, data: { target: 'next-turn', start: 0, inserted: [message('mutable first', 1)] } },
       { type: 'working-directory/change', seq: 1, time: 1001, data: { cwd: `${headerCwd}-two` } },
@@ -839,7 +855,10 @@ function mutableSource(headerCwd: string): MutableOfficialSource {
   }
 }
 
-function mutableDeps(source: MutableOfficialSource): {
+function mutableDeps(
+  source: MutableOfficialSource,
+  extras: readonly MutableOfficialSource[] = [],
+): {
   readonly deps: {
     profileContext: () => { dir: string }
     sessionPersistence: () => HistorySearchPersistenceLike
@@ -852,11 +871,13 @@ function mutableDeps(source: MutableOfficialSource): {
     statIds: () => readonly string[]
   }
 } {
-  const durableHeader = () => source.persistedHeader ?? source.header
-  const snapshot = () => ({
-    header: durableHeader(),
-    ...(source.omitEventCount === true ? {} : { eventCount: source.eventCount ?? source.events.length }),
-    revision: source.revision,
+  const sources = [source, ...extras]
+  const sourceOf = (id: string): MutableOfficialSource | undefined =>
+    sources.find(candidate => String(candidate.header.id) === id)
+  const snapshotOf = (candidate: MutableOfficialSource) => ({
+    header: candidate.persistedHeader ?? candidate.header,
+    ...(candidate.omitEventCount === true ? {} : { eventCount: candidate.eventCount ?? candidate.events.length }),
+    revision: candidate.revision,
   })
   let listCalls = 0
   let statCalls = 0
@@ -865,38 +886,42 @@ function mutableDeps(source: MutableOfficialSource): {
     identity: Symbol('mutable-persistence'),
     async list() {
       listCalls += 1
-      if (!source.present) return []
-      return [snapshot()]
+      return sources.filter(candidate => candidate.present).map(snapshotOf)
     },
     async stat(id) {
       statCalls += 1
       statIds.push(id)
-      if (!source.present || String(durableHeader().id) !== id) return undefined
-      return snapshot()
+      const candidate = sourceOf(id)
+      if (candidate === undefined || !candidate.present) return undefined
+      return snapshotOf(candidate)
     },
-    async open() {
+    async open(id) {
+      const candidate = sourceOf(String(id))
+      if (candidate === undefined) throw new Error(`mutable persistence: unknown Session ${String(id)}`)
       return {
-        header: durableHeader(),
+        header: candidate.persistedHeader ?? candidate.header,
         inheritedEventCount: 0,
         async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
-          const durable = source.durableEventCount ?? source.events.length
-          return { events: source.events.slice(offset, Math.min(offset + length, durable)) }
+          const durable = candidate.durableEventCount ?? candidate.events.length
+          return { events: candidate.events.slice(offset, Math.min(offset + length, durable)) }
         },
         async close() {},
       }
     },
   }
   const query: HistorySearchQueryLike = {
-    async observeSession() {
+    async observeSession(id) {
+      const candidate = sourceOf(String(id))
+      if (candidate === undefined) throw new Error(`mutable query: unknown Session ${String(id)}`)
       return {
-        header: source.header,
+        header: candidate.header,
         inheritedEventCount: 0,
-        events: source.events,
+        events: candidate.events,
         [Symbol.dispose]() {},
       }
     },
   }
-  const sessions = liveRegistry(source)
+  const sessions = liveRegistryMany(sources)
   return {
     deps: {
       profileContext: () => ({ dir: '' }),
@@ -2488,6 +2513,99 @@ test('a gapped accepted batch is retained until the official source covers it', 
     if (five.kind !== 'ready') throw new Error('expected ready')
     assert.equal(five.items.length, 1)
     assert.equal(internals.index.occurrenceCount(), 5)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.heldPending.size, 0)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an unrelated overflow preserves another Session held accepted batch', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r205-')
+  const held = mutableSource('/repo/r205-a', 'r205-a')
+  const overflowing = mutableSource('/repo/r205-b', 'r205-b')
+  held.live = true
+  overflowing.live = true
+  const { deps } = mutableDeps(held, [overflowing])
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    pendingEventCount: number
+    heldPending: Set<string>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (sessionId: string, seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 9000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `${sessionId}-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-${sessionId}-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (source: MutableOfficialSource, event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  try {
+    await waitDirectReady(service)
+    assert.equal(internals.index.occurrenceCount(), 4, 'both live Sessions are indexed')
+
+    // A: accepted gap is not durable; the Session is disposed before repair.
+    const gap = inbox('r205-a', 5, 'r205-a accepted gap five')
+    deliver(held, gap)
+    held.live = false
+    const heldStarted = Date.now()
+    while (!internals.heldPending.has('r205-a') && Date.now() - heldStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await settleRepairs()
+    const short = await waitDirectSettled(service)
+    assert.equal(short.kind, 'incomplete', JSON.stringify(short))
+    assert.equal(internals.heldPending.has('r205-a'), true)
+    assert.equal(internals.pendingEventCount, 1)
+
+    // An UNRELATED Session B overflows the shared live buffer. A's held batch
+    // must not be cleared with B's ordinary (re-readable) batch.
+    for (let seq = 3; seq <= 4098; seq += 1) deliver(overflowing, inbox('r205-b', seq, `r205-b burst ${String(seq)}`))
+    assert.equal(internals.heldPending.has('r205-a'), true, 'the overflow must preserve the held Session')
+    await settleRepairs()
+    const afterOverflow = await waitDirectSettled(service)
+    assert.equal(afterOverflow.kind, 'incomplete', JSON.stringify(afterOverflow))
+    assert.equal(internals.heldPending.has('r205-a'), true)
+    assert.equal(internals.heldPending.has('r205-b'), false)
+    assert.equal(internals.pendingEventCount, 1, "only the held Session's batch remains")
+    assert.equal(internals.index.occurrenceCount(), 4)
+    const hidden = await service.search({ scope: 'all', query: 'r205-a accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(hidden.kind, 'incomplete', 'the unproven held event is never exposed as a hit')
+
+    // Once A's official source covers 3..5, the held batch settles and ready.
+    held.events.push(inbox('r205-a', 3, 'r205-a durable three'), inbox('r205-a', 4, 'r205-a durable four'), gap)
+    held.revision += 1
+    await internals.verifySources()
+    await waitDirectReady(service)
+    const five = await service.search({ scope: 'all', query: 'r205-a accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(five.kind, 'ready', JSON.stringify(five))
+    if (five.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(five.items.length, 1)
+    assert.equal(internals.index.occurrenceCount(), 7)
     assert.equal(internals.pendingEventCount, 0)
     assert.equal(internals.heldPending.size, 0)
   } finally {
