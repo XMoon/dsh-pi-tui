@@ -2128,17 +2128,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.capabilities?.subagents !== true || claim.notifyProjection === undefined) continue
       const access = this.access
       if (access === undefined) continue
-      // The official runId joins the end edge to the association the start
-      // edge already verified: the child Agent is disposed before `end` is
-      // published, so a second lineage read would race that disposal. An end
-      // whose start this View never projected announces NOTHING — a lone idle
-      // snapshot would create an association this connection never observed.
-      const known = edge === 'end' ? claim.subagentRuns?.get(info.runId) : undefined
-      if (edge === 'end' && (known === undefined || known.childId !== info.id)) {
-        this.diag.warn('local-acp.projection.subagent-unverified', { edge, reason: 'run-unknown' })
-        continue
-      }
       const task = this.enqueueProjectionTask(claim, async () => {
+        // The official runId joins the end edge to the association the start
+        // edge already verified on THIS claim. Both edges are resolved INSIDE
+        // one FIFO tail, so an end published while the start notification is
+        // still held sees the start's verified entry. The child Agent is
+        // disposed before `end` is published, so a second lineage read would
+        // race that disposal; an end whose start this View never projected
+        // announces NOTHING — a lone idle snapshot would create an association
+        // this connection never observed.
+        const known = edge === 'end' ? claim.subagentRuns?.get(info.runId) : undefined
+        if (edge === 'end' && (known === undefined || known.childId !== info.id)) {
+          this.diag.warn('local-acp.projection.subagent-unverified', { edge, reason: 'run-unknown' })
+          return
+        }
         const verified = known !== undefined && known.childId === info.id
           ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }
           : await this.verifySubagentChild(access, info, edge)

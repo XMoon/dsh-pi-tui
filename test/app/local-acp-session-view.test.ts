@@ -5531,6 +5531,23 @@ test('G-ACP2-PR2 COMPACT-01: a duplicated compaction callback never re-projects 
   assert.equal((view.notifications[1] as { summary?: unknown }).summary !== undefined, true)
 })
 
+test('G-ACP2-PR2 SUB-01: an end arriving while the start notification is still held still joins it in order', async () => {
+  const view = projectionView('S8')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'S8', origin: 'subagent', cwd: '/w' }
+  const release = view.holdProjection()
+  view.registry.onSubagentStart({ runId: 'run-held', id: 'CHILD', parentSessionId: 'S8', local: true })
+  view.registry.onSubagentEnd({ runId: 'run-held', id: 'CHILD', parentSessionId: 'S8', local: true, stopReason: 'completed' })
+  release()
+  await waitUntil(() => view.notifications.length >= 2, 'the held start then its end are delivered in order')
+  const states = view.notifications
+    .filter(update => update.sessionUpdate === 'subagent_update')
+    .map(update => (update as { state?: { state?: string; stopReason?: unknown } }).state)
+  assert.deepEqual(states, [{ state: 'running' }, { state: 'idle', stopReason: 'end_turn' }],
+    'the runId join resolves inside the one FIFO tail, so a held start cannot orphan its end')
+})
+
 test('G-ACP2-PR2 SUB-01 negative: an end edge whose start this View never projected announces nothing', async () => {
   const view = projectionView('S9')
   await view.resume()
