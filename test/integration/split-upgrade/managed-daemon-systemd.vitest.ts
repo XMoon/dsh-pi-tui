@@ -634,7 +634,7 @@ test(TEST_TITLE, async () => {
     ].join('\n')
     writeFileSync(targetUnitPath, foreignUnitText, { mode: 0o600 })
     const foreignBytes = readFileSync(targetUnitPath)
-    const statBefore = statSync(targetUnitPath)
+    const statBefore = lstatSync(targetUnitPath)
     const foreignShowArgs = ['show', targetUnitName, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID']
     try {
       systemctlUser(['daemon-reload'], environment)
@@ -653,9 +653,18 @@ test(TEST_TITLE, async () => {
       assert.equal(statAfter.mode & 0o7777, statBefore.mode & 0o7777, 'the refused foreign unit mode changed')
       assert.equal(systemctlUser(foreignShowArgs, environment), showBefore, 'the refused foreign unit manager state changed')
     } finally {
-      if (existsSync(targetUnitPath) && readFileSync(targetUnitPath).equals(foreignBytes)) {
-        unlinkSync(targetUnitPath)
+      let removeForeign = false
+      try {
+        const current = lstatSync(targetUnitPath)
+        removeForeign = current.dev === statBefore.dev
+          && current.ino === statBefore.ino
+          && (current.mode & 0o7777) === (statBefore.mode & 0o7777)
+          && readFileSync(targetUnitPath).equals(foreignBytes)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'ENOENT') throw error
       }
+      if (removeForeign) unlinkSync(targetUnitPath)
       systemctlUser(['daemon-reload'], environment)
     }
     assert.equal(existsSync(targetUnitPath), false, 'the foreign unit was not removed')
