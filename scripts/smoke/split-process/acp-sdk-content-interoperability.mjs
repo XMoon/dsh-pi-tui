@@ -26,6 +26,9 @@ import { createC1Scene } from './c1-scene.mjs'
  * 2.9.1, so a fixed relative depth is not a fact: walk up to the manifest that
  * names THIS package.
  */
+/** The repository's exact SDK pin (the dependency this candidate is built with). */
+const PINNED_SDK = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'))
+  .dependencies?.['@agentclientprotocol/sdk']
 const SDK_VERSION = (() => {
   let dir = dirname(fileURLToPath(import.meta.resolve('@agentclientprotocol/sdk')))
   for (let depth = 0; depth < 8; depth += 1) {
@@ -530,7 +533,8 @@ async function outputScene(context) {
 }
 
 export async function runAcpSdkContentInteroperability(context) {
-  requireFact(SDK_VERSION === '1.4.0' && acp.PROTOCOL_VERSION === 1, 'installed pinned official SDK and ACP v1')
+  requireFact(SDK_VERSION === PINNED_SDK && acp.PROTOCOL_VERSION === 1,
+    `installed pinned official SDK and ACP v1 (resolved ${String(SDK_VERSION)}, pinned ${String(PINNED_SDK)})`)
   const input = await inputScene(context)
   // inputScene returns only AFTER SDK/TUI/Host teardown and kernel seat release.
   // Rewriting the existing fixture in this same profile is safe only then.

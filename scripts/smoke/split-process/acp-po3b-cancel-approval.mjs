@@ -129,6 +129,25 @@ class AcpRawClient {
     })
   }
 
+  /**
+   * Collect every frame that arrives inside a bounded window. The read-only
+   * projections of a shared Session are legitimate notifications, so a step
+   * that proves "no RESPONSE" drains frames instead of requiring silence.
+   */
+  async drain(windowMs) {
+    const frames = this.queue.splice(0, this.queue.length)
+    const deadline = Date.now() + windowMs
+    for (;;) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return frames
+      try {
+        frames.push(await this.next(remaining))
+      } catch {
+        return frames
+      }
+    }
+  }
+
   async initialize(id) {
     this.send({ jsonrpc: '2.0', id, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } })
     return await this.next()
@@ -387,7 +406,9 @@ export async function runAcpPo3bCancelApproval(context) {
       'C01: the TUI message to be committed inside its held step', 120_000)
     const idleCancelWindow = (hostSessionEvents(dshHome, sessionA) ?? []).length
     conn1.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionA } })
-    assert(await conn1.silent(1_000), 'C01: an idle cancel notification carries no response')
+    const earlyC01 = await conn1.drain(1_000)
+    assert(earlyC01.every(frame => frame?.method !== undefined),
+      `C01: an idle cancel notification carries no response (got ${JSON.stringify(earlyC01.find(frame => frame?.method === undefined))})`)
     assert((hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
       !(event.type === 'agent/inbox/spliced' && event.data?.outcome === 'canceled')),
     'C01: an idle cancel must not remove any Host message')
