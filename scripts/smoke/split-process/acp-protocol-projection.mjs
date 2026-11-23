@@ -442,7 +442,7 @@ export async function runAcpProtocolProjection(context) {
 
     // ── I) The Host and the Session authority are untouched.
     const hostAfter = await scene.hostIdentityFacts(host)
-    const hostIdentityKept = hostAfter?.pid === hostIdentity.hostPid
+    const hostIdentityKept = hostAfter?.hostPid === hostIdentity.hostPid
       && hostAfter?.instanceId === hostIdentity.instanceId
     assert(hostIdentityKept,
       `PP-10: the same Host instance serves every read (${JSON.stringify({ before: hostIdentity, after: hostAfter })})`)
