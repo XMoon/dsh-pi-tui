@@ -633,16 +633,15 @@ test(TEST_TITLE, async () => {
       '',
     ].join('\n')
     writeFileSync(targetUnitPath, foreignUnitText, { mode: 0o600 })
+    const foreignBytes = readFileSync(targetUnitPath)
+    const statBefore = statSync(targetUnitPath)
     const foreignShowArgs = ['show', targetUnitName, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID']
-    let foreignBytes: Buffer | null = null
     try {
       systemctlUser(['daemon-reload'], environment)
       const showBefore = systemctlUser(foreignShowArgs, environment)
       assert.match(showBefore, /LoadState=loaded/u, 'the foreign unit was not loaded')
       assert.match(showBefore, /ActiveState=inactive/u, 'the foreign unit is not inactive')
       assert.equal(readFileSync(targetUnitPath, 'utf8'), foreignUnitText, 'the foreign unit bytes changed before the refusal')
-      foreignBytes = readFileSync(targetUnitPath)
-      const statBefore = statSync(targetUnitPath)
       await assert.rejects(scene.reserveManagedService(), (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
         return message.includes('NATIVE_MANAGED_SERVICE_CONFLICT') || message.includes('not absent and not-loaded')
@@ -654,7 +653,7 @@ test(TEST_TITLE, async () => {
       assert.equal(statAfter.mode & 0o7777, statBefore.mode & 0o7777, 'the refused foreign unit mode changed')
       assert.equal(systemctlUser(foreignShowArgs, environment), showBefore, 'the refused foreign unit manager state changed')
     } finally {
-      if (foreignBytes !== null && existsSync(targetUnitPath) && readFileSync(targetUnitPath).equals(foreignBytes)) {
+      if (existsSync(targetUnitPath) && readFileSync(targetUnitPath).equals(foreignBytes)) {
         unlinkSync(targetUnitPath)
       }
       systemctlUser(['daemon-reload'], environment)
