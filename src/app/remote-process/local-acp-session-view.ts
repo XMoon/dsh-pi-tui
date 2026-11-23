@@ -1879,7 +1879,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       case 'session/title':
         return true
       case 'turn/start':
-        return claim.announcedPlan === true
+        // ALWAYS queue the reset: the decision whether a plan needs removal
+        // belongs to the moment this task RUNS in the one ordered tail, after
+        // any earlier plan notification completed. Deciding here would drop the
+        // reset while a slow plan send is still in flight.
+        return true
       case 'compaction/start':
       case 'compaction/summary':
       case 'compaction/end':
@@ -2001,7 +2005,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
       try {
         blocks.push(await this.readProjectionImage(replay, part.ref))
-      } catch {
+      } catch (error) {
+        // A CANONICAL HISTORY read is fail-closed: a committed image the Store
+        // cannot produce must fail the load (the same rule as any other
+        // history image), never silently drop the message and report a
+        // complete replay. A live projection only loses this one message.
+        if (replay !== undefined) throw error
         this.diag.warn('local-acp.projection.attachment-failed', { key: 'session_message' })
         return
       }

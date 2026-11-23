@@ -5712,6 +5712,50 @@ test('G-ACP2-PR2 SUB-02: an official child edge observed inside a load barrier n
     'the canonical history comes first, then the child association announced inside the same tail')
 })
 
+test('G-ACP2-PR2 PLAN-05: a turn/start reset arriving while the plan send is still held is not lost', async () => {
+  const view = projectionView('P5')
+  await view.resume()
+  view.notifications.length = 0
+  const release = view.holdProjection()
+  view.commit('todo/write', { todos: [{ content: 'held plan', status: 'pending' }] })
+  // The plan notification is STILL HELD at the sink when the official reset
+  // arrives. The reset must still enter the one ordered tail; deciding at
+  // arrival time would drop it while `announcedPlan` is not set yet.
+  view.commit('turn/start', { turn: 2 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  release()
+  await waitUntil(() => view.notifications.length >= 2, 'the held plan then exactly one reset')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'])
+})
+
+test('G-ACP2-PR2 LOAD-06: an unreadable agent-message image fails the load instead of dropping the message', async () => {
+  const event = (image: unknown) => [{
+    seq: 0,
+    type: 'user/message',
+    data: {
+      id: 'am1',
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+      role: 'user',
+      content: [{ type: 'text', text: 'see the image' }, image],
+    },
+  }]
+  const broken = projectionView('LD6', {
+    history: { header: { sessionId: 'LD6', cwd: '/w' }, events: event({ type: 'image', attachment: { attachmentId: 'img-missing', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }) },
+  })
+  broken.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'LD6', cwd: '/w' }
+  await assert.rejects(broken.load(), isViewError('LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED'),
+    'an incomplete canonical replay fails closed instead of dropping the message')
+  // The same committed message with a readable Store object replays normally.
+  const healthy = projectionView('LD7', {
+    history: { header: { sessionId: 'LD7', cwd: '/w' }, events: event({ type: 'image', attachment: { attachmentId: 'img-ok', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }) },
+  })
+  healthy.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'LD7', cwd: '/w' }
+  healthy.access.storedImages.set('img-ok', { bytes: Uint8Array.of(1, 2, 3), mediaType: 'image/png' })
+  await healthy.load()
+  const message = healthy.notifications.find(update => update.sessionUpdate === 'session_message')
+  assert.deepEqual(message?.content?.map(block => block.type), ['text', 'image'])
+})
+
 test('G-ACP2-PR2 LOAD-02: buffered live events join in seq order, once per seq, even when delivered out of order', async () => {
   const view = projectionView('O1')
   const readStarted = Promise.withResolvers<void>()
