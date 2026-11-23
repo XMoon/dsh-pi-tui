@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -253,6 +253,22 @@ function requireSystemdEnvironment(): SystemdEnvironment {
   requireFrozenTarball('SPLIT_VITEST_UPGRADE_OLD_TGZ')
   requireFrozenTarball('SPLIT_VITEST_UPGRADE_NEW_TGZ')
   return { accountHome, runtimeDir, tmpBase, uid }
+}
+
+function systemdManagerEnv(environment: SystemdEnvironment): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, XDG_RUNTIME_DIR: environment.runtimeDir }
+  const busPath = join(environment.runtimeDir, 'bus')
+  if (existsSync(busPath)) env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath}`
+  else delete env.DBUS_SESSION_BUS_ADDRESS
+  return env
+}
+
+function systemctlUser(args: string[], environment: SystemdEnvironment): string {
+  const result = spawnSync('/usr/bin/systemctl', [
+    '--user', '--no-pager', '--no-ask-password', ...args,
+  ], { encoding: 'utf8', timeout: 15_000, env: systemdManagerEnv(environment) })
+  assert.equal(result.status, 0, `systemctl --user ${args.join(' ')} failed: ${result.stderr}`)
+  return result.stdout
 }
 
 function sha256File(path: string): string {
@@ -491,6 +507,18 @@ async function waitForExternalKill(point: string): Promise<never> {
   throw new Error(`the external probe did not deliver the ${point} kill within the bounded wait`)
 }
 
+function workerKillIdentity(): { pid: number; ppid: number; kernelIdentity: string } {
+  const stat = readFileSync('/proc/self/stat', 'utf8')
+  const close = stat.lastIndexOf(')')
+  assert.ok(close > 0, 'the Worker kernel identity is unreadable')
+  const fields = stat.slice(close + 2).trim().split(/\s+/u)
+  const ppid = Number(fields[1])
+  const startTicks = fields[19] ?? ''
+  assert.ok(Number.isSafeInteger(ppid) && ppid > 0, 'the Worker parent PID is unreadable')
+  assert.match(startTicks, /^\d+$/u, 'the Worker kernel start time is unreadable')
+  return { pid: process.pid, ppid, kernelIdentity: `linux:${startTicks}` }
+}
+
 async function runScene(run: (scene: UpgradeScene) => Promise<void>): Promise<void> {
   let scene: UpgradeScene | undefined
   let primary: unknown
@@ -585,6 +613,56 @@ test(TEST_TITLE, async () => {
     assert.deepEqual(seededCredentials.recordKeys, [CREDENTIAL_KEY], 'the seeded credential store carries unexpected records')
     const sessionPath = readSessionLogPath(scene, sessionId)
 
+    // ── a loaded foreign unit at the target path must be refused untouched ──
+    const targetUnitName = `dsh-pi-tui@pi-tui-${seedIdentity.scopeId.slice(0, 16)}.service`
+    assert.match(targetUnitName, UNIT_NAME_PATTERN, 'the seed scope does not name the Profile unit')
+    const targetUnitDir = join(environment.accountHome, '.config', 'systemd', 'user')
+    const targetUnitPath = join(targetUnitDir, targetUnitName)
+    assert.equal(existsSync(targetUnitPath), false, 'the target unit path is not absent before the foreign-unit control')
+    mkdirSync(targetUnitDir, { recursive: true, mode: 0o700 })
+    const foreignUnitText = [
+      '[Unit]',
+      'Description=Foreign qualification unit',
+      '[Service]',
+      'Type=oneshot',
+      'ExecStart=/bin/true',
+      'X-DshPiTuiOwner=local-host-manager-v1',
+      `X-DshPiTuiScopeId=${'f'.repeat(64)}`,
+      `X-DshPiTuiProfileIdentity=${'a'.repeat(64)}`,
+      `X-DshPiTuiInstallBuild=${'b'.repeat(64)}`,
+      '',
+    ].join('\n')
+    writeFileSync(targetUnitPath, foreignUnitText, { mode: 0o600 })
+    const foreignShowArgs = ['show', targetUnitName, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'FragmentPath', '-p', 'MainPID']
+    let foreignBytes: Buffer | null = null
+    try {
+      systemctlUser(['daemon-reload'], environment)
+      const showBefore = systemctlUser(foreignShowArgs, environment)
+      assert.match(showBefore, /LoadState=loaded/u, 'the foreign unit was not loaded')
+      assert.match(showBefore, /ActiveState=inactive/u, 'the foreign unit is not inactive')
+      assert.equal(readFileSync(targetUnitPath, 'utf8'), foreignUnitText, 'the foreign unit bytes changed before the refusal')
+      foreignBytes = readFileSync(targetUnitPath)
+      const statBefore = statSync(targetUnitPath)
+      await assert.rejects(scene.reserveManagedService(), (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        return message.includes('NATIVE_MANAGED_SERVICE_CONFLICT') || message.includes('not absent and not-loaded')
+      })
+      assert.deepEqual(readFileSync(targetUnitPath), foreignBytes, 'the refused foreign unit bytes changed')
+      const statAfter = statSync(targetUnitPath)
+      assert.equal(statAfter.dev, statBefore.dev, 'the refused foreign unit device changed')
+      assert.equal(statAfter.ino, statBefore.ino, 'the refused foreign unit inode changed')
+      assert.equal(statAfter.mode & 0o7777, statBefore.mode & 0o7777, 'the refused foreign unit mode changed')
+      assert.equal(systemctlUser(foreignShowArgs, environment), showBefore, 'the refused foreign unit manager state changed')
+    } finally {
+      if (foreignBytes !== null && existsSync(targetUnitPath) && readFileSync(targetUnitPath).equals(foreignBytes)) {
+        unlinkSync(targetUnitPath)
+      }
+      systemctlUser(['daemon-reload'], environment)
+    }
+    assert.equal(existsSync(targetUnitPath), false, 'the foreign unit was not removed')
+    assert.match(systemctlUser(['show', targetUnitName, '-p', 'LoadState'], environment), /^LoadState=not-found$/mu,
+      'the removed foreign unit is still loaded')
+
     // ── reserve the run-owned unit before any service write ─────────────────
     const reserved = await scene.reserveManagedService()
     assertObservation(reserved, {
@@ -611,8 +689,8 @@ test(TEST_TITLE, async () => {
     assert.equal(reservation.oldBuildId, oldProfile.buildId, 'the reservation old build is not the installed old build')
     assert.equal(reservation.sceneId, scene.sceneId, 'the reservation belongs to another Scene')
     assert.match(reservation.unitName, UNIT_NAME_PATTERN, 'the reservation unit name is not the Profile unit')
-    assert.equal(reservation.unitPath, join(environment.accountHome, '.config', 'systemd', 'user', reservation.unitName),
-      'the reservation unit path is not the fixed user-manager path')
+    assert.equal(reservation.unitName, targetUnitName, 'the reservation target changed after the foreign-unit control')
+    assert.equal(reservation.unitPath, targetUnitPath, 'the reservation did not return to the controlled target path')
 
     const cold = readDaemon(await scene.runProfileDaemon('status'), {
       host: 'stopped',
@@ -660,7 +738,7 @@ test(TEST_TITLE, async () => {
     const oldEntryIsStable = typeof oldExecStart === 'string' && oldExecStart.includes(stableProfileEntry)
 
     if (killPoint === KILL_INSTALL) {
-      await scene.report('native-kill-ready', { point: KILL_INSTALL })
+      await scene.report('native-kill-ready', { point: KILL_INSTALL, worker: workerKillIdentity() })
       await waitForExternalKill(KILL_INSTALL)
     }
 
@@ -713,7 +791,7 @@ test(TEST_TITLE, async () => {
     }, 'the old managed Host with its Client attached')
 
     if (killPoint === KILL_CLIENT_ATTACHED) {
-      await scene.report('native-kill-ready', { point: KILL_CLIENT_ATTACHED })
+      await scene.report('native-kill-ready', { point: KILL_CLIENT_ATTACHED, worker: workerKillIdentity() })
       await waitForExternalKill(KILL_CLIENT_ATTACHED)
     }
 

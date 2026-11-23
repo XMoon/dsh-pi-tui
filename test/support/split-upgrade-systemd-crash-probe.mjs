@@ -34,6 +34,7 @@ import { inspectSplitUpgradePair, readSplitUpgradePairEnvironment } from './spli
 const SUPPORT_DIR = fileURLToPath(new URL('.', import.meta.url))
 const REPO_ROOT = realpathSync(join(SUPPORT_DIR, '..', '..'))
 const KILL_POINTS = Object.freeze(['managed-install-complete', 'managed-host-client-attached'])
+const ATTACHED_CLIENT_LABEL = 'managed-systemd-client-old'
 const RECEIPT_WAIT_MS = 600_000
 const TERMINAL_WAIT_MS = 300_000
 const SUPERVISOR_EXIT_WAIT_MS = 60_000
@@ -93,12 +94,14 @@ function readProcessObservation(pid) {
   if (close < 0) return { kind: 'unknown', code: 'READ_FAILED' }
   const fields = stat.slice(close + 2).trim().split(/\s+/u)
   const state = fields[0]
+  const ppid = Number(fields[1])
   const startTicks = fields[19]
   if (typeof state !== 'string' || !/^[A-Za-z]$/u.test(state)
+    || !Number.isSafeInteger(ppid) || ppid <= 0
     || typeof startTicks !== 'string' || !/^\d+$/u.test(startTicks)) {
     return { kind: 'unknown', code: 'READ_FAILED' }
   }
-  return { kind: 'alive', state, startTicks }
+  return { kind: 'alive', state, ppid, startTicks }
 }
 
 function processState(pid, birth) {
@@ -159,7 +162,7 @@ function findKillReadyReceipt(receiptDir, runId, point) {
     if (receipt?.native === null || receipt?.native === undefined) continue
     const notes = Array.isArray(receipt.notes) ? receipt.notes : []
     const ready = notes.find(note => note?.event === 'native-kill-ready' && note?.detail?.point === point)
-    if (ready !== undefined) return { path: join(receiptDir, name), receipt }
+    if (ready !== undefined) return { path: join(receiptDir, name), receipt, ready: ready.detail }
   }
   return undefined
 }
@@ -365,16 +368,31 @@ async function main() {
   try {
     const found = await waitForKillReadyReceipt(receiptDir, runId, point)
     const receipt = found.receipt
-    workerPid = Number(receipt?.worker?.pid)
+    const readyWorker = found.ready?.worker
+    workerPid = Number(readyWorker?.pid)
     const supervisorPid = Number(receipt?.supervisor?.pid)
-    if (!Number.isInteger(workerPid) || workerPid <= 0) fail('the kill-ready receipt carries no real Worker PID')
-    if (receipt?.worker?.ppid !== child.pid) {
-      fail(`the Worker PPID ${String(receipt?.worker?.ppid)} does not match the spawned Vitest PID ${String(child.pid)}`)
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      fail('the kill-ready note carries no exact Worker PID')
+    }
+    if (receipt?.worker?.pid !== workerPid) {
+      fail('the kill-ready note Worker PID does not match the durable Worker ledger')
+    }
+    if (readyWorker?.ppid !== child.pid || receipt?.worker?.ppid !== child.pid) {
+      fail(`the Worker PPID ${String(readyWorker?.ppid)} does not match the spawned Vitest PID ${String(child.pid)}`)
+    }
+    if (typeof readyWorker?.kernelIdentity !== 'string' || !readyWorker.kernelIdentity.startsWith('linux:')) {
+      fail('the kill-ready note carries no Worker kernel birth')
     }
     const workerObservation = readProcessObservation(workerPid)
     if (workerObservation.kind !== 'alive'
       || workerObservation.state === 'Z' || workerObservation.state === 'X' || workerObservation.state === 'x') {
       fail('the Worker PID is not a live kernel process before the SIGKILL')
+    }
+    if (workerObservation.ppid !== child.pid) {
+      fail(`the current Worker PPID ${String(workerObservation.ppid)} is not the spawned Vitest PID ${String(child.pid)}`)
+    }
+    if (`linux:${workerObservation.startTicks}` !== readyWorker.kernelIdentity) {
+      fail('the current Worker kernel birth differs from the kill-ready note')
     }
     if (!Number.isInteger(supervisorPid) || supervisorPid <= 0) {
       fail('the kill-ready receipt carries no real Supervisor PID')
@@ -405,7 +423,25 @@ async function main() {
       if (host.pid !== before.mainPid) fail('the recorded Host PID does not match the manager MainPID')
       if (hostProcessState(host) !== 'alive') fail('the recorded managed Host is not a live kernel process before the SIGKILL')
       const clients = Array.isArray(receipt?.clients) ? receipt.clients : []
-      if (clients.length === 0) fail('the client-attached window recorded no Client')
+      const attached = clients.find(client => client?.label === ATTACHED_CLIENT_LABEL)
+      if (attached === undefined) fail(`the client-attached window recorded no ${ATTACHED_CLIENT_LABEL}`)
+      const nativeOs = attached?.nativeOs
+      const attachedIdentities = [
+        ...(Array.isArray(nativeOs?.business) ? nativeOs.business : []),
+        ...(nativeOs?.shell === null || nativeOs?.shell === undefined ? [] : [nativeOs.shell]),
+      ]
+      if (attachedIdentities.length === 0) fail('the attached Client carries no registered native OS identity')
+      for (const identity of attachedIdentities) {
+        if (!Number.isInteger(identity?.pid) || identity.pid <= 0) {
+          fail('the attached Client carries no registered PID')
+        }
+        if (identity.uid !== uid) {
+          fail(`the attached Client PID ${String(identity.pid)} has another uid`)
+        }
+        if (processState(identity.pid, identity.birth) !== 'alive') {
+          fail(`the attached Client PID ${String(identity.pid)} is not live before the SIGKILL`)
+        }
+      }
     }
     console.log(`KILL_POINT=${point}`)
     console.log(`WORKER_PID=${String(workerPid)}`)
