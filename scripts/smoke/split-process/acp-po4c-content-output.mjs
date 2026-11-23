@@ -191,6 +191,19 @@ function imageRefOf(block) {
   return block.attachment
 }
 
+/**
+ * G-ACP2-PR2 read-only projections of the SHARED Session ride the same
+ * connection but are never part of a prompt's flight output. A flight
+ * assertion filters them out explicitly; a "nothing at all arrives" assertion
+ * does not use this filter.
+ */
+const READ_ONLY_PROJECTION_KINDS = new Set([
+  'plan', 'plan_update', 'plan_removed', 'session_info_update', 'usage_update',
+  'compaction_update', 'subagent_update', 'session_message', 'notice',
+])
+const flightOnly = updates => updates.filter(entry =>
+  !READ_ONLY_PROJECTION_KINDS.has(entry?.message?.params?.update?.sessionUpdate))
+
 export async function runAcpPo4cContentOutput(context) {
   const { dshHome, workDir, trace } = context
   const scene = createC1Scene(context, { imageProbe: true })
@@ -288,7 +301,10 @@ export async function runAcpPo4cContentOutput(context) {
     await waitForHostSessionEventAfter(dshHome, sessionId, start,
       event => event.type === 'turn/end' && event.data?.turn === turn, `${label} real turn/end`)
     const turnEvents = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.data?.turn === turn)
-    return { start, id, turn, requestId, messageId: durable.data.id, settled, turnEvents }
+    return {
+      start, id, turn, requestId, messageId: durable.data.id, turnEvents,
+      settled: { ...settled, updates: flightOnly(settled.updates ?? []) },
+    }
   }
 
   /**
@@ -559,7 +575,9 @@ export async function runAcpPo4cContentOutput(context) {
     for (;;) {
       const entry = await acp.next(message => message?.id === fenceId || message?.method === 'session/update')
       if (entry.message?.id === fenceId) break
-      strayTui.push(entry)
+      // Only the TUI turn's OWN output would be a violation; the shared
+      // Session's read-only projections are legitimate on this connection.
+      if (!READ_ONLY_PROJECTION_KINDS.has(entry.message?.params?.update?.sessionUpdate)) strayTui.push(entry)
     }
     assert(strayTui.length === 0,
       `PO-4C: a foreign TUI turn never projects onto the ACP View (got ${String(strayTui.length)} stray update(s))`)
