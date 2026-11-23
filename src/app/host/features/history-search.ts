@@ -448,6 +448,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    * them. Held ids are excluded from the automatic drain loop to avoid a spin.
    */
   private readonly heldPending = new Set<string>()
+  /**
+   * Highest accepted seq evicted from the live buffer by the HARD memory bound.
+   * Evicting is unavoidable once the bound is crossed, but it is never silent:
+   * the exact seq is recorded and the index stays incomplete/resource-limit
+   * until a committed replay covers it. Content recovery comes from the official
+   * durable source.
+   */
+  private readonly droppedAccepted = new Map<string, number>()
   /** Active read candidates by exact Session id (source/identity/checkpoint witness). */
   private readonly activeCandidates = new Map<string, Set<HistoryCandidateWitness>>()
   /**
@@ -657,6 +665,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.disposalRequests.clear()
       this.rebuildRequests.clear()
       this.heldPending.clear()
+      this.droppedAccepted.clear()
       const index = this.index
       this.index = undefined
       index?.close()
@@ -874,16 +883,34 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   private handleOverflow(): void {
     this.bufferOverflows += 1
-    // Held batches are the only copy of accepted events the official source may
-    // still be too short to prove. An overflow owned by another Session must
-    // never discard them; only ordinary (re-readable) batches are cleared.
-    const affected = [...this.pending.keys()].filter(sessionId => !this.heldPending.has(sessionId))
-    for (const sessionId of affected) this.discardPendingSession(sessionId)
+    const ordinary = [...this.pending.keys()].filter(sessionId => !this.heldPending.has(sessionId))
+    for (const sessionId of ordinary) this.discardPendingSession(sessionId)
+    // Held batches are the only in-memory copy of accepted events the official
+    // source may still be too short to prove, so keep them while the retained
+    // set is within the HARD bound (an unrelated burst must not evict them).
+    // A held Session that is itself over the bound must still be evicted: the
+    // bound is finite. Record its last seq so completeness cannot claim ready
+    // until the official source covers the evicted facts.
+    const evicted: string[] = []
+    if (this.pendingEventCount > HISTORY_SEARCH_MAX_PENDING_EVENTS || this.pendingBytes > HISTORY_SEARCH_MAX_PENDING_BYTES) {
+      for (const [sessionId, batch] of [...this.pending.entries()]) {
+        if (!this.heldPending.has(sessionId)) continue
+        const lastSeq = batch.events.reduce((max, event) => Math.max(max, event.seq), -1)
+        this.droppedAccepted.set(sessionId, Math.max(this.droppedAccepted.get(sessionId) ?? -1, lastSeq))
+        evicted.push(sessionId)
+        this.discardPendingSession(sessionId)
+        if (this.pendingEventCount <= HISTORY_SEARCH_MAX_PENDING_EVENTS && this.pendingBytes <= HISTORY_SEARCH_MAX_PENDING_BYTES) break
+      }
+    }
     this.markReconcileNeeded('resource-limit')
-    this.diag.warn('history search live buffer reached its bound', { sessions: affected.length })
+    this.diag.warn('history search live buffer reached its bound', {
+      sessions: ordinary.length,
+      heldEvicted: evicted.length,
+    })
     // Merge the affected ids into the per-id repair map: no writer callback
     // awaits an official read, and different ids make progress independently.
-    for (const sessionId of affected) this.scheduleSessionRepair(sessionId, 'rebuild')
+    for (const sessionId of ordinary) this.scheduleSessionRepair(sessionId, 'rebuild')
+    for (const sessionId of evicted) this.scheduleSessionRepair(sessionId, 'rebuild')
   }
 
   // ── maintenance ownership (full pass + per-Session repairs) ─────────────
@@ -947,8 +974,17 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // rows/pending and stay incomplete until the official source advances.
     const checkpoint = this.index?.checkpointOf(sessionId)
     if (checkpoint !== undefined) {
-      if (snapshot.eventCount === undefined) return 'stale'
-      if (snapshot.eventCount < checkpoint.nextSeq) return 'stale'
+      if (snapshot.eventCount !== undefined) {
+        if (snapshot.eventCount < checkpoint.nextSeq) return 'stale'
+      } else {
+        // rc.5 JSONL `stat()`/`list()` omit eventCount. Prove the checkpoint's
+        // own durable tail through an authoritative official read: a short or
+        // unreadable source keeps the rows/incomplete, while a proven prefix
+        // makes the full replay safe (that replay re-reads the complete source
+        // and same-instance revision-proves the result).
+        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+        if (proof !== 'proven') return 'stale'
+      }
     }
     const record: OfficialSession = {
       header: structuredClone(snapshot.header),
@@ -2090,9 +2126,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       try {
         let stale = false
         const receipt = await this.enqueueWrite(() => {
-          // A live entry, a buffered accepted event, an active same-id repair or
-          // a moved checkpoint refuses this derived deletion outright.
-          if (!this.isCandidateCurrent(witness) || this.sessionRepairFlights.has(sessionId)) {
+          // A live entry, a buffered accepted event (held or not), an active
+          // same-id repair or a moved checkpoint refuses this derived deletion
+          // outright. Unlike a replay, deletion never gets the held exception:
+          // a held batch is the sole copy of accepted facts.
+          if (!this.isCandidateCurrent(witness) || this.sessionRepairFlights.has(sessionId) || this.pending.has(sessionId)) {
             stale = true
             return
           }
@@ -2102,8 +2140,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           }
           this.requireIndex().deleteSession(sessionId)
           // The official roster no longer owns this session; an accepted batch
-          // must not keep a deleted session's barrier alive forever.
+          // must not keep a deleted session's barrier alive forever. (No batch
+          // can reach here now: pending vetoes deletion above.)
           this.discardPendingSession(sessionId)
+          this.droppedAccepted.delete(sessionId)
         })
         if (receipt === 'failed') return 'failed'
         if (stale) {
@@ -2396,6 +2436,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     if (this.sourceFaulted || this.indexFaulted) {
       this.state = { kind: 'incomplete', reason: 'source-read-failed' }
+      return
+    }
+    // Drop a watermark only once the committed checkpoint has passed it; the
+    // evicted accepted facts are then covered by the official replay.
+    for (const [sessionId, lastSeq] of this.droppedAccepted) {
+      const checkpoint = this.index.checkpointOf(sessionId)
+      if (checkpoint !== undefined && checkpoint.nextSeq > lastSeq) this.droppedAccepted.delete(sessionId)
+    }
+    if (this.droppedAccepted.size > 0) {
+      this.state = { kind: 'incomplete', reason: 'resource-limit' }
       return
     }
     if (this.reconcilePending.size > 0) {

@@ -2613,3 +2613,359 @@ test('an unrelated overflow preserves another Session held accepted batch', asyn
     await ctx.fiber.dispose()
   }
 })
+
+test('the hard buffer bound evicts an over-cap held Session and keeps the barrier', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r301-')
+  const a = mutableSource('/repo/r301-a', 'r301-a')
+  const c = mutableSource('/repo/r301-c', 'r301-c')
+  a.live = true
+  c.live = true
+  const { deps } = mutableDeps(a, [c])
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const query = deps.sessionQuery()
+  assert.ok(query !== undefined)
+  const realObserve = query.observeSession
+  let observeEntered!: () => void
+  const entered = new Promise<void>(resolve => { observeEntered = resolve })
+  let releaseObserve!: () => void
+  const observeGate = new Promise<void>(resolve => { releaseObserve = resolve })
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number; checkpointOf(id: string): { nextSeq: number } | undefined }
+    pendingEventCount: number
+    heldPending: Set<string>
+    droppedAccepted: Map<string, number>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (sessionId: string, seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 10_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `${sessionId}-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-${sessionId}-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (source: MutableOfficialSource, event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const flush = async (): Promise<void> => {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  const waitHeld = async (): Promise<void> => {
+    const started = Date.now()
+    while (!internals.heldPending.has('r301-a') && Date.now() - started < 250) await flush()
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  try {
+    await waitDirectReady(service)
+    assert.equal(internals.index.occurrenceCount(), 4)
+    // A stalled official observation is the causal condition: the gap cannot be
+    // resolved, so each new accepted event is re-held after the drain.
+    query.observeSession = async (id, options) => {
+      const observation = await realObserve.call(query, id, options)
+      observeEntered()
+      await observeGate
+      return observation
+    }
+    const gap = inbox('r301-a', 4, 'r301-a accepted gap four')
+    deliver(a, gap)
+    await entered
+    await waitHeld()
+    assert.equal(internals.heldPending.has('r301-a'), true)
+
+    // The SAME held Session keeps accepting events; the gap batch grows while
+    // its official observation is blocked, then crosses the hard event cap.
+    let lastBurstSeq = 0
+    for (let seq = 5; seq <= 4100; seq += 1) {
+      deliver(a, inbox('r301-a', seq, `r301-a burst ${String(seq)}`))
+      lastBurstSeq = seq
+      if (internals.droppedAccepted.has('r301-a')) break
+      await waitHeld()
+      assert.equal(internals.heldPending.has('r301-a'), true, 'the gap batch is re-held between accepted events')
+    }
+    assert.equal(lastBurstSeq, 4100)
+    assert.equal(internals.pendingEventCount, 0, 'the hard bound must be restored')
+    assert.equal(internals.heldPending.size, 0)
+    assert.equal(internals.droppedAccepted.get('r301-a'), 4100)
+    releaseObserve()
+    await settleRepairs()
+    const bounded = await waitDirectSettled(service)
+    assert.equal(bounded.kind, 'incomplete', JSON.stringify(bounded))
+    if (bounded.kind !== 'incomplete') throw new Error('expected incomplete')
+    assert.equal(bounded.reason, 'resource-limit')
+    assert.equal(internals.index.occurrenceCount(), 4, 'the evicted batch is not fabricated into rows')
+
+    // An unrelated Session must still make progress: its ordinary batch commits
+    // even while the evicted Session keeps the global barrier truthful.
+    deliver(c, inbox('r301-c', 3, 'r301-c progress three'))
+    const progressStarted = Date.now()
+    while ((internals.index.checkpointOf('r301-c')?.nextSeq ?? 0) < 4 && Date.now() - progressStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r301-c')?.nextSeq, 4)
+    assert.equal(internals.index.occurrenceCount(), 5)
+
+    // The official source eventually covers the evicted seqs; only then ready.
+    a.live = false
+    query.observeSession = realObserve
+    const recovery: unknown[] = [inbox('r301-a', 3, 'r301-a missing three'), gap]
+    for (let seq = 5; seq <= 4100; seq += 1) recovery.push(inbox('r301-a', seq, `r301-a burst ${String(seq)}`))
+    a.events.push(...recovery as never[])
+    a.revision += 1
+    await internals.verifySources()
+    await waitDirectReady(service)
+    assert.equal(internals.droppedAccepted.size, 0)
+    assert.equal(internals.index.occurrenceCount(), 4103)
+    const last = await service.search({ scope: 'all', query: 'r301-a burst 4100', limit: 25 }, new AbortController().signal)
+    assert.equal(last.kind, 'ready', JSON.stringify(last))
+    if (last.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(last.items.length, 1)
+  } finally {
+    releaseObserve()
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('the hard buffer bound evicts an over-cap held Session on the byte cap', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r301b-')
+  const source = mutableSource('/repo/r301b', 'r301b')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    pendingEventCount: number
+    heldPending: Set<string>
+    droppedAccepted: Map<string, number>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 11_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `r301b-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-r301b-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  try {
+    await waitDirectReady(service)
+    const gap = inbox(5, 'r301b accepted gap five')
+    deliver(gap)
+    source.live = false
+    const heldStarted = Date.now()
+    while (!internals.heldPending.has('r301b') && Date.now() - heldStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await settleRepairs()
+    assert.equal(internals.heldPending.has('r301b'), true)
+
+    const huge = inbox(6, `r301b-huge-${'x'.repeat(17 * 1024 * 1024)}`)
+    deliver(huge)
+    assert.equal(internals.pendingEventCount, 0, 'the byte bound must be restored')
+    assert.equal(internals.heldPending.size, 0)
+    assert.equal(internals.droppedAccepted.get('r301b'), 6)
+    await settleRepairs()
+    const bounded = await waitDirectSettled(service)
+    assert.equal(bounded.kind, 'incomplete', JSON.stringify(bounded))
+    if (bounded.kind !== 'incomplete') throw new Error('expected incomplete')
+    assert.equal(bounded.reason, 'resource-limit')
+    assert.equal(internals.index.occurrenceCount(), 2)
+
+    source.events.push(inbox(3, 'r301b durable three'), inbox(4, 'r301b durable four'), gap, huge)
+    source.revision += 1
+    await internals.verifySources()
+    await waitDirectReady(service)
+    assert.equal(internals.droppedAccepted.size, 0)
+    assert.equal(internals.index.occurrenceCount(), 6)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a held accepted batch vetoes a temporary official roster deletion', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r302-')
+  const a = mutableSource('/repo/r302-a', 'r302-a')
+  const c = mutableSource('/repo/r302-c', 'r302-c')
+  a.live = true
+  c.live = true
+  const { deps } = mutableDeps(a, [c])
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    pendingEventCount: number
+    heldPending: Set<string>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (sessionId: string, seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 12_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `${sessionId}-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-${sessionId}-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (source: MutableOfficialSource, event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  try {
+    await waitDirectReady(service)
+    const gap = inbox('r302-a', 5, 'r302-a accepted gap five')
+    deliver(a, gap)
+    a.live = false
+    const heldStarted = Date.now()
+    while (!internals.heldPending.has('r302-a') && Date.now() - heldStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await settleRepairs()
+    assert.equal(internals.heldPending.has('r302-a'), true)
+
+    // The official roster temporarily omits A after its point repair settled.
+    // The held batch is the only accepted copy and must veto the deletion.
+    a.present = false
+    await internals.verifySources()
+    const during = await waitDirectSettled(service)
+    assert.equal(during.kind, 'incomplete', JSON.stringify(during))
+    assert.equal(internals.heldPending.has('r302-a'), true)
+    assert.equal(internals.pendingEventCount, 1)
+    assert.equal(internals.index.occurrenceCount(), 4, 'A rows must not be deleted')
+    const hidden = await service.search({ scope: 'all', query: 'r302-a accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(hidden.kind, 'incomplete')
+
+    // Restoring the official source lets the held batch and rows recover.
+    a.present = true
+    a.events.push(inbox('r302-a', 3, 'r302-a durable three'), inbox('r302-a', 4, 'r302-a durable four'), gap)
+    a.revision += 1
+    await internals.verifySources()
+    await waitDirectReady(service)
+    const five = await service.search({ scope: 'all', query: 'r302-a accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(five.kind, 'ready', JSON.stringify(five))
+    if (five.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(five.items.length, 1)
+    assert.equal(internals.index.occurrenceCount(), 7)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.heldPending.size, 0)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a cold dirty repair completes from rc.5 JSONL without eventCount', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r303-')
+  const source = mutableSource('/repo/r303', 'r303')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as { index: { occurrenceCount(): number } }
+  const persistence = deps.sessionPersistence()
+  const gap = {
+    type: 'agent/inbox/spliced',
+    seq: 5,
+    time: 13_000,
+    data: {
+      target: 'next-turn',
+      start: 5,
+      inserted: [{
+        id: 'r303-gap-five',
+        role: 'user',
+        content: [{ type: 'text', text: 'r303 accepted gap five' }],
+        source: { kind: 'user', rpcId: 'rpc-r303-5' },
+      }],
+    },
+  }
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  let listCalls = 0
+  const realList = persistence.list
+  try {
+    await waitDirectReady(service)
+    // The real rc.5 JSONL shape: stat()/list() carry no eventCount.
+    source.omitEventCount = true
+    persistence.list = async (options) => {
+      listCalls += 1
+      await listGate
+      return realList.call(persistence, options)
+    }
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), gap)
+    source.live = false
+    // Durable 3..5 (including the accepted gap) exists before the repair reads.
+    source.events.push(
+      { type: 'agent/inbox/spliced', seq: 3, time: 13_003, data: { target: 'next-turn', start: 3, inserted: [{ id: 'r303-three', role: 'user', content: [{ type: 'text', text: 'r303 durable three' }], source: { kind: 'user', rpcId: 'rpc-r303-3' } }] } },
+      { type: 'agent/inbox/spliced', seq: 4, time: 13_004, data: { target: 'next-turn', start: 4, inserted: [{ id: 'r303-four', role: 'user', content: [{ type: 'text', text: 'r303 durable four' }], source: { kind: 'user', rpcId: 'rpc-r303-4' } }] } },
+      gap,
+    )
+    source.revision += 1
+    await waitDirectReady(service, 10_000)
+    assert.equal(listCalls, 0, 'the per-ID repair must not wait for the full roster list')
+    const five = await service.search({ scope: 'all', query: 'r303 accepted gap five', limit: 25 }, new AbortController().signal)
+    assert.equal(five.kind, 'ready', JSON.stringify(five))
+    if (five.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(five.items.length, 1)
+    assert.equal(internals.index.occurrenceCount(), 5)
+  } finally {
+    releaseList()
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
