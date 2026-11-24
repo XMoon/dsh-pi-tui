@@ -1658,9 +1658,10 @@ required initial authoritative reset invalidated by ordinary pending is handed
 to the point-repair owner AFTER the round's own ordinary drain settles, so the
 mandatory replay observes the post-drain accepted checkpoint; a normal
 contiguous drain against an older clean checkpoint is not full coverage. A live
-point replay whose candidate was invalidated by a newer accepted or
-ordinary-drain commit re-arms the same coalesced repair, so a mandatory source
-proof never falls back to the periodic timer.
+authoritative replay first takes an ordinary pending remainder over as its own
+held obligation, so an unchanged backlog cannot refuse every reset; only after
+that ownership transfer may a stale candidate re-arm the same coalesced repair,
+and a mandatory source proof never falls back to the periodic timer.
 
 The search is a literal Unicode lower-case substring match over the first
 accepted text. `all` addresses every accessible Session of the authenticated

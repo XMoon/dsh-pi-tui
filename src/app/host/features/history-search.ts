@@ -1949,6 +1949,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const signal = this.lifecycle.signal
     this.reconcilePending.add(sessionId)
     this.markReconcileNeeded('reconciling')
+    // An ordinary pending batch is a currentness veto while it has no owner.
+    // This live authoritative replay is about to read the full observation, so
+    // take the batch over as a held obligation: the reset/replay may proceed,
+    // and the terminal commit settles it only once the replay has covered its
+    // last sequence. An unchanged backlog must not refuse every reset.
+    if (this.pending.has(sessionId)) this.heldPending.add(sessionId)
     const witness = this.createWitness(sessionId, persistence, sessions, this.index?.checkpointOf(sessionId))
     try {
       const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })

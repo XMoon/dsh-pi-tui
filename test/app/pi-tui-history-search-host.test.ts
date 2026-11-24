@@ -4493,6 +4493,171 @@ test('a real Session born and retired during a held roster scan survives the old
   }
 })
 
+test('a real retained-index startup replay owns a pre-reset ordinary backlog without spinning', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'history-search-r13-backlog', {
+    pluginManagerProfile: true,
+    withoutHostRuntime: true,
+  })
+  let runtime1: { dispose(): Promise<void> } | undefined
+  let runtime2: { dispose(): Promise<void> } | undefined
+  let m3: Awaited<ReturnType<typeof createRemoteHostRuntime>> | undefined
+  const persistence = host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+  const realList = persistence.list
+  const query = host.ctx.sessionQuery as unknown as HistorySearchQueryLike
+  const realObserve = query.observeSession
+  let releaseList: () => void = () => {}
+  let releasePoint: () => void = () => {}
+  try {
+    runtime1 = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    m3 = await createRemoteHostRuntime(host.ctx)
+    const peer = host.ctx.connection.browserPeer
+    const sessionId = 'history-r13-backlog'
+    const waitGateway = async (label: string, request: HistorySearchRequest): Promise<HistorySearchResponse> => {
+      const started = Date.now()
+      for (;;) {
+        const answer = await realSearch(host, peer, request)
+        if (answer.kind === 'ready') return answer
+        if (answer.kind === 'unavailable') throw new Error(`${label}: ${JSON.stringify(answer)}`)
+        if (Date.now() - started > 20_000) throw new Error(`${label}: timeout (${answer.kind})`)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+    }
+    const agent = await host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+    await promptHost(host, sessionId, 'req-r13-first', 'hsp-r13-first')
+    await waitGateway('retained first incarnation', { scope: 'all', query: '', limit: 1 })
+    const service1 = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
+      index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    }
+    const retained = service1.index.checkpointOf(sessionId)
+    assert.ok(retained !== undefined, 'the first incarnation must retain a real Session checkpoint')
+    await runtime1.dispose()
+    runtime1 = undefined
+
+    let listEntered!: () => void
+    const listReached = new Promise<void>(resolve => { listEntered = resolve })
+    const listGate = new Promise<void>(resolve => { releaseList = resolve })
+    persistence.list = async (options) => {
+      listEntered()
+      await listGate
+      return realList.call(persistence, options)
+    }
+    const pointGate = new Promise<void>(resolve => { releasePoint = resolve })
+    let pointGated = false
+    let observations = 0
+    let observationError: Error | undefined
+    query.observeSession = async (id, options) => {
+      observations += 1
+      if (observations > 6) {
+        observationError = new Error(`unbounded live re-observation (${String(observations)}) on an unchanged backlog`)
+        throw observationError
+      }
+      if (!pointGated && String(id) === sessionId) {
+        pointGated = true
+        await pointGate
+      }
+      return realObserve.call(query, id, options)
+    }
+    runtime2 = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    await listReached
+
+    // A finite contiguous accepted burst > one 256-event writer batch, all
+    // before the required reset, while the retained roster read is held.
+    const burst = 600
+    for (let index = 0; index < burst; index += 1) {
+      const message = createUserMessage({
+        content: [{ type: 'text', text: `hsp-r13-backlog-${String(index)}` }],
+        source: { kind: 'user', rpcId: `rpc-r13-backlog-${String(index)}` as never },
+      })
+      agent.session.append([['agent/inbox/spliced', { target: 'next-turn', start: index, inserted: [message] }]])
+    }
+    const service2Proxy = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
+      index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+      pending: Map<string, { events: unknown[] }>
+      heldPending: Set<string>
+      sessionRepairFlights: Map<string, unknown>
+      rebuildRequests: Set<string>
+      reconcilePending: Set<string>
+      state: { kind: string }
+      coverage: string
+    }
+    const service2 = ((service2Proxy as unknown as Record<symbol, unknown>)[symbols.original] ?? service2Proxy) as typeof service2Proxy
+    const bufferedStarted = Date.now()
+    while ((service2.pending.get(sessionId)?.events.length ?? 0) < burst && Date.now() - bufferedStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok((service2.pending.get(sessionId)?.events.length ?? 0) >= burst, 'the whole accepted burst must be buffered before release')
+    releaseList()
+    const pointStarted = Date.now()
+    while (!pointGated && Date.now() - pointStarted < 5_000) {
+      assert.equal(observationError, undefined, String(observationError))
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(observationError, undefined, String(observationError))
+    assert.equal(pointGated, true, JSON.stringify({
+      state: service2.state,
+      coverage: service2.coverage,
+      checkpoint: service2.index.checkpointOf(sessionId),
+      pending: service2.pending.get(sessionId)?.events.length,
+      held: service2.heldPending.has(sessionId),
+      flights: [...service2.sessionRepairFlights.keys()],
+      rebuilds: [...service2.rebuildRequests],
+      observations,
+    }))
+    // The point owns the unchanged ordinary remainder; the reset/replay can
+    // proceed instead of re-observing the same backlog forever.
+    assert.equal(service2.heldPending.has(sessionId), true, 'the authoritative replay must take over the remaining accepted backlog')
+    const remainder = service2.pending.get(sessionId)?.events.length ?? 0
+    assert.ok(remainder > 0 && remainder < burst, JSON.stringify({ remainder, checkpoint: service2.index.checkpointOf(sessionId) }))
+    const afterDrain = service2.index.checkpointOf(sessionId)
+    assert.ok(afterDrain !== undefined)
+    assert.ok(afterDrain.nextSeq > retained.nextSeq)
+    releasePoint()
+    const readyStarted = Date.now()
+    let replayed: HistorySearchResponse
+    for (;;) {
+      replayed = await realSearch(host, peer, { scope: 'all', query: 'hsp-r13-backlog-599', limit: 25 })
+      if (replayed.kind === 'ready' || replayed.kind === 'unavailable') break
+      assert.equal(observationError, undefined, String(observationError))
+      if (Date.now() - readyStarted > 20_000) {
+        assert.fail(JSON.stringify({
+          kind: replayed.kind,
+          state: service2.state,
+          coverage: service2.coverage,
+          pending: service2.pending.get(sessionId)?.events.length,
+          held: service2.heldPending.has(sessionId),
+          flights: [...service2.sessionRepairFlights.keys()],
+          rebuilds: [...service2.rebuildRequests],
+          checkpoint: service2.index.checkpointOf(sessionId),
+          observations,
+        }))
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(observationError, undefined, String(observationError))
+    assert.equal(replayed.kind, 'ready', JSON.stringify(replayed))
+    if (replayed.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(replayed.items.length, 1)
+    assert.equal(replayed.items[0]?.sessionId, sessionId)
+    assert.equal(replayed.items[0]?.preview, 'hsp-r13-backlog-599')
+    assert.equal(service2.pending.has(sessionId), false, 'the replay terminal must settle the owned backlog')
+    assert.equal(service2.heldPending.has(sessionId), false)
+    const first = await realSearch(host, peer, { scope: 'all', query: 'hsp-r13-first', limit: 25 })
+    assert.equal(first.kind, 'ready', JSON.stringify(first))
+    if (first.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(first.items.length, 1)
+  } finally {
+    releaseList()
+    releasePoint()
+    persistence.list = realList
+    query.observeSession = realObserve
+    await runtime1?.dispose()
+    await runtime2?.dispose()
+    await m3?.dispose()
+    await host.dispose()
+  }
+})
+
 test('a required initial replay invalidated by ordinary pending is handed to the point repair owner', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r10-replay-handoff-')
