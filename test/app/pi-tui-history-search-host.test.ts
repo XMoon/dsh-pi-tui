@@ -5450,6 +5450,9 @@ test('a materialized empty cold Session and a real empty live Session settle a c
       dirty: false,
     }, 'the real empty live source must settle a live zero-event checkpoint')
     assert.equal(service.index.occurrenceCount(), 0, 'an empty source must create no accepted occurrence')
+    // A zero-event checkpoint is not a content mutation: no keyset cursor may be
+    // invalidated by settling one (only occurrence insert/reset/delete moves it).
+    assert.equal(service.index.revision, 0, 'settling an empty checkpoint must not advance the content generation')
     const revisionBeforePass = service.index.revision
 
     // 3. An explicit production verification pass over the unchanged sources:
