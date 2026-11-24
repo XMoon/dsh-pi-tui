@@ -13,6 +13,8 @@ import type {
 } from '../src/app/command/session-browser-presentation.ts'
 import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
 import type {
+  ActivityObservation,
+  SessionActivityFact,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
   WorkspaceFactsFrame,
@@ -148,8 +150,46 @@ const read: SessionReader = {
   sessionStatus: () => undefined,
 }
 
+/**
+ * The controlled Activity observation of this fixture: it publishes the REAL
+ * accepted roster with every fact honestly unknown (the fixture has no Gateway
+ * activity source). `setSnapshot` on the panel therefore sees rows with no
+ * Working/Needs fact, never a fabricated one.
+ */
+const controlledActivityObservation = (): ActivityObservation => {
+  let listener: (() => void) | undefined
+  let roster: readonly SessionSummary[] = []
+  let rosterRevision = 0
+  let revision = 0
+  const factsOf = (): readonly SessionActivityFact[] => roster.map(row => ({
+    sessionId: row.id,
+    running: undefined,
+    attention: 'unknown',
+    attentionSourceState: 'unknown',
+  }))
+  return {
+    setRoster(rows, nextRosterRevision) {
+      roster = rows
+      rosterRevision = nextRosterRevision
+      revision += 1
+      listener?.()
+    },
+    setPriorityIds() {},
+    getSnapshot: () => ({ rosterRevision, revision, facts: factsOf() }),
+    subscribe(next) {
+      listener = next
+      return () => { if (listener === next) listener = undefined }
+    },
+    dispose() {
+      listener = undefined
+      roster = []
+    },
+  }
+}
+
 const sessionWorkspaceFacts: SessionWorkspaceFactsPort = {
   readActivity: async () => [],
+  observeActivity: () => controlledActivityObservation(),
   followWorkspaces: (signal): WorkspaceFactsHandle => ({
     dispose() {},
     async *[Symbol.asyncIterator]() {

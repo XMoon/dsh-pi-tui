@@ -24,6 +24,10 @@ export interface SessionSummary {
   createdAt?: number
   /** Absolute working directory, for the workspace group. */
   cwd?: string
+  /** The official durable Session title, when the source row carries one.
+   * A caller may still enrich it from the projection batch; an enriched value
+   * must survive later roster pushes that do not repeat it. */
+  title?: string
   /** Effective agent preset id, when a caller has already enriched this row.
    * Initial list results may omit it while projection replay is pending. */
   preset?: string

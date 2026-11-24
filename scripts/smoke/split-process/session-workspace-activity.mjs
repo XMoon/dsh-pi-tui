@@ -74,17 +74,21 @@ export async function runSessionWorkspaceActivity(context) {
   // ── Space Peek: read-only, no answer affordance, no Host write ────────────
   const eventsBeforePeek = (hostSessionEvents(dshHome, sessionX) ?? []).length
   clientA.send(' ')
-  await clientA.waitForScreen('Peek ·', 'U-D read-only Peek', 30_000)
+  // The committed read-only Reader's current header. The pending kind was
+  // proven on the row frame before Space; this step proves the Peek is
+  // read-only (its provenance line), carries no answer affordance and writes
+  // no Host event.
+  await clientA.waitForScreen('Transcript ·', 'U-D read-only Peek', 30_000)
   const peek = await viewportText(clientA)
-  assert(peek.includes('Pending: Question'),
-    `U-D the Peek does not state the proved pending kind:\n${peek}`)
+  assert(peek.includes('Read-only'),
+    `U-D the Peek does not state its read-only provenance:\n${peek}`)
   assert(!/Allow|Deny|Proceed/.test(peek), `U-D the Peek carries an answer affordance:\n${peek}`)
   trace('ud-workspace-peek', { sessionX, frame: peek.split('\n') })
   clientA.send('\x1b')
   // The Peek body must really be GONE before the next key: `Sessions ·` is the
   // persistent header and would pass a vacuous wait, and an Enter delivered
   // while the Esc is still in the same chunk parses as Alt+Enter.
-  await clientA.waitForScreenGone('Peek ·', 'U-D Peek back to the list', 30_000)
+  await clientA.waitForScreenGone('Transcript ·', 'U-D Peek back to the list', 30_000)
   assert((hostSessionEvents(dshHome, sessionX) ?? []).length === eventsBeforePeek,
     'U-D Peek wrote a Host session event')
 

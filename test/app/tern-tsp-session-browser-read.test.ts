@@ -12,6 +12,7 @@ import type {
   SessionBrowserResumeIntent,
 } from '../../src/app/command/session-browser-presentation.ts'
 import type { SessionProjectionSummary, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
+import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 
@@ -771,4 +772,41 @@ test('a failed resume attempt re-enables the panel and each intent settles indep
     'the older attempt must not settle the newer pending intent')
   settles[1]!({ kind: 'switched', sessionId: 'session-other' })
   await waitUntil('the retry settles pending', () => presentation.latest()?.resumePending === false, 3_000)
+})
+
+test('an explicit refresh re-opens the ONE Activity observation so unfinished discovery is retried', async (t) => {
+  const observations: Array<{ disposed: number }> = []
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    observeActivity: () => {
+      const record = { disposed: 0 }
+      observations.push(record)
+      return {
+        setRoster() {},
+        setPriorityIds() {},
+        getSnapshot: () => ({ rosterRevision: 0, revision: 0, facts: [] }),
+        subscribe: () => () => {},
+        dispose: () => { record.disposed += 1 },
+      }
+    },
+    followWorkspaces: () => ({
+      dispose() {},
+      isCurrent: () => true,
+      async *[Symbol.asyncIterator]() { /* no frames in this read-only case */ },
+    }),
+  }
+  const presentation = new PresentationProbe()
+  const owner = createSessionBrowserReadOwner({
+    reader: reader(),
+    presentation,
+    captureSubject: () => captured(),
+    diag: DIAG(),
+    sessionWorkspaceFacts: facts,
+  })
+  t.after(() => { owner.dispose() })
+  owner.open()
+  assert.equal(observations.length, 1, 'opening starts exactly ONE observation')
+  owner.refresh()
+  assert.equal(observations[0]!.disposed, 1, 'the explicit refresh disposes the unfinished observation')
+  assert.equal(observations.length, 2, 'the refresh re-opens exactly ONE observation so failed discovery retries')
 })

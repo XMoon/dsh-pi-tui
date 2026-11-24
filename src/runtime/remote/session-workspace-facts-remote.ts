@@ -521,14 +521,55 @@ interface ActivityRow {
   continuedQuestionCallIds: readonly string[] | undefined
   /** The hint witness this row was last measured against. */
   witness: string
-  /** The epoch whose exact projection this observation already holds, if any
-   *  (reused by the priority lane instead of a second `session.projections`). */
+  /** The epoch whose exact projection this observation already holds.
+   *  `reuseProjection` is set ONLY by the discovery read that promoted this row
+   *  (one-shot): every independent recheck re-reads its pair. */
   exactProjection: { readonly epoch: number; readonly read: QuestionProjectionRead } | undefined
+  reuseProjection: boolean
   /** This source revision's ONE discovery attempt (scheduling evidence only). */
   discovery: { readonly epoch: number; readonly witness: string; readonly negative: boolean } | undefined
   /** A discovery found a real active entry: promote this id to the priority
    *  lane as soon as the discovery read settles. */
   promote: boolean
+}
+
+/**
+ * Adapter-lifetime successful-negative-discovery receipts.
+ *
+ * A receipt answers ONLY "has this unresolved source revision already had its
+ * ordinary discovery in this Connection generation?" — it is never an
+ * answerability fact, never cached projection content and never consulted by
+ * the answer gate or the Writer. It exists so closing and reopening the Browser
+ * with an unchanged source does not repeat one projection read per ordinary row
+ * (the accepted warm-reopen optimization).
+ *
+ * Invalidated by: a changed relevant source witness, roster removal, a new
+ * Connection generation and adapter disposal. A denied/unavailable/failed read
+ * records NOTHING, so it is retried on the next meaningful invalidation, an
+ * explicit refresh/reopen, or a Connection change.
+ */
+class DiscoveryReceipts {
+  private readonly byId = new Map<string, { readonly generation: RemoteConnectionGeneration; readonly witness: string }>()
+
+  matches(sessionId: string, generation: RemoteConnectionGeneration | undefined, witness: string): boolean {
+    if (generation === undefined) return false
+    const receipt = this.byId.get(sessionId)
+    return receipt !== undefined && Object.is(receipt.generation, generation) && receipt.witness === witness
+  }
+
+  record(sessionId: string, generation: RemoteConnectionGeneration, witness: string): void {
+    this.byId.set(sessionId, { generation, witness })
+  }
+
+  /** Keep receipts bounded by the official authorized membership. */
+  prune(authorized: readonly string[]): void {
+    const live = new Set(authorized)
+    for (const id of [...this.byId.keys()]) if (!live.has(id)) this.byId.delete(id)
+  }
+
+  clear(): void {
+    this.byId.clear()
+  }
 }
 
 /** The observation-level failure: the source generation is gone for good. */
@@ -562,6 +603,7 @@ class RemoteActivityObservation implements ActivityObservation {
   private readonly session: RemoteSessionFactsRemotes['session']
   private readonly generation: RemoteConnectionGenerationSource
   private readonly initialGeneration: RemoteConnectionGeneration | undefined
+  private readonly receipts: DiscoveryReceipts
   private readonly listeners = new Set<() => void>()
   private readonly offs: Array<() => void> = []
   private readonly rows = new Map<string, ActivityRow>()
@@ -575,13 +617,23 @@ class RemoteActivityObservation implements ActivityObservation {
   private disposed = false
   private readonly priorityQueue: string[] = []
   private readonly discoveryQueue: string[] = []
-  private readonly inflight = new Map<string, AbortController>()
+  /** The ONE in-flight read of a row. The token is the operation identity: an
+   *  older read settling can never retire a newer request's ownership. */
+  private readonly inflight = new Map<string, { readonly token: symbol; readonly controller: AbortController }>()
+  /** Work recorded while a row's read is in flight (latest invalidation wins).
+   *  It is dispatched once when the owning read settles, so no newer epoch is
+   *  lost behind an old blocked response. */
+  private readonly pendingWork = new Map<string, 'priority' | 'discovery'>()
   private activePriority = 0
   private activeDiscovery = 0
   private timer: ReturnType<typeof setTimeout> | undefined
   private readonly abortCleanup: () => void
 
-  constructor(source: RemoteSessionWorkspaceFactsSource, signal: AbortSignal) {
+  constructor(
+    source: RemoteSessionWorkspaceFactsSource,
+    signal: AbortSignal,
+    receipts: DiscoveryReceipts,
+  ) {
     // An observation may open while the Client is disconnected (the Browser
     // still opens with its latest-known/flat fallback): it publishes the roster
     // with every fact unknown and adopts the first REAL generation when it
@@ -591,6 +643,7 @@ class RemoteActivityObservation implements ActivityObservation {
     this.session = source.remote.session
     this.generation = source.connection.generation
     this.initialGeneration = source.initialGeneration
+    this.receipts = receipts
     this.capturedGeneration = captured
     this.offs.push(this.sessions.list.subscribe(() => { this.onListChanged() }))
     this.offs.push(this.generation.subscribe(() => { this.onGenerationChanged() }))
@@ -618,15 +671,18 @@ class RemoteActivityObservation implements ActivityObservation {
     const listed = new Set(authorized)
     for (const [id, row] of this.rows) {
       if (listed.has(id)) continue
-      // A removed id loses EVERY fact and every queued/in-flight read at once.
+      // A removed id loses every fact and every queued read at once. The
+      // in-flight entry stays until its own operation settles: deleting it here
+      // would let that older completion retire a newer request's ownership.
       this.rows.delete(id)
-      this.inflight.get(id)?.abort(new Error('the Session left the roster'))
-      this.inflight.delete(id)
+      this.pendingWork.delete(id)
+      this.inflight.get(id)?.controller.abort(new Error('the Session left the roster'))
     }
     for (const id of authorized) {
       if (!this.rows.has(id)) this.rows.set(id, this.freshRow(id))
     }
     this.rosterOrder = authorized
+    this.receipts.prune(authorized)
     // The official running projection is published in the SAME roster frame.
     this.refreshRunningFromList()
     this.pruneQueues()
@@ -647,9 +703,18 @@ class RemoteActivityObservation implements ActivityObservation {
     // Eligibility is a SCHEDULING hint: a newly eligible or newly revoked id is
     // re-read so its exact pending fact is current. The renderer's answer gate
     // already repaints the frame itself; this only refreshes the Host fact.
+    let invalidated = false
     for (const id of changed) {
-      if (!this.rows.has(id)) continue
+      const row = this.rows.get(id)
+      if (row === undefined) continue
+      // A revoked eligibility may never keep painting its old Needs fact while
+      // the re-read is in flight, and a newly eligible row is re-read.
+      if (this.invalidateRow(row)) invalidated = true
       this.schedulePriority(id, { front: true })
+    }
+    if (invalidated) {
+      this.revision += 1
+      this.emit()
     }
     this.pump()
   }
@@ -692,7 +757,7 @@ class RemoteActivityObservation implements ActivityObservation {
     // Mark disposed BEFORE any callback/abort can re-enter.
     this.disposed = true
     this.clearTimer()
-    for (const controller of this.inflight.values()) controller.abort(new Error('the Session activity observation was disposed'))
+    for (const entry of this.inflight.values()) entry.controller.abort(new Error('the Session activity observation was disposed'))
     this.inflight.clear()
     this.priorityQueue.length = 0
     this.discoveryQueue.length = 0
@@ -770,6 +835,13 @@ class RemoteActivityObservation implements ActivityObservation {
         changed = true
         this.invalidateRow(row)
         this.scheduleAfterRelevantChange(row)
+        continue
+      }
+      // The list may carry a fresh positive running fact for a row this
+      // generation has not proven (e.g. after a reconnect). It is a scheduling
+      // trigger only: the targeted read proves it, never the replayed row.
+      if (!row.runningProven && entry?.running === true && this.rowIsCandidate(row)) {
+        this.scheduleAfterRelevantChange(row)
       }
     }
     if (!changed) return
@@ -830,11 +902,13 @@ class RemoteActivityObservation implements ActivityObservation {
     }
     if (Object.is(current, this.capturedGeneration)) return
     this.capturedGeneration = current
-    for (const controller of this.inflight.values()) controller.abort(new Error('the Connection generation was replaced'))
-    this.inflight.clear()
+    for (const entry of this.inflight.values()) entry.controller.abort(new Error('the Connection generation was replaced'))
     this.priorityQueue.length = 0
     this.discoveryQueue.length = 0
     this.clearTimer()
+    // Every proof (and every discovery receipt) belongs to the replaced
+    // generation: nothing the old generation measured may be reused.
+    this.receipts.clear()
     for (const row of this.rows.values()) {
       row.epoch += 1
       row.running = undefined
@@ -842,6 +916,7 @@ class RemoteActivityObservation implements ActivityObservation {
       row.runningSource = undefined
       row.witness = this.witnessOf(row.sessionId)
       row.exactProjection = undefined
+      row.reuseProjection = false
       row.discovery = undefined
       this.resetAttention(row)
     }
@@ -858,18 +933,24 @@ class RemoteActivityObservation implements ActivityObservation {
   /** Revoke every proven fact without ending the observation: the caller keeps
    *  its last-known roster and the next real generation re-proves what it can. */
   private revokeGeneration(): void {
-    for (const controller of this.inflight.values()) controller.abort(new Error('the Connection generation was lost'))
-    this.inflight.clear()
+    for (const entry of this.inflight.values()) entry.controller.abort(new Error('the Connection generation was lost'))
     this.priorityQueue.length = 0
     this.discoveryQueue.length = 0
     this.clearTimer()
+    this.receipts.clear()
+    // Clear the dispatch authority BEFORE the rows are reset: while the Client
+    // is disconnected no new unary read may leave, and the post-await fence is
+    // far too late to prevent dispatch.
+    this.capturedGeneration = undefined
     let changed = false
     for (const row of this.rows.values()) {
       row.epoch += 1
+      if (row.running !== undefined || row.runningProven) changed = true
       row.running = undefined
       row.runningProven = false
       row.runningSource = undefined
       row.exactProjection = undefined
+      row.reuseProjection = false
       row.discovery = undefined
       if (this.resetAttention(row)) changed = true
     }
@@ -893,6 +974,7 @@ class RemoteActivityObservation implements ActivityObservation {
       continuedQuestionCallIds: undefined,
       witness: this.witnessOf(sessionId),
       exactProjection: undefined,
+      reuseProjection: false,
       discovery: undefined,
       promote: false,
     }
@@ -904,6 +986,7 @@ class RemoteActivityObservation implements ActivityObservation {
   private invalidateRow(row: ActivityRow): boolean {
     row.epoch += 1
     row.exactProjection = undefined
+    row.reuseProjection = false
     row.discovery = undefined
     row.promote = false
     return this.resetAttention(row)
@@ -953,7 +1036,20 @@ class RemoteActivityObservation implements ActivityObservation {
     if (row.sessionId === this.currentSessionId) return true
     if (this.priorityIds.has(row.sessionId)) return true
     if (row.running === true) return true
+    // A new-generation list `running=true` is an UNVERIFIED scheduling trigger:
+    // it queues the targeted exact read that may prove the fact, and is never
+    // published as proof by itself.
+    if (!row.runningProven && this.listSaysRunning(row.sessionId)) return true
     return this.hintIsCandidate(this.hintValuesOf(row.sessionId))
+  }
+
+  /** The latest-known official list running fact. A positive value schedules a
+   *  targeted read on any generation; only the INITIAL generation treats the
+   *  list itself as proof. */
+  private listSaysRunning(sessionId: string): boolean {
+    const listed = this.sessions.list.getSnapshot()
+    if (listed.phase !== 'ready') return false
+    return listed.byId[sessionId]?.running === true
   }
 
   private hintIsCandidate(values: RemoteProjectionValues | undefined): boolean {
@@ -988,14 +1084,19 @@ class RemoteActivityObservation implements ActivityObservation {
         this.schedulePriority(id)
         continue
       }
-      if (this.discoverySettled(row)) continue
+      if (this.discoverySettled(row) || this.discoveryReceiptHeld(row)) continue
       this.scheduleDiscovery(id)
     }
   }
 
   private schedulePriority(sessionId: string, options: { readonly front?: boolean } = {}): void {
     if (this.disposed || !this.rows.has(sessionId)) return
-    if (this.inflight.has(sessionId)) return
+    if (this.inflight.has(sessionId)) {
+      // The row is being read under an older epoch: coalesce the newer work so
+      // it is dispatched when that read settles, never silently dropped.
+      this.pendingWork.set(sessionId, 'priority')
+      return
+    }
     const discoveryIndex = this.discoveryQueue.indexOf(sessionId)
     if (discoveryIndex >= 0) this.discoveryQueue.splice(discoveryIndex, 1)
     const priorityIndex = this.priorityQueue.indexOf(sessionId)
@@ -1006,8 +1107,18 @@ class RemoteActivityObservation implements ActivityObservation {
 
   private scheduleDiscovery(sessionId: string): void {
     if (this.disposed || !this.rows.has(sessionId)) return
-    if (this.inflight.has(sessionId) || this.priorityQueue.includes(sessionId) || this.discoveryQueue.includes(sessionId)) return
+    if (this.inflight.has(sessionId)) {
+      if (this.pendingWork.get(sessionId) !== 'priority') this.pendingWork.set(sessionId, 'discovery')
+      return
+    }
+    if (this.priorityQueue.includes(sessionId) || this.discoveryQueue.includes(sessionId)) return
     this.discoveryQueue.push(sessionId)
+  }
+
+  /** Whether the adapter already holds a valid successful negative discovery
+   *  receipt for this row's CURRENT source revision and generation. */
+  private discoveryReceiptHeld(row: ActivityRow): boolean {
+    return this.receipts.matches(row.sessionId, this.capturedGeneration, row.witness)
   }
 
   private pruneQueues(): void {
@@ -1048,26 +1159,37 @@ class RemoteActivityObservation implements ActivityObservation {
     const row = this.rows.get(sessionId)
     if (row === undefined) return
     const controller = new AbortController()
-    this.inflight.set(sessionId, controller)
+    const token = Symbol(`priority:${sessionId}`)
+    this.inflight.set(sessionId, { token, controller })
     this.activePriority += 1
     const epoch = row.epoch
     const generation = this.capturedGeneration
+    // The projection reuse is the ONE promotion transfer from a discovery read
+    // of THIS epoch; an independent recheck always re-reads its pair.
+    const promotedProjection = row.reuseProjection && row.exactProjection?.epoch === epoch
+      ? row.exactProjection.read
+      : undefined
+    row.reuseProjection = false
     if (generation === undefined) {
-      this.finishWork(sessionId, 'priority')
+      this.finishWork(sessionId, 'priority', token)
       return
     }
     this.track((async () => {
       try {
+        const witness = row.witness
         const pending = await this.readState(sessionId, controller.signal)
         if (!this.committable(sessionId, epoch, generation)) return
-        const reused = row.exactProjection?.epoch === epoch ? row.exactProjection.read : undefined
-        const projection = reused ?? await this.readProjections(sessionId, controller.signal)
+        const projection = promotedProjection ?? await this.readProjections(sessionId, controller.signal)
         if (!this.committable(sessionId, epoch, generation)) return
         row.exactProjection = { epoch, read: projection }
-        row.discovery = { epoch, witness: row.witness, negative: this.isNegativeDiscovery(projection) }
+        const negative = this.isNegativeDiscovery(projection)
+        row.discovery = { epoch, witness, negative }
+        if (negative && row.witness === witness) {
+          this.receipts.record(sessionId, generation, witness)
+        }
         this.commitPair(row, epoch, pending, projection)
       } finally {
-        this.finishWork(sessionId, 'priority')
+        this.finishWork(sessionId, 'priority', token)
       }
     })())
   }
@@ -1076,41 +1198,50 @@ class RemoteActivityObservation implements ActivityObservation {
     const row = this.rows.get(sessionId)
     if (row === undefined) return
     const controller = new AbortController()
-    this.inflight.set(sessionId, controller)
+    const token = Symbol(`discovery:${sessionId}`)
+    this.inflight.set(sessionId, { token, controller })
     this.activeDiscovery += 1
     const epoch = row.epoch
     const generation = this.capturedGeneration
     if (generation === undefined) {
-      this.finishWork(sessionId, 'discovery')
+      this.finishWork(sessionId, 'discovery', token)
       return
     }
     this.track((async () => {
       try {
+        const witness = row.witness
         const projection = await this.readProjections(sessionId, controller.signal)
         if (!this.committable(sessionId, epoch, generation)) return
         row.exactProjection = { epoch, read: projection }
         if (projection.kind === 'known' && projection.active.length > 0) {
           // A real active entry promotes this id to the priority lane once this
           // read settles (a second concurrent sample would be a duplicate); the
-          // exact projection response is reused, never re-fetched.
+          // exact projection response is the ONE-shot promotion transfer.
           row.promote = true
-          row.discovery = { epoch, witness: row.witness, negative: false }
+          row.reuseProjection = true
+          row.discovery = { epoch, witness, negative: false }
           return
         }
         // An ordinary row that proved no active entry has NOT proven "no
         // pending": without a Gateway state sample the attention fact stays
         // unknown. Publishing a `none` here would fabricate an absence.
         this.setUnmeasuredAttention(row, projection.kind)
-        row.discovery = { epoch, witness: row.witness, negative: this.isNegativeDiscovery(projection) }
+        const negative = this.isNegativeDiscovery(projection)
+        row.discovery = { epoch, witness, negative }
+        if (negative && row.witness === witness) {
+          this.receipts.record(sessionId, generation, witness)
+        }
       } finally {
-        this.finishWork(sessionId, 'discovery')
+        this.finishWork(sessionId, 'discovery', token)
       }
 
     })())
   }
 
-  private finishWork(sessionId: string, lane: 'priority' | 'discovery'): void {
-    this.inflight.delete(sessionId)
+  private finishWork(sessionId: string, lane: 'priority' | 'discovery', token: symbol): void {
+    // Only the operation that owns the entry may release it; the lane counter
+    // always belongs to this operation.
+    if (this.inflight.get(sessionId)?.token === token) this.inflight.delete(sessionId)
     if (lane === 'priority') this.activePriority -= 1
     else this.activeDiscovery -= 1
     if (this.disposed) return
@@ -1118,6 +1249,13 @@ class RemoteActivityObservation implements ActivityObservation {
     if (row?.promote === true) {
       row.promote = false
       this.schedulePriority(sessionId, { front: true })
+    } else {
+      const pending = this.pendingWork.get(sessionId)
+      if (pending !== undefined) {
+        this.pendingWork.delete(sessionId)
+        if (pending === 'priority') this.schedulePriority(sessionId, { front: true })
+        else this.scheduleDiscovery(sessionId)
+      }
     }
     this.pump()
     if (this.priorityQueue.length === 0 && this.activePriority === 0) this.armRecheck()
@@ -1293,7 +1431,9 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   private readonly mode: WorkspaceFollowMode
   private readonly officialStream: RemoteWorkspaceStreamSource | undefined
   private readonly generation: RemoteConnectionGenerationSource
-  private capturedGeneration: RemoteConnectionGeneration
+  /** The adopted Connection generation; undefined while the Connection is
+   *  lost (the membership proof is revoked with it). */
+  private capturedGeneration: RemoteConnectionGeneration | undefined
   /** The `single-generation` raw official follow (opened exactly once). */
   private raw: (AsyncIterable<RemoteWorkspaceFollowFrameLike> & { dispose(): void }) | undefined
   private logical: RemoteLogicalStreamLike<RemoteWorkspaceFollowFrameLike> | undefined
@@ -1378,7 +1518,14 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   private noteGenerationChange(): void {
     if (this.disposed) return
     const current = this.generation.getSnapshot()
-    if (current === undefined || Object.is(current, this.capturedGeneration)) return
+    if (current === undefined) {
+      // The Connection is gone: the membership proof is gone with it. Recovery
+      // depends on the loss itself, never on when a carrier error is observed.
+      this.capturedGeneration = undefined
+      this.noteInvalidation('reconnecting')
+      return
+    }
+    if (Object.is(current, this.capturedGeneration)) return
     this.capturedGeneration = current
     this.noteInvalidation('replaced')
   }
@@ -1520,6 +1667,12 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           yield frame
           continue
         }
+        if (frame?.type === 'baseline') {
+          // A second opening baseline inside the SAME physical generation has
+          // no protocol meaning: the membership was never invalidated between
+          // them, so accepting it would silently rewrite the proven baseline.
+          throw new Error('the Host Workspace stream repeated an opening baseline')
+        }
         if (frame !== undefined) yield frame
       }
     } finally {
@@ -1535,12 +1688,23 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
   private readonly sessions: RemoteSessionsReadSource
   private readonly remote: RemoteSessionFactsRemotes & { readonly workspace: RemoteWorkspaceNamespaceLike }
   private readonly generation: RemoteConnectionGenerationSource
+  /** Adapter-lifetime (surface-runtime lifetime) discovery receipts: shared by
+   *  every observation this adapter creates, so a close/reopen with an
+   *  unchanged source does not repeat ordinary discovery. */
+  private readonly discoveryReceipts = new DiscoveryReceipts()
 
   constructor(source: RemoteSessionWorkspaceFactsSource) {
     this.source = source
     this.sessions = source.sessions
     this.remote = source.remote
     this.generation = source.connection.generation
+  }
+
+  /** Whether the live Connection is still the one captured at domain mount. */
+  private isInitialGeneration(): boolean {
+    const current = this.generation.getSnapshot()
+    return this.source.initialGeneration !== undefined && current !== undefined
+      && Object.is(this.source.initialGeneration, current)
   }
 
   private fence(
@@ -1588,9 +1752,17 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
         // state answers ONLY when the list cannot (a pending/absent list); it
         // is never compared with an arbitrarily older list cut.
         const derivation = deriveAttention(pending, projection)
+        // The official list row owns the NORMAL running fact, but only the
+        // initial generation's list is a baseline. In a replacement generation
+        // the current exact state is the recovery evidence and a possibly stale
+        // ready row can never masquerade as it.
+        const listRow = byId?.[row.id]
+        const running = this.isInitialGeneration() && listRow !== undefined
+          ? listRow.running
+          : (pending.kind === 'known' ? pending.running : listRow?.running)
         return {
           sessionId: row.id,
-          running: byId?.[row.id]?.running ?? (pending.kind === 'known' ? pending.running : undefined),
+          running,
           pendingKinds: pending.kind === 'known' ? pending.pendingKinds : undefined,
           continuedQuestionCallIds: derivation.continuedQuestionCallIds,
           attention: derivation.attention,
@@ -1604,7 +1776,7 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
 
   observeActivity(signal: AbortSignal): ActivityObservation {
     signal.throwIfAborted()
-    return new RemoteActivityObservation(this.source, signal)
+    return new RemoteActivityObservation(this.source, signal, this.discoveryReceipts)
   }
 
   /** One passive `session.state` read: no retain, no open, no Agent creation. */

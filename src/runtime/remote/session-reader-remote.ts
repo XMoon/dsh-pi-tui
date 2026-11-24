@@ -57,6 +57,8 @@ export interface RemoteSessionProjectionSnapshot {
 /** The official Client Session list row subset consumed by this adapter. */
 export interface RemoteSessionListRow {
   readonly id: string
+  /** The official durable Host title, when the Client row carries one. */
+  readonly title?: string
   readonly cwd?: string
   readonly parentId?: string
   readonly origin?: 'subagent'
@@ -231,6 +233,7 @@ export class RemoteSessionReader implements SessionReader {
         // keyed row only supplies detached metadata for this id.
         id,
         updatedAt: row.updatedAt,
+        ...(row.title === undefined ? {} : { title: row.title }),
         cwd: row.cwd,
         ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
         ...(row.origin === undefined ? {} : { origin: row.origin }),

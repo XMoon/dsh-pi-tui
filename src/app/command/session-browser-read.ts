@@ -456,6 +456,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           }
         })
         panel.rosterRows = enriched
+        // The ACCEPTED roster is the enriched one: a later raw push merged with
+        // the same enrichment is a semantic no-op (no revision, no re-batch).
+        panel.rosterSemantics = rosterSemanticsOf(enriched)
         panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
         if (panel.query !== '') {
           panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
@@ -614,7 +617,20 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel: ActiveRead,
     listed: readonly SessionBrowserRow[],
   ): { readonly listedRows: readonly SessionBrowserRow[]; readonly changed: boolean } => {
-    const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
+    // The official push row carries identity/running/cwd, but its projection
+    // enrichment may be absent. Keep the accepted enriched title/preset for an
+    // unchanged id: a status-only notification must never erase a label the
+    // projection batch already proved.
+    const accepted = new Map(panel.rosterRows.map((row) => [row.id, row]))
+    const listedRows = listed.map((row): SessionBrowserRow => {
+      const kept = accepted.get(row.id)
+      if (kept === undefined) return { ...row }
+      return {
+        ...row,
+        ...(row.title === undefined && kept.title !== undefined ? { title: kept.title } : {}),
+        ...(row.preset === undefined && kept.preset !== undefined ? { preset: kept.preset } : {}),
+      }
+    })
     const semantics = rosterSemanticsOf(listedRows)
     // The FIRST accepted roster is always a real revision, including a truly
     // empty one (which must reach the distinct `empty` list state).
@@ -720,6 +736,22 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.activityHandle = handle
     panel.activityUnsubscribe = handle.subscribe(() => { onActivityChanged(panel) })
     handle.setPriorityIds(eligibleIdsOf(panel))
+    if (panel.listRevision > 0) {
+      handle.setRoster(panel.rosterRows, panel.listRevision, panel.subject.currentSessionId)
+    }
+  }
+
+  /** ONE explicit refresh re-opens the observation: rows whose discovery never
+   *  completed (denied/unavailable/cancelled) are retried, while the adapter's
+   *  successful receipts still answer an unchanged source without a read. */
+  const restartActivityObservation = (panel: ActiveRead): void => {
+    if (!isActive(panel) || panel.activityHandle === undefined) return
+    panel.activityUnsubscribe?.()
+    panel.activityUnsubscribe = undefined
+    const previous = panel.activityHandle
+    panel.activityHandle = undefined
+    previous.dispose()
+    startActivityObservation(panel)
   }
 
   /** One Activity publication from the observation: accepted only while it was
@@ -743,6 +775,19 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     handle?.dispose()
   }
 
+  /** Install the ONE per-open Connection-generation observation. It is
+   *  installed even when the first follow cannot open, because the ONLY
+   *  recovery trigger for that open is the arrival of a real generation. */
+  const installWorkspaceGenerationObservation = (panel: ActiveRead): void => {
+    const facts = options.sessionWorkspaceFacts
+    if (panel.workspaceGenerationOff !== undefined || facts?.observeConnectionGeneration === undefined) return
+    panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
+      panel.workspaceEpoch += 1
+      if (!isActive(panel) || !panel.workspaceTerminal) return
+      startWorkspaceFollow(panel)
+    })
+  }
+
   /** Open the ONE per-open Workspace follow in the OFFICIAL recovering mode:
    *  a lost physical carrier invalidates the membership and the official
    *  Gateway stream restores a fresh baseline in the SAME handle. A terminal
@@ -751,6 +796,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   const startWorkspaceFollow = (panel: ActiveRead): void => {
     const facts = options.sessionWorkspaceFacts
     if (facts === undefined || panel.disposed || panel.workspaceHandle !== undefined) return
+    // The ONE per-open generation observation exists from this open onward,
+    // even when no usable Connection exists yet: a follow that cannot open on a
+    // disconnected Client must still rebind when a real generation arrives.
+    installWorkspaceGenerationObservation(panel)
     let handle: WorkspaceFactsHandle
     try {
       handle = facts.followWorkspaces(panel.controller.signal, 'recovering')
@@ -767,13 +816,6 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // late completion from the OLD handle must never paint into, or clear, the
     // newer membership.
     const ownsHandle = (): boolean => !panel.disposed && panel.workspaceHandle === handle
-    if (panel.workspaceGenerationOff === undefined && facts.observeConnectionGeneration !== undefined) {
-      panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
-        panel.workspaceEpoch += 1
-        if (!isActive(panel) || !panel.workspaceTerminal) return
-        startWorkspaceFollow(panel)
-      })
-    }
     const openedEpoch = panel.workspaceEpoch
     /** One terminal failure may rebind exactly once. It either waits for the
      *  NEXT generation change or, when a change already landed since this
@@ -1152,6 +1194,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         clearTimeout(active.refreshTimer)
         active.refreshTimer = undefined
       }
+      restartActivityObservation(active)
       startRefresh(active)
     },
     dispose() {

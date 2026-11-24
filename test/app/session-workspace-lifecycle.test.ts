@@ -22,6 +22,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
 import { createSessionCommands } from '../../src/tui/commands/sessions.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { TuiApp, type EditorWorkspaceEntryControl, type SubagentViewerTarget } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
@@ -190,11 +191,15 @@ interface FactsSource {
   setFacts(facts: readonly SessionActivityFact[]): void
   /** Fire the official Connection generation change for a terminal rebind. */
   notifyGeneration(): void
+  /** Make the next follow require a live Connection generation (a disconnected
+   *  open), and let `notifyGeneration` make one available. */
+  requireGeneration(): void
 }
 
 function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource {
   const handles: ControlledFactsHandle[] = []
   const observations: ControlledActivityObservation[] = []
+  let generationLive = true
   const state = {
     followCalls: 0,
     facts: initial,
@@ -269,6 +274,9 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
       return handle
     },
     followWorkspaces: (signal) => {
+      if (!generationLive) {
+        throw new SupersededReadError('the Host Workspace follow requires a current Connection generation')
+      }
       state.followCalls += 1
       const handle = new ControlledFactsHandle(signal)
       handles.push(handle)
@@ -282,7 +290,11 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
     get followCalls() { return state.followCalls },
     readActivityCalls: state.readActivityCalls,
     setFacts: (facts) => { state.facts = facts },
-    notifyGeneration: () => { for (const listener of [...generationListeners]) listener() },
+    notifyGeneration: () => {
+      generationLive = true
+      for (const listener of [...generationListeners]) listener()
+    },
+    requireGeneration: () => { generationLive = false },
   }
 }
 
@@ -3047,4 +3059,67 @@ test('review EXT-P1 (manual precedence): a Folder New into a VALID Workspace suc
     TuiApp.prototype.openSessionWorkspace = originalOpen
     h.close()
   }
+})
+
+// ── Review-driven roster enrichment and disconnected-open regressions ───────
+
+test('R11 a status-only roster push never erases the accepted title/preset enrichment', async () => {
+  const snapshots: SessionBrowserReadSnapshot[] = []
+  const presentation: SessionBrowserPresentation = {
+    open: (request) => ({
+      isDisposed: () => false,
+      setSnapshot: (snapshot) => { snapshots.push(snapshot) },
+      close: () => { request.onClose() },
+    }),
+    notify: () => {},
+  }
+  const titles: Record<string, string | undefined> = { [CURRENT]: 'Current title' }
+  let batches = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    observableList: true,
+    nativePresentation: presentation,
+    rows: [row(CURRENT, 3_000)],
+    projection: async () => {
+      batches += 1
+      return new Map([[CURRENT, { ...(titles[CURRENT] === undefined ? {} : { title: titles[CURRENT] }), preset: 'reviewer' }]])
+    },
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  await waitUntil(() => snapshots.at(-1)?.rows[0]?.title === 'Current title', 'the projection batch enriches the row')
+  const batchesAfterEnrichment = batches
+  const revisionAfterEnrichment = snapshots.at(-1)!.listRevision
+  // A status-only push repeats the SAME raw identity: the official Remote row
+  // carries no title/preset, so the accepted enrichment must survive it.
+  h.pushRoster([row(CURRENT, 3_000)])
+  await h.vt.waitForRender()
+  const pushed = snapshots.at(-1)!
+  assert.equal(pushed.rows[0]?.title, 'Current title', 'the accepted title survives a status-only push')
+  assert.equal(pushed.rows[0]?.preset, 'reviewer', 'the accepted preset survives a status-only push')
+  assert.equal(batches, batchesAfterEnrichment, 'a semantic no-op push never re-runs the projection batch')
+  assert.equal(pushed.listRevision, revisionAfterEnrichment, 'a semantic no-op push never bumps the roster revision')
+  // A genuine official title change reaches the same owner without a list read.
+  const listCallsBefore = h.listCalls
+  titles[CURRENT] = 'Renamed title'
+  h.pushRoster([row(CURRENT, 3_000, { title: 'Renamed title' })])
+  await waitUntil(() => snapshots.at(-1)?.rows[0]?.title === 'Renamed title', 'the official title change paints')
+  assert.equal(h.listCalls, listCallsBefore, 'a pushed title update never triggers a Host list read')
+  h.close()
+})
+
+test('R12 an open with no Connection generation installs the ONE generation observation and rebinds when it arrives', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  h.facts.requireGeneration()
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  assert.equal(h.facts.followCalls, 0, 'no Workspace handle can be opened while disconnected')
+  assert.ok(h.view().includes('Workspace membership unavailable'), `the truthful unavailable fact paints:\n${h.view()}`)
+  h.facts.notifyGeneration()
+  await waitUntil(() => h.facts.handles.length === 1, 'the arriving generation opens the ONE follow for the SAME panel')
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'project-a', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('project-a · 1'), 'the fresh baseline paints in the same panel')
+  h.close()
 })
