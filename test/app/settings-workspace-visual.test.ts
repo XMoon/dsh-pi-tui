@@ -2863,21 +2863,24 @@ test('a mounted tenant with a bar-only grant admits no hidden action', async () 
   await key(h, 'r')
   await settle(h, 4)
   assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'a hidden official refresh is never requested')
-  // The WIDE zero-body grant (200x2) paints NO parent pane either: Tab and
-  // Shift+Tab may never focus a region the frame does not paint.
-  h.vt.resize(200, 2)
-  await h.vt.waitForRender()
-  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u)
-  await key(h, '\t')
-  await settle(h, 4)
-  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Tab keeps the SAME tenant at a zero-grant frame')
-  assert.doesNotMatch(h.view(), /Settings · Categories/u, 'no invisible destination is focused')
-  await key(h, '\x1b[Z') // Shift+Tab
-  await settle(h, 4)
-  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Shift+Tab keeps the SAME tenant too')
-  assert.doesNotMatch(h.view(), /Settings · Categories|Settings · Agent · Rows/u)
-  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'no Tab direction refreshes')
-  assert.deepEqual(h.agentLoopWrites(), [], 'and none writes')
+  // A zero-body grant in BOTH layouts paints no parent pane and no body, so Tab
+  // and Shift+Tab may never focus a region the frame does not paint.
+  for (const [columns, rows] of [[200, 2], [100, 2]] as const) {
+    h.vt.resize(columns, rows)
+    await h.vt.waitForRender()
+    assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u)
+    await key(h, '\t')
+    await settle(h, 4)
+    assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, `${columns}x${rows}: Tab keeps the SAME tenant at a zero-grant frame`)
+    assert.doesNotMatch(h.view(), /Settings · Categories/u, `${columns}x${rows}: no invisible destination is focused`)
+    await key(h, '\x1b[Z') // Shift+Tab
+    await settle(h, 4)
+    assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, `${columns}x${rows}: Shift+Tab keeps the SAME tenant too`)
+    assert.doesNotMatch(h.view(), /Settings · Categories|Settings · Agent · Rows/u)
+    assert.doesNotMatch(h.view(), /Discard and leave|Leave anyway/u, 'a clean page opens no hidden question')
+    assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'no Tab direction refreshes')
+    assert.deepEqual(h.agentLoopWrites(), [], 'and none writes')
+  }
   // The page's own Back is the ONE admitted action at this grant.
   await key(h, '\x1b')
   await settle(h, 6)
@@ -2894,6 +2897,19 @@ test('a mounted tenant with a bar-only grant admits no hidden action', async () 
   await settle(h, 6)
   assert.match(h.view(), /Settings · Categories/u, 'a VISIBLE Tab destination really takes focus')
   assert.match(h.view(), /\[Categories \(10\)\]/u, 'and the rail is the focused pane')
+  // The other direction is symmetric: a visible Shift+Tab from the clean tenant
+  // steps back to the Rows pane it really paints.
+  await key(h, '\r') // rail -> Rows
+  await settle(h, 4)
+  await key(h, '\r') // the row -> the tenant Input
+  await settle(h, 6)
+  await key(h, '\x1b') // Cancel -> clean
+  await settle(h, 4)
+  await key(h, '\x1b[Z') // Shift+Tab
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u, 'a VISIBLE Shift+Tab destination really takes focus')
+  await key(h, '\r') // back into the tenant for the fresh Change below
+  await settle(h, 6)
   // And from the rail a fresh explicit Change still writes exactly once.
   await key(h, '\r') // rail -> Rows
   await settle(h, 4)
@@ -2905,6 +2921,61 @@ test('a mounted tenant with a bar-only grant admits no hidden action', async () 
   await settle(h, 12)
   assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 7 }])
   h.dispose()
+})
+
+test('a medium frame keeps its ordinary clean Tab and never opens a hidden question', async () => {
+  // (a) VISIBLE medium frame (80x24): the ordinary clean Tab paths really work.
+  const clean = setup({ columns: 80, rows: 24, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await clean.open('Agent')
+  await key(clean, '\r')
+  await highlightRow(clean, 'Parallel tool calls')
+  await key(clean, '\r')
+  await key(clean, '\x1b') // Cancel -> the clean tenant
+  await settle(clean, 6)
+  assert.match(clean.view(), /Settings · Agent · Parallel tool calls/u)
+  await key(clean, '\t')
+  await settle(clean, 6)
+  assert.match(clean.view(), /Settings · Categories/u, 'medium clean Tab really leaves to the rail')
+  assert.match(clean.view(), /\[Categories \(10\)\]/u, 'and the rail is the focused pane')
+  await key(clean, '\r') // rail -> Rows
+  await settle(clean, 4)
+  await key(clean, '\r') // the row -> the tenant Input
+  await settle(clean, 6)
+  await key(clean, '\x1b') // Cancel -> clean
+  await settle(clean, 4)
+  await key(clean, '\x1b[Z') // Shift+Tab
+  await settle(clean, 6)
+  assert.match(clean.view(), /Settings · Agent · Rows/u, 'medium clean Shift+Tab really leaves to Rows')
+  clean.dispose()
+
+  // (b) DIRTY page at a zero-body grant: Tab may neither leave nor open the
+  // page's parent-leave question, because no frame region is painted at all.
+  const dirty = setup({
+    columns: 160,
+    rows: 40,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'read-only profile',
+  })
+  await dirty.open('Agent')
+  await key(dirty, '\r')
+  await highlightRow(dirty, 'Parallel tool calls')
+  await key(dirty, '\r')
+  await key(dirty, '\x15')
+  await key(dirty, '6')
+  await clickPainted(dirty, 'Confirm [Enter]', true)
+  await settle(dirty, 12)
+  dirty.vt.resize(200, 2)
+  await dirty.vt.waitForRender()
+  assert.match(dirty.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'the zero-grant bar paints only Back')
+  await key(dirty, '\t')
+  await settle(dirty, 4)
+  assert.match(dirty.view(), /Settings · Agent · Parallel tool calls/u, 'Tab keeps the SAME dirty tenant')
+  assert.match(dirty.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'and never opens the hidden parent-leave question')
+  await key(dirty, '\x1b[Z')
+  await settle(dirty, 4)
+  assert.match(dirty.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'Shift+Tab opens no hidden question either')
+  assert.deepEqual(dirty.agentLoopWrites(), [], 'and no Tab direction writes')
+  dirty.dispose()
 })
 
 test('a bar-only grant also covers the Advanced, Input and confirmation states', async () => {

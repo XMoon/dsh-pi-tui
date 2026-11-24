@@ -5085,12 +5085,16 @@ export class SettingsWorkspacePanel implements Component {
           : this.focus === 'rows'
             ? (tabForward ? 'detail' : 'categories')
             : (tabForward ? 'categories' : 'rows')
-        // The destination must be REALLY painted: a frame that grants no body
-        // row (a wide/medium zero-body grant) paints no parent pane either, so
-        // Tab may never focus an invisible region. Same zero-grant rule the
-        // child applies to its own body; no new state, no other Tab change.
-        const destination = this.paintedPanes[next]
-        if (destination === undefined || destination.contentRows < 1) { this.intents.requestRender(); return }
+        // A frame that grants NO real content row at all (a wide OR medium
+        // zero-body grant) paints no parent pane and no body, so Tab could only
+        // focus an invisible region: refuse it. A frame that DOES grant content
+        // keeps the ordinary Tab path — a medium detail frame paints the sibling
+        // Rows pane even though the Categories destination belongs to the NEXT
+        // layout, so the check must be "does this frame grant any content row",
+        // never "is the destination pane painted in the CURRENT layout".
+        const granted = Object.values(this.paintedPanes)
+          .some(box => box !== undefined && box.contentRows >= 1)
+        if (!granted) { this.intents.requestRender(); return }
         if (this.guardTenantLeave({ categoryId: this.categoryId, rowId: this.rowId, focus: next },
           () => this.leaveDetailTo(next))) return
       }
