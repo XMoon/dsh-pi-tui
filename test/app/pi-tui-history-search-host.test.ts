@@ -4180,7 +4180,10 @@ test('a bounded startup burst completes the round on the final drain', async (t)
       }
       await new Promise(resolve => setTimeout(resolve, 10))
     }
+    const readyElapsed = Date.now() - readyStarted
     assert.equal(ready, true, 'the final drain must not wait for the 30 s timer')
+    assert.ok(readyElapsed < 3_000, `startup ready took ${String(readyElapsed)}ms; the 30 s timer masked the drain`)
+    console.log('R9 STARTUP READY', readyElapsed)
     assert.equal(burstDelivered, true)
     assert.equal(internals.index.checkpointOf('r9-burst')?.nextSeq, 603)
     const hit = await service.search({ scope: 'all', query: 'r9 burst 602', limit: 25 }, new AbortController().signal)
