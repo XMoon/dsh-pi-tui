@@ -15,6 +15,7 @@ import test from 'node:test'
 
 import {
   ACP_COMPACT_CANCEL_REASON,
+  isAcpCompactAbort,
   catalogUpdate,
   classifyCompactOutcome,
   classifyStandaloneOutcome,
@@ -194,8 +195,24 @@ test('compact cancellation wins only before the summary; committed results never
   assert.equal(independent.kind === 'failure' ? independent.code : '', 'LOCAL_ACP_COMMAND_FAILED')
   assert.equal(classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'busy' } },
     facts(), true).kind === 'failure' ? 'busy' : '', 'busy')
-  // The stock symbol is the reason the real controller uses.
+  // A summary followed by a failed end is a partial/unknown replacement.
+  assert.equal(classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'commit' } },
+    facts({ compactionId: 'c1', startSeq: 3, summarySeq: 4, endSeq: 5, endError: 'commit failed' }), false).kind,
+  'failure')
+  const summaryFailed = classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'commit' } },
+    facts({ compactionId: 'c1', startSeq: 3, summarySeq: 4, endSeq: 5, endError: 'commit failed' }), false)
+  assert.equal(summaryFailed.kind === 'failure' ? summaryFailed.code : '', 'LOCAL_ACP_COMMAND_INDETERMINATE')
+  // The exact ACP abort reason must be in the original rejection chain.
   const stock = new AbortController()
   stock.abort(ACP_COMPACT_CANCEL_REASON)
   assert.equal(stock.signal.reason, ACP_COMPACT_CANCEL_REASON)
+  assert.equal(isAcpCompactAbort({ kind: 'rejected', error: ACP_COMPACT_CANCEL_REASON }, stock.signal), true)
+  assert.equal(isAcpCompactAbort({
+    kind: 'rejected',
+    error: { name: 'ManualCompactionError', code: 'cancelled', cause: { kind: 'user' } },
+  }, stock.signal), false, 'an independent Host cancellation never becomes ACP cancelled')
+  assert.equal(isAcpCompactAbort({
+    kind: 'rejected',
+    error: { name: 'ManualCompactionError', code: 'cancelled', cause: new Error('other') },
+  }, stock.signal), false)
 })

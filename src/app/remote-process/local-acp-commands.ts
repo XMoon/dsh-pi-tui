@@ -115,8 +115,12 @@ export class AcpHostCommandError extends Error {
   }
 }
 
-/** The exact operational reasons one compact controller may carry. */
-export const ACP_COMPACT_CANCEL_REASON: unique symbol = Symbol('local-acp-compact-cancel')
+/**
+ * The ONE operation-specific compact abort reason. It is an Error identity so
+ * the official rejection chain can be checked for THIS operation instead of a
+ * local boolean flag that an independent Host cancellation can race.
+ */
+export const ACP_COMPACT_CANCEL_REASON: Error = Object.freeze(new Error('local-acp-compact-cancel'))
 
 /** The compact facts observed synchronously from the exact Session event stream. */
 export interface AcpCompactObservedFacts {
@@ -137,6 +141,11 @@ export type AcpCommandSettlement =
 
 /** The exact official parser injected by the Host access composition. */
 export type AcpCommandParser = (line: string) => { readonly name: string; readonly rawInput: string } | undefined
+
+/** Names reserved by the approved Host command surface. */
+export function isReservedCommandName(name: string): boolean {
+  return name === 'feedback' || name === 'compact'
+}
 
 /** Read the official leading command from the raw first wire block ONLY. */
 export function readLeadingCommand(
@@ -187,7 +196,7 @@ export function routeLeadingCommand(
     // must never fall through to native prose.
     return { kind: 'error', code: 'LOCAL_ACP_COMMAND_UNSUPPORTED', message: 'this Host command is not supported by the ACP command contract' }
   }
-  if (command.name === 'feedback' || command.name === 'compact') {
+  if (isReservedCommandName(command.name)) {
     return { kind: 'error', code: 'LOCAL_ACP_COMMAND_UNAVAILABLE', message: 'the approved Host command is not present on the exact live Agent' }
   }
   if (deliveredSkillNames.has(command.name)) return { kind: 'skill', name: command.name }
@@ -255,9 +264,23 @@ export function compactionErrorCode(error: unknown): string | undefined {
   return typeof candidate.code === 'string' ? candidate.code : undefined
 }
 
+/** Follow the standard Error cause chain without trusting an arbitrary object. */
+function causedBy(error: unknown, reason: unknown): boolean {
+  let current = error
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current === reason) return true
+    if (typeof current !== 'object' || current === null) return false
+    const next = (current as { readonly cause?: unknown }).cause
+    if (next === undefined || next === current) return false
+    current = next
+  }
+  return false
+}
+
 /** Whether one compact rejection was caused by THIS ACP operation's own abort. */
-export function isAcpCompactAbort(signal: AbortSignal): boolean {
-  return signal.aborted && signal.reason === ACP_COMPACT_CANCEL_REASON
+export function isAcpCompactAbort(settlement: AcpCommandSettlement, signal: AbortSignal): boolean {
+  if (!signal.aborted || signal.reason !== ACP_COMPACT_CANCEL_REASON) return false
+  return settlement.kind === 'rejected' && causedBy(settlement.error, ACP_COMPACT_CANCEL_REASON)
 }
 
 /** Validate one official `CommandExecution` shape without trusting it. */
@@ -358,11 +381,9 @@ export function classifyCompactOutcome(
     // classify it as indeterminate, never as a whole successful compaction.
     if (facts.endSeq === undefined) return indeterminateCompact()
     if (facts.endError !== undefined) {
-      return {
-        kind: 'failure',
-        code: 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR',
-        message: 'the compaction changed the session history but did not complete cleanly',
-      }
+      // A summary followed by an error end is a partial/unknown replacement,
+      // not proof of a complete committed history (frozen §8.4).
+      return indeterminateCompact()
     }
     if (code === 'persistence') {
       return {

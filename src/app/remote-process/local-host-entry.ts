@@ -757,7 +757,9 @@ interface CommandRuntimeLike {
 }
 
 interface AgentPresetInspectionLike {
+  readonly id: string
   readonly modules: readonly { readonly moduleName: string }[]
+  readonly leakedServices?: readonly string[]
 }
 
 interface AgentPresetRegistryLike {
@@ -791,6 +793,9 @@ interface CompactionEngineLike {
 const FEEDBACK_DEFINITION_ID = '@deepseek-ai/dsh-command-feedback'
 const COMPACT_DEFINITION_ID = '@deepseek-ai/dsh-command-compact'
 
+/** Official generated preset identities whose compaction composition is audited. */
+const AUDITED_COMPACTION_PRESETS: ReadonlySet<string> = new Set(['standard', 'ptc', 'minimal', 'cordis'])
+
 /** The audited official compaction modules of one isolated preset group. */
 const AUDITED_COMPACTION_MODULES: ReadonlySet<string> = new Set([
   '@deepseek-ai/dsh-compaction-basic',
@@ -821,16 +826,23 @@ function hasContext(agent: LiveAgentViewIdentity): agent is HostAgentLike {
 }
 
 /** The active modules of the exact retained preset revision. */
-function retainedModules(agent: LiveAgentViewIdentity, presets: AgentPresetRegistryLike): readonly string[] | undefined {
+function retainedInspection(
+  agent: LiveAgentViewIdentity,
+  presets: AgentPresetRegistryLike,
+): AgentPresetInspectionLike | undefined {
   if (!hasContext(agent)) return undefined
   let inspections: readonly AgentPresetInspectionLike[]
   try {
     inspections = presets.inspectCompositions(agent.ctx)
   } catch {
-    return undefined
+    throw new AcpHostCommandError('unavailable', 'the retained preset composition could not be inspected')
   }
   if (inspections.length !== 1) return undefined
-  return inspections[0]?.modules.map(module => module.moduleName)
+  return inspections[0]
+}
+
+function retainedModules(agent: LiveAgentViewIdentity, presets: AgentPresetRegistryLike): readonly string[] | undefined {
+  return retainedInspection(agent, presets)?.modules.map(module => module.moduleName)
 }
 
 /** Whether the exact retained revision mounts the native human Skill loader. */
@@ -856,7 +868,9 @@ function readSkillRegistry(
   try {
     scoped = presets.serviceFor(agent, 'skills')
   } catch {
-    scoped = undefined
+    // A failed authoritative read is not absence; never switch to the global
+    // registry because the scoped read could not answer.
+    throw new AcpHostCommandError('unavailable', 'the retained Skill service could not be resolved')
   }
   const registry = (scoped as SkillRegistryLike | undefined) ?? global
   return registry !== undefined && typeof registry.snapshot === 'function' ? registry : undefined
@@ -872,9 +886,10 @@ function auditedCompactionEngine(
   presets: AgentPresetRegistryLike | undefined,
 ): CompactionEngineLike | undefined {
   if (presets === undefined || !hasContext(agent)) return undefined
-  const modules = retainedModules(agent, presets)
-  if (modules === undefined
-    || !modules.includes('@deepseek-ai/dsh-compaction-basic')
+  const inspection = retainedInspection(agent, presets)
+  if (inspection === undefined || !AUDITED_COMPACTION_PRESETS.has(inspection.id)) return undefined
+  const modules = inspection.modules.map(module => module.moduleName)
+  if (!modules.includes('@deepseek-ai/dsh-compaction-basic')
     || !modules.includes('@deepseek-ai/dsh-command-compact')
     || !modules.filter(name => name.includes('compaction')).every(name => AUDITED_COMPACTION_MODULES.has(name))) {
     return undefined
@@ -883,7 +898,7 @@ function auditedCompactionEngine(
   try {
     service = presets.serviceFor(agent, 'compaction')
   } catch {
-    return undefined
+    throw new AcpHostCommandError('unavailable', 'the retained compaction service could not be resolved')
   }
   const engine = service as CompactionEngineLike | undefined
   return engine !== undefined && typeof engine.compactNow === 'function' ? engine : undefined

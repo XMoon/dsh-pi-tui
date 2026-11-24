@@ -2454,34 +2454,40 @@ export async function apply(ctx) {
   const lifecycleControl = process.env.C1_LIFECYCLE_CONTROL
   if (typeof lifecycleControl === 'string' && lifecycleControl !== '') {
     const actions = new Set()
-    let flushFailureArmed = false
-    let flushSummarySeen = false
-    let killAfterSummary = false
+    const flushFailureSessions = new Set()
+    const flushSummarySeen = new Set()
+    let killAfterSummarySession
     const sessions = ctx.sessions
     const originalFlush = sessions.flush
-    sessions.flush = async function lifecycleFlush(...args) {
-      // Fail only the flush that follows a real committed summary; the
-      // engine's earlier start/admission flush must keep its real behavior.
-      if (flushFailureArmed && flushSummarySeen) {
-        flushFailureArmed = false
-        record('lifecycle-flush-failure-hit')
+    const lifecycleFlush = async function (...args) {
+      // Fail only the exact Session's flush that follows its real committed
+      // summary; the engine's earlier start/admission flush keeps its real
+      // behavior, and a different Session can never consume this fault.
+      const sessionId = String(args[0]?.id ?? '')
+      if (flushFailureSessions.has(sessionId) && flushSummarySeen.has(sessionId)) {
+        flushFailureSessions.delete(sessionId)
+        flushSummarySeen.delete(sessionId)
+        record('lifecycle-flush-failure-hit', { sessionId })
         throw new Error('m4-c1-host-work: injected official Session flush failure')
       }
       return await originalFlush.apply(this, args)
     }
+    sessions.flush = lifecycleFlush
     ctx.effect(() => () => {
-      if (sessions.flush === lifecycleFlush) sessions.flush = originalFlush
+      const restored = sessions.flush === originalFlush
+      if (!restored) sessions.flush = originalFlush
+      record('lifecycle-flush-restored', { restored })
     }, 'lifecycle-flush-restore')
     const runAction = async action => {
       const agent = action.sessionId === undefined ? undefined : ctx.agents.get(action.sessionId)
       if (action.action === 'arm-flush-failure') {
-        flushFailureArmed = true
-        flushSummarySeen = false
+        flushFailureSessions.add(String(action.sessionId))
+        flushSummarySeen.delete(String(action.sessionId))
         record('lifecycle-flush-failure-armed', { sessionId: action.sessionId })
         return
       }
       if (action.action === 'arm-kill-after-summary') {
-        killAfterSummary = true
+        killAfterSummarySession = String(action.sessionId)
         record('lifecycle-kill-after-summary-armed', { sessionId: action.sessionId })
         return
       }
@@ -2529,12 +2535,13 @@ export async function apply(ctx) {
       return () => clearInterval(timer)
     }, 'lifecycle-control-poll')
     ctx.effect(() => ctx.on('session/event', (session, event) => {
-      if (event?.type === 'compaction/start') flushSummarySeen = false
-      if (event?.type === 'compaction/summary') flushSummarySeen = true
-      if (!killAfterSummary || event?.type !== 'compaction/summary') return
-      killAfterSummary = false
+      const sessionId = String(session.id)
+      if (event?.type === 'compaction/start') flushSummarySeen.delete(sessionId)
+      if (event?.type === 'compaction/summary') flushSummarySeen.add(sessionId)
+      if (killAfterSummarySession !== sessionId || event?.type !== 'compaction/summary') return
+      killAfterSummarySession = undefined
       record('lifecycle-kill-after-summary', {
-        sessionId: String(session.id),
+        sessionId,
         compactionId: String(event.data?.compactionId ?? ''),
       })
       process.kill(process.pid, 'SIGKILL')
