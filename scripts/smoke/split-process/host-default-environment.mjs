@@ -53,7 +53,7 @@ import { alive, saveFile, restoreFile, waitForSurfaceStatus } from '../../lib/sp
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent, writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
-import { readKernelProcess, readProcessStarttime, sameKernelProcess } from '../../src/runtime/native-process/identity.ts'
+import { readKernelProcess, readProcessStarttime, sameKernelProcess } from '../../../src/runtime/native-process/identity.ts'
 import { installedArtifactBuildId, managedHostGateReason, unitBelongsToRun } from './managed-host-m6-2b.mjs'
 import { waitForComposerMode, waitForComposerText } from './shell-tui-driving.mjs'
 
