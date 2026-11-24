@@ -4708,13 +4708,24 @@ export class TuiApp {
    */
   private readonly expandedContextClusterOwners = new Set<TranscriptMessage>()
   /**
-   * Members of every Work span currently OPEN (or flat/fail-open) in the
-   * current projection. Recomputed once per projection. The regular surface
-   * full-reveals these rows (no mouse ⇒ no per-card fold affordance), so
-   * `Ctrl+O` can never be advertised as a card's expand key while it actually
-   * collapses the Work span.
+   * Members of every Work span the CURRENT projection really emitted as an
+   * open container. Recomputed once per projection from the final blocks, not
+   * from the canonical all-expanded structure: a raw row the projection emits
+   * directly (a post-committed-answer Context, a disjoint fail-open row) is
+   * never full-revealed by a Work it does not currently render inside. The
+   * regular surface full-reveals these rows (no mouse ⇒ no per-card fold
+   * affordance), so `Ctrl+O` can never be advertised as a card's expand key
+   * while it actually collapses the Work span.
    */
   private openWorkRunMembers: ReadonlySet<TranscriptMessage> = new Set()
+  /**
+   * Messages the CURRENT Focus projection emitted as message rows (before any
+   * local card): the call-local direct-row authority used by the regular
+   * master, materialization and reveal-revocation checks. Recomputed once per
+   * projection; empty on non-Focus presets. It is not a disclosure owner and
+   * never survives as durable state.
+   */
+  private projectedFocusMessages: ReadonlySet<TranscriptMessage> = new Set()
   /**
    * Canonical structure indexes for the CURRENT `messages` array identity. One
    * linear projection per window; disclosure/search/pruning read Work and
@@ -4751,6 +4762,10 @@ export class TuiApp {
      * messages array identity stayed: the materialized-container filter must
      * not serve a stale ancestry. */
     readonly publication: number
+    /** The ACTUAL expanded-root scope this ancestry was derived in. A manual
+     * root toggle changes which Work containers the current projection emits,
+     * so the memo must not serve the previous scope's answer. */
+    readonly rootScope: string
     readonly ancestry: TranscriptRevealAncestry
   } | undefined
   /** `focusRootHidesSearchTarget()` memo: the collapsed Focus visibility of one
@@ -11370,6 +11385,12 @@ export class TuiApp {
     if (!this.messages.includes(message)) return false
     const index = this.canonicalStructureIndex()
     const policy = displayPolicyFor(this.displayState.preset)
+    // The Focus projection can emit a row DIRECTLY even when its canonical Work
+    // span is not materialized (the PR1 post-committed-answer fence and a
+    // disjoint fail-open region both keep persistent Context raw). That raw card
+    // is materialized on its own; deciding from the unmaterialized canonical
+    // Work would hide its own disclosure and hand Ctrl+O to the root instead.
+    if (policy.focusBehavior && this.projectedFocusMessages.has(message)) return true
     // Work is a real container only where the projection emits a Work header
     // (Compact; nested Work in expanded Focus). Full keeps Work FLAT, so its
     // members are always materialized at their raw chronology.
@@ -11443,11 +11464,13 @@ export class TuiApp {
     const cluster = index.clusterByMember.get(target)
     if (cluster !== undefined && this.clusterOwnerMaterialized(cluster.owner)) return true
     const span = index.workByMember.get(target)
-    if (span !== undefined) {
+    if (span !== undefined && !this.projectedFocusMessages.has(target)) {
       // Only a MANUAL Focus root survives this collapse. A Ctrl+O-derived
       // recent root is removed by the very transaction we are about to run, so
       // treating it as a surviving owner would leave the reveal active and let
       // search immediately reopen the Thought/Work the user just collapsed.
+      // A row the Focus projection emits RAW (post-fence / fail-open) is not
+      // hidden by any Work ancestor; fall through to its own card disclosure.
       const rootKeepsOpen = isFocusDisplayPreset(this.displayState.preset)
         && this.focusExpandedTurns.has(span.turn)
       return !rootKeepsOpen
@@ -12133,24 +12156,8 @@ export class TuiApp {
       if (owner.kind === 'work') expandedWorkOwners.add(owner.owner)
       else if (owner.kind === 'context-cluster') expandedClusters.add(owner.owner)
     }
-    // Publish the scope the regular surface full-reveals: every member of every
-    // OPEN Work span (and of every span when the header fails open). Computed
-    // ONCE per projection (never per message) so the render-cache path stays
-    // O(1) per card. Only presets that materialize Work as a container
-    // participate: Full keeps its flat Process-expanded semantics.
-    const workIsContainer = workHeader
-      && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed'))
-    const openRunMembers = new Set<TranscriptMessage>()
-    if (workIsContainer) {
-      for (const span of this.canonicalStructureIndex().workSpans) {
-        if (this.workSpanExpanded(span)) {
-          for (const member of span.members) openRunMembers.add(member)
-        }
-      }
-    }
-    this.openWorkRunMembers = openRunMembers
     if (policy.turnLayer === 'open' && policy.processLayer === 'collapsed') {
-      return [
+      const blocks: TranscriptRenderBlock[] = [
         ...projectCompact(this.messages, {
           expandedWorkOwners,
           expandedClusters,
@@ -12159,6 +12166,8 @@ export class TuiApp {
           workHeader,
         }),
       ]
+      this.publishProjectionFacts(blocks, false)
+      return blocks
     }
     // One canonical segmentation per projection. Full materializes it directly
     // (Work flat, the shared cluster presentation); Focus reorders/hoists rows,
@@ -12168,9 +12177,40 @@ export class TuiApp {
     if (policy.focusBehavior) {
       const blocks = projectFocus(this.messages, this.turnActivities, projectionExpanded, true)
       const substituted = this.applyContextClusters(blocks, clusterByMemberOf(structure))
-      return this.materializeFocusWork(substituted)
+      const final = this.materializeFocusWork(substituted)
+      this.publishProjectionFacts(final, true)
+      return final
     }
-    return this.materializeTranscriptStructure(structure)
+    const final = this.materializeTranscriptStructure(structure)
+    this.publishProjectionFacts(final, false)
+    return final
+  }
+
+  /**
+   * Publish the CURRENT projection's call-local disclosure facts from the
+   * final blocks, ONCE per projection (never per card):
+   * - `projectedFocusMessages`: rows the Focus projection really emitted, so a
+   *   raw-visible post-fence row owns its own card even when its canonical Work
+   *   span is not materialized;
+   * - `openWorkRunMembers`: members of Work spans the projection really
+   *   materialized AND left open, so only those are full-revealed by the
+   *   regular master. A raw row or a collapsed/unmaterialized Work never
+   *   contributes.
+   */
+  private publishProjectionFacts(
+    blocks: readonly TranscriptRenderBlock[],
+    focusBehavior: boolean,
+  ): void {
+    const projectedMessages = new Set<TranscriptMessage>()
+    const openRunMembers = new Set<TranscriptMessage>()
+    for (const block of blocks) {
+      if (focusBehavior && block.kind === 'message') projectedMessages.add(block.message)
+      if (block.kind === 'work' && this.workSpanExpanded(block.span)) {
+        for (const member of block.span.members) openRunMembers.add(member)
+      }
+    }
+    this.projectedFocusMessages = projectedMessages
+    this.openWorkRunMembers = openRunMembers
   }
 
   /**
@@ -12251,12 +12291,13 @@ export class TuiApp {
     return this.searchRevealGranted ? this.searchTarget?.message : undefined
   }
 
-  /** The Work owners the ACTUAL expanded Focus projection materialized as
-   * containers. A fail-open region emits its canonical members raw, so its span
-   * is absent here and must never mint a search reveal/promotion. */
-  private focusMaterializedWorkOwners(): ReadonlySet<TranscriptMessage> {
+  /** The Work owners the CURRENT effective expanded-root Focus projection
+   * emitted as containers. A raw-visible post-fence row and a fail-open region
+   * emit their canonical members directly, so their span is absent here and
+   * must never mint a search reveal/promotion. */
+  private focusMaterializedWorkOwners(projectionExpanded: ReadonlySet<number>): ReadonlySet<TranscriptMessage> {
     const owners = new Set<TranscriptMessage>()
-    for (const block of projectFocus(this.messages, this.turnActivities, new Set(this.turnActivities.keys()), true)) {
+    for (const block of projectFocus(this.messages, this.turnActivities, projectionExpanded, true)) {
       if (block.kind === 'work') owners.add(block.span.owner)
     }
     return owners
@@ -12285,7 +12326,7 @@ export class TuiApp {
     // header to reveal or promote: grant only spans the ACTUAL expanded
     // projection materialized. Other presets keep the surface capability.
     const materializedWorkOwners = workIsContainer && isFocusDisplayPreset(this.displayState.preset)
-      ? this.focusMaterializedWorkOwners()
+      ? this.focusMaterializedWorkOwners(this.focusProjectionExpandedTurns())
       : undefined
     return transcriptRevealAncestryFor(message, {
       workByMember: this.canonicalStructureIndex().workByMember,
@@ -12300,11 +12341,12 @@ export class TuiApp {
    * window) — never the mutable open state (plan §30). */
   private searchRevealAncestry(target: TranscriptMessage): TranscriptRevealAncestry {
     const disclosureAvailable = this.transcriptDisclosureActionAvailable()
+    const rootScope = this.focusRootScopeKey()
     const memo = this.revealedOwnerMemo
     if (memo !== undefined && memo.target === target && memo.preset === this.displayState.preset
       && memo.fullscreen === (this.fullscreen !== undefined)
       && memo.disclosureAvailable === disclosureAvailable && memo.messages === this.messages
-      && memo.publication === this.transcriptPublicationEpoch) {
+      && memo.publication === this.transcriptPublicationEpoch && memo.rootScope === rootScope) {
       return memo.ancestry
     }
     const ancestry = this.searchRevealAncestryFor(target)
@@ -12315,9 +12357,17 @@ export class TuiApp {
       disclosureAvailable,
       messages: this.messages,
       publication: this.transcriptPublicationEpoch,
+      rootScope,
       ancestry,
     }
     return ancestry
+  }
+
+  /** A stable key for the CURRENT effective Focus root scope (manual + bulk +
+   * the target's necessary temporary root). The ancestry memo uses it; no
+   * second memo or durable state is introduced. */
+  private focusRootScopeKey(): string {
+    return [...this.focusProjectionExpandedTurns()].sort((left, right) => left - right).join(',')
   }
 
   /** Evaluate the CURRENT reveal path from stable ancestry: only ancestors that
@@ -12339,7 +12389,7 @@ export class TuiApp {
    * THIS single resolution, so they can never disagree about who owns the row.
    */
   private searchRevealOwnerFor(message: TranscriptMessage): SearchRevealPath | undefined {
-    return this.revealPathFromAncestry(this.searchRevealAncestryFor(message))
+    return this.revealPathFromAncestry(this.searchRevealAncestry(message))
   }
 
   /** The GRANTED reveal's container path (undefined when no reveal is active).
@@ -12356,7 +12406,7 @@ export class TuiApp {
   private planRevealPathOwners(): SearchRevealPath | undefined {
     const target = this.planInspection?.message
     if (target === undefined || this.expandedOverride.get(target) === false) return undefined
-    return this.revealPathFromAncestry(this.searchRevealAncestryFor(target))
+    return this.revealPathFromAncestry(this.searchRevealAncestry(target))
   }
 
   /** Whether ONE request's path hides a row inside this Work span / cluster. */

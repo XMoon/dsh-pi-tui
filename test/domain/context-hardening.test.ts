@@ -21,7 +21,7 @@ import {
   isRelayContext,
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../../src/tui/transcript/context-summary.ts'
-import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { projectTranscriptStructure, workContextCarriageOf } from '../../src/tui/transcript/structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../../src/tui/components/transcript/context-row.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 
@@ -451,6 +451,47 @@ test('only the official full-drain claim shape proves same-turn delivery', () =>
   assert.ok(rebuiltRow !== undefined && rebuiltRow.kind === 'system')
   assert.equal(rebuiltRow.contextPresentation?.sameTurnNextStep, true,
     'a later valid full drain proves delivery again')
+})
+
+test('a claimed identity omitted from its step is retired before a later same-turn append', () => {
+  // Defensive log fixture (not a claim about the real upstream reusing an ID):
+  // two identities are claimed by the official full drain. One is really
+  // appended in this step; the other is omitted (e.g. middleware). At step/end
+  // the omitted candidate must be retired, so a later step in the SAME still-open
+  // Turn that appends that ID without a new inbox insert cannot inherit the
+  // old delivery provenance.
+  const source = { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }
+  const consumed = {
+    id: MessageId('retired-consumed'), role: 'user',
+    content: [{ type: 'text', text: 'consumed same-turn notice' }], source,
+  }
+  const retired = {
+    id: MessageId('retired-omitted'), role: 'user',
+    content: [{ type: 'text', text: 'omitted same-turn notice' }], source,
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  folder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [consumed, retired] }, 1001, 1)])
+  folder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 2, inserted: [] }, 1002, 2)])
+  folder.apply([eventAt('step/start', { turn: 0, step: 0 }, 1003, 3)])
+  folder.apply([eventAt('user/message', consumed, 1004, 4)])
+  folder.apply([eventAt('step/end', { turn: 0, step: 0 }, 1005, 5)])
+  folder.apply([eventAt('step/start', { turn: 0, step: 1 }, 1006, 6)])
+  folder.apply([eventAt('user/message', retired, 1007, 7)])
+  folder.apply([eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1008, 8)])
+  const rows = folder.messages().filter((message): message is SystemRow => message.kind === 'system')
+  const consumedRow = rows.find(row => row.text.includes('consumed same-turn notice'))
+  const retiredRow = rows.find(row => row.text.includes('omitted same-turn notice'))
+  assert.ok(consumedRow !== undefined && retiredRow !== undefined,
+    'both real user/message rows materialize as independent Context rows')
+  assert.equal(consumedRow.contextPresentation?.sameTurnNextStep, true,
+    'the identity really appended in its own step keeps the delivery flag')
+  assert.equal(retiredRow.contextPresentation?.sameTurnNextStep, undefined,
+    'step/end retires the claimed identity the step never appended')
+  assert.equal(workContextCarriageOf(consumedRow, new Map()), 'thought',
+    'the consumed row keeps the approved working carriage')
+  assert.equal(workContextCarriageOf(retiredRow, new Map()), undefined,
+    'the retired row stays an independent Context boundary')
 })
 
 test('a repeat-tool-reminder without a same-turn claim never carries the flag', () => {

@@ -409,6 +409,80 @@ function seedCatalogFocusTurn(folder: TranscriptFolder): void {
   folder.apply(events)
 }
 
+/** The PR1 pre-steer fence: a committed answer, then a same-turn steer whose
+ * real Work carries a complete catalog replacement. The catalog stays a raw,
+ * directly visible Context row in collapsed Focus even though canonical
+ * structure gives it the Work as its owner. */
+function seedFencedRawCatalogTurn(folder: TranscriptFolder): void {
+  const events: SessionEvent[] = []
+  let seq = 0
+  const push = (type: string, data: Record<string, unknown>): void => {
+    events.push(ev(type, data, seq))
+    seq += 1
+  }
+  push('turn/start', { turn: 1 })
+  push('step/start', { turn: 1, step: 1 })
+  push('user/message', {
+    id: MessageId('surface-fenced-u1'), role: 'user',
+    content: [{ type: 'text', text: 'start the fenced catalog turn' }], source: { kind: 'user' },
+  })
+  push('agent/inbox/spliced', {
+    target: 'next-step', start: 0, inserted: [{
+      id: MessageId('surface-fenced-steer'), role: 'user',
+      content: [{ type: 'text', text: 'fenced steer' }], source: { kind: 'user' },
+    }],
+  })
+  push('assistant/message', {
+    turn: 1, step: 1,
+    stream: [{ type: 'text-chunks', time0: T0 + 2_000, index: 0, dt: [], texts: ['answer A'] }],
+    message: {
+      id: MessageId('surface-fenced-answer-a'), role: 'assistant',
+      content: [{ type: 'text', text: 'answer A before the steer' }],
+      source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+  })
+  push('step/end', { turn: 1, step: 1 })
+  push('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] })
+  push('step/start', { turn: 1, step: 2 })
+  push('user/message', {
+    id: MessageId('surface-fenced-steer'), role: 'user',
+    content: [{ type: 'text', text: 'fenced steer' }], source: { kind: 'user' },
+  })
+  push('tool/call', { turn: 1, step: 2, callId: ToolCallId('surface-fenced-a'), name: 'read', arguments: '{}' })
+  push('tool/result', {
+    turn: 1, step: 2,
+    message: {
+      id: MessageId('surface-fenced-a-result'), role: 'tool', toolCallId: ToolCallId('surface-fenced-a'),
+      content: [{ type: 'text', text: 'FENCED_PROCESS_A_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-fenced-a') },
+    },
+  })
+  push('user/message', {
+    id: MessageId('surface-fenced-catalog'), role: 'user',
+    content: [{ type: 'text', text: 'FENCED_RAW_CATALOG_MARKER complete replacement body' }],
+    source: { kind: 'skill-catalog', form: 'catalog', update: true, entries: [{ name: 'fenced-surface-skill', description: 'fenced surface skill' }] },
+  })
+  push('tool/call', { turn: 1, step: 2, callId: ToolCallId('surface-fenced-b'), name: 'bash', arguments: JSON.stringify({ command: 'echo b' }) })
+  push('tool/result', {
+    turn: 1, step: 2,
+    message: {
+      id: MessageId('surface-fenced-b-result'), role: 'tool', toolCallId: ToolCallId('surface-fenced-b'),
+      content: [{ type: 'text', text: 'FENCED_PROCESS_B_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-fenced-b') },
+    },
+  })
+  push('assistant/message', {
+    turn: 1, step: 3,
+    message: {
+      id: MessageId('surface-fenced-final'), role: 'assistant',
+      content: [{ type: 'text', text: 'the fenced catalog turn finished' }],
+      source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+    stream: [],
+  })
+  push('step/end', { turn: 1, step: 3 })
+  push('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  folder.apply(events)
+}
+
 test('the binding searches the SAME main Folder the repaint uses, with a complete-log coverage', async (t) => {
   const h = await mountSurface(t)
   const binding = h.binding()
@@ -731,6 +805,51 @@ test('the composed Focus binding reveals only what each semantic hit really hide
   assert.equal(summaryCount(), 1, 'dismissing the standalone hit mints no summary')
 })
 
+
+test('the composed Focus binding keeps a raw post-fence catalog card-owned while the root stays collapsed', async (t) => {
+  const ENTER = '\r'
+  const ESCAPE = '\u001b'
+  const CATALOG = 'FENCED_RAW_CATALOG_MARKER'
+  const PROCESS = 'FENCED_PROCESS_B_MARKER'
+  const h = await mountSurface(t, { preset: 'focus', seed: seedFencedRawCatalogTurn })
+  h.surface.repaint()
+  const textOfNode = (node: WireNode): string => {
+    const own = typeof node.p.text === 'string' ? node.p.text : ''
+    return [own, ...(node.c ?? []).map(textOfNode)].join('\n')
+  }
+  const nodes = (): WireNode[] => foldWireNodes(h.pane.frames())
+  const painted = (needle: string): boolean => h.texts().some(text => text.includes(needle))
+  const summaryCount = (): number => (h.texts().join('\n').match(/Turn complete/g) ?? []).length
+  await waitUntil('the fenced transcript paints its one summary',
+    () => h.texts().join('\n').includes('Turn complete'))
+  assert.equal(painted(CATALOG), false, 'precondition: the catalog body is folded behind its own card')
+  const rawCard = nodes().find(node => node.k === 'section' && node.p.head === 'skill-catalog')
+  assert.ok(rawCard !== undefined && rawCard.p.collapsed === true,
+    'precondition: the raw Context card is visible and folded')
+  assert.equal(painted(PROCESS), false, 'precondition: the Work body is folded')
+  assert.equal(summaryCount(), 1)
+
+  // The root stays collapsed: the raw card is visible on its own and no Work
+  // container exists yet. The search must not mint one for the visible target.
+  await h.key(ALT_SHIFT_S)
+  await waitUntil('the search card painted', () => h.texts().some(text => text.includes('Session Search')))
+  for (let index = 0; index < 'fenced_raw_catalog_marker'.length; index += 1) await h.key('fenced_raw_catalog_marker'[index]!)
+  await waitUntil('the catalog target settles', () => h.texts().some(text => /1\/1 targets/u.test(text)))
+  await h.key(ENTER)
+  await waitUntil('the raw catalog card body opens', () => painted(CATALOG))
+  assert.equal(summaryCount(), 1, 'the raw catalog hit paints exactly one Focus summary')
+  assert.equal(painted(PROCESS), false,
+    'the raw visible card must not borrow the canonical Work to full-reveal its Process')
+
+  assert.ok(nodes().some(node => textOfNode(node).includes(CATALOG)), 'the raw catalog body is exported by an attached native node')
+  assert.equal(nodes().some(node => node.k === 'section' && /work/u.test(node.id)), false,
+    'the raw visible card never mints a Work disclosure owner')
+
+  await h.key(ESCAPE)
+  await waitUntil('the raw catalog retracts on dismiss', () => !painted(CATALOG))
+  assert.equal(painted(PROCESS), false, 'dismissing the raw card opens no Work body')
+  assert.equal(summaryCount(), 1, 'dismissing the raw card mints no summary')
+})
 
 test('the composed Focus binding reveals a carried complete catalog through its one root and retracts on dismiss', async (t) => {
   const ENTER = '\r'

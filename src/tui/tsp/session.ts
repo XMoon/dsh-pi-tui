@@ -3183,7 +3183,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ? new Set<TranscriptMessage>()
       : undefined
     if (focusMaterializedWorkOwners !== undefined && lastTurnActivities !== undefined) {
-      for (const block of projectFocus(lastMessages, lastTurnActivities, new Set(lastTurnActivities.keys()), true)) {
+      // The ACTUAL current root scope: the manual roots plus the root this
+      // navigation really needs. A root the search does not grant is not part
+      // of the projection, so a raw-visible post-fence row cannot borrow its
+      // canonical Work. Conversely, a root granted for a hidden target makes
+      // the real Work headers materialize and those owners are granted below.
+      const focusScope = new Set(expandedFocusTurns)
+      for (const grantedTurn of focusTurns) focusScope.add(grantedTurn)
+      for (const block of projectFocus(lastMessages, lastTurnActivities, focusScope, true)) {
         if (block.kind === 'work') focusMaterializedWorkOwners.add(block.span.owner)
       }
     }
@@ -5997,6 +6004,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
                 for (const owner of focusWorkOwnersByTurn.get(turn) ?? []) expandedWorkOwners.delete(owner)
                 for (const owner of focusThinkingOwnersByTurn.get(turn) ?? []) expandedThinkingOwners.delete(owner)
                 for (const rootKey of focusToolRootsByTurn.get(turn) ?? []) expandedToolKeys.delete(rootKey)
+              }
+              // The actual root scope changed. Re-derive the temporary grants
+              // for the SAME navigation epoch only when the user has not
+              // suppressed them; never reset suppression or write manual sets.
+              if (searchGrants !== undefined && searchGrantSuppressedEpoch !== searchNavigationEpoch) {
+                searchGrants = deriveSearchGrants()
+                searchGrantsEpoch = searchNavigationEpoch
               }
               if (rebuildLastMain()) render()
             }

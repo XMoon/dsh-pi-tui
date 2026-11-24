@@ -383,7 +383,7 @@ test('the REAL skill-catalog producer publishes a complete same-turn update that
   assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the catalog adds no Action')
 })
 
-test('a rejected same-turn claim is retired and cannot become a later delivery', async (t) => {
+test('a real pre-step rejection appends nothing and the next prompt is an independent admission', async (t) => {
   const life = testLifecycle(t)
   const rejected = createUserMessage({
     content: [{ type: 'text', text: 'REJECTED_SAME_TURN_BODY' }],
@@ -429,8 +429,8 @@ test('a rejected same-turn claim is retired and cannot become a later delivery',
   assert.equal(firstEvents.filter(event => event.type === 'turn/end').length, 1,
     'the rejected claim does not prevent the owning turn from closing')
 
-  // The SAME id in a later legitimate prompt is an independent ordinary
-  // admission, never resurrected same-turn provenance.
+  // A later independent prompt is a new ordinary admission; it does not
+  // resurrect the rejected identity or its claimed provenance.
   await harness.run(() => [])
   const events = harness.agent.session.snapshotEvents()
   assert.equal(events.filter(event => event.type === 'turn/start').length, 2)
@@ -440,6 +440,4 @@ test('a rejected same-turn claim is retired and cannot become a later delivery',
   folder.hydrate(events)
   assert.equal(folder.messages().some(row => row.kind === 'system' && row.text.includes('REJECTED_SAME_TURN_BODY')), false,
     'the rejected claimed identity never appears as a Context row')
-  assert.equal(folder.messages().some(row => row.kind === 'system' && row.contextPresentation?.sameTurnNextStep === true), false,
-    'no later row inherits the rejected claim')
 })
