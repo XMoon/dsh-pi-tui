@@ -60,6 +60,13 @@ function promptText(text) {
   return [{ type: 'text', text }]
 }
 
+function messageText(message) {
+  return (message?.content ?? [])
+    .filter(part => part?.type === 'text')
+    .map(part => part.text)
+    .join('')
+}
+
 function openTurn(events) {
   const started = new Set(events.filter(event => event.type === 'turn/start').map(event => event.data?.turn))
   const ended = new Set(events.filter(event => event.type === 'turn/end').map(event => event.data?.turn))
@@ -76,6 +83,16 @@ async function waitForFile(path, label, timeoutMs = 120_000) {
 function resetHold(root) {
   rmSync(`${root}.entered`, { force: true })
   rmSync(`${root}.release`, { force: true })
+}
+
+function clearTurnHold(root, sessions) {
+  rmSync(`${root}.entered`, { force: true })
+  rmSync(`${root}.release`, { force: true })
+  for (const sessionId of sessions) {
+    rmSync(`${root}.entered.${sessionId}`, { force: true })
+    rmSync(`${root}.release.${sessionId}`, { force: true })
+  }
+  rmSync(root, { force: true })
 }
 
 function commandEvents(events, name) {
@@ -102,6 +119,7 @@ export async function runAcpCommandInvocation(context) {
   const scene = createC1Scene(context, { scopedMcpB1: true })
   const hostCwd = realpathSync(workDir)
   const holdRoot = join(workDir, 'acp-command-compaction-hold')
+  const turnHold = join(workDir, 'acp-command-turn-hold')
   resetHold(holdRoot)
   const lifecycleControl = join(workDir, 'acp-command-lifecycle')
   mkdirSync(lifecycleControl, { recursive: true, mode: 0o700 })
@@ -283,37 +301,164 @@ export async function runAcpCommandInvocation(context) {
     // CMP-03: a real standard `session/cancel` is delivered while the official
     // summarizer is held. The deferred decision aborts the exact captured
     // controller; the official failed bracket closes without a summary.
-    resetHold(holdRoot)
-    const beforeCancel = hostSessionEvents(dshHome, sessionId).length
-    const cancelledRequest = settle(client.request(acp.methods.agent.session.prompt, {
-      sessionId,
-      prompt: promptText('/compact'),
-    }))
-    await waitForFile(`${holdRoot}.entered`, 'CMD-07 the held summarizer before ACP cancel')
-    await client.notify(acp.methods.agent.session.cancel, { sessionId })
-    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
-    const cancelledOutcome = await cancelledRequest
-    const cancelled = cancelledOutcome.value
-    assert(cancelledOutcome.error === undefined && cancelled?.stopReason === 'cancelled',
-      `CMD-07: the precommit ACP cancel must stopReason cancelled (${JSON.stringify(cancelled)})`)
-    const cancelEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(beforeCancel)
-    const cancelStart = cancelEvents.find(event => event.type === 'compaction/start')
-    assert(cancelStart?.data?.turn === null, 'CMD-07: the cancelled attempt has a real turn:null start')
-    assert(cancelStart?.data?.sourceCommandId === undefined, 'CMD-07: ACP never fabricates a sourceCommandId')
-    const cancelId = cancelStart?.data?.compactionId
-    assert(typeof cancelId === 'string' && cancelId.length > 0, 'CMD-07: the cancelled attempt has a real compactionId')
-    assert(cancelEvents.some(event => event.type === 'compaction/end'
-      && event.data?.compactionId === cancelId && typeof event.data?.error === 'string'),
-    'CMD-07: the cancelled attempt has its matching failed end')
-    assert(!cancelEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === cancelId),
-      'CMD-07: a precommit cancel never commits a summary')
-    trace('acp-command/cancel', { compactionId: cancelId, stopReason: cancelled.stopReason })
+    // During the hold, a normal Shared-TUI prompt on the same Session must be
+    // accepted by the official inbox and must NOT be claimed until maintenance
+    // ends. A second real Session keeps its own provider turn open, so the
+    // cancel is scoped to the exact compact operation rather than a global
+    // Agent/Host cancellation.
+    const bSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    assert(typeof bSession === 'string' && bSession !== '' && bSession !== sessionId,
+      'CMP-03: B must be a distinct real Host Session')
+    const bBefore = (hostSessionEvents(dshHome, bSession) ?? []).length
+    const cmp03 = `cmp03-${String(Date.now())}-${String(process.pid)}`
+    const queuedText = `CMP-03 queued foreign TUI prompt ${cmp03}`
+    const bText = `CMP-03 held B prompt ${cmp03}`
+    clearTurnHold(turnHold, [sessionId, bSession])
+    writeFileSync(turnHold, `${sessionId}\n${bSession}\n`, { mode: 0o600 })
+    let bRequest
+    try {
+      bRequest = settle(client.request(acp.methods.agent.session.prompt, {
+        sessionId: bSession,
+        prompt: promptText(bText),
+      }))
+      await waitForHostSessionEventAfter(dshHome, bSession, bBefore,
+        event => event.type === 'user/message' && messageText(event.data).includes(bText),
+        'CMP-03 the held B prompt enters its real turn')
+      await waitForFile(`${turnHold}.entered.${bSession}`, 'CMP-03 the B provider turn is held')
+
+      resetHold(holdRoot)
+      const beforeCancel = hostSessionEvents(dshHome, sessionId).length
+      const cmp03FrameOffset = updates.length
+      const cancelledRequest = settle(client.request(acp.methods.agent.session.prompt, {
+        sessionId,
+        prompt: promptText('/compact'),
+      }))
+      await waitForFile(`${holdRoot}.entered`, 'CMP-03 the held summarizer before ACP cancel')
+
+      tui.client.send(`${queuedText}\r`)
+      const accepted = await waitForHostSessionEventAfter(dshHome, sessionId, beforeCancel,
+        event => event.type === 'agent/inbox/spliced'
+          && event.data?.target === 'next-turn'
+          && (event.data?.inserted ?? []).some(message => messageText(message).includes(queuedText)),
+        'CMP-03 the official inbox acceptance of the foreign TUI prompt')
+      const queuedMessage = accepted.data.inserted.find(message => messageText(message).includes(queuedText))
+      assert(typeof queuedMessage?.id === 'string' && queuedMessage.id !== '',
+        `CMP-03: the accepted queued message must carry a real id (${JSON.stringify(accepted.data)})`)
+      assert((accepted.data.removedCount ?? 0) === 0,
+        'CMP-03: acceptance is an insertion, never a claim')
+      await sleep(250)
+      const whileHeld = hostSessionEvents(dshHome, sessionId) ?? []
+      assert(!whileHeld.some(event => event.seq > accepted.seq
+        && event.type === 'user/message' && event.data?.id === queuedMessage.id),
+      'CMP-03: the queued foreign prompt must not be claimed while maintenance is held')
+      assert(!whileHeld.some(event => event.seq > accepted.seq && event.type === 'turn/start'),
+        'CMP-03: no A turn may start while the compact maintenance is held')
+      assert(!whileHeld.some(event => event.seq > accepted.seq
+        && event.type === 'agent/inbox/spliced'
+        && event.data?.target === 'next-turn'
+        && (event.data?.removedCount ?? 0) > 0
+        && (event.data?.inserted ?? []).length === 0),
+      'CMP-03: no inbox removal/claim may run while maintenance is held')
+      assert(!existsSync(`${turnHold}.entered.${sessionId}`),
+        'CMP-03: the exact-session turn hold must not enter before maintenance ends')
+
+      await client.notify(acp.methods.agent.session.cancel, { sessionId })
+      writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+      const cancelledOutcome = await cancelledRequest
+      const cmp03ReplyUpdates = updates.slice(cmp03FrameOffset)
+      const cancelled = cancelledOutcome.value
+      assert(cancelledOutcome.error === undefined && cancelled?.stopReason === 'cancelled',
+        `CMP-03: the precommit ACP cancel must stopReason cancelled (${JSON.stringify(cancelledOutcome.error?.data ?? cancelled)})`)
+      const cancelEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(beforeCancel)
+      const cancelStarts = cancelEvents.filter(event => event.type === 'compaction/start')
+      assert(cancelStarts.length === 1,
+        `CMP-03: the cancelled attempt owns exactly one start (${JSON.stringify(cancelStarts.map(event => event.data))})`)
+      const cancelStart = cancelStarts[0]
+      assert(cancelStart?.data?.turn === null, 'CMP-03: the cancelled attempt has a real turn:null start')
+      assert(cancelStart?.data?.sourceCommandId === undefined, 'CMP-03: ACP never fabricates a sourceCommandId')
+      const cancelId = cancelStart?.data?.compactionId
+      assert(typeof cancelId === 'string' && cancelId.length > 0, 'CMP-03: the cancelled attempt has a real compactionId')
+      const cancelEnd = cancelEvents.find(event => event.type === 'compaction/end'
+        && event.data?.compactionId === cancelId)
+      assert(cancelEnd !== undefined && typeof cancelEnd.data?.error === 'string',
+        'CMP-03: the cancelled attempt has its matching failed end')
+      assert(!cancelEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === cancelId),
+        'CMP-03: a precommit cancel never commits a summary')
+      const cancelFrames = cmp03ReplyUpdates
+        .filter(params => params?.sessionId === sessionId
+          && params.update?.sessionUpdate === 'compaction_update')
+        .map(params => params.update)
+      assert(cancelFrames.length === 2,
+        `CMP-03: the cancelled operation must deliver exactly start+failed frames (${JSON.stringify(cancelFrames)})`)
+      assert(cancelFrames[0]?.compactionId === cancelId && cancelFrames[0]?.status === 'in_progress'
+        && cancelFrames[0]?.summary === undefined,
+      `CMP-03: the first frame must be the same-id start without a summary (${JSON.stringify(cancelFrames)})`)
+      assert(cancelFrames[1]?.compactionId === cancelId && cancelFrames[1]?.status === 'failed'
+        && typeof cancelFrames[1]?.error === 'string',
+      `CMP-03: the second frame must be the same-id failed end (${JSON.stringify(cancelFrames)})`)
+      assert(!cancelFrames.some(frame => frame.summary !== undefined),
+        'CMP-03: a cancelled operation must never deliver a summary frame')
+      assert(!cmp03ReplyUpdates.some(params => params?.sessionId === sessionId
+        && params.update?.sessionUpdate === 'agent_message_chunk'
+        && /Compacted \d+ history items/.test(params.update.content?.text ?? '')),
+      'CMP-03: a cancelled operation must not deliver the success result text')
+
+      const claimed = await waitForHostSessionEventAfter(dshHome, sessionId, accepted.seq,
+        event => event.type === 'user/message' && event.data?.id === queuedMessage.id,
+        'CMP-03 the queued foreign prompt is claimed after maintenance')
+      assert(claimed.seq > cancelEnd.seq,
+        `CMP-03: the claim must follow the failed bracket (${String(claimed.seq)} <= ${String(cancelEnd.seq)})`)
+      await waitForFile(`${turnHold}.entered.${sessionId}`,
+        'CMP-03 the claimed A prompt reaches the held provider turn')
+      assert(openTurn(hostSessionEvents(dshHome, sessionId) ?? []) !== undefined,
+        'CMP-03: the claimed A turn must still be open after the compact reply')
+      assert(openTurn(hostSessionEvents(dshHome, bSession) ?? []) !== undefined,
+        'CMP-03: B must still own its active turn when A settles')
+      assert(!(hostSessionEvents(dshHome, bSession) ?? []).some(event => event.type === 'turn/end'),
+        'CMP-03: the A cancellation must not close B')
+
+      writeFileSync(`${turnHold}.release.${sessionId}`, '1', { mode: 0o600 })
+      const aEnd = await waitForHostSessionEventAfter(dshHome, sessionId, claimed.seq,
+        event => event.type === 'turn/end',
+        'CMP-03 the foreign A turn completes after release')
+      assert(aEnd.data?.reason?.kind === 'completed',
+        `CMP-03: the foreign A turn must complete normally (${JSON.stringify(aEnd.data?.reason)})`)
+      assert(!(hostSessionEvents(dshHome, bSession) ?? []).some(event => event.type === 'turn/end'),
+        'CMP-03: B remains active after A completes')
+
+      writeFileSync(`${turnHold}.release.${bSession}`, '1', { mode: 0o600 })
+      const bOutcome = await bRequest
+      assert(bOutcome.error === undefined && bOutcome.value?.stopReason === 'end_turn',
+        `CMP-03: B must complete normally (${JSON.stringify(bOutcome.error?.data ?? bOutcome.value)})`)
+      const bEnd = await waitForHostSessionEventAfter(dshHome, bSession, bBefore,
+        event => event.type === 'turn/end',
+        'CMP-03 the B turn completes')
+      assert(bEnd.data?.reason?.kind === 'completed',
+        `CMP-03: the B turn must complete normally (${JSON.stringify(bEnd.data?.reason)})`)
+      trace('acp-command/cancel', {
+        compactionId: cancelId,
+        stopReason: cancelled.stopReason,
+        queuedMessageId: queuedMessage.id,
+        acceptedSeq: accepted.seq,
+        claimedSeq: claimed.seq,
+        failedEndSeq: cancelEnd.seq,
+        bSession,
+      })
+    } finally {
+      writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+      writeFileSync(`${turnHold}.release.${sessionId}`, '1', { mode: 0o600 })
+      writeFileSync(`${turnHold}.release.${bSession}`, '1', { mode: 0o600 })
+    }
+    clearTurnHold(turnHold, [sessionId, bSession])
 
     // CMP-01: the same Session then runs one real successful manual compaction
     // through the exact retained engine. ACP must NOT fabricate command/run or
     // sourceCommandId.
     resetHold(holdRoot)
     const beforeCompact = hostSessionEvents(dshHome, sessionId).length
+    const compactFrameOffset = updates.length
     const compactRequest = client.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt: promptText('/compact'),
@@ -321,6 +466,7 @@ export async function runAcpCommandInvocation(context) {
     await waitForFile(`${holdRoot}.entered`, 'CMD-08 the held summarizer before successful commit')
     writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
     const compact = await compactRequest
+    const compactReplyUpdates = updates.slice(compactFrameOffset)
     assert(compact?.stopReason === 'end_turn', `CMD-08: /compact must end_turn (${JSON.stringify(compact)})`)
     trace('acp-command/after-compact', { stopReason: compact.stopReason })
     const compactEvents = await waitFor(() => {
@@ -339,6 +485,30 @@ export async function runAcpCommandInvocation(context) {
     assert(compactEvents.some(event => event.type === 'compaction/end' && event.data?.compactionId === id && event.data?.error === undefined),
       'CMD-08: the same compactionId must close cleanly')
     assert(commandEvents(compactEvents, 'compact').length === 0, 'CMD-08: /compact is not the command-wrapper lifecycle')
+    const successFrames = compactReplyUpdates
+      .filter(params => params?.sessionId === sessionId
+        && params.update?.sessionUpdate === 'compaction_update')
+      .map(params => params.update)
+    assert(successFrames.length === 3,
+      `CMD-08: the success must deliver exactly start+summary+completed frames (${JSON.stringify(successFrames)})`)
+    assert(successFrames[0]?.compactionId === id && successFrames[0]?.status === 'in_progress'
+      && successFrames[0]?.summary === undefined,
+    `CMD-08: the first frame must be the same-id start without a summary (${JSON.stringify(successFrames)})`)
+    assert(successFrames[1]?.compactionId === id && successFrames[1]?.status === 'in_progress'
+      && Array.isArray(successFrames[1]?.summary) && successFrames[1].summary.length > 0,
+    `CMD-08: the second frame must be the same-id summary (${JSON.stringify(successFrames)})`)
+    assert(successFrames[2]?.compactionId === id && successFrames[2]?.status === 'completed'
+      && successFrames[2]?.error === undefined,
+    `CMD-08: the third frame must be the same-id clean completed end (${JSON.stringify(successFrames)})`)
+    const successReply = compactReplyUpdates
+      .filter(params => params?.sessionId === sessionId)
+      .map(params => params.update)
+    const lastFrameIndex = successReply.map(update => update?.sessionUpdate).lastIndexOf('compaction_update')
+    const resultIndex = successReply.findIndex((update, index) => index > lastFrameIndex
+      && update?.sessionUpdate === 'agent_message_chunk'
+      && /Compacted \d+ history items/.test(update.content?.text ?? ''))
+    assert(resultIndex > lastFrameIndex,
+      `CMD-08: the result text must follow the completed frame (${JSON.stringify(successReply)})`)
     const compactText = updatesFor(updates, sessionId)
       .filter(update => update?.sessionUpdate === 'agent_message_chunk')
       .map(update => update.content?.text ?? '')
@@ -376,9 +546,7 @@ export async function runAcpCommandInvocation(context) {
     // CMP-02 busy: a REAL foreign Shared-TUI turn keeps the same Agent in a
     // turn. ACP /compact must receive the official maintenance BUSY refusal,
     // create no bracket and leave the foreign turn untouched.
-    const turnHold = join(workDir, 'acp-command-turn-hold')
-    rmSync(`${turnHold}.entered`, { force: true })
-    rmSync(`${turnHold}.release`, { force: true })
+    clearTurnHold(turnHold, [sessionId])
     writeFileSync(turnHold, `${sessionId}\n`, { mode: 0o600 })
     const busyBefore = hostSessionEvents(dshHome, sessionId).length
     tui.client.send('hold the foreign turn\r')
@@ -399,7 +567,7 @@ export async function runAcpCommandInvocation(context) {
     await waitForHostSessionEventAfter(dshHome, sessionId, busyBefore,
       event => event.type === 'turn/end',
       'CMP-02: the foreign turn completes after the busy refusal')
-    rmSync(turnHold, { force: true })
+    clearTurnHold(turnHold, [sessionId])
     trace('acp-command/busy', { code: busy.data.code })
 
     // TUI-01 follow-up: after the exact ACP terminal, the Shared TUI submits
@@ -761,6 +929,7 @@ export async function runAcpCommandInvocation(context) {
     rmSync(flushRejectRelease, { force: true })
     resetHold(holdRoot)
     const beforeFlushReject = hostSessionEvents(dshHome, flushRejectSession).length
+    const flushRejectFrameOffset = updates.length
     const flushRejectRequest = settle(client.request(acp.methods.agent.session.prompt, {
       sessionId: flushRejectSession, prompt: promptText('/compact'),
     }))
@@ -781,7 +950,7 @@ export async function runAcpCommandInvocation(context) {
     })))
     assert(overlap?.data?.code === 'LOCAL_ACP_PROMPT_IN_FLIGHT',
       `CMP-05 rejection: overlap must be refused without a new operation (${JSON.stringify(overlap?.data)})`)
-    const liveUpdates = updates
+    const liveUpdates = updates.slice(flushRejectFrameOffset)
       .filter(params => params?.sessionId === flushRejectSession && params.update?.sessionUpdate === 'compaction_update')
       .map(params => params.update)
     const liveStart = liveUpdates.find(update => update.status === 'in_progress' && update.summary === undefined)
