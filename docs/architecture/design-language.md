@@ -526,6 +526,15 @@ current value (candidates)  Solarized  [current]    state chip, textMuted
 6. Focus is never carried by colour alone — the brackets are the shape signal,
    and in a single-pane (narrow) layout the breadcrumb names the level instead
    of inventing a second device.
+7. **A PASSIVE region keeps its selected text, not the cursor glyph.** When a
+   hosted Detail tenant (a single-value setting edited inside the real Detail
+   pane) holds the active device, the parent Categories/Rows stay readable
+   context: their selected item keeps the bold `textStrong` emphasis but does
+   NOT paint the `primary` cursor, because `primary` means exactly one thing —
+   *active or actionable*. The 2-cell gutter is still reserved so the parent
+   text does not shift, and ordinary (unhosted) levels keep the full
+   cursor + bold pair. This is a scoped exception of the active device, not a
+   second selection style.
 
 ### 5.2 Why the cursor keeps `primary` and the row does not
 

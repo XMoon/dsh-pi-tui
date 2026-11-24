@@ -796,23 +796,27 @@ test('a stale pointer press cannot commit against a newer painted frame', async 
   h.page.dispose()
 })
 
-test('the same page renders and saves the single-field Agent-loop shape', async () => {
+test('the single-value Agent tenant paints one value and dispatches ONE save per Confirm', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
   const generation = {}
+  const inherited = 2
   let effective = { maxParallelToolCalls: 10 }
   let revision = 2
   const writes: SectionPatch<NumericLoopSettings>[] = []
   const port: HostNumericSettingsPort<NumericLoopSettings> = {
     read: () => ({
       kind: 'ready', generation, revision, effective: { ...effective },
-      inherited: { maxParallelToolCalls: 10 },
-      overridden: { maxParallelToolCalls: effective.maxParallelToolCalls !== 10 },
+      inherited: { maxParallelToolCalls: inherited },
+      overridden: { maxParallelToolCalls: effective.maxParallelToolCalls !== inherited },
     }),
     refresh: async () => {},
     mutate: async (patch, expectedRevision) => {
-      writes.push(patch)
       if (expectedRevision !== revision) return { kind: 'conflict', reason: 'revision changed' }
+      writes.push(patch)
       const edit = patch.maxParallelToolCalls!
-      effective = { maxParallelToolCalls: edit.kind === 'reset' ? 10 : edit.value }
+      effective = { maxParallelToolCalls: edit.kind === 'reset' ? inherited : edit.value }
       revision += 1
       return { kind: 'accepted' }
     },
@@ -827,31 +831,146 @@ test('the same page renders and saves the single-field Agent-loop shape', async 
     requestRender: () => {},
     runOwned: (_label, task) => { tasks.push(Promise.resolve().then(task)) },
   })
-  const actions: string[] = []
+  const dones: string[] = []
   const page = new HostNumericSettingsPage<NumericLoopSettings>({
     controller,
     fields,
     spec: {
-      title: 'Agent loop',
-      sourceHeading: source => source.kind === 'ready' ? 'Host profile · effective settings' : 'Host profile · unavailable',
-      help: ['The next Agent step reads the new cap.'],
+      title: 'Parallel tool calls',
+      commitMode: 'single',
+      sourceHeading: () => 'Host profile',
+      help: [],
+      effect: 'Applies to the next Agent step.',
+      dispatched: 'Already dispatched calls are unchanged.',
+      scope: 'Host profile · every agent on this Host',
     },
     requestRender: () => {},
-    done: () => { actions.push('done') },
+    done: () => { dones.push('done') },
   })
   page.setMaxRows(10)
   for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  const rendered = page.render(80).map(strip).join('\n')
-  assert.match(rendered, /Host profile · effective settings/u)
-  assert.match(rendered, /Parallel tool calls/u)
-  assert.equal((rendered.match(/\[Reset\]/gu) ?? []).length, 1, 'the single numeric field exposes ONE Reset')
-  page.handleInput(ENTER) // open the only field
-  page.handleInput('\x15')
-  for (const character of '4') page.handleInput(character)
-  page.handleInput(ENTER)
-  page.handleInput('s')
+  const plain = (): string => page.render(80).map(strip).join('\n')
+  const clean = plain()
+  assert.match(clean, /Current value\s+10/u, 'the clean tenant paints the ONE authoritative value')
+  assert.match(clean, /Applies to the next Agent step\./u)
+  assert.match(clean, /Details…/u, 'the scoped disclosure is a body affordance')
+  assert.doesNotMatch(clean, /\[Reset\]|Status: Ready|Save \[S\]|Apply \[Enter\]/u,
+    'the single mode paints no staged Reset, no Ready banner and no second save key')
+  // Every key is followed by the frame the next key reads (the app paints
+  // between keystrokes); `press` models exactly that.
+  const press = (data: string): string => { page.handleInput(data); return plain() }
+  // The typed entry intent opens the raw Input directly (no field picker).
+  const input = press(ENTER)
+  assert.match(input, /Value: 10/u)
+  assert.match(input, /Confirm \[Enter\] · Cancel \[Esc\]/u)
+  // Invalid text stays in the Input with the real reason and zero writes.
+  press('\x15')
+  press('0')
+  const invalid = press(ENTER)
+  assert.match(invalid, /Enter a safe positive integer \(1 or greater\)\./u)
+  assert.match(invalid, /Value: 0/u)
+  assert.deepEqual(writes, [], 'invalid text never stages a reset and never writes')
+  // One valid Confirm dispatches exactly ONE set in the SAME call stack.
+  press('\x15')
+  press('4')
+  const ownedBefore = tasks.length
+  press(ENTER)
+  assert.equal(tasks.length, ownedBefore + 1, 'stage->save happened in ONE owned handoff')
   for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
   assert.deepEqual(writes, [{ maxParallelToolCalls: { kind: 'set', value: 4 } }])
+  assert.match(plain(), /Current value\s+4/u)
+  assert.match(plain(), /Verified/u)
+  assert.doesNotMatch(plain(), /Save \[S\]/u, 'the Verified state never advertises a second save')
+  // Equal effective text is a real no-op: zero writes, `No changes`.
+  press(ENTER)
+  press('\x15')
+  press('0004')
+  press(ENTER)
+  await Promise.resolve()
+  assert.equal(writes.length, 1, 'an equal value never writes')
+  assert.match(plain(), /No changes/u)
+  // `?` opens the SAME pane's Advanced disclosure; Reset opens a confirmation
+  // whose risk copy must be painted before Confirm is admitted.
+  page.handleInput('?')
+  page.render(80)
+  const advanced = plain()
+  assert.match(advanced, /Effective\s+4/u)
+  assert.match(advanced, /Inherited\s+2/u)
+  assert.match(advanced, /Revision\s+\d+/u)
+  assert.match(advanced, /Reset to inherited…/u)
+  page.handleInput('x')
+  const question = plain()
+  assert.match(question, /Reset sends the official unset\./u)
+  assert.match(question, /The USER patch may retain the inherited value\./u)
+  assert.match(question, /The Host readback decides the value\./u)
+  assert.match(question, /Confirm \[Enter\] · Cancel \[Esc\]/u)
+  const ownedBeforeReset = tasks.length
+  page.handleInput(ENTER)
+  assert.equal(tasks.length, ownedBeforeReset + 1, 'the reset confirmation is ONE handoff')
+  for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
+  assert.deepEqual(writes[1], { maxParallelToolCalls: { kind: 'reset' } })
+  assert.match(plain(), /Current value\s+2/u, 'the Host readback decides the value')
+  page.dispose()
+})
+
+test('the single-value Reset confirmation requires the risk copy to be painted first', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  let revision = 1
+  const writes: SectionPatch<NumericLoopSettings>[] = []
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async patch => { writes.push(patch); return { kind: 'accepted' } },
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: {
+      title: 'Parallel tool calls',
+      commitMode: 'single',
+      sourceHeading: () => 'Host profile',
+      help: [],
+      effect: 'Applies to the next Agent step.',
+      scope: 'Host profile',
+    },
+    requestRender: () => {},
+    done: () => {},
+  })
+  // A 3-row grant can only paint the confirmation's first facts: the necessary
+  // risk copy is NOT readable yet, so Confirm is neither painted nor admitted.
+  page.setMaxRows(3)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  page.handleInput('?')
+  page.render(60)
+  page.handleInput('x')
+  const narrow = page.render(60).map(strip)
+  assert.doesNotMatch(narrow.join('\n'), /Confirm \[Enter\]/u, 'a clipped risk copy never publishes Confirm')
+  page.handleInput(ENTER)
+  assert.deepEqual(writes, [], 'Enter cannot confirm an unread risk copy')
+  page.handleInput(DOWN)
+  page.render(60)
+  page.handleInput(DOWN)
+  page.render(60)
+  page.handleInput(DOWN)
+  const scrolled = page.render(60).map(strip).join('\n')
+  assert.match(scrolled, /The Host readback decides the value\./u, 'scrolling reveals the remaining risk')
+  assert.match(scrolled, /Confirm \[Enter\]/u, 'Confirm appears only after the whole copy was read')
+  page.handleInput(ENTER)
+  assert.deepEqual(writes, [{ maxParallelToolCalls: { kind: 'reset' } }])
   page.dispose()
 })
 

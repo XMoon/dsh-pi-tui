@@ -349,8 +349,8 @@ specialist-page contract below).
   read answers) → `Default permission` (only while the Host advertises a preset
   roster) → `Subagent settings` (always reachable so each official section can
   state its own readiness) → `User shell sandbox policy` (always painted) →
-  `Agent loop` (always reachable so its official section can state its own
-  readiness). The
+  `Parallel tool calls` (always reachable so its official section can state its
+  own readiness; the internal row id stays `agent-loop`). The
   category stays in the fixed rail even when every row is unavailable, and
   `Agent` has NO transition launcher any more: it has no unmigrated field left.
   - `Approval policy` is scope-pinned and reads the PROVEN Host fact: the
@@ -706,45 +706,84 @@ specialist-page contract below).
 
 ### Host numeric pages, Session log upload and the Host category
 
-`/settings → Agent → Agent loop` and `/settings → Tools → Shell execution` are
-two SPECIALIST pages sharing ONE numeric renderer inside the existing Settings
-lease. Each page owns only its per-open draft, focus, scroll and confirmation;
-the Root keeps the physical Action Bar and Esc, and a painted row/field/Reset/
-Apply/Save/Back control delegates to the SAME page/controller path a key press
-uses. Both pages paint the current effective value and its
-`Differs from base` / `Matches base` relation to the base, an explicit
-`[Reset]` per field and `Status: …` feedback. These comparison labels are not
-USER-layer override presence claims.
-The fixed status line reports `Ready`, `Unavailable`, `Unreadable` or
-`Last-known · read-only` from the captured read and the live section; it never
-says Ready for a missing, unreadable or superseded authority. A field's
-`[Reset]` action is painted as a complete segment and its pointer span is
-derived from that same painted line; a width that cannot host the whole word
-drops the Reset target entirely.
-Numeric validation follows the owning field: Agent loop requires a safe
-positive integer (`Number.isSafeInteger(n) && n>=1`), while the Shell fields
-require a positive finite number as the Host runtime does. An empty field stages
-the official Reset; invalid text keeps
-the draft and never dispatches. Save sends ONE exact-revision/revision-checked
-Host mutation for the page's namespace and reports `Not saved`, `Unverified` or
-`Outcome unconfirmed` exactly as the Host settlement and same-generation
-readback prove; a stale captured page is read-only until an explicit refresh.
-Reset stages the official field `unset`, then shows the Host's CURRENT readback;
-neither USER-field deletion nor `overridden=false` is a success criterion.
+`/settings → Agent → Parallel tool calls` is the first real single-value DETAIL
+TENANT: it is edited INSIDE the workspace's real Detail pane, so the parent
+Categories/Rows stay painted and readable while it holds the active device.
+`/settings → Tools → Shell execution` remains a full-width staged specialist
+page. Both share ONE numeric renderer and ONE per-open controller inside the
+existing Settings lease; the Agent route is the `single` presentation and the
+Shell route the `staged` one. The Root keeps the physical Action Bar and the ONE
+Esc affordance, and a painted control delegates to the SAME page/controller path
+a key press uses.
 
-- `Agent loop` edits only `agent-loop.maxParallelToolCalls`. The next Agent step
-  samples the saved budget immediately before executing its next non-empty tool
-  batch; tool calls already dispatched are never rewritten. The other
-  `agent-loop` Config (notably `agents`) is never part of this page's write.
-- `Shell execution` edits the two numeric caps (`timeoutMs`,
-  `maxOutputBytes`) of the Host-served model-tool executor row in ONE mutation.
-  The bound row follows official dsh-web: `pwsh-sandbox` is preferred when both
-  `bash-sandbox` and `pwsh-sandbox` are served, otherwise the single served row
-  is used, and no served row is `Unavailable`; the Client OS is never used to
-  guess it. A stale captured generation/revision or a same-revision switch to
-  the other served row refuses the write. The caps
-  affect the NEXT shell execution; a running subprocess keeps its current
-  timeout. This is not the `!`/`!!` user-shell sandbox policy.
+- **Row identity and entry.** The `Agent` row keeps its internal `agent-loop`
+  id, category, order, scope, freshness and `agent-loop-settings` specialist
+  tag; its visible label is `Parallel tool calls`, its summary is the
+  authoritative effective number (`Unavailable` / `Unreadable` when the section
+  is not served) and its description states that the NEXT Agent step uses the
+  value while already dispatched calls are unchanged. The row never reads a
+  child draft and never writes. Selecting the row only selects it;
+  `Enter`/`Right` are its `change` forward action and open the same Detail with
+  the raw numeric Input, the Detail preview paints `Change [Enter]` and
+  `Details…`, and a page-local `?` (or the painted `Details [?]` span) opens the
+  same Advanced disclosure without an edit detour. An unreadable or last-known
+  row advertises `details`, never a writable `change`. No global key binding is
+  added for any of these.
+- **ONE Confirm.** Valid text is staged and saved in the SAME call stack: one
+  painted Confirm (pointer) or `Enter` (keyboard) dispatches exactly ONE
+  revision-checked official mutation. Empty text is `Value is required.`,
+  invalid text stays in the Input with the field's real error and zero write,
+  and a value equal to the current effective one is a real no-op (`No changes`),
+  never a fabricated `Verified`. The official unset stays a separate explicit
+  intent: Advanced's `Reset to inherited…` (or `x` there) opens a confirmation
+  whose necessary risk copy must have been painted before Confirm is admitted,
+  and it sends the official `unset` even when the effective value already equals
+  the inherited one — never `set(inherited)` and never a USER-field deletion
+  claim.
+- **Authority and status.** Effective/inherited/revision/generation, official
+  availability and the write result stay owned by the ConfigPort and the
+  existing per-open controller; the page paints the current value, the
+  requested value and `Verified` / `No changes` / `Not saved` / `Unverified` /
+  `Outcome unconfirmed` exactly as the Host settlement and same-generation
+  readback prove. `Last-known · read-only` is never called Ready, a superseded
+  capture refuses the edit until an explicit Refresh, and a Refresh discards a
+  draft only after its own confirmation.
+- **Parent navigation stays guarded, not hidden.** While the raw Input, the
+  Advanced disclosure, a confirmation or a pending/unknown write holds the keys
+  the tenant refuses every parent category/row/pane/Tab/Back path; a definite
+  dirty draft and an ambiguous outcome open the page's OWN leave question
+  (`Discard and leave [D]` / `Leave anyway [D]`, plus `Keep [Esc]`) whose
+  captured destination is re-proved when it is applied. A clean page leaves on
+  the same gesture (Tab retires it and returns the original Rows selection).
+  The lease/focus mechanics are owned by [overlay-focus.md](./overlay-focus.md).
+
+`Shell execution` keeps the staged form. Each field paints the current effective
+value and its `Differs from base` / `Matches base` relation to the base, an
+explicit `[Reset]` per field and `Status: …` feedback. These comparison labels
+are not USER-layer override presence claims. The fixed status line reports
+`Ready`, `Unavailable`, `Unreadable` or `Last-known · read-only` from the
+captured read and the live section; it never says Ready for a missing,
+unreadable or superseded authority. A field's `[Reset]` action is painted as a
+complete segment and its pointer span is derived from that same painted line; a
+width that cannot host the whole word drops the Reset target entirely.
+
+Numeric validation follows the owning field: the Agent field requires a safe
+positive integer (`Number.isSafeInteger(n) && n>=1`), while the Shell fields
+require a positive finite number as the Host runtime does. In the staged Shell
+form an empty field stages the official Reset and invalid text keeps the draft
+without dispatching; in the Agent tenant an empty or invalid field never resets.
+Save sends ONE exact-revision/revision-checked Host mutation for the page's
+namespace and reports `Not saved`, `Unverified` or `Outcome unconfirmed`
+exactly as the Host settlement and same-generation readback prove; a stale
+captured page is read-only until an explicit refresh. Reset stages the official
+field `unset`, then shows the Host's CURRENT readback; neither USER-field
+deletion nor `overridden=false` is a success criterion.
+
+- `Parallel tool calls` edits only `agent-loop.maxParallelToolCalls`. The next
+  Agent step samples the saved budget immediately before executing its next
+  non-empty tool batch; tool calls already dispatched are never rewritten. The
+  other `agent-loop` Config (notably `agents`) is never part of this page's
+  write.
 - The category's USER-visible title is `Host`; the internal category id stays
   `general` (routing, serialization and every row id are unchanged). `Host`
   paints `Backend`, `Web UI`, `ACP access` and `Session log upload` in that

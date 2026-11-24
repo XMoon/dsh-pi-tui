@@ -203,7 +203,7 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(/\bOn\b/u.test(resetFrame), 'the Reset readback may be On and must be shown as the current value')
     trace('fr5b.session-log', { offPersisted: true, resetVerified: true, resetReadbackOn: true })
 
-    // ── Agent loop numeric page ────────────────────────────────────────────
+    // ── Agent loop: the single-value Detail tenant, ONE Confirm ────────────
     clientA.send('\x1b') // settled Detail -> Rows
     await sleep(160)
     clientA.send('\x1b') // Rows -> category rail
@@ -211,29 +211,40 @@ export async function runHostNumericSettingsFr5B(context) {
     await selectFrame(clientA, frame => /^> Agent(?:\s|$)/mu.test(frame), 'FR5-B Agent category')
     clientA.send('\r')
     await sleep(200)
-    await selectFrame(clientA, frame => selectedRow(frame, 'Agent loop'), 'FR5-B Agent loop row')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Parallel tool calls'), 'FR5-B Agent value row')
+    // ONE Enter from Rows is the whole entry: the tenant opens its raw Input in
+    // the SAME Detail pane (no field list, no Apply, no Save).
     clientA.send('\r')
-    await waitForPattern(clientA, /Settings · Agent · Agent loop/u, 'FR5-B Agent loop page')
-    await selectFrame(clientA, frame => selectedRow(frame, 'Parallel tool calls'), 'FR5-B Agent loop field')
-    clientA.send('\r')
-    await waitForText(clientA, 'Edit Parallel tool calls', 'FR5-B Agent loop input')
+    const agentInput = await waitForPattern(clientA, /Settings · Agent · Parallel tool calls/u, 'FR5-B Agent tenant')
+    assert(/Current value\s+\d+/u.test(agentInput), `the Agent tenant must paint the current value: ${JSON.stringify(agentInput)}`)
+    await waitForPattern(clientA, /Value:\s*/u, 'FR5-B Agent raw value input')
     clientA.send('\x15')
     await sleep(80)
     for (const character of '2') {
       clientA.send(character)
       await sleep(40)
     }
+    await sleep(140)
     clientA.send('\r')
-    await waitForPattern(clientA, /Status: Unsaved/u, 'FR5-B Agent loop staged')
-    await saveAndVerify(clientA, 'FR5-B Agent loop verified', /Status: Verified/u)
+    const agentVerified = await waitForPattern(clientA, /Verified/u, 'FR5-B Agent value verified')
+    assert(!/Apply \[Enter\]/u.test(agentVerified) && !/Save \[S\]/u.test(agentVerified),
+      'the migrated Agent journey never advertises a second Apply/Save key')
     assert(profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls === 2,
-      'the Agent-loop page writes the official profile field')
-    trace('fr5b.agent-loop', { savedProfile: true })
-    // Reset through the same page: official unset, Host readback.
-    await selectFrame(clientA, frame => selectedRow(frame, 'Parallel tool calls'), 'FR5-B Agent loop reset field')
+      'ONE Confirm writes the official profile field')
+    trace('fr5b.agent-loop', { savedProfile: true, singleConfirm: true })
+    // Reset through the scoped Details disclosure: the official unset, then the
+    // Host readback (never set(inherited)).
+    await sleep(140)
+    clientA.send('?')
+    await waitForPattern(clientA, /Reset to inherited…/u, 'FR5-B Agent Advanced disclosure')
+    await waitForPattern(clientA, /Inherited\s+\d+/u, 'FR5-B Agent inherited fact')
     clientA.send('x')
-    await waitForPattern(clientA, /Reset staged/u, 'FR5-B Agent loop reset staged')
-    await saveAndVerify(clientA, 'FR5-B Agent loop reset verified', /Status: Verified/u)
+    await waitForPattern(clientA, /The Host readback decides the value\./u, 'FR5-B Agent reset confirmation')
+    await waitForPattern(clientA, /Confirm \[Enter\]/u, 'FR5-B Agent reset confirm affordance')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Verified/u, 'FR5-B Agent reset verified')
+    assert(profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls === undefined,
+      'Reset is the official unset, not a set(inherited) write')
     trace('fr5b.agent-loop-reset', { officialUnset: true, readback: true })
 
     // ── Shell execution: two fields, one CAS, then a stale Client B ────────

@@ -962,6 +962,26 @@ owns only the lease, focus and write-lifecycle mechanics.
   Leaving the workspace is therefore always one reachable key (the Action Bar
   is pinned to the physical last row at every height, down to a one-row
   terminal).
+- **The Detail TENANT keeps the parent panes live under ONE leave gate.** A
+  single-value setting (`Agent → Parallel tool calls`) may be mounted INSIDE the
+  real Detail pane instead of taking the whole body: the parent Categories/Rows
+  stay painted, the tenant's own painted bar becomes the ONE physical last row
+  at column 0, and only the tenant's body cells belong to the child (its painted
+  body box is the admission for every body press, and the parent gutters/header/
+  blank bar stay inert). This is the documented exception to "a mounted
+  specialist owns the whole body": it is not a second screen, lease or focus
+  owner. Every USER parent path — a rail/row/pane click, `Tab`/`Shift+Tab`, the
+  back keys and the Root bar's Esc — is routed through ONE child-owned leave
+  query before any selection/focus mutation. A page that holds a raw input, an
+  open disclosure, a confirmation or an in-flight/unknown write REFUSES and
+  keeps the keys (only its own Esc gradient advances); a dirty/ambiguous page
+  opens its own question and invokes the captured continuation only after the
+  user answers, and the continuation re-proves the same mounted instance, the
+  same source selection and a still-legal destination before it retires the
+  page once. A forced teardown bypasses the gate: a write the page already
+  admitted keeps its own owner and can never be replayed or cancelled by the
+  close. The parent panes' selection stays a passive CONTEXT while the tenant
+  holds the active device (no primary navigation cursor behind it).
 - **Width only projects panes.** Wide paints all three columns; medium derives its
   two columns purely from the current level (`categories + rows` at L0,
   `rows + details` otherwise); narrow paints the current level alone. A direct

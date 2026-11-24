@@ -651,6 +651,8 @@ async function stageSubagentNumber(ui: UiHarness, label: string, value: string):
   await settingsKey(ui, '\r')
 }
 
+let lastUiPointerCell: { readonly row: number; readonly column: number; readonly at: number } | undefined
+
 async function clickPainted(ui: UiHarness, text: string, rowHint?: number): Promise<void> {
   const lines = ui.vt.getViewport().map(stripTerminalSequences)
   const row = rowHint ?? lines.findIndex(line => line.includes(text))
@@ -659,6 +661,14 @@ async function clickPainted(ui: UiHarness, text: string, rowHint?: number): Prom
   const offset = line.indexOf(text)
   assert.ok(offset >= 0, `painted cell ${JSON.stringify(text)} must exist on row ${row}: ${line}`)
   const column = visibleWidth(line.slice(0, offset))
+  // The fork treats a second press on the SAME cell inside its multi-click
+  // window as a double-click and withholds the click; two REAL gestures on the
+  // same control wait that window out.
+  if (lastUiPointerCell !== undefined && lastUiPointerCell.row === row && lastUiPointerCell.column === column) {
+    const remaining = 600 - (Date.now() - lastUiPointerCell.at)
+    if (remaining > 0) await new Promise<void>(resolve => setTimeout(resolve, remaining))
+  }
+  lastUiPointerCell = { row, column, at: Date.now() }
   ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
   if (row !== lines.length - 1) await ui.vt.waitForRender()
   ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
@@ -1249,34 +1259,34 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   const ui = mountSettingsUi(port)
   life.defer(() => ui.dispose())
 
-  // ── Agent loop: Root row click -> field click -> painted Apply -> Save ────
+  // ── Agent loop: explicit Rows entry -> the SAME Detail tenant -> one Confirm
   ui.invoke('settings')
   await ui.vt.waitForRender()
   await selectSettingsCategory(ui.vt, 'Agent')
   await settingsKey(ui, '\r')
-  for (let step = 0; step < 8 && !/> Agent loop/u.test(ui.vt.getViewport().join('\n')); step += 1) {
+  for (let step = 0; step < 8 && !/> Parallel tool calls/u.test(ui.vt.getViewport().join('\n')); step += 1) {
     await settingsKey(ui, '\x1b[B')
   }
-  await clickUiPainted(ui, 'Agent loop')
+  const selectedFrame = ui.vt.getViewport().join('\n')
+  assert.match(selectedFrame, /> Parallel tool calls/u, 'the Rows selection reaches the single value')
+  assert.doesNotMatch(selectedFrame, /Current value/u, 'selecting the row alone never mounts the tenant')
+  // The painted Rows forward hint IS the explicit entry (one press+release).
+  await clickUiPainted(ui, 'Enter change')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
-    frame => /Settings · Agent · Agent loop/u.test(frame) && /Parallel tool calls\s+1/u.test(frame),
-    () => ui.vt.waitForRender(), 'the real Root opens the Agent-loop page',
+    frame => /Settings · Agent · Parallel tool calls/u.test(frame) && /Value:\s*1/u.test(frame),
+    () => ui.vt.waitForRender(), 'the tenant opens its raw Input inside the SAME Detail pane',
   )
   const loopOpened = readySection(port.agentLoopSettings.read())
-  await clickUiPainted(ui, 'Parallel tool calls')
-  assert.match(ui.vt.getViewport().join('\n'), /Edit Parallel tool calls/u)
   await settingsKey(ui, '\x15')
   await settingsKey(ui, '3')
-  await clickUiPainted(ui, 'Apply [Enter]')
-  assert.match(ui.vt.getViewport().join('\n'), /Parallel tool calls\s+3/u)
-  assert.equal(recorder.calls.length, 0, 'staging through the Root writes nothing')
-  await clickUiPainted(ui, 'Save [S]')
+  await clickUiPainted(ui, 'Confirm [Enter]')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
-    frame => /Status: Verified/u.test(frame),
-    () => ui.vt.waitForRender(), 'the real Host write verifies',
+    frame => /Verified/u.test(frame) && /Current value\s+3/u.test(frame),
+    () => ui.vt.waitForRender(), 'ONE Confirm verifies against the real Host readback',
   )
+  assert.equal(recorder.calls.length, 1, 'ONE Confirm is exactly ONE official mutation')
   assert.deepEqual(recorder.calls.at(-1), {
     ns: 'agent-loop',
     ops: [{ op: 'set', path: ['maxParallelToolCalls'], value: 3 }],
@@ -1285,19 +1295,35 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   assert.equal(readySection(port.agentLoopSettings.read()).effective.maxParallelToolCalls, 3)
   assert.equal(ctx.agentLoop.config.maxParallelToolCalls.get(), 3,
     'the official Host the next Agent step reads is the saved value')
+  // Back returns to the SAME Rows selection with the fresh authoritative row.
+  await clickUiPainted(ui, 'Back [Esc]')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Settings · Agent · Rows/u.test(frame) && /Parallel tool calls\s+3/u.test(frame),
+    () => ui.vt.waitForRender(), 'the Row follows the official readback',
+  )
+  assert.equal(recorder.calls.length, 1, 'leaving never writes again')
 
-  // Dirty Discard: the Root's visible question answers from the SAME page.
-  await clickUiPainted(ui, 'Parallel tool calls')
+  // A raw Input owns its keys: the parent region key is refused, Cancel drops
+  // the draft with ZERO writes and the clean tenant leaves on its own Esc.
+  await settingsKey(ui, '\r')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Value:\s*3/u.test(frame),
+    () => ui.vt.waitForRender(), 'the fresh Change re-enters the Input',
+  )
   await settingsKey(ui, '\x15')
   await settingsKey(ui, '4')
-  await clickUiPainted(ui, 'Apply [Enter]')
-  await clickUiPainted(ui, 'Back [Esc]')
-  assert.match(ui.vt.getViewport().join('\n'), /Discard unsaved changes\? y\/N/u)
-  await clickUiPainted(ui, 'Keep [Esc]')
-  assert.match(ui.vt.getViewport().join('\n'), /Parallel tool calls\s+4/u)
-  await clickUiPainted(ui, 'Back [Esc]')
-  await clickUiPainted(ui, 'Discard [Y]')
-  assert.match(ui.vt.getViewport().join('\n'), /Settings · Agent · Rows/u)
+  await settingsKey(ui, '\t')
+  assert.match(ui.vt.getViewport().join('\n'), /Value:\s*4/u, 'the parent Tab never leaves a raw Input')
+  assert.equal(recorder.calls.length, 1, 'parent navigation never dispatched a write')
+  await settingsKey(ui, '\x1b') // Cancel the Input
+  await settingsKey(ui, '\x1b') // clean Back -> the SAME Rows
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Settings · Agent · Rows/u.test(frame),
+    () => ui.vt.waitForRender(), 'a cancelled draft never reaches the Host',
+  )
   assert.equal(recorder.calls.length, 1, 'the discarded draft never reached the Host')
 
   // ── Shell execution: both caps in ONE official mutation ───────────────────
@@ -1347,7 +1373,7 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   assert.equal(liveShell.config.maxOutputBytes.get(), 128_000)
 })
 
-test('Root-level Reset on the real Agent-loop page sends the official unset and reads the Host back', async t => {
+test('the scoped Details Reset on the real Agent-loop tenant sends the official unset and reads the Host back', async t => {
   const life = testLifecycle(t)
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
@@ -1362,21 +1388,36 @@ test('Root-level Reset on the real Agent-loop page sends the official unset and 
   await ui.vt.waitForRender()
   await selectSettingsCategory(ui.vt, 'Agent')
   await settingsKey(ui, '\r')
-  for (let step = 0; step < 8 && !/> Agent loop/u.test(ui.vt.getViewport().join('\n')); step += 1) {
+  for (let step = 0; step < 8 && !/> Parallel tool calls/u.test(ui.vt.getViewport().join('\n')); step += 1) {
     await settingsKey(ui, '\x1b[B')
   }
-  await clickUiPainted(ui, 'Agent loop')
+  assert.match(ui.vt.getViewport().join('\n'), /Parallel tool calls\s+5/u,
+    'the row states the authoritative USER override')
+  // The scoped `?` is the Details command: it opens Advanced WITHOUT passing
+  // through the raw Input, so the Reset journey never becomes an edit detour.
+  await settingsKey(ui, '?')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
-    frame => /Parallel tool calls\s+5/u.test(frame) && /Comparison: Differs from base/u.test(frame),
-    () => ui.vt.waitForRender(), 'the USER override is the current Agent-loop value',
+    frame => /Effective\s+5/u.test(frame) && /Inherited\s+1/u.test(frame) && /Differs from base/u.test(frame),
+    () => ui.vt.waitForRender(), 'the scoped Details opens the Advanced disclosure in place',
   )
-  await clickUiPainted(ui, '[Reset]')
-  assert.match(ui.vt.getViewport().join('\n'), /Reset staged/u)
-  await clickUiPainted(ui, 'Save [S]')
+  assert.doesNotMatch(ui.vt.getViewport().join('\n'), /Value:\s/u, 'Advanced shares the SAME pane')
+  // Cancel the confirmation first: zero writes, back on Advanced.
+  await clickUiPainted(ui, 'Reset to inherited…')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
-    frame => /Status: Verified/u.test(frame) && /Parallel tool calls\s+1/u.test(frame),
+    frame => /The Host readback decides the value\./u.test(frame) && /Confirm \[Enter\]/u.test(frame),
+    () => ui.vt.waitForRender(), 'the confirmation paints its necessary risk copy',
+  )
+  await settingsKey(ui, '\x1b')
+  assert.match(ui.vt.getViewport().join('\n'), /Effective\s+5/u, 'Cancel returns to Advanced')
+  assert.equal(recorder.calls.length, 0, 'opening or cancelling the confirmation never writes')
+  // The real official unset, then the same-generation readback.
+  await settingsKey(ui, 'x')
+  await clickUiPainted(ui, 'Confirm [Enter]')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Verified/u.test(frame) && /Current value\s+1/u.test(frame),
     () => ui.vt.waitForRender(), 'Reset reads back the inherited bundle value',
   )
   assert.deepEqual(recorder.calls.at(-1)?.ops, [{ op: 'unset', path: ['maxParallelToolCalls'] }],
@@ -1384,4 +1425,23 @@ test('Root-level Reset on the real Agent-loop page sends the official unset and 
   const readback = readySection(port.agentLoopSettings.read())
   assert.equal(readback.effective.maxParallelToolCalls, 1)
   assert.equal(ctx.agentLoop.config.maxParallelToolCalls.get(), 1)
+  // An explicit Reset is an INTENT even when effective == inherited: the next
+  // confirmation dispatches the official unset again.
+  const beforeRepeat = recorder.calls.length
+  await settingsKey(ui, '?')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Matches base/u.test(frame),
+    () => ui.vt.waitForRender(), 'the equal-inherited state is stated truthfully',
+  )
+  await settingsKey(ui, 'x')
+  await clickUiPainted(ui, 'Confirm [Enter]')
+  await waitForFrame(
+    () => ui.vt.getViewport().join('\n'),
+    frame => /Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the repeated explicit Reset verifies',
+  )
+  assert.equal(recorder.calls.length, beforeRepeat + 1, 'the repeated intent really dispatched once')
+  assert.deepEqual(recorder.calls.at(-1)?.ops, [{ op: 'unset', path: ['maxParallelToolCalls'] }],
+    'effective == inherited still sends the official unset')
 })
