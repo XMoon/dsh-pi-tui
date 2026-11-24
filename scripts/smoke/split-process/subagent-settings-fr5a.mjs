@@ -80,7 +80,9 @@ const BROWSE_LABEL = {
 
 async function focusField(client, label, where) {
   const visible = BROWSE_LABEL[label] ?? label
-  await selectFrame(client, frame => new RegExp(`^> ${visible.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'mu').test(frame), where, '\x1b[B', 6)
+  // The field lives inside the Detail pane; its cursor is column-relative,
+  // never at the physical line start.
+  await selectFrame(client, frame => new RegExp(`> ${visible.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'mu').test(frame), where, '\x1b[B', 6)
 }
 
 async function stageNumber(client, label, value, where) {
@@ -93,6 +95,7 @@ async function stageNumber(client, label, value, where) {
     client.send(char)
     await sleep(40)
   }
+  await waitForText(client, 'Stage [Enter]', `${where} stage action`)
   client.send('\r')
   const frame = await waitForPattern(client, /unsaved change/u, `${where} staged limit`)
   assert(frame.includes('Save [S]'), `${where}: the staged limit must paint Save`)
@@ -116,6 +119,7 @@ async function closeClient(client, scene, label) {
     const frame = await frameOf(client)
     if (!/Settings ·/u.test(frame)) break
     if (/Discard and leave loses staged values\.|Leaving does not undo them\./u.test(frame)) {
+      await waitForPattern(client, /Discard and leave \[D\]|Leave anyway \[D\]/u, `${label} painted leave action`)
       client.send('d')
       await sleep(180)
     } else {

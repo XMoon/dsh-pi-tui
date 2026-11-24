@@ -197,7 +197,7 @@ test('removing the last allowed route while enabled retains the route and dispat
   const h = await harness({ selection: ready(HOST_A, 82,
     { enabled: true, allowedModels: [ROUTE] }, { enabled: true, allowedModels: [] }) })
   h.controller.toggleRoute(ROUTE)
-  assert.match(h.controller.snapshot().notice ?? '', /Disable model selection/u)
+  assert.match(h.controller.snapshot().issues.allowedModels ?? '', /Disable model selection/u)
   assert.deepEqual(h.controller.snapshot().allowedModels, [ROUTE])
   assert.equal(h.controller.snapshot().dirty, false)
   assert.equal(h.limits.calls.length, 0)

@@ -2682,9 +2682,13 @@ test('the embedded Subagent tenant keeps its selection and Save bar inside every
   const matrix = [
     [200, 50, 'dark', 'symbols'],
     [120, 40, 'light', 'minimal'],
+    [108, 40, 'dark', 'symbols'],
+    [107, 40, 'light', 'minimal'],
     [100, 40, 'plugin:acme/solarized', 'emoji'],
     [80, 24, 'dark', 'symbols'],
     [80, 10, 'light', 'minimal'],
+    [76, 24, 'dark', 'emoji'],
+    [75, 24, 'light', 'symbols'],
     [72, 24, 'dark', 'emoji'],
     [44, 20, 'light', 'symbols'],
     [44, 8, 'plugin:acme/solarized', 'minimal'],
@@ -2740,6 +2744,8 @@ test('the real Settings Root row and delegated spans complete the Subagent point
   await clickPainted(h, 'Subagent settings')
   assert.doesNotMatch(h.view(), /> Maximum depth/u, 'a row click never mounts the tenant')
   assert.match(h.view(), /Open…/u)
+  await key(h, '\t')
+  assert.doesNotMatch(h.view(), /> Maximum depth/u, 'Root Tab never mounts the tenant')
   await clickPainted(h, 'Open…')
   await settle(h)
   assert.match(h.view(), /> Maximum depth/u, 'the painted Detail Open entry mounts the tenant')
@@ -2783,6 +2789,56 @@ test('the real Settings Root row and delegated spans complete the Subagent point
   await settle(h)
   assert.match(h.view(), /Settings · Agent · Rows/u)
   assert.equal(h.subagentWrites().length, 1, 'discard never sends another Host write')
+  h.dispose()
+})
+
+test('a mounted Subagent tenant with a bar-only grant keeps only its real Back', async () => {
+  const h = setup({ columns: 44, rows: 8, agent: {
+    subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  await h.open('Agent')
+  await key(h, '\r')
+  for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.ok(h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)))
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /> Maximum depth/u, 'the tenant is really mounted before the resize')
+  h.vt.resize(44, 2)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'the bar-only grant paints ONLY the page Back')
+  const writesBefore = h.subagentWrites().length + h.subagentLimitsWrites().length
+  await key(h, 's')
+  await settle(h, 4)
+  await key(h, 'r')
+  await settle(h, 4)
+  await key(h, '\r')
+  await settle(h, 4)
+  assert.equal(h.subagentWrites().length + h.subagentLimitsWrites().length, writesBefore,
+    'a hidden Save/Refresh/Enter never reaches the Host')
+  assert.doesNotMatch(h.view(), /Edit Maximum recursion depth|Value:/u, 'no hidden Input is started')
+  h.dispose()
+})
+
+test('the medium Subagent preview forward action is pointer-reachable without a keyboard step', async () => {
+  const h = setup({ columns: 76, rows: 24, agent: {
+    subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  await h.open('Agent')
+  await key(h, '\r')
+  for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.ok(h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)))
+  assert.match(h.view(), /Categories|Rows/u, 'the passive parent stays painted')
+  await clickPainted(h, 'Open…')
+  await settle(h)
+  assert.match(h.view(), /> Maximum depth/u, 'the painted forward action enters the same Detail tenant')
+  assert.match(h.view(), /Settings · Agent · Subagent settings/u)
+  assert.match(h.view(), /Categories|Rows/u, 'the parent context remains readable')
   h.dispose()
 })
 

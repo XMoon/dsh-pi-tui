@@ -196,10 +196,7 @@ export class SubagentSettingsController {
     const routes = patched(this.selection.patch.allowedModels, source.effective.allowedModels, source.inherited.allowedModels)
     const present = routes.some(item => item.provider === route.provider && item.model === route.model)
     if (present && routes.length === 1 && patched(this.selection.patch.enabled, source.effective.enabled, source.inherited.enabled)) {
-      // A direct-operation refusal is not a candidate validity issue: the
-      // current (enabled + one route) candidate stays legal and another field's
-      // Save must not be blocked by a rejected removal attempt.
-      this.notice = 'Disable model selection before removing the last route.'
+      this.issues.allowedModels = 'Disable model selection before removing the last route.'
       this.changed()
       return
     }

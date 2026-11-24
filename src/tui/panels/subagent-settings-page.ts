@@ -757,6 +757,12 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (matchesKey(data, 'escape')) { this.back(); return }
     if (snapshot.saving) return
     const bodyRows = Math.max(0, this.rowGrant - 1)
+    // A zero-body grant keeps ONLY its real Back/Cancel/Keep/Wait: no input,
+    // read, write or local field move reaches a body the user cannot see.
+    if (bodyRows < 1) {
+      if (matchesKey(data, 'left')) this.back()
+      return
+    }
     if (this.question !== undefined) { this.handleQuestionInput(data, snapshot); return }
     if (this.numberInput !== undefined) {
       if (matchesKey(data, 'enter')) this.stageInput()
@@ -775,11 +781,6 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       return
     }
     if (this.view === 'directory') { this.handleDirectoryInput(data, snapshot); return }
-    if (bodyRows < 1) {
-      // A bar-only grant paints only the page's own Back: no hidden body action.
-      if (matchesKey(data, 'left')) this.back()
-      return
-    }
     this.handleBrowseInput(data, snapshot)
   }
 
@@ -1083,11 +1084,19 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     }
     const visible = new Set<number>()
     let acceptPainted = false
+    const routeDetailLines = this.view === 'directory' && this.selectedRoute !== undefined
+      ? content.flatMap((line, index) => line.routeKey === this.selectedRoute ? [index] : [])
+      : []
+    const routeActionRead = routeDetailLines.length > 0
+      && routeDetailLines.every(lineIndex => lineIndex >= offset && lineIndex < offset + viewport)
     const questionFrameComplete = this.question !== undefined
       && mustSee.every(lineIndex => lineIndex >= offset && lineIndex < offset + viewport)
     for (let index = 0; index < viewport; index += 1) {
       const line = content[offset + index]
-      const suppressed = this.question !== undefined && questionFrameComplete === false
+      const hiddenRouteAction = !routeActionRead
+        && (line?.targets?.some(target => target.action.kind === 'route-toggle') ?? false)
+      const suppressed = hiddenRouteAction
+        || this.question !== undefined && questionFrameComplete === false
         && acceptLine !== undefined && offset + index === acceptLine
       lines.push(fit(suppressed ? '' : line?.text ?? '', width))
       visible.add(offset + index)
@@ -1112,7 +1121,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       || saveFacts.dirty.some(block => block.complete && block.lines.length > 0
         && block.lines.every(lineIndex => visible.has(lineIndex)))
     while (lines.length < bodyRows) lines.push(fit('', width))
-    lines.push(this.renderBar(snapshot, width, questionRead, frameComplete, maxOffset > 0, resetReady))
+    lines.push(this.renderBar(snapshot, width, questionRead, frameComplete, maxOffset > 0, resetReady, routeActionRead))
     this.awaitingPaint = false
     this.paint = {
       width, rows: this.rowGrant, identity: this.gestureIdentity(), targets, maxOffset,
@@ -1176,6 +1185,21 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     const lines: ContentLine[] = [{ text: color.textDim(label) }]
     for (const line of wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, width - 2))) {
       lines.push({ text: `  ${color.textDim(line)}` })
+    }
+    return lines
+  }
+  private routeIdentityLines(
+    label: string,
+    routes: readonly SubagentAllowedModelRoute[],
+    width: number,
+    ink: (text: string) => string = color.textDim,
+  ): ContentLine[] {
+    const lines: ContentLine[] = [{ text: ink(label) }]
+    if (routes.length === 0) lines.push({ text: ink('  None') })
+    for (const route of routes) {
+      for (const fragment of wrapTextWithAnsi(`  ${route.provider} / ${route.model}`, Math.max(1, width))) {
+        lines.push({ text: ink(fragment) })
+      }
     }
     return lines
   }
@@ -1383,13 +1407,20 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (section.source.kind === 'ready') lines.push(...this.fact('Revision', String(section.source.revision), rowWidth, color.textDim, pad).lines)
     lines.push(...this.proseFact('Scope', SCOPE, copyWidth, pad))
     if (field === 'allowedModels' && section.source.kind === 'ready') {
-      const routes = (section.source.effective as { allowedModels: readonly SubagentAllowedModelRoute[] }).allowedModels
-      lines.push({ text: color.textDim('Routes') })
-      if (routes.length === 0) lines.push({ text: color.textDim('  None') })
-      for (const route of routes) lines.push(...this.note(`  ${route.provider} / ${route.model}`, copyWidth))
+      const effectiveRoutes = (section.source.effective as { allowedModels: readonly SubagentAllowedModelRoute[] }).allowedModels
+      lines.push(...this.routeIdentityLines('Effective routes', effectiveRoutes, copyWidth))
+      const entry = (section.patch as Readonly<Partial<Record<SubagentSettingsField, { readonly kind: string; readonly value?: unknown }>>>)[field]
+      if (entry !== undefined) {
+        if (entry.kind === 'reset') {
+          lines.push({ text: color.text('Staged official unset') })
+        } else {
+          lines.push(...this.routeIdentityLines('Staged routes', entry.value as readonly SubagentAllowedModelRoute[], copyWidth, color.text))
+        }
+      }
+    } else {
+      const requested = this.requestedValue(snapshot, field)
+      if (requested !== undefined) lines.push(...this.fact('Staged', requested, rowWidth, color.text, pad).lines)
     }
-    const requested = this.requestedValue(snapshot, field)
-    if (requested !== undefined) lines.push(...this.fact('Staged', requested, rowWidth, color.text, pad).lines)
     lines.push(...this.note(this.fieldEffect(field, true), copyWidth))
     lines.push(...this.note('The USER patch may retain the inherited value.', copyWidth))
     lines.push(...this.note('The Host readback decides the value.', copyWidth))
@@ -1439,30 +1470,31 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       const text = `${marker}${selected ? color.textStrong(name) : color.text(name)}${chip === '' ? '' : color.textMuted(chip)}`
       lines.push({ text, routeKey: key, targets: [{ id: `route:${key}`, action: { kind: 'route', key }, startCol: 0, endCol: Math.min(rowWidth, visibleWidth(text)) }] })
       if (!selected) continue
-      lines.push(...this.note(`${model.providerId} / ${model.modelId}`, copyWidth))
+      const detail = (line: ContentLine): ContentLine => ({ ...line, routeKey: key })
+      for (const line of this.note(`${model.providerId} / ${model.modelId}`, copyWidth)) lines.push(detail(line))
       const section = snapshot.selection
       if (section.source.kind === 'ready' && section.dirty) {
         const effectiveMember = (section.source.effective as { allowedModels: readonly SubagentAllowedModelRoute[] }).allowedModels
           .some(route => route.provider === model.providerId && route.model === model.modelId)
-        lines.push(...this.note(`Current: ${effectiveMember ? 'allowed' : 'not allowed'}`, copyWidth))
+        for (const line of this.note(`Current: ${effectiveMember ? 'allowed' : 'not allowed'}`, copyWidth)) lines.push(detail(line))
       }
       if (model.savedRoute !== undefined) {
         const note = model.savedRoute === 'absent' ? 'Saved route not listed in the current directory.'
           : model.savedRoute === 'catalog-loading' ? 'Saved route; the model directory is still loading.'
             : model.savedRoute === 'provider-unavailable' ? "Saved route; this provider's directory is unavailable."
               : 'Saved route; the model directory is unavailable.'
-        lines.push(...this.note(note, copyWidth))
+        for (const line of this.note(note, copyWidth)) lines.push(detail(line))
       }
       const actionLabel = this.routeActionLabel(snapshot, model)
       const blocked = this.routeBlockReason(snapshot, model)
       if (actionLabel !== undefined) {
-        lines.push({
+        lines.push(detail({
           text: color.primary(actionLabel),
           targets: visibleWidth(actionLabel) <= rowWidth
             ? [{ id: 'route-toggle', action: { kind: 'route-toggle' }, startCol: 0, endCol: visibleWidth(actionLabel) }]
             : undefined,
-        })
-      } else if (blocked !== undefined) lines.push(...this.note(blocked, copyWidth, color.warning))
+        }))
+      } else if (blocked !== undefined) for (const line of this.note(blocked, copyWidth, color.warning)) lines.push(detail(line))
     }
     const projection = projectSubagentAllowlist({ catalog: this.catalog, allowed: snapshot.allowedModels })
     for (const failure of projection.failures) {
@@ -1517,10 +1549,23 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       for (const field of fields) {
         const section = this.sectionOf(snapshot, field)
         if (Object.keys(section.patch).length === 0) continue
+        if (field === 'allowedModels' && section.source.kind === 'ready') {
+          const entry = (section.patch as Readonly<Partial<Record<SubagentSettingsField, { readonly kind: string; readonly value?: unknown }>>>)[field]
+          if (entry?.kind === 'reset') lines.push({ text: color.warning('Requested Allowed models official unset') })
+          else lines.push(...this.routeIdentityLines('Requested Allowed models',
+            entry?.value as readonly SubagentAllowedModelRoute[] ?? [], Math.min(width, 72), color.text))
+          continue
+        }
         const requested = this.requestedValue(snapshot, field)
         if (requested !== undefined) lines.push(...this.fact(`Requested ${LABELS[field]}`, requested, Math.min(width, 64), color.text).lines)
       }
       for (const field of fields) {
+        const section = this.sectionOf(snapshot, field)
+        if (field === 'allowedModels' && section.source.kind === 'ready') {
+          const routes = (section.source.effective as { allowedModels: readonly SubagentAllowedModelRoute[] }).allowedModels
+          lines.push(...this.routeIdentityLines('Last confirmed Allowed models', routes, Math.min(width, 72)))
+          continue
+        }
         lines.push(...this.fact(`Last confirmed ${LABELS[field]}`, this.effectiveValue(snapshot, field), Math.min(width, 64), color.textDim).lines)
       }
     }
@@ -1545,6 +1590,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     inputComplete: boolean,
     scrollable: boolean,
     resetReady: boolean,
+    routeActionRead: boolean,
   ): string {
     const bodyRows = Math.max(0, this.rowGrant - 1)
     const painted = this.paintedQuestion !== undefined && this.paintedQuestion === this.questionIdentity()
@@ -1588,7 +1634,9 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       ]
     } else if (this.advanced) {
       segments = [
-        ...(resetReady ? [{ text: `Reset [${KEYS.reset.toUpperCase()}]`, priority: 900, action: 'reset' as const }] : []),
+        ...(resetReady && this.editable(FIELDS[this.fieldIndex]!, snapshot)
+          ? [{ text: `Reset [${KEYS.reset.toUpperCase()}]`, priority: 900, action: 'reset' as const }]
+          : []),
         ...(scrollable ? [{ text: 'Up/Down scroll', priority: 400 }] : []),
         { text: 'Back [Esc]', priority: 1000, escape: true },
       ]
@@ -1599,7 +1647,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     } else if (this.view === 'directory') {
       const model = this.selectedModel(snapshot)
       const action = model === undefined ? undefined : this.routeActionLabel(snapshot, model)
-      const actionWord = model !== undefined && action !== undefined
+      const actionWord = model !== undefined && action !== undefined && routeActionRead
         ? `${model.allowed ? 'Remove' : 'Add'} route [Enter]`
         : undefined
       segments = [

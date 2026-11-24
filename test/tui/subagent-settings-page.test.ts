@@ -46,6 +46,7 @@ interface RigOptions {
   readonly directoryValue?: ModelDirectoryDto
   readonly holdLimits?: boolean
   readonly rejectLimits?: boolean
+  readonly lostAckLimits?: boolean
   readonly holdDirectory?: boolean
 }
 
@@ -109,6 +110,7 @@ function rig(options: RigOptions = {}) {
       if (pinned !== generation || revision !== limitsRevision) return { kind: 'conflict', reason: 'stale' }
       if (limitsWait !== undefined) await limitsWait
       if (options.rejectLimits === true) return { kind: 'rejected', reason: 'limits refused' }
+      if (options.lostAckLimits === true) return { kind: 'outcome-unconfirmed', reason: 'reply lost' }
       limitsValue = apply(limitsValue, limitsBase, patch)
       limitsRevision += 1
       return { kind: 'accepted' }
@@ -729,6 +731,192 @@ test('CJK directory rows stay cell-accurate and toggle only by their painted rou
   assert.deepEqual(controller.snapshot().allowedModels, [], 'a row click never toggles')
   activateBar(page, 'bar:route-toggle')
   assert.deepEqual(controller.snapshot().allowedModels, [{ provider: '提供者', model: '模型甲' }])
+})
+
+
+test('a canonical value is shown when the raw text cannot fit, and an out-of-range value stays refused in the Input', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  for (const character of '0'.repeat(24) + '2') page.handleInput(character)
+  let frame = page.render(30)
+  assert.match(strip(frame.join('\n')), /Value sends\s+2/u, 'the sent canonical stays readable when the raw text cannot')
+  assert.match(barLine(frame), /Stage \[Enter\]/u)
+  activateBar(page, 'bar:apply')
+  frame = page.render(30)
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'set', value: 2 })
+
+  // An out-of-range value keeps the real Stage so its own error is reported;
+  // the Stage refuses it, the Input stays and the prior patch survives.
+  page.render(80)
+  frame = page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(30)
+  page.handleInput('\x15')
+  for (const character of '9'.repeat(40)) page.handleInput(character)
+  frame = page.render(30)
+  assert.match(barLine(frame), /Stage \[Enter\]/u, 'the real Stage stays reachable')
+  activateBar(page, 'bar:apply')
+  frame = page.render(30)
+  assert.match(strip(frame.join('\n')), /Enter a safe integer from 0 to/u)
+  assert.match(strip(frame.join('\n')), /Edit Maximum recursion depth/u, 'the refused Stage stays in the Input')
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'set', value: 2 }, 'the prior patch is untouched')
+})
+
+test('an unknown outcome asks Leave anyway and offers neither an ordinary Discard nor a new Save', async () => {
+  const h = await started({ lostAckLimits: true })
+  const { page, controller, writes } = h
+  page.focused = true
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('2')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  let frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Limits: Outcome unconfirmed/u)
+  assert.equal(controller.snapshot().limits.dirty, true)
+  assert.equal(writes.length, 1)
+  assert.doesNotMatch(barLine(frame), /Save \[S\]|Discard \[D\]/u, 'a settled unknown offers no new Save or ordinary Discard')
+  assert.match(barLine(frame), /Refresh \[R\]/u)
+
+  page.handleInput(ESC)
+  frame = page.render(80)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /The Host may have applied changes\./u)
+  assert.match(plain, /Leaving does not undo them\./u)
+  assert.match(barLine(frame), /Leave anyway \[D\].*Keep \[Esc\]/u)
+  assert.doesNotMatch(barLine(frame), /Discard and leave/u, 'an unknown leave never wears the definite discard label')
+  page.handleInput('d')
+  await settleMicrotasks()
+  assert.deepEqual(h.dones, [1])
+  assert.equal(writes.length, 1, 'acknowledging the unknown leave never replays the write')
+})
+
+test('a same-authority resize reuses the existing directory result without a new read', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider One', models: [{ id: 'm', name: 'Model One' }] }],
+      failures: [],
+    },
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  const reads = h.directoryReadCount()
+  page.setMaxRows(8)
+  page.render(100)
+  page.setMaxRows(12)
+  page.render(80)
+  assert.equal(h.directoryReadCount(), reads, 'a same-authority resize/search/scroll only reprojects')
+  assert.match(strip(page.render(80).join('\n')), /Provider One/u)
+})
+
+test('a width-only repaint revokes a press even at identical cells, and a fresh gesture works', async () => {
+  const h = await started()
+  const { page } = h
+  page.focused = true
+  let frame = page.render(80)
+  const parallelRow = rowIndex(frame, line => line.includes('Parallelism'))
+  assert.notEqual(parallelRow, -1)
+  assert.equal(page.handleMouse(mouse('press', 3, parallelRow, 80, frame.length))?.handled, true)
+  const grown = page.render(100)
+  assert.equal(page.handleMouse(mouse('click', 3, parallelRow, 100, grown.length)), undefined,
+    'the press-frame width no longer matches the painted frame')
+  assert.match(strip(page.render(100).join('\n')), /> Maximum depth/u)
+  const freshRow = rowIndex(grown, line => line.includes('Parallelism'))
+  assert.equal(page.handleMouse(mouse('press', 3, freshRow, 100, grown.length))?.handled, true)
+  page.render(100)
+  assert.equal(page.handleMouse(mouse('click', 3, freshRow, 100, grown.length))?.handled, true)
+  assert.match(strip(page.render(100).join('\n')), /> Parallelism/u)
+})
+
+test('a directory action is withheld until the complete selected route identity is readable', async () => {
+  const provider = 'provider-with-a-very-long-identity'
+  const model = 'model-with-a-very-long-identity'
+  const h = await started({
+    directoryValue: {
+      default: { provider, model },
+      routableProviders: [provider],
+      groups: [{ id: provider, name: 'Long Provider', models: [{ id: model, name: 'Long Model' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller, writes } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.setMaxRows(4) // 3 body rows: the complete route detail cannot fit
+  let frame = page.render(44)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false)
+  assert.doesNotMatch(strip(frame.join('\n')), /Add route \[Enter\]/u, 'the unreadable action text is withdrawn too')
+  page.handleInput(ENTER)
+  assert.deepEqual(controller.snapshot().allowedModels, [], 'Enter cannot toggle an unreadable route')
+
+  page.setMaxRows(6) // 5 body rows: the complete selected detail fits
+  frame = page.render(44)
+  assert.match(strip(frame.join('\n')), new RegExp(`${provider} /\\s+${model}`, 'u'))
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), 'the complete identity admits the action')
+  activateBar(page, 'bar:route-toggle')
+  assert.deepEqual(controller.snapshot().allowedModels, [{ provider, model }])
+  assert.equal(writes.length, 0)
+})
+
+test('the Allowed models Advanced lists complete effective and staged route identities', async () => {
+  const h = await started({
+    allowedModels: [{ provider: 'alpha', model: 'fast' }],
+    directoryValue: {
+      default: { provider: 'alpha', model: 'fast' },
+      routableProviders: ['alpha', 'beta'],
+      groups: [
+        { id: 'alpha', name: 'Alpha', models: [{ id: 'fast', name: 'Fast' }] },
+        { id: 'beta', name: 'Beta', models: [{ id: 'slow', name: 'Slow' }] },
+      ],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  page.setMaxRows(16)
+  selectField(page, 'Allowed models')
+  page.handleInput('?')
+  let frame = page.render(80)
+  let plain = strip(frame.join('\n'))
+  assert.match(plain, /Effective routes/u)
+  assert.match(plain, /alpha \/ fast/u)
+  assert.match(plain, /Inherited/u)
+  page.handleInput('?')
+  page.render(80)
+  page.handleInput(ENTER) // Manage
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput(DOWN) // Beta / Slow
+  page.render(80)
+  activateBar(page, 'bar:route-toggle')
+  page.render(80)
+  page.handleInput(ESC) // back to the group
+  page.render(80)
+  page.handleInput('?')
+  frame = page.render(80)
+  plain = strip(frame.join('\n'))
+  assert.match(plain, /Staged routes/u)
+  assert.match(plain, /alpha \/ fast/u)
+  assert.match(plain, /beta \/ slow/u)
+  assert.deepEqual(controller.snapshot().allowedModels, [{ provider: 'alpha', model: 'fast' }, { provider: 'beta', model: 'slow' }])
 })
 
 // ── FR5-B: the shared host numeric page ──────────────────────────────────
