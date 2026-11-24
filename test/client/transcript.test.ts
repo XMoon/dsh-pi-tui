@@ -274,7 +274,7 @@ test('reinserting a claimed id clears its stale steer claim', () => {
   assert.equal(folded.steer, undefined)
 })
 
-test('inbox splice positions and targets classify only claimed next-step ids', () => {
+test('inbox splice positions and targets classify only official full-drain next-step claims', () => {
   const first = {
     id: MessageId('position-first'),
     role: 'user',
@@ -304,23 +304,32 @@ test('inbox splice positions and targets classify only claimed next-step ids', (
     event('turn/start', { turn: 0 }, 0),
     rawEvent('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [nextTurn] }, 1),
     rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [first, second] }, 2),
+    // A positioned INSERT (not a drain) never proves delivery.
     rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, inserted: [replacement] }, 3),
     rawEvent('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 4),
-    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, removedCount: 1, inserted: [] }, 5),
-    rawEvent('user/message', nextTurn, 6),
+    rawEvent('user/message', nextTurn, 5),
+    // A positioned PARTIAL removal is not the official full-drain claim shape.
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, removedCount: 1, inserted: [] }, 6),
     rawEvent('user/message', replacement, 7),
     rawEvent('user/message', replacement, 8),
-    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 1, removedCount: 1, inserted: [] }, 9),
+    // One official claim draining the WHOLE observed next-step list proves
+    // both remaining identities; each actual append consumes its own id once.
+    rawEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 2, inserted: [] }, 9),
     rawEvent('user/message', second, 10),
     rawEvent('user/message', first, 11),
+    rawEvent('user/message', second, 12),
   ])
   const userMessages = folder.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'user' }> => message.kind === 'user')
   const replacementMessages = userMessages.filter(message => message.text === 'replacement')
-  assert.deepEqual(replacementMessages.map(message => message.steer), [true, undefined])
-  assert.equal(userMessages.find(message => message.text === 'next turn')?.steer, undefined)
-  assert.equal(userMessages.find(message => message.text === 'second')?.steer, true,
-    'the sibling left after the positioned claim remains in the next-step inbox')
-  assert.equal(userMessages.find(message => message.text === 'first')?.steer, undefined)
+  assert.deepEqual(replacementMessages.map(message => message.steer), [undefined, undefined],
+    'a positioned insertion/partial removal proves no delivery')
+  assert.equal(userMessages.find(message => message.text === 'next turn')?.steer, undefined,
+    'a next-turn move never authorizes a next-step claim')
+  const seconds = userMessages.filter(message => message.text === 'second')
+  assert.deepEqual(seconds.map(message => message.steer), [true, undefined],
+    'a full-drain batch claims both ids and each append consumes its own id once')
+  assert.equal(userMessages.find(message => message.text === 'first')?.steer, true,
+    'the sibling claimed by the SAME official batch remains proven')
 })
 
 test('claimed ids are consumed by non-user and empty user messages', () => {
