@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { expect, test } from 'vitest'
@@ -34,6 +34,11 @@ import {
   type SplitProcessHostHandle,
   type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
+
+function expectSameBytes(actualPath: string, expected: Buffer, label: string): void {
+  const actual = readFileSync(actualPath)
+  expect(actual.length === expected.length && actual.equals(expected), `${label}: the bytes changed`).toBe(true)
+}
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
@@ -413,6 +418,8 @@ test('replaces dropped transport generations without retaining wrappers or socke
   let testError: unknown
   try {
     const host = await scene.startHost()
+    const hostPid = host.ready.localHost.hostPid
+    const hostInstanceId = host.ready.localHost.instanceId
     const files = readScopeFiles(scene.installation.dshHome, scene.scope.scopeId)
     const [client] = await scene.startQualificationClients({ mode: 'attach' })
     await scene.waitEntryRecord(client!, { m4a0: 'ready' })
@@ -432,8 +439,8 @@ test('replaces dropped transport generations without retaining wrappers or socke
       await scene.waitEntryRecord(client!, { m4a0: 'qualification', op: 'drop-websocket', requestId })
       await waitFor(async () => {
         const status = await scene.entryStatus(client!)
-        return status.generationId === undefined || status.transport !== 'connected'
-      }, `the dropped generation ${String(cycle)} to clear`, 30_000)
+        return status.transport !== 'connected' && status.generationId === undefined
+      }, `the dropped generation ${String(cycle)} to clear its transport and generation identity`, 30_000)
       const replaced = await waitForValue(async () => {
         const status = await scene.entryStatus(client!)
         return status.transport === 'connected'
@@ -444,6 +451,8 @@ test('replaces dropped transport generations without retaining wrappers or socke
       }, `the replacement generation after drop ${String(cycle)}`, 60_000)
       expect(replaced.activeWrappers).toBe(1)
       expect(replaced.liveSockets).toBe(1)
+      expect(replaced.host?.instanceId, `drop ${String(cycle)}: the replacement echoed another Host`).toBe(hostInstanceId)
+      expect(replaced.host?.hostPid, `drop ${String(cycle)}: the replacement echoed another Host PID`).toBe(hostPid)
       generation = Number(replaced.generationId)
     }
 
@@ -459,6 +468,10 @@ test('replaces dropped transport generations without retaining wrappers or socke
     expect(retryableBaseline.activeWrappers).toBe(1)
     expect(retryableBaseline.liveSockets).toBe(1)
     await scene.qualificationControl(retryable!, { op: 'qualification-drop-websocket', requestId: 'retryable-drop' })
+    await waitFor(async () => {
+      const status = await scene.entryStatus(retryable!)
+      return status.transport !== 'connected' && status.generationId === undefined
+    }, 'the retryable refresh actual interruption and cleared generation', 30_000)
     const recovered = await waitForValue(async () => {
       const status = await scene.entryStatus(retryable!)
       return status.transport === 'connected'
@@ -469,6 +482,8 @@ test('replaces dropped transport generations without retaining wrappers or socke
     }, 'the retryable refresh replacement generation', 90_000)
     expect(recovered.activeWrappers).toBe(1)
     expect(recovered.liveSockets).toBe(1)
+    expect(recovered.host?.instanceId, 'the retryable replacement echoed another Host').toBe(hostInstanceId)
+    expect(recovered.host?.hostPid, 'the retryable replacement echoed another Host PID').toBe(hostPid)
     const retryableExit = await scene.finishEntry(retryable!)
     expect(retryableExit.exit).toEqual({ code: 0, signal: null })
 
@@ -544,6 +559,14 @@ test('settles qualification Client startup and exit failures without taking down
       await assertHostUnchanged()
       const facts = await scene.entryRecordFacts(client!)
       expect(facts.records.some(record => record.m4a0 === 'ready')).toBe(false)
+      const failureRecords = facts.records.filter(record => record.m4a0 === 'failure')
+      const cleanupRecords = facts.records.filter(record => record.m4a0 === 'cleanup')
+      const cleanupFailures = facts.records.filter(record => record.m4a0 === 'cleanup-failure')
+      expect(failureRecords, `${mode}: exactly one failure record`).toHaveLength(1)
+      expect(cleanupRecords, `${mode}: exactly one completed cleanup record`)
+        .toHaveLength(1)
+      expect(cleanupRecords[0]?.status, `${mode}: the cleanup outcome is not completed`).toBe('completed')
+      expect(cleanupFailures, `${mode}: cleanup-failure cannot be treated as clean success`).toHaveLength(0)
       return { failure, terminal }
     }
 
@@ -573,8 +596,8 @@ test('settles qualification Client startup and exit failures without taking down
     } finally {
       await scene.restoreInstallation()
     }
-    expect(readFileSync(files.registryPath)).toEqual(registrySnapshot.bytes)
-    expect(readFileSync(files.launchPath)).toEqual(launchSnapshot.bytes)
+    expectSameBytes(files.registryPath, registrySnapshot.bytes, 'the restored registry')
+    expectSameBytes(files.launchPath, launchSnapshot.bytes, 'the restored launch')
 
     // Exact owned qualification Client signals: SIGKILL and SIGTERM are
     // different terminals and never take the Host down.
@@ -724,6 +747,27 @@ test('refuses unsafe or forged Host discovery facts without killing or replacing
       await assertHostAndWitnessAlive()
     }
 
+    // A contained symlink alias plus a nonexistent child must be rejected
+    // BEFORE any mkdir: the canonical parent is outside the Scene.
+    const outsideDir = join(dirname(scene.workDir), `outside-sentinel-${randomUUID()}`)
+    const outsideAlias = join(scene.workDir, `outside-alias-${randomUUID()}`)
+    mkdirSync(outsideDir, { recursive: true, mode: 0o700 })
+    symlinkSync(outsideDir, outsideAlias)
+    try {
+      const [aliasClient] = await scene.startQualificationClients({ mode: 'attach' })
+      await scene.waitEntryRecord(aliasClient!, { m4a0: 'ready' })
+      await expect(scene.qualificationControl(aliasClient!, {
+        op: 'qualification-host-foundation',
+        requestId: 'outside-alias',
+        workspacePath: join(outsideAlias, 'nested'),
+      })).rejects.toThrow(/inside the Scene root|does not exist/u)
+      expect(existsSync(join(outsideDir, 'nested')), 'the rejected contained path created an outside directory').toBe(false)
+      await scene.finishEntry(aliasClient!)
+    } finally {
+      unlinkSync(outsideAlias)
+      rmSync(outsideDir, { recursive: true, force: true })
+    }
+
     const registryReal = `${files.registryPath}.real`
     const registryDecoy = join(decoyDir, 'registry-decoy.json')
     await runRefusal('registry-symlink', 'LOCAL_FILE_UNSAFE', () => {
@@ -735,7 +779,7 @@ test('refuses unsafe or forged Host discovery facts without killing or replacing
       rmSync(files.registryPath, { force: true })
       renameSync(registryReal, files.registryPath)
     }, () => {
-      expect(readFileSync(registryDecoy)).toEqual(registrySnapshot.bytes)
+      expectSameBytes(registryDecoy, registrySnapshot.bytes, 'the symlink decoy registry')
       expect(statSync(registryDecoy).mode & 0o777).toBe(0o600)
     })
 
@@ -750,7 +794,7 @@ test('refuses unsafe or forged Host discovery facts without killing or replacing
       rmSync(files.launchPath, { force: true })
       renameSync(launchReal, files.launchPath)
     }, () => {
-      expect(readFileSync(launchDecoy)).toEqual(launchSnapshot.bytes)
+      expectSameBytes(launchDecoy, launchSnapshot.bytes, 'the symlink decoy launch')
     })
 
     await runRefusal('forged-instance', 'HOST_IDENTITY_MISMATCH', () => {

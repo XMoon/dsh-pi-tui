@@ -10,6 +10,7 @@
  * @module split-process-authentication
  */
 
+import assert from 'node:assert/strict'
 import { readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { request as httpRequest } from 'node:http'
@@ -23,7 +24,7 @@ import {
   type KernelProcessIdentity,
 } from '../../src/runtime/native-process/identity.ts'
 // @ts-expect-error -- the repository's plain-JavaScript upgrade contract has no declaration file
-import { classifyKernelLiveness } from './split-upgrade-native-contract.mjs'
+import { classifyKernelLiveness, serializeKernelIdentity } from './split-upgrade-native-contract.mjs'
 // @ts-expect-error -- the repository's plain-JavaScript smoke helper has no declaration file
 import { connectCookie as exchangeLaunchCookie, fetchStatus as fetchRawStatus } from '../../scripts/lib/split-smoke-processes.mjs'
 
@@ -192,6 +193,19 @@ export function assertWitnessIdentityLive(
     || classifyKernelLiveness(observation).state !== 'alive'
     || sameKernelProcess(witness.kernelIdentity as KernelProcessIdentity, observation) !== 'same') {
     throw new Error(`${label}: the identity witness is not the same live kernel process`)
+  }
+}
+
+/** A captured kernel birth is gone or provably another process (never live). */
+export function assertKernelBirthTerminal(pid: number, birth: string | undefined, label: string): void {
+  assert(typeof pid === 'number' && Number.isInteger(pid) && pid > 0, `${label}: no real PID`)
+  assert(typeof birth === 'string' && birth !== '', `${label}: no recorded kernel birth`)
+  const observation = readKernelProcess(pid)
+  if (observation.kind === 'unknown') throw new Error(`${label}: the kernel identity is unverifiable`)
+  if (observation.kind === 'alive'
+    && serializeKernelIdentity(observation.identity) === birth
+    && classifyKernelLiveness(observation).state === 'alive') {
+    throw new Error(`${label}: the captured kernel birth is still live`)
   }
 }
 

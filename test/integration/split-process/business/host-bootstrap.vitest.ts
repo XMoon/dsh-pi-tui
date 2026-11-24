@@ -8,12 +8,13 @@
  * and its exact kernel identity.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { expect, test } from 'vitest'
 
 import {
+  assertKernelBirthTerminal,
   assertPublishedHostMatchesKernel,
   assertClientHostMatchesPublished,
   exchangeCookie,
@@ -22,6 +23,8 @@ import {
 } from '../../../support/split-process-authentication.ts'
 import {
   createSplitProcessScene,
+  type IdentityWitnessHandle,
+  type QualificationClientHandle,
   type SplitProcessHostHandle,
   type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
@@ -147,6 +150,8 @@ test('admits the installed Host composition and refuses missing required owners'
       expect(facts.records.some(record => record.m4a0 === 'ready')).toBe(false)
       expect(facts.records.some(record => record.m4a0 === 'failure' && record.phase === 'after-boot')).toBe(true)
       expect(facts.redactedKeys).not.toContain('token')
+      expect(existsSync(join(scene.scopeDir, 'instance.json')), `the ${mode} refusal left a registry`).toBe(false)
+      expect(existsSync(join(scene.scopeDir, 'launch.json')), `the ${mode} refusal left a launch record`).toBe(false)
       await scene.assertEntrySeatsFree()
     }
 
@@ -240,6 +245,9 @@ test('refuses a missing installed Host Runtime artifact and authenticates after 
     const [attempt] = await scene.startHostAttempts({ mode: 'host-runtime-absent' })
     const failure = await scene.waitEntryRecord(attempt, { m4a0: 'failure' })
     expect(String(failure.error)).toMatch(/expected exactly one active piTuiHostRuntime owner row, found 0/u)
+    // The scoped install may not be restored while an affected attempt has no
+    // validated terminal, even if its process already exited.
+    await expect(scene.restoreInstallation()).rejects.toThrow(/Host attempt is not finished/u)
     const terminal = await scene.finishEntry(attempt)
     expect(terminal.exit).toEqual({ code: 1, signal: null })
     expect(terminal.outcome).toBe('startup-refusal')
@@ -363,66 +371,79 @@ test('honors stop signals across Host publication and initial liveness observati
   let testError: unknown
   try {
     // (a) The publication window: the registry is committed, Ready is not.
-    const publicationScratch = scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)
-    const [publication] = await scene.startHostAttempts({ mode: 'stop-during-publication', signal: 'SIGTERM' })
-    const registryPath = join(scene.scopeDir, 'instance.json')
-    await waitForPublishedFile(registryPath, 'the publication-window registry')
-    const published = JSON.parse(readFileSync(registryPath, 'utf8')) as Record<string, any>
-    expect(published.hostPid).toBe(publication.pid)
-    assertPublishedHostMatchesKernel(published as never, 'the publication-window registry')
-    expect(existsSync(join(scene.scopeDir, 'launch.json'))).toBe(true)
-    const beforeSignal = await scene.entryRecordFacts(publication)
-    expect(beforeSignal.records.some(record => record.m4a0 === 'ready')).toBe(false)
+    // Both stop signals exercise the same production await boundary with their
+    // distinct terminal codes; one signal alone would lose half the contract.
+    for (const stopSignal of ['SIGTERM', 'SIGINT'] as const) {
+      const expectedCode = stopSignal === 'SIGINT' ? 130 : 0
+      const publicationScratch = scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)
+      const [publication] = await scene.startHostAttempts({ mode: 'stop-during-publication', signal: stopSignal })
+      const registryPath = join(scene.scopeDir, 'instance.json')
+      await waitForPublishedFile(registryPath, 'the publication-window registry')
+      const published = JSON.parse(readFileSync(registryPath, 'utf8')) as Record<string, any>
+      expect(published.hostPid).toBe(publication.pid)
+      assertPublishedHostMatchesKernel(published as never, 'the publication-window registry')
+      expect(existsSync(join(scene.scopeDir, 'launch.json'))).toBe(true)
+      const beforeSignal = await scene.entryRecordFacts(publication)
+      expect(beforeSignal.records.some(record => record.m4a0 === 'ready')).toBe(false)
 
-    await scene.signalEntry(publication, 'SIGTERM')
-    const requested = await scene.waitEntryRecord(publication, { m4a0: 'stop-requested' })
-    expect(requested.signal).toBe('SIGTERM')
-    expect(requested.phase).toBe('publication')
-    await scene.signalEntry(publication, 'SIGTERM')
-    const publicationRepeat = await scene.waitEntryRecord(publication, { m4a0: 'stop-repeat-ignored' })
-    expect(publicationRepeat.phase).toBe('publication')
+      const anotherSignal = stopSignal === 'SIGTERM' ? 'SIGINT' : 'SIGTERM'
+      await expect(scene.request('SIGNAL_ENTRY', { entryId: publication.entryId, signal: anotherSignal }))
+        .rejects.toThrow(/declared/u)
 
-    scene.releaseBarrier(publication, 'publish')
-    const cleanup = await scene.waitEntryRecord(publication, { m4a0: 'cleanup' })
-    expect(cleanup.status).toBe('completed')
-    await scene.signalEntry(publication, 'SIGTERM')
-    const shutdownRepeat = await scene.waitEntryRecord(publication, { m4a0: 'stop-repeat-ignored', phase: 'shutdown' })
-    expect(shutdownRepeat.signal).toBe('SIGTERM')
-    scene.releaseBarrier(publication, 'stop')
+      await scene.signalEntry(publication, stopSignal)
+      const requested = await scene.waitEntryRecord(publication, { m4a0: 'stop-requested' })
+      expect(requested.signal).toBe(stopSignal)
+      expect(requested.phase).toBe('publication')
+      await scene.signalEntry(publication, stopSignal)
+      const publicationRepeat = await scene.waitEntryRecord(publication, { m4a0: 'stop-repeat-ignored' })
+      expect(publicationRepeat.phase).toBe('publication')
 
-    const publicationTerminal = await scene.finishEntry(publication)
-    expect(publicationTerminal.outcome).toBe('signal-stop')
-    expect(publicationTerminal.exit).toEqual({ code: 0, signal: null })
-    expect(publicationTerminal.stopRequested).toBe(1)
-    expect(publicationTerminal.repeatIgnored).toBe(2)
-    const publicationRecords = await scene.entryRecords(publication)
-    expect(publicationRecords.some(record => record.m4a0 === 'ready')).toBe(false)
-    expect(publicationRecords.some(record => record.m4a0 === 'failure')).toBe(false)
-    expect(publicationRecords.filter(record => record.m4a0 === 'cleanup' && record.status === 'completed')).toHaveLength(1)
-    expect(existsSync(registryPath)).toBe(false)
-    expect(existsSync(join(scene.scopeDir, 'launch.json'))).toBe(false)
-    expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(publicationScratch)
-    await scene.assertEntrySeatsFree()
+      scene.releaseBarrier(publication, 'publish')
+      const cleanup = await scene.waitEntryRecord(publication, { m4a0: 'cleanup' })
+      expect(cleanup.status).toBe('completed')
+      await scene.signalEntry(publication, stopSignal)
+      const shutdownRepeat = await scene.waitEntryRecord(publication, { m4a0: 'stop-repeat-ignored', phase: 'shutdown' })
+      expect(shutdownRepeat.signal).toBe(stopSignal)
+      scene.releaseBarrier(publication, 'stop')
+
+      const publicationTerminal = await scene.finishEntry(publication)
+      expect(publicationTerminal.outcome).toBe('signal-stop')
+      expect(publicationTerminal.exit).toEqual({ code: expectedCode, signal: null })
+      expect(publicationTerminal.stopRequested).toBe(1)
+      expect(publicationTerminal.repeatIgnored).toBe(2)
+      const publicationRecords = await scene.entryRecords(publication)
+      expect(publicationRecords.some(record => record.m4a0 === 'ready')).toBe(false)
+      expect(publicationRecords.some(record => record.m4a0 === 'failure')).toBe(false)
+      expect(publicationRecords.filter(record => record.m4a0 === 'cleanup' && record.status === 'completed')).toHaveLength(1)
+      expect(existsSync(registryPath)).toBe(false)
+      expect(existsSync(join(scene.scopeDir, 'launch.json'))).toBe(false)
+      expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(publicationScratch)
+      await scene.assertEntrySeatsFree()
+    }
 
     // (b) The first-liveness window is a DIFFERENT production await boundary.
-    const livenessScratch = scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)
-    const [liveness] = await scene.startHostAttempts({ mode: 'stop-during-initial-liveness', signal: 'SIGINT' })
-    const held = await scene.waitEntryRecord(liveness, { m4a0: 'qualification', op: 'liveness-barrier' })
-    expect(held.pid).toBe(liveness.pid)
-    await scene.signalEntry(liveness, 'SIGINT')
-    const livenessRequested = await scene.waitEntryRecord(liveness, { m4a0: 'stop-requested' })
-    expect(livenessRequested.signal).toBe('SIGINT')
-    expect(livenessRequested.phase).toBe('running')
-    scene.releaseBarrier(liveness, 'liveness')
-    const livenessTerminal = await scene.finishEntry(liveness)
-    expect(livenessTerminal.outcome).toBe('signal-stop')
-    expect(livenessTerminal.exit).toEqual({ code: 130, signal: null })
-    const livenessRecords = await scene.entryRecords(liveness)
-    expect(livenessRecords.some(record => record.m4a0 === 'ready')).toBe(false)
-    expect(livenessRecords.some(record => record.m4a0 === 'failure')).toBe(false)
-    expect(livenessRecords.filter(record => record.m4a0 === 'cleanup' && record.status === 'completed')).toHaveLength(1)
-    expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(livenessScratch)
-    await scene.assertEntrySeatsFree()
+    // It carries the symmetric SIGTERM/SIGINT proof, not one representative.
+    for (const stopSignal of ['SIGTERM', 'SIGINT'] as const) {
+      const expectedCode = stopSignal === 'SIGINT' ? 130 : 0
+      const livenessScratch = scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)
+      const [liveness] = await scene.startHostAttempts({ mode: 'stop-during-initial-liveness', signal: stopSignal })
+      const held = await scene.waitEntryRecord(liveness, { m4a0: 'qualification', op: 'liveness-barrier' })
+      expect(held.pid).toBe(liveness.pid)
+      await scene.signalEntry(liveness, stopSignal)
+      const livenessRequested = await scene.waitEntryRecord(liveness, { m4a0: 'stop-requested' })
+      expect(livenessRequested.signal).toBe(stopSignal)
+      expect(livenessRequested.phase).toBe('running')
+      scene.releaseBarrier(liveness, 'liveness')
+      const livenessTerminal = await scene.finishEntry(liveness)
+      expect(livenessTerminal.outcome).toBe('signal-stop')
+      expect(livenessTerminal.exit).toEqual({ code: expectedCode, signal: null })
+      const livenessRecords = await scene.entryRecords(liveness)
+      expect(livenessRecords.some(record => record.m4a0 === 'ready')).toBe(false)
+      expect(livenessRecords.some(record => record.m4a0 === 'failure')).toBe(false)
+      expect(livenessRecords.filter(record => record.m4a0 === 'cleanup' && record.status === 'completed')).toHaveLength(1)
+      expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(livenessScratch)
+      await scene.assertEntrySeatsFree()
+    }
 
     // The stopped windows leave a reusable seat and scratch ownership.
     const recovered = await scene.startHost()
@@ -515,12 +536,31 @@ test('refuses unqualified installed-entry operations before any child exists', a
     await reject('WAIT_ENTRY_RECORD', { entryId: 'unknown-entry', match: { m4a0: 'ready' } }, /unknown entryId/u)
     await reject('START_HOST_ATTEMPTS', { mode: 'seat-race', count: 17 }, /INPUT_HOST_ATTEMPT_COUNT/u)
 
+    // A synthetic credential marker in an IPC diagnostic is redacted at the
+    // boundary; the real assertion is that it never reaches the Worker text.
+    const marker = 'SYNTHETIC_MARKER_SECRET'
+    const diagnostic = await scene.request('SIGNAL_ENTRY', {
+      entryId: `token=${marker}`,
+      signal: 'SIGTERM',
+    }, 30_000).then(() => undefined, error => asError(error))
+    expect(diagnostic?.message).toContain('[redacted]')
+    expect(diagnostic?.message).not.toContain(marker)
+
     // No reservation, directory or child was created by any refused input.
     expect(readdirSync(scene.workDir).sort()).toEqual(rootEntriesBefore)
     expect(existsSync(join(scene.workDir, 'host-attempts'))).toBe(false)
     expect(existsSync(join(scene.workDir, 'qualification-clients'))).toBe(false)
     expect(existsSync(join(scene.workDir, 'identity-witnesses'))).toBe(false)
     expect(existsSync(join(scene.scopeDir, 'instance.json'))).toBe(false)
+
+    // A fast real child that has exited but whose stdio may still be draining:
+    // FINISH_ENTRY must join the real close event, not synthesize it from
+    // exitCode, before validating the terminal/records.
+    const [fast] = await scene.startHostAttempts({ mode: 'early-exit' })
+    const fastTerminal = await scene.finishEntry(fast!)
+    expect(fastTerminal.exit).toEqual({ code: 1, signal: null })
+    expect(fastTerminal.outcome).toBe('early-exit')
+    expect(fastTerminal.records).toEqual([])
 
     // The refused inputs do not poison a later legal Scene.
     const host = await scene.startHost()
@@ -540,6 +580,106 @@ test('refuses unqualified installed-entry operations before any child exists', a
       }
       throw new AggregateError([asError(cleanupError)],
         'the entry-admission test passed but its Scene cleanup failed')
+    }
+  }
+})
+
+
+test('compensates a failed finalization without leaking a live Client or witness', async () => {
+  const scene = await createSplitProcessScene()
+  let client: QualificationClientHandle | undefined
+  let witness: IdentityWitnessHandle | undefined
+  try {
+    const host = await scene.startHost()
+    await scene.setInstallationFault('client-bootstrap-drift')
+    ;[client] = await scene.startQualificationClients({ mode: 'client-bootstrap-drift' })
+    await scene.waitEntryRecord(client!, { m4a0: 'ready' })
+    witness = await scene.startIdentityWitness('live-non-host')
+    // The Host is killed first so dispose cannot spend its bounded stop budget;
+    // the live qualification Client and witness are the unfinished entries that
+    // make ordinary FINALIZE fail.
+    await scene.signalHost(host, 'SIGKILL')
+
+    const failure = await scene.dispose().then(() => undefined, error => asError(error))
+    expect(failure, 'a finalization with unfinished qualification entries must fail').toBeDefined()
+    const receipt = await scene.readSupervisorReceipt()
+    expect(receipt.phase).toBe('NOT_QUIESCED')
+    expect(receipt.compensation?.attempted, 'failed FINALIZE did not run compensation').toBe(true)
+    expect(receipt.compensation?.completed, 'the joined compensation did not complete').toBe(true)
+    expect(receipt.cleanup?.sceneRootRemoved, 'a failed finalization must preserve its evidence root').toBe(false)
+    expect(receipt.cleanup?.hostSeatFree, 'the Host seat was not proven free').toBe(true)
+    expect(receipt.cleanup?.qualificationSeatFree, 'the qualification seat was not proven free').toBe(true)
+    expect(receipt.installationMutation, 'the installed-copy mutation was not restored').toBeUndefined()
+    expect((receipt.hosts ?? []).every((entry: Record<string, any>) => entry.exited === true), 'a Host entry is still live').toBe(true)
+    const clientFacts = (receipt.qualificationClients ?? []).find((entry: Record<string, any>) => entry.entryId === client!.entryId)
+    const witnessFacts = (receipt.qualificationHelpers ?? []).find((entry: Record<string, any>) => entry.entryId === witness!.entryId)
+    expect(clientFacts?.exited, 'the qualification Client was not reclaimed').toBe(true)
+    expect(witnessFacts?.exited, 'the identity witness was not reclaimed').toBe(true)
+    assertKernelBirthTerminal(client!.pid, client!.birth ?? undefined, 'the abandoned qualification Client')
+    assertKernelBirthTerminal(witness!.pid, witness!.birth ?? undefined, 'the abandoned identity witness')
+    expect(existsSync(scene.workDir), 'the failed-finalization evidence root was removed').toBe(true)
+  } finally {
+    await scene.dispose().catch(() => undefined)
+    rmSync(scene.workDir, { recursive: true, force: true })
+  }
+})
+
+
+test('refuses installed-entry operations in a real non-process Scene before any child exists', async () => {
+  const scene = await createSplitProcessScene()
+  let testError: unknown
+  const pilotRunId = `pilot-admission-${scene.runId}`
+  const { SupervisorClient } = await import('../../../support/split-supervisor-client.ts')
+  const pilot = new SupervisorClient({ runId: pilotRunId })
+  try {
+    await pilot.request('BOOTSTRAP', {
+      tarball: scene.candidate.tarball,
+      expectedSha256: scene.candidate.candidateSha256,
+      tmpBase: scene.tmpBase,
+      workerPid: process.pid,
+      workerPpid: process.ppid,
+    }, { timeoutMs: 600_000 })
+    for (const [type, payload] of [
+      ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
+      ['START_QUALIFICATION_CLIENTS', { mode: 'attach' }],
+      ['START_IDENTITY_WITNESS', { kind: 'live-non-host' }],
+      ['ENTRY_RECORDS', { entryId: 'unknown' }],
+      ['WAIT_ENTRY_RECORD', { entryId: 'unknown', match: { m4a0: 'ready' } }],
+      ['SIGNAL_ENTRY', { entryId: 'unknown', signal: 'SIGTERM' }],
+      ['FINISH_ENTRY', { entryId: 'unknown' }],
+      ['ASSERT_ENTRY_SEATS_FREE', {}],
+    ] as const) {
+      await expect(pilot.request(type, payload, { timeoutMs: 30_000 }))
+        .rejects.toThrow(/no process scene/u)
+    }
+    const receipt = JSON.parse(readFileSync(join(scene.tmpBase, 'split-resources', `${pilotRunId}.json`), 'utf8')) as Record<string, any>
+    expect(receipt.kind).toBe('pilot')
+    expect(receipt.hosts ?? []).toEqual([])
+    expect((receipt.qualificationClients ?? [])).toEqual([])
+    expect((receipt.qualificationHelpers ?? [])).toEqual([])
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    try {
+      await pilot.close({ timeoutMs: 300_000, allowKill: false })
+    } catch (closeError) {
+      if (testError !== undefined) {
+        throw new AggregateError([asError(testError), asError(closeError)],
+          'the wrong-kind admission test failed and its Pilot Scene cleanup also failed')
+      }
+      throw new AggregateError([asError(closeError)],
+        'the wrong-kind admission test passed but its Pilot Scene cleanup failed')
+    }
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      if (testError !== undefined) {
+        throw new AggregateError([asError(testError), asError(cleanupError)],
+          'the wrong-kind admission test failed and its process Scene cleanup also failed')
+      }
+      throw new AggregateError([asError(cleanupError)],
+        'the wrong-kind admission test passed but its process Scene cleanup failed')
     }
   }
 })

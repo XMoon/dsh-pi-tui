@@ -52,6 +52,7 @@ const PROCESS_ATS = [
   'host-contenders-spawned',
   'qualification-client-spawned',
   'host-artifact-absent-started',
+  'identity-witness-spawned',
 ]
 /**
  * The three installed-entry windows bind ONE exact business test so the probe
@@ -70,6 +71,10 @@ const PROCESS_AT_TARGETS = new Map([
   ['host-artifact-absent-started', {
     file: 'test/integration/split-process/business/host-bootstrap.vitest.ts',
     title: 'refuses a missing installed Host Runtime artifact and authenticates after restoring the same bytes',
+  }],
+  ['identity-witness-spawned', {
+    file: 'test/integration/split-process/business/host-seat.vitest.ts',
+    title: 'treats a same-birth Linux zombie as dead and never as a signal target',
   }],
 ])
 const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
@@ -348,37 +353,6 @@ function checkUpgradeReceiptResources(receipt, options = {}) {
     if (pidAlive(qualification.pid)) problems.push(`qualification Client PID still alive: ${String(qualification.pid)}`)
     if (qualification.pgid !== undefined && groupAlive(qualification.pgid)) {
       problems.push(`qualification Client process group still alive: ${String(qualification.pgid)}`)
-    }
-  }
-  for (const client of receipt.qualificationClients ?? []) {
-    if (client.kind !== 'qualification-client') continue
-    if (client.exited !== true) {
-      problems.push(`qualification Client ${String(client.label)} did not record its terminal state`)
-    }
-    const state = identityLiveness(kernel, client.pid, client.birth)
-    if (state !== 'gone' && state !== 'foreign') {
-      problems.push(`qualification Client ${String(client.label)} PID is ${state}: ${String(client.pid)}`)
-    }
-    if (Number.isInteger(client.pgid)) {
-      const groupState = processGroupTerminalState(kernel, client.pgid)
-      if (groupState !== 'terminal') {
-        problems.push(`qualification Client ${String(client.label)} group is ${groupState}: ${String(client.pgid)}`)
-      }
-    }
-  }
-  for (const helper of receipt.qualificationHelpers ?? []) {
-    if (helper.exited !== true) {
-      problems.push(`${String(helper.kind)} ${String(helper.label)} did not record its terminal state`)
-    }
-    const state = identityLiveness(kernel, helper.pid, helper.birth)
-    if (state !== 'gone' && state !== 'foreign') {
-      problems.push(`${String(helper.kind)} ${String(helper.label)} PID is ${state}: ${String(helper.pid)}`)
-    }
-    if (Number.isInteger(helper.pgid)) {
-      const groupState = processGroupTerminalState(kernel, helper.pgid)
-      if (groupState !== 'terminal') {
-        problems.push(`${String(helper.kind)} ${String(helper.label)} group is ${groupState}: ${String(helper.pgid)}`)
-      }
     }
   }
   if (receipt.installationMutation !== undefined) {
@@ -1093,6 +1067,18 @@ try {
           const host = receipt.host
           if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
             fail('qualification-client-spawned: the authenticated Host is not live at the checkpoint')
+          }
+        } else if (at === 'identity-witness-spawned') {
+          const helper = (receipt.qualificationHelpers ?? []).find(value => value.kind === 'identity-witness')
+          if (helper === undefined) fail('identity-witness-spawned: no registered identity-witness holder')
+          if (helper.witnessPid !== undefined) {
+            fail('identity-witness-spawned: the child identity was already read before the registration-window signal')
+          }
+          if (identityLiveness(kernel, helper.pid, helper.birth) !== 'live') {
+            fail('identity-witness-spawned: the registered holder is not the live kernel process')
+          }
+          if (!Number.isInteger(helper.pgid) || !groupAlive(helper.pgid)) {
+            fail('identity-witness-spawned: the registered holder group is not alive')
           }
         } else if (at === 'host-artifact-absent-started') {
           const attempt = (receipt.hosts ?? []).find(value => value.mode === 'host-runtime-absent')

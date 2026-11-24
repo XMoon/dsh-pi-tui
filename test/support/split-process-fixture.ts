@@ -14,8 +14,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -329,6 +329,10 @@ export interface SplitProcessScene {
   readonly scope: SplitProcessScopeFacts
   /** The exact installed product scope directory (`run/dsh-pi-tui/<scopeId>`). */
   readonly scopeDir: string
+  /** The private external run base this Scene was created under. */
+  readonly tmpBase: string
+  /** The durable receipt, readable after the Supervisor exits (including failure). */
+  readSupervisorReceipt(): Promise<SupervisorReceipt>
   /** Bounded typed Supervisor IPC, for boundary negatives on a real Scene. */
   request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
   startHost(): Promise<SplitProcessHostHandle>
@@ -463,6 +467,12 @@ interface SupervisorReceipt {
   scope?: { scopeId?: string; hostSeat?: { path?: string; name?: string } }
   worker?: { pid?: number; ppid?: number; birth?: string }
   host?: { pid?: number; birth?: string; pgid?: number }
+  hosts?: Array<Record<string, any>>
+  qualificationClients?: Array<Record<string, any>>
+  qualificationHelpers?: Array<Record<string, any>>
+  installationMutation?: Record<string, any>
+  compensation?: { attempted?: boolean; completed?: boolean; failure?: string }
+  cleanup?: { sceneRootRemoved?: boolean; hostSeatFree?: boolean; qualificationSeatFree?: boolean }
   processClients?: Array<{
     clientId?: string
     label?: string
@@ -656,6 +666,17 @@ class ProcessScene implements SplitProcessScene {
 
   get supervisorPids(): { worker: number; supervisor: number | undefined } {
     return this.#supervisor.pids
+  }
+
+  get tmpBase(): string {
+    return this.#tmpBase
+  }
+
+  /** The durable receipt of THIS Scene, readable after the Supervisor exits. */
+  async readSupervisorReceipt(): Promise<SupervisorReceipt> {
+    const own = this.#ownReceipt()
+    assert(own !== undefined, 'this Scene has no durable Supervisor receipt')
+    return own
   }
 
   async request(type: string, payload: Record<string, unknown>, timeoutMs: number): Promise<Record<string, any>> {
@@ -861,6 +882,15 @@ class ProcessScene implements SplitProcessScene {
     const rel = relative(this.workDir, path)
     assert(rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`),
       `${handle.label}: the ${name} barrier escapes the Scene root`)
+    // The Supervisor preallocates this exact path. Re-prove the real parent is
+    // still inside the Scene before writing; a symlinked parent must fail.
+    const parent = realpathSync(dirname(path))
+    const parentRel = relative(this.workDir, parent)
+    assert(parentRel !== '..' && !parentRel.startsWith(`..${sep}`),
+      `${handle.label}: the ${name} barrier parent escapes the Scene root`)
+    const existing = existsSync(path) ? lstatSync(path) : undefined
+    assert(existing === undefined || (existing.isFile() && !existing.isSymbolicLink()),
+      `${handle.label}: the ${name} barrier is not a plain owned file`)
     writeFileSync(path, 'release\n', { mode: 0o600 })
   }
 

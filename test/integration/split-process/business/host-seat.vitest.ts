@@ -252,7 +252,27 @@ test('admits one qualification Client and releases its seat without stopping the
     expect(finalStatus.localHost.instanceId).toBe(host.ready.localHost.instanceId)
     expect(finalStatus.rootFiberUid).toBe(statusBefore.rootFiberUid)
     expect(finalStatus.services.piTuiHostReady).toBe(true)
+
+    // An exit-0 seat-conflict contender is an ATTEMPT, not a generation. While
+    // it is un-finished, START_HOST must refuse even though its process exited 0.
+    const conflictDir = join(scene.workDir, 'conflict-scratch')
+    mkdirSync(conflictDir, { recursive: true, mode: 0o700 })
+    const [conflict] = await scene.startHostAttempts({ mode: 'seat-conflict', scratchTarget: conflictDir })
+    await scene.waitEntryRecord(conflict!, { m4a0: 'host-seat-conflict' })
     await scene.stopHost(host)
+    const conflictSettled = Date.now() + 30_000
+    while (!(await scene.entryRecordFacts(conflict!)).exited) {
+      if (Date.now() >= conflictSettled) throw new Error('the exit-0 seat contender never closed')
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    await expect(scene.startHost())
+      .rejects.toThrow(/un-finished Host attempt cannot become a previous generation/u)
+    const conflictTerminal = await scene.finishEntry(conflict!)
+    expect(conflictTerminal.outcome).toBe('seat-conflict')
+    expect(conflictTerminal.exit).toEqual({ code: 0, signal: null })
+    const recovered = await scene.startHost()
+    await scene.stopHost(recovered)
+
     await scene.assertEntrySeatsFree()
   } catch (error) {
     testError = error
@@ -304,7 +324,7 @@ test('recovers a stale Host through authenticated discovery and rejects its reti
     expect(newFiles.registry.hostPid).toBe(discovered.hostPid)
     expect(newFiles.registry.instanceId).toBe(discovered.instanceId)
     const newToken = new URL(newFiles.launch.connectUrl).searchParams.get('token')
-    expect(newToken).not.toBe(oldToken)
+    expect(newToken === oldToken, 'the recovered Host republished the retired launch token').toBe(false)
 
     // Retired credentials are refused by the NEW authenticated Host.
     const oldTokenResponse = await rawHttpRequest(discovered.origin, {

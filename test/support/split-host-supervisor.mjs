@@ -304,6 +304,13 @@ function codedInputError(code, message) {
   return error
 }
 
+/** Remove credential-looking substrings from diagnostic text. */
+function redactText(text) {
+  return String(text)
+    .replace(/([?&](?:token|cookie)=)[^&\s"'`]+/giu, '$1[redacted]')
+    .replace(/((?:token|cookie|authorization)["']?\s*[:=]\s*["']?)[^\s,"'}]+/giu, '$1[redacted]')
+}
+
 function boundedError(error) {
   const name = error instanceof Error ? error.name : 'Error'
   const code = error !== null && typeof error === 'object' && 'code' in error ? String(error.code) : undefined
@@ -405,7 +412,7 @@ function reply(requestId, payload) {
 }
 
 function fail(requestId, code, error) {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = redactText(error instanceof Error ? error.message : String(error))
   send({ type: 'ERROR', requestId, code, message })
 }
 
@@ -733,14 +740,11 @@ async function terminateOwnedEntry(handle, reason) {
     if (!handle.exited) {
       signal('SIGTERM')
       try {
-        await waitForChildClose(handle.child, TERM_GRACE_MS)
+        await waitForEntryClose(handle, `${reason}: SIGTERM`, TERM_GRACE_MS)
       } catch {
         signal('SIGKILL')
-        await waitForChildClose(handle.child, KILL_GRACE_MS)
+        await waitForEntryClose(handle, `${reason}: SIGKILL`, KILL_GRACE_MS)
       }
-      handle.exited = true
-      handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
-      handle.closedAt = now()
     }
     await assertHostGroupGone(handle, reason)
     if (handle === activeQualificationClient) activeQualificationClient = undefined
@@ -751,14 +755,33 @@ async function terminateOwnedEntry(handle, reason) {
 }
 
 async function terminateAllProcessEntries(reason) {
+  const problems = []
+  const reclaim = async (handle, label) => {
+    try {
+      if (!handle.exited) await terminateOwnedEntry(handle, label)
+      else await assertHostGroupGone(handle, label)
+      if (handle.witnessKind === 'linux-zombie' && Number.isInteger(handle.witnessPid)) {
+        const observation = readKernelProcess(handle.witnessPid)
+        if (observation.kind === 'unknown') {
+          throw new Error(`${label}: the zombie witness identity is unverifiable`)
+        }
+        if (observation.kind === 'alive' && observation.identity.state !== 'Z' && observation.identity.state !== 'X'
+          && (handle.witnessBirth === undefined || serializeKernelIdentity(observation.identity) === handle.witnessBirth)) {
+          throw new Error(`${label}: the zombie witness ${String(handle.witnessPid)} is still live`)
+        }
+      }
+    } catch (error) {
+      problems.push({ entryId: handle.entryId, kind: handle.kind ?? null, error: boundedError(error) })
+    }
+  }
   for (const handle of [...qualificationClients].reverse()) {
-    if (handle.kind !== 'qualification-client' || handle.exited) continue
-    await terminateOwnedEntry(handle, `${reason}: qualification Client`)
+    if (handle.kind !== 'qualification-client') continue
+    await reclaim(handle, `${reason}: qualification Client`)
   }
   for (const handle of [...qualificationHelpers].reverse()) {
-    if (handle.exited) continue
-    await terminateOwnedEntry(handle, `${reason}: ${entryKindLabel(handle)}`)
+    await reclaim(handle, `${reason}: ${entryKindLabel(handle)}`)
   }
+  return problems
 }
 
 /** The Darwin qualification-Client seat is an O_EXLOCK file inside the scope. */
@@ -1616,7 +1639,8 @@ async function closeLifecycle(reason) {
   return await cleanup(reason)
 }
 
-async function cleanup(reason) {
+async function cleanup(reason, options = {}) {
+  const preserve = options.preserveRoot === true
   lifecycleClosed = true
   if (finalized) return { clean: true }
   if (cleanupPromise !== undefined) return await cleanupPromise
@@ -1642,24 +1666,14 @@ async function cleanup(reason) {
       await terminateQualificationClient(reason)
       if (scene?.kind === 'process') {
         try {
-          await terminateAllProcessEntries(reason)
+          const problems = await terminateAllProcessEntries(reason)
+          if (problems.length > 0) {
+            clean = false
+            for (const problem of problems) appendNote('process-entry-termination-failed', problem)
+          }
         } catch (error) {
           clean = false
           appendNote('process-entry-termination-failed', { reason: boundedError(error) })
-        }
-        // An anomalous cleanup must still dispose of the registered installed
-        // copy mutation and record the real result; the root is preserved when
-        // the restoration itself cannot be proven.
-        if (processInstallationMutation !== undefined) {
-          try {
-            await restoreInstallationMutation()
-          } catch (error) {
-            clean = false
-            appendNote('installation-mutation-restore-failed', {
-              fault: processInstallationMutation?.fault ?? null,
-              reason: boundedError(error),
-            })
-          }
         }
       }
       // A process Scene's native Clients are owned by THIS process. Let the ONE
@@ -1747,15 +1761,58 @@ async function cleanup(reason) {
           }
         }
         await reclaimClientFallbackHosts(`cleanup:${reason}:post-host`)
+        // The installed-copy mutation is restored only after every affected
+        // Host/Client/helper/fallback is terminal, so no live consumer observes
+        // a half-restored install.
+        if (scene.kind === 'process' && processInstallationMutation !== undefined) {
+          try {
+            await restoreInstallationMutation()
+          } catch (error) {
+            clean = false
+            appendNote('installation-mutation-restore-failed', {
+              fault: processInstallationMutation?.fault ?? null,
+              reason: boundedError(error),
+            })
+          }
+        }
         await assertSceneHostSeatFree(`cleanup:${reason}`)
+        if (scene.kind === 'process') {
+          await assertClientSeatFree(scene.installation, processScope.scopeId, `cleanup:${reason}`)
+        }
+        const compensation = options.failure === undefined ? undefined : {
+          attempted: true,
+          completed: clean,
+          failure: boundedError(options.failure),
+          attemptedAt: now(),
+        }
         if (!clean) {
+          writeReceipt({
+            phase: 'NOT_QUIESCED',
+            ...(compensation === undefined ? {} : { compensation }),
+            cleanup: { ...(receipt?.cleanup ?? {}), reason, completedAt: now(), sceneRootRemoved: false },
+          })
           throw new Error(`${reason}: the Scene is not quiesced; the root is preserved for diagnosis`)
         }
-        await cleanupSceneRoot(reason)
+        if (!preserve) await cleanupSceneRoot(reason)
+        writeReceipt({
+          phase: preserve ? 'NOT_QUIESCED' : 'ABORTED_CLEAN',
+          ...(compensation === undefined ? {} : { compensation }),
+          ...(options.failure === undefined ? {} : { errorName: boundedError(options.failure), errorDetail: String(boundedError(options.failure)).slice(0, 600) }),
+          cleanup: {
+            ...(receipt?.cleanup ?? {}),
+            reason,
+            completedAt: now(),
+            hostsExited: hosts.every(handle => handle.exited),
+            hostSeatFree: true,
+            qualificationSeatFree: scene.kind === 'process' ? true : undefined,
+            sceneRootRemoved: scene === undefined ? undefined : !existsSync(scene.workDir),
+          },
+        })
+        return { clean: true, compensation }
       }
       installInProgress = false
       writeReceipt({
-        phase: clean ? 'ABORTED_CLEAN' : 'NOT_QUIESCED',
+        phase: preserve || !clean ? 'NOT_QUIESCED' : 'ABORTED_CLEAN',
         cleanup: {
           ...(receipt?.cleanup ?? {}),
           reason,
@@ -3456,18 +3513,32 @@ async function handleStartHost(message) {
     // its real records, exit and group.
     for (const previous of hosts) {
       if (!previous.exited) throw new Error('START_HOST: the previous Host generation has not stopped')
-      if (previous.finished === true && previous.terminal?.outcome === 'signal') {
-        await assertHostGroupGone(previous, 'START_HOST: previous generation')
+      await assertHostGroupGone(previous, 'START_HOST: previous generation')
+      const cleanExit = previous.exitResult?.code === 0 && previous.exitResult?.signal === null
+      if (previous.acceptedHost === true) {
+        // The ONE explicit qualification exception: ACCEPT_HOST_WINNER validated
+        // the ready identity/seat/terminal owner before setting this flag.
+        if (!cleanExit) {
+          throw new Error(`START_HOST: the accepted Host exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
+        }
         continue
       }
-      if (previous.finished !== true && previous.acceptedHost !== true) {
-        if (previous.exitResult?.code !== 0 || previous.exitResult?.signal !== null) {
-          throw new Error(`START_HOST: the previous Host generation exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
+      if (previous.finished === true) {
+        // FINISH_ENTRY validated this attempt's whole terminal contract. A
+        // finished attempt (including a declared refusal or a stopped window)
+        // is a legal predecessor; only an UN-finished mode-bearing contender is
+        // not, regardless of its exit code.
+        if (previous.terminal === undefined) {
+          throw new Error('START_HOST: the previous attempt has no validated terminal facts')
         }
-      } else if (previous.finished === true && previous.terminal === undefined) {
-        throw new Error('START_HOST: the previous attempt has no validated terminal facts')
+        continue
       }
-      await assertHostGroupGone(previous, 'START_HOST: previous generation')
+      if (previous.mode !== undefined) {
+        throw new Error('START_HOST: an un-finished Host attempt cannot become a previous generation')
+      }
+      if (!cleanExit) {
+        throw new Error(`START_HOST: the previous Host generation exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
+      }
     }
     if (processInstallationMutation !== undefined) {
       throw codedInputError('INPUT_INSTALLATION_MUTATED', 'START_HOST is not allowed under a mutated installation')
@@ -4855,8 +4926,7 @@ async function handleFinalize(message) {
     }
   }
   if (message.clientsClosed !== true) {
-    writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENTS_NOT_CLOSED' })
-    throw new Error('FINALIZE: worker did not confirm Clients closed')
+    hostStopError = hostStopError ?? new Error('FINALIZE: worker did not confirm Clients closed')
   }
   if (isNativeScene()) {
     const nativeCleanup = await cleanupNativeManagedService('FINALIZE')
@@ -4864,9 +4934,19 @@ async function handleFinalize(message) {
       hostStopError = hostStopError ?? new Error(`FINALIZE: the native managed service is not reclaimed (${String(nativeCleanup.reason)})`)
     }
   } else {
-    auditClientLedger('FINALIZE')
+    try {
+      auditClientLedger('FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
   }
-  if (scene?.kind === 'process') await auditProcessClientLedger('FINALIZE')
+  if (scene?.kind === 'process') {
+    try {
+      await auditProcessClientLedger('FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
+  }
   if (hostStopError !== undefined) throw hostStopError
   for (const handle of hosts) {
     if (handle.finished === true) continue
@@ -4879,11 +4959,24 @@ async function handleFinalize(message) {
       throw new Error(`FINALIZE: Host generation ${String(handle.generation)} has an unvalidated terminal record`)
     }
   }
-  await reclaimClientFallbackHosts('FINALIZE')
-  await assertSceneHostSeatFree('FINALIZE')
-  if (scene?.kind === 'process') {
-    await assertClientSeatFree(scene.installation, processScope.scopeId, 'FINALIZE')
+  try {
+    await reclaimClientFallbackHosts('FINALIZE')
+  } catch (error) {
+    hostStopError = hostStopError ?? error
   }
+  try {
+    await assertSceneHostSeatFree('FINALIZE')
+  } catch (error) {
+    hostStopError = hostStopError ?? error
+  }
+  if (scene?.kind === 'process') {
+    try {
+      await assertClientSeatFree(scene.installation, processScope.scopeId, 'FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
+  }
+  if (hostStopError !== undefined) throw hostStopError
   if (scene !== undefined) {
     await cleanupSceneRoot('FINALIZE')
   }
@@ -5135,7 +5228,7 @@ function publicEntryFacts(handle) {
     exitCode: handle.exitResult?.code ?? null,
     exitSignal: handle.exitResult?.signal ?? null,
     finished: handle.finished === true,
-    terminal: handle.terminal ?? null,
+    terminal: handle.terminal === undefined ? null : sanitizeEntryRecord(handle.terminal).value,
     recordCount: handle.records?.length ?? 0,
   }
 }
@@ -5166,7 +5259,9 @@ function sanitizeEntryRecord(record) {
         redactedKeys.add('profilePath')
         return '[scene-path]'
       }
-      return value.length > 2_000 ? `${value.slice(0, 2_000)}…` : value
+      const redacted = redactText(value)
+      if (redacted !== value) redactedKeys.add('secret-text')
+      return redacted.length > 2_000 ? `${redacted.slice(0, 2_000)}…` : redacted
     }
     if (typeof value !== 'object') return value
     if (depth >= 6) return '[depth-limit]'
@@ -5291,17 +5386,28 @@ async function waitForEntryRecord(handle, match, label, timeoutMs) {
 }
 
 async function waitForEntryClose(handle, label, timeoutMs = 180_000) {
-  if (handle.exited) return handle.exitResult ?? { code: null, signal: null }
-  return await waitForChildClose(handle.child, timeoutMs).catch(error => {
-    throw new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`)
-  }).then(result => {
-    // The close handler owns the durable flag; wait until it observed the same
-    // close so the terminal facts are never a torn read.
-    handle.exited = true
-    handle.exitResult = result
-    handle.closedAt = handle.closedAt ?? now()
-    return result
+  if (handle.closePromise === undefined) {
+    throw new Error(`${label}: the entry has no registered close event`)
+  }
+  let timer
+  const result = await new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label}: the entry did not close within ${String(timeoutMs)}ms`))
+    }, timeoutMs)
+    handle.closePromise.then(value => {
+      clearTimeout(timer)
+      resolve(value)
+    }, error => {
+      clearTimeout(timer)
+      reject(error)
+    })
   })
+  // The close listener owns the durable flag. If it has not settled, the
+  // record ledger is still draining and no terminal may be committed.
+  if (handle.exited !== true) {
+    throw new Error(`${label}: the real close event did not settle the entry ledger`)
+  }
+  return result
 }
 
 /** The exact live-env observation of one registered entry, bounded. */
@@ -5329,10 +5435,13 @@ function requireSceneBarrier(raw, name) {
   if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`)) {
     throw new Error(`INPUT_UNQUALIFIED: ${name} must be a contained Scene path`)
   }
+  // Every caller requires an EXISTING directory. Resolve the real parent
+  // before any side effect: a Scene-local symlink alias to the outside is
+  // rejected by the canonical containment check without creating anything.
   const parentPath = dirname(raw)
-  mkdirSync(parentPath, { recursive: true })
   const parent = realpathSync(parentPath)
-  if (relative(scene.workDir, parent) === '..' || relative(scene.workDir, parent).startsWith(`..${sep}`)) {
+  const parentRel = relative(scene.workDir, parent)
+  if (parentRel === '..' || parentRel.startsWith(`..${sep}`)) {
     throw new Error(`INPUT_UNQUALIFIED: ${name} must stay inside the Scene root`)
   }
   return { path: raw, parent }
@@ -5510,12 +5619,14 @@ async function handleStartHostAttempts(message) {
       if (stderr.text.length < 64_000) stderr.text += chunk
     })
     const entryId = `host-attempt-${String(generation)}-${String(child.pid)}-${String(Date.now())}`
+    const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
     const handle = {
       entryId,
       hostId: entryId,
       kind: 'host-attempt',
       label,
       mode,
+      declaredSignal: signal,
       signalIntent: undefined,
       expected: mode,
       child,
@@ -5531,6 +5642,7 @@ async function handleStartHostAttempts(message) {
       startedAt: now(),
       starttime: readHostStarttime(child.pid),
       birth: captureEntryBirth(child, label),
+      closePromise,
       closedAt: undefined,
       exited: false,
       exitResult: undefined,
@@ -5790,6 +5902,7 @@ async function handleStartQualificationClients(message) {
       if (stderr.text.length < 64_000) stderr.text += chunk
     })
     const entryId = `qualification-${mode}-${String(sequence)}-${String(child.pid)}-${String(Date.now())}`
+    const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
     const handle = {
       entryId,
       clientId: entryId,
@@ -5809,6 +5922,7 @@ async function handleStartQualificationClients(message) {
       startedAt: now(),
       starttime: readHostStarttime(child.pid),
       birth: captureEntryBirth(child, 'qualification Client'),
+      closePromise,
       closedAt: undefined,
       exited: false,
       exitResult: undefined,
@@ -5871,6 +5985,7 @@ async function handleStartQualificationClients(message) {
 
 async function handleQualificationClientControl(message) {
   requireKnownFields(message, ['entryId', 'control'], 'QUALIFICATION_CLIENT_CONTROL')
+  requireProcessScene('QUALIFICATION_CLIENT_CONTROL')
   const handle = findQualificationClientById(message.entryId, 'QUALIFICATION_CLIENT_CONTROL')
   if (handle.kind !== 'qualification-client') {
     throw new Error('QUALIFICATION_CLIENT_CONTROL: the entry is not a qualification Client')
@@ -5932,6 +6047,7 @@ async function handleQualificationClientControl(message) {
 
 async function handleQualificationClientStatus(message) {
   requireKnownFields(message, ['entryId'], 'QUALIFICATION_CLIENT_STATUS')
+  requireProcessScene('QUALIFICATION_CLIENT_STATUS')
   const handle = findQualificationClientById(message.entryId, 'QUALIFICATION_CLIENT_STATUS')
   if (handle.kind !== 'qualification-client') {
     throw new Error('QUALIFICATION_CLIENT_STATUS: the entry is not a qualification Client')
@@ -5946,6 +6062,7 @@ async function handleQualificationClientStatus(message) {
 
 async function handleSignalEntry(message) {
   requireKnownFields(message, ['entryId', 'signal'], 'SIGNAL_ENTRY')
+  requireProcessScene('SIGNAL_ENTRY')
   assertLifecycleOpen('SIGNAL_ENTRY')
   const handle = findEntryById(message.entryId, 'SIGNAL_ENTRY')
   const signal = message.signal
@@ -5954,6 +6071,23 @@ async function handleSignalEntry(message) {
   }
   if (handle.exited) throw new Error('SIGNAL_ENTRY: the entry already exited')
   if (handle.birth === undefined) throw new Error('SIGNAL_ENTRY: the entry has no captured kernel birth')
+  if (handle.declaredSignal !== undefined && handle.declaredSignal !== signal) {
+    throw codedInputError('INPUT_ENTRY_SIGNAL',
+      `SIGNAL_ENTRY: the Host attempt declared ${String(handle.declaredSignal)}, not ${String(signal)}`)
+  }
+  if (handle.declaredSignal === undefined && handle.kind === 'host-attempt') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL', 'SIGNAL_ENTRY: this Host attempt declared no stop signal')
+  }
+  if (handle.kind === 'qualification-client' && handle.mode !== 'attach') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL',
+      `SIGNAL_ENTRY: qualification Client mode ${String(handle.mode)} has a declared non-signal terminal`)
+  }
+  if (handle.kind === 'bootstrap-cli' || handle.kind === 'identity-witness') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL', `SIGNAL_ENTRY: ${entryKindLabel(handle)} is not a signal target`)
+  }
+  if (handle.signalIntent !== undefined && handle.signalIntent !== signal) {
+    throw new Error(`SIGNAL_ENTRY: the entry already declared ${String(handle.signalIntent)}`)
+  }
   assertKernelGroupSignalOwnership(processKernelReaders(), handle.child.pid, handle.birth, `SIGNAL_ENTRY ${signal}`)
   handle.signalIntent = signal
   try {
@@ -6212,6 +6346,7 @@ async function finishQualificationClient(handle) {
 
 async function handleFinishEntry(message) {
   requireKnownFields(message, ['entryId'], 'FINISH_ENTRY')
+  requireProcessScene('FINISH_ENTRY')
   assertLifecycleOpen('FINISH_ENTRY')
   const handle = findEntryById(message.entryId, 'FINISH_ENTRY')
   if (handle.finished) {
@@ -6230,6 +6365,13 @@ async function handleFinishEntry(message) {
   if (isHostEntry && handle.readyRecord !== undefined && terminal.outcome === 'startup-refusal') {
     throw new Error('FINISH_ENTRY: a ready attempt cannot be accepted as a refusal')
   }
+  if (handle.kind === 'qualification-client') {
+    const liveOthers = qualificationClients.some(other => other !== handle && !other.exited)
+    if (!liveOthers) await assertClientSeatFree(scene.installation, processScope.scopeId, 'FINISH_ENTRY')
+  } else {
+    const liveOthers = hosts.some(other => other !== handle && !other.exited)
+    if (!liveOthers) await assertSceneHostSeatFree('FINISH_ENTRY')
+  }
   handle.finished = true
   handle.terminal = {
     ...terminal,
@@ -6240,13 +6382,8 @@ async function handleFinishEntry(message) {
     records: entryRecordsOf(handle).records,
     stderrMarkers: entryStderrMarkers(handle),
   }
-  if (handle.kind === 'qualification-client') {
-    const liveOthers = qualificationClients.some(other => other !== handle && !other.exited)
-    if (!liveOthers) await assertClientSeatFree(scene.installation, processScope.scopeId, 'FINISH_ENTRY')
-    syncQualificationClientReceipt()
-  } else {
-    syncHostReceipt()
-  }
+  if (handle.kind === 'qualification-client') syncQualificationClientReceipt()
+  else syncHostReceipt()
   writeReceipt({ phase: 'ENTRY_FINISHED' })
   return handle.terminal
 }
@@ -6313,6 +6450,7 @@ async function handleAcceptHostWinner(message) {
 
 async function handleEntryRecords(message) {
   requireKnownFields(message, ['entryId'], 'ENTRY_RECORDS')
+  requireProcessScene('ENTRY_RECORDS')
   const handle = findEntryById(message.entryId, 'ENTRY_RECORDS')
   const facts = entryRecordsOf(handle)
   // Re-reading a closed entry is the complete ledger fact; a live entry's
@@ -6322,6 +6460,7 @@ async function handleEntryRecords(message) {
 
 async function handleWaitEntryRecord(message) {
   requireKnownFields(message, ['entryId', 'match', 'timeoutMs'], 'WAIT_ENTRY_RECORD')
+  requireProcessScene('WAIT_ENTRY_RECORD')
   const handle = findEntryById(message.entryId, 'WAIT_ENTRY_RECORD')
   const match = requireEntryMatch(message.match, 'WAIT_ENTRY_RECORD')
   const timeoutMs = message.timeoutMs ?? 180_000
@@ -6364,6 +6503,7 @@ function registerHelperHandle({ entryId, kind, label, child, dir, extra = {} }) 
       if (stderr.text.length < 64_000) stderr.text += chunk
     })
   }
+  const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
   const handle = {
     entryId,
     kind,
@@ -6377,6 +6517,7 @@ function registerHelperHandle({ entryId, kind, label, child, dir, extra = {} }) 
     starttime: readHostStarttime(child.pid),
     birth: captureEntryBirth(child, label),
     pgid: child.pid ?? null,
+    closePromise,
     exited: false,
     exitResult: undefined,
     closedAt: undefined,
@@ -6495,6 +6636,22 @@ function assertPristineInstalledCopy(label) {
   return facts
 }
 
+/** Atomic private replacement: never follows or writes through a hardlink. */
+function atomicReplaceFile(path, bytes, mode, label) {
+  const temp = join(dirname(path), `.split-process-${String(process.pid)}-${String(Date.now())}-${Math.random().toString(16).slice(2)}`)
+  try {
+    writeFileSync(temp, bytes, { mode, flag: 'wx' })
+    renameSync(temp, path)
+  } catch (error) {
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // The primary replacement error is the failure that must surface.
+    }
+    throw new Error(`${label}: the atomic private replacement failed (${boundedError(error)})`)
+  }
+}
+
 async function handleSetInstallationFault(message) {
   requireKnownFields(message, ['fault'], 'SET_INSTALLATION_FAULT')
   requireProcessScene('SET_INSTALLATION_FAULT')
@@ -6553,38 +6710,58 @@ async function handleSetInstallationFault(message) {
     const previousBarrier = existsSync(packageScopeBarrier)
       ? { bytes: readFileSync(packageScopeBarrier), mode: statSync(packageScopeBarrier).mode & 0o777 }
       : undefined
-    writeFileSync(packageScopeBarrier, barrierBody, { mode: 0o600 })
-    renameSync(artifact, absent)
-    let resolutionError
-    try {
-      profileRequire.resolve('@xmoon76/dsh-pi-tui/host-runtime')
-    } catch (error) {
-      resolutionError = error
-    }
-    if (resolutionError === undefined) {
-      renameSync(absent, artifact)
-      if (previousBarrier === undefined) rmSync(packageScopeBarrier, { force: true })
-      else writeFileSync(packageScopeBarrier, previousBarrier.bytes, { mode: previousBarrier.mode })
-      throw new Error('SET_INSTALLATION_FAULT: the renamed artifact is still resolvable from the profile anchor')
-    }
-    processInstallationMutation = {
+    // Register the rollback obligation BEFORE the first side effect. A failure
+    // between the rename and the post-check is still owned by this mutation.
+    const mutation = {
       ...base,
       target: artifact,
       absentPath: absent,
       barrier: { path: packageScopeBarrier, previous: previousBarrier },
+      barrierWritten: false,
+      artifactRenamed: false,
       restore: async () => {
-        renameSync(absent, artifact)
-        if (previousBarrier === undefined) rmSync(packageScopeBarrier, { force: true })
-        else writeFileSync(packageScopeBarrier, previousBarrier.bytes, { mode: previousBarrier.mode })
+        if (mutation.artifactRenamed) {
+          renameSync(absent, artifact)
+          mutation.artifactRenamed = false
+        }
+        if (mutation.barrierWritten) {
+          if (previousBarrier === undefined) rmSync(packageScopeBarrier, { force: true })
+          else atomicReplaceFile(packageScopeBarrier, previousBarrier.bytes, previousBarrier.mode, 'install barrier restore')
+          mutation.barrierWritten = false
+        }
       },
     }
-    writeReceipt({ installationMutation: { fault, target: artifact, recordedAt: now() } })
-    appendNote('installation-mutation-committed', { fault, target: artifact, candidateSha256: processCandidate.candidateSha256 })
-    return {
-      ...base,
-      target: artifact,
-      barrierPath: packageScopeBarrier,
-      resolverRefused: true,
+    processInstallationMutation = mutation
+    try {
+      writeFileSync(packageScopeBarrier, barrierBody, { mode: 0o600 })
+      mutation.barrierWritten = true
+      renameSync(artifact, absent)
+      mutation.artifactRenamed = true
+      let resolutionError
+      try {
+        profileRequire.resolve('@xmoon76/dsh-pi-tui/host-runtime')
+      } catch (error) {
+        resolutionError = error
+      }
+      if (resolutionError === undefined) {
+        throw new Error('SET_INSTALLATION_FAULT: the renamed artifact is still resolvable from the profile anchor')
+      }
+      writeReceipt({ installationMutation: { fault, target: artifact, recordedAt: now() } })
+      appendNote('installation-mutation-committed', { fault, target: artifact, candidateSha256: processCandidate.candidateSha256 })
+      return {
+        ...base,
+        target: artifact,
+        barrierPath: packageScopeBarrier,
+        resolverRefused: true,
+      }
+    } catch (error) {
+      try {
+        await mutation.restore()
+        processInstallationMutation = undefined
+      } catch (restoreError) {
+        appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+      }
+      throw error
     }
   }
   if (fault === 'host-bootstrap-absent') {
@@ -6594,19 +6771,37 @@ async function handleSetInstallationFault(message) {
     }
     const chunkPath = installedChunk('host-bootstrap-')
     const absent = `${chunkPath}.absent`
-    renameSync(chunkPath, absent)
-    if (!existsSync(join(packageRoot, 'dist', 'local-host.mjs'))) {
-      throw new Error('SET_INSTALLATION_FAULT: the real Host entry disappeared with the bootstrap chunk')
-    }
-    processInstallationMutation = {
+    const mutation = {
       ...base,
       target: chunkPath,
       absentPath: absent,
-      restore: async () => { renameSync(absent, chunkPath) },
+      renamed: false,
+      restore: async () => {
+        if (mutation.renamed) {
+          renameSync(absent, chunkPath)
+          mutation.renamed = false
+        }
+      },
     }
-    writeReceipt({ installationMutation: { fault, target: chunkPath, recordedAt: now() } })
-    appendNote('installation-mutation-committed', { fault, target: chunkPath })
-    return { ...base, target: chunkPath, hostEntryPresent: true }
+    processInstallationMutation = mutation
+    try {
+      renameSync(chunkPath, absent)
+      mutation.renamed = true
+      if (!existsSync(join(packageRoot, 'dist', 'local-host.mjs'))) {
+        throw new Error('SET_INSTALLATION_FAULT: the real Host entry disappeared with the bootstrap chunk')
+      }
+      writeReceipt({ installationMutation: { fault, target: chunkPath, recordedAt: now() } })
+      appendNote('installation-mutation-committed', { fault, target: chunkPath })
+      return { ...base, target: chunkPath, hostEntryPresent: true }
+    } catch (error) {
+      try {
+        await mutation.restore()
+        processInstallationMutation = undefined
+      } catch (restoreError) {
+        appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+      }
+      throw error
+    }
   }
   // client-bootstrap-drift: a stable live Host and no other qualification Client.
   requireReadyHost('SET_INSTALLATION_FAULT client-bootstrap-drift')
@@ -6614,48 +6809,69 @@ async function handleSetInstallationFault(message) {
     throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live qualification Client')
   }
   const chunkPath = installedChunk('client-bootstrap-')
-  const original = { bytes: readFileSync(chunkPath), mode: statSync(chunkPath).mode & 0o777 }
+  const canonicalChunk = realpathSync(chunkPath)
+  if (canonicalChunk !== chunkPath) {
+    throw new Error('SET_INSTALLATION_FAULT: the installed bootstrap chunk is not a canonical package file')
+  }
+  const chunkStat = statSync(canonicalChunk)
+  if (!chunkStat.isFile() || chunkStat.uid !== process.getuid()) {
+    throw new Error('SET_INSTALLATION_FAULT: the installed bootstrap chunk is not an owned regular file')
+  }
+  const original = { bytes: readFileSync(canonicalChunk), mode: chunkStat.mode & 0o777 }
   const drift = Buffer.concat([original.bytes, Buffer.from('\n// split-process qualification installed-copy drift\n')])
-  writeFileSync(chunkPath, drift, { mode: original.mode })
-  const driftFacts = installedPackageFacts(packageRoot, processCandidate.manifest?.version,
-    processCandidate.targetDshVersion, 'SET_INSTALLATION_FAULT drift')
-  if (driftFacts.payloadHash === scene.installFacts.payloadHash) {
-    writeFileSync(chunkPath, original.bytes, { mode: original.mode })
-    throw new Error('SET_INSTALLATION_FAULT: the installed-copy drift did not change the payload hash')
-  }
-  if (driftFacts.buildId === processScope.buildId || driftFacts.buildId === activeHost.buildId) {
-    writeFileSync(chunkPath, original.bytes, { mode: original.mode })
-    throw new Error('SET_INSTALLATION_FAULT: the drift did not change the build identity away from the live Host')
-  }
-  processInstallationMutation = {
+  // The replacement is a private atomic rename, so a pnpm store hardlink can
+  // never be mutated in place; the rollback obligation exists before the write.
+  const mutation = {
     ...base,
-    target: chunkPath,
+    target: canonicalChunk,
     original,
-    payloadHashAfter: driftFacts.payloadHash,
-    buildIdAfter: driftFacts.buildId,
-    restore: async () => { writeFileSync(chunkPath, original.bytes, { mode: original.mode }) },
+    restore: async () => {
+      atomicReplaceFile(canonicalChunk, original.bytes, original.mode, 'installed-copy restore')
+    },
   }
-  writeReceipt({
-    installationMutation: {
+  processInstallationMutation = mutation
+  try {
+    atomicReplaceFile(canonicalChunk, drift, original.mode, 'installed-copy drift')
+    const driftFacts = installedPackageFacts(packageRoot, processCandidate.manifest?.version,
+      processCandidate.targetDshVersion, 'SET_INSTALLATION_FAULT drift')
+    if (driftFacts.payloadHash === scene.installFacts.payloadHash) {
+      throw new Error('SET_INSTALLATION_FAULT: the installed-copy drift did not change the payload hash')
+    }
+    if (driftFacts.buildId === processScope.buildId || driftFacts.buildId === activeHost.buildId) {
+      throw new Error('SET_INSTALLATION_FAULT: the drift did not change the build identity away from the live Host')
+    }
+    mutation.payloadHashAfter = driftFacts.payloadHash
+    mutation.buildIdAfter = driftFacts.buildId
+    writeReceipt({
+      installationMutation: {
+        fault,
+        target: chunkPath,
+        buildIdBefore: processScope.buildId,
+        buildIdAfter: driftFacts.buildId,
+        recordedAt: now(),
+      },
+    })
+    appendNote('installation-mutation-committed', {
       fault,
       target: chunkPath,
       buildIdBefore: processScope.buildId,
       buildIdAfter: driftFacts.buildId,
-      recordedAt: now(),
-    },
-  })
-  appendNote('installation-mutation-committed', {
-    fault,
-    target: chunkPath,
-    buildIdBefore: processScope.buildId,
-    buildIdAfter: driftFacts.buildId,
-  })
-  return {
-    ...base,
-    target: chunkPath,
-    payloadHashAfter: driftFacts.payloadHash,
-    buildIdAfter: driftFacts.buildId,
-    liveHostBuildId: activeHost.buildId,
+    })
+    return {
+      ...base,
+      target: chunkPath,
+      payloadHashAfter: driftFacts.payloadHash,
+      buildIdAfter: driftFacts.buildId,
+      liveHostBuildId: activeHost.buildId,
+    }
+  } catch (error) {
+    try {
+      await mutation.restore()
+      processInstallationMutation = undefined
+    } catch (restoreError) {
+      appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+    }
+    throw error
   }
 }
 
@@ -6665,6 +6881,18 @@ async function restoreInstallationMutation() {
   if (mutation === undefined) throw new Error('RESTORE_INSTALLATION: no scoped installation mutation is active')
   if (mutation.fault !== 'client-bootstrap-drift' && activeHost !== undefined) {
     throw new Error('RESTORE_INSTALLATION: the Host artifact mutation cannot be restored under a live Host')
+  }
+  if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true)) {
+    throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
+  }
+  if (qualificationClients.some(handle => !handle.exited)) {
+    throw new Error('RESTORE_INSTALLATION: a qualification Client is still live')
+  }
+  if (qualificationHelpers.some(handle => !handle.exited)) {
+    throw new Error('RESTORE_INSTALLATION: a qualification helper is still live')
+  }
+  if (fallbackHosts.some(record => record.reclaimed !== true)) {
+    throw new Error('RESTORE_INSTALLATION: a discovered fallback Host is still unreclaimed')
   }
   await mutation.restore()
   const restored = installedPackageFacts(scene.installation.profilePackage,
@@ -6712,41 +6940,84 @@ async function handleStartIdentityWitness(message) {
       stdio: ['ignore', 'pipe', 'ignore'],
       detached: true,
     })
-    const zombiePid = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('START_IDENTITY_WITNESS: the holder never published its zombie child')), 30_000)
-      const lines = createInterface({ input: holder.stdout })
-      lines.once('line', line => {
-        clearTimeout(timer)
-        lines.close()
-        const pid = Number(line.trim())
-        if (!Number.isInteger(pid) || pid <= 0) reject(new Error('START_IDENTITY_WITNESS: the holder published no real PID'))
-        else resolve(pid)
-      })
-    })
     const entryId = `identity-witness-zombie-${String(holder.pid)}-${String(Date.now())}`
+    // Register the holder synchronously, BEFORE awaiting its first output: a
+    // Worker death in this window must reclaim the holder, never leave it
+    // outside the ledger while cleanup removes the scene root.
     const handle = registerHelperHandle({
       entryId,
       kind: 'identity-witness',
-      label: `linux-zombie-${String(zombiePid)}`,
+      label: `linux-zombie-holder-${String(holder.pid)}`,
       child: holder,
       dir: witnessDir,
-      extra: { witnessKind: kind, witnessPid: zombiePid },
+      extra: { witnessKind: kind, witnessPid: undefined },
     })
+    await processProbeHold('identity-witness-spawned', { entryId, holderPid: holder.pid })
+    let zombiePid
+    try {
+      zombiePid = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('START_IDENTITY_WITNESS: the holder never published its zombie child')), 30_000)
+        const lines = createInterface({ input: holder.stdout })
+        const fence = setInterval(() => {
+          if (!lifecycleClosed) return
+          clearInterval(fence)
+          clearTimeout(timer)
+          lines.close()
+          reject(new Error('START_IDENTITY_WITNESS: the Supervisor lifecycle closed while the holder registration window was open'))
+        }, 50)
+        lines.once('line', line => {
+          clearTimeout(timer)
+          clearInterval(fence)
+          lines.close()
+          const pid = Number(line.trim())
+          if (!Number.isInteger(pid) || pid <= 0) reject(new Error('START_IDENTITY_WITNESS: the holder published no real PID'))
+          else resolve(pid)
+        })
+      })
+    } catch (error) {
+      // The holder is already registered, so this path reclaims it even when the
+      // Worker disappears before the child identity exists.
+      await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS registration failure').catch(() => undefined)
+      throw error
+    }
+    assertLifecycleOpen('START_IDENTITY_WITNESS after holder output')
+    const before = readKernelProcess(zombiePid)
+    if (before.kind !== 'alive' || before.identity.state === 'Z' || before.identity.state === 'X'
+      || before.identity.ppid !== holder.pid || before.identity.pgid !== holder.pid || before.identity.sid !== holder.pid) {
+      await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS child ownership failure').catch(() => undefined)
+      throw new Error('START_IDENTITY_WITNESS: the published PID is not a live child in the holder\'s owned group/session')
+    }
+    const preSignalBirth = serializeKernelIdentity(before.identity)
+    assertLifecycleOpen('START_IDENTITY_WITNESS before child signal')
+    const recheck = readKernelProcess(zombiePid)
+    if (recheck.kind !== 'alive' || serializeKernelIdentity(recheck.identity) !== preSignalBirth
+      || recheck.identity.ppid !== holder.pid || recheck.identity.pgid !== holder.pid) {
+      await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS child identity changed before signal').catch(() => undefined)
+      throw new Error('START_IDENTITY_WITNESS: the child identity changed before its individual signal')
+    }
+    // The individual signal is authorized by the exact captured birth and the
+    // holder/group/session membership just re-read; a group signal would kill
+    // the holder that must keep the zombie unreaped.
     process.kill(zombiePid, 'SIGKILL')
     const started = Date.now()
     let zombieObservation
     for (;;) {
-      if (Date.now() - started >= 30_000) throw new Error('START_IDENTITY_WITNESS: the real child never became a readable zombie')
+      if (Date.now() - started >= 30_000) {
+        await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS zombie timeout').catch(() => undefined)
+        throw new Error('START_IDENTITY_WITNESS: the real child never became a readable zombie with the captured birth')
+      }
       try {
         zombieObservation = readKernelProcess(zombiePid)
       } catch {
         zombieObservation = undefined
       }
-      if (zombieObservation?.kind === 'alive' && zombieObservation.identity.state === 'Z') break
+      if (zombieObservation?.kind === 'alive' && zombieObservation.identity.state === 'Z'
+        && serializeKernelIdentity(zombieObservation.identity) === preSignalBirth) break
       await sleep(25)
     }
+    handle.witnessPid = zombiePid
     handle.witnessIdentity = zombieObservation.identity
-    handle.witnessBirth = serializeKernelIdentity(zombieObservation.identity)
+    handle.witnessBirth = preSignalBirth
     handle.witnessStarttime = readHostStarttime(zombiePid)
     syncQualificationHelpersReceipt()
     appendNote('identity-witness-live', {
@@ -7141,11 +7412,26 @@ async function dispatch(message) {
           await handleFinalize(message)
         } catch (error) {
           preserveRoot = true
+          // ONE joined owner path: explicit failed FINALIZE uses the same
+          // compound cleanup as a disconnect/main signal, but preserves the
+          // root for the primary test failure. Compensation success never
+          // turns the failed finalization into a success.
+          let compensation
+          try {
+            compensation = await cleanup('FINALIZE', { preserveRoot: true, failure: error })
+          } catch (compensationError) {
+            appendNote('finalize-compensation-failed', { reason: boundedError(compensationError) })
+          }
           const detail = error instanceof Error ? error.message : String(error)
           writeReceipt({
             phase: 'NOT_QUIESCED',
             errorName: boundedError(error),
-            errorDetail: detail.slice(0, 600),
+            errorDetail: redactText(detail).slice(0, 600),
+            compensation: compensation?.compensation ?? receipt.compensation ?? {
+              attempted: true,
+              completed: false,
+              failure: boundedError(error),
+            },
             cleanup: {
               ...(receipt.cleanup ?? {}),
               reason: 'FINALIZE',
