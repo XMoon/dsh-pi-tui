@@ -284,13 +284,28 @@ export class SubagentSettingsController {
     if (ambiguous(state.status) && (failed || fresh.kind !== 'ready')) {
       return { source: state.source, patch: state.patch, status: state.status, refreshRequired: true }
     }
-    return failed ? { source: fresh, patch: {}, refreshRequired: true } : { source: fresh, patch: {} }
+    // A successful ready read replaces the source and retires the old intent.
+    // A failed/non-ready read is NOT a successful operation: keep a readable
+    // last-confirmed source (and its historical settlement), mark it read-only
+    // and reload only once a real current read exists.
+    if (failed || fresh.kind !== 'ready') {
+      return {
+        source: state.source.kind === 'ready' ? state.source : fresh,
+        patch: {},
+        ...(state.status === undefined ? {} : { status: state.status }),
+        refreshRequired: true,
+      }
+    }
+    return { source: fresh, patch: {} }
   }
 
   discard(): void {
     if (this.disposed || this.saving || this.loading) return
-    this.limits = { source: this.limits.source, patch: {} }
-    this.selection = { source: this.selection.source, patch: {} }
+    // A local discard clears ONLY the caller's draft/validation intent. The
+    // captured source, its refreshRequired gate and the settlement status stay:
+    // discarding a draft can never make a rejected/unknown authority current.
+    this.limits.patch = {}
+    this.selection.patch = {}
     this.issues = {}
     this.notice = undefined
     this.saved = false

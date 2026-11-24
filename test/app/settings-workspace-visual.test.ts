@@ -2773,22 +2773,36 @@ test('the real Settings Root row and delegated spans complete the Subagent point
   assert.equal(h.subagentWrites().length, 1, 'Root delegated Save is the only writer')
   assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
 
-  // A second pointer-only edit stays dirty until the explicit leave answer.
+  // A second pointer-only edit stays dirty. An ACTUAL parent row click must
+  // ask the leave question; Keep retains the tenant, then Save keeps it again
+  // and drops the queued destination, and only a fresh dirty parent click with
+  // Discard and leave really leaves without another write.
   await clickPainted(h, 'Enabled')
   await clickPainted(h, 'Toggle [Enter]', true)
   await settle(h)
-  await clickPainted(h, 'Back [Esc]', true)
+  await clickPainted(h, 'Parallel tool calls')
   await settle(h)
   assert.match(h.view(), /Discard and leave loses staged values\./u)
   await clickPainted(h, 'Keep [Esc]', true)
   await settle(h)
   assert.match(h.view(), /> Enabled/u, 'Keep retains the group, its field and the draft')
-  await clickPainted(h, 'Back [Esc]', true)
+  await clickPainted(h, 'Parallel tool calls')
+  await settle(h)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Agent · Subagent settings/u, 'Save keeps the tenant')
+  assert.doesNotMatch(h.view(), />\s+Parallel tool calls/u, 'Save drops the queued parent destination')
+  assert.equal(h.subagentWrites().length, 2, 'the leave question Save is the second real write')
+  await clickPainted(h, 'Enabled')
+  await clickPainted(h, 'Toggle [Enter]', true)
+  await settle(h)
+  await clickPainted(h, 'Parallel tool calls')
   await settle(h)
   await clickPainted(h, 'Discard and leave [D]', true)
   await settle(h)
   assert.match(h.view(), /Settings · Agent · Rows/u)
-  assert.equal(h.subagentWrites().length, 1, 'discard never sends another Host write')
+  assert.match(h.rowsPlain().join('\n'), />\s+Parallel tool calls/u, 'the captured destination is reached')
+  assert.equal(h.subagentWrites().length, 2, 'discard never sends another Host write')
   h.dispose()
 })
 

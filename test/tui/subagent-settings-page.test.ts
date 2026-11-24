@@ -47,6 +47,7 @@ interface RigOptions {
   readonly holdLimits?: boolean
   readonly rejectLimits?: boolean
   readonly lostAckLimits?: boolean
+  readonly lostAckSelection?: boolean
   readonly holdDirectory?: boolean
 }
 
@@ -122,6 +123,7 @@ function rig(options: RigOptions = {}) {
     mutate: async (patch, revision, pinned): Promise<SectionMutationOutcome> => {
       writes.push({ section: 'selection', patch, revision, generation: pinned })
       if (pinned !== generation || revision !== selectionRevision) return { kind: 'conflict', reason: 'stale' }
+      if (options.lostAckSelection === true) return { kind: 'outcome-unconfirmed', reason: 'reply lost' }
       selectionValue = apply(selectionValue, selectionBase, patch)
       selectionRevision += 1
       return { kind: 'accepted' }
@@ -2707,5 +2709,317 @@ test('the dirty block receipt measures the real composed Current line', async ()
   h.page.handleInput('s')
   await h.drain()
   assert.deepEqual(h.writes[0]?.patch, { timeoutMs: { kind: 'set', value: 45_000 } })
+  h.page.dispose()
+})
+
+function scrollSubagentUntil(page: SubagentSettingsPage, width: number, needle: string, limit = 60): string[] {
+  let frame = page.render(width)
+  for (let step = 0; step < limit && !strip(frame.join('\n')).includes(needle); step += 1) {
+    page.handleInput(DOWN)
+    frame = page.render(width)
+  }
+  return frame
+}
+
+test('a complete dirty count alone admits Save while the dirty field block is offscreen', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Parallelism')
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('4')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  assert.equal(controller.snapshot().dirty, true)
+  page.setMaxRows(4) // body 3: the count and section heading fit, the dirty block does not
+  page.render(80)
+  page.handleInput(HOME)
+  const frame = page.render(80)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /1 unsaved change/u, 'the real total is complete')
+  assert.doesNotMatch(plain, /> Parallelism/u, 'the dirty field block is offscreen at the home position')
+  assert.match(barLine(frame), /Save \[S\]/u, 'the complete count alone admits its Save')
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  assert.equal(h.writes.length, 1)
+  assert.equal(h.writes[0]?.section, 'limits')
+  assert.deepEqual(h.writes[0]?.patch, { maxActiveSubagents: { kind: 'set', value: 4 } })
+  h.page.dispose()
+})
+
+test('bar Toggle and Enter converge on one reveal-only decision for a hidden selected field', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Enabled')
+  page.setMaxRows(6)
+  page.render(80)
+  page.handleInput(END)
+  let frame = page.render(80)
+  assert.doesNotMatch(strip(frame.join('\n')), /> Enabled/u, 'the selected field is really hidden')
+  assert.match(barLine(frame), /Toggle \[Enter\]/u, 'the bar still names the selected field action')
+  activateBar(page, 'bar:toggle')
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /> Enabled/u, 'the bar reveals instead of staging a hidden field')
+  assert.equal(controller.snapshot().dirty, false, 'the bar gesture staged nothing')
+  page.handleInput(END)
+  page.render(80)
+  page.handleInput(ENTER)
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /> Enabled/u, 'the keyboard uses the same reveal-only decision')
+  assert.equal(controller.snapshot().dirty, false, 'the keyboard gesture staged nothing')
+  activateBar(page, 'bar:toggle')
+  await settleMicrotasks()
+  assert.equal(controller.snapshot().selection.patch.enabled?.kind, 'set', 'the fresh visible frame stages the chosen action')
+  assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('a height-only Advanced reflow retires the read receipt until its facts are read again', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Maximum depth')
+  page.handleInput('?')
+  let frame = page.render(80)
+  assert.match(barLine(frame), /Reset \[X\]/u, 'the full grant reads the short disclosure')
+  assert.equal(controller.snapshot().limits.patch.maxDepth, undefined)
+  page.setMaxRows(3)
+  frame = page.render(80)
+  assert.doesNotMatch(barLine(frame), /Reset \[X\]/u, 'a new height grant has no read receipt')
+  page.handleInput('x')
+  frame = page.render(80)
+  assert.equal(controller.snapshot().limits.patch.maxDepth, undefined, 'the stale Reset is inert')
+  page.handleInput(HOME)
+  frame = scrollSubagentUntil(page, 80, 'Reset [X]')
+  assert.match(barLine(frame), /Reset \[X\]/u, 'the fresh grant re-reads the same disclosure')
+  page.handleInput('x')
+  await settleMicrotasks()
+  assert.equal(controller.snapshot().limits.patch.maxDepth?.kind, 'reset')
+  h.page.dispose()
+})
+
+test('a narrow ambiguous question reserves its answer before long optional route identities', async () => {
+  const longRoute = { provider: 'provider-with-a-very-long-identity', model: 'model-with-a-very-long-identity' }
+  const h = await started({
+    lostAckSelection: true,
+    directoryValue: {
+      default: { provider: longRoute.provider, model: longRoute.model },
+      routableProviders: [longRoute.provider],
+      groups: [{ id: longRoute.provider, name: 'Provider Long', models: [{ id: longRoute.model, name: 'Model Long' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  controller.toggleEnabled()
+  controller.toggleRoute(longRoute)
+  page.render(80)
+  const saveFrame = page.render(80)
+  assert.match(barLine(saveFrame), /Save/u)
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  assert.equal(controller.snapshot().selection.status?.kind, 'outcome-unconfirmed')
+  page.setMaxRows(8)
+  page.render(80)
+  page.handleInput(ESC)
+  const frame = page.render(30)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /The Host may have applied\s+changes\./u, 'the necessary ambiguous copy is complete')
+  const acceptRow = rowIndex(frame, line => line.includes('Leave anyway…'))
+  assert.ok(acceptRow >= 0, `the body answer is reserved before optional details:\n${frame.join('\n')}`)
+  assert.ok(acceptRow < 8, 'the reserved answer is inside the grant')
+  h.page.dispose()
+})
+
+test('a stale formerly Verified section paints Last-known, never a current Verified', async () => {
+  const h = await started()
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Maximum depth')
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  for (const character of '2') page.handleInput(character)
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  let plain = strip(page.render(80).join('\n'))
+  assert.match(plain, /Limits:\s+Verified/u)
+  h.replaceGeneration()
+  plain = strip(page.render(80).join('\n'))
+  assert.match(plain, /Limits:?\s+Last-known · read-only/u)
+  assert.match(plain, /Previous save verified; refresh to review\./u)
+  assert.doesNotMatch(plain, /Limits:\s+Verified/u)
+  h.page.dispose()
+})
+
+test('directory search suppresses route targets/actions and Done republishes them', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }, { id: 'n', name: 'Other N' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput('/')
+  page.handleInput('other')
+  let frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search: other/u)
+  assert.equal(barLine(frame).replace(/\s+$/u, ''), 'Done [Enter] · Back [Esc]')
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:refresh'), false)
+  assert.doesNotMatch(strip(frame.join('\n')), /Add route \[Enter\]|Remove route \[Enter\]/u)
+  const otherRow = rowIndex(frame, line => line.includes('Other N'))
+  assert.ok(otherRow >= 0)
+  assert.notEqual(page.handleMouse(mouse('press', 2, otherRow, 80, frame.length))?.handled, true,
+    'a filtered search row is not a route hit target')
+  assert.equal(controller.snapshot().allowedModels.length, 0)
+  page.handleInput(ENTER)
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+other/u)
+  assert.match(barLine(frame), /Add route \[Enter\]/u, 'Done republishes the route action on a fresh frame')
+  assert.equal(controller.snapshot().allowedModels.length, 0)
+  h.page.dispose()
+})
+
+test('a clean directory refresh invalidates the old read and never publishes its late answer', async () => {
+  const h = await started({
+    holdDirectory: true,
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }] }],
+      failures: [],
+    },
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.directoryStarted
+  page.render(80)
+  assert.match(barLine(page.render(80)), /Refresh/u)
+  page.handleInput('r')
+  h.releaseDirectory() // release the aborted first read; it must never publish
+  await h.drainTasks()
+  page.render(80) // start the post-refresh current request (held)
+  await settleMicrotasks() // let the scheduled loader really enter its hold
+  assert.equal(h.directoryReadCount(), 2, 'the refresh starts exactly one current read')
+  const stale = strip(page.render(80).join('\n'))
+  assert.match(stale, /Loading models…/u, 'the aborted first read never publishes')
+  assert.doesNotMatch(stale, /Provider P/u)
+  h.releaseDirectory()
+  await settleMicrotasks()
+  let published = strip(page.render(80).join('\n'))
+  for (let step = 0; step < 5 && !published.includes('Provider P'); step += 1) {
+    await settleMicrotasks()
+    published = strip(page.render(80).join('\n'))
+  }
+  assert.match(published, /Provider P/u, 'the current request publishes its real directory')
+  assert.equal(h.directoryReadCount(), 2, 'the accepted refresh starts exactly ONE fresh read')
+  h.page.dispose()
+})
+
+test('a dirty directory refresh keeps its state on Keep and re-reads once on the accepted path', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }, { id: 'n', name: 'Other N' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput('/')
+  page.handleInput('other')
+  page.handleInput(ENTER)
+  page.render(80)
+  activateBar(page, 'bar:route-toggle')
+  await settleMicrotasks()
+  assert.equal(controller.snapshot().selection.patch.allowedModels?.kind, 'set')
+  page.render(80) // the staged route changed the frame; admit the key only on this fresh one
+  page.handleInput('r')
+  page.render(80)
+  assert.match(strip(page.render(80).join('\n')), /Refresh discards unsaved edits\./u)
+  const reads = h.directoryReadCount()
+  page.handleInput(ESC) // the refresh question's real Keep
+  page.render(80)
+  assert.equal(h.directoryReadCount(), reads, 'Keep starts no new read')
+  assert.match(strip(page.render(80).join('\n')), /Search \[\/\]\s+other/u, 'Keep preserves the query')
+  page.handleInput('r')
+  page.render(80)
+  page.handleInput('r')
+  await h.drainTasks()
+  page.render(80)
+  await h.drainTasks()
+  page.render(80)
+  assert.equal(h.directoryReadCount(), reads + 1, 'the accepted refresh reads the current authority once')
+  h.page.dispose()
+})
+
+test('route identities are sanitized in Advanced and a narrow body never paints a clipped primary verb', async () => {
+  const h = await started({
+    allowedModels: [{ provider: 'provider\u001b]0;OWNED\u0007', model: 'model-with-a-long-name' }],
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput('?')
+  const raw = page.render(80).join('')
+  assert.ok(raw.includes('provider'), 'the visible route identity remains readable')
+  assert.equal(raw.includes('\u001b]0;'), false, 'the OSC identity/control introducer is stripped')
+  assert.equal(raw.includes('OWNED\u0007'), false, 'the BEL-terminated control payload is stripped')
+  page.handleInput(LEFT)
+  page.render(80)
+  const narrow = strip(page.render(8).join('\n'))
+  assert.doesNotMatch(narrow, /Search \[|Add route|Remove route|Edit \[|Toggle \[|Manage \[|Details \[|Refresh \[/u,
+    'a width that cannot host a primary verb paints no clipped action word')
+  h.page.dispose()
+})
+
+test('a zero-body authority drift starts no directory read until a real body grant returns', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }] }],
+      failures: [],
+    },
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  const reads = h.directoryReadCount()
+  page.setMaxRows(1) // body 0: only the page's own Back
+  h.replaceGeneration()
+  page.render(80)
+  await settleMicrotasks()
+  assert.equal(h.directoryReadCount(), reads, 'a bar-only grant starts no new directory read')
+  page.setMaxRows(12)
+  page.render(80)
+  await settleMicrotasks()
+  assert.equal(h.directoryReadCount(), reads + 1, 'the returned body grant reads the current authority once')
+  assert.match(strip(page.render(80).join('\n')), /Provider P/u)
   h.page.dispose()
 })

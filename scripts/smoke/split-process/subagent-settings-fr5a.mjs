@@ -186,24 +186,34 @@ export async function runSubagentSettingsFr5A(context) {
       'neither Client has written Selection before Save')
 
     clientB.send('s')
-    const bFrame = await waitForPattern(clientB,
+    await waitForPattern(clientB,
       /Limits: Verified[\s\S]*Selection: Outcome unconfirmed/u,
       'FR5-A Client B partial namespace settlement')
     assert(isDeepStrictEqual(profileUserConfig(installation.profileDir, 'subagent'), { maxDepth: 3 }),
       'the writable Limits namespace reaches the actual Host USER profile patch')
     assert(profileUserConfig(installation.profileDir, SELECTION_NS) === undefined,
       'the home-overlay refusal creates no Selection USER override')
-    // The packed Split Detail pane wraps the official reason into several
-    // physical lines; normalize only whitespace so the same sentence is still
-    // proven without depending on one terminal width.
-    assert(bFrame.replace(/\s+/gu, ' ').includes('is overridden by a home patch or command-line overlay'),
-      'the failed section names the official higher-layer refusal')
+    // Prove the reason inside the REAL Detail region, not by joining unrelated
+    // parent columns. The status label starts the region column; the reason is
+    // the wrapped continuation below it. Normalize whitespace only inside that
+    // region so the same official sentence is proven at any pane width.
+    const bLines = await clientB.viewport()
+    const statusIndex = bLines.findIndex(line => line.includes('Selection: Outcome unconfirmed'))
+    assert(statusIndex >= 0, 'Client B paints the failed section settlement')
+    const statusColumn = bLines[statusIndex].indexOf('Selection:')
+    assert(statusColumn >= 0, 'Client B paints the settlement label in its Detail column')
+    const region = bLines.slice(statusIndex, Math.min(bLines.length, statusIndex + 8))
+      .map(line => line.slice(statusColumn).trimEnd()).join(' ').replace(/\s+/gu, ' ')
+    assert(region.includes('is overridden by a home patch or command-line overlay'),
+      `the failed section names the official higher-layer refusal (region=${JSON.stringify(region)})`)
     trace('fr5a.remote-partial-save', { limitsVerified: true, selectionOutcomeUnconfirmed: true, profilePatch: true })
 
     // A must not rebase its draft onto B's newer Host revision or overwrite it.
     // Whether the shared document-updated event has already refreshed A's mirror
     // or A discovers the revision at Save, the real Settings page refuses the
     // stale intent and the bytes remain B's committed value.
+    await waitForPattern(clientA, /Limits: (Unsaved|Verified|Last-known)/u,
+      'FR5-A Client A actual frame before its stale save')
     clientA.send('s')
     const aFrame = await waitForPattern(clientA,
       /Last-known|Not saved · settings changed|Refresh to review/u,

@@ -201,6 +201,9 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (next === this.rowGrant) return
     this.rowGrant = next
     this.revealSelection = true
+    this.advancedSignature = undefined
+    this.advancedSeen.clear()
+    this.advancedFactLines = []
     this.revoke()
   }
   grantAwaitingPaint(): boolean { return this.awaitingPaint }
@@ -373,7 +376,12 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (!this.paintedActions.has(accepting)) return
     this.question = undefined
     this.browseOffset = 0
-    if (question.kind === 'refresh') { this.controller.refresh(true); this.changed(); return }
+    if (question.kind === 'refresh') {
+      this.invalidateCatalog()
+      this.controller.refresh(true)
+      this.changed()
+      return
+    }
     if (question.kind === 'discard') {
       this.controller.discard()
       this.advanced = false
@@ -403,7 +411,14 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       this.changed()
       return
     }
-    if (this.advanced) { this.advanced = false; this.changed(); return }
+    if (this.advanced) {
+      this.advanced = false
+      this.advancedSignature = undefined
+      this.advancedSeen.clear()
+      this.advancedFactLines = []
+      this.changed()
+      return
+    }
     if (this.view === 'directory') {
       if (this.searching) {
         this.searching = false
@@ -419,12 +434,21 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (snapshot.dirty) this.openQuestion('leave')
     else this.intents.done()
   }
+  /** Retire the old directory request/authority BEFORE a refresh callback; a
+   *  stale result can never publish into the new capture. Query/selection/
+   *  offsets stay local and the reload happens only after settlement with a
+   *  real body grant. */
+  private invalidateCatalog(): void {
+    this.catalogAbort?.abort()
+    this.catalogAbort = undefined
+    this.catalogAuthority = undefined
+    this.catalog = { state: 'loading' }
+  }
   private refresh(): void {
     const snapshot = this.controller.snapshot()
     if (snapshot.loading || snapshot.saving) return
     if (snapshot.dirty) { this.openQuestion('refresh'); return }
-    this.catalogAbort?.abort()
-    this.catalogAuthority = undefined
+    this.invalidateCatalog()
     this.controller.refresh()
     this.changed()
   }
@@ -452,6 +476,9 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (this.sectionOf(this.controller.snapshot(), FIELDS[this.fieldIndex]!).source.kind !== 'ready') return
     this.advanced = true
     this.browseOffset = 0
+    this.advancedSignature = undefined
+    this.advancedSeen.clear()
+    this.advancedFactLines = []
     this.changed()
   }
   private openDirectory(): void {
@@ -635,7 +662,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     }
   }
   private stageRouteToggle(): void {
-    if (this.disposed || this.handoff !== 0) return
+    if (this.disposed || this.handoff !== 0 || this.searching || this.view !== 'directory') return
     const snapshot = this.controller.snapshot()
     if (!this.editable('allowedModels', snapshot)) return
     if (!this.paintedActions.has('route-toggle')) return
@@ -751,6 +778,10 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     // Any local commit callback may synchronously re-enter; it never starts a
     // second stage/save/reset of the same gesture.
     if (this.handoff !== 0) return
+    // The action admission is the identity of the frame the user ACTUALLY saw,
+    // captured before this key advances the local input revision. Pointer paths
+    // use the same fact through their painted box/gesture identity.
+    const frameCurrent = this.pointerFrameCurrent()
     this.revision += 1
     this.pressed = undefined
     const snapshot = this.controller.snapshot()
@@ -763,10 +794,12 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       if (matchesKey(data, 'left')) this.back()
       return
     }
-    if (this.question !== undefined) { this.handleQuestionInput(data, snapshot); return }
+    if (this.question !== undefined) { this.handleQuestionInput(data, snapshot, frameCurrent); return }
     if (this.numberInput !== undefined) {
-      if (matchesKey(data, 'enter')) this.stageInput()
-      else {
+      if (matchesKey(data, 'enter')) {
+        if (!frameCurrent) { this.changed(); return }
+        this.stageInput()
+      } else {
         this.numberInput.input.handleInput(data)
         this.fieldError = undefined
         this.changed()
@@ -776,32 +809,48 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (this.advanced) {
       if (this.scrollKey(data)) { this.scroll(data); return }
       if (data === DETAILS_KEY || matchesKey(data, 'left')) { this.back(); return }
-      if (matchesKey(data, KEYS.reset) && this.paintedActions.has('reset')) { this.stageAdvancedReset(); return }
-      if (matchesKey(data, KEYS.refresh)) { this.refresh(); return }
+      if (matchesKey(data, KEYS.reset) && this.paintedActions.has('reset')) {
+        if (!frameCurrent) { this.changed(); return }
+        this.stageAdvancedReset()
+        return
+      }
       return
     }
-    if (this.view === 'directory') { this.handleDirectoryInput(data, snapshot); return }
-    this.handleBrowseInput(data, snapshot)
+    if (this.view === 'directory') { this.handleDirectoryInput(data, snapshot, frameCurrent); return }
+    this.handleBrowseInput(data, snapshot, frameCurrent)
   }
 
-  private handleQuestionInput(data: string, snapshot: SubagentSettingsSnapshot): void {
+  private handleQuestionInput(data: string, snapshot: SubagentSettingsSnapshot, frameCurrent: boolean): void {
     if (this.scrollKey(data)) { this.scroll(data); return }
     const question = this.question!
     if (question.kind === 'refresh') {
-      if (matchesKey(data, KEYS.refresh) || matchesKey(data, 'enter')) this.acceptQuestion()
+      if (matchesKey(data, KEYS.refresh) || matchesKey(data, 'enter')) {
+        if (!frameCurrent) { this.changed(); return }
+        this.acceptQuestion()
+      }
       return
     }
     if (question.kind === 'discard') {
-      if (data === KEYS.discard || data === KEYS.discard.toUpperCase()) this.acceptQuestion()
-      else if (matchesKey(data, 'left')) this.keepEditing()
+      if (data === KEYS.discard || data === KEYS.discard.toUpperCase()) {
+        if (!frameCurrent) { this.changed(); return }
+        this.acceptQuestion()
+      } else if (matchesKey(data, 'left')) this.keepEditing()
       return
     }
-    if (data === KEYS.discard || data === KEYS.discard.toUpperCase()) { this.acceptQuestion(); return }
-    if (matchesKey(data, KEYS.save)) { this.saveGroup(); return }
+    if (data === KEYS.discard || data === KEYS.discard.toUpperCase()) {
+      if (!frameCurrent) { this.changed(); return }
+      this.acceptQuestion()
+      return
+    }
+    if (matchesKey(data, KEYS.save)) {
+      if (!frameCurrent) { this.changed(); return }
+      this.saveGroup()
+      return
+    }
     if (matchesKey(data, 'left')) this.keepEditing()
   }
 
-  private handleDirectoryInput(data: string, snapshot: SubagentSettingsSnapshot): void {
+  private handleDirectoryInput(data: string, snapshot: SubagentSettingsSnapshot, frameCurrent: boolean): void {
     if (this.searching) {
       if (matchesKey(data, 'enter') || matchesKey(data, 'tab')) { this.completeSearch(); return }
       this.searchInput.handleInput(data)
@@ -816,12 +865,24 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (matchesKey(data, 'shift+tab')) { this.moveRoute(-1); return }
     if (this.scrollKey(data)) { this.scroll(data); return }
     if (matchesKey(data, KEYS.search)) { this.enterSearch(); return }
-    if (matchesKey(data, 'enter') || matchesKey(data, 'right')) { this.stageRouteToggle(); return }
-    if (matchesKey(data, KEYS.refresh)) { this.refresh(); return }
+    if (matchesKey(data, 'enter') || matchesKey(data, 'right')) {
+      if (!frameCurrent) { this.changed(); return }
+      this.stageRouteToggle()
+      return
+    }
+    if (matchesKey(data, KEYS.refresh) && this.paintedActions.has('refresh')) {
+      if (!frameCurrent) { this.changed(); return }
+      this.refresh()
+      return
+    }
     if (matchesKey(data, 'left')) { this.back(); return }
   }
 
-  private handleBrowseInput(data: string, snapshot: SubagentSettingsSnapshot): void {
+  private handleBrowseInput(data: string, snapshot: SubagentSettingsSnapshot, frameCurrent: boolean): void {
+    const business = matchesKey(data, 'enter') || matchesKey(data, 'right')
+      || data === DETAILS_KEY || matchesKey(data, KEYS.save) || matchesKey(data, KEYS.discard)
+      || matchesKey(data, KEYS.refresh)
+    if (business && !frameCurrent) { this.changed(); return }
     if (matchesKey(data, 'up')) { this.moveField(-1, false); return }
     if (matchesKey(data, 'down')) { this.moveField(1, false); return }
     if (matchesKey(data, 'tab')) { this.moveField(1, true); return }
@@ -835,7 +896,10 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     if (matchesKey(data, KEYS.save)) { this.saveGroup(); return }
     if (matchesKey(data, KEYS.discard) && snapshot.dirty && !this.ambiguous(snapshot)
       && this.paintedActions.has('discard')) { this.openQuestion('discard'); return }
-    if (matchesKey(data, KEYS.refresh)) { this.refresh(); return }
+    if (matchesKey(data, KEYS.refresh) && this.paintedActions.has('refresh')) {
+      this.refresh()
+      return
+    }
     if (this.scrollKey(data)) this.scroll(data)
   }
 
@@ -874,7 +938,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       : matchesKey(data, 'home') ? -Number.MAX_SAFE_INTEGER
         : matchesKey(data, 'end') ? Number.MAX_SAFE_INTEGER
           : step
-    const key = this.view === 'directory' ? 'directoryOffset' : 'browseOffset'
+    const key = this.view === 'directory' && this.question === undefined ? 'directoryOffset' : 'browseOffset'
     this[key] = Math.max(0, this[key] + delta)
     this.revealSelection = false
     this.changed()
@@ -891,9 +955,9 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       case 'refresh': this.refresh(); break
       case 'discard': if (this.question !== undefined) this.acceptQuestion(); else this.openQuestion('discard'); break
       case 'keep': this.keepEditing(); break
-      case 'edit': this.activateFieldAction(snapshot); break
-      case 'toggle': this.stageToggle(); break
-      case 'manage': this.openDirectory(); break
+      case 'edit':
+      case 'toggle':
+      case 'manage': this.activateFieldAction(snapshot); break
       case 'details': this.openAdvanced(); break
       case 'reset': this.stageAdvancedReset(); break
       case 'apply': this.stageInput(); break
@@ -952,9 +1016,9 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       case 'field':
         if (this.numberInput === undefined && this.view === 'browse') this.selectField(target.action.field)
         break
-      case 'edit': if (this.numberInput === undefined) this.activateFieldAction(snapshot); break
-      case 'toggle': this.stageToggle(); break
-      case 'manage': this.openDirectory(); break
+      case 'edit':
+      case 'toggle':
+      case 'manage': if (this.numberInput === undefined) this.activateFieldAction(snapshot); break
       case 'details': this.openAdvanced(); break
       case 'reset': if (this.numberInput === undefined) this.stageAdvancedReset(); break
       case 'route': if (this.searching) break; if (this.view === 'directory') { this.selectedRoute = target.action.key; this.revealSelection = true; this.routeNotice = undefined; this.changed() }; break
@@ -975,7 +1039,11 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
   render(width: number): string[] {
     if (this.disposed) return [fit('', width)]
     const snapshot = this.controller.snapshot()
-    if (this.view === 'directory' && !snapshot.loading && this.catalogAuthority !== this.authorityIdentity(snapshot)) {
+    const bodyRows = Math.max(0, this.rowGrant - 1)
+    // A bar-only grant starts no new read; the current authority read resumes
+    // only once the pane really grants body rows again.
+    if (bodyRows > 0 && this.question === undefined && this.view === 'directory'
+      && !snapshot.loading && this.catalogAuthority !== this.authorityIdentity(snapshot)) {
       this.loadDirectory(true)
     }
     return this.renderTenant(width, snapshot)
@@ -1034,7 +1102,10 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     }
     const viewport = Math.max(0, bodyRows - fixedRows)
     const baseMaxOffset = Math.max(0, content.length - viewport)
-    offset = Math.min(Math.max(0, this.view === 'directory' ? this.directoryOffset : this.browseOffset), baseMaxOffset)
+    // A question/Input/Advanced owns the existing browse scroll coordinate. A
+    // directory question must not consume or re-anchor the directory offset.
+    const directoryScroll = this.view === 'directory' && this.question === undefined
+    offset = Math.min(Math.max(0, directoryScroll ? this.directoryOffset : this.browseOffset), baseMaxOffset)
     if (this.view === 'browse' && this.revealSelection && this.question === undefined && this.numberInput === undefined && !this.advanced) {
       const settlement = snapshot.notice !== undefined
         || snapshot.limits.status !== undefined && snapshot.limits.status.kind !== 'verified'
@@ -1046,7 +1117,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
         offset = Math.min(Math.max(0, offset), baseMaxOffset)
       }
     }
-    if (this.view === 'directory' && this.revealSelection && viewport > 0) {
+    if (directoryScroll && this.revealSelection && viewport > 0) {
       const span = this.selectedRouteSpan(content)
       if (span !== undefined) {
         if (span.start < offset) offset = span.start
@@ -1059,7 +1130,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     // complete necessary facts were really painted.
     let resetReady = false
     if (this.advanced && advancedAction !== undefined) {
-      const signature = `${this.fieldIndex}|${width}|${this.authorityIdentity(snapshot)}|${advancedFacts.join(',')}`
+      const signature = `${this.fieldIndex}|${width}|${this.rowGrant}|${this.authorityIdentity(snapshot)}|${advancedFacts.join(',')}`
       if (this.advancedSignature !== signature) {
         this.advancedSignature = signature
         this.advancedSeen.clear()
@@ -1075,7 +1146,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     const maxAfterAction = Math.max(0, content.length - viewport)
     offset = Math.min(Math.max(0, offset), maxAfterAction)
     maxOffset = maxAfterAction
-    if (this.view === 'directory') this.directoryOffset = offset
+    if (directoryScroll) this.directoryOffset = offset
     else this.browseOffset = offset
     if (this.view === 'directory' && fixedRows === 1) {
       const search = this.searchRow(width)!
@@ -1194,22 +1265,22 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     width: number,
     ink: (text: string) => string = color.textDim,
   ): ContentLine[] {
-    const lines: ContentLine[] = [{ text: ink(label) }]
+    const lines: ContentLine[] = [{ text: ink(sanitizedPhysicalLine(label)) }]
     if (routes.length === 0) lines.push({ text: ink('  None') })
     for (const route of routes) {
-      for (const fragment of wrapTextWithAnsi(`  ${route.provider} / ${route.model}`, Math.max(1, width))) {
+      for (const fragment of wrapTextWithAnsi(sanitizedPhysicalLine(`  ${route.provider} / ${route.model}`), Math.max(1, width))) {
         lines.push({ text: ink(fragment) })
       }
     }
     return lines
   }
   private bodyAction(label: string, action: BodyAction, width: number): ContentLine {
-    if (visibleWidth(label) > width) return { text: color.primary(label) }
+    if (visibleWidth(label) > width) return { text: '' }
     const suffix = action.kind === 'field' ? `:${action.field}` : ''
     return { text: color.primary(label), targets: [{ id: `${action.kind}${suffix}`, action, startCol: 0, endCol: visibleWidth(label) }] }
   }
   private acceptAction(label: string, width: number): ContentLine {
-    if (visibleWidth(label) > width) return { text: color.primary(label) }
+    if (visibleWidth(label) > width) return { text: '' }
     return { text: color.primary(label), targets: [{ id: 'accept', action: { kind: 'accept' }, startCol: 0, endCol: visibleWidth(label) }] }
   }
 
@@ -1218,9 +1289,18 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     const copyWidth = Math.min(width, 72)
     for (const [name, section] of [['Limits', snapshot.limits], ['Selection', snapshot.selection]] as const) {
       const kind = section.status?.kind
+      const stale = section.source.kind === 'ready' && !section.current
       if (kind !== undefined) {
-        lines.push({ text: color.textDim(`${name}:`) + ' ' + statusInk(kind, sectionWord(section)) })
-        if (kind !== 'verified' && kind !== 'saving') lines.push(...this.note(section.status!.text, copyWidth))
+        if (kind === 'verified' && stale) {
+          // A previous verification is history, never a certificate that an old
+          // source is current.
+          lines.push(...this.fact(name, 'Last-known · read-only', width, color.warning).lines)
+          lines.push(...this.note('Previous save verified; refresh to review.', copyWidth, color.textDim))
+        } else {
+          lines.push({ text: color.textDim(`${name}:`) + ' ' + statusInk(kind, sectionWord(section)) })
+          if (stale) lines.push(...this.note('Last-known · read-only', copyWidth, color.warning))
+          if (kind !== 'verified' && kind !== 'saving') lines.push(...this.note(section.status!.text, copyWidth))
+        }
       } else if (section.source.kind !== 'ready') {
         lines.push(...this.fact(name, section.source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable', width, color.error).lines)
         lines.push(...this.note(section.source.reason, copyWidth, color.error))
@@ -1237,7 +1317,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
   } {
     const lines: ContentLine[] = []
     const dirtyBlocks: { lines: number[]; complete: boolean }[] = []
-    let countLine: number | undefined
+    let countLines: readonly number[] | undefined
     const copyWidth = Math.min(width, 72)
     const rowWidth = Math.min(width, 64)
     if (snapshot.loading) {
@@ -1254,10 +1334,10 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     // The real dirty count is a TOP fact: a short grant must never hide the
     // total/sub-counts behind the fields it describes.
     if (snapshot.dirty) {
-      countLine = lines.length
-      for (const fragment of wrapTextWithAnsi(this.dirtyCountText(snapshot), copyWidth)) {
-        lines.push({ text: color.text(fragment) })
-      }
+      const fragments = wrapTextWithAnsi(this.dirtyCountText(snapshot), copyWidth)
+      const start = lines.length
+      for (const fragment of fragments) lines.push({ text: color.text(fragment) })
+      countLines = fragments.map((_, offset) => start + offset)
     }
     let index = 0
     for (const field of FIELDS) {
@@ -1338,7 +1418,6 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     for (const section of [snapshot.limits, snapshot.selection]) {
       if (section.source.kind !== 'ready') lines.push(...this.note(section.source.reason, copyWidth))
     }
-    const countLines = countLine === undefined ? undefined : lines.slice(countLine).map((_, offset) => countLine! + offset)
     return { lines, saveFacts: { ...(countLines === undefined ? {} : { count: countLines }), dirty: dirtyBlocks } }
   }
   private fieldActionLabel(field: SubagentSettingsField): string {
@@ -1442,10 +1521,9 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       return { text, targets: [{ id: 'search', action: { kind: 'search' }, startCol: 0, endCol: width }] }
     }
     const word = `Search [${KEYS.search}]`
+    if (visibleWidth(word) > width) return undefined
     const text = color.primary(word) + color.textDim(`  ${sanitizedPhysicalLine(this.searchInput.getValue())}`)
-    return { text, targets: visibleWidth(word) <= width
-      ? [{ id: 'search', action: { kind: 'search' }, startCol: 0, endCol: visibleWidth(word) }]
-      : undefined }
+    return { text, targets: [{ id: 'search', action: { kind: 'search' }, startCol: 0, endCol: visibleWidth(word) }] }
   }
   private directoryLines(width: number, snapshot: SubagentSettingsSnapshot): ContentLine[] {
     const lines: ContentLine[] = []
@@ -1468,8 +1546,13 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       const room = Math.max(1, rowWidth - 2 - (chip === '' ? 0 : visibleWidth(chip)))
       const name = truncateToWidth(label, room, '…', false)
       const text = `${marker}${selected ? color.textStrong(name) : color.text(name)}${chip === '' ? '' : color.textMuted(chip)}`
-      lines.push({ text, routeKey: key, targets: [{ id: `route:${key}`, action: { kind: 'route', key }, startCol: 0, endCol: Math.min(rowWidth, visibleWidth(text)) }] })
-      if (!selected) continue
+      const searching = this.searching
+      lines.push(searching ? { text } : {
+        text,
+        routeKey: key,
+        targets: [{ id: `route:${key}`, action: { kind: 'route', key }, startCol: 0, endCol: Math.min(rowWidth, visibleWidth(text)) }],
+      })
+      if (!selected || searching) continue
       const detail = (line: ContentLine): ContentLine => ({ ...line, routeKey: key })
       for (const line of this.note(`${model.providerId} / ${model.modelId}`, copyWidth)) lines.push(detail(line))
       const section = snapshot.selection
@@ -1487,12 +1570,10 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       }
       const actionLabel = this.routeActionLabel(snapshot, model)
       const blocked = this.routeBlockReason(snapshot, model)
-      if (actionLabel !== undefined) {
+      if (actionLabel !== undefined && visibleWidth(actionLabel) <= rowWidth) {
         lines.push(detail({
           text: color.primary(actionLabel),
-          targets: visibleWidth(actionLabel) <= rowWidth
-            ? [{ id: 'route-toggle', action: { kind: 'route-toggle' }, startCol: 0, endCol: visibleWidth(actionLabel) }]
-            : undefined,
+          targets: [{ id: 'route-toggle', action: { kind: 'route-toggle' }, startCol: 0, endCol: visibleWidth(actionLabel) }],
         }))
       } else if (blocked !== undefined) for (const line of this.note(blocked, copyWidth, color.warning)) lines.push(detail(line))
     }
@@ -1540,8 +1621,18 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
         lines.push(wrapped)
       }
     }
-    // Optional requested/last-confirmed detail stays scrollable; it never blocks
-    // the necessary copy's admission.
+    // The complete mandatory copy is followed immediately by the reserved body
+    // answer; optional requested/last-confirmed detail is appended AFTER it so
+    // a long route identity can never push the answer out of the frame.
+    const acceptWord = question.kind === 'refresh'
+      ? 'Refresh…'
+      : question.kind === 'discard' ? 'Discard…' : this.ambiguous(snapshot) ? 'Leave anyway…' : 'Discard and leave…'
+    const bodyRows = Math.max(0, this.rowGrant - 1)
+    let acceptLine: number | undefined
+    if (visibleWidth(acceptWord) <= width && lines.length + 1 <= bodyRows) {
+      acceptLine = lines.length
+      lines.push(this.acceptAction(acceptWord, width))
+    }
     if (this.ambiguous(snapshot)) {
       const ambiguousLimits = snapshot.limits.status?.kind === 'unverified' || snapshot.limits.status?.kind === 'outcome-unconfirmed'
       const ambiguousSelection = snapshot.selection.status?.kind === 'unverified' || snapshot.selection.status?.kind === 'outcome-unconfirmed'
@@ -1568,15 +1659,6 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
         }
         lines.push(...this.fact(`Last confirmed ${LABELS[field]}`, this.effectiveValue(snapshot, field), Math.min(width, 64), color.textDim).lines)
       }
-    }
-    const acceptWord = question.kind === 'refresh'
-      ? 'Refresh…'
-      : question.kind === 'discard' ? 'Discard…' : this.ambiguous(snapshot) ? 'Leave anyway…' : 'Discard and leave…'
-    const bodyRows = Math.max(0, this.rowGrant - 1)
-    let acceptLine: number | undefined
-    if (visibleWidth(acceptWord) <= width && lines.length + 1 <= bodyRows) {
-      acceptLine = lines.length
-      lines.push(this.acceptAction(acceptWord, width))
     }
     return { lines, mustSee, ...(acceptLine === undefined ? {} : { acceptLine }) }
   }
@@ -1645,18 +1727,26 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       // are not a current action basis.
       segments = [{ text: 'Back [Esc]', priority: 1000, escape: true }]
     } else if (this.view === 'directory') {
-      const model = this.selectedModel(snapshot)
-      const action = model === undefined ? undefined : this.routeActionLabel(snapshot, model)
-      const actionWord = model !== undefined && action !== undefined && routeActionRead
-        ? `${model.allowed ? 'Remove' : 'Add'} route [Enter]`
-        : undefined
-      segments = [
-        ...(actionWord === undefined ? [] : [{ text: actionWord, priority: 850, action: 'route-toggle' as const }]),
-        this.searching ? { text: 'Done [Enter]', priority: 400, action: 'search-done' as const }
-          : { text: `Search [${KEYS.search}]`, priority: 400, action: 'search' as const },
-        { text: `Refresh [${KEYS.refresh.toUpperCase()}]`, short: 'Refresh', priority: 500, action: 'refresh' as const },
-        { text: 'Back [Esc]', priority: 1000, escape: true },
-      ]
+      if (this.searching) {
+        // Search focus is a distinct typing state: Enter is Done, Escape is the
+        // REAL Back. No route action or Refresh is advertised while typing.
+        segments = [
+          { text: 'Done [Enter]', priority: 400, action: 'search-done' as const },
+          { text: 'Back [Esc]', priority: 1000, escape: true },
+        ]
+      } else {
+        const model = this.selectedModel(snapshot)
+        const action = model === undefined ? undefined : this.routeActionLabel(snapshot, model)
+        const actionWord = model !== undefined && action !== undefined && routeActionRead
+          ? `${model.allowed ? 'Remove' : 'Add'} route [Enter]`
+          : undefined
+        segments = [
+          ...(actionWord === undefined ? [] : [{ text: actionWord, priority: 850, action: 'route-toggle' as const }]),
+          { text: `Search [${KEYS.search}]`, priority: 400, action: 'search' as const },
+          { text: `Refresh [${KEYS.refresh.toUpperCase()}]`, short: 'Refresh', priority: 500, action: 'refresh' as const },
+          { text: 'Back [Esc]', priority: 1000, escape: true },
+        ]
+      }
     } else if (snapshot.dirty && !this.ambiguous(snapshot)) {
       // A real dirty group keeps its local Discard even while an invalid draft
       // makes Save inadmissible; Save itself stays gated by its own facts.

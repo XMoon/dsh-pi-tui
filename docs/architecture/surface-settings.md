@@ -412,11 +412,14 @@ specialist-page contract below).
   - The model directory is a read-only projection inside the same tenant:
     route identity is always the exact `(provider, model)` pair, a row click
     only selects and the explicit `Add route [Enter]` / `Remove route [Enter]`
-    stages the choice. A `/` search filters provider/model identities and `Esc`
-    returns to the group with the query, the field and the selected route
-    intact. A saved route remains visible and removable when the directory or
-    that provider is unavailable; absence is claimed only from a current
-    successful ready directory. Removing the last allowed route while the
+    stages the choice. A `/` search filters provider/model identities; while the
+    search Input owns the keyboard, `Enter`/`Tab` is `Done` and only the real
+    Back remains, and route hit targets/actions and Refresh are not painted.
+    The first `Esc` ends search, and a second `Esc`/`Left` returns to the group
+    with the query, the field and the selected route intact. A saved route
+    remains visible and removable when the directory or that provider is
+    unavailable; absence means only that a route was not listed in a current
+    successful ready directory, never physical deletion or future routability. Removing the last allowed route while the
     candidate Enabled is On is refused with its real reason; Enabled Off allows
     it, and On with no routes is a legal dirty draft that Save refuses.
   - Save is the ONE explicit grouped commit: it validates the whole staged

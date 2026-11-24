@@ -935,3 +935,50 @@ test('the post-save readback must serve the SAME executor row, even when the cap
   assert.equal(mutations.length, 4)
   positive.dispose()
 })
+
+test('a definite rejection at an unchanged revision survives local discard as read-only', async () => {
+  const h = await harness()
+  h.limits.plans.push({ outcome: { kind: 'rejected', reason: 'the Host refused this exact revision' }, apply: false })
+  h.controller.setNumber('maxDepth', '2')
+  h.controller.save()
+  await latest(h)
+  assert.equal(h.controller.snapshot().limits.status?.kind, 'not-saved')
+  assert.equal(h.controller.snapshot().limits.current, false, 'a definite rejection requires a new read')
+  h.controller.discard()
+  const afterDiscard = h.controller.snapshot()
+  assert.equal(afterDiscard.dirty, false)
+  assert.equal(afterDiscard.limits.current, false, 'discard cannot clear the refresh gate')
+  assert.equal(afterDiscard.limits.status?.kind, 'not-saved', 'the historical settlement stays truthful')
+  h.controller.setNumber('maxDepth', '3')
+  assert.deepEqual(h.controller.snapshot().limits.patch, {})
+  h.limits.state = ready(HOST_A, 42,
+    { maxDepth: 1, maxActiveSubagents: 8 }, { maxDepth: 1, maxActiveSubagents: 8 })
+  h.controller.refresh(true)
+  await latest(h, 'subagent settings refresh')
+  assert.equal(h.controller.snapshot().limits.current, true)
+  h.controller.setNumber('maxDepth', '3')
+  assert.deepEqual(h.controller.snapshot().limits.patch, { maxDepth: { kind: 'set', value: 3 } })
+})
+
+test('a failed definite refresh keeps a readable last-confirmed source, not the failed read', async () => {
+  const h = await harness()
+  h.limits.plans.push({ outcome: { kind: 'rejected', reason: 'refused' }, apply: false })
+  h.controller.setNumber('maxDepth', '2')
+  h.controller.save()
+  await latest(h)
+  h.controller.discard()
+  h.limits.refresh = async () => { throw new Error('settings read lost') }
+  h.limits.state = { kind: 'unavailable', reason: 'settings read lost' }
+  assert.equal(h.controller.refresh(true), true)
+  await latest(h, 'subagent settings refresh')
+  const snapshot = h.controller.snapshot()
+  assert.equal(snapshot.limits.source.kind, 'ready', 'the old ready facts remain readable')
+  if (snapshot.limits.source.kind === 'ready') {
+    assert.deepEqual(snapshot.limits.source.effective, { maxDepth: 1, maxActiveSubagents: 8 })
+  }
+  assert.equal(snapshot.limits.current, false)
+  assert.equal(snapshot.limits.dirty, false)
+  assert.equal(snapshot.limits.status?.kind, 'not-saved')
+  h.controller.setNumber('maxDepth', '3')
+  assert.deepEqual(h.controller.snapshot().limits.patch, {})
+})
