@@ -21,6 +21,7 @@ import {
   isRelayContext,
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../../src/tui/transcript/context-summary.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../../src/tui/components/transcript/context-row.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 
@@ -350,28 +351,106 @@ function foldClaimedSource(source: unknown, text: string): TranscriptMessage | u
   return folder.messages().find(candidate => candidate.kind === 'system' && candidate.context === true)
 }
 
-test('the Working-delivery claim qualifies only the four exact source pairs', () => {
-  const cases: ReadonlyArray<readonly [string, unknown, boolean]> = [
-    ['tool-jobs notice', { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }, true],
-    ['agent-message relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' }, true],
-    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }, true],
-    ['repeat-tool-reminder notice', { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' }, true],
-    ['agent-message notice', { kind: 'agent-message', form: 'notice', senderSessionId: 'child-1' }, false],
-    ['subagent-settled relay', { kind: 'subagent-settled', form: 'relay', summary: 'settled', senderSessionId: 'child-1' }, false],
-    ['repeat-tool-reminder relay', { kind: 'repeat-tool-reminder', form: 'relay' }, false],
-    ['repeat-tool-reminder without form', { kind: 'repeat-tool-reminder' }, false],
-    ['plugin notice', { kind: 'plugin', form: 'notice', plugin: 'foreign' }, false],
-    ['plugin relay', { kind: 'plugin', form: 'relay', plugin: 'foreign' }, false],
-    ['tool-jobs relay', { kind: 'tool-jobs', form: 'relay' }, false],
-    ['relay without sender', { kind: 'agent-message', form: 'relay' }, true],
+test('a proven same-turn next-step claim is delivery provenance, independent of the source', () => {
+  const cases: ReadonlyArray<readonly [string, unknown]> = [
+    ['tool-jobs notice', { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }],
+    ['agent-message relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' }],
+    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }],
+    ['repeat-tool-reminder notice', { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' }],
+    ['agent-message notice', { kind: 'agent-message', form: 'notice', senderSessionId: 'child-1' }],
+    ['subagent-settled relay', { kind: 'subagent-settled', form: 'relay', summary: 'settled', senderSessionId: 'child-1' }],
+    ['repeat-tool-reminder relay', { kind: 'repeat-tool-reminder', form: 'relay' }],
+    ['repeat-tool-reminder without form', { kind: 'repeat-tool-reminder' }],
+    ['plugin notice', { kind: 'plugin', form: 'notice', plugin: 'foreign' }],
+    ['plugin relay', { kind: 'plugin', form: 'relay', plugin: 'foreign' }],
+    ['tool-jobs relay', { kind: 'tool-jobs', form: 'relay' }],
+    ['relay without sender', { kind: 'agent-message', form: 'relay' }],
+    ['tool-goal notice', { kind: 'tool-goal', form: 'notice', summary: 'goal round complete' }],
+    ['unknown future source', { kind: 'future-producer', form: 'notice' }],
+    ['unknown future form', { kind: 'plugin', form: 'future-form', plugin: 'future' }],
   ]
-  for (const [label, source, qualifies] of cases) {
+  for (const [label, source] of cases) {
     const row = foldClaimedSource(source, `${label} body`)
     assert.ok(row !== undefined && row.kind === 'system', label)
-    assert.equal(row.contextPresentation?.sameTurnNextStep === true, qualifies,
-      `${label}: the durable claim is not enough — the source/form pair decides`)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, true,
+      `${label}: the durable claim proves delivery independent of what the row is`)
     assert.equal(row.text, `${label} body`, `${label}: the payload is untouched`)
   }
+})
+
+test('the carriage decision carries only the approved working pairs with a real Work', () => {
+  const approved = new Set([
+    'tool-jobs notice',
+    'agent-message relay',
+    'subagent-settled notice',
+    'repeat-tool-reminder notice',
+    'relay without sender',
+  ])
+  const cases: ReadonlyArray<readonly [string, unknown]> = [
+    ['tool-jobs notice', { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }],
+    ['agent-message relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' }],
+    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }],
+    ['repeat-tool-reminder notice', { kind: 'repeat-tool-reminder', form: 'notice', summary: 'read × 4' }],
+    ['agent-message notice', { kind: 'agent-message', form: 'notice', senderSessionId: 'child-1' }],
+    ['subagent-settled relay', { kind: 'subagent-settled', form: 'relay', summary: 'settled', senderSessionId: 'child-1' }],
+    ['plugin notice', { kind: 'plugin', form: 'notice', plugin: 'foreign' }],
+    ['tool-jobs relay', { kind: 'tool-jobs', form: 'relay' }],
+    ['relay without sender', { kind: 'agent-message', form: 'relay' }],
+    ['tool-goal notice', { kind: 'tool-goal', form: 'notice', summary: 'goal round complete' }],
+  ]
+  for (const [label, source] of cases) {
+    const row = foldClaimedSource(source, `${label} body`)
+    assert.ok(row !== undefined && row.kind === 'system', label)
+    const structure = projectTranscriptStructure([{ kind: 'thinking', turn: 0, text: 'r', running: true }, row, { kind: 'tool', turn: 0, name: 'read', args: '{}', result: 'ok', status: 'ok' }])
+    const spans = structure.filter(block => block.kind === 'work')
+    assert.equal(spans.length, approved.has(label) ? 1 : 2, `${label}: carriage is a separate policy decision`)
+    const carried = spans.some(block => block.kind === 'work' && block.span.members.includes(row))
+    assert.equal(carried, approved.has(label), `${label}: only the approved pair rides the same Work`)
+  }
+})
+
+test('only the official full-drain claim shape proves same-turn delivery', () => {
+  const noticeSource = { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }
+  const makeMessage = (id: string) => ({
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text: `${id} body` }],
+    source: noticeSource,
+  })
+
+  // A partial next-step removal is NOT the official claim shape: it must not
+  // authorize the removed identity even if the row materializes in this turn.
+  const partial = makeMessage('partial-claim')
+  const partialFolder = new TranscriptFolder()
+  partialFolder.apply([eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  partialFolder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [partial, makeMessage('partial-keep')] }, 1001, 1)])
+  partialFolder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1002, 2)])
+  partialFolder.apply([eventAt('user/message', partial, 1003, 3)])
+  const partialRow = partialFolder.messages().find(message => message.kind === 'system')
+  assert.ok(partialRow !== undefined && partialRow.kind === 'system')
+  assert.equal(partialRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a partial (non-draining) removal is not a claim')
+
+  // An out-of-range fragment cannot clamp onto real pending identities.
+  const outOfRange = makeMessage('out-of-range-claim')
+  const outOfRangeFolder = new TranscriptFolder()
+  outOfRangeFolder.apply([eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  outOfRangeFolder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [outOfRange] }, 1001, 1)])
+  outOfRangeFolder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 5, inserted: [] }, 1002, 2)])
+  outOfRangeFolder.apply([eventAt('user/message', outOfRange, 1003, 3)])
+  const outOfRangeRow = outOfRangeFolder.messages().find(message => message.kind === 'system')
+  assert.ok(outOfRangeRow !== undefined && outOfRangeRow.kind === 'system')
+  assert.equal(outOfRangeRow.contextPresentation?.sameTurnNextStep, undefined,
+    'an out-of-range fragment discards proof instead of clamping')
+
+  // A valid later insert/drain rebuilds the evidence from the real queue.
+  const rebuilt = makeMessage('rebuilt-claim')
+  outOfRangeFolder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [rebuilt] }, 1004, 4)])
+  outOfRangeFolder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1005, 5)])
+  outOfRangeFolder.apply([eventAt('user/message', rebuilt, 1006, 6)])
+  const rebuiltRow = outOfRangeFolder.messages().find(message => message.kind === 'system' && message.text.includes('rebuilt-claim'))
+  assert.ok(rebuiltRow !== undefined && rebuiltRow.kind === 'system')
+  assert.equal(rebuiltRow.contextPresentation?.sameTurnNextStep, true,
+    'a later valid full drain proves delivery again')
 })
 
 test('a repeat-tool-reminder without a same-turn claim never carries the flag', () => {

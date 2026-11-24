@@ -17,14 +17,15 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Six
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Seven
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
  * cluster, a `tool-jobs` Notice, an `agent-message` relay, a
  * `subagent-settled` Notice, a `repeat-tool-reminder` Notice and an
  * image-bearing `ptc-mode` Context, each of the last five with durable
- * same-turn `next-step` delivery evidence. A mixed
- * `instructions`/`catalog`/`snapshot` cluster and every other Notice/relay form
- * stay independent Context boundaries.
+ * same-turn `next-step` delivery evidence, plus a complete `skill-catalog`
+ * replacement that may only TRAIL an already-established same-turn Work. A
+ * mixed `instructions`/`catalog`/`snapshot` cluster and every other
+ * Notice/relay form stay independent Context boundaries.
  *
  * The projector is a single forward pass plus the linear ambient-clustering
  * pass (O(n)); wrappers are freshly allocated each call, but their
@@ -163,9 +164,7 @@ export function isFoldableSnapshotContext(
  * missing claim carries no flag and therefore stays an independent Context
  * boundary.
  */
-export function isWorkingToolJobsNotice(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+function isWorkingToolJobsNotice(message: TranscriptMessage): boolean {
   if (!isSurfacedContext(message)) return false
   const presentation = message.contextPresentation
   return presentation !== undefined
@@ -186,9 +185,7 @@ export function isWorkingToolJobsNotice(
  * pair or a missing claim carries no flag and therefore stays an independent
  * Context boundary.
  */
-export function isWorkingAgentRelay(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+function isWorkingAgentRelay(message: TranscriptMessage): boolean {
   if (!isSurfacedContext(message)) return false
   const presentation = message.contextPresentation
   return presentation !== undefined
@@ -212,9 +209,7 @@ export function isWorkingAgentRelay(
  * missing claim carries no flag and therefore stays an independent Context
  * boundary.
  */
-export function isWorkingSubagentSettledNotice(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+function isWorkingSubagentSettledNotice(message: TranscriptMessage): boolean {
   if (!isSurfacedContext(message)) return false
   const presentation = message.contextPresentation
   return presentation !== undefined
@@ -238,9 +233,7 @@ export function isWorkingSubagentSettledNotice(
  * source/form pair or a missing claim carries no flag and therefore stays an
  * independent Context boundary.
  */
-export function isWorkingRepeatToolReminderNotice(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+function isWorkingRepeatToolReminderNotice(message: TranscriptMessage): boolean {
   if (!isSurfacedContext(message)) return false
   const presentation = message.contextPresentation
   return presentation !== undefined
@@ -262,9 +255,7 @@ export function isWorkingRepeatToolReminderNotice(
  * ptc-mode Spill/Reset Context, a foreign image Context, a cross-turn claim
  * and a missing claim.
  */
-export function isWorkingPtcImageContext(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true; content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] } {
+function isWorkingPtcImageContext(message: TranscriptMessage): boolean {
   if (!isPtcImageContext(message)) return false
   const presentation = message.contextPresentation
   return presentation !== undefined
@@ -274,23 +265,49 @@ export function isWorkingPtcImageContext(
 }
 
 /**
- * The complete narrow display-layer eligibility: may this Context row be
- * carried by the same-turn Work/Thought instead of ending it? Only a foldable
- * Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn Agent
- * relay, a proven same-turn subagent settlement Notice, a proven same-turn
- * repeat-tool-reminder Notice or a proven same-turn image-bearing PTC Context
- * qualifies; every other surfaced Context remains a boundary.
+ * The narrow display-layer carriage decision: what does this Context row do to
+ * the surrounding same-turn Work?
+ *
+ * - `thought`: the row may join the Work/Thought, and collapsed Focus keeps its
+ *   existing Thought-only recoverability exception (a foldable Snapshot or a
+ *   proven Working `tool-jobs` Notice);
+ * - `work`: the row may join the Work AND collapsed Focus additionally requires
+ *   the real Process membership of this group's canonical Work span (Agent
+ *   relay, subagent settlement Notice, repeat reminder, image-bearing PTC
+ *   Context);
+ * - `trailing-work`: a complete skill-catalog replacement may only TRAIL an
+ *   already-established same-turn real Work run (never create a Work, never
+ *   prefix one, never bridge two);
+ * - `undefined`: independent Context boundary.
+ *
+ * The `sameTurnNextStep` flag is only delivery provenance; the exact
+ * source/form controls below decide this PRESENTATION question. PTC requires
+ * its real formless producer shape; a declared form fails open. A catalog
+ * update must be a raw singleton: a mixed/multi-row ambient cluster stays one
+ * indivisible boundary.
+ * @param message - one raw transcript row.
+ * @param clusterByMember - raw-adjacency membership for the SAME window.
  */
-export function isFoldableWorkContext(
+export type WorkContextCarriage = 'thought' | 'work' | 'trailing-work'
+
+export function workContextCarriageOf(
   message: TranscriptMessage,
   clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  return isFoldableSnapshotContext(message, clusterByMember)
-    || isWorkingToolJobsNotice(message)
-    || isWorkingAgentRelay(message)
-    || isWorkingSubagentSettledNotice(message)
-    || isWorkingRepeatToolReminderNotice(message)
-    || isWorkingPtcImageContext(message)
+): WorkContextCarriage | undefined {
+  if (!isSurfacedContext(message)) return undefined
+  const presentation = message.contextPresentation
+  if (isFoldableSnapshotContext(message, clusterByMember)) return 'thought'
+  if (presentation?.sameTurnNextStep === true) {
+    if (isWorkingToolJobsNotice(message)) return 'thought'
+    if (isWorkingAgentRelay(message)
+      || isWorkingSubagentSettledNotice(message)
+      || isWorkingRepeatToolReminderNotice(message)
+      || isWorkingPtcImageContext(message)) return 'work'
+  }
+  if (presentation?.completeCatalogUpdate === true && clusterByMember.get(message) === undefined) {
+    return 'trailing-work'
+  }
+  return undefined
 }
 
 /**
@@ -378,17 +395,34 @@ export function projectTranscriptStructure(messages: readonly TranscriptMessage[
       pushPending([{ kind: 'context-cluster', cluster }], cluster.members, cluster.turn)
       continue
     }
-    if (isFoldableWorkContext(message, clustering.byMember)) {
-      if (runMembers.length > 0) {
-        if (runTurn === message.turn) {
+    if (isSurfacedContext(message)) {
+      const carriage = workContextCarriageOf(message, clustering.byMember)
+      if (carriage === 'thought' || carriage === 'work') {
+        if (runMembers.length > 0) {
+          if (runTurn === message.turn) {
+            runParts.push({ kind: 'message', message })
+            runMembers.push(message)
+            continue
+          }
+          flush()
+        }
+        pushPending([{ kind: 'message', message }], [message], message.turn)
+        continue
+      }
+      if (carriage === 'trailing-work') {
+        // A complete catalog replacement may only TRAIL an already-established
+        // same-turn real Process run. It never waits as a pending prefix, never
+        // opens a Work and never bridges two runs: without that exact run it
+        // stays the ordinary standalone Context boundary it already was.
+        if (runMembers.length > 0 && runTurn === message.turn) {
           runParts.push({ kind: 'message', message })
           runMembers.push(message)
           continue
         }
         flush()
+        out.push({ kind: 'message', message })
+        continue
       }
-      pushPending([{ kind: 'message', message }], [message], message.turn)
-      continue
     }
     if (isSurfacedInteractionTool(message)) {
       flush()

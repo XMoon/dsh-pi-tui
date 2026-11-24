@@ -44,13 +44,9 @@ import {
 } from '../../domain/transcript/semantics.ts'
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
 import {
-  isFoldableWorkContext,
-  isWorkingAgentRelay,
-  isWorkingPtcImageContext,
-  isWorkingRepeatToolReminderNotice,
-  isWorkingSubagentSettledNotice,
   projectTranscriptStructure,
   workByMemberOf,
+  workContextCarriageOf,
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
 } from './structure.ts'
@@ -812,33 +808,26 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * stays BEFORE the Thought. Every other persistent input/context row keeps its
  * existing pre-Thought behavior, and ordinary Process stays hidden inside the
  * collapsed Thought (restored in raw chronology when the Thought opens). A
- * foldable Context row (Snapshot, a proven Working tool-jobs Notice, a proven
- * same-turn Agent relay or a proven same-turn subagent settlement Notice) joins
- * that hidden set INSTEAD of the
- * post-Thought rule above when a real Thought owner exists; without one every
- * row must fail open. The ORDINARY Notice position decision reads the semantic
- * `form`, raw adjacency and raw position, never a producer name; the Working
- * exceptions additionally require their exact `sourceKind`/`form` pair AND the
- * durable same-turn next-step claim. `Compact` and `Full` do not route through
- * here.
+ * carried Context row (see `workContextCarriageOf`) joins that hidden set
+ * INSTEAD of the post-Thought rule above when a real Thought owner exists;
+ * without one every row must fail open. The ORDINARY Notice position decision
+ * reads the semantic `form`, raw adjacency and raw position, never a producer
+ * name; the carried exceptions additionally require their exact
+ * `sourceKind`/`form` pair and the durable same-turn next-step provenance, and
+ * the `work`/`trailing-work` classes require their REAL canonical Work owner.
+ * `Compact` and `Full` do not route through here.
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
-/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice,
- * Agent relay, subagent settlement Notice, repeat-tool-reminder Notice or
- * image-bearing PTC Context) a collapsed Thought may carry instead of
- * surfacing as turn foundation.
+/** The carried Context rows a collapsed Thought may hide instead of surfacing
+ * as turn foundation.
  * `thoughtOwned` is false where no Thought block will be emitted (a truncated
  * window without an activity) — the rows then fail open instead of disappearing.
- * `workByMember` is the same group's canonical Work membership, used by the
- * Agent-relay rule: a claimed relay is only carried when a REAL Process run
- * owns it, so an activity-only turn (no Process at all) fails open. Snapshot
- * and Working tool-jobs Notice keep their established activity-owner rule; a
- * settled subagent Notice follows the Agent-relay rule because its body is the
- * recoverable child result and must never be lost, a repeat-tool reminder
- * follows that same rule because its payload is the only account of why the
- * same call was repeated, and an image-bearing PTC Context follows it because
- * its media/content is otherwise unreachable when the Thought is collapsed.
+ * `workByMember` is the same group's canonical Work membership: the `work` and
+ * `trailing-work` carriage classes are hidden only when a REAL Process run owns
+ * them, so an activity-only turn (no Process at all), an opening position or an
+ * independent card fails open. Snapshot and Working tool-jobs Notice keep the
+ * Thought-only recoverability exception.
  * The Thought-lead boundary decides WHICH rows are foundation; anything at or
  * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {
@@ -854,17 +843,17 @@ function collapsedFocusRowDisposition(
   foldableSnapshots: CollapsedFoldableSnapshotScope,
 ): CollapsedFocusRowDisposition {
   if (!isFocusPersistentInputRow(message)) return 'hidden'
-  if (foldableSnapshots.thoughtOwned
-    && index >= leadBoundary
-    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)
-    // A claimed Agent relay, subagent settlement Notice, repeat-tool
-    // reminder or image-bearing PTC Context additionally needs its REAL Work
-    // (Process) owner: an activity-only turn has no Process for the Context to
-    // be recovered through, so hiding it there would lose the original
-    // Context (and the child's reported result / reminder body / image).
-    && (!(isWorkingAgentRelay(message) || isWorkingSubagentSettledNotice(message)
-      || isWorkingRepeatToolReminderNotice(message) || isWorkingPtcImageContext(message))
-      || foldableSnapshots.workByMember.has(message))) return 'hidden'
+  if (foldableSnapshots.thoughtOwned && index >= leadBoundary) {
+    const carriage = workContextCarriageOf(message, foldableSnapshots.clusterByMember)
+    // `thought` keeps the accepted Thought-only recoverability exception
+    // (foldable Snapshot, proven Working tool-jobs Notice). `work` and
+    // `trailing-work` are hidden only through the REAL canonical Work span that
+    // owns them: an activity-only turn, an opening position or an independent
+    // fail-open card never loses the recoverable Context.
+    if (carriage === 'thought'
+      || ((carriage === 'work' || carriage === 'trailing-work')
+        && foldableSnapshots.workByMember.has(message))) return 'hidden'
+  }
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
@@ -873,13 +862,14 @@ function collapsedFocusRowDisposition(
  * Thought. It starts after the FIRST unmarked user row when one exists; a turn
  * with no human user (an inject-woken / next-turn wakeup turn) starts at the
  * group beginning. In both cases the boundary then consumes leading surfaced
- * Context rows that are NOT foldable (the wakeup cause, `instructions`,
- * `catalog`, an unqualified notice or relay). The first FOLDABLE Context row
- * (Snapshot, a proven Working tool-jobs Notice, Agent relay or subagent
- * settlement Notice) ends the
- * foundation and becomes Thought content — so a next-turn wakeup notice stays
- * visible while the Snapshot and same-turn deliveries that arrive during the
- * work fold with it. A mixed
+ * Context rows that are NOT Thought/Work carriage candidates (the wakeup cause,
+ * `instructions`, an independent or not-yet-attachable `catalog`, an
+ * unqualified notice or relay). The first carried Context row (`thought` or
+ * `work`) ends the foundation and becomes Thought content — so a next-turn
+ * wakeup notice stays visible while the Snapshot and same-turn deliveries that
+ * arrive during the work fold with it. A `trailing-work` catalog (and an
+ * independent catalog) remains foundation content until a real preceding Work
+ * exists and it is actually carried. A mixed
  * `instructions`/`catalog` + Snapshot cluster keeps its indivisible foundation
  * position. `llm/retry`/max-token orchestration rows are not surfaced Context,
  * so they never enter the prefix. Without steer metadata the first user remains
@@ -893,7 +883,11 @@ export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): n
   while (true) {
     const member = group[end]
     if (member === undefined || !isSurfacedContext(member)) break
-    if (isFoldableWorkContext(member, clusterByMember)) break
+    const carriage = workContextCarriageOf(member, clusterByMember)
+    // The foundation stops at a Thought/Work-carried Context candidate. A
+    // `trailing-work` catalog (like an independent catalog) remains foundation
+    // content until a real preceding Work exists; it can never start one.
+    if (carriage === 'thought' || carriage === 'work') break
     end += 1
   }
   return end

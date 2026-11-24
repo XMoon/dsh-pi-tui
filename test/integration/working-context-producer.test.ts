@@ -30,12 +30,16 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import { LlmAdapter, ToolCallId, createUserMessage, type ContentBlock, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import * as toolSkill from '@deepseek-ai/dsh-tool-skill'
 import SubprocessLocal from '@deepseek-ai/dsh-subprocess-local'
 import SandboxLocal from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
+import type { TranscriptMessage } from '../../src/domain/transcript/types.ts'
 import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const requireFromBase = createRequire(requireFromBasePath())
@@ -101,6 +105,7 @@ interface Harness {
   readonly adapter: ScriptedAdapter
   readonly agent: {
     followup(message: unknown): void
+    inject(message: unknown): void
     whenIdle(): Promise<void>
     session: { id: string; snapshotEvents(): readonly SessionEvent[] }
   }
@@ -278,4 +283,163 @@ test('the REAL PTC executor emits an image-bearing same-turn Context that the pr
   assert.ok(unclaimedRow !== undefined && unclaimedRow.kind === 'system')
   assert.equal(unclaimedRow.contextPresentation?.sameTurnNextStep, undefined,
     'the same PTC image Context without the durable claim fails open')
+})
+
+test('the REAL skill-catalog producer publishes a complete same-turn update that one Work carries', async (t) => {
+  const life = testLifecycle(t)
+  const harness = await boot(life, 'catalog', 'native', async (ctx) => {
+    await mountPlugin(ctx, SkillRegistry)
+    await mountPlugin(ctx, toolSkill)
+    ctx.skills.register({
+      name: 'alpha-catalog-skill',
+      description: 'First deterministic catalog skill.',
+      source: 'runtime',
+      content: 'Alpha body.',
+    })
+    ctx.tools.register(defineContentToolFixture({
+      name: 'catalog_refresh_probe',
+      description: 'registers a second real skill and returns a normal result',
+      parameters: {},
+      execute: async () => {
+        ctx.skills.register({
+          name: 'beta-catalog-skill',
+          description: 'Second deterministic catalog skill.',
+          source: 'runtime',
+          content: 'Beta body.',
+        })
+        return [{ type: 'text', text: 'catalog refreshed' }]
+      },
+    }))
+    ctx.tools.register(defineContentToolFixture({
+      name: 'after_catalog_probe',
+      description: 'returns a normal result after the catalog update',
+      parameters: {},
+      execute: async () => [{ type: 'text', text: 'after catalog' }],
+    }))
+  })
+  await harness.run(
+    () => [{ callId: 'catalog-refresh-call', name: 'catalog_refresh_probe', args: {} }],
+    () => [{ callId: 'after-catalog-call', name: 'after_catalog_probe', args: {} }],
+    () => [],
+  )
+  const events = harness.agent.session.snapshotEvents()
+  const catalogs = events.filter((event): event is Extract<SessionEvent, { type: 'user/message' }> =>
+    event.type === 'user/message'
+    && (event.data.source as { kind?: string }).kind === 'skill-catalog')
+  assert.equal(catalogs.length, 2, 'the real producer published one initial catalog and one complete update')
+  const initial = catalogs[0]!.data
+  const updated = catalogs[1]!.data
+  const initialSource = initial.source as { update?: unknown; incomplete?: unknown; entries: readonly { name: string }[] }
+  const updatedSource = updated.source as { update?: unknown; incomplete?: unknown; entries: readonly { name: string }[] }
+  assert.equal(initialSource.update, undefined, 'the first publication is not an update')
+  assert.equal(Object.hasOwn(updatedSource, 'incomplete'), false, 'the replacement is a COMPLETE discovery')
+  assert.equal(updatedSource.update, true)
+  assert.deepEqual(initialSource.entries.map(entry => entry.name), ['alpha-catalog-skill'])
+  assert.deepEqual(updatedSource.entries.map(entry => entry.name), ['alpha-catalog-skill', 'beta-catalog-skill'])
+
+  // No fabricated inbox identity: the catalog arrives as a direct pre-step
+  // append, never through the next-step insert/claim chain.
+  const inboxText = eventTexts(events, 'agent/inbox/spliced').join('\n')
+  assert.equal(inboxText.includes(initial.id), false, 'the initial catalog is not an inbox item')
+  assert.equal(inboxText.includes(updated.id), false, 'the update is not an inbox item')
+
+  // Exact causal position: the update lands in the SAME open turn AFTER the
+  // first real tool result and BEFORE the second tool call/request.
+  const updatedIndex = events.indexOf(catalogs[1]!)
+  const firstResultIndex = events.findIndex(event => event.type === 'tool/result')
+  const secondCallIndex = events.findIndex((event, index) => index > firstResultIndex && event.type === 'tool/call')
+  assert.ok(firstResultIndex >= 0 && secondCallIndex > firstResultIndex, 'fixture: both real tool calls/results landed')
+  assert.ok(updatedIndex > firstResultIndex && updatedIndex < secondCallIndex,
+    'the complete update is admitted after the first real Process result and before the second request')
+  const turnStarts = events.filter(event => event.type === 'turn/start')
+  const turnEnds = events.filter(event => event.type === 'turn/end')
+  assert.equal(turnStarts.length, 1)
+  assert.equal(turnEnds.length, 1)
+  assert.ok(events.indexOf(turnStarts[0]!) < updatedIndex && updatedIndex < events.indexOf(turnEnds[0]!))
+
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const messages = folder.messages()
+  const catalogRows = messages.filter((row): row is Extract<TranscriptMessage, { kind: 'system' }> => row.kind === 'system'
+    && row.contextPresentation?.sourceKind === 'skill-catalog')
+  assert.equal(catalogRows.length, 2)
+  const [initialRow, updatedRow] = catalogRows
+  assert.ok(initialRow !== undefined && updatedRow !== undefined)
+  assert.equal(initialRow.contextPresentation?.completeCatalogUpdate, undefined)
+  assert.equal(initialRow.contextPresentation?.sameTurnNextStep, undefined)
+  assert.equal(updatedRow.contextPresentation?.completeCatalogUpdate, true,
+    'the fold records the complete replacement as one source fact')
+  assert.equal(updatedRow.contextPresentation?.sameTurnNextStep, undefined,
+    'a direct pre-step append is not an inbox claim')
+
+  const structure = projectTranscriptStructure(messages)
+  const works = structure.filter(block => block.kind === 'work')
+  assert.equal(works.length, 1, 'the complete update does not split the one real same-turn Activity')
+  const span = works[0]!.span
+  assert.ok(span.members.includes(updatedRow), 'the complete update is carried by the real Work')
+  assert.equal(span.members.includes(initialRow), false, 'the initial catalog stays an independent boundary')
+  assert.ok(span.members.indexOf(updatedRow) > span.members.indexOf(messages.find(row => row.kind === 'tool' && row.name === 'catalog_refresh_probe')!),
+    'the carried update keeps its raw position after the first real result')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'the catalog adds no Action')
+})
+
+test('a rejected same-turn claim is retired and cannot become a later delivery', async (t) => {
+  const life = testLifecycle(t)
+  const rejected = createUserMessage({
+    content: [{ type: 'text', text: 'REJECTED_SAME_TURN_BODY' }],
+    source: { kind: 'system-prompt', form: 'notice', summary: 'rejected goal round' },
+  })
+  let rejectedOnce = false
+  let injectRejected: () => void = () => {}
+  const harness = await boot(life, 'reject', 'native', async (ctx) => {
+    ctx.on('agent/pre-step', async (_payload, next) => {
+      const decision = await next()
+      if (decision.kind === 'reject') return decision
+      if (!rejectedOnce && decision.messages.some(message => message.id === rejected.id)) {
+        rejectedOnce = true
+        return { kind: 'reject' as const }
+      }
+      return decision
+    })
+    ctx.tools.register(defineContentToolFixture({
+      name: 'reject_probe',
+      description: 'injects one next-step message that the real pre-step rejects',
+      parameters: {},
+      execute: async () => {
+        injectRejected()
+        return [{ type: 'text', text: 'reject probe result' }]
+      },
+    }))
+  })
+  injectRejected = () => harness.agent.inject(rejected)
+  await harness.run(() => [{ callId: 'reject-call', name: 'reject_probe', args: {} }], () => [])
+  assert.equal(rejectedOnce, true, 'the real pre-step waterfall rejected the claimed identity')
+  const firstEvents = harness.agent.session.snapshotEvents()
+  assert.equal(firstEvents.some(event => event.type === 'user/message' && event.data.id === rejected.id), false,
+    'the rejected claimed identity never materialized as a user/message')
+  const splices = firstEvents.filter(event => event.type === 'agent/inbox/spliced')
+  assert.ok(splices.some(event => JSON.stringify(event.data.inserted).includes(rejected.id)),
+    'the fixture produced the real next-step insertion')
+  const claim = splices.find(event => {
+    const data = event.data
+    return data.target === 'next-step' && data.start === 0 && data.removedCount === 1
+      && Array.isArray(data.inserted) && data.inserted.length === 0 && data.outcome === undefined
+  })
+  assert.ok(claim !== undefined, 'the fixture produced the official full-drain claim')
+  assert.equal(firstEvents.filter(event => event.type === 'turn/end').length, 1,
+    'the rejected claim does not prevent the owning turn from closing')
+
+  // The SAME id in a later legitimate prompt is an independent ordinary
+  // admission, never resurrected same-turn provenance.
+  await harness.run(() => [])
+  const events = harness.agent.session.snapshotEvents()
+  assert.equal(events.filter(event => event.type === 'turn/start').length, 2)
+  assert.equal(events.filter(event => event.type === 'turn/end').length, 2)
+  assert.equal(events.some(event => event.type === 'user/message' && event.data.id === rejected.id), false)
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  assert.equal(folder.messages().some(row => row.kind === 'system' && row.text.includes('REJECTED_SAME_TURN_BODY')), false,
+    'the rejected claimed identity never appears as a Context row')
+  assert.equal(folder.messages().some(row => row.kind === 'system' && row.contextPresentation?.sameTurnNextStep === true), false,
+    'no later row inherits the rejected claim')
 })

@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { Session } from '@deepseek-ai/dsh-session'
 import { registerHooks } from 'node:module'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const paneRoot = process.env.TERN_PANE_DIR
 if (paneRoot === undefined) throw new Error('TERN_PANE_DIR is required by the Focus-turn subject')
@@ -474,6 +475,27 @@ try {
       const toolCallId = (data as { readonly message?: { readonly toolCallId?: unknown } } | undefined)?.message?.toolCallId
       if (!commandInjected && type === 'tool/result' && String(toolCallId) === 'focus-command-a') {
         commandInjected = true
+        // One deterministic COMPLETE skill-catalog replacement between the Work A
+        // member and the delayed command boundary. It is a direct pre-step
+        // append (no inbox claim) and must be carried by Work A; its body marker
+        // is unique so a collapsed header can never satisfy the disclosure check.
+        const catalog = originalAppend.call(this, 'user/message', createUserMessage({
+          content: [{
+            type: 'text',
+            text: 'Skill catalog refresh for the Focus qualification.\nTERN-CATALOG-BODY-MARKER the complete replacement catalog row must trail Work A.',
+          }],
+          source: {
+            kind: 'skill-catalog',
+            form: 'catalog',
+            update: true,
+            entries: [{ name: 'focus-qualification-skill', description: 'deterministic qualification skill' }],
+          },
+        }), { surfaceOp: 'append' })
+        note({
+          kind: 'catalog.injected',
+          after: toolCallId,
+          time: (catalog as { readonly time?: unknown }).time,
+        })
         // A measurable gap between the Work member and the real command
         // boundary: the Activity duration must freeze at the command time, not
         // at the member settle and not at a later event.

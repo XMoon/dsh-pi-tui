@@ -289,6 +289,47 @@ test('a carried Snapshot Context is a flat member of the open Work and never a c
     'clusterHeader:false paints no second, inoperable Context disclosure root')
 })
 
+test('a carried complete catalog update is a flat member of the open Work and never a counted Action', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'user-1', 'read with a catalog update'),
+    toolCall(2, 'call-read', 'read'),
+    toolResult(3, 'call-read', 'body'),
+    ev('user/message', {
+      id: MessageId('catalog-1'),
+      role: 'user',
+      content: [{ type: 'text', text: 'complete catalog update body' }],
+      source: { kind: 'skill-catalog', form: 'catalog', update: true, entries: [{ name: 'tsp-skill', description: 'tsp skill' }] },
+    }, 4),
+    toolCall(5, 'call-bash', 'bash'),
+    toolResult(6, 'call-bash', 'hi'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 7),
+  ])
+  const messages = folder.messages()
+  const spans = projectTranscriptStructure(messages).flatMap(block => block.kind === 'work' ? [block.span] : [])
+  assert.equal(spans.length, 1, 'the complete replacement is carried by the same-turn Work')
+  assert.equal(summarizeWorkSpan(spans[0]!).actionStats.total, 2, 'the catalog contributes no Action')
+  const owner = spans[0]!.owner
+  const nodes = flatten(messages, {
+    preset: 'compact', scopePrefix: 's1-', window: LATEST_WINDOW, expandedWorkOwners: new Set([owner]),
+  })
+  const section = nodesOf(nodes, 'section')[0]!
+  assert.ok(descendantText(nodes, section.id).includes('complete catalog update body'),
+    'the carried catalog is restored inside the open Work')
+  assert.ok(descendantText(nodes, section.id).includes('read ×1'), 'the header counts the first real action')
+  assert.ok(descendantText(nodes, section.id).includes('bash ×1'), 'the header counts the second real action')
+
+  // Full keeps the exact raw chronology with no Activity container.
+  const full = flatten(messages, { preset: 'full', scopePrefix: 's1-' })
+  assert.equal(nodesOf(full, 'section').length, 0)
+  const rows = full.filter(node => node.parent === 'main' && node.id !== 'main')
+  const catalogIndex = rows.findIndex(node => descendantText(full, node.id).includes('complete catalog update body'))
+  const readIndex = rows.findIndex(node => descendantText(full, node.id).includes('body'))
+  const bashIndex = rows.findIndex(node => descendantText(full, node.id).includes('hi'))
+  assert.ok(catalogIndex > readIndex && catalogIndex < bashIndex,
+    'Full keeps the catalog at its exact raw position between the two Process rows')
+})
+
 // ── Thought identity and stats authority ────────────────────────────────────
 
 test('a settled historical think-only Work reads Thought while an orphan result keeps Activity with zero counted actions', () => {

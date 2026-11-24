@@ -123,11 +123,26 @@ export function contextPresentation(source: unknown): TranscriptContextPresentat
   const form = record['form']
   const formDeclared = Object.hasOwn(record, 'form')
   const senderSessionId = readString(record, 'senderSessionId')
+  // The ONE complete skill-catalog replacement shape (D3): exact producer
+  // kind + form, an explicit `update:true`, no `incomplete` member, and a
+  // readable entries array (empty is a valid complete revoke). This records
+  // the source fact only; it is never a "collapsible" boolean.
+  const entries = record['entries']
+  const completeCatalogUpdate = kind === 'skill-catalog'
+    && form === 'catalog'
+    && record['update'] === true
+    && !Object.hasOwn(record, 'incomplete')
+    && Array.isArray(entries)
+    && entries.every((entry) => {
+      const item = asRecord(entry)
+      return item !== null && readString(item, 'name') !== null && typeof item['description'] === 'string'
+    })
   return {
     ...isTranscriptContextForm(form) ? { form } : {},
     ...formDeclared ? { formDeclared: true as const } : {},
     ...kind === null ? {} : { sourceKind: kind },
     ...senderSessionId === null ? {} : { senderSessionId },
+    ...completeCatalogUpdate ? { completeCatalogUpdate: true as const } : {},
     role,
   }
 } // contextPresentation

@@ -77,7 +77,7 @@ projectTranscriptStructure()
         │
         ├── Message
         ├── Work span        (maximal contiguous same-turn Process run,
-        │                      carrying foldable Snapshot Context parts)
+        │                      carrying eligible Context parts)
         └── Context cluster  (raw-adjacent same-turn ambient Context run)
 ```
 
@@ -90,15 +90,20 @@ projectTranscriptStructure()
   interaction (question / Plan review) closes the trailing run everywhere.
   A same-turn `form:'snapshot'` Context row, a proven Working `tool-jobs`
   Notice, a proven same-turn `agent-message` relay, a proven same-turn
-  `subagent-settled` Notice, a proven same-turn `repeat-tool-reminder` Notice
-  or a proven same-turn image-bearing `ptc-mode` Context may be CARRIED by a
-  Work span, but carriage is the separate display predicate
-  `isFoldableWorkContext()` (`isFoldableSnapshotContext()` for Snapshots;
-  exact source-form pair + the durable same-turn next-step claim flag for
+  `subagent-settled` Notice, a proven same-turn `repeat-tool-reminder` Notice,
+  a proven same-turn image-bearing `ptc-mode` Context, or a COMPLETE
+  `skill-catalog` replacement may be CARRIED by a Work span, but carriage is
+  the separate display policy `workContextCarriageOf()`
+  (`isFoldableSnapshotContext()` for Snapshots; exact source-form pair + the
+  durable same-turn next-step delivery flag for
   `tool-jobs`/`notice`, `agent-message`/`relay`, `subagent-settled`/`notice`
   and `repeat-tool-reminder`/`notice`; structured image content + the same
-  claim for `ptc-mode`, which has no form). It never becomes Process,
-  never changes this predicate, and never enters Action/timing aggregates.
+  delivery flag for `ptc-mode`, which has no form; the exact complete-update
+  source fact for a raw-singleton catalog replacement). The policy answers the
+  carriage class (`thought` / `work` / `trailing-work`), so Focus can keep its
+  Thought-only recoverability exception separate from rows that require a real
+  canonical Work member. A carried row never becomes Process, never changes
+  this predicate, and never enters Action/timing aggregates.
 - `clusterAdjacentAmbientContext()` remains the single cluster membership
   authority, computed from raw adjacency before any row is hidden. A
   snapshot-only cluster can be nested inside a Work span as one structural
@@ -326,18 +331,24 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
 - Every surfaced Context presentation is a Work boundary **except a foldable
   Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn
   `agent-message` relay, a proven same-turn `subagent-settled` Notice, a proven
-  same-turn `repeat-tool-reminder` Notice or a proven same-turn image-bearing
-  `ptc-mode` Context** (Owner decision): a `form:'snapshot'` singleton,
-  snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice`,
+  same-turn `repeat-tool-reminder` Notice, a proven same-turn image-bearing
+  `ptc-mode` Context or a COMPLETE `skill-catalog` replacement that trails an
+  already-established same-turn Work** (Owner decision): a `form:'snapshot'`
+  singleton, snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice`,
   `agent-message`/`relay`, `subagent-settled`/`notice`,
   `repeat-tool-reminder`/`notice` or image-bearing `ptc-mode` row with the
-  durable same-turn `next-step` claim flag
-  is carried by the same-turn Work instead of splitting it. A
+  durable same-turn `next-step` delivery evidence is carried by the same-turn
+  Work instead of splitting it. A complete catalog replacement requires the
+  exact complete-update source fact and a RAW SINGLETON: it only TRAILS an
+  already-established same-turn real Work run (never opens one, never waits as
+  a pending prefix, never bridges two), and a mixed/multi-row ambient cluster
+  stays indivisible. A
   `ptc-mode` row that declares a form never qualifies as a Snapshot through
   either the singleton or the snapshot-only-cluster route (the real PTC
   producer omits `form`); it stays an independent Context while its structured
   media still renders. A mixed `instructions`/`catalog` + `snapshot` cluster,
-  an unqualified/foreign `notice`/`relay`, `recall` and every unknown form
+  an unqualified/foreign `notice`/`relay`, an initial or incomplete catalog,
+  `recall` and every unknown form
   remain boundaries. The
   carried Context keeps its own row/cluster disclosure inside the expanded
   Work; a collapsed Work shows neither its header nor its body. Context never
@@ -443,9 +454,16 @@ Surfaced Context
 ```
 
 - `contextPresentation(source)` is the single parser of raw context sources
-  (`context.ts`); no other layer re-parses the source. The fold may add the
-  presentation-only `sameTurnNextStep` flag from its durable inbox claim chain;
-  that flag never rewrites the parsed source facts.
+  (`context.ts`); no other layer re-parses the source. It also records the ONE
+  complete `skill-catalog` replacement source fact
+  (`completeCatalogUpdate`): exact `kind:'skill-catalog'` + `form:'catalog'` +
+  `update:true`, no `incomplete` member, and a readable `entries` array whose
+  items each carry a real name string and a description string (an empty array
+  is a valid complete revoke). That field is a source fact, never a
+  "collapsible" boolean. The fold may add the presentation-only
+  `sameTurnNextStep` flag from its durable inbox claim chain; that flag is pure
+  positive DELIVERY provenance for any source/form and never rewrites the
+  parsed source facts.
 - Unknown or absent forms are never coerced into the ambient role.
 - A notice shows its producer-authored `summary` below the header at normal
   brightness, wrapped naturally at render time. The TUI never invents a
@@ -571,35 +589,41 @@ the same-turn Work?":
 
 ### Working same-turn delivery follows Work
 
-Five narrow non-Snapshot Context deliveries have the same carriage: a
-producer-declared `kind:'tool-jobs'` / `form:'notice'` completion Notice, a
-producer-declared `kind:'agent-message'` / `form:'relay'` message, a
-producer-declared `kind:'subagent-settled'` / `form:'notice'` settlement
-report, a producer-declared `kind:'repeat-tool-reminder'` / `form:'notice'`
-repeat-call reminder, or an image-bearing `kind:'ptc-mode'` Context (that
-producer declares NO form), that the agent inbox delivered through
-**`next-step` during the same still-working turn**. This is a deliberately
-narrow exception, never a generic notice/relay/context rule:
+The fold records ONE pure positive delivery fact, independent of source, form
+and content: `contextPresentation.sameTurnNextStep` means the exact identity
+entered the `next-step` inbox, was claimed by the SAME still-open turn in the
+official full-drain shape, and then materialized as the actual `user/message`.
+It is derived from the durable `agent/inbox/spliced` insert/claim identity
+chain — never from `Agent.status`, the summary/body text, the TUI Working
+indicator or visual adjacency. Its absence means UNPROVEN, never "not
+delivered". A proven delivery does not by itself hide the row.
+
+Carriage is a SEPARATE display decision (`workContextCarriageOf`). Five narrow
+non-Snapshot Context deliveries qualify: a producer-declared `kind:'tool-jobs'`
+/ `form:'notice'` completion Notice, a producer-declared `kind:'agent-message'`
+/ `form:'relay'` message, a producer-declared `kind:'subagent-settled'` /
+`form:'notice'` settlement report, a producer-declared
+`kind:'repeat-tool-reminder'` / `form:'notice'` repeat-call reminder, or an
+image-bearing `kind:'ptc-mode'` Context (that producer declares NO form). This
+is a deliberately narrow exception, never a generic notice/relay/context rule:
 
 - Qualification requires ALL of: surfaced Context + either the EXACT
   source/form pair (`tool-jobs`/`notice`, `agent-message`/`relay`,
   `subagent-settled`/`notice` or `repeat-tool-reminder`/`notice`) or the
   structured `ptc-mode` + at least one real `image` ContentBlock fact
-  (`isPtcImageContext`) + NO declared `form` at all + the fold's
-  presentation-only `contextPresentation.sameTurnNextStep` flag. The fold
-  retains the raw presence (`contextPresentation.formDeclared`) separately
+  (`isPtcImageContext`) + NO declared `form` at all, AND the fold's
+  presentation-only `contextPresentation.sameTurnNextStep` delivery fact. The
+  fold retains the raw presence (`contextPresentation.formDeclared`) separately
   from the recognized semantic `form`, because an unknown or non-string form
   must also fail open; a `ptc-mode` row that declares any form is a
-  malformed/foreign source and none is invented. That flag is derived by the
-  `TranscriptFolder` from the durable `agent/inbox/spliced` insert/claim
-  identity chain (the same message id inserted into `next-step`, claimed, then
-  materialized as `user/message` in the SAME turn) — never from
-  `Agent.status`, the summary/body text, the TUI Working indicator or visual
-  adjacency.
+  malformed/foreign source and none is invented. A crossed source/form pair,
+  a claimed but unqualified producer (for example a tool-goal Notice) and a
+  text-only PTC Spill/Reset Context can still carry the pure delivery fact, but
+  their carriage stays `undefined` and they remain independent rows.
 - A `next-turn` idle wakeup, a next-step message claimed in a DIFFERENT turn,
-  a foreign/legacy log, a missing claim, a crossed source/form pair, a
-  text-only `ptc-mode` Spill/Reset Context, a `ptc-mode` image Context that
-  declares a form, a non-`ptc-mode` image Context, or any other producer
+  a foreign/legacy log, a missing or non-official claim, a crossed source/form
+  pair, a text-only `ptc-mode` Spill/Reset Context, a `ptc-mode` image Context
+  that declares a form, a non-`ptc-mode` image Context, or any other producer
   (recall, unknown and future producers) keeps the existing independent
   Context behavior: the delivery explains why the agent was woken and must
   stay visible.
@@ -627,10 +651,39 @@ narrow exception, never a generic notice/relay/context rule:
   never parsed. An image-bearing PTC Context is folded only when its structured
   `content` carries a real image block AND the claim exists; a text-only PTC
   Spill or environment reset is never image-bearing and stays independent.
-- The durable claim flag is presentation-only (`sameTurnNextStep` on
+- The durable delivery fact is presentation-only (`sameTurnNextStep` on
   `TranscriptContextPresentation`); it is never written back to the Session
   source, message, model input or Host/Remote wire. Search/click/Ctrl+O,
   nested ancestry and capability fail-open are the same as Snapshot carriage.
+
+### Complete skill-catalog replacement trails Work
+
+A producer-declared complete replacement of the available-skills catalog is
+the one carriage class that needs NO inbox claim: the real `tool-skill` producer
+writes it directly into the pre-step decision. The exact source fact
+(`contextPresentation.completeCatalogUpdate`) is surfaced Context + the exact
+`kind:'skill-catalog'`/`form:'catalog'` pair + `update:true` + no `incomplete`
+member + a readable entries array. Initial publication, an incomplete discovery
+attempt, malformed entries, a foreign source kind and a legacy row without
+`update:true` stay ordinary independent Context.
+
+- A complete update is `trailing-work`: it may only append to an ALREADY
+  ESTABLISHED same-turn real Process run. It never opens a Work, never waits as
+  a pending prefix, never bridges two runs and never turns into Process. Without
+  that exact run it remains the standalone Context boundary it already was.
+- It must be a RAW SINGLETON. A raw-adjacent ambient cluster containing the
+  update (for example `instructions`/`catalog`, two consecutive refreshes or a
+  catalog + snapshot run) is one indivisible boundary and is never torn apart.
+- Full keeps the raw chronology and the row; Compact folds it under the
+  Activity and restores the original row/cluster disclosure when the Work
+  opens; collapsed Focus hides it only through the REAL canonical Work
+  membership of the same Thought root, and expanded Focus restores it once in
+  raw order. An opening, ownerless, incomplete or independent catalog fails
+  open and grants no synthetic Work or Focus root.
+- It stays Context: its point sidecar remains raw evidence but never contributes
+  Action, ActionStats or member timing. A carried catalog never becomes the
+  Activity close boundary; an independent catalog keeps closing the preceding
+  Activity at its own first-visible point.
 
 ### Surfaced interaction evidence (settled question / Plan review)
 
@@ -705,11 +758,12 @@ class:
 - An opening ambient burst (the initial user plus the immediately following
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the
-  Thought is expanded. **Exception:** a foldable Context row (Snapshot, a
+  Thought is expanded. **Exception:** a carried Context row (Snapshot, a
   proven Working `tool-jobs` Notice, a proven same-turn `agent-message` relay,
   a proven same-turn `subagent-settled` Notice, a proven same-turn
-  `repeat-tool-reminder` Notice or a proven same-turn image-bearing `ptc-mode`
-  Context) after the initial user stops the foundation boundary and follows the
+  `repeat-tool-reminder` Notice, a proven same-turn image-bearing `ptc-mode`
+  Context or a complete catalog replacement that really trails this Turn's Work)
+  after the initial user stops the foundation boundary and follows the
   Thought instead (hidden while
   collapsed, restored once in raw order when expanded); a mixed
   `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
@@ -717,24 +771,28 @@ class:
   never moved across that user.
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
   `tool-jobs` Notice, same-turn Agent relay, same-turn subagent settlement
-  Notice, same-turn repeat-tool reminder or same-turn image-bearing PTC
-  Context with a Thought owner) inside its
+  Notice, same-turn repeat-tool reminder, same-turn image-bearing PTC
+  Context or a complete catalog replacement that really trails a Work, all
+  with a Thought owner) inside its
   real Thought; all remain recoverable there. A same-turn Agent relay, a
-  subagent settlement Notice, a repeat-tool reminder and an image-bearing PTC
-  Context additionally require a REAL Work (Process) owner:
+  subagent settlement Notice, a repeat-tool reminder, an image-bearing PTC
+  Context and a complete catalog replacement additionally require a REAL Work
+  (Process) owner:
   the row must be a member
   of a canonical Work span, so a Process elsewhere in the same turn is not
   enough when a hard boundary separates the row from it. Without that owner
   the row stays independently visible (fail open) instead of disappearing
   into an activity-only Thought.
 - **Userless (next-turn wakeup) turns:** there is no initial user to anchor the
-  foundation. The leading run of NON-foldable Context — the wakeup Notice and
-  any `instructions`/`catalog` — is the foundation; the first foldable
+  foundation. The leading run of NON-carried Context — the wakeup Notice and
+  any `instructions`/`catalog` — is the foundation; the first carried
   Snapshot, proven Working `tool-jobs` Notice, same-turn Agent relay,
-  same-turn subagent settlement Notice, same-turn repeat reminder or
-  same-turn image-bearing PTC Context starts Thought content. The wakeup cause therefore stays visible while later
-  internal Snapshot / next-step deliveries fold, and expanded Focus restores
-  them once in raw order.
+  same-turn subagent settlement Notice, same-turn repeat reminder,
+  same-turn image-bearing PTC Context or complete catalog replacement that
+  really trails a Work starts Thought content. An opening or independent
+  catalog remains foundation content. The wakeup cause therefore stays visible
+  while later internal Snapshot / next-step deliveries fold, and expanded Focus
+  restores them once in raw order.
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
@@ -744,11 +802,12 @@ class:
   inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
   BEFORE the Thought because it explains why the turn started; an UNQUALIFIED
   mid-turn relay stays visible because it is external Agent-authored input.
-  **Working-delivery exception:** a `tool-jobs`/`notice`,
+  **Working-delivery exception:** a carried `tool-jobs`/`notice`,
   `agent-message`/`relay`, `subagent-settled`/`notice`,
-  `repeat-tool-reminder`/`notice` or image-bearing `ptc-mode` row with the
-  durable same-turn `next-step` claim flag follows the Thought instead (hidden
-  while collapsed, restored once in raw order); `next-turn` wakeups, text-only
+  `repeat-tool-reminder`/`notice` or image-bearing `ptc-mode` row follows the
+  Thought instead (hidden while collapsed, restored once in raw order); a
+  complete catalog replacement follows it only when its real Work membership
+  exists. `next-turn` wakeups, text-only
   `ptc-mode` Spill/Reset and every unqualified/foreign notice or relay keep
   this existing post-Thought or foundation rule. Settlements of every outcome
   share this rule. Expanded Focus restores
@@ -1306,8 +1365,11 @@ These guarantees hold under bad input, long sessions and rapid live updates:
   arrays. The fold reads the source kind through the single parser
   (`contextPresentation`) and degrades such rows to a standalone generic Context
   row: never a crash, never a fabricated summary/sender/label, never an invented
-  ambient role. A legacy `session-reference` keeps its recall role with or
-  without a declared form.
+  ambient role. A malformed or incomplete catalog source (missing/non-array
+  `entries`, an entry without a non-empty name or a string description, a
+  declared `incomplete`) never admits the complete-update carriage fact. A
+  legacy `session-reference` keeps its recall role with or without a declared
+  form.
 - **Large-history scaling.** `projectCompact`, `clusterAdjacentAmbientContext`
   and the cluster summary stay linear. The transcript presentation memoizes the
   active search reveal owner per projection (keyed on the target, preset,
@@ -1327,9 +1389,11 @@ These guarantees hold under bad input, long sessions and rapid live updates:
   mutation re-resolves the current container path instead of a stale identity;
   and an UNQUALIFIED mid-turn notice is already visible outside the collapsed
   Thought, so search reaches it through the ordinary row/message disclosure
-  paths. A proven Working same-turn delivery (`tool-jobs` Notice, Agent relay
-  or subagent settlement Notice) is hidden with the Work/Thought and resolves
-  through that ancestor path instead.
+  paths. A carried same-turn delivery or complete catalog replacement (the
+  exact rows listed under "Working same-turn delivery" and "Complete
+  skill-catalog replacement") is hidden with the real Work/Thought and resolves
+  through that ancestor path; a raw delivery flag without the exact carriage
+  shape is not hidden and needs no synthetic root.
 - **Width / grapheme.** Every transcript row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and

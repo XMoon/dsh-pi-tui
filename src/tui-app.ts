@@ -363,7 +363,7 @@ import { focusHeldBackFinalByTurn, focusLiveTailPlacement, focusMaterializedMess
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isFoldableWorkContext, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
+import { clusterByMemberOf, projectTranscriptStructure, workByMemberOf, workContextCarriageOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRevealAncestry } from './tui/transcript/reveal.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerOwner, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
@@ -11395,10 +11395,12 @@ export class TuiApp {
       // Compaction cards are emitted by BOTH Focus branches (collapsed and
       // expanded), so they are always materialized in the current window.
       if (message.kind === 'compaction') return true
-      // A foldable Context row (Snapshot / proven Working tool-jobs Notice)
-      // with a real Thought owner lives INSIDE the collapsed Thought; its own
-      // card override only materializes once the root is expanded.
-      if (isFoldableWorkContext(message, index.clusterByMember)
+      // A Thought-only carried Context row (foldable Snapshot / proven
+      // Working tool-jobs Notice) with a real Thought owner lives INSIDE the
+      // collapsed Thought; its own card override only materializes once the
+      // root is expanded. Work-owned carriage classes are already resolved
+      // through their canonical Work span above.
+      if (workContextCarriageOf(message, index.clusterByMember) === 'thought'
         && this.turnActivities.has(message.turn)) {
         return projectionExpanded.has(message.turn)
       }

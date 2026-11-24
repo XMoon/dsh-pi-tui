@@ -63,15 +63,23 @@ export interface TranscriptContextPresentation {
   /** recall for a cross-session reference; inject for everything else. */
   readonly role: 'inject' | 'recall'
   /**
-   * Durable delivery provenance: this injected row entered the agent inbox as
-   * a `next-step` item during the SAME turn it materialized in (derived by the
-   * fold from the `agent/inbox/spliced` insert/claim identity chain). The
-   * exact source/form pairs are `tool-jobs`/`notice`, `agent-message`/`relay`,
-   * `subagent-settled`/`notice` and `repeat-tool-reminder`/`notice`; an
-   * image-bearing `ptc-mode` row qualifies by its structured image content
-   * instead (that producer has no form). Every other source and every
-   * missing/foreign claim stays absent and therefore fails open (independent
-   * Context). Presentation-only — never a Session fact.
+   * The producer declared one COMPLETE replacement of the available-skills
+   * catalog: exact `kind:'skill-catalog'` + `form:'catalog'` + `update:true`,
+   * no `incomplete` member, and a readable `entries` array (each entry a real
+   * name string plus a description string; an empty array is a valid complete
+   * revoke). This is ONE source fact, never a carriage boolean: the
+   * presentation policy decides separately whether the row may trail an
+   * already-established Work. Presentation-only; no entries are copied.
+   */
+  readonly completeCatalogUpdate?: true
+  /**
+   * Pure positive delivery provenance: this injected row entered the agent
+   * inbox as a `next-step` item during the SAME open turn it materialized in
+   * (derived by the fold from the `agent/inbox/spliced` insert/full-drain
+   * claim identity chain and the actual `user/message` append). It is
+   * independent of the source/form/content — any proven delivery carries it.
+   * Missing means unproven (not "not delivered"). Presentation-only — never a
+   * Session fact; the structure policy decides actual carriage separately.
    */
   readonly sameTurnNextStep?: true
 }

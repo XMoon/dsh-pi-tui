@@ -361,6 +361,54 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
 const ALT_SHIFT_S = '\u001b[115;4u'
 const ESCAPE = '\u001b'
 
+/** One settled Focus Turn whose real Work carries a complete skill-catalog
+ * replacement between two genuine Process rows (the catalog marker is only
+ * reachable through the Work/Thought reveal). */
+function seedCatalogFocusTurn(folder: TranscriptFolder): void {
+  const events: SessionEvent[] = []
+  let seq = 0
+  const push = (type: string, data: Record<string, unknown>): void => {
+    events.push(ev(type, data, seq))
+    seq += 1
+  }
+  push('turn/start', { turn: 1 })
+  push('user/message', {
+    id: MessageId('surface-catalog-u1'), role: 'user',
+    content: [{ type: 'text', text: 'work with a catalog refresh' }], source: { kind: 'user' },
+  })
+  push('tool/call', { turn: 1, step: 0, callId: ToolCallId('surface-catalog-a'), name: 'read', arguments: '{}' })
+  push('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('surface-catalog-a-result'), role: 'tool', toolCallId: ToolCallId('surface-catalog-a'),
+      content: [{ type: 'text', text: 'PROCESS_A_RESULT_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-catalog-a') },
+    },
+  })
+  push('user/message', {
+    id: MessageId('surface-catalog-update'), role: 'user',
+    content: [{ type: 'text', text: 'CATALOG_COMPOSED_MARKER complete replacement body' }],
+    source: { kind: 'skill-catalog', form: 'catalog', update: true, entries: [{ name: 'surface-skill', description: 'surface skill' }] },
+  })
+  push('tool/call', { turn: 1, step: 1, callId: ToolCallId('surface-catalog-b'), name: 'bash', arguments: JSON.stringify({ command: 'echo b' }) })
+  push('tool/result', {
+    turn: 1, step: 1,
+    message: {
+      id: MessageId('surface-catalog-b-result'), role: 'tool', toolCallId: ToolCallId('surface-catalog-b'),
+      content: [{ type: 'text', text: 'PROCESS_B_RESULT_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-catalog-b') },
+    },
+  })
+  push('assistant/message', {
+    turn: 1, step: 2,
+    message: {
+      id: MessageId('surface-catalog-final'), role: 'assistant',
+      content: [{ type: 'text', text: 'the catalog turn finished' }], source: { kind: 'model', provider: 'scripted', model: 'scripted' },
+    },
+    stream: [],
+  })
+  push('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  folder.apply(events)
+}
+
 test('the binding searches the SAME main Folder the repaint uses, with a complete-log coverage', async (t) => {
   const h = await mountSurface(t)
   const binding = h.binding()
@@ -681,4 +729,46 @@ test('the composed Focus binding reveals only what each semantic hit really hide
   assert.equal(painted('PROCESS_B_RESULT_MARKER'), false,
     'dismissing the standalone hit keeps the Thought collapsed')
   assert.equal(summaryCount(), 1, 'dismissing the standalone hit mints no summary')
+})
+
+
+test('the composed Focus binding reveals a carried complete catalog through its one root and retracts on dismiss', async (t) => {
+  const ENTER = '\r'
+  const BACKSPACE = '\u007f'
+  const h = await mountSurface(t, { preset: 'focus', seed: seedCatalogFocusTurn })
+  h.surface.repaint()
+  const painted = (needle: string): boolean => h.texts().some(text => text.includes(needle))
+  const summaryCount = (): number => (h.texts().join('\n').match(/Turn complete/g) ?? []).length
+  await waitUntil('the composed catalog transcript paints its one summary',
+    () => h.texts().join('\n').includes('Turn complete'))
+  assert.equal(painted('CATALOG_COMPOSED_MARKER'), false, 'precondition: the carried catalog is folded')
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false, 'precondition: the second Process body is folded')
+  assert.equal(summaryCount(), 1, 'precondition: one collapsed Focus summary')
+
+  await h.key(ALT_SHIFT_S)
+  await waitUntil('the search card painted', () => h.texts().some(text => text.includes('Session Search')))
+  const query = async (next: string): Promise<void> => {
+    for (let index = 0; index < next.length; index += 1) await h.key(next[index]!)
+    await waitUntil(`the ${next} target settles`, () => h.texts().some(text => /1\/1 targets/u.test(text)))
+    await h.key(ENTER)
+  }
+  await query('catalog_composed_marker')
+  await waitUntil('the carried catalog body opens through its one root', () => painted('CATALOG_COMPOSED_MARKER'))
+  assert.equal(summaryCount(), 1, 'the catalog hit paints exactly one Focus summary')
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false, 'the catalog hit opens no unrelated Process body')
+
+  const live = foldWireNodes(h.pane.frames())
+  const textOfNode = (node: WireNode): string => {
+    const own = typeof node.p.text === 'string' ? node.p.text : ''
+    return [own, ...(node.c ?? []).map(textOfNode)].join('\n')
+  }
+  const markerNodes = live.filter(node => textOfNode(node).includes('CATALOG_COMPOSED_MARKER'))
+  assert.ok(markerNodes.length > 0, 'the carried catalog body is painted by an attached native node')
+  assert.ok(markerNodes.some(node => /focus/u.test(node.id)),
+    `the catalog body belongs to the existing Focus root, not a standalone card: ${markerNodes.map(node => node.id).join(', ')}`)
+
+  await h.key(ESCAPE)
+  await waitUntil('the carried catalog retracts on dismiss', () => !painted('CATALOG_COMPOSED_MARKER'))
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false, 'dismissing the catalog keeps the Thought collapsed')
+  assert.equal(summaryCount(), 1, 'dismissing the catalog mints no summary')
 })

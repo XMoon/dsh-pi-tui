@@ -750,9 +750,15 @@ interface NextStepInboxIdentity {
 
 export class TranscriptFolder {
   private readonly items: TranscriptMessage[] = []
-  /** Durable next-step identities awaiting a claim or replacement. */
+  /** The observed valid positional prefix of the durable next-step queue,
+   * awaiting a claim, cancellation or replacement. A fragment that cannot
+   * address this prefix exactly discards it (fail open); JS splice clamping is
+   * never positional evidence. */
   private readonly pendingNextSteps: NextStepInboxIdentity[] = []
-  /** Claimed next-step identities, including their insertion time. */
+  /** Unconsumed positive claim candidates: removed from next-step by an
+   * official full-drain claim in this same open turn, awaiting the actual
+   * `user/message` append. Retired at the owning turn's step/turn end and when
+   * a newer open turn is accepted. */
   private readonly claimedNextStepTurns = new Map<string, NextStepInboxIdentity>()
   /** The assistant message object per (turn, step); streaming text lands in place. */
   private readonly assistantEntries = new Map<string, Extract<TranscriptMessage, { kind: 'assistant' }>>()
@@ -4973,18 +4979,55 @@ export class TranscriptFolder {
         inserted: readonly { id: string }[]
         outcome?: 'canceled'
       }
-      const inserted = data.inserted.map(message => ({ id: message.id, insertionTurn: this.openTurn, insertionTime: event.time }))
-      let removed: NextStepInboxIdentity[] = []
-      if (data.target === 'next-step') {
-        removed = this.pendingNextSteps.splice(
-          data.start,
-          data.removedCount ?? 0,
-          ...inserted,
-        )
+      const insertedSource = data.inserted
+      const inserted = Array.isArray(insertedSource)
+        ? insertedSource.map(message => ({ id: message.id, insertionTurn: this.openTurn, insertionTime: event.time }))
+        : []
+      const validInserted = Array.isArray(insertedSource)
+        && inserted.every(identity => typeof identity.id === 'string' && identity.id !== '')
+      // A reinserted identity is a NEW pending occurrence: any earlier claim
+      // for that id (from either target) is no longer evidence.
+      if (validInserted) for (const { id } of inserted) this.claimedNextStepTurns.delete(id)
+      // Only the observed next-step prefix is modelled positionally. A
+      // next-turn move is not a claim shape and never touches this prefix.
+      if (data.target !== 'next-step') return
+      // One boundary validation of the official normalized splice. The durable
+      // log may be replayed from a cut, so the observed prefix can be shorter
+      // than the real queue: a fragment that cannot address it exactly must
+      // discard the positional proof (fail open) instead of clamping JS splice
+      // arguments or guessing identities.
+      const removedCount = data.removedCount ?? 0
+      const validSplice = validInserted
+        && Number.isSafeInteger(data.start)
+        && data.start >= 0
+        && Number.isSafeInteger(removedCount)
+        && removedCount >= 0
+        && data.start <= this.pendingNextSteps.length
+        && data.start + removedCount <= this.pendingNextSteps.length
+      if (!validSplice) {
+        this.pendingNextSteps.length = 0
+        this.claimedNextStepTurns.clear()
+        return
       }
-      for (const { id } of inserted) this.claimedNextStepTurns.delete(id)
-      if (data.target === 'next-step' && data.outcome !== 'canceled') {
-        for (const identity of removed) this.claimedNextStepTurns.set(identity.id, identity)
+      const priorObservedLength = this.pendingNextSteps.length
+      const removed = this.pendingNextSteps.splice(data.start, removedCount, ...inserted)
+      // The official claim is exactly: drain the WHOLE observed next-step list
+      // from offset 0, insert nothing, and carry no outcome. Anything else is a
+      // cancellation, replacement, insertion or partial mutation and proves no
+      // delivery.
+      const officialClaim = data.start === 0
+        && removedCount > 0
+        && removedCount === priorObservedLength
+        && inserted.length === 0
+        && data.outcome === undefined
+      if (!officialClaim) return
+      for (const identity of removed) {
+        // Only a same-open-turn identity can prove a same-turn delivery. A
+        // cross-turn (or turn-less) identity is a real delivery fact for its
+        // own turn, but it is not THIS open turn's claim.
+        if (identity.insertionTurn !== undefined && identity.insertionTurn === this.openTurn) {
+          this.claimedNextStepTurns.set(identity.id, identity)
+        }
       }
       return
     }
@@ -5114,6 +5157,14 @@ export class TranscriptFolder {
         // a late step/end (replay artifact) is a no-op (review finding).
         const activity = this.activityFor(event.data.turn)
         if (activity.completed) break
+        // An unconsumed claim candidate of this open step was never appended
+        // (ordinary appends happen after step/start and before step/end): the
+        // official lifecycle proves it rejected/removed, so retire the proof.
+        if (event.data.turn === this.openTurn) {
+          for (const identity of this.claimedNextStepTurns.values()) {
+            if (identity.insertionTurn === this.openTurn) this.claimedNextStepTurns.delete(identity.id)
+          }
+        }
         // A failed attempt closes at step/end even when the turn continues;
         // expose its preserved evidence without waiting for turn/end.
         this.markAttemptEvidenceInterrupted(event.data.turn, event.data.step)
@@ -5148,6 +5199,11 @@ export class TranscriptFolder {
         activity.completed = false
         activity.reason = undefined
         if (event.data.turn === this.currentTurn) {
+          // A new current open turn retires leftover claim candidates from an
+          // earlier turn: a missed turn/end must never carry proof forward.
+          for (const identity of this.claimedNextStepTurns.values()) {
+            if (identity.insertionTurn !== event.data.turn) this.claimedNextStepTurns.delete(identity.id)
+          }
           this.openTurn = event.data.turn
         }
         activity.revision += 1
@@ -5155,13 +5211,23 @@ export class TranscriptFolder {
       }
       case 'user/message': {
         const claimedIdentity = this.claimedNextStepTurns.get(event.data.id)
-        const wasClaimedFromNextStep = this.claimedNextStepTurns.delete(event.data.id)
+        this.claimedNextStepTurns.delete(event.data.id)
+        // Pure delivery provenance: was this exact identity inserted into the
+        // next-step inbox and then claimed by THIS still-open turn before its
+        // actual user/message materialized? The source/form/content never
+        // restricts the fact; the presentation policy decides separately which
+        // rows it may carry. A next-turn wakeup, a claim carried across turns,
+        // a replaced/rejected identity and a turn-less fragment stay absent
+        // (fail open) instead of claiming "not delivered".
+        const openTurn = this.openTurn
+        const deliveredThisTurn = claimedIdentity !== undefined
+          && openTurn !== undefined
+          && claimedIdentity.insertionTurn === openTurn
+          && this.currentTurn === openTurn
         // Only a next-step identity inserted during this admission turn is a
         // mid-turn steer; an idle wake or a claim carried across turns is an
         // ordinary opening/follow-up user message.
-        const isMidTurnSteer = wasClaimedFromNextStep
-          && claimedIdentity !== undefined
-          && claimedIdentity.insertionTurn === this.currentTurn
+        const isMidTurnSteer = deliveredThisTurn
         const blocks = event.data.content
         // User messages keep known attachment markers at their original
         // positions in the FLAT text; the ordered `content` blocks stay the
@@ -5176,32 +5242,8 @@ export class TranscriptFolder {
         // foreign log that records a null/undefined/non-object source folds
         // as standalone injected Context instead of crashing the whole fold.
         const sourcePresentation = contextPresentation(event.data.source)
-        // Narrow Working delivery provenance: a Context row claimed from the
-        // SAME turn's next-step inbox is the one delivery the presentation may
-        // carry with that turn's Work. The exact source/form pairs are a
-        // tool-jobs Notice, an Agent relay, a subagent settlement Notice and a
-        // repeat-tool-reminder Notice; the image-bearing `ptc-mode` source
-        // qualifies by its structured image content instead (that producer has
-        // no form and none may be invented). It is derived ONLY from the
-        // durable insert/claim identity chain above (no Agent.status sampling,
-        // no summary/wording inference); next-turn wakeups, foreign/legacy
-        // logs, crossed source/form pairs, text-only ptc-mode Context and every
-        // other producer stay absent and therefore fail open as independent
-        // Context. The settlement body stays an opaque producer payload: this
-        // branch never parses or synthesizes a stop reason.
-        const claimedInThisTurn = wasClaimedFromNextStep === true
-          && claimedIdentity !== undefined
-          && claimedIdentity.insertionTurn === this.currentTurn
-        const sameTurnNextStepDelivery = claimedInThisTurn && (
-          (sourcePresentation.sourceKind === 'tool-jobs' && sourcePresentation.form === 'notice')
-          || (sourcePresentation.sourceKind === 'agent-message' && sourcePresentation.form === 'relay')
-          || (sourcePresentation.sourceKind === 'subagent-settled' && sourcePresentation.form === 'notice')
-          || (sourcePresentation.sourceKind === 'repeat-tool-reminder' && sourcePresentation.form === 'notice')
-          || (sourcePresentation.sourceKind === 'ptc-mode'
-            && sourcePresentation.form === undefined
-            && sourcePresentation.formDeclared !== true
-            && blocks.some(block => block.type === 'image'))
-        )
+        // The settlement/relay/notice body stays an opaque producer payload:
+        // this branch never parses or synthesizes a stop reason.
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
@@ -5259,10 +5301,11 @@ export class TranscriptFolder {
               : {},
             // Presentation-only provenance (form/kind/sender) for the
             // form-aware Context roles Compact and Focus present. The
-            // semantic marker above stays the surfaced authority. The narrow
-            // same-turn next-step flag is added only for a proven Working
-            // delivery pair (see above); it never changes the source facts.
-            contextPresentation: sameTurnNextStepDelivery
+            // semantic marker above stays the surfaced authority. The
+            // same-turn next-step flag is a pure positive DELIVERY fact (any
+            // source/form); the presentation policy decides separately
+            // whether the row may be carried.
+            contextPresentation: deliveredThisTurn
               ? { ...sourcePresentation, sameTurnNextStep: true as const }
               : sourcePresentation,
           }
@@ -5854,6 +5897,12 @@ export class TranscriptFolder {
         // synthetic cards or re-settle the activity (review finding).
         const endTurn = event.data.turn
         if (this.openTurn === endTurn) this.openTurn = undefined
+        // Unconsumed claim candidates of the closing turn are rejected/removed:
+        // an actual append is the only way they can be consumed. Replayed old
+        // ends cannot clear a newer turn's live candidates (identity turn).
+        for (const identity of this.claimedNextStepTurns.values()) {
+          if (identity.insertionTurn === endTurn) this.claimedNextStepTurns.delete(identity.id)
+        }
         const endActivity = this.activityFor(endTurn)
         endActivity.pendingPreSteerAnswerStep = undefined
         if (endActivity.completed) break

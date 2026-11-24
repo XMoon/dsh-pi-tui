@@ -2147,3 +2147,65 @@ test('runner search: ordinary paint after a jump does not expire navigation qual
   assert.notEqual(fixture.app.searchQualificationEpochForRuntime(), epochBefore,
     'a terminal resize invalidates the stale qualification epoch')
 })
+
+test('runner search: a carried complete catalog update reveals its owning Work and promotes it on dismiss', async (t) => {
+  const needle = 'CATALOG_SEARCH_NEEDLE'
+  const catalogMessage = {
+    id: MessageId('runner-catalog-update'),
+    role: 'user',
+    content: [{ type: 'text', text: `${needle} complete catalog payload` }],
+    source: {
+      kind: 'skill-catalog', form: 'catalog', update: true,
+      entries: [{ name: 'runner-skill', description: 'runner skill' }],
+    },
+  } as never
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('catalog-search-c1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('catalog-search-r1'), role: 'tool', toolCallId: ToolCallId('catalog-search-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('catalog-search-c1') },
+      },
+    }, 2),
+    event('user/message', catalogMessage, 3),
+    event('tool/call', { turn: 0, step: 1, callId: ToolCallId('catalog-search-c2'), name: 'bash', arguments: '{}' }, 4),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('catalog-search-r2'), role: 'tool', toolCallId: ToolCallId('catalog-search-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('catalog-search-c2') },
+      },
+    }, 5),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('catalog-search-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 6),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], needle, events)
+  const view = (): string => fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  fixture.app.setDisplayPreset('compact')
+  await fixture.settleRender()
+  assert.ok(!view().includes(needle),
+    `precondition: Compact folds the complete catalog update under its Work:\n${view()}`)
+
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, needle)
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/, `the carried catalog owns ONE navigation target:\n${fullTitle(fixture)}`)
+  const target = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(target?.revealGranted, true, 'Full grants the temporary reveal for the folded catalog')
+  assert.ok(view().includes(needle),
+    `the reveal opens the owning Work and locates the catalog body:\n${view()}`)
+
+  fixture.input('\x1b')
+  await fixture.settleRender()
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'closing Search retires the temporary target')
+  assert.ok(view().includes(needle),
+    'the Compact dismiss promotes the revealed Work and keeps the matched catalog visible')
+})

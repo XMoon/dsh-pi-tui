@@ -538,6 +538,66 @@ export default async function (h) {
     h.check('the closed Work A duration never grows as time advances',
       workAAfterAdvance !== undefined && h.descendantsText(workAAfterAdvance) === commandWorkAHeadText,
       JSON.stringify({ before: commandWorkAHeadText ?? null, after: workAAfterAdvance === undefined ? null : h.descendantsText(workAAfterAdvance) }))
+    // The complete skill-catalog replacement is a Work A member (never a
+    // standalone boundary): its body is unreachable while Work A is collapsed
+    // and appears exactly through Work A's own native disclosure.
+    const catalogMarker = 'TERN-CATALOG-BODY-MARKER'
+    const catalogVisible = () => h.texts(h.snapshot()).some(line => line.includes(catalogMarker))
+    const catalogInjectedRow = records(h).find(row => row.kind === 'catalog.injected')
+    h.check('the complete catalog update is a durable same-turn source row',
+      catalogInjectedRow !== undefined, JSON.stringify(catalogInjectedRow ?? null))
+    h.check('the fixture clock keeps the catalog point strictly before the command boundary',
+      typeof catalogInjectedRow?.time === 'number' && typeof commandInjected?.time === 'number'
+        && catalogInjectedRow.time < commandInjected.time,
+      JSON.stringify({ catalog: catalogInjectedRow?.time, command: commandInjected?.time }))
+    h.check('the catalog body is folded while Work A is collapsed', !catalogVisible())
+    const workAOpenSnap = h.snapshot()
+    const workAHeadForCatalog = mainNodes(workAOpenSnap).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    h.check('Work A opens through its real native header pointer',
+      workAHeadForCatalog !== undefined && await h.click(workAOpenSnap.chains, workAHeadForCatalog),
+      JSON.stringify(workAHeadForCatalog === undefined ? null : h.descendantsText(workAHeadForCatalog)))
+    // The Context row keeps its OWN native disclosure: opening Work A exposes
+    // the catalog card head, and its body appears only through that real toggle.
+    const catalogRowSnap = h.snapshot()
+    const catalogHead = mainNodes(catalogRowSnap).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('skill-catalog')
+      && !h.descendantsText(node).startsWith('Activity'))
+    h.check('the carried catalog card exposes its own native disclosure',
+      catalogHead !== undefined && await h.click(catalogRowSnap.chains, catalogHead),
+      JSON.stringify(catalogHead === undefined ? null : h.descendantsText(catalogHead)))
+    if (!await waitFor(h, 'the catalog body appears after Work A opens', catalogVisible)) {
+      finish(h, extra)
+      return
+    }
+    const workAIdForCatalog = workIds(liveNodes(h), rootIdForCommand)
+      .find(id => subtreeText(liveNodes(h), id).includes('focus_command_a'))
+    const markerIds = [...liveNodes(h).keys()].filter(id => subtreeText(liveNodes(h), id).includes(catalogMarker))
+    h.check('the catalog body belongs to Work A, not the Turn root or a synthetic container',
+      workAIdForCatalog !== undefined && markerIds.some(id => id === workAIdForCatalog || id.startsWith(`${workAIdForCatalog}.`)),
+      JSON.stringify({ workAIdForCatalog, markerIds }))
+    h.check('opening Work A never mints a second Focus summary', rootIds(liveNodes(h)).length === 1,
+      JSON.stringify(rootIds(liveNodes(h))))
+    h.capture('focus-command-catalog-work-a-open-1280x800-dark',
+      'Work A opens through the native header and restores the carried complete catalog body')
+    const workACloseSnap = h.snapshot()
+    const closeWorkAHead = mainNodes(workACloseSnap).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    h.check('Work A closes through the same real native header pointer',
+      closeWorkAHead !== undefined && await h.click(workACloseSnap.chains, closeWorkAHead))
+    if (!await waitFor(h, 'the catalog body folds again with Work A', () => !catalogVisible())) {
+      finish(h, extra)
+      return
+    }
+    h.check('closing Work A keeps the one Root open and both canonical Works intact',
+      liveNodes(h).get(rootIdForCommand)?.p.collapsed === false
+        && workIds(liveNodes(h), rootIdForCommand).length === 2,
+      JSON.stringify({ root: liveNodes(h).get(rootIdForCommand)?.p.collapsed }))
     const commandId = expandedCommand[0]?.[0]
     h.check('the command is a top-level Root child, never wrapped by a Work container',
       commandId !== undefined && !worksAfterOpen.some(work => commandId.startsWith(`${work}.`)))
@@ -1053,9 +1113,14 @@ export default async function (h) {
     // The seeded standalone maintenance card after the closed turn: it must be
     // one top-level native row AFTER the official final, own its detail toggle,
     // and never mint a Focus root or re-open the real Turn.
-    if (!await waitFor(h, 'the standalone compaction card lands after the official final', () =>
-      records(h).some(row => row.kind === 'standalone.injected')
-        && h.texts(h.snapshot()).some(text => text.includes('Compaction failed')))) {
+    if (!await waitFor(h, 'the standalone compaction card lands after the official final', () => {
+      if (!records(h).some(row => row.kind === 'standalone.injected')) return false
+      // Require the REAL main-region head, not only the dock echo: the dock
+      // notification paints the failure title before the transcript commit.
+      return mainNodes(h.snapshot()).some(node =>
+        String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+        && h.descendantsText(node).includes('Compaction failed'))
+    })) {
       finish(h, extra)
       return
     }
