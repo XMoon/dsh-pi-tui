@@ -1519,9 +1519,10 @@ workspace/question/approval store and keeps no cross-session cache.
   adapter's surface-runtime lifetime, so a close/reopen with an unchanged source
   does not repeat ordinary discovery. The adapter observes the official list and
   Connection generation for that whole lifetime (Client-store subscriptions
-  only, no Host work while closed), so a relevant source revision change — even
-  one that changes and reverts while the panel is closed — deletes the receipt;
-  equal witness values are not proof of the same revision. Receipts are bound to
+  only, no Host work while closed), so a relevant source revision change — the
+  pending-hint witness or an official `running`/status transition, even one that
+  changes and reverts while the panel is closed — deletes the receipt; equal
+  witness values are not proof of the same revision. Receipts are bound to
   the official authorized roster, are discarded on a generation
   replacement/loss, record nothing for a denied/unavailable/failed read, and are
   never an answerability fact, never cached payload and never consulted by the
