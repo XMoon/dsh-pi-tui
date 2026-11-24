@@ -26,14 +26,31 @@ function sleep(ms) {
   return new Promise(resolveSleep => setTimeout(resolveSleep, ms))
 }
 
+/** The historical offline-LLM fixture identity the existing lanes still consume. */
+export const LEGACY_OFFLINE_LLM_IDENTITY = 'm4b2s-stub-llm'
+/** The semantic offline-LLM fixture identity of the single-package bundled path. */
+export const SPLIT_OFFLINE_LLM_IDENTITY = 'split-offline-llm'
+
+/**
+ * The fixed offline-LLM fixture identities and their generated file names. A
+ * bundled single-package profile carries the semantic identity; the historical
+ * lanes keep their exact file/plugin names and output.
+ */
+const OFFLINE_LLM_FIXTURES = new Map([
+  [LEGACY_OFFLINE_LLM_IDENTITY, { stubFile: 'm4b2s-stub-llm.mjs', patchFile: 'm4b2s-llm.patch.yml' }],
+  [SPLIT_OFFLINE_LLM_IDENTITY, { stubFile: 'split-offline-llm.mjs', patchFile: 'split-offline-llm.patch.yml' }],
+])
+
 /** The test-only offline Host LLM route (official Loader row + patch override). */
-export function writeSurfaceLlmFixture(profileDir, workDir) {
-  const stubPath = join(profileDir, 'm4b2s-stub-llm.mjs')
+export function writeSurfaceLlmFixture(profileDir, workDir, identity = LEGACY_OFFLINE_LLM_IDENTITY) {
+  const names = OFFLINE_LLM_FIXTURES.get(identity)
+  assert(names !== undefined, `unknown offline LLM fixture identity: ${String(identity)}`)
+  const stubPath = join(profileDir, names.stubFile)
   const promptEvidencePath = join(workDir, 'prompt-evidence.jsonl')
   writeFileSync(promptEvidencePath, '', { mode: 0o600 })
   const fixtureSource = `import { appendFileSync } from 'node:fs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
-export const name = 'm4b2s-stub-llm'
+export const name = '${identity}'
 export const inject = ['llm']
 const evidencePath = process.env.SPLIT_PROCESS_PROMPT_EVIDENCE
 const guidanceMarker = 'Prefer showing the primary results within your final response'
@@ -91,10 +108,10 @@ class StubLlmAdapter extends LlmAdapter {
 export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapter()) }
 `
   writeFileSync(stubPath, fixtureSource, { mode: 0o600 })
-  const patchPath = join(workDir, 'm4b2s-llm.patch.yml')
+  const patchPath = join(workDir, names.patchFile)
   writeFileSync(patchPath, [
     '- insert:',
-    '    - id: m4b2s-stub-llm',
+    `    - id: ${identity}`,
     `      name: '${pathToFileURL(stubPath).href}'`,
     '      inject: [llm]',
     '- id: agent-default-model',

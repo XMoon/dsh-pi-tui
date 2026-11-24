@@ -17,9 +17,9 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 
 import {
   dshInvocation,
@@ -30,12 +30,25 @@ import {
   runPnpmInstall,
   validateCandidateTarball,
 } from './dsh-smoke-harness.mjs'
-import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './dsh-distribution.mjs'
-import { requireExactSmokeDshPin, smokeArtifactIdentity, SplitSmokeAssertionError } from './split-smoke-diagnostics.mjs'
-import { writeSurfaceLlmFixture } from './split-smoke-fixtures.mjs'
+import { DSH_AGENT_PACKAGE, loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './dsh-distribution.mjs'
+import { requireExactSmokeDshPin, smokeArtifactIdentity, SplitSmokeAssertionError, SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
+import { LEGACY_OFFLINE_LLM_IDENTITY, SPLIT_OFFLINE_LLM_IDENTITY, writeSurfaceLlmFixture } from './split-smoke-fixtures.mjs'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
+}
+
+/**
+ * The immutable-input refusal. The code stays on the error object and in the
+ * message; the new Process lane surfaces it through the Supervisor IPC rather
+ * than the smoke-lane report projection, so the historical lane error-code
+ * registry is deliberately not extended.
+ */
+function inputRefusal(code, message) {
+  return new SplitSmokeInputError(
+    code,
+    `INPUT_UNQUALIFIED: ${code} (INVALID_TEST_INPUT, not a product regression): ${message}`,
+  )
 }
 
 function readJson(path) {
@@ -66,6 +79,178 @@ export function inspectSplitCandidate(explicitPath) {
     artifact: smokeArtifactIdentity('candidate', manifest, candidateSha256),
   })
   return { tarball, manifest, candidateSha256, targetDshVersion }
+}
+
+const candidateStatIdentity = stats => ({
+  dev: stats.dev,
+  ino: stats.ino,
+  size: stats.size,
+  mode: stats.mode,
+  nlink: stats.nlink,
+})
+
+/**
+ * The independent post-read identity proof for one explicit candidate path:
+ * the path still canonicalizes to itself, is still the same regular single-link
+ * owned file, and its full stat identity equals the pre-read snapshot. A
+ * disappearance or replacement is the stable changed-input refusal, never a raw
+ * filesystem error.
+ */
+export function assertPostReadCandidateIdentity(real, before) {
+  let afterReal
+  try {
+    afterReal = realpathSync(real)
+  } catch (error) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED',
+      `the candidate path cannot be canonicalized after its bytes were read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (afterReal !== real) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate path was replaced while its bytes were being read')
+  }
+  let after
+  try {
+    after = lstatSync(real)
+  } catch (error) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED',
+      `the candidate path disappeared or became unreadable after its bytes were read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1
+    || (typeof process.getuid === 'function' && after.uid !== before.uid)) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate file shape changed while its bytes were being read')
+  }
+  const statBefore = candidateStatIdentity(before)
+  const statAfter = candidateStatIdentity(after)
+  if (statAfter.dev !== statBefore.dev || statAfter.ino !== statBefore.ino
+    || statAfter.size !== statBefore.size || statAfter.mode !== statBefore.mode
+    || statAfter.nlink !== statBefore.nlink) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate tarball changed while its bytes were being read')
+  }
+  return after
+}
+
+/**
+ * The immutable single-package input preflight for the split-process business
+ * Project.
+ *
+ * Unlike the historical lanes, this input is never discovered by filename: the
+ * caller supplies one explicit, canonical, read-only path OUTSIDE this
+ * checkout. The function proves the real bytes it returns are the bytes the
+ * candidate preflight qualified: lstat identity (dev/ino/size/mode/nlink) is
+ * read before and after the single content read, and the existing
+ * `inspectSplitCandidate` manifest/name/version/exact-pin/SHA qualification
+ * must agree with that content hash. A changed or replaced input is refused,
+ * never retried.
+ */
+export function inspectImmutableSplitCandidate(explicitPath) {
+  const refuse = (code, message) => {
+    throw inputRefusal(code, message)
+  }
+  if (typeof explicitPath !== 'string' || explicitPath === '') {
+    refuse('INPUT_CANDIDATE_PATH_UNQUALIFIED', 'the candidate tarball must be an explicit absolute path')
+  }
+  if (!isAbsolute(explicitPath)) {
+    refuse('INPUT_CANDIDATE_PATH_UNQUALIFIED', 'the candidate tarball must be an absolute path')
+  }
+  if (!explicitPath.endsWith('.tgz')) {
+    refuse('INPUT_CANDIDATE_SUFFIX_UNQUALIFIED', 'the candidate tarball must end in .tgz')
+  }
+  let before
+  try {
+    before = lstatSync(explicitPath)
+  } catch (error) {
+    refuse('INPUT_CANDIDATE_PATH_UNQUALIFIED',
+      `the candidate tarball does not exist or is unreadable (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (before.isSymbolicLink() || !before.isFile()) {
+    refuse('INPUT_CANDIDATE_FILE_UNQUALIFIED', 'the candidate must be a regular file, not a symlink or special file')
+  }
+  if (before.nlink !== 1) {
+    refuse('INPUT_CANDIDATE_HARDLINK_UNQUALIFIED', 'the candidate must have exactly one hard link')
+  }
+  if (typeof process.getuid === 'function' && before.uid !== process.getuid()) {
+    refuse('INPUT_CANDIDATE_OWNER_UNQUALIFIED', 'the candidate must be owned by the current user')
+  }
+  if ((before.mode & 0o222) !== 0) {
+    refuse('INPUT_CANDIDATE_WRITABLE_UNQUALIFIED', 'the candidate must be read-only (0444)')
+  }
+  if ((before.mode & 0o444) === 0) {
+    refuse('INPUT_CANDIDATE_UNREADABLE_UNQUALIFIED', 'the candidate must be readable')
+  }
+  let real
+  try {
+    real = realpathSync(explicitPath)
+  } catch (error) {
+    refuse('INPUT_CANDIDATE_PATH_UNQUALIFIED',
+      `the candidate tarball cannot be canonicalized (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (real !== explicitPath) {
+    refuse('INPUT_CANDIDATE_PATH_NOT_CANONICAL', `the candidate path must already be canonical (${real})`)
+  }
+  const outside = relative(realpathSync(PACKAGE_ROOT), dirname(real))
+  if (outside !== '..' && !outside.startsWith(`..${sep}`)) {
+    refuse('INPUT_CANDIDATE_INSIDE_CHECKOUT', 'the candidate tarball must live outside this checkout')
+  }
+  const statBefore = candidateStatIdentity(before)
+  let bytes
+  try {
+    bytes = readFileSync(real)
+  } catch (error) {
+    refuse('INPUT_CANDIDATE_UNREADABLE_UNQUALIFIED',
+      `the candidate tarball cannot be read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  const candidateSha256 = createHash('sha256').update(bytes).digest('hex')
+  assertPostReadCandidateIdentity(real, before)
+  let qualified
+  try {
+    qualified = inspectSplitCandidate(real)
+  } catch (error) {
+    // A disappearance or replacement during the requalification read is still
+    // the same changed input; a malformed manifest on the SAME inode keeps its
+    // own classification.
+    let current
+    try {
+      current = lstatSync(real)
+    } catch {
+      current = undefined
+    }
+    if (current === undefined || current.isSymbolicLink() || !current.isFile()
+      || current.dev !== before.dev || current.ino !== before.ino
+      || current.size !== before.size || current.mode !== before.mode
+      || current.nlink !== before.nlink || current.uid !== before.uid
+      || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs) {
+      refuse('INPUT_CANDIDATE_CHANGED',
+        `the candidate changed while its requalification was running (${String(error?.code ?? error?.name ?? 'unknown')})`)
+    }
+    throw error
+  }
+  if (qualified.tarball !== real || qualified.candidateSha256 !== candidateSha256) {
+    refuse('INPUT_CANDIDATE_CHANGED', 'the candidate bytes changed between the content read and the candidate preflight')
+  }
+  return {
+    tarball: real,
+    manifest: qualified.manifest,
+    manifestPin: qualified.manifest?.devDependencies?.[DSH_AGENT_PACKAGE],
+    candidateSha256,
+    targetDshVersion: qualified.targetDshVersion,
+    stat: statBefore,
+  }
+}
+
+/**
+ * Re-read the immutable input after an installation and refuse any replaced or
+ * rewritten candidate. The caller compares SHA and stat identity with the
+ * preflight facts it holds; a change is an input error, never a product one.
+ */
+export function assertImmutableSplitCandidateUnchanged(candidate) {
+  const fresh = inspectImmutableSplitCandidate(candidate.tarball)
+  if (fresh.candidateSha256 !== candidate.candidateSha256
+    || fresh.stat.dev !== candidate.stat.dev
+    || fresh.stat.ino !== candidate.stat.ino
+    || fresh.stat.size !== candidate.stat.size
+    || fresh.stat.mode !== candidate.stat.mode) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate tarball changed after its installation')
+  }
+  return fresh
 }
 
 /**
@@ -170,7 +355,11 @@ export function createSplitSmokeProfile({ tarball, targetDshVersion, workDir, cl
   // The test-only offline Host LLM row is part of the isolated profile for
   // this whole run: the link lanes never prompt, and the surface lanes need a
   // real Host-side model route to prove a committed prompt round trip.
-  const surfaceLlm = writeSurfaceLlmFixture(profileDir, workDir)
+  const surfaceLlm = writeSurfaceLlmFixture(
+    profileDir,
+    workDir,
+    clientPlatformProvisioning === 'bundled' ? SPLIT_OFFLINE_LLM_IDENTITY : LEGACY_OFFLINE_LLM_IDENTITY,
+  )
   const base = {
     cwd: profileDir,
     env: {

@@ -19,6 +19,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { TuiTest, sessions as openTuiSessions } from '@microsoft/tui-test'
 
+import {
+  createSplitTerminal,
+  readOfficialClientRecords,
+  waitForTerminalExit,
+} from './split-process-client.ts'
 import { SupervisorClient, type SupervisorExitResult } from './split-supervisor-client.ts'
 
 const SUPPORT_DIR = fileURLToPath(new URL('.', import.meta.url))
@@ -374,20 +379,7 @@ class UpgradeClient implements UpgradeClientHandle {
   }
 
   readRecords(): Record<string, any>[] {
-    if (!existsSync(this.recordFile)) return []
-    const text = readFileSync(this.recordFile, 'utf8')
-    if (text === '') return []
-    if (!text.endsWith('\n')) {
-      throw new Error(`${this.label}: the official client record file has an incomplete trailing line`)
-    }
-    const lines = text.slice(0, -1).split('\n')
-    return lines.map((line, index) => {
-      try {
-        return JSON.parse(line) as Record<string, any>
-      } catch (error) {
-        throw new Error(`${this.label}: client record line ${String(index + 1)} is invalid JSON: ${asError(error).message}`)
-      }
-    })
+    return readOfficialClientRecords(this.recordFile, this.label)
   }
 
   async waitForRecord(
@@ -480,15 +472,7 @@ class UpgradeClient implements UpgradeClientHandle {
   }
 
   async waitForExit(timeoutMs = 120_000): Promise<{ code: number | null; signal: string | null }> {
-    const started = Date.now()
-    while (Date.now() - started < timeoutMs) {
-      const state = await this.terminal.state().catch(() => undefined)
-      if (state !== undefined && state.exited !== null) {
-        return { code: state.exited, signal: state.exit_signal ?? null }
-      }
-      await sleep(50)
-    }
-    throw new Error(`${this.label}: the real tui-test shell did not exit within ${String(timeoutMs)}ms`)
+    return await waitForTerminalExit(this.terminal, this.label, timeoutMs)
   }
 
   async closeExpectedFailure(expectedCode: number): Promise<void> {
@@ -758,18 +742,19 @@ class Scene implements UpgradeScene {
     const recordFile = join(clientDir, 'records.jsonl')
     const scratch = join(clientDir, 'scratch')
     mkdirSync(scratch, { recursive: true, mode: 0o700 })
-    const terminal = TuiTest.ephemeral('split-upgrade', {
-      backend: 'xtermjs',
-      trace: { mode: 'on-failure', directory: join(this.workRoot, 'trace') },
-      artifacts: { dir: join(this.workRoot, 'artifacts'), onFailure: 'text' },
+    const splitTerminal = createSplitTerminal({
+      prefix: 'split-upgrade',
+      traceDirectory: join(this.workRoot, 'trace'),
+      artifactsDirectory: join(this.workRoot, 'artifacts'),
     })
+    const terminal = splitTerminal.terminal
     const client: UpgradeClient = new UpgradeClient(options.label, terminal, recordFile, {
       qualificationProbe: reexecTargetPresent(reexecEnv),
       expectedFailure: startupExpectation === 'expected-failure',
       replacementChildFault: options.reexecChildFailure !== undefined,
       refreshBusinessPids: () => this.refreshClientBusinessPids(client),
     })
-    this.#ownedTuiSessions.add(terminal.session)
+    this.#ownedTuiSessions.add(splitTerminal.sessionId)
     this.#clients.set(options.label, client)
     if (reservedTarget !== undefined) this.#plannedSideNewTargets.set(options.label, reservedTarget)
     const env: Record<string, string> = {

@@ -356,6 +356,7 @@
     "test:split:upgrade": "vitest run --config vitest.split.config.ts --project split-upgrade",
     "test:split:upgrade:systemd": "vitest run --config vitest.split.config.ts --project split-upgrade-systemd",
     "test:split:upgrade:launchd": "vitest run --config vitest.split.config.ts --project split-upgrade-launchd",
+    "test:split:process": "vitest run --config vitest.split.config.ts --project split-process-business",
     "test:tmux": "node scripts/run-test-lane.mjs tmux",
     "test": "pnpm test:fork && pnpm test:product && pnpm test:tooling && pnpm test:tmux",
     "smoke": "node scripts/tarball-smoke.mjs",
