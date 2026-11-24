@@ -2165,7 +2165,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return replayOutcome
       })
       if (outcome === 'failed' || drained !== 'committed') return false
-      if (outcome === 'complete') this.settleRoundSession(sessionId, record.liveObject)
       await yieldEventLoop()
     }
     // The full traversal is complete, but this round is not the publication
@@ -2189,7 +2188,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const outcome = await this.withFullSessionOwnership(sessionId, () =>
         this.rebuildLiveSession(sessionId, persistence, sessions, query, counters))
       if (outcome === 'failed') return false
-      if (outcome === 'complete') this.settleRoundSession(sessionId, sessions.get(sessionId))
     }
     // ONE final exact-roster identity audit after every await. The round-local
     // terminal evidence is used where present; otherwise the original roster
@@ -2200,6 +2198,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.invalidateCoverageBinding()
       return false
     }
+    this.seedProvenRoundIdentities(official, sessions, auditedRound)
     for (const sessionId of this.roundIdentityMismatches(official, sessions, auditedRound)) {
       auditedRound.settled.delete(sessionId)
       this.markRoundInvalidating()
@@ -2836,8 +2835,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           outcome = 'incomplete'
           return
         }
-        if (result === 'complete') this.settleRoundSession(sessionId, record.liveObject)
-        else this.markRoundInvalidating()
+        if (result !== 'complete') this.markRoundInvalidating()
       }
       // The round may only record traversal/completion while the source
       // binding and every proof authority it consumed are still current.
@@ -2870,6 +2868,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         outcome = 'incomplete'
         return
       }
+      this.seedProvenRoundIdentities(official, sessions, auditedRound)
       for (const sessionId of this.roundIdentityMismatches(official, sessions, auditedRound)) {
         auditedRound.settled.delete(sessionId)
         this.markRoundInvalidating()
@@ -3320,14 +3319,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         }
         const settled = await this.commitWitness(witness, () => {
           this.requireIndex().markSession({ sessionId, sourceState: 'persisted', dirty: false })
+          // Disposal evidence is bound to the SAME successful witness marker
+          // that persists the prefix; a failed marker writes no evidence.
+          this.reconcilePending.delete(sessionId)
+          this.settleRoundSession(sessionId, witness.liveObject)
         })
         if (settled !== 'committed') {
           this.reconcilePending.add(sessionId)
           this.markReconcileNeeded('reconciling')
           return
         }
-        this.reconcilePending.delete(sessionId)
-        this.settleRoundSession(sessionId, undefined)
         this.finishCoverageRound()
         this.refreshCompleteness()
       } finally {
@@ -3519,6 +3520,26 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.scheduleSessionRepair(sessionId, 'rebuild')
   }
 
+  /**
+   * A previously proven periodic round already has an authoritative roster;
+   * when a round-local terminal did no read, retain that exact unchanged
+   * identity as round evidence so a later created/restored producer can revoke
+   * it. Unproven rounds retain only actual terminal evidence (never coverage).
+   */
+  private seedProvenRoundIdentities(
+    official: ReadonlyMap<string, OfficialSession>,
+    sessions: HistorySearchSessionsLike,
+    round: HistoryCoverageRound,
+  ): void {
+    if (round.expected !== undefined) return
+    for (const [sessionId, record] of official) {
+      if (round.settled.has(sessionId)) continue
+      if (sessions.get(sessionId) === record.liveObject) {
+        round.settled.set(sessionId, { liveObject: record.liveObject })
+      }
+    }
+  }
+
   /** The exact source-identity mismatches for the full round's final audit. */
   private roundIdentityMismatches(
     official: ReadonlyMap<string, OfficialSession>,
@@ -3539,9 +3560,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     liveObject: object | undefined,
     round: HistoryCoverageRound | undefined = this.coverageRound,
   ): void {
-    if (round?.expected?.has(sessionId) === true) {
-      round.settled.set(sessionId, { liveObject })
-    }
+    if (round === undefined) return
+    // Both round kinds need the exact identity evidence: unproven rounds use it
+    // as the per-ID coverage fact, and a previously proven periodic round uses
+    // it to fence a destructive/read-only round that is still open.
+    round.settled.set(sessionId, { liveObject })
   }
 
   private finishCoverageRound(): void {

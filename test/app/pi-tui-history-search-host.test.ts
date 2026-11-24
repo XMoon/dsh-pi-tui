@@ -4754,7 +4754,7 @@ test('the round finish requires the full traversal proof even with no outstandin
     coverageRound?: {
       basis: unknown
       expected: Set<string> | undefined
-      settled: Set<string>
+      settled: Map<string, { readonly liveObject: object | undefined }>
       deletionsSettled: boolean
       invalidating: boolean
       traversed: boolean
@@ -4766,7 +4766,7 @@ test('the round finish requires the full traversal proof even with no outstandin
     internals.coverageRound = {
       basis: (service as unknown as { currentCoverageBasis(): unknown }).currentCoverageBasis(),
       expected: undefined,
-      settled: new Set(),
+      settled: new Map(),
       deletionsSettled: true,
       invalidating: true,
       traversed: false,
@@ -6656,5 +6656,174 @@ test('a restored cold Session with preexisting history cannot keep the early pro
     release()
     await service.dispose()
     await ctx.fiber.dispose()
+  }
+})
+
+test('a real restored cold Session opened during a proven periodic round cannot keep it ready', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-r3-periodic-restore')
+  const A = 'history-r3-restored-a'
+  const B = 'history-r3-restored-b'
+  const C = 'history-r3-pending-c'
+  const cwd = wire.host.anchorDir
+  const service = wire.service() as unknown as {
+    enqueueWrite(task: () => void | Promise<void>): Promise<unknown>
+    verifySources(): Promise<void>
+    index: { checkpointOf(id: string): { sourceState: string; dirty: boolean } | undefined }
+    pointCounters: { replayAttempted: number; replayCompleted: number }
+    writeTail: Promise<void>
+  }
+  const rawPersistence = wire.host.ctx.sessionPersistence
+  const rawQuery = wire.host.ctx.sessionQuery
+  const originalObserve = rawQuery.observeSession
+  const originalEnqueue = service.enqueueWrite
+  let releaseHold: () => void = () => {}
+  let releaseB: () => void = () => {}
+  let releaseA: () => void = () => {}
+  const holdGate = new Promise<void>(resolve => { releaseHold = resolve })
+  const bGate = new Promise<void>(resolve => { releaseB = resolve })
+  const aGate = new Promise<void>(resolve => { releaseA = resolve })
+  let bStarted: () => void = () => {}
+  let aStarted: () => void = () => {}
+  const bSignal = new Promise<void>(resolve => { bStarted = resolve })
+  const aSignal = new Promise<void>(resolve => { aStarted = resolve })
+  let bArmed = false
+  let aArmed = false
+  let bObserveCalls = 0
+  let aObserveCalls = 0
+  const coldEvent = (id: string, seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 1000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `${id}-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-${id}-${String(seq)}` },
+      }],
+    },
+  })
+  const seedCold = async (id: string, texts: readonly string[]): Promise<void> => {
+    const handle = await wire.host.ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId(id),
+      createdAt: Date.now(),
+      cwd,
+      isSeeded: false,
+    })
+    await handle.append(texts.map((text, seq) => coldEvent(id, seq, text)) as never)
+    await handle.flush()
+    await handle.close()
+  }
+  try {
+    await seedCold(A, ['r3 alpha'])
+    await seedCold(B, ['r3 beta'])
+    await service.verifySources()
+    const imported = await waitForSettled(wire,
+      { scope: 'all', query: 'r3 ', limit: 25 }, 'r3 cold import')
+    assert.equal(imported.kind, 'ready', JSON.stringify(imported))
+
+    // A real live pending event keeps the final drain queued behind the held
+    // writer; the periodic round has already listed A/B cold before the drain.
+    const pendingC = await wire.host.harness.create(
+      SessionId(C), { provider: 'smoke', model: 'smoke' }, { cwd })
+    const hold = service.enqueueWrite(async () => { await holdGate })
+    pendingC.session.append([['agent/inbox/spliced', {
+      target: 'next-turn',
+      start: 0,
+      inserted: [createUserMessage({
+        content: [{ type: 'text', text: 'r3 pending c' }],
+        source: { kind: 'user', rpcId: 'rpc-r3-pending-c' as never },
+      })],
+    }]])
+
+    let drainStarted: () => void = () => {}
+    const drainSignal = new Promise<void>(resolve => { drainStarted = resolve })
+    let verifyStarted = false
+    service.enqueueWrite = async (task) => {
+      if (verifyStarted) drainStarted()
+      return originalEnqueue.call(service, task)
+    }
+    rawQuery.observeSession = function (id, options) {
+      if (bArmed && String(id) === B) {
+        bArmed = false
+        bObserveCalls += 1
+        bStarted()
+        return bGate.then(() => originalObserve.call(this, id, options))
+      }
+      if (aArmed && String(id) === A) {
+        aArmed = false
+        aObserveCalls += 1
+        aStarted()
+        return aGate.then(() => originalObserve.call(this, id, options))
+      }
+      return originalObserve.call(this, id, options)
+    }
+
+    bArmed = true
+    verifyStarted = true
+    const pass = service.verifySources()
+    await drainSignal
+    // B is registered while the round is blocked before its final audit; the
+    // audit therefore sees a real cold→live mismatch and schedules B's repair.
+    const restoredB = wire.host.ctx.sessions.prepare(SessionId(B), {
+      seed: [coldEvent(B, 0, 'r3 beta')] as never,
+      meta: { cwd },
+    })
+    wire.host.ctx.sessions.enter(restoredB)
+    wire.host.ctx.sessions.announce(restoredB)
+    releaseHold()
+    await pass
+    await hold
+    await bSignal
+
+    // A is registered only after traversal/audit, while B's repair is still
+    // open. The proven round's identity evidence must revoke A and schedule its
+    // ONE current repair instead of becoming ready when B settles.
+    aArmed = true
+    const restoredA = wire.host.ctx.sessions.prepare(SessionId(A), {
+      seed: [coldEvent(A, 0, 'r3 alpha'), coldEvent(A, 1, 'r3 restored row')] as never,
+      meta: { cwd },
+    })
+    wire.host.ctx.sessions.enter(restoredA)
+    wire.host.ctx.sessions.announce(restoredA)
+    const aRepairObserved = await Promise.race([
+      aSignal.then(() => true),
+      // Bounded observation: the real repair must start while this round is open.
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5000)),
+    ])
+    assert.equal(aRepairObserved, true, 'the restored cold identity must schedule its own authoritative repair')
+    releaseB()
+    const bDeadline = Date.now() + 10_000
+    while (service.index.checkpointOf(B)?.sourceState !== 'persisted' && Date.now() < bDeadline) {
+      // Bounded observation of B's real checkpoint settlement.
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await service.writeTail
+    const during = await wire.search({
+      scope: 'session', sessionId: A, query: 'r3 restored row', limit: 5,
+    })
+    assert.equal(during.kind, 'incomplete',
+      `the open round must not publish ready while A's current identity is unproved: ${JSON.stringify(during)}`)
+    releaseA()
+    const after = await waitForSettled(wire,
+      { scope: 'session', sessionId: A, query: 'r3 restored row', limit: 5 }, 'r3 restored row')
+    assert.equal(after.kind, 'ready', JSON.stringify(after))
+    if (after.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(after.items.length, 1, 'the restored row must be projected exactly once')
+    const old = await wire.search({ scope: 'session', sessionId: A, query: 'r3 alpha', limit: 5 })
+    assert.equal(old.kind, 'ready')
+    assert.ok(old.kind === 'ready' && old.items.length === 1)
+    assert.equal(bObserveCalls, 1, 'B must have exactly one current live observation')
+    assert.equal(aObserveCalls, 1, 'A must have exactly one current live observation')
+  } finally {
+    releaseHold()
+    releaseB()
+    releaseA()
+    rawQuery.observeSession = originalObserve
+    service.enqueueWrite = originalEnqueue
+    await wire.dispose()
   }
 })
