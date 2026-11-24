@@ -2535,6 +2535,7 @@ test('an unrelated overflow preserves another Session held accepted batch', asyn
     index: { occurrenceCount(): number }
     pendingEventCount: number
     heldPending: Set<string>
+    droppedAccepted: Map<string, number>
     sessionRepairFlights: Map<string, { promise: Promise<void> }>
     verifySources(): Promise<void>
   }
@@ -2583,9 +2584,13 @@ test('an unrelated overflow preserves another Session held accepted batch', asyn
     assert.equal(internals.pendingEventCount, 1)
 
     // An UNRELATED Session B overflows the shared live buffer. A's held batch
-    // must not be cleared with B's ordinary (re-readable) batch.
-    for (let seq = 3; seq <= 4098; seq += 1) deliver(overflowing, inbox('r205-b', seq, `r205-b burst ${String(seq)}`))
+    // must not be cleared with B's ordinary batch; B's discarded tail must also
+    // retain the same accepted-coverage obligation (R4-01).
+    const burst: unknown[] = []
+    for (let seq = 3; seq <= 4098; seq += 1) burst.push(inbox('r205-b', seq, `r205-b burst ${String(seq)}`))
+    for (const event of burst) deliver(overflowing, event)
     assert.equal(internals.heldPending.has('r205-a'), true, 'the overflow must preserve the held Session')
+    assert.equal(internals.droppedAccepted.has('r205-b'), true, 'the ordinary discarded tail is an obligation')
     await settleRepairs()
     const afterOverflow = await waitDirectSettled(service)
     assert.equal(afterOverflow.kind, 'incomplete', JSON.stringify(afterOverflow))
@@ -2596,7 +2601,10 @@ test('an unrelated overflow preserves another Session held accepted batch', asyn
     const hidden = await service.search({ scope: 'all', query: 'r205-a accepted gap five', limit: 25 }, new AbortController().signal)
     assert.equal(hidden.kind, 'incomplete', 'the unproven held event is never exposed as a hit')
 
-    // Once A's official source covers 3..5, the held batch settles and ready.
+    // Both the held A batch and B's ordinary discarded tail must be covered by
+    // their authoritative durable sources before the global state may be ready.
+    overflowing.events.push(...burst as never[])
+    overflowing.revision += 1
     held.events.push(inbox('r205-a', 3, 'r205-a durable three'), inbox('r205-a', 4, 'r205-a durable four'), gap)
     held.revision += 1
     await internals.verifySources()
@@ -2605,9 +2613,10 @@ test('an unrelated overflow preserves another Session held accepted batch', asyn
     assert.equal(five.kind, 'ready', JSON.stringify(five))
     if (five.kind !== 'ready') throw new Error('expected ready')
     assert.equal(five.items.length, 1)
-    assert.equal(internals.index.occurrenceCount(), 7)
+    assert.equal(internals.index.occurrenceCount(), 4103)
     assert.equal(internals.pendingEventCount, 0)
     assert.equal(internals.heldPending.size, 0)
+    assert.equal(internals.droppedAccepted.size, 0)
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()
@@ -2721,8 +2730,25 @@ test('the hard buffer bound evicts an over-cap held Session and keeps the barrie
     assert.equal(internals.index.checkpointOf('r301-c')?.nextSeq, 4)
     assert.equal(internals.index.occurrenceCount(), 5)
 
-    // The official source eventually covers the evicted seqs; only then ready.
+    // R4-01(B): after eviction the watermark is the ONLY outstanding accepted
+    // evidence. A temporary roster omission must not delete the checkpoint, the
+    // rows or that obligation.
     a.live = false
+    a.present = false
+    await internals.verifySources()
+    const rosterAbsent = await waitDirectSettled(service)
+    assert.equal(rosterAbsent.kind, 'incomplete', JSON.stringify(rosterAbsent))
+    if (rosterAbsent.kind !== 'incomplete') throw new Error('expected incomplete')
+    assert.equal(rosterAbsent.reason, 'resource-limit')
+    assert.equal(internals.droppedAccepted.get('r301-a'), 4100)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.index.checkpointOf('r301-a')?.nextSeq, 3)
+    assert.equal(internals.index.occurrenceCount(), 5, 'the temporary omission must not delete the rows')
+    const hiddenAfterRoster = await service.search({ scope: 'all', query: 'r301-a accepted gap four', limit: 25 }, new AbortController().signal)
+    assert.equal(hiddenAfterRoster.kind, 'incomplete', 'the uncovered accepted tail is never a ready hit')
+
+    // The official source eventually covers the evicted seqs; only then ready.
+    a.present = true
     query.observeSession = realObserve
     const recovery: unknown[] = [inbox('r301-a', 3, 'r301-a missing three'), gap]
     for (let seq = 5; seq <= 4100; seq += 1) recovery.push(inbox('r301-a', seq, `r301-a burst ${String(seq)}`))
@@ -2822,6 +2848,90 @@ test('the hard buffer bound evicts an over-cap held Session on the byte cap', as
   }
 })
 
+test('ordinary overflow keeps its coverage across a later burst and a short cold source', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r401-')
+  const source = mutableSource('/repo/r401', 'r401')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    pendingEventCount: number
+    droppedAccepted: Map<string, number>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 14_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `r401-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-r401-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  try {
+    await waitDirectReady(service)
+    assert.equal(internals.index.occurrenceCount(), 2)
+    // The accepted bursts precede the disposal; the repair is now cold and the
+    // durable source still exposes only 0..2.
+    source.live = false
+    const first: unknown[] = []
+    for (let seq = 3; seq <= 4099; seq += 1) first.push(inbox(seq, `r401 first ${String(seq)}`))
+    for (const event of first) deliver(event)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.droppedAccepted.get('r401'), 4099)
+
+    // A later ordinary burst after the earlier watermark raises the same
+    // unresolved coverage obligation; it never resets or bypasses it.
+    const second: unknown[] = []
+    for (let seq = 4100; seq <= 8196; seq += 1) second.push(inbox(seq, `r401 second ${String(seq)}`))
+    for (const event of second) deliver(event)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.droppedAccepted.get('r401'), 8196)
+    await settleRepairs()
+    const bounded = await waitDirectSettled(service)
+    assert.equal(bounded.kind, 'incomplete', JSON.stringify(bounded))
+    if (bounded.kind !== 'incomplete') throw new Error('expected incomplete')
+    assert.equal(bounded.reason, 'resource-limit')
+    assert.equal(internals.index.occurrenceCount(), 2, 'a short durable prefix must not fabricate the discarded tail')
+
+    // Only the authoritative durable source covering 3..8196 may clear it.
+    source.events.push(...first as never[], ...second as never[])
+    source.revision += 1
+    await internals.verifySources()
+    await waitDirectReady(service)
+    assert.equal(internals.droppedAccepted.size, 0)
+    assert.equal(internals.index.occurrenceCount(), 8196)
+    const last = await service.search({ scope: 'all', query: 'r401 second 8196', limit: 25 }, new AbortController().signal)
+    assert.equal(last.kind, 'ready', JSON.stringify(last))
+    if (last.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(last.items.length, 1)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
 test('a held accepted batch vetoes a temporary official roster deletion', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r302-')
@@ -2908,7 +3018,7 @@ test('a held accepted batch vetoes a temporary official roster deletion', async 
   }
 })
 
-test('a cold dirty repair completes from rc.5 JSONL without eventCount', async (t) => {
+test('a cold dirty repair completes from the rc.5 no-eventCount source shape', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r303-')
   const source = mutableSource('/repo/r303', 'r303')

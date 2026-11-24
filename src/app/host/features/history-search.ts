@@ -881,22 +881,39 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.scheduleSessionRepair(sessionId, 'disposal')
   }
 
+  /**
+   * Record the highest accepted seq of a discarded overflow batch. This is the
+   * ONE unresolved-coverage obligation shared by ordinary and held eviction:
+   * the payload may be gone, but the index cannot claim ready until a committed
+   * official replay has passed this seq. A newer discard only raises it.
+   */
+  private recordDroppedCoverage(sessionId: string, batch: PendingSession): void {
+    if (batch.events.length === 0) return
+    const lastSeq = batch.events.reduce((max, event) => Math.max(max, event.seq), -1)
+    if (lastSeq < 0) return
+    this.droppedAccepted.set(sessionId, Math.max(this.droppedAccepted.get(sessionId) ?? -1, lastSeq))
+  }
+
   private handleOverflow(): void {
     this.bufferOverflows += 1
     const ordinary = [...this.pending.keys()].filter(sessionId => !this.heldPending.has(sessionId))
-    for (const sessionId of ordinary) this.discardPendingSession(sessionId)
+    // Ordinary overflow is NOT a durability guarantee: record the same
+    // unresolved coverage obligation before freeing the payload.
+    for (const sessionId of ordinary) {
+      const batch = this.pending.get(sessionId)
+      if (batch !== undefined) this.recordDroppedCoverage(sessionId, batch)
+      this.discardPendingSession(sessionId)
+    }
     // Held batches are the only in-memory copy of accepted events the official
     // source may still be too short to prove, so keep them while the retained
     // set is within the HARD bound (an unrelated burst must not evict them).
     // A held Session that is itself over the bound must still be evicted: the
-    // bound is finite. Record its last seq so completeness cannot claim ready
-    // until the official source covers the evicted facts.
+    // bound is finite; the shared coverage obligation keeps the barrier.
     const evicted: string[] = []
     if (this.pendingEventCount > HISTORY_SEARCH_MAX_PENDING_EVENTS || this.pendingBytes > HISTORY_SEARCH_MAX_PENDING_BYTES) {
       for (const [sessionId, batch] of [...this.pending.entries()]) {
         if (!this.heldPending.has(sessionId)) continue
-        const lastSeq = batch.events.reduce((max, event) => Math.max(max, event.seq), -1)
-        this.droppedAccepted.set(sessionId, Math.max(this.droppedAccepted.get(sessionId) ?? -1, lastSeq))
+        this.recordDroppedCoverage(sessionId, batch)
         evicted.push(sessionId)
         this.discardPendingSession(sessionId)
         if (this.pendingEventCount <= HISTORY_SEARCH_MAX_PENDING_EVENTS && this.pendingBytes <= HISTORY_SEARCH_MAX_PENDING_BYTES) break
@@ -2052,6 +2069,16 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
     }
+    const droppedCoverage = this.droppedAccepted.get(sessionId)
+    if (droppedCoverage !== undefined && checkpoint.nextSeq <= droppedCoverage) {
+      // An overflow evicted accepted facts at or above this checkpoint. The
+      // no-read live path cannot prove them, and a pending veto no longer
+      // exists once the payload was freed. Force an authoritative read: observe
+      // the live source, or fully replay the persisted source. The shared
+      // watermark stays until the committed checkpoint passes it.
+      if (record.live) return this.rebuildLiveSession(sessionId, persistence, sessions, query)
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+    }
     if (!record.live && record.eventCount !== undefined && record.eventCount < checkpoint.nextSeq) {
       // A durable tail shrink is a rollback: rebuild from the official log. A
       // LIVE Session's persistence count may legitimately lag its accepted
@@ -2126,11 +2153,17 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       try {
         let stale = false
         const receipt = await this.enqueueWrite(() => {
-          // A live entry, a buffered accepted event (held or not), an active
-          // same-id repair or a moved checkpoint refuses this derived deletion
-          // outright. Unlike a replay, deletion never gets the held exception:
-          // a held batch is the sole copy of accepted facts.
-          if (!this.isCandidateCurrent(witness) || this.sessionRepairFlights.has(sessionId) || this.pending.has(sessionId)) {
+          // A live entry, a buffered accepted event, an evicted-but-uncovered
+          // accepted tail, an active same-id repair or a moved checkpoint
+          // refuses this derived deletion outright. A stale roster snapshot is
+          // not proof that the accepted facts are gone; only a committed
+          // official replay may cover the watermark.
+          if (
+            !this.isCandidateCurrent(witness)
+            || this.sessionRepairFlights.has(sessionId)
+            || this.pending.has(sessionId)
+            || this.droppedAccepted.has(sessionId)
+          ) {
             stale = true
             return
           }
