@@ -666,6 +666,51 @@ test('a Focus live Preparing after a replay fence follows the later visible assi
     'one root per logical Turn; no third root')
 })
 
+test('a TSP Focus live Preparing stays after a trailing foreign replay fence', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 0 }, 0),
+    ev('tool/call', { turn: 0, step: 0, callId: ToolCallId('tail-a'), name: 'read', arguments: '{}' }, 1),
+    ev('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('tail-ar'), role: 'tool', toolCallId: ToolCallId('tail-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('tail-a') } },
+    }, 2),
+    ev('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('tail-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    ev('turn/start', { turn: 1 }, 5),
+    ev('user/message', {
+      id: MessageId('tail-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 6),
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('tail-b1'), name: 'read', arguments: '{}' }, 7),
+    ev('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('tail-b1r'), role: 'tool', toolCallId: ToolCallId('tail-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('tail-b1') } },
+    }, 8),
+    ev('step/end', { turn: 1, step: 0 }, 9),
+    ev('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('tail-late'), role: 'tool', toolCallId: ToolCallId('tail-late-c'), content: [{ type: 'text', text: 'LATE_REPLAY_TAIL' }], source: { kind: 'tool', callId: ToolCallId('tail-late-c') } },
+    }, 10),
+  ])
+  const preview: StreamingToolPreview = { callId: 'tail-live', turn: 1, step: 1, index: 0, name: 'bash', argumentBytes: 12 }
+  const nodes = flatten(folder.messages(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: [preview],
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  })
+  const replayNode = nodes.find(node => textOf(node).includes('LATE_REPLAY_TAIL'))
+  const preparing = nodes.filter(node => node.kind === 'row' && node.id.includes('preparing-tail-live'))
+  assert.equal(preparing.length, 1, 'exactly one live Preparing row')
+  assert.equal(preparing[0]?.parent, 'main', 'the independent replay fence keeps the live row standalone')
+  assert.ok(replayNode !== undefined && nodes.indexOf(preparing[0]!) > nodes.indexOf(replayNode),
+    'the live row follows the raw replay fence')
+})
+
 test('the TSP Focus sink never releases the latest pending final for a late older-step row', () => {
   const folder = apply([
     ev('turn/start', { turn: 1 }, 0),

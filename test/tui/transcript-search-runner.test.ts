@@ -473,6 +473,62 @@ test('runner Focus search: a fail-open Work member never promotes a phantom Work
   assert.ok(app.expandedWorkOwnersForTest().has(b1), 'the real hidden Work is promoted on dismiss')
 })
 
+test('runner Focus search: a suppressed pending final stays source-only and promotes no root', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('ps-a'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('ps-ar'), role: 'tool', toolCallId: ToolCallId('ps-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('ps-a') } },
+    }, 2),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('ps-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    event('turn/start', { turn: 1 }, 5),
+    event('user/message', {
+      id: MessageId('ps-u'), role: 'user', content: [{ type: 'text', text: 'search the pending' }], source: { kind: 'user' },
+    }, 6),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('ps-b1'), name: 'read', arguments: '{}' }, 7),
+    event('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('ps-b1r'), role: 'tool', toolCallId: ToolCallId('ps-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('ps-b1') } },
+    }, 8),
+    event('step/end', { turn: 1, step: 0 }, 9),
+    event('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('ps-late'), role: 'tool', toolCallId: ToolCallId('ps-late-c'), content: [{ type: 'text', text: 'LATE_REPLAY' }], source: { kind: 'tool', callId: ToolCallId('ps-late-c') } },
+    }, 10),
+    // The latest-step settled Assistant is the PENDING final and lies beyond
+    // the replay fence: the projection suppresses it, so opening the root could
+    // not reveal it.
+    event('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('ps-pending'), role: 'assistant', content: [{ type: 'text', text: 'PENDING_SOURCE_ONLY' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 11),
+  ]
+  const fixture = await mountSearchRunner(t, 2, [], 'unused', events)
+  const { app } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  app.closeTranscriptSearch()
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  typeQuery(fixture, 'PENDING_SOURCE_ONLY')
+  await fixture.settleRender()
+  const target = app.transcriptSearchPresentationForTest()?.message
+  assert.ok(target !== undefined && target.kind === 'assistant', 'the pending final is a source match')
+  assert.equal(mountedSearchSelection(app, target), undefined,
+    'the suppressed pending row is not materialized')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'a nonrecoverable pending match never promotes a Thought root')
+})
+
 test('runner search: a same-window query re-windows zero times and rebuilds at most once', async (t) => {
   const fixture = await mountSearchRunner(t, 30, [25, 29])
   const { app, projections } = fixture

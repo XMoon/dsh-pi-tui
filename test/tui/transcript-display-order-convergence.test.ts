@@ -29,6 +29,8 @@ import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { CompactWorkComponent, formatWorkHeaderLine } from '../../src/tui/components/transcript/compact-work.ts'
 import { activityClockOf } from '../../src/tui/transcript/activity-clock.ts'
 import { resolveWorkLifetimes, type WorkLifetime } from '../../src/tui/transcript/activity-clock.ts'
+import { assistantStepIntermediateOf } from '../../src/domain/transcript/folder.ts'
+import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
 
 const T0 = 1_700_000_000_000
 
@@ -209,7 +211,66 @@ test('Tool → Assistant text → Tool derives the SAME live and cold Work parti
   assert.deepEqual(spanFacts(cold).map(facts => facts.members), [['tool:c1'], ['tool:c2']])
 })
 
+// ── T1b: the same intermediate fact and expanded output BEFORE turn/end ─────
+
+test('Tool → Assistant text → Tool records the SAME intermediate fact and Focus row live and cold', () => {
+  const cold = foldEvents(interleavedEvents())
+  const live = interleavedLive()
+  for (const [lane, folder] of [['cold', cold], ['live', live]] as const) {
+    const activity = folder.turnActivities().get(1)
+    assert.ok(activity !== undefined, `${lane}: turn activity exists`)
+    const assistant = folder.messages().find(message =>
+      message.kind === 'assistant' && message.text === 'let me check')
+    assert.ok(assistant !== undefined && assistant.kind === 'assistant', `${lane}: assistant row exists`)
+    assert.equal(assistantStepIntermediateOf(activity, assistant), true,
+      `${lane}: the durable stream proves the text precedes the same-step call`)
+    const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+    const rows = blocks.flatMap(block => block.kind === 'work'
+      ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
+    assert.equal(rows.filter(row => row.kind === 'assistant'
+      && row.text === 'let me check').length, 1,
+    `${lane}: the proven-intermediate Assistant is visible before turn/end`)
+  }
+})
+
+/** `Tool c2 (step 1) at +1s → Assistant text visible at +2s`: the converse
+ * order must NOT be accepted as continuation. */
+function callBeforeTextEvents(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('c1', 1, 0, T0 + 1_500, 2, 'a'),
+    toolCall({ callId: 'c2', name: 'read', turn: 1, step: 1, time: T0 + 1_000, seq: 3, args: '{}' }),
+    toolResult('c2', 1, 1, T0 + 2_000, 4, 'b'),
+    assistantSettlement({
+      turn: 1, step: 1, time: T0 + 5_000, seq: 5, text: 'after the call',
+      stream: [
+        toolCallDeltaChunk(T0 + 1_000, 1, 'c2', 'read'),
+        textChunk(T0 + 2_000, 0, 'after the call'),
+      ],
+    }),
+  ]
+}
+
+test('a call that precedes the visible text is not a continuation fact', () => {
+  const folder = foldEvents(callBeforeTextEvents())
+  const activity = folder.turnActivities().get(1)
+  assert.ok(activity !== undefined)
+  const assistant = folder.messages().find(message =>
+    message.kind === 'assistant' && message.text === 'after the call')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  assert.equal(assistantStepIntermediateOf(activity, assistant), false,
+    'a call on the preceding display side never confirms the text intermediate')
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+  const rows = blocks.flatMap(block => block.kind === 'work'
+    ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
+  assert.equal(rows.filter(row => row.kind === 'assistant' && row.text === 'after the call').length, 0,
+    'the unproven-order candidate stays the pending final')
+})
+
 // ── T2: reads separated by a Conversation must not merge ───────────────────
+
+
 
 test('a Conversation visible between two reads keeps them as two reads in the cold fold too', () => {
   const cold = foldEvents(readsAcrossConversationEvents())

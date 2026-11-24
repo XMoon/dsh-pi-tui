@@ -122,7 +122,7 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
-import { focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { focusMaterializedMessages, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
 import { FocusTimingStore } from '../transcript/focus-timing.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
@@ -1509,6 +1509,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     readonly publication: number
     readonly activities: ReadonlyMap<number, TurnActivity>
     readonly visible: ReadonlySet<TranscriptMessage>
+    readonly materialized: ReadonlySet<TranscriptMessage>
   } | undefined
   /** Increments on every committed transcript publication (a dropped stale
    * frame does not count). The visibility memo above is keyed by it. */
@@ -3278,10 +3279,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       for (const block of projectFocus(lastMessages, activities, EMPTY_PROBE_TURNS, true)) {
         if (block.kind === 'message') visible.add(block.message)
       }
-      visibleIndex = { publication: transcriptPublicationEpoch, activities, visible }
+      // A hidden row is recoverable only when the ACTUAL expanded projection can
+      // materialize it; a suppressed pending/final row stays source-only and
+      // must not mint a temporary root grant.
+      const materialized = focusMaterializedMessages(lastMessages, activities)
+      visibleIndex = { publication: transcriptPublicationEpoch, activities, visible, materialized }
       collapsedFocusVisible = visibleIndex
     }
-    return !visibleIndex.visible.has(message)
+    return !visibleIndex.visible.has(message) && visibleIndex.materialized.has(message)
   }
   const EMPTY_PROBE_TURNS: ReadonlySet<number> = new Set()
 

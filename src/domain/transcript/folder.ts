@@ -3511,6 +3511,30 @@ export class TranscriptFolder {
   private isDeclaredToolCall(turn: number, step: number, callId: string): boolean {
     return this.declaredToolCallsByStep.get(stepKey(turn, step))?.has(callId) === true
   }
+  /** Whether this step's durable evidence owns a same-step ACTUAL tool call
+   * that the lane convergence places on the Assistant's FOLLOWING display side
+   * (text-then-call). A cold fold can observe the call event BEFORE the
+   * settlement; the existing lane relation is the display authority, and a
+   * conformant raw row needs no relation. A call on the preceding side, a
+   * requested-but-never-started call (no card) and an older-step call are not
+   * continuation. */
+  private assistantStepHasFollowingActualCall(turn: number, step: number): boolean {
+    const key = stepKey(turn, step)
+    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+    const declared = this.declaredToolCallsByStep.get(key)
+    if (assistantIndex === undefined || declared === undefined) return false
+    for (const callId of declared) {
+      const rawIndex = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+      if (rawIndex === undefined) continue
+      const relation = this.laneDisplayByDisplaced.get(rawIndex)
+      const following = relation !== undefined
+        ? relation.anchor === assistantIndex && relation.position === 'after'
+        : rawIndex > assistantIndex
+      if (following) return true
+    }
+    return false
+  }
+
 
   /** Whether a proven Tool row already sits on the physical side its evidence
    *  asks for (so it keeps its own slot and needs no relation). */
@@ -5374,6 +5398,15 @@ export class TranscriptFolder {
         // (review finding).
         activity.settledSteps.add(event.data.step)
         const staleForFocus = event.data.step < priorLast
+        // The SAME durable facts can reach the Fold in either order: live text
+        // before the call, cold call before the settlement. The settlement's
+        // own convergence has now placed every ACTUAL same-step call on its
+        // proven side; a following call records the exact same text-then-call
+        // authority as the live call-first branch. Unprovable/equal/older-step
+        // orders and requested-only blocks stay unmarked.
+        if (!staleForFocus && this.assistantStepHasFollowingActualCall(event.data.turn, event.data.step)) {
+          activity.intermediateAssistantSteps.add(event.data.step)
+        }
         if (!staleForFocus) {
           // A message of a DIFFERENT step than the open candidate proves the
           // earlier step's output was intermediate: confirm it first (plan

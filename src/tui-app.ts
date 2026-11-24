@@ -359,7 +359,7 @@ import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
 import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
 import type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
-import { focusHeldBackFinalByTurn, focusLiveTailPlacement, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
+import { focusHeldBackFinalByTurn, focusLiveTailPlacement, focusMaterializedMessages, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
@@ -4738,6 +4738,10 @@ export class TuiApp {
     readonly fullscreen: boolean
     readonly disclosureAvailable: boolean
     readonly messages: readonly TranscriptMessage[]
+    /** The projection changed in place (late continuation/reflow) while the
+     * messages array identity stayed: the materialized-container filter must
+     * not serve a stale ancestry. */
+    readonly publication: number
     readonly ancestry: TranscriptRevealAncestry
   } | undefined
   /** `focusRootHidesSearchTarget()` memo: the collapsed Focus visibility of one
@@ -10725,6 +10729,7 @@ export class TuiApp {
     const turn = this.searchTargetTurn()
     if (isFocusDisplayPreset(this.displayState.preset) && turn !== undefined
       && this.messages.includes(message) && this.turnActivities.has(turn)
+      && this.focusRootHidesSearchTarget(message)
       && !this.focusExpandedTurns.has(turn)) {
       this.focusExpandedTurns.add(turn)
       changed = true
@@ -11009,14 +11014,19 @@ export class TuiApp {
       true,
     )
     const visible = blocks.some(block => block.kind === 'message' && block.message === message)
+    // A row hidden while collapsed is recoverable only if the ACTUAL expanded
+    // projection can materialize it. A suppressed pending/final (or a raw
+    // fail-open Work member) must stay source-only: opening the root would not
+    // reveal it, so it mints no temporary reveal and no dismiss promotion.
+    const recoverable = !visible && focusMaterializedMessages(this.messages, this.turnActivities).has(message)
     this.collapsedFocusHiddenMemo = {
       publication: this.transcriptPublicationEpoch,
       messages: this.messages,
       activities: this.turnActivities,
       target: message,
-      hidden: !visible,
+      hidden: recoverable,
     }
-    return !visible
+    return recoverable
   }
 
   /** Whether the CURRENT search target owns this message (effective reveal).
@@ -12270,7 +12280,8 @@ export class TuiApp {
     const memo = this.revealedOwnerMemo
     if (memo !== undefined && memo.target === target && memo.preset === this.displayState.preset
       && memo.fullscreen === (this.fullscreen !== undefined)
-      && memo.disclosureAvailable === disclosureAvailable && memo.messages === this.messages) {
+      && memo.disclosureAvailable === disclosureAvailable && memo.messages === this.messages
+      && memo.publication === this.transcriptPublicationEpoch) {
       return memo.ancestry
     }
     const ancestry = this.searchRevealAncestryFor(target)
@@ -12280,6 +12291,7 @@ export class TuiApp {
       fullscreen: this.fullscreen !== undefined,
       disclosureAvailable,
       messages: this.messages,
+      publication: this.transcriptPublicationEpoch,
       ancestry,
     }
     return ancestry
@@ -12551,7 +12563,11 @@ export class TuiApp {
     // preview next to its own turn instead.
     const last = blocks.at(-1)
     const trailingTurn = last === undefined ? undefined : this.focusLiveTurnOf(last)
-    return trailingTurn === undefined || trailingTurn === turn ? blocks.length : lastTurnIndex + 1
+    if (trailingTurn === undefined || trailingTurn === turn) return blocks.length
+    // A later OPEN turn keeps the preview next to its own turn. An independent
+    // trailing boundary of a COMPLETED/replay turn is a hard fence: fail open
+    // standalone AFTER it (the same placement TSP derives), never before it.
+    return this.turnActivities.get(trailingTurn)?.completed === false ? lastTurnIndex + 1 : blocks.length
   }
 
   /** Interleave Client-local cards only after canonical Work/Focus projection. */

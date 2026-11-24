@@ -197,6 +197,45 @@ function focusPendingFinal(
   return latestAssistant
 }
 
+/** The turn's PRIMARY presentation region derived from the canonical raw
+ * window: the same `focusPrimaryRegion` the projection emits. Used by the live
+ * tail placement so a SUPPRESSED pending final still answers by region
+ * membership, never by its own identity. */
+function focusPrimaryRegionOfTurn(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+  turn: number,
+): { readonly members: readonly TranscriptMessage[]; readonly end: number } | undefined {
+  const activity = activities.get(turn)
+  const rows = focusRowsByTurn(messages).get(turn)
+  if (activity === undefined || rows === undefined) return undefined
+  const startMessage = messages.find(message =>
+    focusProjectionTurnOf(message) === turn && !isPostTurnReplayEvidence(message))
+  if (startMessage === undefined) return undefined
+  const start = messages.indexOf(startMessage)
+  if (start < 0) return undefined
+  return focusPrimaryRegion(messages, start, turn, eligibleFinalAssistant(activity, rows))
+}
+
+/** Every message the ACTUAL all-expanded Focus projection can materialize on
+ * the current preset: top-level rows plus members of a materialized Work span.
+ * A suppressed pending/final row is absent; a Work emitted raw by a fail-open
+ * region contributes no span. Search reveal/root grants use this so a
+ * nonrecoverable hidden row mints no ancestor. */
+export function focusMaterializedMessages(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+): ReadonlySet<TranscriptMessage> {
+  const out = new Set<TranscriptMessage>()
+  for (const block of projectFocus(messages, activities, new Set(activities.keys()), true)) {
+    if (block.kind === 'message') out.add(block.message)
+    else if (block.kind === 'work') {
+      for (const member of block.span.members) out.add(member)
+    }
+  }
+  return out
+}
+
 /**
  * The row a turn's expanded Focus holds back / emits as its final, per turn:
  * the qualified final once `turn/end` authoritatively qualifies it, otherwise
@@ -722,19 +761,13 @@ export function focusLiveTailPlacement(
     return materialized ? { rootOwner: activity.owner, workOwner: tailWork.owner } : undefined
   }
   if (tailMessage === undefined) return undefined
-  const heldBack = focusHeldBackFinalByTurn(messages, activities).get(tailTurn)
-  const emitted = expanded.find((block): block is Extract<FocusProjectedBlock, { kind: 'message' }> =>
-    block.kind === 'message' && block.message === tailMessage)
-  const activityIndex = expanded.findIndex(block => block.kind === 'activity' && block.activity.turn === tailTurn)
-  // A region FOUNDATION row (leading prompt/surfaced context) is emitted before
-  // the Thought without a marker and is still part of the region; a raw
-  // later-region row appears after the Thought with no marker.
-  const foundationRow = emitted !== undefined && activityIndex >= 0 && expanded.indexOf(emitted) < activityIndex
-  const regionRow = tailMessage === heldBack
-    || foundationRow
-    || (emitted !== undefined && (emitted.focusPresentationOwner !== undefined
-      || emitted.containerPath?.some(node => node.kind === 'focus-root' && node.turn === tailTurn) === true))
-  return regionRow ? { rootOwner: activity.owner } : undefined
+  // Region membership is the authority even when the tail row is a SUPPRESSED
+  // pending final: a pending Assistant beyond a replay/disjoint fence is not
+  // part of the primary region, so it must not lend that root to the call.
+  const primary = focusPrimaryRegionOfTurn(messages, activities, tailTurn)
+  return primary !== undefined && primary.members.includes(tailMessage)
+    ? { rootOwner: activity.owner }
+    : undefined
 }
 
 /** Rows that remain visible outside the collapsed Thought as persistent

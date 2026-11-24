@@ -208,7 +208,10 @@ projectTranscriptStructure()
   Before `turn/end`, the structural latest-step settled Assistant is held back
   as the pending final unless the Folder recorded authoritative continuation
   for that exact step (a real `tool/call` or a new step after its settlement,
-  or a later output that confirmed its streaming candidate). A late older-step
+  or a later output that confirmed its streaming candidate). The settlement
+  reconciles both arrival orders: a cold fold that observed the same-step
+  actual call BEFORE its settlement records the fact from the call's proven
+  display side, so live and cold agree. A late older-step
   Assistant/Thinking, an orphan/result-only diagnostic, a retry diagnostic or
   an independent control row never confirms it; display kind and physical order
   are never the authority. After `turn/end` the qualified final classifier owns
@@ -217,10 +220,13 @@ projectTranscriptStructure()
   identity: a materialized trailing Work owns it, a primary region that reaches
   the raw tail admits it as the root's child, and an independent boundary or a
   later fail-open region renders it exactly once standalone with no Focus
-  ancestry (a preview with no projected root also fails open standalone).
-  Search reveal ancestry is derived only from containers the actual projection
-  materialized: a canonical Work emitted raw by a fail-open region mints no Work
-  grant and is never promoted into a manual disclosure.
+  ancestry (a preview with no projected root also fails open standalone). A
+  suppressed pending final beyond the primary region is not that region's tail
+  and lends no root. Search reveal ancestry is derived only from containers the
+  actual projection materialized: a canonical Work emitted raw by a fail-open
+  region mints no Work grant and is never promoted into a manual disclosure; a
+  suppressed pending/final row is not recoverable and mints no reveal or root
+  promotion.
 
 Compact, Full and expanded Focus all materialize this structure:
 

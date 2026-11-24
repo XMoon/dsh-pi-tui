@@ -4143,6 +4143,122 @@ test('a late older-step settlement never releases the latest pending final in th
   app.stop()
 })
 
+test('a live Focus run stays after a trailing foreign replay fence', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('tail-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('tail-ar'), role: 'tool', toolCallId: ToolCallId('tail-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('tail-a') } },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('tail-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('tail-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('tail-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('tail-b1r'), role: 'tool', toolCallId: ToolCallId('tail-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('tail-b1') } },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    // The raw tail is a late orphan result of the settled Turn A: an independent
+    // hard fence, with NO Turn-1 continuation after it.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('tail-late'), role: 'tool', toolCallId: ToolCallId('tail-late-c'), content: [{ type: 'text', text: 'LATE_TAIL_REPLAY' }], source: { kind: 'tool', callId: ToolCallId('tail-late-c') } },
+    }, T0 + 10, 10),
+  ])
+  show(app, folder, [
+    { callId: 'tail-live', turn: 1, step: 1, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly text?: string; readonly turn?: number; readonly kind?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  // The late orphan card is the raw Turn-0 TOOL message; the Turn-0 assistant
+  // final is emitted at the end of its own collapsed Activity.
+  const replayIndex = blocks.findIndex(block => block.kind === 'message'
+    && block.message?.turn === 0 && block.message.kind === 'tool')
+  const previewIndex = blocks.findIndex(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.ok(replayIndex >= 0, 'the replay fence is visible')
+  assert.ok(previewIndex > replayIndex,
+    `the live call fails open AFTER the independent replay fence:\n${JSON.stringify({ replayIndex, previewIndex })}`)
+  assert.equal(blocks[previewIndex]?.containerPath, undefined, 'no Focus ancestry across the fence')
+  app.stop()
+})
+
+test('a hidden pending Assistant beyond a replay fence lends no root to a live run', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pend-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pend-ar'), role: 'tool', toolCallId: ToolCallId('pend-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('pend-a') } },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pend-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('pend-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('pend-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('pend-b1r'), role: 'tool', toolCallId: ToolCallId('pend-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('pend-b1') } },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('pend-late'), role: 'tool', toolCallId: ToolCallId('pend-late-c'), content: [{ type: 'text', text: 'LATE_PENDING_REPLAY' }], source: { kind: 'tool', callId: ToolCallId('pend-late-c') } },
+    }, T0 + 10, 10),
+    // The structural latest step settles in the DISJOINT secondary region; it
+    // is still the pending final, hidden, and its raw tail is NOT a member of
+    // the primary region that owns the Thought.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('pend-hidden'), role: 'assistant', content: [{ type: 'text', text: 'PENDING_SECONDARY' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+  ])
+  show(app, folder, [
+    { callId: 'pend-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  assert.equal(blocks.some(block => block.kind === 'message' && block.message?.text === 'PENDING_SECONDARY'), false,
+    'the pending final beyond the fence stays suppressed')
+  const preview = blocks.find(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.ok(preview !== undefined, 'the live call is present exactly once')
+  assert.equal(preview.containerPath, undefined,
+    'a suppressed pending beyond the fence never lends the primary root to the call')
+  app.stop()
+})
+
 test('an expanded Focus live run with no projected root fails open standalone', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()
