@@ -3034,6 +3034,126 @@ test('the short-screen leave question scrolls under the wheel and refuses a hidd
   h.dispose()
 })
 
+test('a second workspace cannot be leased while a tenant write is owned, and a remount is fresh', async () => {
+  let releaseWrite: (() => void) | undefined
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteGate: () => new Promise<void>(resolve => { releaseWrite = resolve }),
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '9')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Saving…/u)
+  assert.equal(h.agentLoopWrites().length, 1, 'the write really left the Client')
+  // A freshly mounted page can only be a page of a NEW workspace, and the app
+  // takes exactly ONE workspace lease: a second `/settings` is refused while the
+  // tenant owns the in-flight write. (The tenant itself refuses every user leave
+  // in the same window, so no fresh page can exist beside it by contract.)
+  assert.throws(() => h.invoke('settings'), /a workspace screen is already leased/u)
+  assert.equal(h.agentLoopWrites().length, 1)
+  // The owned write settles on the SAME page, exactly once.
+  releaseWrite?.()
+  await settle(h, 12)
+  assert.match(h.view(), /Current value\s+9/u)
+  assert.match(h.view(), /Verified/u)
+  assert.equal(h.agentLoopWrites().length, 1, 'the settlement never replays or duplicates the write')
+  // After the settlement the page is clean, so a remount in the SAME app yields
+  // a FRESH instance: its own read, no inherited Saving/Verified, no new write.
+  await key(h, '\x1b')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Value:\s*9/u, 'the remounted tenant seeds its own authoritative value')
+  assert.doesNotMatch(h.view(), /Saving…|Verified/u, 'a remounted tenant never inherits a retired settlement')
+  assert.equal(h.agentLoopWrites().length, 1, 'and never replays the retired write')
+  h.dispose()
+})
+
+test('a raw Input already open is degraded by a bar-only grant without losing its text', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r') // the raw Input opens on the explicit entry
+  await key(h, '\x15')
+  await key(h, '5')
+  await settle(h, 4)
+  assert.match(h.view(), /Value: 5/u)
+  const refreshesBefore = h.agentLoopRefreshes()
+  h.vt.resize(44, 2) // bar-only while the Input is already open
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Cancel \[Esc\]\s*$/u, 'the bar-only row paints the Input Cancel')
+  await key(h, '7') // typing must not edit a body that is not painted
+  await key(h, '\r') // and Enter must not confirm it
+  await settle(h, 6)
+  assert.deepEqual(h.agentLoopWrites(), [], 'no hidden confirm can write')
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'and no hidden refresh runs')
+  // The page's own Cancel closes the Input; restoring the grant shows the
+  // untouched authoritative value, and a fresh Input works.
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  h.vt.resize(160, 44)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Current value\s+10/u, 'the refused typing never reached the controller')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Value: 10/u, 'a fresh explicit Change seeds the real current value')
+  h.dispose()
+})
+
+test('the short-screen refresh question scrolls under the wheel and recovers', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'read-only profile',
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [], 'the Host refused the write')
+  const refreshesBefore = h.agentLoopRefreshes()
+  await key(h, 'r') // a dirty page asks its OWN refresh question
+  await settle(h, 6)
+  h.vt.resize(44, 3) // ONE body row: the copy cannot fit whole
+  await h.vt.waitForRender()
+  const before = h.view()
+  assert.match(before, /Keep \[Esc\]/u)
+  wheel(h, 1, 20, true)
+  await settle(h, 4)
+  assert.notEqual(h.view(), before, 'the wheel scrolls the refresh question body')
+  await key(h, 'r')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'an unread refresh copy never accepts its action')
+  await key(h, '\x1b') // Keep
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Keep returns to the same dirty page')
+  // With a grant that really hosts the copy, the SAME action is admitted.
+  h.vt.resize(160, 44)
+  await h.vt.waitForRender()
+  await key(h, 'r')
+  await settle(h, 6)
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh \[R\]/u, 'the wide grant paints the refresh action')
+  await key(h, '\r')
+  await settle(h, 8)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore + 1, 'the really painted action refreshes once')
+  h.dispose()
+})
+
 test('a wrapped reset risk statement still has to be painted before Confirm exists', async () => {
   const h = setup({ columns: 44, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
   await h.open('Agent')
