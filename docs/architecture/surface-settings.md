@@ -739,7 +739,20 @@ a key press uses.
   whose necessary risk copy must have been painted before Confirm is admitted,
   and it sends the official `unset` even when the effective value already equals
   the inherited one — never `set(inherited)` and never a USER-field deletion
-  claim.
+  claim. Every frame's action is admitted only through its own REALLY painted
+  span: an action segment that a narrow row drops is inert for the keyboard and
+  the pointer alike, and a grant that paints no body row admits nothing but the
+  page's own Back. The scrollable confirmation body obeys the same wheel the
+  tenant body uses, so a pointer-only user can reach the risk fragments that
+  gate Confirm.
+- **Entry is explicit.** Row selection and Tab are never a mount: an ordinary
+  Detail fact or blank cell click only transfers the Detail column's focus
+  (the scoped exception to the ordinary L1→L2 click that this page owns), and
+  the tenant plus its raw Input are entered only through the painted
+  `Change [Enter]` / `?` affordances or Enter/Right on the row. One Confirm is
+  one stage→save handoff: it retires that editor's admission before it stages,
+  refuses any key delivered by its own synchronous callback, and re-proves the
+  captured text and source identity before the single mutation is dispatched.
 - **Authority and status.** Effective/inherited/revision/generation, official
   availability and the write result stay owned by the ConfigPort and the
   existing per-open controller; the page paints the current value, the

@@ -177,6 +177,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private handoff = 0
   /** The painted admission for the state's ONE confirm action. */
   private paintedConfirm = false
+  /** The leave/refresh question's own action span was really published by the
+   *  last frame (a dropped or truncated segment is never keyboard-admitted). */
+  private paintedAction = false
   private riskSeen = new Set<number>()
   /** The reset confirmation's risk fragments projected by the LAST render. */
   private riskLines: readonly { readonly line: number }[] = []
@@ -302,6 +305,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private discard(): void {
     const question = this.question
     if (question === undefined || this.paintedQuestion !== this.questionIdentity()) return
+    // SUX-01: the single-mode accepting action (Discard/Leave or Refresh) must
+    // be a really painted span; a dropped segment is never admitted through its
+    // shortcut key. The staged Shell form keeps its established behaviour.
+    if (this.single && !this.paintedAction) return
     const snapshot = this.controller.snapshot()
     if (snapshot.loading || snapshot.saving) return
     this.question = undefined
@@ -409,7 +416,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
    */
   private confirmSingle(): void {
     const active = this.numberInput
-    if (active === undefined || this.disposed) return
+    if (active === undefined || this.disposed || this.handoff !== 0) return
     const snapshot = this.controller.snapshot()
     if (snapshot.saving) return
     if (!this.paintedConfirm) return
@@ -426,22 +433,36 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       this.changed()
       return
     }
+    const captured = snapshot.source
     const handoff = ++this.handoff
+    // Retire THIS editor's admission BEFORE the stage: the synchronous changed
+    // callback can render, and that frame must not offer a second Confirm of the
+    // same request. The text stays in the (now detached) Input so a refusal can
+    // restore it.
+    this.numberInput = undefined
+    this.singleFeedback = undefined
     try {
       this.controller.setNumber(key, raw)
       const staged = this.controller.snapshot()
       if (this.disposed || this.handoff !== handoff) return
-      if (staged.notice !== undefined) {
-        // The controller refused the stage (stale source): keep THIS input.
-        this.singleError = staged.notice
+      // The staged intent must still be EXACTLY what this gesture captured: the
+      // same text, a set (never a Reset), and the still-current captured source.
+      const stagedIntent = staged.texts[key] === raw
+        && !staged.resetFields.includes(key)
+        && staged.current
+        && staged.source.kind === 'ready' && captured.kind === 'ready'
+        && staged.source.revision === captured.revision
+        && staged.source.generation === captured.generation
+      if (staged.notice !== undefined || !stagedIntent) {
+        // The stage was refused, or the captured source is no longer the one
+        // that was staged: restore the gesture's own text with the REAL reason.
+        this.numberInput = active
+        this.singleError = staged.notice ?? 'Host settings changed or are unavailable; cancel and refresh.'
         this.changed()
         return
       }
-      // The committed local transition: the Input leaves the screen BEFORE the
-      // write, so no frame can offer a second Confirm of the same request.
-      this.numberInput = undefined
-      this.singleError = undefined
       this.advanced = false
+      this.singleError = undefined
       this.singleFeedback = staged.dirty ? undefined : 'no-changes'
       this.revoke()
       if (!staged.dirty) return
@@ -503,6 +524,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // The stage->save handoff owns the page: a key delivered by a synchronous
+    // callback inside it can never start a second stage, confirm or save.
+    if (this.handoff !== 0) return
     // Every key retires a Root bar gesture and a body gesture. The painted
     // question receipt is independent: an explicit answer still proves it.
     this.revision += 1
@@ -556,6 +580,12 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   }
 
   private handleSingleInput(data: string, snapshot: HostNumericSettingsSnapshot<T>): void {
+    if (Math.max(0, this.rowGrant - 1) < 1) {
+      // A bar-only grant paints ONLY the page's own Back: no body action exists,
+      // so no key may start an Input, a disclosure or an official refresh.
+      if (matchesKey(data, 'left')) this.back()
+      return
+    }
     const active = this.numberInput
     if (active !== undefined) {
       if (matchesKey(data, 'enter')) { this.confirmSingle(); return }
@@ -654,7 +684,12 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       return undefined
     }
     if (event.type === 'wheel') {
-      if (event.y < paint.scrollStart || event.y >= paint.scrollEnd || this.question !== undefined || this.numberInput !== undefined || !event.wheelDelta) return undefined
+      if (event.y < paint.scrollStart || event.y >= paint.scrollEnd || this.numberInput !== undefined || !event.wheelDelta) return undefined
+      // SUX-01: the single-value page's OWN body scrolls under the wheel,
+      // including a scrollable reset confirmation whose risk fragments must have
+      // been painted before its Confirm exists (a mouse-only user must be able
+      // to reach them). The staged Shell form keeps its old question exclusion.
+      if (this.question !== undefined && !this.single) return undefined
       this.scroll(event.wheelDelta < 0 ? -1 : 1)
       return { handled: true }
     }
@@ -766,6 +801,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     this.barSpans = []
     this.paintedQuestion = undefined
     this.paintedConfirm = false
+    this.paintedAction = false
     let content: ContentLine[]
     let mustSee: readonly number[] = []
     let risk: readonly { readonly line: number; readonly statement: number }[] = []
@@ -1028,6 +1064,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       // Not even one segment fits WHOLE: the row is an inert truncated hint, so
       // no action (least of all a main Confirm) may stay keyboard-admitted.
       this.paintedConfirm = false
+      this.paintedAction = false
       this.barSpans = []
       return fit(color.textMuted(layout.text), width)
     }
@@ -1040,7 +1077,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
           || segment.action === 'reset-confirm' || segment.action === 'refresh-confirm' || segment.action === 'leave'
           ? 'primary' : 'secondary'))
       if (segment.escape) this.escapeSpan = { startCol: span.startCol, endCol: span.endCol }
-      else if (segment.action !== undefined) spans.push({ id: `bar:${segment.action}`, action: segment.action, startCol: span.startCol, endCol: span.endCol })
+      else if (segment.action !== undefined) {
+        spans.push({ id: `bar:${segment.action}`, action: segment.action, startCol: span.startCol, endCol: span.endCol })
+        if (segment.action === 'leave' || segment.action === 'refresh-confirm') this.paintedAction = true
+      }
     }
     this.barSpans = spans
     // A dropped Confirm publishes neither a span nor the keyboard admission.
@@ -1160,7 +1200,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       painted.push(segment.action === undefined && !segment.escape ? color.textMuted(span.text)
         : paintActionSpan(span.text, segment.action === 'save' || segment.action === 'apply' ? 'primary' : 'secondary'))
       if (segment.escape) this.escapeSpan = { startCol: span.startCol, endCol: span.endCol }
-      else if (segment.action !== undefined) spans.push({ id: `bar:${segment.action}`, action: segment.action, startCol: span.startCol, endCol: span.endCol })
+      else if (segment.action !== undefined) {
+        spans.push({ id: `bar:${segment.action}`, action: segment.action, startCol: span.startCol, endCol: span.endCol })
+        if (segment.action === 'leave' || segment.action === 'refresh-confirm') this.paintedAction = true
+      }
     }
     this.barSpans = spans
     return fit(painted.join(ACTION_BAR_SEPARATOR), width)

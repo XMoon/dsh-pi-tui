@@ -1155,6 +1155,225 @@ test('a jumped-past reset risk fragment is never treated as read', async () => {
   page.dispose()
 })
 
+test('a bar-only grant admits nothing but the page own Back', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  let refreshes = 0
+  let dones = 0
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision: 1, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => { refreshes += 1 },
+      mutate: async () => ({ kind: 'accepted' }),
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => { dones += 1 },
+  })
+  page.setMaxRows(1) // ZERO body content rows: the bar paints only Back
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const frame = (): string => page.render(44).map(strip).join('\n')
+  assert.match(frame(), /Back \[Esc\]/u)
+  assert.doesNotMatch(frame(), /Change \[Enter\]|Details|Refresh \[R\]/u, 'no body action is painted')
+  // No key may start an Input, a disclosure or an official refresh.
+  page.handleInput(ENTER)
+  assert.doesNotMatch(frame(), /Value:/u, 'a hidden Input is never started')
+  page.handleInput('?')
+  assert.doesNotMatch(frame(), /Effective/u, 'a hidden disclosure is never opened')
+  const refreshesBefore = refreshes
+  page.handleInput('r')
+  await Promise.resolve()
+  assert.equal(refreshes, refreshesBefore, 'a hidden official refresh is never dispatched')
+  page.handleInput(' ')
+  assert.equal(dones, 0, 'nothing in a bar-only frame may leave the page')
+  // The page's OWN Back is the one admitted action, and a restored grant works.
+  page.handleInput(LEFT)
+  assert.equal(dones, 1, 'Left is the same Back the bar paints')
+  page.setMaxRows(10)
+  page.handleInput(ENTER)
+  assert.match(frame(), /Value:/u, 'a restored grant admits a fresh explicit Change')
+  page.dispose()
+})
+
+test('a dropped question action is never keyboard-admitted', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  let dones = 0
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision: 1, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      // The Host refuses the write: the draft stays dirty, so leaving asks the
+      // page's OWN question.
+      mutate: async () => ({ kind: 'rejected', reason: 'read-only profile' }),
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => { dones += 1 },
+  })
+  page.setMaxRows(40)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const frame = (width: number): string => page.render(width).map(strip).join('\n')
+  page.handleInput(ENTER)
+  frame(80)
+  page.handleInput('\x15')
+  page.handleInput('6')
+  frame(80) // paint the typed value so its Confirm is really admitted
+  page.handleInput(ENTER) // the refused write leaves the draft dirty
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  page.handleInput(ESC) // leaving a dirty page asks its own question
+  const narrow = frame(30)
+  assert.match(narrow, /Keep \[Esc\]/u)
+  assert.doesNotMatch(narrow, /Discard and leave/u, 'the action segment is dropped WHOLE at 30 cells')
+  page.handleInput('d')
+  assert.equal(dones, 0, 'a dropped Discard action is never keyboard-admitted')
+  const wide = frame(80)
+  assert.match(wide, /Discard and leave \[D\]/u, 'a grant that can host the whole action paints it')
+  page.handleInput('d')
+  assert.equal(dones, 1, 'the really painted action admits its own shortcut')
+  page.dispose()
+})
+
+/** A single-mode page plus its controller over a counting fake port. */
+function singlePageFixture(mutate: (patch: SectionPatch<{ readonly maxParallelToolCalls: number }>) => Promise<{ kind: 'accepted' } | { kind: 'rejected'; reason: string }>) {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  const writes: SectionPatch<NumericLoopSettings>[] = []
+  const state: { page?: HostNumericSettingsPage<NumericLoopSettings>; onRender?: () => void } = {}
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision: 1, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async patch => { writes.push(patch); return await mutate(patch) },
+    },
+    fields,
+    requestRender: () => { state.onRender?.() },
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => {},
+  })
+  state.page = page
+  return { page, writes, state }
+}
+
+test('the stage->save handoff refuses a key delivered by its own synchronous callback', async () => {
+  const fixture = singlePageFixture(async () => ({ kind: 'accepted' }))
+  const { page, writes, state } = fixture
+  page.setMaxRows(40)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  page.handleInput(ENTER)
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('6')
+  page.render(80) // the typed value really paints its Confirm
+  let reentered = false
+  state.onRender = () => {
+    if (reentered) return
+    reentered = true
+    // A synchronous callback delivers a Confirm into the middle of the handoff.
+    page.handleInput(ENTER)
+  }
+  page.handleInput(ENTER) // the stage -> save handoff
+  state.onRender = undefined
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const frame = page.render(80).map(strip).join('\n')
+  assert.ok(reentered, 'the callback really ran inside the handoff')
+  assert.doesNotMatch(frame, /Value:/u, 'the reentrant key never revives the raw editor')
+  assert.equal(JSON.stringify(writes), JSON.stringify([{ maxParallelToolCalls: { kind: 'set', value: 6 } }]),
+    `exactly ONE official write leaves the handoff: ${JSON.stringify(writes)}`)
+  page.dispose()
+})
+
+test('a page retired inside its own stage callback dispatches nothing', async () => {
+  const fixture = singlePageFixture(async () => ({ kind: 'accepted' }))
+  const { page, writes, state } = fixture
+  page.setMaxRows(40)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  page.handleInput(ENTER)
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('6')
+  page.render(80)
+  let disposed = false
+  state.onRender = () => {
+    if (disposed) return
+    disposed = true
+    page.dispose()
+  }
+  page.handleInput(ENTER)
+  state.onRender = undefined
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  assert.ok(disposed, 'the stage callback really retired the page')
+  assert.deepEqual(writes, [], 'a page retired inside its stage never dispatches')
+  page.dispose()
+})
+
+test('a forced close after admission lets the owned write complete exactly once', async () => {
+  const fixture = singlePageFixture(async () => {
+    // The admitted write keeps its own owner: closing the page mid-flight never
+    // cancels or replays it.
+    fixture.state.page?.dispose()
+    return { kind: 'accepted' }
+  })
+  const { page, writes } = fixture
+  page.setMaxRows(40)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  page.handleInput(ENTER)
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('6')
+  page.render(80)
+  page.handleInput(ENTER)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  assert.equal(JSON.stringify(writes), JSON.stringify([{ maxParallelToolCalls: { kind: 'set', value: 6 } }]),
+    `the owned write completes exactly once after the close: ${JSON.stringify(writes)}`)
+  assert.equal(page.render(80).map(strip).join('').trim(), '', 'the retired page paints nothing')
+  page.dispose()
+})
+
 test('the numeric page status distinguishes Ready, Unavailable, Unreadable and Last-known', async () => {
   interface SectionSettings {
     readonly timeoutMs: number

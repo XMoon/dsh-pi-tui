@@ -976,8 +976,9 @@ owns only the lease, focus and write-lifecycle mechanics.
   against the same painted body only. The page's refusal states, its own
   dirty/ambiguous question and the continuation's instance/source/target
   re-proof are owned by
-  [surface-settings.md](./surface-settings.md#host-numeric-pages-session-log-upload-and-the-host-category);
-  the passive parent selection styling by
+  [surface-settings.md](./surface-settings.md#host-numeric-pages-session-log-upload-and-the-host-category),
+  including that contract's passive-preview click exception to the ordinary
+  L1→L2 click rule; the passive parent selection styling by
   [design-language.md](./design-language.md) §5.1 rule 7. A forced teardown
   bypasses the gate: a write the page already admitted keeps its own owner and
   can never be replayed or cancelled by the close.

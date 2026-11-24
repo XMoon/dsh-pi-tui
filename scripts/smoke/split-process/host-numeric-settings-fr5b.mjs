@@ -258,17 +258,26 @@ export async function runHostNumericSettingsFr5B(context) {
     await waitForPattern(clientA, /Reset to inherited…/u, 'FR5-B Agent Advanced disclosure')
     await waitForPattern(clientA, /Inherited\s+\d+/u, 'FR5-B Agent inherited fact')
     clientA.send('x')
-    await waitForPattern(clientA, /The Host readback decides the value\./u, 'FR5-B Agent reset confirmation')
+    const resetQuestion = await waitForPattern(clientA, /The Host readback decides the value\./u, 'FR5-B Agent reset confirmation')
+    const inheritedMatch = /Inherited\s+(\d+)/u.exec(resetQuestion)
+    assert(inheritedMatch !== null, `the reset confirmation must paint the real inherited value: ${JSON.stringify(resetQuestion)}`)
+    const inherited = Number(inheritedMatch[1])
     await waitForPattern(clientA, /Confirm \[Enter\]/u, 'FR5-B Agent reset confirm affordance')
     clientA.send('\r')
-    await waitForPattern(clientA, /Verified/u, 'FR5-B Agent reset verified')
-    assert(profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls === undefined,
-      'Reset is the official unset, not a set(inherited) write')
-    trace('fr5b.agent-loop-reset', { officialUnset: true, readback: true })
+    const agentReset = await waitForPattern(clientA, /Verified/u, 'FR5-B Agent reset verified')
+    // The official unset's success criterion is the Host readback, never USER-key
+    // absence: an unset may legitimately materialize the inherited value.
+    assert(new RegExp(`Current value\\s+${inherited}(?:\\s|$)`, 'u').test(agentReset),
+      `the reset readback must paint the value the official unset leaves behind (inherited=${inherited}): ${JSON.stringify(agentReset)}`)
+    const persistedAfterReset = profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls
+    assert(persistedAfterReset === undefined || persistedAfterReset === inherited,
+      `the official unset leaves either no USER key or the inherited value, never a different number: ${JSON.stringify(persistedAfterReset)}`)
+    clientA.send('\x1b') // the clean tenant -> Rows
+    await sleep(200)
+    await waitForPattern(clientA, new RegExp(`Parallel tool calls\\s+${inherited}(?:\\s|$)`, 'u'), 'FR5-B Agent row readback')
+    trace('fr5b.agent-loop-reset', { officialUnset: true, readback: true, inherited })
 
     // ── Shell execution: two fields, one CAS, then a stale Client B ────────
-    clientA.send('\x1b') // Agent-loop page -> Agent rows
-    await sleep(160)
     clientA.send('\x1b') // Agent rows -> category rail
     await sleep(160)
     await selectFrame(clientA, frame => /^> Tools(?:\s|$)/mu.test(frame), 'FR5-B Tools category')

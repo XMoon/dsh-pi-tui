@@ -2747,6 +2747,91 @@ test('the real Root Agent Detail tenant is entered explicitly and edits the cap 
   h.dispose()
 })
 
+test('an ordinary Detail click on the single-value preview only transfers focus', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
+    const h = setup({ columns, rows, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+    await h.open('Agent')
+    await key(h, '\r')
+    await highlightRow(h, 'Parallel tool calls')
+    assert.doesNotMatch(h.view(), /Current value/u, 'selection alone never mounts')
+    // The preview's Detail column: an ordinary FACT cell and a BLANK cell are
+    // pure focus transfers — no tenant, no refresh, no raw Input.
+    const factRow = rowOf(h, 'Value')
+    const factCol = cellIndexOf(h, factRow, 'Value')
+    press(h, factRow, factCol)
+    await h.vt.waitForRender()
+    release(h, factRow, factCol)
+    await settle(h)
+    assert.match(h.view(), /\[Details\]/u, `the Detail column now owns the focus:\n${h.view()}`)
+    assert.doesNotMatch(h.view(), /Current value/u, 'a fact click never mounts the tenant')
+    assert.doesNotMatch(h.view(), /Refresh \[R\]/u, 'no tenant bar exists after a passive click')
+    assert.doesNotMatch(h.view(), /Value:\s/u, 'and the raw Input never opened')
+    const blankRow = rows - 6
+    press(h, blankRow, columns - 30)
+    await h.vt.waitForRender()
+    release(h, blankRow, columns - 30)
+    await settle(h)
+    assert.doesNotMatch(h.view(), /Current value/u, 'a blank Detail cell is the same pure transfer')
+    assert.doesNotMatch(h.view(), /Refresh \[R\]/u)
+    assert.deepEqual(h.agentLoopWrites(), [], 'no passive click ever writes')
+    // The explicit painted entries are the ONLY mount gestures.
+    await clickPainted(h, 'Change [Enter]')
+    assert.match(h.view(), /Current value\s+10/u, 'the explicit Change mounts the SAME tenant')
+    assert.match(h.view(), /Value:\s*/u, 'and lands on the raw Input')
+    assert.match(h.view(), /Confirm \[Enter\] · Cancel \[Esc\]/u, 'the tenant bar is the child-owned one')
+    h.dispose()
+  }
+})
+
+test('a held tenant gesture is refused across BOTH resize directions and cross owners', async () => {
+  const h = setup({ columns: 80, rows: 24, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x1b') // Cancel the entry Input -> the clean tenant
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant is mounted at 80x24')
+  assert.match(h.view(), /Details…/u)
+  // A) GROW: press INSIDE the tenant, resize, release on the SAME cells. The
+  // admitted paint/box no longer exists, so nothing may activate.
+  const detailsRow = rowOf(h, 'Details…')
+  const detailsCol = cellIndexOf(h, detailsRow, 'Details…')
+  press(h, detailsRow, detailsCol)
+  await h.vt.waitForRender()
+  h.vt.resize(200, 50)
+  await h.vt.waitForRender()
+  release(h, detailsRow, detailsCol)
+  await settle(h, 8)
+  assert.doesNotMatch(h.view(), /Effective/u, 'a straddling grow gesture never opens the disclosure')
+  assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'and never changes the parent selection')
+  // A fresh gesture at the NEW geometry works.
+  await clickPainted(h, 'Details…')
+  assert.match(h.view(), /Effective\s+10/u, 'a fresh gesture opens the Advanced disclosure')
+  await key(h, '?') // close the disclosure again
+  await settle(h, 4)
+  // B) CROSS OWNER: a parent press released inside the child body activates
+  // neither side; a child press released over a parent row changes nothing.
+  const rowRow = rowOf(h, 'Subagent settings')
+  press(h, rowRow, 40)
+  await h.vt.waitForRender()
+  release(h, rowRow, cellIndexOf(h, rowOf(h, 'Details…'), 'Details…'))
+  await settle(h, 6)
+  assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'a parent press never selects through the child body')
+  assert.doesNotMatch(h.view(), /> Subagent settings {2,}/u, 'the parent selection never moved')
+  assert.doesNotMatch(h.view(), /Effective/u, 'and never activates the child')
+  const bodyRow = rowOf(h, 'Details…')
+  const bodyCol = cellIndexOf(h, bodyRow, 'Details…')
+  press(h, bodyRow, bodyCol)
+  await h.vt.waitForRender()
+  release(h, rowRow, 40)
+  await settle(h, 6)
+  assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'the parent row selection is unchanged')
+  assert.doesNotMatch(h.view(), /> Subagent settings {2,}/u)
+  assert.doesNotMatch(h.view(), /Effective/u, 'the child body action is unchanged')
+  h.dispose()
+})
+
 test('a wrapped reset risk statement still has to be painted before Confirm exists', async () => {
   const h = setup({ columns: 44, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
   await h.open('Agent')
@@ -2768,17 +2853,35 @@ test('a wrapped reset risk statement still has to be painted before Confirm exis
   await key(h, '\r')
   await settle(h, 6)
   assert.deepEqual(h.agentLoopWrites(), [], 'Enter cannot confirm an unread risk statement')
-  // Read the rest of the copy, then Confirm becomes real and dispatches once.
-  for (let step = 0; step < 6; step += 1) {
+  // MOUSE ONLY: the wheel over the REAL tenant body walks the scrollable
+  // confirmation until every fragment was painted. Without it a pointer-only
+  // user could never reach the fragments that gate Confirm.
+  for (let step = 0; step < 8; step += 1) {
     if (/Confirm \[Enter\]/u.test(h.rowsPlain().at(-1) ?? '')) break
-    await key(h, '\x1b[B')
+    wheel(h, 4, 20, true)
     await settle(h, 4)
   }
-  assert.match(h.view(), /The Host readback decides the value\./u, 'the last statement is reachable')
+  assert.match(h.view(), /The Host readback decides the value\./u, 'the wheel really reached the last fragment')
   assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'Confirm appears only after the whole copy')
-  await key(h, '\r')
+  // A wheel over the BAR row is outside the body box: it scrolls nothing.
+  wheel(h, 7, 20, true)
+  await settle(h, 4)
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u,
+    'the bar keeps its own painted actions')
+  await clickPainted(h, 'Confirm [Enter]', true)
   await settle(h, 12)
-  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }])
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }],
+    'a pointer Confirm dispatches exactly ONE official unset')
+  // A pointer Cancel closes the question without any further write.
+  await key(h, '?')
+  await settle(h, 6)
+  await key(h, 'x')
+  await settle(h, 6)
+  await clickPainted(h, 'Cancel [Esc]', true)
+  await settle(h, 6)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }],
+    'the pointer Cancel performs zero writes')
+  assert.match(h.view(), /Reset \[X\]/u, 'Cancel returns to the Advanced disclosure')
   h.dispose()
 })
 

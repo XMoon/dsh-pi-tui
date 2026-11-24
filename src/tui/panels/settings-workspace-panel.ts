@@ -6760,8 +6760,14 @@ export class SettingsWorkspacePanel implements Component {
             () => this.leaveDetailTo(page))
           return
         }
-        if (page === 'detail' && this.focus !== 'detail') this.enterDetail()
-        else this.takeColumnFocus(page)
+        if (page === 'detail' && this.focus !== 'detail') {
+          // SUX-01: an ordinary Detail cell of the single-value PREVIEW is a
+          // PURE focus transfer. Only the explicit Change/Enter/Right/`?`
+          // gestures mount the tenant (and with it the page's own editor), so a
+          // passive click never starts the refresh or the raw Input.
+          if (this.singleAgentRow(this.selectedRow())) { this.leaveDetailTo('detail'); return }
+          this.enterDetail()
+        } else this.takeColumnFocus(page)
         return
       }
     }
