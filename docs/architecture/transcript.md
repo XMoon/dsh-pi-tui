@@ -174,16 +174,37 @@ projectTranscriptStructure()
   run), never an Action candidate or ActionStats input, and never a
   replay-fence candidate (there is no owning turn to be late for). In collapsed
   Focus it stays VISIBLE as standalone evidence rather than being hidden as
-  process. Its `turn` field is a legacy display-placement artifact only; a real
-  `TranscriptCommandMessage` (upstream `CommandNode` convergence) retires it in
-  later work, and any correlation with a domain event must use the explicit
-  `sourceEventSeq` rather than the placement turn. A `subagent/descriptor` is
+  process. It carries NO semantic turn at all: window/search placement is a
+  fold-side anchor from the physical log position, never a Turn, and any
+  correlation with a domain event must use the explicit
+  `sourceEventSeq`/`sourceCommandId` identity rather than that anchor. Its own
+  `command/run` (or the done-only fallback event) also supplies the row's real
+  first-visible point: a command is a PROVEN Activity close boundary, never a
+  Work member, Action, or token/usage source. A `subagent/descriptor` is
   likewise NOT Process evidence, for a different reason: it is the CHILD
   session's identity record (version / mode / provider / label), which a
   continuable child logs BEFORE its first `turn/start` (upstream asserts
   `descriptorIndex < turnStartIndex`) — so it owns no model turn to belong to,
   and it never joins a Work span, an Action or ActionStats. The parent's own
   genuine `tool/call name=subagent` is the delegation evidence.
+- **Compaction ownership comes from the official lifecycle end points, never
+  from the fold's current turn.** A `kind:'compaction'` row's semantic `turn`
+  is optional: `compaction/start` (or an end-only `compaction/end`) admits the
+  durable numeric `data.turn` when it is a safe non-negative integer. The
+  official `null` standalone owner — and a missing/invalid or summary-first
+  fragment — admits NO numeric turn; `0` remains a legal real owner, never a
+  truthiness test. The `compaction/summary` payload has no owner field and
+  never re-admits one: matching summary/end events settle the SAME row by
+  `compactionId`, and an admitted owner is never re-homed by later evidence.
+  A numeric card materialized after its own turn completed is post-turn replay
+  evidence. Automatic in-turn compaction therefore stays a normal Context row
+  of its real Turn; a standalone maintenance transaction is a hard Focus
+  fence that is never bridgeable, while an exact
+  `sourceCommandId`/`sourceEventSeq`-correlated manual compaction keeps its
+  existing fused control-card bridge. The fold's placement anchor for a
+  standalone row is a SEPARATE presentation fact (window/search only) and is
+  never read back as semantic ownership; the same separation applies to a
+  command row.
 - **One logical Turn owns one Focus summary; the owner is a row, the disclosure
   identity is the Turn.** The Turn's primary presentation region is its maximal
   raw run of eligible rows, bridged across a bounded, maximal run of standalone
@@ -347,10 +368,18 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   Compact current work is observable; historical work is scannable; detail
   remains available on demand.
 - Counts and previews describe the SPAN, never the whole turn. The header
-  duration is the span's OWN wall clock from its members' timing evidence;
-  it is omitted only when no member carries a `TranscriptTiming` sidecar
-  (unknown is omitted, never `0s`) — never faked or stretched from the
-  whole-turn Focus duration.
+  duration is the span's OWN canonical Activity lifetime, not the member settle
+  and never the whole-turn Focus duration: it starts at the first proven member
+  first-visible time and ends at the earliest proven following structural
+  boundary (an actually-visible Conversation/Context row; a real command row's
+  own `run`/done-only event time qualifies, and a successfully fused
+  compaction representative keeps the earlier of its own and its command's
+  first-visible points), floored by the member end and capped by the owning
+  `turn/end`. A following row with no proven time never fabricates a close, so
+  the Activity renders NO duration until a real boundary or the turn end proves
+  one (unknown is omitted, never `0s`). Commands and compaction cards are
+  BOUNDARIES, never Work members; the member walk always stays the Process
+  authority.
 - **Header action-subtype order.** The shared
   `compactActionStatParts()` formatter (Compact Activity and Focus header
   alike) lists a recorded `send_message` subtype FIRST, then every remaining
@@ -1051,7 +1080,9 @@ canonical Work membership and canonical cluster membership. Navigation opens
 every hidden node temporarily without writing manual state; an ordinary dismiss
 promotes every currently necessary node atomically; an explicit collapse revokes
 the temporary reveal so the owner cannot instantly reopen. A flat/fail-open
-container mints no reveal node.
+container mints no reveal node. A standalone command or compaction is
+navigated by its fold placement anchor: the search opens the containing turn
+window and the card's own detail, never a semantic Turn or Focus root.
 
 ### Transcript Find scopes
 

@@ -16,7 +16,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
+import { TranscriptFolder, transcriptTimingOf, type TranscriptMessage } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { projectTranscriptStructure, type TranscriptWorkSpan } from '../../src/tui/transcript/structure.ts'
@@ -229,25 +229,133 @@ test('an unprovable end renders NO duration (unknown), never the member end or a
   assert.equal(summarizeWorkSpan(span).timing?.endedAt, T0 + 5_000)
 })
 
-test('the canonical trailing structure decides live: a Work followed by a Context row is not the tail', () => {
+test('a real command/run first visible point closes the preceding Activity; the next Work is independent', () => {
+  // PR2 C01-1: a slash command is a real Context/control boundary whose OWN
+  // durable `command/run` time is proven first-visible evidence. It closes the
+  // preceding Activity at +10s; the known `command/done` at +12s never moves
+  // that boundary and the command never joins a Work/Activity/Action.
+  const events = (): SessionEvent[] => [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 1_000, 1),
+    toolResult('c1', T0 + 5_000, 2),
+    eventAt('command/run', { commandId: 'cmd1', name: 'theme', source: { kind: 'user' } }, T0 + 10_000, 3),
+    eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'ok' }, T0 + 12_000, 4),
+    toolCall('c2', 'bash', T0 + 20_000, 5),
+    toolResult('c2', T0 + 25_000, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 30_000, 7),
+  ]
+  const folder = foldEvents(events())
+  const { lifetimes, spans } = analyze(folder)
+  assert.equal(spans.length, 2, 'the command splits the Process run into two Activities')
+  assert.deepEqual(lifetimes.get(spans[0]!.owner),
+    { startedAt: T0 + 1_000, endedAt: T0 + 10_000, open: false, trailing: false },
+    'Work A freezes at the command run first-visible time')
+  assert.deepEqual(lifetimes.get(spans[1]!.owner),
+    { startedAt: T0 + 20_000, endedAt: T0 + 30_000, open: false, trailing: true },
+    'Work B has its own members and closes at the owning turn end')
+  assert.equal(spans[0]!.members.some(member => member.kind === 'command'), false,
+    'a command is never a Work member')
+  // The known done updates the same row but never resets the boundary: apply
+  // through command/run, then settle it live.
+  const live = new TranscriptFolder()
+  live.hydrate(events().slice(0, 4))
+  const atRun = analyze(live)
+  assert.equal(atRun.lifetimes.get(atRun.spans[0]!.owner)!.endedAt, T0 + 10_000)
+  live.apply([events()[4]!])
+  const afterDone = analyze(live)
+  assert.equal(afterDone.lifetimes.get(afterDone.spans[0]!.owner)!.endedAt, T0 + 10_000,
+    'the done event never moves the Activity boundary')
+  // Cold hydration derives the identical first-Activity lifetime (the
+  // trailing fact differs here only because the incremental fixture stops at
+  // command/done, before the second Work/turn end exist).
+  const cold = analyze(folder)
+  const coldFirst = cold.lifetimes.get(cold.spans[0]!.owner)!
+  const liveFirst = afterDone.lifetimes.get(afterDone.spans[0]!.owner)!
+  assert.deepEqual(
+    { startedAt: coldFirst.startedAt, endedAt: coldFirst.endedAt, open: coldFirst.open },
+    { startedAt: liveFirst.startedAt, endedAt: liveFirst.endedAt, open: liveFirst.open },
+    'the incremental and cold folds agree on the first Activity lifetime',
+  )
+})
+
+test('a fused manual-compaction representative keeps the earliest proven command/compaction point', () => {
+  // PR2 C01-3: the exact sourceCommandId correlation fuses the command INTO the
+  // compaction card. The retained representative must reconcile BOTH proven
+  // first-visible points into the earlier one (+10 run < +11 start), so the
+  // preceding Activity keeps closing at the command's real run time.
+  const fused = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 1_000, 1),
+    toolResult('c1', T0 + 5_000, 2),
+    eventAt('command/run', { commandId: 'cmd-1', name: 'compact', source: { kind: 'user' } }, T0 + 10_000, 3),
+    eventAt('compaction/start', { compactionId: 'cpt-1', sourceCommandId: 'cmd-1', turn: null }, T0 + 11_000, 4),
+    eventAt('compaction/summary', {
+      compactionId: 'cpt-1', sourceCommandId: 'cmd-1',
+      summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, T0 + 12_000, 5),
+    eventAt('compaction/end', { compactionId: 'cpt-1', turn: null }, T0 + 13_000, 6),
+    eventAt('command/done', { commandId: 'cmd-1', kind: 'success', sourceEventSeq: 5 }, T0 + 14_000, 7),
+  ])
+  const fusedAnalysis = analyze(fused)
+  const fusedSpan = fusedAnalysis.spans[0]!
+  assert.equal(fusedAnalysis.spans.length, 1, 'the fused owner is a control boundary, never a Work')
+  assert.equal(fusedAnalysis.lifetimes.get(fusedSpan.owner)!.endedAt, T0 + 10_000,
+    'the representative keeps the earliest proven point (the command run)')
+  const card = fused.messages().find(message => message.kind === 'compaction')
+  assert.ok(card !== undefined && card.kind === 'compaction' && card.sourceCommand !== undefined)
+  assert.equal(transcriptTimingOf(card)?.startedAt, T0 + 10_000,
+    'the fused representative point is min(compaction, command)')
+
+  // An UNRELATED compaction never reconciles points: both rows stay visible
+  // with their own real times (+10 command, +12 standalone compaction).
+  const unrelated = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 1_000, 1),
+    toolResult('c1', T0 + 5_000, 2),
+    eventAt('command/run', { commandId: 'cmd-2', name: 'theme', source: { kind: 'user' } }, T0 + 10_000, 3),
+    eventAt('compaction/start', { compactionId: 'cpt-2', turn: null }, T0 + 12_000, 4),
+    eventAt('compaction/summary', {
+      compactionId: 'cpt-2', summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, T0 + 13_000, 5),
+    eventAt('compaction/end', { compactionId: 'cpt-2', turn: null }, T0 + 14_000, 6),
+  ])
+  const unrelatedCard = unrelated.messages().find(message => message.kind === 'compaction')
+  assert.ok(unrelatedCard !== undefined && unrelatedCard.kind === 'compaction')
+  assert.equal(unrelatedCard.sourceCommand, undefined)
+  assert.equal(transcriptTimingOf(unrelatedCard)?.startedAt, T0 + 12_000,
+    'an uncorrelated compaction keeps its own first-visible point')
+  const unrelatedCommand = unrelated.messages().find(message => message.kind === 'command')
+  assert.ok(unrelatedCommand !== undefined && unrelatedCommand.kind === 'command')
+  assert.equal(transcriptTimingOf(unrelatedCommand)?.startedAt, T0 + 10_000,
+    'the unfused command keeps its own point')
+})
+
+test('a done-only command uses its own first-visible time; duplicate runs never move the point', () => {
+  // PR2 C01-2: the fail-soft done-only fallback row is created at the done
+  // event's REAL position/time — that is its proven first-visible point, so it
+  // closes the preceding Activity there.
   const folder = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall('c1', 'bash', T0 + 1_000, 1),
     toolResult('c1', T0 + 5_000, 2),
-    // A command row is Context/control without its own time evidence: it is the
-    // trailing canonical block, so the Work before it is not a live tail even
-    // though no boundary time could be proven.
-    eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, T0 + 6_000, 3),
+    eventAt('command/done', { commandId: 'cmd-late', kind: 'success', text: 'late' }, T0 + 10_000, 3),
   ])
   const { lifetimes, spans } = analyze(folder)
-  assert.equal(spans.length, 1)
-  const lifetime = lifetimes.get(spans[0]!.owner)!
-  assert.equal(lifetime.endedAt, undefined, 'the command row proves no boundary time')
-  assert.equal(lifetime.trailing, false, 'a following canonical block means the span is not the tail')
-  assert.equal(activityClockOf(lifetime, () => true, () => true).isLive(), false,
-    'a non-trailing open Activity is never live')
-  assert.ok(!/Activity \d/u.test(headerAt(spans[0]!, activityClockOf(lifetime, () => true, () => true), T0 + 999_999)),
-    'an open non-tail Activity has no provable end: no duration renders')
+  assert.equal(lifetimes.get(spans[0]!.owner)!.endedAt, T0 + 10_000,
+    'the done-only fragment closes the Activity at its actual first-visible time')
+
+  // A duplicated run with a known id is ignored: the row identity and its
+  // proven first-visible point stay the original ones (no second row either).
+  const duplicate = new TranscriptFolder()
+  duplicate.apply([
+    eventAt('command/run', { commandId: 'cmd-dup', name: 'title', source: { kind: 'user' } }, T0 + 10_000, 0),
+    eventAt('command/run', { commandId: 'cmd-dup', name: 'title', source: { kind: 'user' } }, T0 + 12_000, 1),
+  ])
+  const command = duplicate.messages().find(message => message.kind === 'command')
+  assert.ok(command !== undefined && command.kind === 'command')
+  assert.equal(duplicate.messages().filter(message => message.kind === 'command').length, 1)
+  assert.equal(transcriptTimingOf(command)?.startedAt, T0 + 10_000,
+    'a duplicate run neither re-mints the row nor moves its first-visible point')
 })
 
 test('an interleaved step derives the SAME Activity lifetime live and cold (review blocker: convergence)', () => {
@@ -978,7 +1086,7 @@ test('a VISIBLE streamless settlement is the proven boundary; turn/end never ove
     'the earliest proven first-visible time is preserved')
 })
 
-test('a CACHED Activity card re-gates when a following structure block appears (production component cache)', async (t) => {
+test('a CACHED Activity card freezes at a real command boundary (production component cache)', async (t) => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     displayState: { preset: 'compact' },
@@ -1002,16 +1110,28 @@ test('a CACHED Activity card re-gates when a following structure block appears (
   assert.ok(first !== null && Number(first[1]) >= 39,
     `the open trailing Activity must be live:\n${strip(vt.getViewport().join('\n'))}`)
 
-  // Append a canonical boundary with NO proven point sidecar (a turn-less
-  // command row): the span stops being the canonical tail while its start/end
-  // and summary stay identical. The CACHED card must be re-created as
-  // open-but-not-live instead of extending the stale live closure.
-  folder.apply([eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, now - 1_000, 3)])
+  // A real command/run at now−1s is a PROVEN first-visible boundary: the cached
+  // card must be re-created as CLOSED at 39s (the command's real time), never
+  // keep extending the stale live closure and never lose the duration.
+  folder.apply([eventAt('command/run', { commandId: 'cmd1', name: 'theme', source: { kind: 'user' } }, now - 1_000, 3)])
   app.setTranscript(folder.messages(), folder.turnActivities())
   await vt.waitForRender()
   const secondView = strip(vt.getViewport().join('\n'))
-  assert.ok(secondView.includes('Activity'), `the Activity must still render:\n${secondView}`)
-  assert.ok(!/Activity \d/u.test(secondView),
-    `the cached card must drop the stale live value and show no unprovable end:\n${secondView}`)
+  const frozen = /Activity (\d+)s/u.exec(secondView)
+  assert.ok(frozen !== null, `the Activity must keep a proven duration:\n${secondView}`)
+  assert.equal(Number(frozen[1]), 39, `the command point freezes the Activity:\n${secondView}`)
+
+  // The known done and later Work/time advancement cannot grow the frozen card.
+  folder.apply([
+    eventAt('command/done', { commandId: 'cmd1', kind: 'success', text: 'ok' }, now + 500, 4),
+    toolCall('c2', 'bash', now + 1_000, 5),
+    toolResult('c2', now + 2_000, 6),
+  ])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const thirdView = strip(vt.getViewport().join('\n'))
+  const still = /Activity (\d+)s/u.exec(thirdView)
+  assert.ok(still !== null && Number(still[1]) === 39,
+    `the frozen Activity must not grow after later events:\n${thirdView}`)
   app.stop()
 })

@@ -31,6 +31,7 @@ import {
 } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { countFocusHeaders } from '../support/focus-header.ts'
 
 /** Capture the production TuiApp the runner starts (without replacing it). */
 function captureApps(): { apps: TuiApp[]; restore: () => void } {
@@ -395,6 +396,89 @@ test('runner Focus search: command detail needs no root reveal, hidden Process d
   app.closeTranscriptSearch()
   await fixture.settleRender()
   assert.ok(app.focusExpandedTurnsForTest().has(0), 'a manual grant is never revoked by a search dismissal')
+})
+
+test('runner Focus search: a standalone compaction hit opens its own card, never a phantom Focus root', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('pr2-search-user'), role: 'user',
+      content: [{ type: 'text', text: 'first turn' }],
+      source: { kind: 'user' },
+    }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('pr2-sc'), name: 'bash', arguments: '{}' }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('pr2-sr'), role: 'tool', toolCallId: ToolCallId('pr2-sc'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-sc') },
+      },
+    }, 3),
+    event('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('pr2-sa'), role: 'assistant',
+        content: [{ type: 'text', text: 'first final' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+    // The REAL standalone maintenance shape between the two real turns.
+    event('compaction/start', { compactionId: 'pr2-search-compaction', turn: null } as never, 6),
+    event('compaction/summary', {
+      compactionId: 'pr2-search-compaction',
+      summary: [{ type: 'text', text: 'STANDALONE_SEARCH_MARKER' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    } as never, 7),
+    event('compaction/end', { compactionId: 'pr2-search-compaction', turn: null } as never, 8),
+    event('turn/start', { turn: 1 }, 9),
+    event('user/message', {
+      id: MessageId('pr2-search-user-2'), role: 'user',
+      content: [{ type: 'text', text: 'second turn' }],
+      source: { kind: 'user' },
+    }, 10),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pr2-search-a-2'), role: 'assistant',
+        content: [{ type: 'text', text: 'second final' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 11),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 12),
+  ]
+  const fixture = await mountSearchRunner(t, 2, [], 'unused', events)
+  const { app } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'precondition: both real Turns start collapsed')
+  const baseView = fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.equal(countFocusHeaders(baseView), 2, 'only the two real Turns own a Focus header')
+
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  typeQuery(fixture, 'STANDALONE_SEARCH_MARKER')
+  await fixture.settleRender()
+  const target = app.transcriptSearchPresentationForTest()?.message
+  assert.equal(target?.kind, 'compaction', 'the standalone card body is the search target')
+  assert.ok(target !== undefined && mountedSearchSelection(app, target) !== undefined,
+    'the standalone card is materialized and addressable')
+  const revealed = fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.ok(revealed.includes('STANDALONE_SEARCH_MARKER'),
+    `the standalone card detail is painted by the search reveal:\n${revealed}`)
+  assert.ok(countFocusHeaders(revealed) <= 2,
+    'the standalone card never mints an extra Focus root')
+  assert.equal(countFocusHeaders(revealed, true), 0,
+    'the search reveal never opens a Thought root')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'dismissing a standalone compaction hit promotes no Thought root')
+  const after = fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.ok(countFocusHeaders(after) <= 2, 'no ghost Focus root survives the dismissal')
+  assert.equal(countFocusHeaders(after, true), 0, 'both real Focus roots stay collapsed')
 })
 
 test('runner Focus search: a fail-open Work member never promotes a phantom Work', async (t) => {

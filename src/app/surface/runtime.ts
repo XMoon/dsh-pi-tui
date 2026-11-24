@@ -145,6 +145,7 @@ import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
 import { deriveActivityStatus, type ActivityFacts } from '../../domain/status/derive-activity.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
+import { transcriptTurnOf } from '../../domain/transcript/semantics.ts'
 import { transcriptSearchMatchKey } from '../../domain/transcript/search.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
@@ -2472,9 +2473,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // per historical turn) made repaint cost grow with session age.
     const groupsByTurn = new Map<number, TranscriptMessage[]>()
     for (const message of messages) {
-      if (!('turn' in message)) continue
-      const group = groupsByTurn.get(message.turn)
-      if (group === undefined) groupsByTurn.set(message.turn, [message])
+      const turn = transcriptTurnOf(message)
+      if (turn === undefined) continue
+      const group = groupsByTurn.get(turn)
+      if (group === undefined) groupsByTurn.set(turn, [message])
       else group.push(message)
     }
     const selected = new Set<Extract<TranscriptMessage, { kind: 'assistant' }>>()

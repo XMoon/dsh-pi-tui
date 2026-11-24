@@ -17,7 +17,7 @@ import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '../../src/transcript.ts'
+import { TranscriptFolder, windowMessages, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
@@ -1165,7 +1165,7 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   // The search reveals the OLDEST turn — NOT inside the recent boundary:
   // regular mode must still full-reveal its process (a manual root is
   // never a dead compact timeline).
-  const oldestTool = folder.messages().find(m => m.kind === 'tool' && m.turn === 1)
+  const oldestTool = folder.messages().find((m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.turn === 1)
   assert.ok(oldestTool !== undefined, 'fixture: the oldest turn has a tool card')
   app.revealSearchMatch(oldestTool)
   await vt.waitForRender()
@@ -3618,7 +3618,7 @@ test('search-revealing an old tool does not Thought-expand unrelated surfaced co
   app.setTranscriptDetailExpanded(true)
   show(app, folder)
   await vt.waitForRender()
-  const tool = folder.messages().find(message => message.kind === 'tool' && message.turn === 1)
+  const tool = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool' && message.turn === 1)
   assert.ok(tool !== undefined, 'fixture: the old tool exists')
   const collapsed = vt.getViewport().join('\n')
   assert.ok(!collapsed.includes('old context detail line'), 'precondition: the old context starts folded')
@@ -5161,5 +5161,115 @@ test('a terminal Turn error still paints exactly one bounded Focus summary', asy
   assert.equal(countFocusHeaders(joined), 1, `a failed Turn keeps exactly one summary:\n${joined}`)
   assert.ok(/Failed/.test(joined), `the terminal reason is named:\n${joined}`)
   assert.ok(joined.includes('Action:'), `the bounded Action slot remains:\n${joined}`)
+  app.stop()
+})
+
+// ---------------------------------------------------------------------------
+// PR2 C02: standalone compaction stays independent of the Focus root
+// ---------------------------------------------------------------------------
+
+test('a standalone compaction after a final renders once, keeps two real roots, and opens its own detail', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('pr2-u1'), role: 'user',
+      content: [{ type: 'text', text: 'first prompt' }], source: { kind: 'user' },
+    }, T0 + 1_000, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('pr2-c1'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo first' }),
+    }, T0 + 2_000, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pr2-r1'), role: 'tool', toolCallId: ToolCallId('pr2-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-c1') },
+      },
+    }, T0 + 5_000, 3),
+    // A NUMERIC in-turn automatic compaction stays a normal Context card of
+    // its real turn (never a standalone fence and never a second root).
+    eventAt('compaction/start', { compactionId: 'pr2-numeric', turn: 1 }, T0 + 6_000, 4),
+    eventAt('compaction/summary', {
+      compactionId: 'pr2-numeric', summary: [{ type: 'text', text: 'NUMERIC_SUMMARY_BODY' }],
+      shadowedSeqs: [0], shadowedTokenCount: 20,
+    }, T0 + 7_000, 5),
+    eventAt('compaction/end', { compactionId: 'pr2-numeric', turn: 1 }, T0 + 8_000, 6),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pr2-a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'first final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 9_000, 7),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 10_000, 8),
+    // The REAL upstream idle maintenance shape: `turn: null` BETWEEN turns.
+    eventAt('compaction/start', { compactionId: 'pr2-standalone', turn: null }, T0 + 11_000, 9),
+    eventAt('compaction/summary', {
+      compactionId: 'pr2-standalone', summary: [{ type: 'text', text: 'STANDALONE_SUMMARY_BODY' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, T0 + 12_000, 10),
+    eventAt('compaction/end', { compactionId: 'pr2-standalone', turn: null }, T0 + 13_000, 11),
+    eventAt('turn/start', { turn: 2 }, T0 + 14_000, 12),
+    eventAt('user/message', {
+      id: MessageId('pr2-u2'), role: 'user',
+      content: [{ type: 'text', text: 'second prompt' }], source: { kind: 'user' },
+    }, T0 + 15_000, 13),
+    eventAt('tool/call', {
+      turn: 2, step: 0, callId: ToolCallId('pr2-c2'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo second' }),
+    }, T0 + 16_000, 14),
+    eventAt('tool/result', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('pr2-r2'), role: 'tool', toolCallId: ToolCallId('pr2-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-c2') },
+      },
+    }, T0 + 17_000, 15),
+    eventAt('assistant/message', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('pr2-a2'), role: 'assistant',
+        content: [{ type: 'text', text: 'second final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 18_000, 16),
+    eventAt('turn/end', { turn: 2, reason: { kind: 'completed' } }, T0 + 19_000, 17),
+  ])
+  const messages = folder.messages()
+  const standalone = messages.find(message => message.kind === 'compaction' && message.text === 'STANDALONE_SUMMARY_BODY')
+  const numeric = messages.find(message => message.kind === 'compaction' && message.text === 'NUMERIC_SUMMARY_BODY')
+  assert.ok(standalone !== undefined && standalone.kind === 'compaction')
+  assert.ok(numeric !== undefined && numeric.kind === 'compaction' && numeric.turn === 1)
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(countFocusHeaders(view), 2, 'only the two REAL turns own a Focus root')
+  assert.equal(countFocusHeaders(view, true), 0, 'both real roots start collapsed')
+  assert.equal((view.match(/Context compacted/gu) ?? []).length, 2, 'both compaction cards render once')
+  assert.ok(!view.includes('STANDALONE_SUMMARY_BODY'), 'the standalone card starts folded')
+  assert.ok(!view.includes('NUMERIC_SUMMARY_BODY'), 'the numeric card starts folded')
+  assert.ok(view.indexOf('first final answer') < view.lastIndexOf('Context compacted'),
+    'the standalone card keeps its real position after the closed turn final')
+
+  // The standalone card's OWN disclosure opens without opening a Thought root:
+  // the detail toggle is independent of root ownership.
+  app.setTranscriptSearchTarget({
+    query: 'STANDALONE_SUMMARY_BODY',
+    match: { id: -1, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: standalone,
+  })
+  await vt.waitForRender()
+  const revealed = vt.getViewport().join('\n')
+  assert.ok(revealed.includes('STANDALONE_SUMMARY_BODY'), `the card detail opens independently:\n${revealed}`)
+  assert.equal(countFocusHeaders(revealed), 2, 'no ghost root appears for the standalone card')
+  assert.equal(countFocusHeaders(revealed, true), 0, 'opening the card detail never opens a Thought root')
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(!restored.includes('STANDALONE_SUMMARY_BODY'), 'clearing the search reveal restores the folded card')
+  assert.equal(countFocusHeaders(restored), 2, 'the two real roots remain')
   app.stop()
 })

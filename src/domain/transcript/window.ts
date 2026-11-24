@@ -14,6 +14,7 @@
  */
 
 import { recentTurnThreshold } from './grouping.ts'
+import { transcriptTurnOf } from './semantics.ts'
 import type { TranscriptMessage } from './types.ts'
 
 /** The semantic state of the transcript presentation window. */
@@ -288,13 +289,17 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
     // newer than the anchor are hidden (the search jumped back in history).
     const turns = new Set<number>()
     for (const message of messages) {
-      if ('turn' in message) turns.add(message.turn)
+      const turn = transcriptTurnOf(message)
+      if (turn !== undefined) turns.add(turn)
     }
     const sorted = [...turns].sort((a, b) => b - a)
     const anchor = sorted.indexOf(endTurn)
     if (anchor === -1) return windowMessages(messages, maxTurns)
     const windowTurns = new Set(sorted.slice(anchor, anchor + maxTurns))
-    const kept = messages.filter(message => !('turn' in message) || windowTurns.has(message.turn))
+    const kept = messages.filter((message) => {
+      const turn = transcriptTurnOf(message)
+      return turn === undefined || windowTurns.has(turn)
+    })
     const newerTurns = new Set(sorted.slice(0, anchor))
     const oldTurns = new Set(sorted.slice(anchor + maxTurns))
     if (newerTurns.size === 0 && oldTurns.size === 0) return kept
@@ -311,10 +316,11 @@ export function windowMessages(messages: readonly TranscriptMessage[], maxTurns:
   let oldTools = 0
   let oldCount = 0
   for (const message of messages) {
-    if ('turn' in message && message.turn < boundary) {
+    const turn = transcriptTurnOf(message)
+    if (turn !== undefined && turn < boundary) {
       oldCount += 1
       if (message.kind === 'tool') oldTools += 1
-      oldTurns.add(message.turn)
+      oldTurns.add(turn)
       continue
     }
     kept.push(message)

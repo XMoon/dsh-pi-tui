@@ -544,3 +544,88 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
   disposeRelease()
   assert.deepEqual(await disposed, { status: 'discarded', generation: '1', reason: 'disposed' })
 })
+
+test('Activity lifetime facts expose the real command boundary and detect divergence', async () => {
+  const base = 1_700_000_000_000
+  const events = (): PresentationDurableEvent[] => [
+    event('turn/start', 0, { turn: 0 }),
+    event('user/message', 1, {
+      turn: 0,
+      id: 'user-lifetime',
+      role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }),
+    event('step/start', 2, { turn: 0, step: 0 }),
+    event('tool/call', 3, {
+      turn: 0,
+      step: 0,
+      callId: 'lifetime-call',
+      name: 'bash',
+      arguments: '{"command":"lifetime"}',
+    }),
+    event('tool/result', 4, {
+      turn: 0,
+      step: 0,
+      message: {
+        id: 'lifetime-result',
+        role: 'tool',
+        toolCallId: 'lifetime-call',
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: 'lifetime-call' },
+      },
+    }),
+    event('command/run', 5, { commandId: 'lifetime-command', name: 'model', args: 'switch', source: { kind: 'user' } }),
+    event('command/done', 6, { commandId: 'lifetime-command', kind: 'success', text: 'switched' }),
+    event('assistant/message', 7, {
+      turn: 0,
+      step: 0,
+      message: {
+        id: 'lifetime-answer',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+      },
+    }),
+    event('turn/end', 8, { turn: 0, reason: { kind: 'completed' } }),
+  ]
+  interface LifetimeFact {
+    readonly owner: { readonly kind?: string; readonly args?: string }
+    readonly startedAt: number
+    readonly endedAt?: number
+    readonly open: boolean
+    readonly trailing: boolean
+  }
+  const eventsValue = events()
+  const projection = projectPresentationSnapshot(directSnapshot(eventsValue), { displayPreset: 'compact' })
+  const fact = projection.lifetimes[0] as LifetimeFact | undefined
+  assert.ok(fact !== undefined, 'the canonical Work receives ONE lifetime fact')
+  assert.equal(fact.owner.kind, 'tool')
+  assert.equal(fact.owner.args, '{"command":"lifetime"}')
+  assert.equal(fact.startedAt, base + 3, 'the lifetime starts at the first real member')
+  assert.equal(fact.endedAt, base + 5, 'the real command/run first-visible time closes the Activity')
+  assert.equal(fact.open, false)
+
+  // A comparator-only equality is not enough: perturb ONLY the command run's
+  // durable time and the lifetime oracle must actually diverge.
+  const remoteEvents = eventsValue.map(value => value.type === 'command/run'
+    ? { ...value, time: value.time + 1 }
+    : value)
+  const remoteProjection = projectPresentationSnapshot(
+    { ...directSnapshot(remoteEvents), coverage: 'bounded' },
+    { displayPreset: 'compact' },
+  )
+  const remoteFact = remoteProjection.lifetimes[0] as LifetimeFact | undefined
+  assert.equal(remoteFact?.endedAt, base + 6, 'the perturbed boundary moves the derived lifetime')
+  const generations = createObservableGenerationHarness()
+  const shadow = new RemotePresentationReadShadow(
+    reader(directSnapshot(eventsValue)),
+    reader({ ...directSnapshot(remoteEvents), coverage: 'bounded' }),
+    generations.source,
+  )
+  const report = reportOf(await shadow.compare({ sessionId: 'session', projection: { displayPreset: 'compact' } }))
+  assert.equal(report.comparable, false, 'a lifetime divergence makes the comparison fail')
+  assert.ok(report.mismatches.some(mismatch => mismatch.field === 'projection.lifetimes'),
+    'the oracle reports the lifetime field it actually saw diverge')
+  shadow.dispose()
+})

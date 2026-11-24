@@ -309,7 +309,7 @@ import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, text
 import type { UserShellPresentationPlacement, UserShellSubmissionState } from './app/submission/user-shell.ts'
 import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
 import { isPtcImageContext } from './domain/transcript/context-semantics.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext, transcriptTurnOf } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -10940,12 +10940,15 @@ export class TuiApp {
   /** Message-only convenience over {@link setTranscriptSearchTarget} for a
    * caller that resolved a card without an occurrence identity (the search
    * overlay always uses the full target). */
-  revealSearchMatch(message: TranscriptMessage): void {
+  revealSearchMatch(message: TranscriptMessage & { turn: number }): void {
+    // A turn-less control/standalone card has no semantic turn to anchor a
+    // weak-match reveal; callers with a real Fold search match pass its
+    // placement-anchored occurrence identity instead.
     this.setTranscriptSearchTarget({
       query: '',
       match: {
         id: -1,
-        turn: 'turn' in message ? message.turn : 0,
+        turn: message.turn,
         occurrence: 0,
         source: { kind: 'message' },
         sourceOccurrence: 0,
@@ -10976,9 +10979,11 @@ export class TuiApp {
     if (!this.searchRevealGranted) return undefined
     if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
     const message = this.searchTarget?.message
-    if (message === undefined || !('turn' in message)) return undefined
+    if (message === undefined) return undefined
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined) return undefined
     if (!this.focusRootHidesSearchTarget(message)) return undefined
-    return message.turn
+    return turn
   }
 
   /** The plan inspection's owner turn, but ONLY when collapsed Focus actually
@@ -10987,10 +10992,12 @@ export class TuiApp {
    * collapsed Thought, and the row proof needs it materialized). */
   private planInspectionTurn(): number | undefined {
     const message = this.planInspection?.message
-    if (message === undefined || !('turn' in message)) return undefined
+    if (message === undefined) return undefined
     if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined) return undefined
     if (!this.focusRootHidesSearchTarget(message)) return undefined
-    return message.turn
+    return turn
   }
 
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
@@ -11517,9 +11524,10 @@ export class TuiApp {
    * the real owner via the callers' early return). */
   private messageOverrideContributes(message: TranscriptMessage): boolean {
     if (this.openWorkRunMembers.has(message)) return false
-    if (isFocusDisplayPreset(this.displayState.preset) && 'turn' in message
+    const turn = transcriptTurnOf(message)
+    if (turn !== undefined && isFocusDisplayPreset(this.displayState.preset)
       && isFocusSecondaryDisclosure(message)
-      && this.focusProjectionExpandedTurnsBase().has(message.turn)) return false
+      && this.focusProjectionExpandedTurnsBase().has(turn)) return false
     return true
   }
 
@@ -11606,7 +11614,8 @@ export class TuiApp {
   private eligibleFocusRootTurns(): number[] {
     const projected = new Set<number>()
     for (const message of this.messages) {
-      if ('turn' in message) projected.add(message.turn)
+      const turn = transcriptTurnOf(message)
+      if (turn !== undefined) projected.add(turn)
     }
     const turns: number[] = []
     for (const activity of this.turnActivities.values()) {
@@ -11724,8 +11733,9 @@ export class TuiApp {
    * must keep its override. */
   private clearFocusSecondaryExpansionsForTurns(turns: ReadonlySet<number>): void {
     for (const message of this.expandedOverride.keys()) {
-      if (!('turn' in message)) continue
-      if (!turns.has(message.turn)) continue
+      const turn = transcriptTurnOf(message)
+      if (turn === undefined) continue
+      if (!turns.has(turn)) continue
       if (!isFocusSecondaryDisclosure(message)) continue
       // The settled surfaced-interaction card (question / Plan review) keeps
       // its own disclosure override across a root collapse, so it is EXEMPT
@@ -12065,13 +12075,15 @@ export class TuiApp {
       if (!Number.isFinite(boundary)) return this.focusExpandedTurns
       const derived = new Set<number>()
       for (const message of this.messages) {
-        if ('turn' in message && message.turn >= boundary) derived.add(message.turn)
+        const turn = transcriptTurnOf(message)
+        if (turn !== undefined && turn >= boundary) derived.add(turn)
       }
       return derived
     }
     const union = new Set(this.focusExpandedTurns)
     for (const message of this.messages) {
-      if ('turn' in message && message.turn >= boundary) union.add(message.turn)
+      const turn = transcriptTurnOf(message)
+      if (turn !== undefined && turn >= boundary) union.add(turn)
     }
     return union
   }
@@ -13070,9 +13082,9 @@ export class TuiApp {
       // volatile inputs (live tail / displayed-subject running) stay
       // render-time and deliberately do not churn this signature — but every
       // structural fact the cached clock's `isLive` reads MUST be here, or a
-      // cached card keeps a stale liveness (e.g. a boundary with no proven
-      // point sidecar appended after an open span flips `trailing` without
-      // touching start/end).
+      // cached card keeps a stale liveness (e.g. a synthetic/untimed boundary
+      // row appended after an open span flips `trailing` without touching
+      // start/end).
       clock === undefined
         ? ''
         : `${clock.startedAt}\u0000${clock.endedAt ?? ''}\u0000${clock.open ? '1' : '0'}\u0000${clock.trailing ? '1' : '0'}`,
@@ -21049,8 +21061,9 @@ export class TuiApp {
    * not pollute each other). Both count: regular mode full-reveals ANY
    * expanded root. */
   private isInsideExpandedFocus(message: TranscriptMessage, boundary: number): boolean {
-    if (!isFocusDisplayPreset(this.displayState.preset) || !('turn' in message)) return false
-    const turn = message.turn
+    if (!isFocusDisplayPreset(this.displayState.preset)) return false
+    const turn = transcriptTurnOf(message)
+    if (turn === undefined) return false
     return this.focusExpandedTurns.has(turn) || this.isRegularCtrlOExpandedTurn(turn, boundary)
   }
 
@@ -21248,7 +21261,26 @@ export class TuiApp {
         || this.expandedOverride.get(message) === true
         || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
-    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+    // A compaction row WITHOUT an admitted numeric turn is standalone control
+    // evidence (a real upstream `turn: null` transaction, or an unprovable
+    // fragment): like a command card it owns its disclosure outside the Focus
+    // turn boundary. A numeric compaction keeps the existing recent-turn rule.
+    if (message.kind === 'compaction') {
+      const turn = transcriptTurnOf(message)
+      if (turn === undefined) {
+        if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
+          return this.expandedOverride.get(message) === true
+            || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
+        }
+        return this.transcriptDetailExpanded
+          || this.expandedOverride.get(message) === true
+          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
+      }
+      return turn >= boundary
+        || this.expandedOverride.get(message) === true
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
+    }
+    return (message.kind === 'system' || message.kind === 'tool')
       && (message.turn >= boundary
         || this.expandedOverride.get(message) === true
         || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)))

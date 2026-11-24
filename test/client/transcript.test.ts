@@ -13,6 +13,7 @@ import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, groupConsecutiveReads, PTC_MAX_DEPTH, subCallDisplayStatus, TranscriptFolder, windowMessages, workflowPhaseKey, type TranscriptMessage } from '../../src/transcript.ts'
+import { transcriptTurnOf } from '../../src/domain/transcript/semantics.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
 import { computeStats, StatsFolder } from '../../src/domain/status/stats.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
@@ -1587,7 +1588,8 @@ test('windows older turns into one summary entry', () => {
   assert.ok(summary.text.includes('1 tool call'), `summary text:\n${summary.text}`)
   assert.deepEqual(kinds(windowed.slice(1)), ['user', 'assistant', 'user'])
   for (const message of windowed.slice(1)) {
-    assert.ok('turn' in message && message.turn >= 1, `window kept an old turn: ${JSON.stringify(message)}`)
+    const turn = transcriptTurnOf(message)
+    assert.ok(turn !== undefined && turn >= 1, `window kept an old turn: ${JSON.stringify(message)}`)
   }
 })
 

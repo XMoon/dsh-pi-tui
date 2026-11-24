@@ -200,6 +200,8 @@ export default async function (h) {
     finish(h, extra)
     return
   }
+  /** Command scenario: the Work A header text at the proof instant. */
+  let commandWorkAHeadText
   if (SCENARIO === 'svg') {
     if (!await waitFor(h, 'the real registered Tool A is executing inside canonical Work A', () => {
       const rows = records(h)
@@ -500,6 +502,32 @@ export default async function (h) {
     const worksAfterOpen = workIds(expandedNodes, rootIdForCommand)
     h.check('the bridged command never hides the two canonical Work runs', worksAfterOpen.length === 2,
       JSON.stringify(worksAfterOpen))
+    // ABSOLUTE lifetime fact on the REAL client tree: Work A is the Process run
+    // BEFORE the command, so its displayed Activity duration must be exactly the
+    // official command-run boundary minus the first real member — never the
+    // member settle, and never a later Work/turn event.
+    const lifetimeRows = records(h)
+    const workACall = lifetimeRows.find(row => row.kind === 'subject.work-a-call')
+    const commandInjected = lifetimeRows.find(row => row.kind === 'command.injected')
+    const expectedWorkASeconds = typeof workACall?.time === 'number' && typeof commandInjected?.time === 'number'
+      ? Math.floor((commandInjected.time - workACall.time) / 1000)
+      : undefined
+    const workAHead = mainNodes(h.snapshot()).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    commandWorkAHeadText = workAHead === undefined ? undefined : h.descendantsText(workAHead)
+    h.check('the seeded Work A Activity header carries a proven duration', workAHead !== undefined
+      && expectedWorkASeconds !== undefined && commandWorkAHeadText.includes(`· ${expectedWorkASeconds}s ·`),
+      JSON.stringify({ expectedWorkASeconds, head: commandWorkAHeadText ?? null }))
+    await h.sleep(1_200)
+    const workAAfterAdvance = mainNodes(h.snapshot()).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    h.check('the closed Work A duration never grows as time advances',
+      workAAfterAdvance !== undefined && h.descendantsText(workAAfterAdvance) === commandWorkAHeadText,
+      JSON.stringify({ before: commandWorkAHeadText ?? null, after: workAAfterAdvance === undefined ? null : h.descendantsText(workAAfterAdvance) }))
     const commandId = expandedCommand[0]?.[0]
     h.check('the command is a top-level Root child, never wrapped by a Work container',
       commandId !== undefined && !worksAfterOpen.some(work => commandId.startsWith(`${work}.`)))
@@ -1011,6 +1039,52 @@ export default async function (h) {
   h.check('official turn/end publishes one final Assistant outside the Focus root', finalCards.length === 1, JSON.stringify(finalCards.map(([id]) => id)))
   h.check('the subject recorded an authoritative completed activity after release',
     records(h).some(row => row.kind === 'display.commit' && row.completedTurns.includes(1) && row.finalPresent))
+  if (SCENARIO === 'command') {
+    // The seeded standalone maintenance card after the closed turn: it must be
+    // one top-level native row AFTER the official final, own its detail toggle,
+    // and never mint a Focus root or re-open the real Turn.
+    if (!await waitFor(h, 'the standalone compaction card lands after the official final', () =>
+      records(h).some(row => row.kind === 'standalone.injected')
+        && h.texts(h.snapshot()).some(text => text.includes('Compaction failed')))) {
+      finish(h, extra)
+      return
+    }
+    const standaloneSnap = h.snapshot()
+    const standaloneNodes = mainNodes(standaloneSnap)
+    const compactionHead = standaloneNodes.find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('Compaction failed'))
+    const finalTrailingRow = standaloneNodes.find(node =>
+      typeof node.text === 'string' && node.text.includes(promptInfo.assistantMarker))
+    h.check('the standalone compaction keeps its real position after the final Assistant',
+      compactionHead !== undefined && finalTrailingRow !== undefined
+        && standaloneNodes.indexOf(compactionHead) > standaloneNodes.indexOf(finalTrailingRow),
+      JSON.stringify({ compaction: compactionHead === undefined ? null : h.descendantsText(compactionHead),
+        final: finalTrailingRow === undefined ? null : h.descendantsText(finalTrailingRow) }))
+    const rootIdBeforeStandalone = rootIds(liveNodes(h))[0]
+    const rootCollapsedBefore = liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed
+    h.check('the standalone compaction never mints a second Focus root', rootIds(liveNodes(h)).length === 1,
+      JSON.stringify(rootIds(liveNodes(h))))
+    const standaloneDetailVisible = () => h.texts(h.snapshot()).some(line => line.includes('STANDALONE-DETAIL-MARKER'))
+    if (!standaloneDetailVisible()) {
+      const beforeStandaloneToggle = eventRows(h).length
+      h.check('the standalone compaction head opens through the real client pointer',
+        compactionHead !== undefined && await h.click(standaloneSnap.chains, compactionHead))
+      if (!await waitFor(h, 'the standalone detail body appears after the client toggle', standaloneDetailVisible)) {
+        finish(h, extra)
+        return
+      }
+      const toggle = eventRows(h).slice(beforeStandaloneToggle).at(-1)
+      h.check('the standalone detail toggle addresses the compaction row, never the Focus root',
+        toggle !== undefined && toggle.id !== rootIdBeforeStandalone)
+    }
+    h.check('the standalone detail opens without changing the one real root state',
+      rootIds(liveNodes(h)).length === 1
+        && liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed === rootCollapsedBefore,
+      JSON.stringify({ roots: rootIds(liveNodes(h)), collapsed: liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed }))
+    h.capture('focus-standalone-compaction-after-final-1280x800-dark',
+      'the standalone compaction after the closed turn owns an independent native detail')
+  }
   if (SCENARIO === 'svg') {
     const short = await h.resize(900, 360)
     h.send('appearance', 'light')

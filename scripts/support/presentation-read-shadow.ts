@@ -7,6 +7,8 @@
 
 import { projectFocus, type FocusProjectedBlock } from '../../src/tui/transcript/focus-projection.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { resolveWorkLifetimes } from '../../src/tui/transcript/activity-clock.ts'
 import type { TranscriptContainerPath } from '../../src/tui/transcript/container-owner.ts'
 import type { DisplayPreset } from '../../src/domain/display/preset.ts'
 import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../src/domain/transcript/window.ts'
@@ -41,6 +43,7 @@ export type PresentationReadMismatchField =
   | 'projection.activities'
   | 'projection.focus'
   | 'projection.compact'
+  | 'projection.lifetimes'
   | 'projection.window'
 
 /** One bounded presentation mismatch. */
@@ -110,6 +113,11 @@ export interface PresentationSemanticProjection {
   /** The Compact projection at this observation point (empty disclosure
    * sets — the same deterministic defaults on both readers). */
   readonly compact: readonly unknown[]
+  /** One deterministic Activity-lifetime fact per canonical Work span, in
+   * Compact order: the canonical owner row identity plus startedAt/endedAt/
+   * open/trailing. These are durable EVENT TIMES, never a wall-clock duration
+   * or a render-time value, so both readers must agree exactly. */
+  readonly lifetimes: readonly unknown[]
   readonly window: {
     readonly controller: TranscriptWindowSnapshot
     readonly firstTurn?: number
@@ -410,6 +418,24 @@ export function projectPresentationSnapshot(
     expandedClusters: new Set(),
     forcedExpanded: new Set(),
   })
+  // The SAME canonical window and fold facts both readers materialize: the
+  // Activity lifetime is a pure derivation, so a divergence here is a real
+  // reader/projection divergence, not a renderer difference.
+  const structure = projectTranscriptStructure(window.messages)
+  const workLifetimes = resolveWorkLifetimes(structure, folder.turnActivities())
+  const lifetimes: unknown[] = []
+  for (const block of structure) {
+    if (block.kind !== 'work') continue
+    const lifetime = workLifetimes.get(block.span.owner)
+    if (lifetime === undefined) continue
+    lifetimes.push({
+      owner: normalizeValue(block.span.owner),
+      startedAt: lifetime.startedAt,
+      ...(lifetime.endedAt === undefined ? {} : { endedAt: lifetime.endedAt }),
+      open: lifetime.open,
+      trailing: lifetime.trailing,
+    })
+  }
   const activities = [...folder.turnActivities().entries()]
     .sort(([left], [right]) => left - right)
     .map(([, activity]) => normalizeActivity(activity))
@@ -419,6 +445,7 @@ export function projectPresentationSnapshot(
     activities: Object.freeze(activities),
     focus: Object.freeze(focus.map(block => normalizeFocusBlock(block))),
     compact: Object.freeze(compact.map(block => normalizeCompactBlock(block))),
+    lifetimes: Object.freeze(lifetimes),
     window: Object.freeze({
       controller: controllerSnapshot,
       firstTurn: window.firstTurn,
@@ -445,6 +472,7 @@ function compareProjection(
   pushFieldMismatch(mismatches, 'projection.activities', undefined, directProjection.activities, remoteProjection.activities)
   pushFieldMismatch(mismatches, 'projection.focus', undefined, directProjection.focus, remoteProjection.focus)
   pushFieldMismatch(mismatches, 'projection.compact', undefined, directProjection.compact, remoteProjection.compact)
+  pushFieldMismatch(mismatches, 'projection.lifetimes', undefined, directProjection.lifetimes, remoteProjection.lifetimes)
   pushFieldMismatch(mismatches, 'projection.window', undefined, directProjection.window, remoteProjection.window)
   return true
 }
