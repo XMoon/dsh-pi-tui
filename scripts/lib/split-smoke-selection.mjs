@@ -109,6 +109,7 @@ import {
   runDaemonControlStatusSafety,
   runDaemonControlSystemdLifecycle,
 } from '../smoke/split-process/daemon-controls-m6-2c.mjs'
+import { runHostDefaultEnvironment } from '../smoke/split-process/host-default-environment.mjs'
 import { SplitSmokeInputError } from './split-smoke-diagnostics.mjs'
 
 /** The evidence scope every selected result declares. */
@@ -678,6 +679,14 @@ const CASE_REGISTRY = Object.freeze([
     id: 'daemon-control.m6-2c-inflight-stop',
     title: 'a REAL Host Session turn in flight is interrupted by stop, the Host exits, and the restarted Host never replays it or fabricates its completion',
     run: runDaemonControlInflightStop,
+  }),
+  Object.freeze({
+    suite: 'daemon-control',
+    defaultLane: false,
+    id: 'daemon-control.host-default-environment',
+    title: 'the managed Host augments its inherited PATH before the official boot, keeps explicit same-name precedence, never leaks Client state, honours inherit on a cold start and preserves its service definition across warm reuse and restart',
+    platforms: LINUX_DARWIN,
+    run: runHostDefaultEnvironment,
   }),
   Object.freeze({
     suite: 'acp',
