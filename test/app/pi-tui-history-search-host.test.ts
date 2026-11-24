@@ -6383,6 +6383,22 @@ test('a temporary missing-service gap preserves accepted input and recovers thro
     assert.equal(internals.serviceGap, false)
     assert.equal(internals.priorProofReuseAllowed, false, 'proof reuse must stay retired for this Host lifetime')
     assert.equal(internals.pending.size, 0)
+
+    // Query-only absence: the persisted/session services are unchanged, but a
+    // required read service is gone. The mounted epoch must become unavailable
+    // and must not answer from the old ready index.
+    queryCurrent = undefined
+    const queryGap = await service.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
+    assert.equal(queryGap.kind, 'unavailable', JSON.stringify(queryGap))
+    if (queryGap.kind === 'unavailable') assert.equal(queryGap.reason, 'service-missing')
+    queryCurrent = firstQuery
+    await verifyFullPass(service)
+    await waitDirectReady(service)
+    const afterQueryGap = await service.search(
+      { scope: 'session', sessionId: 'proof-session', query: 'mutable gap third', limit: 5 },
+      new AbortController().signal,
+    )
+    assert.equal(afterQueryGap.kind, 'ready')
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()

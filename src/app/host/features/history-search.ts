@@ -1010,11 +1010,22 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
       return
     }
-    if (this.sameCoverageBasis(known, current)) return
+    if (this.sameCoverageBasis(known, current)) {
+      // The basis records the persistence/sessions binding, but every required
+      // official service still participates in source availability. A query-only
+      // absence must not keep the mounted epoch readable, and its later return
+      // must leave the recoverable gap for the next full pass to prove.
+      if (this.index !== undefined && this.requiredServicesMissing()) {
+        this.enterServiceGap()
+        return
+      }
+      if (this.serviceGap) this.leaveServiceGap()
+      return
+    }
     // Save the new actual binding (an absent service is recorded as absent) so
     // a later recovery is another observable change, never a silent re-open.
     this.coveragePersistenceBasis = current
-    if (current.persistence === undefined || current.sessions === undefined) {
+    if (this.requiredServicesMissing()) {
       if (this.index !== undefined) this.enterServiceGap()
       return
     }
