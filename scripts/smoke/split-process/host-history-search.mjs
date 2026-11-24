@@ -260,7 +260,7 @@ async function runInstalledWriter(installation, workDir, spec) {
     cwd: installation.harnessDir,
     env: {
       ...process.env,
-      HSP_HARNESS_PACKAGE: join(installation.harnessDir, 'package.json'),
+      HSP_HARNESS_PACKAGE: installation.anchor,
       HSP_WRITER_SPEC: JSON.stringify(spec),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -484,6 +484,12 @@ async function waitForExtraProof(path, kind, label, timeoutMs = 120_000) {
 
 /** The real installed Split accepted-input history search case. */
 export async function runHostHistorySearch(context) {
+  // External qualification seam: S02's OS-crash driver lives outside this
+  // repository and receives the exact same isolated packed-scene context.
+  if (process.env.HSP_S02_MODULE !== undefined) {
+    const external = await import(pathToFileURL(process.env.HSP_S02_MODULE).href)
+    return external.runHostHistorySearchS02(context)
+  }
   const { workDir, dshHome, trace } = context
   const scene = createC1Scene(context)
   installExtraFixture(scene, workDir)
