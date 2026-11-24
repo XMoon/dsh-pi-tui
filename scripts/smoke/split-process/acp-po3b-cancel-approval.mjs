@@ -182,10 +182,7 @@ async function sendRequest(client, id, method, params) {
   for (;;) {
     const message = await client.next(120_000)
     // Standard notifications never stand in for the control response.
-    if (message?.method === 'session/update') {
-      if (message.params?.update?.sessionUpdate === 'available_commands_update') continue
-      continue
-    }
+    if (message?.method === 'session/update') continue
     if (message?.id === id && (message.result !== undefined || message.error !== undefined)) return message
     assert(false, `PO-3B: unexpected message while awaiting control response ${String(id)}: ${JSON.stringify(message).slice(0, 300)}`)
   }
