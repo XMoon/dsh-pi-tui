@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -95,6 +95,7 @@ export interface SplitProcessScopeFacts {
 
 export interface SplitProcessHostHandle {
   readonly hostId: string
+  readonly entryId: string
   readonly generation: number
   readonly ready: Record<string, any>
   readonly workRoot: string
@@ -173,6 +174,152 @@ export interface StartProcessClientOptions {
   rows?: number
 }
 
+/** A bounded official record match; never a Worker-supplied predicate. */
+export interface EntryRecordMatch {
+  m4a0?: string
+  m4b2hf?: string
+  requestId?: string
+  phase?: string
+  signal?: string
+  op?: string
+}
+
+export type EntryRecord = Record<string, any>
+
+export type HostAttemptMode =
+  | 'seat-race'
+  | 'seat-conflict'
+  | 'host-runtime-disabled'
+  | 'tui-row-enabled'
+  | 'connection-disabled'
+  | 'session-controller-disabled'
+  | 'workspace-controller-disabled'
+  | 'host-runtime-absent'
+  | 'host-bootstrap-absent'
+  | 'scratch-removal-failure'
+  | 'early-exit'
+  | 'stop-during-publication'
+  | 'stop-during-initial-liveness'
+
+export type QualificationClientMode =
+  | 'attach'
+  | 'seat-race'
+  | 'omit-cookie'
+  | 'startup-fatal'
+  | 'refresh-unresponsive-once'
+  | 'bootstrap-failure'
+  | 'client-bootstrap-drift'
+  | 'discover-after-host-death'
+  | 'discover-with-pre-profile-failure'
+  | 'discovery-refusal'
+  | 'identity-changed'
+
+export type DiscoveryRefusal =
+  | 'registry-symlink'
+  | 'launch-symlink'
+  | 'forged-instance'
+  | 'forged-pid'
+  | 'forged-build'
+  | 'forged-origin'
+  | 'unresponsive-dummy-origin'
+  | 'protocol'
+  | 'wrong-token'
+  | 'scope-directory'
+
+export type EntrySignal = 'SIGTERM' | 'SIGINT' | 'SIGKILL'
+
+export interface EntryQualificationHandle {
+  readonly entryId: string
+  readonly kind: 'host-attempt' | 'qualification-client'
+  readonly label: string
+  readonly mode: HostAttemptMode | QualificationClientMode
+  readonly pid: number
+  readonly birth: string | null
+  readonly pgid: number | null
+  readonly scratch: string | null
+  readonly barriers: Record<string, string>
+  readonly coStarted?: number
+}
+
+export interface HostAttemptHandle extends EntryQualificationHandle {
+  readonly kind: 'host-attempt'
+  readonly mode: HostAttemptMode
+}
+
+export interface QualificationClientHandle extends EntryQualificationHandle {
+  readonly kind: 'qualification-client'
+  readonly mode: QualificationClientMode
+  readonly refusal?: DiscoveryRefusal
+}
+
+export interface EntryStderrMarkers {
+  loaderImportFailed: boolean
+  moduleNotFound: boolean
+  requiredTuiSurfaceMissing: boolean
+}
+
+export interface EntryRecordFacts {
+  entryId: string
+  kind: string
+  mode: string | null
+  exited: boolean
+  exitCode: number | null
+  exitSignal: string | null
+  stderrMarkers: EntryStderrMarkers
+  stderrBytes: number
+  redactedKeys: string[]
+  records: EntryRecord[]
+}
+
+export interface EntryTerminalFacts {
+  entryId: string
+  kind: string
+  mode: string | null
+  outcome: string
+  exit: { code: number | null; signal: string | null }
+  records: EntryRecord[]
+  stderrMarkers: EntryStderrMarkers
+  [key: string]: unknown
+}
+
+export interface BootstrapCliFacts {
+  mode: 'inherited-host-role' | 'direct-help'
+  entryId: string
+  exit: { code: number | null; signal: string | null }
+  markers: EntryStderrMarkers
+  profilePatchRestored: boolean
+}
+
+export interface InstallFaultFacts {
+  fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift'
+  target: string
+  payloadHashBefore: string
+  buildIdBefore: string
+  candidateSha256: string
+  barrierPath?: string
+  payloadHashAfter?: string
+  buildIdAfter?: string
+  [key: string]: unknown
+}
+
+export interface IdentityWitnessHandle {
+  entryId: string
+  kind: 'live-non-host' | 'linux-zombie'
+  pid: number
+  holderPid: number | null
+  birth: string
+  starttime: string | null
+  kernelIdentity: Record<string, any>
+}
+
+export interface DiscoveredHostTerminalFacts {
+  pid: number
+  birth: string | null
+  reclaimed: boolean
+  registryRemoved: boolean
+  scratchEntries: string[]
+}
+
 export interface SplitProcessScene {
   /** The Scenario's unique Supervisor receipt/run identity. */
   readonly runId: string
@@ -180,12 +327,53 @@ export interface SplitProcessScene {
   readonly candidate: CandidateFacts
   readonly installation: SplitProcessInstallation
   readonly scope: SplitProcessScopeFacts
+  /** The exact installed product scope directory (`run/dsh-pi-tui/<scopeId>`). */
+  readonly scopeDir: string
   /** Bounded typed Supervisor IPC, for boundary negatives on a real Scene. */
   request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
   startHost(): Promise<SplitProcessHostHandle>
   hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>>
   stopHost(host: SplitProcessHostHandle): Promise<SplitProcessClientExitFacts>
   startClient(options: StartProcessClientOptions): Promise<SplitProcessClient>
+  startHostAttempts(options: {
+    mode: HostAttemptMode
+    count?: number
+    scratchTarget?: string
+    signal?: 'SIGTERM' | 'SIGINT'
+  }): Promise<HostAttemptHandle[]>
+  startQualificationClients(options: {
+    mode: QualificationClientMode
+    count?: number
+    refusal?: DiscoveryRefusal
+    foundationBarrier?: boolean
+  }): Promise<QualificationClientHandle[]>
+  entryRecordFacts(handle: EntryQualificationHandle): Promise<EntryRecordFacts>
+  entryRecords(handle: EntryQualificationHandle): Promise<EntryRecord[]>
+  waitEntryRecord(handle: EntryQualificationHandle, match: EntryRecordMatch, timeoutMs?: number): Promise<EntryRecord>
+  entryStatus(handle: QualificationClientHandle): Promise<EntryRecord>
+  qualificationControl(
+    handle: QualificationClientHandle,
+    control: {
+      op: 'qualification-host-foundation' | 'qualification-drop-websocket'
+      requestId: string
+      workspacePath?: string
+      workspaceResume?: true
+      schedule?: true
+    },
+  ): Promise<void>
+  signalEntry(handle: EntryQualificationHandle, signal: EntrySignal): Promise<void>
+  signalHost(host: SplitProcessHostHandle, signal: EntrySignal): Promise<void>
+  finishEntry(handle: EntryQualificationHandle | SplitProcessHostHandle): Promise<EntryTerminalFacts>
+  acceptHostWinner(handle: HostAttemptHandle): Promise<SplitProcessHostHandle>
+  runBootstrapCli(mode: 'inherited-host-role' | 'direct-help'): Promise<BootstrapCliFacts>
+  setInstallationFault(fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift'): Promise<InstallFaultFacts>
+  restoreInstallation(): Promise<void>
+  startIdentityWitness(kind: 'live-non-host' | 'linux-zombie'): Promise<IdentityWitnessHandle>
+  finishIdentityWitness(handle: IdentityWitnessHandle): Promise<void>
+  reclaimDiscoveredHost(client: QualificationClientHandle): Promise<DiscoveredHostTerminalFacts>
+  assertEntrySeatsFree(): Promise<void>
+  /** Release one Supervisor-preallocated qualification barrier (file existence). */
+  releaseBarrier(handle: EntryQualificationHandle, name: string): void
   sessionIds(): Promise<string[]>
   sessionEvents(sessionId: string): SessionEvent[] | undefined
   hostSessionLogCount(): number
@@ -444,6 +632,7 @@ class ProcessScene implements SplitProcessScene {
   readonly candidate: CandidateFacts
   readonly installation: SplitProcessInstallation
   readonly scope: SplitProcessScopeFacts
+  readonly scopeDir: string
   readonly #supervisor: SupervisorClient
   readonly #tmpBase: string
   readonly #clients: ProcessClient[] = []
@@ -460,6 +649,7 @@ class ProcessScene implements SplitProcessScene {
     this.candidate = facts.candidate as CandidateFacts
     this.installation = facts.installation as SplitProcessInstallation
     this.scope = facts.scope as SplitProcessScopeFacts
+    this.scopeDir = join(this.installation.dshHome, 'run', 'dsh-pi-tui', this.scope.scopeId)
     this.#supervisor = supervisor
     this.#tmpBase = tmpBase
   }
@@ -480,6 +670,7 @@ class ProcessScene implements SplitProcessScene {
     const payload = await this.request('START_HOST', {}, 600_000)
     const host: SplitProcessHostHandle = {
       hostId: String(payload.hostId),
+      entryId: String(payload.hostId),
       generation: Number(payload.generation),
       ready: payload.ready as Record<string, any>,
       workRoot: String(payload.workRoot),
@@ -490,6 +681,187 @@ class ProcessScene implements SplitProcessScene {
     }
     this.#hosts.push(host)
     return host
+  }
+
+  #entryHandle(payload: Record<string, any>): EntryQualificationHandle {
+    return {
+      entryId: String(payload.entryId),
+      kind: payload.kind as EntryQualificationHandle['kind'],
+      label: String(payload.label),
+      mode: payload.mode as EntryQualificationHandle['mode'],
+      pid: Number(payload.pid),
+      birth: payload.birth === null || payload.birth === undefined ? null : String(payload.birth),
+      pgid: payload.pgid === null || payload.pgid === undefined ? null : Number(payload.pgid),
+      scratch: payload.scratch === null || payload.scratch === undefined ? null : String(payload.scratch),
+      barriers: (payload.barriers ?? {}) as Record<string, string>,
+      ...(payload.coStarted === null || payload.coStarted === undefined ? {} : { coStarted: Number(payload.coStarted) }),
+    }
+  }
+
+  async startHostAttempts(options: {
+    mode: HostAttemptMode
+    count?: number
+    scratchTarget?: string
+    signal?: 'SIGTERM' | 'SIGINT'
+  }): Promise<HostAttemptHandle[]> {
+    const payload = await this.request('START_HOST_ATTEMPTS', {
+      mode: options.mode,
+      ...(options.count === undefined ? {} : { count: options.count }),
+      ...(options.scratchTarget === undefined ? {} : { scratchTarget: options.scratchTarget }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    }, 240_000)
+    const attempts = (payload.attempts as Record<string, any>[]).map(facts => {
+      const handle = this.#entryHandle(facts) as HostAttemptHandle
+      return Object.assign(handle, { kind: 'host-attempt' as const, mode: facts.mode as HostAttemptMode })
+    })
+    return attempts
+  }
+
+  async startQualificationClients(options: {
+    mode: QualificationClientMode
+    count?: number
+    refusal?: DiscoveryRefusal
+    foundationBarrier?: boolean
+  }): Promise<QualificationClientHandle[]> {
+    const payload = await this.request('START_QUALIFICATION_CLIENTS', {
+      mode: options.mode,
+      ...(options.count === undefined ? {} : { count: options.count }),
+      ...(options.refusal === undefined ? {} : { refusal: options.refusal }),
+      ...(options.foundationBarrier === undefined ? {} : { foundationBarrier: options.foundationBarrier }),
+    }, 240_000)
+    return (payload.clients as Record<string, any>[]).map(facts => {
+      const handle = this.#entryHandle(facts) as QualificationClientHandle
+      return Object.assign(handle, {
+        kind: 'qualification-client' as const,
+        mode: facts.mode as QualificationClientMode,
+        ...(facts.refusal === null || facts.refusal === undefined ? {} : { refusal: facts.refusal as DiscoveryRefusal }),
+      })
+    })
+  }
+
+  async entryRecordFacts(handle: EntryQualificationHandle): Promise<EntryRecordFacts> {
+    const payload = await this.request('ENTRY_RECORDS', { entryId: handle.entryId }, 60_000)
+    return {
+      entryId: String(payload.entryId),
+      kind: String(payload.kind),
+      mode: payload.mode === null || payload.mode === undefined ? null : String(payload.mode),
+      exited: payload.exited === true,
+      exitCode: payload.exitCode === null || payload.exitCode === undefined ? null : Number(payload.exitCode),
+      exitSignal: payload.exitSignal === null || payload.exitSignal === undefined ? null : String(payload.exitSignal),
+      stderrMarkers: payload.stderrMarkers as EntryStderrMarkers,
+      stderrBytes: Number(payload.stderrBytes),
+      redactedKeys: (payload.redactedKeys ?? []) as string[],
+      records: (payload.records ?? []) as EntryRecord[],
+    }
+  }
+
+  async entryRecords(handle: EntryQualificationHandle): Promise<EntryRecord[]> {
+    return (await this.entryRecordFacts(handle)).records
+  }
+
+  async waitEntryRecord(
+    handle: EntryQualificationHandle,
+    match: EntryRecordMatch,
+    timeoutMs = 240_000,
+  ): Promise<EntryRecord> {
+    return await this.request('WAIT_ENTRY_RECORD', {
+      entryId: handle.entryId,
+      match,
+      timeoutMs,
+    }, timeoutMs + 30_000) as EntryRecord
+  }
+
+  async entryStatus(handle: QualificationClientHandle): Promise<EntryRecord> {
+    return await this.request('QUALIFICATION_CLIENT_STATUS', { entryId: handle.entryId }, 90_000) as EntryRecord
+  }
+
+  async qualificationControl(
+    handle: QualificationClientHandle,
+    control: {
+      op: 'qualification-host-foundation' | 'qualification-drop-websocket'
+      requestId: string
+      workspacePath?: string
+      workspaceResume?: true
+      schedule?: true
+    },
+  ): Promise<void> {
+    await this.request('QUALIFICATION_CLIENT_CONTROL', {
+      entryId: handle.entryId,
+      control,
+    }, 60_000)
+  }
+
+  async signalEntry(handle: EntryQualificationHandle, signal: EntrySignal): Promise<void> {
+    await this.request('SIGNAL_ENTRY', { entryId: handle.entryId, signal }, 60_000)
+  }
+
+  async signalHost(host: SplitProcessHostHandle, signal: EntrySignal): Promise<void> {
+    await this.request('SIGNAL_ENTRY', { entryId: host.entryId, signal }, 60_000)
+  }
+
+  async finishEntry(handle: EntryQualificationHandle | SplitProcessHostHandle): Promise<EntryTerminalFacts> {
+    const terminal = await this.request('FINISH_ENTRY', { entryId: handle.entryId }, 600_000) as EntryTerminalFacts
+    if ('hostId' in handle) {
+      handle.exited = true
+      handle.exitResult = { code: terminal.exit.code, signal: terminal.exit.signal as NodeJS.Signals | null }
+    }
+    return terminal
+  }
+
+  async acceptHostWinner(handle: HostAttemptHandle): Promise<SplitProcessHostHandle> {
+    const payload = await this.request('ACCEPT_HOST_WINNER', { entryId: handle.entryId }, 120_000)
+    const host: SplitProcessHostHandle = {
+      hostId: String(payload.hostId),
+      entryId: String(payload.entryId ?? payload.hostId),
+      generation: Number(payload.generation),
+      ready: payload.ready as Record<string, any>,
+      workRoot: String(payload.workRoot),
+      scopeId: String(payload.scopeId),
+      pgid: payload.pgid === null || payload.pgid === undefined ? null : Number(payload.pgid),
+      entryRealpath: String(payload.entryRealpath),
+      exited: false,
+    }
+    this.#hosts.push(host)
+    return host
+  }
+
+  async runBootstrapCli(mode: 'inherited-host-role' | 'direct-help'): Promise<BootstrapCliFacts> {
+    return await this.request('RUN_BOOTSTRAP_CLI', { mode }, 240_000) as BootstrapCliFacts
+  }
+
+  async setInstallationFault(
+    fault: 'host-runtime-absent' | 'host-bootstrap-absent' | 'client-bootstrap-drift',
+  ): Promise<InstallFaultFacts> {
+    return await this.request('SET_INSTALLATION_FAULT', { fault }, 180_000) as InstallFaultFacts
+  }
+
+  async restoreInstallation(): Promise<void> {
+    await this.request('RESTORE_INSTALLATION', {}, 180_000)
+  }
+
+  async startIdentityWitness(kind: 'live-non-host' | 'linux-zombie'): Promise<IdentityWitnessHandle> {
+    return await this.request('START_IDENTITY_WITNESS', { kind }, 120_000) as IdentityWitnessHandle
+  }
+
+  async finishIdentityWitness(handle: IdentityWitnessHandle): Promise<void> {
+    await this.request('FINISH_IDENTITY_WITNESS', { entryId: handle.entryId }, 120_000)
+  }
+
+  async reclaimDiscoveredHost(client: QualificationClientHandle): Promise<DiscoveredHostTerminalFacts> {
+    return await this.request('RECLAIM_DISCOVERED_HOST', { entryId: client.entryId }, 240_000) as DiscoveredHostTerminalFacts
+  }
+
+  async assertEntrySeatsFree(): Promise<void> {
+    await this.request('ASSERT_ENTRY_SEATS_FREE', {}, 120_000)
+  }
+
+  releaseBarrier(handle: EntryQualificationHandle, name: string): void {
+    const path = handle.barriers[name]
+    assert(typeof path === 'string' && path !== '', `${handle.label}: no preallocated ${name} barrier`)
+    const rel = relative(this.workDir, path)
+    assert(rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`),
+      `${handle.label}: the ${name} barrier escapes the Scene root`)
+    writeFileSync(path, 'release\n', { mode: 0o600 })
   }
 
   async hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>> {

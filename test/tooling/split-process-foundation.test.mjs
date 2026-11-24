@@ -359,3 +359,39 @@ test('the shared official-record reader keeps complete-line strictness and only 
     /client record line 2 is invalid JSON/u,
   )
 })
+
+test('the installed-entry qualification operations are refused before any process Scene exists', async t => {
+  const life = testLifecycle(t)
+  const root = realpathSync(life.tempDir('split-process-entry-admission-'))
+  const tmpBase = privateBase(life, root, 'base')
+  const supervisor = new SupervisorClient({ runId: `split-process-entry-admission-${String(process.pid)}` })
+  try {
+    for (const [type, payload] of [
+      ['START_HOST_ATTEMPTS', { mode: 'seat-race' }],
+      ['START_QUALIFICATION_CLIENTS', { mode: 'attach' }],
+      ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
+      ['RESTORE_INSTALLATION', {}],
+      ['RUN_BOOTSTRAP_CLI', { mode: 'direct-help' }],
+      ['START_IDENTITY_WITNESS', { kind: 'live-non-host' }],
+      ['FINISH_IDENTITY_WITNESS', { entryId: 'probe' }],
+      ['RECLAIM_DISCOVERED_HOST', { entryId: 'probe' }],
+      ['ASSERT_ENTRY_SEATS_FREE', {}],
+      ['ENTRY_RECORDS', { entryId: 'probe' }],
+      ['WAIT_ENTRY_RECORD', { entryId: 'probe', match: { m4a0: 'ready' } }],
+      ['QUALIFICATION_CLIENT_STATUS', { entryId: 'probe' }],
+      ['QUALIFICATION_CLIENT_CONTROL', { entryId: 'probe', control: { op: 'shutdown' } }],
+      ['SIGNAL_ENTRY', { entryId: 'probe', signal: 'SIGTERM' }],
+      ['FINISH_ENTRY', { entryId: 'probe' }],
+      ['ACCEPT_HOST_WINNER', { entryId: 'probe' }],
+    ]) {
+      await assert.rejects(
+        supervisor.request(type, payload, { timeoutMs: 30_000 }),
+        /no process scene|unknown entryId|no Scene/,
+      )
+    }
+    // Refused admission creates no receipt, root, directory or child process.
+    assert.deepEqual(readdirSync(tmpBase), [])
+  } finally {
+    await supervisor.close({ timeoutMs: 30_000, allowKill: false })
+  }
+})
