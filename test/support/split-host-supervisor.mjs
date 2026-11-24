@@ -33,6 +33,8 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import { waitForEntryClose } from './entry-close.mjs'
+
 import {
   allowNativeMutation,
   applyServiceObservation,
@@ -151,6 +153,16 @@ let nativeRuntime
 /** The one-shot native cleanup of this run (idempotent across FINALIZE/disconnect). */
 let nativeCleanupPromise
 
+/** Commit the ONE Supervisor exit verdict to the receipt, then exit. */
+function exitSupervisor(code, reason) {
+  writeReceipt({
+    phase: receipt?.phase ?? 'NOT_QUIESCED',
+    supervisorExitVerdict: code,
+    supervisorExitReason: reason,
+  })
+  process.exit(code)
+}
+
 // Register every parent-death / message / signal handler before loading the
 // heavy profile and fixture modules. A fork can deliver `disconnect` while the
 // module graph is still evaluating; an event registered after that point is not
@@ -189,8 +201,8 @@ process.on('disconnect', () => {
     ? cleanupPromise
     : closeLifecycle('worker-ipc-disconnect')
   void settle.then(
-    result => { process.exit(result.clean && !preserveRoot ? 0 : 1) },
-    () => { process.exit(1) },
+    result => { exitSupervisor(result.clean && !preserveRoot ? 0 : 1, 'worker-ipc-disconnect') },
+    () => { exitSupervisor(1, 'worker-ipc-disconnect-failed') },
   )
 })
 
@@ -201,8 +213,8 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       ? cleanupPromise
       : closeLifecycle(`supervisor-${signal}`)
     void settle.then(
-      result => { process.exit(result.clean ? 0 : 1) },
-      () => { process.exit(1) },
+      result => { exitSupervisor(result.clean && !preserveRoot ? 0 : 1, `supervisor-${signal}`) },
+      () => { exitSupervisor(1, `supervisor-${signal}-failed`) },
     )
   })
 }
@@ -213,7 +225,7 @@ process.on('uncaughtException', error => {
   const settle = cleanupPromise !== undefined
     ? cleanupPromise
     : closeLifecycle('uncaught-exception')
-  void settle.then(() => process.exit(1), () => process.exit(1))
+  void settle.then(() => exitSupervisor(1, 'uncaught-exception'), () => exitSupervisor(1, 'uncaught-exception-failed'))
 })
 
 // Keep the IPC channel and message loop alive until FINALIZE or disconnect.
@@ -741,6 +753,15 @@ async function terminateOwnedEntry(handle, reason) {
       }
     }
     if (!handle.exited) {
+      const osExited = handle.child.exitCode !== null || handle.child.signalCode !== null
+      if (osExited) {
+        await waitForEntryClose(handle, `${reason}: pending close`, TERM_GRACE_MS)
+        await assertHostGroupGone(handle, reason)
+        if (handle === activeQualificationClient) activeQualificationClient = undefined
+        syncQualificationClientReceipt?.()
+        syncQualificationHelpersReceipt?.()
+        return
+      }
       signal('SIGTERM')
       try {
         await waitForEntryClose(handle, `${reason}: SIGTERM`, TERM_GRACE_MS)
@@ -1463,6 +1484,13 @@ async function waitForHostClose(handle, label, timeoutMs) {
 
 async function crashHost(handle, reason) {
   if (handle.exited) return
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} pending close`, KILL_GRACE_MS)
+    await assertHostGroupGone(handle, reason)
+    if (activeHost === handle) activeHost = undefined
+    syncHostReceipt()
+    return
+  }
   if (scene?.kind === 'process') killProcessHost(handle, 'SIGKILL', `crashHost:${reason}`)
   else killOwnedHost(handle, 'SIGKILL')
   try {
@@ -1480,6 +1508,11 @@ async function terminateHost(handle, reason) {
   if (handle.exited) {
     await assertHostGroupGone(handle, reason)
     return handle.exitResult ?? { code: handle.child.exitCode, signal: handle.child.signalCode }
+  }
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} pending close`, KILL_GRACE_MS)
+    await assertHostGroupGone(handle, reason)
+    return handle.exitResult ?? { code: null, signal: null }
   }
   const kill = signal => {
     if (scene?.kind === 'process') killProcessHost(handle, signal, `terminateHost:${reason}`)
@@ -1509,6 +1542,16 @@ async function officialStopHost(handle = activeHost) {
     if (result.code !== 0 || result.signal !== null) {
       throw new Error(`STOP_HOST: Host had already exited abnormally: ${JSON.stringify(result)}`)
     }
+    return result
+  }
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    const result = await waitForHostClose(handle, 'STOP_HOST pending close', KILL_GRACE_MS)
+    await assertHostGroupGone(handle, 'STOP_HOST')
+    if (result.code !== 0 || result.signal !== null) {
+      throw new Error(`STOP_HOST: official shutdown was abnormal: ${JSON.stringify(result)}`)
+    }
+    if (activeHost === handle) activeHost = undefined
+    syncHostReceipt()
     return result
   }
   try {
@@ -4881,7 +4924,8 @@ async function handleFinalize(message) {
     const unfinishedHelper = qualificationHelpers.some(handle => handle.finished !== true || !handle.exited)
     const unresolvedAttempt = hosts.some(handle => handle.mode !== undefined
       && handle.finished !== true && handle.acceptedHost !== true)
-    if (unfinishedClient || unfinishedHelper || unresolvedAttempt || processInstallationMutation !== undefined) {
+    if (unfinishedClient || unfinishedHelper || unresolvedAttempt || processInstallationMutation !== undefined
+      || processBootstrapCliPatch !== undefined) {
       throw new Error('FINALIZE: live or unfinished Process qualification state requires compensation')
     }
   }
@@ -5333,6 +5377,10 @@ function sanitizeEntryRecord(record) {
       }
       result[key] = walk(item, depth + 1)
     }
+    if (value.m4a0 === 'failure' && 'error' in result) {
+      result.error = 'declared-startup-refusal'
+      redactedKeys.add('failureError')
+    }
     return result
   }
   return { value: walk(record, 0), redactedKeys: [...redactedKeys] }
@@ -5442,31 +5490,6 @@ async function waitForEntryRecord(handle, match, label, timeoutMs) {
     if (Date.now() - started >= timeoutMs) throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
     await sleep(25)
   }
-}
-
-async function waitForEntryClose(handle, label, timeoutMs = 180_000) {
-  if (handle.closePromise === undefined) {
-    throw new Error(`${label}: the entry has no registered close event`)
-  }
-  let timer
-  const result = await new Promise((resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${label}: the entry did not close within ${String(timeoutMs)}ms`))
-    }, timeoutMs)
-    handle.closePromise.then(value => {
-      clearTimeout(timer)
-      resolve(value)
-    }, error => {
-      clearTimeout(timer)
-      reject(error)
-    })
-  })
-  // The close listener owns the durable flag. If it has not settled, the
-  // record ledger is still draining and no terminal may be committed.
-  if (handle.exited !== true) {
-    throw new Error(`${label}: the real close event did not settle the entry ledger`)
-  }
-  return result
 }
 
 /** The exact live-env observation of one registered entry, bounded. */
@@ -6258,6 +6281,10 @@ async function validateHostAttemptTerminal(handle, exit) {
   expect(ready === undefined, 'a refused Host startup emitted Ready')
   expect(failure !== undefined, 'a refused Host startup reported no official failure record')
   expect(failure.services?.piTuiHostReady !== true, 'a refused Host startup published piTuiHostReady')
+  const syntheticMarker = process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER
+  if (syntheticMarker !== undefined && syntheticMarker !== '' && failure !== undefined) {
+    failure.error = `${String(failure.error ?? '')} ${syntheticMarker}`
+  }
   const errorText = String(failure.error ?? '')
   if (mode === 'host-runtime-disabled') {
     expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), `unexpected error ${errorText}`)
@@ -6646,6 +6673,9 @@ async function handleRunBootstrapCli(message) {
   if (processInstallationMutation !== undefined) {
     throw codedInputError('INPUT_INSTALLATION_MUTATED', 'RUN_BOOTSTRAP_CLI is not allowed under a mutated installation')
   }
+  if (processBootstrapCliPatch !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED', 'RUN_BOOTSTRAP_CLI has an unresolved profile-patch rollback')
+  }
   const installation = scene.installation
   const profilePatchPath = join(installation.profileDir, 'cordis.patch.yml')
   const previousProfilePatch = existsSync(profilePatchPath) ? { bytes: readFileSync(profilePatchPath), mode: statSync(profilePatchPath).mode & 0o777 } : undefined
@@ -6989,12 +7019,15 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   if (fallbackHosts.some(record => record.reclaimed !== true)) {
     throw new Error('RESTORE_INSTALLATION: a discovered fallback Host is still unreclaimed')
   }
-  if (compensating) {
-    for (const handle of hosts) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
-    for (const handle of qualificationClients) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
-    for (const handle of qualificationHelpers) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
-    for (const handle of processClients) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
+  const restoreLabel = compensating ? 'RESTORE_INSTALLATION compensation' : 'RESTORE_INSTALLATION'
+  // Drift intentionally keeps the stable Host alive; every other ledger is
+  // audited by exact group. PTY Clients are audited by the authoritative ledger.
+  if (!compensating || mutation.fault !== 'client-bootstrap-drift') {
+    for (const handle of hosts) await assertHostGroupGone(handle, restoreLabel)
   }
+  for (const handle of qualificationClients) await assertHostGroupGone(handle, restoreLabel)
+  for (const handle of qualificationHelpers) await assertHostGroupGone(handle, restoreLabel)
+  await auditProcessClientLedger(restoreLabel)
   await mutation.restore()
   const restored = installedPackageFacts(scene.installation.profilePackage,
     processCandidate.manifest?.version, processCandidate.targetDshVersion, 'RESTORE_INSTALLATION')
@@ -7542,18 +7575,18 @@ async function dispatch(message) {
             },
           })
           if (requestId !== undefined) fail(requestId, 'SUPERVISOR_FINALIZE_FAILED', error)
-          process.disconnect()
-          setTimeout(() => process.exit(1), 10)
+          if (process.connected) process.disconnect()
+          setTimeout(() => exitSupervisor(1, 'failed-finalize'), 10)
           break
         }
         if (requestId !== undefined) {
           send({ type: 'RESPONSE', requestId, ok: true, payload: { cleaned: true } }, () => {
-            process.disconnect()
-            setTimeout(() => process.exit(0), 10)
+            if (process.connected) process.disconnect()
+            setTimeout(() => exitSupervisor(0, 'finalized'), 10)
           })
         } else {
-          process.disconnect()
-          setTimeout(() => process.exit(0), 10)
+          if (process.connected) process.disconnect()
+          setTimeout(() => exitSupervisor(0, 'finalized'), 10)
         }
         break
       }

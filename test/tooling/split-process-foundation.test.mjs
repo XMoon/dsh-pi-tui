@@ -12,8 +12,9 @@
  */
 
 import assert from 'node:assert/strict'
+import { waitForEntryClose } from '../support/entry-close.mjs'
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
@@ -393,5 +394,38 @@ test('the installed-entry qualification operations are refused before any proces
     assert.deepEqual(readdirSync(tmpBase), [])
   } finally {
     await supervisor.close({ timeoutMs: 30_000, allowKill: false })
+  }
+})
+
+test('the real close waiter ignores exitCode until the inherited stdout closes', async () => {
+  const child = spawn(process.execPath, ['-e', [
+    "const { spawn } = require('node:child_process')",
+    "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1200)'], { stdio: ['ignore', 'inherit', 'ignore'] })",
+    'process.exit(0)',
+  ].join(';')], { stdio: ['ignore', 'pipe', 'ignore'] })
+  let closeFired = false
+  let settleClose
+  const closePromise = new Promise(resolve => { settleClose = resolve })
+  const handle = { closePromise, exited: false }
+  child.once('close', (code, signal) => {
+    closeFired = true
+    handle.exited = true
+    settleClose({ code, signal })
+  })
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the safe child never exited')), 5_000)
+      child.once('exit', () => { clearTimeout(timer); resolve() })
+    })
+    assert.equal(closeFired, false, 'close already fired before the inherited stdout was released')
+    let settled = false
+    const waiter = waitForEntryClose(handle, 'close authority control', 5_000)
+      .then(value => { settled = true; return value })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(settled, false, 'the close waiter settled before the real close event')
+    assert.deepEqual(await waiter, { code: 0, signal: null })
+    assert.equal(closeFired, true)
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   }
 })

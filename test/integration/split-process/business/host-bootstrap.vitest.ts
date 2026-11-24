@@ -705,3 +705,24 @@ test('refuses installed-entry operations in a real non-process Scene before any 
     }
   }
 })
+
+test('projects only the fixed safe startup-refusal classification', async () => {
+  const marker = 'SYNTHETIC_TERMINAL_MARKER_SECRET'
+  const previous = process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER
+  process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER = marker
+  const scene = await createSplitProcessScene()
+  try {
+    const [attempt] = await scene.startHostAttempts({ mode: 'host-runtime-disabled' })
+    await scene.waitEntryRecord(attempt!, { m4a0: 'failure' })
+    const terminal = await scene.finishEntry(attempt!)
+    expect(terminal.outcome).toBe('startup-refusal')
+    expect(terminal.errorClass).toBe('declared-startup-refusal')
+    expect(JSON.stringify(terminal), 'the terminal leaked the synthetic failure marker').not.toContain(marker)
+    const receipt = await scene.readSupervisorReceipt()
+    expect(JSON.stringify(receipt), 'the durable receipt leaked the synthetic failure marker').not.toContain(marker)
+  } finally {
+    await scene.dispose().catch(() => undefined)
+    if (previous === undefined) delete process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER
+    else process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER = previous
+  }
+})

@@ -694,8 +694,8 @@ window before its zombie child identity exists, and
 `finalize-compensation-started` the joined compensation of an intentionally
 failed FINALIZE while a registered Client/helper is still live. The last window
 expects the compensated `NOT_QUIESCED` receipt and a retained diagnostic root;
-an unrun window is `NOT_RUN`, never a pass. The probe passes only with the terminal `ABORTED_CLEAN`
-receipt, the exact Host seat free, the registered kernel identities gone or
+the other windows pass only with the terminal `ABORTED_CLEAN` receipt, the
+exact Host seat free, the registered kernel identities gone or
 provably reused, and — for `clients-ready` — a separate real sibling Scene
 already live at its authenticated checkpoint when the target is signalled,
 held across the target's reclaim, then released to continue its own business
