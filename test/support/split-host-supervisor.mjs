@@ -4966,6 +4966,16 @@ async function handleFinalize(message) {
     }
     for (const handle of processClients) {
       if (!handle.closed) preconditions.push(`the process Client ${String(handle.label)} is not closed`)
+      if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+        preconditions.push(`the process Client ${String(handle.label)} exited abnormally: ${JSON.stringify(handle.exitResult ?? null)}`)
+      }
+    }
+    if (processClients.length > 0 && !preconditions.some(value => value.includes('process Client'))) {
+      try {
+        await auditProcessClientLedger('FINALIZE: pre-stop')
+      } catch (error) {
+        preconditions.push(`the process Client ledger is not terminal (${boundedError(error)})`)
+      }
     }
     if (processInstallationMutation !== undefined) {
       preconditions.push(`the installed-copy mutation ${String(processInstallationMutation.fault)} is not restored`)
@@ -5021,31 +5031,30 @@ async function handleFinalize(message) {
     hostStopError = hostStopError ?? new Error(
       `FINALIZE: the installed-copy mutation ${String(processInstallationMutation.fault)} was not restored by the Worker`)
   }
-  // Process Clients are Supervisor-owned native sessions. A Client the Worker
-  // did not close is compensated here AND reported as a failed finalization:
-  // forgetting a close is never a silent success.
-  for (const handle of processClients) {
-    if (handle.closed) continue
-    try {
-      await settleProcessClientHandler(handle, 'FINALIZE')
-      await settleProcessClientClose(handle, 'FINALIZE')
-      await reclaimProcessClient(handle, 'FINALIZE')
-    } catch (error) {
-      hostStopError = hostStopError ?? error
-    }
-    hostStopError = hostStopError ?? new Error(
-      `FINALIZE: the process Client ${handle.label} was not closed by the Worker`)
-  }
-  for (const handle of processClients) {
-    if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+  if (scene?.kind !== 'process') {
+    for (const handle of processClients) {
+      if (handle.closed) continue
+      try {
+        await settleProcessClientHandler(handle, 'FINALIZE')
+        await settleProcessClientClose(handle, 'FINALIZE')
+        await reclaimProcessClient(handle, 'FINALIZE')
+      } catch (error) {
+        hostStopError = hostStopError ?? error
+      }
       hostStopError = hostStopError ?? new Error(
-        `FINALIZE: process Client ${handle.label} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
+        `FINALIZE: the process Client ${handle.label} was not closed by the Worker`)
     }
-  }
-  for (const handle of hosts) {
-    if (handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true) {
-      hostStopError = hostStopError ?? new Error(
-        `FINALIZE: the Host attempt ${String(handle.label)} was not finished by the Worker`)
+    for (const handle of processClients) {
+      if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+        hostStopError = hostStopError ?? new Error(
+          `FINALIZE: process Client ${handle.label} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
+      }
+    }
+    for (const handle of hosts) {
+      if (handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true) {
+        hostStopError = hostStopError ?? new Error(
+          `FINALIZE: the Host attempt ${String(handle.label)} was not finished by the Worker`)
+      }
     }
   }
   // Native leftover Clients/shells are reclaimed BEFORE any Host stop, using
@@ -5080,7 +5089,7 @@ async function handleFinalize(message) {
       }
     }
   }
-  if (message.clientsClosed !== true) {
+  if (scene?.kind !== 'process' && message.clientsClosed !== true) {
     hostStopError = hostStopError ?? new Error('FINALIZE: worker did not confirm Clients closed')
   }
   if (isNativeScene()) {
@@ -5091,13 +5100,6 @@ async function handleFinalize(message) {
   } else {
     try {
       auditClientLedger('FINALIZE')
-    } catch (error) {
-      hostStopError = hostStopError ?? error
-    }
-  }
-  if (scene?.kind === 'process') {
-    try {
-      await auditProcessClientLedger('FINALIZE')
     } catch (error) {
       hostStopError = hostStopError ?? error
     }
@@ -5423,7 +5425,8 @@ function sanitizeEntryRecord(record) {
       if (ENTRY_REDACTED_KEYS.has(key)) continue
       result[key] = walk(item, depth + 1)
     }
-    if (value.m4a0 === 'failure' && 'error' in result) {
+    if ((value.m4a0 === 'failure' || value.m4a0 === 'control-failure' || value.m4a0 === 'control-error')
+      && 'error' in result) {
       // The raw failure text is private Supervisor evidence. Only the one
       // stable business conflict code is a Worker-visible fact.
       if (result.error === 'HOST_ALREADY_OWNED') result.error = 'HOST_ALREADY_OWNED'
@@ -6405,7 +6408,7 @@ async function validateQualificationClientTerminal(handle, exit) {
     expect(ready !== undefined, 'the identity-changed Client never reached its first Ready')
     expect(exit.code === 1 && exit.signal === null, 'a fatal identity change must exit 1 with no signal')
     expect(failure !== undefined && failure.code === 'HOST_IDENTITY_MISMATCH',
-      `the identity change was not classified as HOST_IDENTITY_MISMATCH (${String(failure?.code ?? failure?.error)})`)
+      `the identity change was not classified as HOST_IDENTITY_MISMATCH (code=${String(failure?.code ?? 'none')}, phase=${String(failure?.phase ?? 'none')})`)
     expect(cleanupCompleted.length === 1, 'the fatal identity change did not report one completed cleanup')
     expect(cleanupFailures.length === 0, 'the fatal identity change reported an unexpected cleanup failure')
     return { outcome: 'startup-refusal', code: failure.code, readyEmitted: true, cleanupCompleted: 1 }
@@ -6627,10 +6630,12 @@ async function assertNoLiveMutationConsumers({ allowStableHost, label }) {
   if (processClients.some(client => !client.closed)) {
     throw new Error(`${label}: a process Client is still live`)
   }
-  await auditProcessClientLedger(label)
+  if (processClients.length > 0) await auditProcessClientLedger(label)
   if (fallbackHosts.some(record => record.reclaimed !== true)) {
     throw new Error(`${label}: a discovered Host fallback is still live`)
   }
+  // Refuse before returning permission to perform the synchronous side effect.
+  assertLifecycleOpen(label)
 }
 
 function installedChunk(prefix) {
@@ -6758,7 +6763,7 @@ async function handleRunBootstrapCli(message) {
       : undefined
     processBootstrapCliPatch = { path: profilePatchPath, previous }
     try {
-      writeFileSync(profilePatchPath, '- id: tui-app\n  disabled: true\n', { mode: 0o600 })
+      atomicReplaceFile(profilePatchPath, Buffer.from('- id: tui-app\n  disabled: true\n'), 0o600, 'bootstrap CLI patch write')
       const env = { ...installation.env, DSH_PI_TUI_ROLE: 'host' }
       delete env.DSH_PI_TUI_HOST_ENTRY
       const handle = await runTrackedOnce(installation.dshInvocation, ['--profile', 'pi-tui'],
@@ -6919,8 +6924,8 @@ async function handleSetInstallationFault(message) {
     }
     processInstallationMutation = mutation
     try {
-      writeFileSync(packageScopeBarrier, barrierBody, { mode: 0o600 })
       mutation.barrierWritten = true
+      atomicReplaceFile(packageScopeBarrier, Buffer.from(barrierBody), 0o600, 'install barrier write')
       renameSync(artifact, absent)
       mutation.artifactRenamed = true
       let resolutionError
@@ -7063,39 +7068,17 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   if (mutation.fault !== 'client-bootstrap-drift' && activeHost !== undefined) {
     throw new Error('RESTORE_INSTALLATION: the Host artifact mutation cannot be restored under a live Host')
   }
-  if (!compensating && hosts.some(handle => handle.mode !== undefined && handle.finished !== true)) {
-    throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
-  }
-  if (compensating && hosts.some(handle => !handle.exited)) {
-    throw new Error('RESTORE_INSTALLATION: a Host attempt is still live during compensation')
-  }
-  for (const handle of hosts) {
-    if (mutation.fault === 'client-bootstrap-drift' && handle === activeHost) continue
-    if (!handle.exited) throw new Error('RESTORE_INSTALLATION: a Host is still live')
-    if (!compensating && handle.mode !== undefined && handle.finished !== true) {
+  if (!compensating) {
+    if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true)) {
       throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
     }
-    await assertHostGroupGone(handle, 'RESTORE_INSTALLATION')
+    const allowStableHost = mutation.fault === 'client-bootstrap-drift'
+    await assertNoLiveMutationConsumers({ allowStableHost, label: 'RESTORE_INSTALLATION' })
+    await assertClientSeatFree(scene.installation, processScope.scopeId, 'RESTORE_INSTALLATION')
+    if (!allowStableHost) await assertSceneHostSeatFree('RESTORE_INSTALLATION')
   }
-  for (const handle of qualificationClients) {
-    if (!handle.exited || (!compensating && handle.finished !== true)) {
-      throw new Error('RESTORE_INSTALLATION: a qualification Client is not terminal')
-    }
-    await assertHostGroupGone(handle, 'RESTORE_INSTALLATION')
-  }
-  for (const handle of qualificationHelpers) {
-    if (!handle.exited || (!compensating && handle.finished !== true)) {
-      throw new Error('RESTORE_INSTALLATION: a qualification helper is not terminal')
-    }
-    await assertHostGroupGone(handle, 'RESTORE_INSTALLATION')
-  }
-  if (processClients.some(handle => !handle.closed)) {
-    throw new Error('RESTORE_INSTALLATION: a process Client is not closed')
-  }
-  await auditProcessClientLedger('RESTORE_INSTALLATION')
-  if (fallbackHosts.some(record => record.reclaimed !== true)) {
-    throw new Error('RESTORE_INSTALLATION: a discovered fallback Host is still unreclaimed')
-  }
+  // Compensation is the cleanup owner: it already audited every owned group,
+  // PTY ledger, fallback and both seats before calling this restore.
   await mutation.restore()
   const restored = installedPackageFacts(scene.installation.profilePackage,
     processCandidate.manifest?.version, processCandidate.targetDshVersion, 'RESTORE_INSTALLATION')

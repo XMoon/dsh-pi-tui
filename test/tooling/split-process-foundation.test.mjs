@@ -423,6 +423,7 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
       settled = true
       return value
     })
+    waiter.catch(() => {})
     await Promise.resolve()
     await Promise.resolve()
     assert.equal(settled, false, 'the close waiter settled before the real close event')
@@ -435,21 +436,36 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
     throw error
   } finally {
     // Release even on the intended early-waiter regression, then bounded-join
-    // the real close so the inherited stdout cannot leak.
-    try { writeFileSync(release, 'release\n', { mode: 0o600 }) } catch {}
-    if (waiter !== undefined) await waiter.catch(() => {})
-    if (!closeFired) await bounded(new Promise(resolve => child.once('close', resolve)), 5_000, 'the close control join').catch(() => {})
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    if (primaryError !== undefined) {
-      // The primary assertion remains the reported failure; the finally only
-      // ensured release/join.
+    // the registered close so the inherited stdout cannot leak. Cleanup errors
+    // surface together with the primary failure instead of being swallowed.
+    let cleanupError
+    try { writeFileSync(release, 'release\n', { mode: 0o600 }) } catch (error) { cleanupError = error }
+    if (!closeFired) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      try {
+        await bounded(handle.closePromise, 5_000, 'the close control join')
+      } catch (error) {
+        cleanupError = cleanupError ?? error
+      }
+    }
+    if (cleanupError !== undefined) {
+      if (primaryError !== undefined) {
+        throw new AggregateError([primaryError, cleanupError], 'the close control failed and its cleanup also failed')
+      }
+      throw cleanupError
     }
   }
 })
 
 function bounded(promise, timeoutMs, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} exceeded ${String(timeoutMs)}ms`)), timeoutMs)),
-  ])
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${String(timeoutMs)}ms`)), timeoutMs)
+    Promise.resolve(promise).then(value => {
+      clearTimeout(timer)
+      resolve(value)
+    }, error => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
 }

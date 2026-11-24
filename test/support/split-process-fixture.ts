@@ -646,7 +646,6 @@ class ProcessScene implements SplitProcessScene {
   readonly #supervisor: SupervisorClient
   readonly #tmpBase: string
   readonly #clients: ProcessClient[] = []
-  readonly #hosts: SplitProcessHostHandle[] = []
 
   constructor(
     facts: Record<string, any>,
@@ -704,7 +703,6 @@ class ProcessScene implements SplitProcessScene {
       entryRealpath: String(payload.entryRealpath),
       exited: false,
     }
-    this.#hosts.push(host)
     return host
   }
 
@@ -841,7 +839,6 @@ class ProcessScene implements SplitProcessScene {
       entryRealpath: String(payload.entryRealpath),
       exited: false,
     }
-    this.#hosts.push(host)
     return host
   }
 
@@ -1179,19 +1176,6 @@ class ProcessScene implements SplitProcessScene {
         await client.exitGracefully()
       } catch (error) {
         errors.push(asError(error))
-      }
-    }
-    // A failed native PTY close must not let the Worker stop the Host under a
-    // live qualification consumer. Finalize still sends clientsClosed:false so
-    // the Supervisor owns the compensation.
-    if (errors.length === 0) {
-      for (const host of [...this.#hosts].reverse()) {
-        if (host.exited) continue
-        try {
-          await this.stopHost(host)
-        } catch (error) {
-          errors.push(asError(error))
-        }
       }
     }
     const clientsClosed = this.#clients.every(client => client.closed) && errors.length === 0

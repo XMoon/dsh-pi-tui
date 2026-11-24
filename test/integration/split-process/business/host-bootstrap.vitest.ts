@@ -527,7 +527,6 @@ test('refuses unqualified installed-entry operations before any child exists', a
   let testError: unknown
   try {
     const entriesBefore = readdirSync(scene.workDir).sort()
-    const receiptsBefore = readdirSync(join(scene.tmpBase, 'split-resources')).sort()
     const reject = async (type: string, payload: Record<string, unknown>, pattern: RegExp): Promise<void> => {
       await expect(scene.request(type, payload, 30_000)).rejects.toThrow(pattern)
     }
@@ -548,9 +547,13 @@ test('refuses unqualified installed-entry operations before any child exists', a
     expect(diagnostic?.message).toContain('[redacted]')
     expect(diagnostic?.message).not.toContain(marker)
 
-    // No refused input created an entry or a second receipt/root ledger.
+    // No refused input created an entry; THIS Scene's actual owner ledgers
+    // remain empty (sibling worker receipts are a different authority).
     expect(readdirSync(scene.workDir).sort()).toEqual(entriesBefore)
-    expect(readdirSync(join(scene.tmpBase, 'split-resources')).sort()).toEqual(receiptsBefore)
+    const receipt = await scene.readSupervisorReceipt()
+    expect(receipt.hosts ?? []).toEqual([])
+    expect(receipt.qualificationClients ?? []).toEqual([])
+    expect(receipt.qualificationHelpers ?? []).toEqual([])
   } catch (error) {
     testError = error
     throw error
@@ -587,8 +590,7 @@ test('compensates a failed finalization without leaking a live Client or witness
     // assertion.
     await expect(scene.request('STOP_HOST', { hostId: host.hostId }, 60_000))
       .rejects.toThrow(/qualification Client|live or un-finished/u)
-    const stillLive = await scene.entryRecordFacts(host as never)
-    expect(stillLive.exited, 'STOP_HOST stopped the Host under a live qualification Client').toBe(false)
+    await assertAuthenticatedCurrentHost(scene, host)
 
     // The Host is still Ready, the drifted Client is connected, the witness is
     // live and the mutation is registered: FINALIZE must refuse and hand the
@@ -670,6 +672,12 @@ test('refuses installed-entry operations in a real non-process Scene before any 
   } finally {
     try {
       await pilot.close({ timeoutMs: 300_000, allowKill: false })
+      const exit = await pilot.waitExit(60_000)
+      expect(exit).toEqual({ code: 0, signal: null })
+      const receipt = JSON.parse(readFileSync(join(tmpBase!, 'split-resources', `${pilotRunId}.json`), 'utf8')) as Record<string, any>
+      expect(receipt.phase).toBe('ABORTED_CLEAN')
+      expect(receipt.sceneRoot === undefined || !existsSync(receipt.sceneRoot),
+        'the Pilot Scene root was not removed').toBe(true)
     } catch (closeError) {
       if (primaryError !== undefined) {
         throw new AggregateError([asError(primaryError), asError(closeError)],
