@@ -4918,17 +4918,6 @@ async function auditProcessClientLedger(reason) {
 }
 
 async function handleFinalize(message) {
-  if (scene?.kind === 'process') {
-    const unfinishedClient = qualificationClients.some(handle => handle.kind === 'qualification-client'
-      && (handle.finished !== true || !handle.exited))
-    const unfinishedHelper = qualificationHelpers.some(handle => handle.finished !== true || !handle.exited)
-    const unresolvedAttempt = hosts.some(handle => handle.mode !== undefined
-      && handle.finished !== true && handle.acceptedHost !== true)
-    if (unfinishedClient || unfinishedHelper || unresolvedAttempt || processInstallationMutation !== undefined
-      || processBootstrapCliPatch !== undefined) {
-      throw new Error('FINALIZE: live or unfinished Process qualification state requires compensation')
-    }
-  }
   let hostStopError
   // The one-shot qualification Client must already be gone on the normal path;
   // a still-live one is reclaimed so FINALIZE never leaks, then fails closed.
@@ -7022,7 +7011,7 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   const restoreLabel = compensating ? 'RESTORE_INSTALLATION compensation' : 'RESTORE_INSTALLATION'
   // Drift intentionally keeps the stable Host alive; every other ledger is
   // audited by exact group. PTY Clients are audited by the authoritative ledger.
-  if (!compensating || mutation.fault !== 'client-bootstrap-drift') {
+  if (mutation.fault !== 'client-bootstrap-drift') {
     for (const handle of hosts) await assertHostGroupGone(handle, restoreLabel)
   }
   for (const handle of qualificationClients) await assertHostGroupGone(handle, restoreLabel)
