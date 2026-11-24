@@ -52,6 +52,7 @@ import { isGroupableRead } from './grouping.ts'
 import {
   isSurfacedInteractionToolName,
   markPostTurnReplayEvidence,
+  transcriptTurnOf,
 } from './semantics.ts'
 import {
   resolveSearchSource,
@@ -898,21 +899,15 @@ export class TranscriptFolder {
    * turn 0 itself is a perfectly legal first turn (an in-turn-0 command
    * anchored to 0 must NOT be re-anchored away by turn 1). */
   private seenAcceptedTurnStart = false
-  /** The placement-anchor AUTHORITY for turn-less standalone rows (plan
-   * §8.1/§9): one anchor per command object, written at append time and
-   * re-anchored with the leading prefix. Search navigation, the fast
-   * indexed window's physical ranges and the non-monotonic defensive window
-   * all derive placement from this ONE sidecar — never a semantic `turn` on
-   * the row. */
-  private readonly commandPlacementTurns = new WeakMap<TranscriptCommandMessage, number>()
-  /** The placement anchor a fused command HANDS OVER to its combined
-   * manual-compaction owner: the visible representative of a manual
-   * `/compact` is the compaction card, so its window/search placement must
-   * inherit the command's anchor (a pre-turn or replayed manual compaction
-   * would otherwise keep the legacy `currentTurn` and anchor the wrong
-   * bounded window). Written at fuse time; re-anchored with the leading
-   * prefix exactly like the command sidecar. */
-  private readonly manualCompactionPlacementTurns = new WeakMap<Extract<TranscriptMessage, { kind: 'compaction' }>, number>()
+  /** The placement-anchor AUTHORITY for standalone rows (plan §4.3): one
+   * anchor per command object, per compaction WITHOUT an admitted numeric
+   * model-turn owner, and per successfully fused compaction representative.
+   * Written at append time and re-anchored with the leading prefix. Search
+   * navigation, the fast indexed window's physical ranges and the
+   * non-monotonic defensive window all derive placement from this ONE sidecar
+   * — never a semantic `turn` on the row, never a second dedicated map, and
+   * never the reverse (an anchor is not ownership). */
+  private readonly standalonePlacementTurns = new WeakMap<TranscriptMessage, number>()
   /** Manual-compaction correlation legs (post-PR166 plan §7): bounded direct
    * lookups so `command/done.sourceEventSeq` and compaction
    * `sourceCommandId` never scan history. */
@@ -1518,60 +1513,64 @@ export class TranscriptFolder {
   }
 
   /** The FIRST REAL model turn (turn/start) adopts the leading standalone
-   * prefix (pre-turn commands): their anchors — 0 until now — re-anchor to
-   * the first turn value, so an anchored search window that contains the
-   * first turn reveals them (the raw prefix itself renders from index 0).
-   * Only turn/start adopts the prefix: a GHOST legacy turn (a pre-turn
-   * manual compaction registering the initial currentTurn) is not a real
-   * turn and must not consume it. */
+   * prefix (pre-turn commands AND pre-turn standalone compactions): their
+   * anchors — 0 until now — re-anchor to the first accepted turn value, so an
+   * anchored search window that contains the first turn reveals them (the raw
+   * prefix itself renders from index 0). Only a REAL turn/start adopts the
+   * prefix. A fused representative is skipped: its command was already
+   * re-anchored through the ONE hand-over path, so the command stays the only
+   * independent anchor authority regardless of fusion order. */
   private adoptLeadingAnchors(turn: number): void {
     if (this.seenAcceptedTurnStart) return
     this.seenAcceptedTurnStart = true
     if (this.pendingAnchorEntries.length === 0) return
     for (const index of this.pendingAnchorEntries) {
       const item = this.items[index]
-      if (item !== undefined && item.kind === 'command') this.setPlacementAnchor(item, index, turn)
+      if (item === undefined) continue
+      // A fused representative follows its command's anchor (see
+      // setPlacementAnchor); never re-anchor it independently.
+      if (item.kind === 'compaction' && item.sourceCommand !== undefined) continue
+      if (item.kind === 'command' || item.kind === 'compaction') this.setPlacementAnchor(item, index, turn)
     }
     this.pendingAnchorEntries.length = 0
   }
 
-  /** The PRESENTATION placement anchor of one turn-less standalone row: the
-   * turn currently open, else the latest known turn, else 0 while the log
-   * still has no turn (re-anchored by {@link appendTurnIndex}). This anchor
-   * drives window/search navigation ONLY — it is never stored on the row as
-   * a semantic `turn` (post-PR166 plan §8.1). */
+  /** The PRESENTATION placement anchor of one standalone row: the turn
+   * currently open, else the latest registered log-order turn, else 0 while
+   * the log still has no turn (re-anchored by {@link adoptLeadingAnchors}).
+   * This anchor drives window/search navigation ONLY — it is never stored on
+   * the row as a semantic `turn`, and a numeric owner never consumes it. */
   private placementAnchorTurn(): number {
     if (this.openTurn !== undefined) return this.openTurn
     return this.turnValues.length > 0 ? this.turnValues[this.turnValues.length - 1]! : 0
   }
 
-  /** Write one command's placement anchor and hand it over to an already
-   * fused manual-compaction owner: the owner is the VISIBLE representative,
-   * so its sidecar and search entry must follow the same anchor. */
-  private setPlacementAnchor(message: TranscriptCommandMessage, index: number, turn: number): void {
-    this.commandPlacementTurns.set(message, turn)
+  /** Write one standalone row's placement anchor and hand a COMMAND's anchor
+   * over to an already fused manual-compaction representative: the card is
+   * the VISIBLE owner, so its sidecar and search entry follow the same
+   * anchor. This is the ONE write path — the anchor is never inferred back
+   * into semantic ownership. */
+  private setPlacementAnchor(message: TranscriptMessage, index: number, turn: number): void {
+    this.standalonePlacementTurns.set(message, turn)
     const entry = this.searchEntries[index]
     if (entry !== undefined) entry.turn = turn
+    if (message.kind !== 'command') return
     const owner = this.compactionOwnerByCommandId.get(message.commandId)
     if (owner === undefined) return
     const compaction = this.items[owner]
     if (compaction !== undefined && compaction.kind === 'compaction') {
-      this.manualCompactionPlacementTurns.set(compaction, turn)
+      this.standalonePlacementTurns.set(compaction, turn)
       const ownerEntry = this.searchEntries[owner]
       if (ownerEntry !== undefined) ownerEntry.turn = turn
     }
   }
 
-  /** The placement anchor of one turn-less standalone row from the shared
-   * authority sidecar (undefined for turn-owned rows): a plain command, or
-   * the COMBINED manual-compaction owner inheriting its fused command's
-   * anchor. */
+  /** The placement anchor of one standalone row from the shared authority
+   * sidecar (undefined for numeric-turn-owned rows): a plain command, a
+   * compaction with no admitted numeric owner, or a fused representative
+   * inheriting its command's anchor. Never semantic ownership. */
   private placementAnchorOf(message: TranscriptMessage): number | undefined {
-    if (message.kind === 'command') return this.commandPlacementTurns.get(message)
-    if (message.kind === 'compaction' && message.sourceCommand !== undefined) {
-      return this.manualCompactionPlacementTurns.get(message)
-    }
-    return undefined
+    return this.standalonePlacementTurns.get(message)
   }
 
   /** Append one folded message, maintaining the window projections. Returns
@@ -1579,21 +1578,33 @@ export class TranscriptFolder {
   private appendItem(message: TranscriptMessage): number {
     this.items.push(message)
     const index = this.items.length - 1
+    // A real command row proves its OWN first-visible instant: the
+    // `command/run` time, or the done-only fallback row's real event time.
+    // The Activity lifetime consumer reads this sidecar as a proven structural
+    // boundary; the command stays control evidence — never Work/Action input.
+    if (message.kind === 'command') setTranscriptTiming(message, pointTiming(message.time))
     // The searchable projection mirrors the item's own text (eager at
     // append — the cold path); later mutations mark the entry dirty and
     // re-normalize lazily at the next search.
     const corpus = transcriptSearchCorpus(message)
-    const ownsTurn = 'turn' in message
-    const anchorTurn = ownsTurn ? message.turn : this.placementAnchorTurn()
-    if (!ownsTurn && message.kind === 'command') this.commandPlacementTurns.set(message, anchorTurn)
+    // A row OWNS a model turn only when it carries a real numeric semantic
+    // turn. A standalone compaction (absent optional turn) is a real row with
+    // NO owner: it gets the placement anchor instead, and never registers a
+    // turn value / grouped turn from that anchor.
+    const turn = transcriptTurnOf(message)
+    const anchorTurn = turn ?? this.placementAnchorTurn()
     this.searchEntries.push({
       turn: anchorTurn,
       normalizedText: corpus.normalizedText,
       spans: corpus.spans,
     })
-    if (!ownsTurn && !this.seenAcceptedTurnStart) this.pendingAnchorEntries.push(index)
+    // Standalone placement goes through the ONE write path (which also keeps
+    // the search entry in sync); the anchor is never semantic ownership.
+    if (turn === undefined && (message.kind === 'command' || message.kind === 'compaction')) {
+      this.setPlacementAnchor(message, index, anchorTurn)
+    }
+    if (turn === undefined && !this.seenAcceptedTurnStart) this.pendingAnchorEntries.push(index)
     this.searchRevisionCounter += 1
-    const turn = ownsTurn ? message.turn : undefined
     if (turn !== undefined) {
       if (this.turnValues.length === 0) {
         this.appendTurnIndex(turn)
@@ -1669,9 +1680,10 @@ export class TranscriptFolder {
       // is the authority (post-PR166 plan §8.1/§9), and resetting it to 0
       // would point an inter-turn search match at the wrong bounded window.
       // A fused manual compaction keeps its HANDED-OVER anchor for the same
-      // reason — its legacy `turn` is not the placement authority.
-      if ('turn' in card && !(card.kind === 'compaction' && card.sourceCommand !== undefined)) {
-        entry.turn = card.turn
+      // reason — a defensive numeric `turn` is never its placement authority.
+      const cardTurn = transcriptTurnOf(card)
+      if (cardTurn !== undefined && !(card.kind === 'compaction' && card.sourceCommand !== undefined)) {
+        entry.turn = cardTurn
       }
       const corpus = transcriptSearchCorpus(card)
       entry.normalizedText = corpus.normalizedText
@@ -1853,7 +1865,8 @@ export class TranscriptFolder {
       }
       const item = this.items[index]
       // Tombstoned failed-attempt text is never visible output.
-      if (item !== undefined && 'turn' in item && this.isVisible(item)) this.addGroupedTurn(item.turn)
+      const turn = item === undefined ? undefined : transcriptTurnOf(item)
+      if (item !== undefined && turn !== undefined && this.isVisible(item)) this.addGroupedTurn(turn)
     }
    this.groupedTurnIndexDirty = false
   }
@@ -2084,7 +2097,8 @@ export class TranscriptFolder {
       // card. The `groupable` guard narrows the negative branch, so read the
       // kind structurally instead of through the narrowed union.
       if ((item as { kind: string }).kind === 'tool' && absoluteCounts) this.groupedToolCount += 1
-      if ('turn' in item) this.addGroupedTurn(item.turn)
+      const turn = transcriptTurnOf(item)
+      if (turn !== undefined) this.addGroupedTurn(turn)
     }
     flush()
   }
@@ -2248,7 +2262,7 @@ export class TranscriptFolder {
   /** The turn value of one raw row, when it carries one. */
   private turnOfRaw(index: number): number | undefined {
     const item = this.items[index]
-    return item !== undefined && 'turn' in item ? item.turn : undefined
+    return item === undefined ? undefined : transcriptTurnOf(item)
   }
 
   /** Re-group one LOCAL span from the display order: detach its existing groups,
@@ -2555,7 +2569,8 @@ export class TranscriptFolder {
       if (members === undefined) return false
       const meta = this.groupMeta.get(previousGroup)
       const firstMember = this.items[members[0]!]
-      const firstTurn = meta?.firstTurn ?? (firstMember !== undefined && 'turn' in firstMember ? firstMember.turn : previous.turn)
+      const firstTurn = meta?.firstTurn
+        ?? (firstMember === undefined ? previous.turn : transcriptTurnOf(firstMember) ?? previous.turn)
       const wasCross = meta?.spansTurns ?? this.crossTurn(members)
       this.removeGroupedTurn(previousGroup.turn)
        this.removeGroupedTurn(item.turn)
@@ -2636,10 +2651,10 @@ export class TranscriptFolder {
   private crossTurn(members: readonly number[]): boolean {
     if (members.length <= 1) return false
     const first = this.items[members[0]!]!
-    const turn = 'turn' in first ? first.turn : undefined
+    const turn = transcriptTurnOf(first)
     for (let i = 1; i < members.length; i += 1) {
       const member = this.items[members[i]!]!
-      if (('turn' in member ? member.turn : undefined) !== turn) return true
+      if (transcriptTurnOf(member) !== turn) return true
     }
     return false
   }
@@ -4285,7 +4300,9 @@ export class TranscriptFolder {
        if (anchor !== undefined) anchoredRows.set(message, anchor)
        else windowInput.push(message)
       }
-      const allTurns = [...new Set(windowInput.filter(message => 'turn' in message).map(message => message.turn))]
+      const allTurns = [...new Set(windowInput
+        .map(message => transcriptTurnOf(message))
+        .filter((turn): turn is number => turn !== undefined))]
        .sort((a, b) => a - b)
 
       const windowed = windowMessages(windowInput, maxTurns, options.endTurn)
@@ -4307,7 +4324,8 @@ export class TranscriptFolder {
       }
       const visibleSet = new Set<number>()
       for (const message of messages) {
-        if ('turn' in message) visibleSet.add(message.turn)
+        const turn = transcriptTurnOf(message)
+        if (turn !== undefined) visibleSet.add(turn)
       }
        const visibleTurnValues = [...visibleSet].sort((a, b) => a - b)
        const firstTurn = visibleTurnValues[0] ?? this.turnValues[range.start]
@@ -4351,8 +4369,8 @@ export class TranscriptFolder {
     }
 
     const visibleTurns = projected.messages
-      .filter(message => 'turn' in message)
-      .map(message => message.turn)
+      .map(message => transcriptTurnOf(message))
+      .filter((turn): turn is number => turn !== undefined)
     const firstTurn = visibleTurns[0] ?? this.turnValues[range.start]
      const lastTurn = visibleTurns[visibleTurns.length - 1] ?? this.turnValues[range.end]
      const facts = this.crossTurnGroups > 0
@@ -4712,8 +4730,18 @@ export class TranscriptFolder {
     const compactionId = typeof data.compactionId === 'string' ? data.compactionId : undefined
     let index = compactionId === undefined ? undefined : this.compacting.get(compactionId)
     if (index === undefined) {
+      // First-visible admission (PR2 C02): ONLY the official lifecycle end
+      // points carry a model-turn owner, and only a real numeric one is
+      // admitted. The official `turn: null` is a standalone maintenance
+      // transaction; a summary-first / missing / invalid fragment admits no
+      // owner either. `currentTurn`/`openTurn` are NEVER consulted — a
+      // standalone compaction is a real row that belongs to no model turn.
+      const ownerTurn = kind === 'compaction/start' || kind === 'compaction/end'
+        ? compactionOwnerTurnOf(data.turn)
+        : undefined
       const created: Extract<TranscriptMessage, { kind: 'compaction' }> = {
-        kind: 'compaction', turn: this.currentTurn, text: '', items: 0, tokens: 0, running: true,
+        kind: 'compaction', text: '', items: 0, tokens: 0, running: true,
+        ...(ownerTurn === undefined ? {} : { turn: ownerTurn }),
       }
       this.appendItem(created)
       index = this.items.length - 1
@@ -4722,6 +4750,12 @@ export class TranscriptFolder {
       // Context boundary; the point sidecar is display-only and never enters
       // the Process member walk).
       setTranscriptTiming(created, pointTiming(event.time))
+      // A numeric card that materializes after its own turn already completed
+      // is replay evidence: it stays readable but never opens or joins a
+      // historical Thought root.
+      if (ownerTurn !== undefined && this.activityByTurn.get(ownerTurn)?.completed === true) {
+        markPostTurnReplayEvidence(created)
+      }
       if (compactionId !== undefined) this.compacting.set(compactionId, index)
     }
     const entry = this.items[index]
@@ -4822,27 +4856,24 @@ export class TranscriptFolder {
     compaction.sourceCommand = message
     this.fusedCommands.add(message)
     this.compactionOwnerByCommandId.set(message.commandId, target)
+    // The ONE visible representative must carry the earliest PROVEN
+    // first-visible point of both exact-correlated rows: the retained card's
+    // own admission time and the fused command's real run (or done-only)
+    // time. Only a succeeded fusion reconciles them; a failed/contradictory
+    // correlation never touches either side's clock, and a later completion
+    // never rewrites the point.
+    const compactionPoint = transcriptTimingOf(compaction)?.startedAt
+    const commandPoint = transcriptTimingOf(message)?.startedAt
+    const earliestPoint = compactionPoint === undefined
+      ? commandPoint
+      : commandPoint === undefined ? compactionPoint : Math.min(compactionPoint, commandPoint)
+    if (earliestPoint !== undefined) setTranscriptTiming(compaction, pointTiming(earliestPoint))
     // The combined owner INHERITS the command's placement anchor: the card is
-    // the visible/searchable representative now, and its legacy `turn` (the
-    // fold-time currentTurn, which never regresses for replays and is 0 for
-    // a pre-turn manual compaction) must not steer the anchored window.
-    const anchor = this.commandPlacementTurns.get(message)
+    // the visible/searchable representative now. A standalone card has no
+    // semantic turn at all; a defensive numeric card keeps its real owner for
+    // registration while the anchor still steers window/search placement.
+    const anchor = this.placementAnchorOf(message)
     if (anchor !== undefined) this.setPlacementAnchor(message, index, anchor)
-    // A fused owner whose legacy turn is a GHOST singleton (that turn's only
-    // raw item is this very card — e.g. a pre-turn manual compaction
-    // registering the initial currentTurn) drops the ghost turn
-    // registration: the card is placement-anchored now, and the ghost would
-    // otherwise claim the leading raw prefix and push the first REAL turn's
-    // segment past it, hiding the card from the first-turn window.
-    const ghostIndex = this.turnValues.indexOf(compaction.turn)
-    if (ghostIndex >= 0 && this.turnStarts[ghostIndex] === target
-      && this.activityByTurn.get(compaction.turn)?.startedAt === undefined
-      && (ghostIndex + 1 >= this.turnStarts.length || this.turnStarts[ghostIndex + 1]! === target + 1)) {
-      this.turnValues.splice(ghostIndex, 1)
-      this.turnStarts.splice(ghostIndex, 1)
-      this.turnValueSet.delete(compaction.turn)
-      this.removeGroupedTurn(compaction.turn)
-    }
     // The card's corpus now carries the command fields and the raw command
     // entry stops producing hits — both entries re-normalize lazily.
     this.markSearchEntryDirty(target)
@@ -6022,6 +6053,15 @@ export class TranscriptFolder {
         break
     }
   }
+}
+
+/** The official compaction lifecycle's admitted model-turn owner: a safe
+ * non-negative integer from `compaction/start` or an end-only `compaction/end`.
+ * The official `null` (standalone maintenance) and every missing/invalid value
+ * admit NO numeric owner — never fall back to the fold's current/open turn.
+ * Zero is a legal owner; this is a numeric test, never truthiness. */
+function compactionOwnerTurnOf(turn: unknown): number | undefined {
+  return typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 0 ? turn : undefined
 }
 
 /** Validate and retain the official `command/done` outcome (post-PR166 plan

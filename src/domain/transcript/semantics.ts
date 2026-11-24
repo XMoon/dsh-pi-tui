@@ -84,6 +84,26 @@ export function classifyTranscriptMessage(message: TranscriptMessage): Transcrip
 export const transcriptSemanticOf = classifyTranscriptMessage
 
 /**
+ * The ONE internal numeric model-turn reader shared by transcript consumers:
+ * the row's admitted semantic-turn ownership, or `undefined` when the row
+ * owns none (a command, a window summary, or a compaction that never proved a
+ * numeric owner). A standalone compaction is a real transcript row that
+ * belongs to NO model turn — never `0`, never a placement anchor. This is
+ * SEMANTIC ownership; the fold's presentation placement (`TranscriptFolder`
+ * `placementAnchorOf`) is a separate fact and must never be promoted here.
+ *
+ * Already-narrowed accesses on tool/system/assistant/user rows keep their
+ * definite `turn`; this helper exists for the generic row readers (window,
+ * grouping, Focus projection, search navigation) whose union includes the
+ * optional-turn compaction row.
+ */
+export function transcriptTurnOf(message: TranscriptMessage): number | undefined {
+  if (!('turn' in message)) return undefined
+  const turn: unknown = message.turn
+  return typeof turn === 'number' ? turn : undefined
+}
+
+/**
  * Whether a system row is an injected context boundary that Focus keeps
  * visible when its Thought is collapsed. The fold's authoritative `context`
  * marker intentionally covers unknown/future injection producers too.

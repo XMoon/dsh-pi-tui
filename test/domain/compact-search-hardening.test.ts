@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import type { TranscriptMessage } from '../../src/transcript.ts'
+import { transcriptTurnOf } from '../../src/domain/transcript/semantics.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { DisplayState } from '../../src/domain/display/preset.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -50,9 +51,11 @@ function targetFor(message: TranscriptMessage, query: string): {
   match: { id: number; turn: number; occurrence: number; source: { kind: 'message' }; sourceOccurrence: number }
   message: TranscriptMessage
 } {
+  const turn = transcriptTurnOf(message)
+  assert.ok(turn !== undefined, 'the fixture search target carries a semantic turn')
   return {
     query,
-    match: { id: 0, turn: 'turn' in message ? message.turn : 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    match: { id: 0, turn, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
     message,
   }
 }

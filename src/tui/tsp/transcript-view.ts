@@ -27,6 +27,7 @@ import type { DisplayPreset } from '../../domain/display/preset.ts'
 import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { contextFormOf, isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
+import { transcriptTurnOf } from '../../domain/transcript/semantics.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import { displayFailureText } from '../../domain/transcript/failure.ts'
 import {
@@ -3151,9 +3152,10 @@ function settledFinalAssistantStats(
   if (activities === undefined) return EMPTY_ASSISTANT_STATS
   const rowsByTurn = new Map<number, TranscriptMessage[]>()
   for (const message of messages) {
-    if (!('turn' in message)) continue
-    const rows = rowsByTurn.get(message.turn)
-    if (rows === undefined) rowsByTurn.set(message.turn, [message])
+    const turn = transcriptTurnOf(message)
+    if (turn === undefined) continue
+    const rows = rowsByTurn.get(turn)
+    if (rows === undefined) rowsByTurn.set(turn, [message])
     else rows.push(message)
   }
 

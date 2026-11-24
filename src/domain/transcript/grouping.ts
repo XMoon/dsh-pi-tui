@@ -9,7 +9,7 @@
  * @module @xmoon76/dsh-pi-tui/domain/transcript/grouping
  */
 
-import { isPostTurnReplayEvidence } from './semantics.ts'
+import { isPostTurnReplayEvidence, transcriptTurnOf } from './semantics.ts'
 import type { TranscriptMessage } from './types.ts'
 
 /**
@@ -31,8 +31,11 @@ export function recentTurnThreshold(
   if (recentTurns <= 0) return Number.POSITIVE_INFINITY
   const turns = new Set<number>()
   for (const message of messages) {
-    if (message.kind === 'summary' || !('turn' in message)) continue
-    if (kinds === undefined || kinds.includes(message.kind)) turns.add(message.turn)
+    // Only a real numeric semantic turn counts: a standalone compaction (and
+    // every turn-less row) contributes no "recent turn".
+    const turn = transcriptTurnOf(message)
+    if (turn === undefined) continue
+    if (kinds === undefined || kinds.includes(message.kind)) turns.add(turn)
   }
   const sorted = [...turns].sort((a, b) => b - a)
   if (sorted.length <= recentTurns) return 0

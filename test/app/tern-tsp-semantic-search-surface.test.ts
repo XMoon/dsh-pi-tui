@@ -43,7 +43,7 @@ import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
-import { surfaceTexts } from '../support/tsp-picker-wire.ts'
+import { foldWireNodes, surfaceTexts, type WireNode } from '../support/tsp-picker-wire.ts'
 
 const T0 = 1_700_000_000_000
 const SESSION_ID = 'ses_b1_surface'
@@ -130,6 +130,15 @@ function seedFocusCommandTurn(folder: TranscriptFolder): void {
       content: [{ type: 'text', text: 'LATE_EVIDENCE_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-focus-late') },
     },
   })
+  // A REAL standalone maintenance card after the final: no semantic turn, its
+  // own disclosure owner. The marker lives in the body, never in the head.
+  push('compaction/start', { compactionId: 'surface-focus-standalone', turn: null })
+  push('compaction/summary', {
+    compactionId: 'surface-focus-standalone',
+    summary: [{ type: 'text', text: 'STANDALONE_COMPOSED_MARKER' }],
+    shadowedSeqs: [0], shadowedTokenCount: 10,
+  })
+  push('compaction/end', { compactionId: 'surface-focus-standalone', turn: null })
   folder.apply(events)
 }
 
@@ -350,6 +359,7 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
 }
 
 const ALT_SHIFT_S = '\u001b[115;4u'
+const ESCAPE = '\u001b'
 
 test('the binding searches the SAME main Folder the repaint uses, with a complete-log coverage', async (t) => {
   const h = await mountSurface(t)
@@ -631,4 +641,44 @@ test('the composed Focus binding reveals only what each semantic hit really hide
   assert.equal(painted('PROCESS_B_RESULT_MARKER'), false,
     'late standalone evidence never opens the settled Turn Process')
   assert.equal(summaryCount(), 1, 'late replay evidence mints no phantom summary')
+
+  // (4) A real turnless standalone compaction: the composed binding, the real
+  // Folder hit, the TSP mapper's card and the native reveal must all agree on
+  // the CARD's own root — never a synthetic Focus root.
+  const revealOpsBefore = h.pane.frames()
+    .flatMap(frame => frame.ops.filter(op => op[0] === 'reveal')).length
+  await query('standalone_composed_marker')
+  await waitUntil('the standalone compaction body opens', () => painted('STANDALONE_COMPOSED_MARKER'))
+  await waitUntil('the standalone reveal op arrives', () => h.pane.frames()
+    .flatMap(frame => frame.ops.filter(op => op[0] === 'reveal')).length > revealOpsBefore)
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false,
+    'the standalone card hit never opens the collapsed Thought')
+  assert.equal(summaryCount(), 1, 'the standalone card mints no phantom summary')
+  const textOfNode = (node: WireNode): string => {
+    const own = typeof node.p.text === 'string' ? node.p.text : ''
+    return [own, ...(node.c ?? []).map(textOfNode)].join('\n')
+  }
+  const roots = foldWireNodes(h.pane.frames())
+  const revealOps = h.pane.frames()
+    .flatMap(frame => frame.ops.filter(op => op[0] === 'reveal'))
+    .map(op => String(op[1]))
+  const revealId = revealOps.at(-1)
+  assert.ok(revealId !== undefined, 'the navigation emitted a native reveal op')
+  const revealedRoot = roots.find(node => node.id === revealId)
+  assert.ok(revealedRoot !== undefined,
+    'the native reveal names a currently attached Main root')
+  assert.ok(roots.some(node => (node.id === revealId || node.id.startsWith(`${revealId}.`))
+    && textOfNode(node).includes('STANDALONE_COMPOSED_MARKER')),
+    'the revealed root actually owns the standalone card body')
+  assert.ok(!/(^|[.])focus/u.test(revealId),
+    'the reveal target is the card root, never a Focus/Thought root')
+
+  // The REAL dismiss (Esc through the seat) retracts the temporary grant; the
+  // two real roots and the one summary stay untouched.
+  await h.key(ESCAPE)
+  await waitUntil('the standalone card detail retracts on dismiss',
+    () => !painted('STANDALONE_COMPOSED_MARKER'))
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false,
+    'dismissing the standalone hit keeps the Thought collapsed')
+  assert.equal(summaryCount(), 1, 'dismissing the standalone hit mints no summary')
 })

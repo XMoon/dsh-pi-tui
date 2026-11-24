@@ -106,7 +106,7 @@ export interface ActivityClock {
  * nothing; an equal-time following row, by contrast, is already visible and
  * closes the Activity from the same instant (a point span hides its duration —
  * a coarse clock must never leave it live). A following block with NO proven
- * time (a local command card, a synthetic window summary) keeps the span out of
+ * time (a Client-local shell card, a synthetic window summary) keeps the span out of
  * the live tail without closing it. The lookup is an exact offline 2D
  * dominance-min, so no ordering assumption about the Activities' starts is
  * needed.
@@ -115,15 +115,15 @@ export interface ActivityClock {
  * end after its turn, so a row of a later turn can never lengthen an
  * already-frozen Activity.
  *
- * KNOWN LIMIT (pinned by `test/activity-clock.test.ts` as a live/cold
- * differential): the canonical Work MEMBERSHIP (which Process rows share one
- * span) is decided by the fold's row ORDER, not by this clock. When cold
- * hydration appends a step's settlement AFTER that step's tool rows while its
- * first visible text preceded them, cold shows ONE Activity where the live fold
- * showed TWO; a raw-adjacent settled-read pair is moreover MERGED by the fold's
- * read grouping before any display rule could act. Converging that belongs to
- * the fold's display-order authority (the `convergeStepLaneOrder` mechanism plus
- * display-aware read grouping) and is tracked as a separate unit.
+ * KNOWN LIMIT: the canonical Work MEMBERSHIP (which Process rows share one
+ * span) is decided by the display-order authority — `projectTranscriptStructure`
+ * plus the fold's lane/read-group convergence — never by this clock. A cold
+ * hydration materializes a settlement at its raw log position while the live
+ * lane may have projected its first visible text earlier; the existing
+ * convergence mechanism and its live/cold parity tests supply the qualified
+ * order. This clock derives lifetimes from the rows that authority already
+ * ordered; it never reorders membership and never fabricates a boundary from
+ * an unqualified row position.
  * @param structure - the canonical structural blocks for one window.
  * @param turnActivities - the folded turn boundary facts of the SAME snapshot.
  */
@@ -289,8 +289,9 @@ function interactionBoundaryOf(span: TranscriptWorkSpan): number | undefined {
 /** The first ACTUALLY VISIBLE time of one non-Process boundary block: the
  *  earliest reliable sidecar start among the row(s) that carry the boundary.
  *  `undefined` means the block has no provable first-visible evidence (a
- *  synthetic window summary, a command row, a row the fold could not time) —
- *  the Activity then stays open rather than freezing at a fabricated time. */
+ *  synthetic window summary, or a row the fold could not time) — the Activity
+ *  then stays open rather than freezing at a fabricated time. A real command
+ *  row carries its own point sidecar and therefore closes the Activity. */
 function boundaryTimeOf(block: TranscriptStructureBlock): number | undefined {
   if (block.kind === 'message') return transcriptTimingOf(block.message)?.startedAt
   if (block.kind === 'context-cluster') {

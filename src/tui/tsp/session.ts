@@ -128,7 +128,7 @@ import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
 import type { TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
-import { isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
+import { isSurfacedInteractionTool, transcriptTurnOf } from '../../domain/transcript/semantics.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
 import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
@@ -3167,7 +3167,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // target never needed (Finding 5). The ancestry test is the projection's own
     // collapsed-Focus disposition — the SAME authority that decides what the
     // Thought hides — never a second classifier.
-    if ('turn' in message && focusRootHides(message)) focusTurns.add(message.turn)
+    const turn = transcriptTurnOf(message)
+    if (turn !== undefined && focusRootHides(message)) focusTurns.add(turn)
     // Work spans / clusters that really CONTAIN the message in this projection.
     // The membership authority is the SAME canonical structure the mapper uses:
     // a snapshot-only Context cluster nested INSIDE a Work span makes its members

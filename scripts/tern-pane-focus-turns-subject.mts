@@ -464,28 +464,73 @@ try {
     }
     const originalAppend = sessionPrototype.append
     let commandInjected = false
+    let standaloneInjected = false
     sessionPrototype.append = function patched(this: { readonly id: unknown }, type, data, ...options) {
       const result = originalAppend.call(this, type, data, ...options)
+      if (type === 'tool/call'
+        && (data as { readonly callId?: unknown } | undefined)?.callId === 'focus-command-a') {
+        note({ kind: 'subject.work-a-call', callId: 'focus-command-a', time: (result as { readonly time?: unknown }).time })
+      }
       const toolCallId = (data as { readonly message?: { readonly toolCallId?: unknown } } | undefined)?.message?.toolCallId
       if (!commandInjected && type === 'tool/result' && String(toolCallId) === 'focus-command-a') {
         commandInjected = true
-        // The real official command lifecycle, appended inside the open model
-        // Turn. DSH opens no model turn for it: the card is session-level.
-        originalAppend.call(this, 'command/run', {
-          commandId: 'focus-command-mid-turn',
-          name: 'model',
-          args: 'switch',
-          source: { kind: 'user' },
-        })
-        originalAppend.call(this, 'command/done', {
-          commandId: 'focus-command-mid-turn',
-          kind: 'success',
-          // A genuinely FOLDABLE outcome: the collapsed card paints the bounded
-          // first line; the native detail body (the marker) only appears after
-          // the client's own command-detail toggle.
-          text: 'model switched mid-turn\nCOMMAND-DETAIL-MARKER the remaining steps continue with the newly selected model and the card body stays independently operable.',
-        })
-        note({ kind: 'command.injected', commandId: 'focus-command-mid-turn', after: toolCallId })
+        // A measurable gap between the Work member and the real command
+        // boundary: the Activity duration must freeze at the command time, not
+        // at the member settle and not at a later event.
+        setTimeout(() => {
+          const commandRun = originalAppend.call(this, 'command/run', {
+            commandId: 'focus-command-mid-turn',
+            name: 'model',
+            args: 'switch',
+            source: { kind: 'user' },
+          })
+          originalAppend.call(this, 'command/done', {
+            commandId: 'focus-command-mid-turn',
+            kind: 'success',
+            // A genuinely FOLDABLE outcome: the collapsed card paints the bounded
+            // first line; the native detail body (the marker) only appears after
+            // the client's own command-detail toggle.
+            text: 'model switched mid-turn\nCOMMAND-DETAIL-MARKER the remaining steps continue with the newly selected model and the card body stays independently operable.',
+          })
+          note({
+            kind: 'command.injected',
+            commandId: 'focus-command-mid-turn',
+            after: toolCallId,
+            time: (commandRun as { readonly time?: unknown }).time,
+          })
+        }, 1_500)
+      }
+      if (!standaloneInjected && type === 'turn/end') {
+        standaloneInjected = true
+        // The REAL standalone maintenance shape between turns (official
+        // `turn: null`), seeded through the same official Session append path.
+        // A failed bracket is a valid readable lifecycle and never mutates the
+        // surface, so the standalone card is the only new row.
+        setTimeout(() => {
+          const start = originalAppend.call(this, 'compaction/start', {
+            compactionId: 'focus-standalone-compaction',
+            turn: null,
+          })
+          // The FAILURE's first line is the bounded collapsed preview and is
+          // also what the dock echo repeats; the diagnostic BODY marker lives
+          // only in the summary text, so neither the collapsed head nor the
+          // dock notification can satisfy the "detail is open" assertion.
+          originalAppend.call(this, 'compaction/summary', {
+            compactionId: 'focus-standalone-compaction',
+            summary: [{
+              type: 'text',
+              text: 'Standalone maintenance diagnostics\nSTANDALONE-DETAIL-MARKER the maintenance summary body stays independently operable.',
+            }],
+            shadowedSeqs: [0],
+            shadowedTokenCount: 10,
+          })
+          originalAppend.call(this, 'compaction/end', {
+            compactionId: 'focus-standalone-compaction',
+            turn: null,
+            error: 'Idle maintenance transaction failed',
+          })
+          note({ kind: 'standalone.injected', startTime: (start as { readonly time?: unknown }).time })
+        }, 100)
       }
       return result
     }

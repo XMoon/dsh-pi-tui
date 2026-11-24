@@ -1226,3 +1226,141 @@ test('a trailing command keeps the one collapsed Action slot and defers the live
   assert.equal(bridged.filter(node => node.id.includes('preparing-live-trailing')).length, 0,
     'no duplicate standalone Preparing survives the bridge')
 })
+
+// ── PR2 C02: standalone vs numeric compaction ownership in the TSP sink ─────
+test('a standalone compaction maps once outside the two real Focus roots while a numeric card stays in its Turn', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'pr2-user-1', 'first prompt'),
+    toolCall(2, 'pr2-c1', 'bash', { command: 'echo first' }, 0),
+    toolResult(3, 'pr2-c1', 'first result', 0),
+    ev('command/run', { commandId: CommandId('pr2-command'), name: 'status', source: { kind: 'user' } }, 4),
+    ev('command/done', { commandId: CommandId('pr2-command'), kind: 'success', text: 'healthy' }, 5),
+    ev('compaction/start', { compactionId: 'pr2-numeric', turn: 1 }, 6),
+    ev('compaction/summary', {
+      compactionId: 'pr2-numeric',
+      summary: [{ type: 'text', text: 'NUMERIC_SUMMARY_BODY' }],
+      shadowedSeqs: [0, 1],
+      shadowedTokenCount: 20,
+    }, 7),
+    ev('compaction/end', { compactionId: 'pr2-numeric', turn: 1 }, 8),
+    assistantMessage(9, 'pr2-final-1', 'first final answer', 0),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 10),
+    ev('compaction/start', { compactionId: 'pr2-standalone', turn: null }, 11),
+    ev('compaction/summary', {
+      compactionId: 'pr2-standalone',
+      summary: [{ type: 'text', text: 'STANDALONE_SUMMARY_BODY' }],
+      shadowedSeqs: [0],
+      shadowedTokenCount: 10,
+    }, 12),
+    ev('compaction/end', { compactionId: 'pr2-standalone', turn: null }, 13),
+    ev('turn/start', { turn: 2 }, 14),
+    ev('user/message', {
+      id: MessageId('pr2-user-2'), role: 'user',
+      content: [{ type: 'text', text: 'second prompt' }], source: { kind: 'user' },
+    }, 15),
+    ev('tool/call', {
+      turn: 2, step: 0, callId: ToolCallId('pr2-c2'), name: 'read',
+      arguments: JSON.stringify({ file_path: 'src/b.ts' }),
+    }, 16),
+    ev('tool/result', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('result-pr2-c2'), role: 'tool', toolCallId: ToolCallId('pr2-c2'),
+        content: [{ type: 'text', text: 'second result' }],
+        source: { kind: 'tool', callId: ToolCallId('pr2-c2') },
+      },
+    }, 17),
+    ev('assistant/message', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('pr2-final-2'), role: 'assistant',
+        content: [{ type: 'text', text: 'second final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' }, stream: [],
+      },
+    }, 18),
+    ev('turn/end', { turn: 2, reason: { kind: 'completed' } }, 19),
+  ])
+  const messages = folder.messages()
+  const activities = folder.turnActivities()
+  const standalone = rowOf(folder, (message): message is Extract<TranscriptMessage, { kind: 'compaction' }> =>
+    message.kind === 'compaction' && message.text === 'STANDALONE_SUMMARY_BODY')
+  const innerDisclosure = (expanded: ReadonlySet<TranscriptMessage> = new Set()) => ({
+    expandedThinkingOwners: new Set<TranscriptMessage>(),
+    expandedContextRowOwners: new Set<TranscriptMessage>(),
+    expandedClusterOwners: new Set<TranscriptMessage>(),
+    expandedCommandCompactionOwners: expanded,
+  })
+  const topLevelIndexOf = (nodes: readonly FlatNode[], text: string): number => nodes
+    .filter(node => node.parent === 'main')
+    .findIndex(node => descendantText(nodes, node.id).includes(text))
+
+  // Compact: the shared Activity clock closes Work A at the REAL command run
+  // time (member end at seq 3, command at seq 4 → 1s), and both compaction
+  // cards render folded at their real positions.
+  const compact = flatten(messages, {
+    preset: 'compact',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: activities,
+    innerDisclosure: innerDisclosure(),
+  })
+  const workSections = compact.filter(node => node.kind === 'section'
+    && String(node.props['key']).includes('work-'))
+  assert.equal(workSections.length, 2, 'two canonical Work spans only')
+  assert.ok(descendantText(compact, workSections[0]!.id).includes('2s'),
+    'the shared Activity clock freezes Work A at the command boundary')
+  assert.ok(descendantText(compact, workSections[0]!.id).includes('bash ×1'),
+    'the command is never counted as an Action')
+  const numericCompact = compact.filter(node => node.parent === 'main')
+    .find(node => descendantText(compact, node.id).includes('Compacted 2 history items'))
+  const standaloneCompact = compact.filter(node => node.parent === 'main')
+    .find(node => descendantText(compact, node.id).includes('Compacted 1 history item'))
+  assert.ok(numericCompact !== undefined, 'the numeric compaction card is materialized once')
+  assert.ok(standaloneCompact !== undefined, 'the standalone compaction card is materialized once')
+  assert.ok(!descendantText(compact, standaloneCompact!.id).includes('STANDALONE_SUMMARY_BODY'),
+    'the card body starts folded')
+  assert.ok(topLevelIndexOf(compact, 'Compacted 2 history items') < topLevelIndexOf(compact, 'first final answer'),
+    'the numeric card stays inside its real Turn chronology')
+  assert.ok(topLevelIndexOf(compact, 'first final answer') < topLevelIndexOf(compact, 'Compacted 1 history item'),
+    'the standalone card keeps its real position after the closed turn final')
+  assert.ok(topLevelIndexOf(compact, 'Compacted 1 history item') < topLevelIndexOf(compact, 'second final answer'),
+    'the next real Turn follows the standalone card')
+
+  // Focus: exactly the two real Turns own native roots. Both compaction cards
+  // stay top-level rows; the standalone one never mints a third root.
+  const focus = flatten(messages, {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: activities,
+    innerDisclosure: innerDisclosure(),
+  })
+  const roots = focus.filter(node => node.kind === 'section'
+    && String(node.props['key']).includes('focus-'))
+  assert.equal(roots.length, 2, 'only the two REAL turns own a Focus root')
+  assert.ok(!focus.some(node => textOf(node).includes('STANDALONE_SUMMARY_BODY')),
+    'the standalone card starts folded in Focus')
+  const numericFocus = focus.filter(node => node.parent === 'main')
+    .find(node => descendantText(focus, node.id).includes('Compacted 2 history items'))
+  const standaloneFocus = focus.filter(node => node.parent === 'main')
+    .find(node => descendantText(focus, node.id).includes('Compacted 1 history item'))
+  assert.ok(numericFocus !== undefined, 'the numeric card stays a top-level row of its Turn region')
+  assert.ok(standaloneFocus !== undefined, 'the standalone card stays a top-level independent row')
+
+  // The card's own native disclosure opens WITHOUT opening a Thought root.
+  const expanded = flatten(messages, {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    window: LATEST_WINDOW,
+    turnActivities: activities,
+    innerDisclosure: innerDisclosure(new Set([standalone])),
+  })
+  assert.ok(expanded.some(node => textOf(node).includes('STANDALONE_SUMMARY_BODY')),
+    'the standalone card body opens through its own native detail owner')
+  assert.equal(
+    expanded.filter(node => node.kind === 'section' && String(node.props['key']).includes('focus-')).length,
+    2,
+    'opening the card detail never mints a Focus root',
+  )
+})

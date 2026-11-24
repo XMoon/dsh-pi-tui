@@ -15,6 +15,7 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TurnActivity, TranscriptMessage } from '../../src/transcript.ts'
 import { TranscriptFolder, windowMessages } from '../../src/transcript.ts'
+import { transcriptTurnOf } from '../../src/domain/transcript/semantics.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { DisplayState } from '../../src/domain/display/preset.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
@@ -76,9 +77,11 @@ function fixture(): { messages: TranscriptMessage[]; activities: Map<number, Tur
 }
 
 function targetFor(message: TranscriptMessage, query: string) {
+  const turn = transcriptTurnOf(message)
+  assert.ok(turn !== undefined, 'the fixture search target carries a semantic turn')
   return {
     query,
-    match: { id: 0, turn: 'turn' in message ? message.turn : 0, occurrence: 0, source: { kind: 'message' as const }, sourceOccurrence: 0 },
+    match: { id: 0, turn, occurrence: 0, source: { kind: 'message' as const }, sourceOccurrence: 0 },
     message,
   }
 }
@@ -86,11 +89,13 @@ function targetFor(message: TranscriptMessage, query: string) {
 /** A search target whose semantic source is one delivered file (so the reveal
  * necessity can be judged against the folded limit). */
 function deliverableTarget(message: TranscriptMessage, query: string, index: number) {
+  const turn = transcriptTurnOf(message)
+  assert.ok(turn !== undefined, 'the fixture search target carries a semantic turn')
   return {
     query,
     match: {
       id: 0,
-      turn: 'turn' in message ? message.turn : 0,
+      turn,
       occurrence: 0,
       source: { kind: 'assistant-deliverable' as const, index, field: 'path' as const },
       sourceOccurrence: 0,

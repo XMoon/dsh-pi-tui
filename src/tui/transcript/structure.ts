@@ -35,7 +35,7 @@
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-structure.ts'
 import { contextFormOf, isPtcImageContext } from '../../domain/transcript/context-semantics.ts'
-import { classifyTranscriptMessage, isPostTurnReplayEvidence, isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
+import { classifyTranscriptMessage, isPostTurnReplayEvidence, isSurfacedContext, isSurfacedInteractionTool, transcriptTurnOf } from '../../domain/transcript/semantics.ts'
 import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 
 /**
@@ -88,7 +88,7 @@ export type TranscriptStructureBlock =
  * {@link isFoldableSnapshotContext} inside {@link projectTranscriptStructure}.
  */
 export function isTranscriptWorkMember(message: TranscriptMessage): message is TranscriptMessage & { turn: number } {
-  return 'turn' in message
+  return transcriptTurnOf(message) !== undefined
     && classifyTranscriptMessage(message).class === 'process'
     && !isSurfacedInteractionTool(message)
     // Post-turn replay evidence stays in the transcript but is never Process

@@ -25,7 +25,8 @@ import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { assistantLatestStepOf, assistantStepIntermediateOf } from '../../src/domain/transcript/folder.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
-import { classifyTranscriptMessage } from '../../src/domain/transcript/semantics.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { classifyTranscriptMessage, isPostTurnReplayEvidence } from '../../src/domain/transcript/semantics.ts'
 
 function event<K extends string>(
   type: K,
@@ -1449,4 +1450,243 @@ test('a turn-0 fused manual compaction keeps its legal 0 anchor', () => {
   const turnOne = folder.window({ maxTurns: 1, endTurn: 1 })
   assert.ok(!turnOne.messages.some(message => message.kind === 'compaction'),
     'the turn-1 window does not steal the turn-0 fused manual compaction')
+})
+
+// ---------------------------------------------------------------------------
+// B — real compaction ownership admission (PR2 C02)
+// ---------------------------------------------------------------------------
+
+test('a standalone compaction before the first turn owns no synthetic turn and adopts the leading anchor', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    rawEvent('compaction/start', { compactionId: 'cpt-1', turn: null }, 0),
+    rawEvent('compaction/summary', {
+      compactionId: 'cpt-1', summary: [{ type: 'text', text: 'pre-turn body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 1),
+    rawEvent('compaction/end', { compactionId: 'cpt-1', turn: null }, 2),
+    event('turn/start', { turn: 7 }, 3),
+    userMessage('later prompt', 4, 7),
+    event('turn/end', { turn: 7, reason: { kind: 'completed' } }, 5),
+  ])
+  const card = folder.messages().find(message => message.kind === 'compaction')
+  assert.ok(card !== undefined && card.kind === 'compaction')
+  assert.equal('turn' in card, false, 'a null owner admits no semantic turn')
+  assert.deepEqual(folder.turns(), [7], 'no synthetic turn 0 is registered')
+  assert.deepEqual(folder.groupedTurns(), [7])
+  const matches = folder.search('pre-turn body')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 7, 'the leading card follows the first ACCEPTED turn anchor')
+  const resolved = folder.resolveSearchMatch(matches[0]!)
+  assert.ok(resolved !== undefined && resolved.kind === 'compaction')
+  const firstWindow = folder.window({ maxTurns: 1, endTurn: 7 })
+  assert.equal(firstWindow.messages.filter(message => message.kind === 'compaction').length, 1,
+    'the anchored first-turn window reveals the leading standalone card once')
+  assert.equal(firstWindow.firstTurn, 7)
+  assert.equal(firstWindow.lastTurn, 7)
+
+  // A compaction-only session is a real transcript without any turn metadata.
+  const standaloneOnly = new TranscriptFolder()
+  standaloneOnly.apply([
+    rawEvent('compaction/start', { compactionId: 'cpt-only', turn: null }, 0),
+    rawEvent('compaction/summary', {
+      compactionId: 'cpt-only', summary: [{ type: 'text', text: 'only body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 1),
+    rawEvent('compaction/end', { compactionId: 'cpt-only', turn: null }, 2),
+  ])
+  const onlyCard = standaloneOnly.messages().find(message => message.kind === 'compaction')
+  assert.ok(onlyCard !== undefined && onlyCard.kind === 'compaction')
+  assert.equal('turn' in onlyCard, false)
+  assert.deepEqual(standaloneOnly.turns(), [])
+  assert.deepEqual(standaloneOnly.groupedTurns(), [])
+  const standaloneWindow = standaloneOnly.window({ maxTurns: 20 })
+  assert.ok(standaloneWindow.messages.some(message => message.kind === 'compaction'),
+    'a zero-turn transcript still shows the standalone card')
+  assert.equal(standaloneWindow.firstTurn, undefined, 'no fake first turn')
+  assert.equal(standaloneWindow.lastTurn, undefined, 'no fake last turn')
+})
+
+test('a numeric compaction keeps its own durable turn instead of the current fold turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 2 }, 0),
+    userMessage('turn two', 1, 2),
+    assistantMessage('two answer', 2, 2),
+    event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 3),
+    event('turn/start', { turn: 3 }, 4),
+    userMessage('turn three', 5, 3),
+    rawEvent('compaction/start', { compactionId: 'cpt-old', turn: 2 }, 6),
+    rawEvent('compaction/summary', {
+      compactionId: 'cpt-old', summary: [{ type: 'text', text: 'old T body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 7),
+    rawEvent('compaction/end', { compactionId: 'cpt-old', turn: 3 }, 8),
+    assistantMessage('three answer', 9, 3),
+  ])
+  const card = folder.messages().find(message => message.kind === 'compaction')
+  assert.ok(card !== undefined && card.kind === 'compaction')
+  assert.equal(card.turn, 2, 'the first admitted owner wins, not the open turn')
+  assert.equal(isPostTurnReplayEvidence(card), true,
+    'a late row of an already completed turn is replay evidence')
+  // A contradictory terminal owner never re-homes the admitted row.
+  assert.equal(card.turn, 2)
+  assert.deepEqual(folder.turns(), [2, 3])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
+  assert.equal(blocks.filter(block => block.kind === 'activity').length, 2,
+    'the real Turns keep exactly their own summaries')
+  const emitted = blocks.filter(block => block.kind === 'message' && block.message === card)
+  assert.equal(emitted.length, 1, 'the card is emitted exactly once')
+  assert.equal(emitted[0]?.kind === 'message' ? emitted[0].containerPath : 'missing', undefined,
+    'the replay card stays standalone without minting a historical root')
+})
+
+test('end-only and summary-first compactions fail open without borrowing the current turn', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 2 }, 0),
+    userMessage('two', 1, 2),
+    event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 2),
+    event('turn/start', { turn: 6 }, 3),
+    userMessage('six', 4, 6),
+    rawEvent('compaction/end', { compactionId: 'end-owner', turn: 2, error: 'failed' }, 5),
+    rawEvent('compaction/end', { compactionId: 'end-null', turn: null }, 6),
+    rawEvent('compaction/summary', {
+      compactionId: 'summary-first', summary: [{ type: 'text', text: 'fragment body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 7),
+    rawEvent('compaction/end', { compactionId: 'summary-first' }, 8),
+  ])
+  const cards = folder.messages().filter((message): message is Extract<TranscriptMessage, { kind: 'compaction' }> =>
+    message.kind === 'compaction')
+  assert.equal(cards.length, 3)
+  const endOwner = cards[0]!
+  const endNull = cards[1]!
+  const summaryFirst = cards[2]!
+  assert.equal(endOwner.turn, 2, 'an end-only fragment admits its own durable numeric owner')
+  assert.equal(endOwner.error, 'failed')
+  assert.equal(isPostTurnReplayEvidence(endOwner), true)
+  assert.equal('turn' in endNull, false, 'a null end-only owner is standalone')
+  assert.equal('turn' in summaryFirst, false,
+    'a summary-first fragment admits no owner, even after its matching end lands')
+  assert.equal(summaryFirst.running, false, 'the matching end still settles the fragment')
+  assert.deepEqual(folder.turns(), [2, 6], 'no fake turn registration from the fragments')
+  assert.deepEqual(folder.groupedTurns(), [2, 6])
+})
+
+test('an idle standalone compaction after a final stays independent and the next turn never drags it', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 1 }, 0),
+    userMessage('go', 1, 1),
+    toolCall('read', 'r1', 2, 1, 0),
+    toolResultAt('r1', 'ok', 3, 1, 0),
+    assistantMessage('final answer', 4, 1, 0),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    rawEvent('compaction/start', { compactionId: 'idle', turn: null }, 6),
+    rawEvent('compaction/summary', {
+      compactionId: 'idle', summary: [{ type: 'text', text: 'idle body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 7),
+    rawEvent('compaction/end', { compactionId: 'idle', turn: null }, 8),
+    event('turn/start', { turn: 2 }, 9),
+    userMessage('next', 10, 2),
+    assistantMessage('next answer', 11, 2, 0),
+    event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 12),
+  ])
+  const messages = folder.messages()
+  const card = messages.find(message => message.kind === 'compaction')
+  assert.ok(card !== undefined && card.kind === 'compaction')
+  assert.equal('turn' in card, false)
+  const cardIndex = messages.indexOf(card)
+  assert.equal(messages[cardIndex - 1]?.kind, 'assistant', 'the card sits after the real final')
+  assert.equal(messages[cardIndex + 1]?.kind, 'user', 'and before the next turn prompt')
+  const shapes: string[] = []
+  for (const block of projectFocus(messages, folder.turnActivities(), new Set(), true)) {
+    if (block.kind === 'message') shapes.push(block.message.kind)
+    else shapes.push('<Thought>')
+  }
+  assert.deepEqual(shapes, ['user', '<Thought>', 'assistant', 'compaction', 'user', '<Thought>', 'assistant'],
+    `the standalone card keeps the real chronology in every turn: ${JSON.stringify(shapes)}`)
+  // Placement: the idle card belongs to the turn it followed, never the next.
+  const matches = folder.search('idle body')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 1, 'search anchors the idle card to the turn it followed')
+  const eraWindow = folder.window({ maxTurns: 1, endTurn: 1 })
+  assert.equal(eraWindow.messages.filter(message => message.kind === 'compaction').length, 1,
+    'the completed turn window reveals the card')
+  const latestWindow = folder.window({ maxTurns: 1 })
+  assert.ok(!latestWindow.messages.some(message => message.kind === 'compaction'),
+    'the next turn does not drag the historical standalone card in')
+  const structure = projectTranscriptStructure(messages)
+  const works = structure.filter(block => block.kind === 'work')
+  assert.equal(works.length, 1, 'the standalone Context never changes the canonical Work membership')
+  assert.ok(!works.some(block => block.kind === 'work' && block.span.members.includes(card)),
+    'the standalone compaction is never a Work member')
+})
+
+test('a non-monotonic replay keeps each standalone compaction in its own era', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 8 }, 0),
+    toolCall('read', 'call-8', 1, 8),
+    toolResultAt('call-8', 'r8', 2, 8),
+    event('turn/end', { turn: 8, reason: { kind: 'completed' } }, 3),
+    rawEvent('compaction/start', { compactionId: 'c8', turn: null }, 4),
+    rawEvent('compaction/summary', {
+      compactionId: 'c8', summary: [{ type: 'text', text: 'era eight body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 5),
+    rawEvent('compaction/end', { compactionId: 'c8', turn: null }, 6),
+    event('turn/start', { turn: 3 }, 7),
+    toolCall('read', 'call-3', 8, 3),
+    toolResultAt('call-3', 'r3', 9, 3),
+    event('turn/end', { turn: 3, reason: { kind: 'completed' } }, 10),
+    rawEvent('compaction/start', { compactionId: 'c3', turn: null }, 11),
+    rawEvent('compaction/summary', {
+      compactionId: 'c3', summary: [{ type: 'text', text: 'era three body' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 12),
+    rawEvent('compaction/end', { compactionId: 'c3', turn: null }, 13),
+  ])
+  assert.deepEqual(folder.turns(), [8, 3], 'fixture: the log turn order is non-monotonic')
+  const matches8 = folder.search('era eight body')
+  const matches3 = folder.search('era three body')
+  assert.equal(matches8[0]?.turn, 8)
+  assert.equal(matches3[0]?.turn, 3)
+  const era8 = folder.window({ maxTurns: 1, endTurn: 8 })
+  const era3 = folder.window({ maxTurns: 1, endTurn: 3 })
+  const cardsIn = (messages: readonly TranscriptMessage[]): string[] =>
+    messages.filter((message): message is Extract<TranscriptMessage, { kind: 'compaction' }> => message.kind === 'compaction')
+      .map(message => message.text)
+  assert.deepEqual(cardsIn(era8.messages), ['era eight body'])
+  assert.deepEqual(cardsIn(era3.messages), ['era three body'])
+  for (const card of folder.messages().filter(message => message.kind === 'compaction')) {
+    assert.equal('turn' in card, false, 'no standalone card forges a semantic turn')
+  }
+})
+
+test('a fusion established after the leading prefix adoption keeps the command anchor', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', args: 'latefused', source: { kind: 'user' } }, 0),
+    event('turn/start', { turn: 7 }, 1),
+    userMessage('later', 2, 7),
+    rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 3),
+    rawEvent('compaction/summary', {
+      compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'),
+      summary: [{ type: 'text', text: 'body' }], shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, 4),
+    rawEvent('compaction/end', { compactionId: 'cpt-1' }, 5),
+    event('command/done', { commandId: CommandId('cmd-1'), kind: 'success', sourceEventSeq: SessionSeq(4) }, 6),
+    event('turn/end', { turn: 7, reason: { kind: 'completed' } }, 7),
+  ])
+  const card = folder.messages().find(message => message.kind === 'compaction')
+  assert.ok(card !== undefined && card.kind === 'compaction' && card.sourceCommand !== undefined)
+  assert.equal('turn' in card, false, 'the fused representative owns no semantic turn')
+  const matches = folder.search('latefused')
+  assert.ok(matches.length >= 1)
+  assert.equal(matches[0]!.turn, 7, 'the fused card keeps the command anchor adopted before fusion')
+  const window = folder.window({ maxTurns: 1, endTurn: 7 })
+  assert.equal(window.messages.filter(message => message.kind === 'compaction').length, 1)
 })

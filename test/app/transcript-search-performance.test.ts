@@ -12,6 +12,7 @@ import { afterEach, test } from 'node:test'
 import { createSearchProfiler, searchProfilingEnabled } from '../../src/app/surface/search-profile.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { TranscriptMessage } from '../../src/transcript.ts'
+import { transcriptTurnOf } from '../../src/domain/transcript/semantics.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -37,11 +38,13 @@ function target(
   sourceOccurrence = 0,
   normalizedSourceRange?: { readonly start: number; readonly end: number },
 ) {
+  const turn = transcriptTurnOf(message)
+  assert.ok(turn !== undefined, 'the search presentation target fixture carries a semantic turn')
   return {
     query,
     match: {
       id: 0,
-      turn: 'turn' in message ? message.turn : 0,
+      turn,
       occurrence: 0,
       source: { kind: 'message' as const },
       sourceOccurrence,

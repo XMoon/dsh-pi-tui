@@ -300,7 +300,7 @@ test('parity: system cards, compaction summary and the image marker in user text
   folder.apply([
     turnStart(0, 0),
     userMessage(1, 'Look at this 🖼️ screenshot.png content'),
-    rawEvent('llm/retry', { retry: 1, delayMs: 2000, failure: { code: 'E_RATE', message: 'too many requests' } }, 2),
+    rawEvent('llm/retry', { retry: 1, delayMs: 2000, failure: { code: 'E_RATE', message: 'too many requests' }, turn: 0, step: 0 }, 2),
     compactionEvent('compaction/start', { compactionId: 'k1' }, 3),
     compactionEvent('compaction/summary', { compactionId: 'k1', summary: [{ type: 'text', text: 'compressed earlier discussion about token budgets' }] }, 4),
     compactionEvent('compaction/end', { compactionId: 'k1' }, 5),

@@ -200,6 +200,8 @@ export default async function (h) {
     finish(h, extra)
     return
   }
+  /** Command scenario: the Work A header text at the proof instant. */
+  let commandWorkAHeadText
   if (SCENARIO === 'svg') {
     if (!await waitFor(h, 'the real registered Tool A is executing inside canonical Work A', () => {
       const rows = records(h)
@@ -346,6 +348,16 @@ export default async function (h) {
         && liveNodes(h).get(roots[0])?.p.collapsed === true
         && !h.texts(h.snapshot()).includes(promptInfo.assistantMarker)
     })) {
+      finish(h, extra)
+      return
+    }
+    // The fold record precedes the client repaint: wait for the REAL native
+    // head to land before taking the geometry snapshot (a stale frame is not
+    // evidence that the command card is absent).
+    if (!await waitFor(h, 'the unbridged command row reaches the native client tree', () =>
+      mainNodes(h.snapshot()).some(node =>
+        String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+        && h.descendantsText(node).includes('/model switch')))) {
       finish(h, extra)
       return
     }
@@ -500,6 +512,32 @@ export default async function (h) {
     const worksAfterOpen = workIds(expandedNodes, rootIdForCommand)
     h.check('the bridged command never hides the two canonical Work runs', worksAfterOpen.length === 2,
       JSON.stringify(worksAfterOpen))
+    // ABSOLUTE lifetime fact on the REAL client tree: Work A is the Process run
+    // BEFORE the command, so its displayed Activity duration must be exactly the
+    // official command-run boundary minus the first real member — never the
+    // member settle, and never a later Work/turn event.
+    const lifetimeRows = records(h)
+    const workACall = lifetimeRows.find(row => row.kind === 'subject.work-a-call')
+    const commandInjected = lifetimeRows.find(row => row.kind === 'command.injected')
+    const expectedWorkASeconds = typeof workACall?.time === 'number' && typeof commandInjected?.time === 'number'
+      ? Math.floor((commandInjected.time - workACall.time) / 1000)
+      : undefined
+    const workAHead = mainNodes(h.snapshot()).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    commandWorkAHeadText = workAHead === undefined ? undefined : h.descendantsText(workAHead)
+    h.check('the seeded Work A Activity header carries a proven duration', workAHead !== undefined
+      && expectedWorkASeconds !== undefined && commandWorkAHeadText.includes(`· ${expectedWorkASeconds}s ·`),
+      JSON.stringify({ expectedWorkASeconds, head: commandWorkAHeadText ?? null }))
+    await h.sleep(1_200)
+    const workAAfterAdvance = mainNodes(h.snapshot()).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    h.check('the closed Work A duration never grows as time advances',
+      workAAfterAdvance !== undefined && h.descendantsText(workAAfterAdvance) === commandWorkAHeadText,
+      JSON.stringify({ before: commandWorkAHeadText ?? null, after: workAAfterAdvance === undefined ? null : h.descendantsText(workAAfterAdvance) }))
     const commandId = expandedCommand[0]?.[0]
     h.check('the command is a top-level Root child, never wrapped by a Work container',
       commandId !== undefined && !worksAfterOpen.some(work => commandId.startsWith(`${work}.`)))
@@ -1011,6 +1049,162 @@ export default async function (h) {
   h.check('official turn/end publishes one final Assistant outside the Focus root', finalCards.length === 1, JSON.stringify(finalCards.map(([id]) => id)))
   h.check('the subject recorded an authoritative completed activity after release',
     records(h).some(row => row.kind === 'display.commit' && row.completedTurns.includes(1) && row.finalPresent))
+  if (SCENARIO === 'command') {
+    // The seeded standalone maintenance card after the closed turn: it must be
+    // one top-level native row AFTER the official final, own its detail toggle,
+    // and never mint a Focus root or re-open the real Turn.
+    if (!await waitFor(h, 'the standalone compaction card lands after the official final', () =>
+      records(h).some(row => row.kind === 'standalone.injected')
+        && h.texts(h.snapshot()).some(text => text.includes('Compaction failed')))) {
+      finish(h, extra)
+      return
+    }
+    const standaloneSnap = h.snapshot()
+    const standaloneNodes = mainNodes(standaloneSnap)
+    const standaloneHeadOf = snapshot => mainNodes(snapshot).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('Compaction failed'))
+    const compactionHead = standaloneHeadOf(standaloneSnap)
+    const finalTrailingRow = standaloneNodes.find(node =>
+      typeof node.text === 'string' && node.text.includes(promptInfo.assistantMarker))
+    h.check('the standalone compaction keeps its real position after the final Assistant',
+      compactionHead !== undefined && finalTrailingRow !== undefined
+        && standaloneNodes.indexOf(compactionHead) > standaloneNodes.indexOf(finalTrailingRow),
+      JSON.stringify({ compaction: compactionHead === undefined ? null : h.descendantsText(compactionHead),
+        final: finalTrailingRow === undefined ? null : h.descendantsText(finalTrailingRow) }))
+    const rootIdBeforeStandalone = rootIds(liveNodes(h))[0]
+    const rootCollapsedBefore = liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed
+    h.check('the standalone compaction never mints a second Focus root', rootIds(liveNodes(h)).length === 1,
+      JSON.stringify(rootIds(liveNodes(h))))
+    const marker = 'STANDALONE-DETAIL-MARKER'
+    const standaloneDetailVisible = () => h.texts(h.snapshot()).some(line => line.includes(marker))
+    // The DOM snapshot carries no SDK ids; the LIVE wire tree does. The exact
+    // top-level standalone Section is the one whose subtree holds the failure
+    // title but not the summary-body marker while collapsed.
+    const standaloneSectionIdOfLive = (nodes) => [...nodes.entries()].find(([id, node]) =>
+      id.startsWith('main.') && node.k === 'section' && node.p.collapsible === true
+      && subtreeText(nodes, id).includes('Compaction failed'))?.[0]
+    const liveBeforeStandalone = liveNodes(h)
+    const sectionBeforeId = standaloneSectionIdOfLive(liveBeforeStandalone)
+    const sectionBefore = sectionBeforeId === undefined ? undefined : liveBeforeStandalone.get(sectionBeforeId)
+    // R1-02 PRECONDITION: the body-only marker is really hidden in the collapsed
+    // card (it lives only in the summary body; neither the head preview nor the
+    // dock failure echo paints it), and the exact section is a closed Section
+    // before any pointer input.
+    h.check('the collapsed standalone head does not paint the body-only detail',
+      !standaloneDetailVisible(), JSON.stringify({ section: sectionBeforeId ?? null }))
+    h.check('the standalone compaction starts as its own collapsed native section',
+      sectionBefore !== undefined && sectionBefore.p.collapsed === true,
+      JSON.stringify({ section: sectionBeforeId ?? null, collapsed: sectionBefore?.p.collapsed }))
+    // R1-02: UNCONDITIONAL real-header click. The previous conditional skip let
+    // a head-preview text match masquerade as an opened body.
+    const openTogglesBefore = eventRows(h).length
+    h.check('the standalone compaction head opens through the real client pointer',
+      compactionHead !== undefined && await h.click(standaloneSnap.chains, compactionHead))
+    if (!await waitFor(h, 'the standalone detail body appears after the client toggle', standaloneDetailVisible)) {
+      finish(h, extra)
+      return
+    }
+    const openToggle = eventRows(h).slice(openTogglesBefore).at(-1)
+    h.check('the open toggle addresses exactly the standalone section, never the Focus root',
+      openToggle !== undefined && openToggle.id === sectionBeforeId && openToggle.collapsed === false,
+      JSON.stringify({ toggle: openToggle ?? null, section: sectionBeforeId ?? null, root: rootIdBeforeStandalone }))
+    if (!await waitFor(h, 'the opened section body reaches the live wire tree', () => {
+      const live = liveNodes(h)
+      return sectionBeforeId !== undefined && [...live.entries()].some(([id, node]) =>
+        id.startsWith(`${sectionBeforeId}.`) && String(node.p.text ?? '').includes(marker))
+    })) {
+      finish(h, extra)
+      return
+    }
+    h.check('the opened detail body belongs to that exact section',
+      sectionBeforeId !== undefined && [...liveNodes(h).entries()].some(([id, node]) =>
+        id.startsWith(`${sectionBeforeId}.`) && String(node.p.text ?? '').includes(marker)),
+      JSON.stringify({ section: sectionBeforeId ?? null }))
+    h.check('the standalone detail opens without changing the one real root state',
+      rootIds(liveNodes(h)).length === 1
+        && liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed === rootCollapsedBefore,
+      JSON.stringify({ roots: rootIds(liveNodes(h)), collapsed: liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed }))
+    h.capture('focus-standalone-compaction-open-1280x800-dark',
+      'the standalone compaction after the closed turn owns an independent native detail')
+    // R1-02: close it again through the same real header and prove the exact
+    // section (not the root) toggled back.
+    const closeSnap = h.snapshot()
+    const closeHead = standaloneHeadOf(closeSnap)
+    const closeTogglesBefore = eventRows(h).length
+    h.check('the standalone compaction head closes through the same real pointer',
+      closeHead !== undefined && await h.click(closeSnap.chains, closeHead))
+    if (!await waitFor(h, 'the standalone detail body retracts after the close toggle',
+      () => !standaloneDetailVisible())) {
+      finish(h, extra)
+      return
+    }
+    const closeToggle = eventRows(h).slice(closeTogglesBefore).at(-1)
+    h.check('the close toggle addresses exactly the standalone section',
+      closeToggle !== undefined && closeToggle.id === sectionBeforeId && closeToggle.collapsed === true,
+      JSON.stringify({ toggle: closeToggle ?? null, section: sectionBeforeId ?? null }))
+    h.check('closing the standalone detail leaves the one real root state unchanged',
+      rootIds(liveNodes(h)).length === 1
+        && liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed === rootCollapsedBefore,
+      JSON.stringify({ roots: rootIds(liveNodes(h)), collapsed: liveNodes(h).get(rootIdBeforeStandalone)?.p.collapsed }))
+
+    // R1-02 §13.3: qualify the SAME card at the targeted narrow width and short
+    // height with real clipping observation — never reusing the earlier generic
+    // Focus screenshots as standalone-card evidence.
+    for (const viewport of [
+      { width: 400, height: 600, appearance: 'dark' },
+      { width: 900, height: 360, appearance: 'light' },
+    ]) {
+      const resized = await h.resize(viewport.width, viewport.height)
+      if (IS_GUI) h.check('the GUI window remains at the supported content size', resized.clamped === false, JSON.stringify(resized))
+      h.send('appearance', viewport.appearance)
+      const label = `${viewport.width}x${viewport.height}`
+      const closedSnap = h.snapshot()
+      const closedHead = standaloneHeadOf(closedSnap)
+      const closedSpan = closedHead === undefined ? { x: 0, y: 0 } : {
+        x: visibleSpan(closedSnap.chains, closedHead, 'x'),
+        y: visibleSpan(closedSnap.chains, closedHead, 'y'),
+      }
+      h.check(`the standalone compaction header survives clipping at ${label}`,
+        closedHead !== undefined && closedSpan.x >= 4 && closedSpan.y >= 4,
+        JSON.stringify({ span: closedSpan, rect: closedHead === undefined ? null : rect(closedHead) }))
+      h.capture(`focus-standalone-compaction-collapsed-${label}-${viewport.appearance}`,
+        `collapsed standalone compaction at ${label}`)
+      const narrowOpenBefore = eventRows(h).length
+      h.check(`the standalone header opens at ${label}`,
+        closedHead !== undefined && await h.click(closedSnap.chains, closedHead))
+      if (!await waitFor(h, `the standalone detail opens at ${label}`, standaloneDetailVisible)) {
+        finish(h, extra)
+        return
+      }
+      const openSnap = h.snapshot()
+      // The DOM tree carries no semantic `k`: measure the ACTUAL text node
+      // that paints the marker and its surviving clipped span.
+      const bodyNode = openSnap.nodes.find(node =>
+        String(node.text ?? '').includes(marker) && rect(node)[3] > 0)
+      const bodySpan = bodyNode === undefined ? 0 : visibleSpan(openSnap.chains, bodyNode, 'y')
+      h.check(`the opened standalone body is actually readable at ${label}`,
+        bodyNode !== undefined && bodySpan >= 4,
+        JSON.stringify({ body: bodyNode === undefined ? null : rect(bodyNode), visibleY: bodySpan }))
+      const narrowToggle = eventRows(h).slice(narrowOpenBefore).at(-1)
+      h.check(`the ${label} pointer addresses exactly the standalone section`,
+        narrowToggle !== undefined && narrowToggle.id === sectionBeforeId && narrowToggle.collapsed === false,
+        JSON.stringify({ toggle: narrowToggle ?? null, section: sectionBeforeId ?? null }))
+      h.capture(`focus-standalone-compaction-open-${label}-${viewport.appearance}`,
+        `open standalone compaction detail at ${label}`)
+      const narrowCloseSnap = h.snapshot()
+      const narrowCloseHead = standaloneHeadOf(narrowCloseSnap)
+      h.check(`the standalone header closes again at ${label}`,
+        narrowCloseHead !== undefined && await h.click(narrowCloseSnap.chains, narrowCloseHead))
+      if (!await waitFor(h, `the standalone detail closes at ${label}`,
+        () => !standaloneDetailVisible())) {
+        finish(h, extra)
+        return
+      }
+    }
+    await h.resize(1280, 800)
+    h.send('appearance', 'dark')
+  }
   if (SCENARIO === 'svg') {
     const short = await h.resize(900, 360)
     h.send('appearance', 'light')

@@ -309,7 +309,7 @@ import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, text
 import type { UserShellPresentationPlacement, UserShellSubmissionState } from './app/submission/user-shell.ts'
 import { eligibleFinalAssistant } from './domain/transcript/final-assistant.ts'
 import { isPtcImageContext } from './domain/transcript/context-semantics.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext, transcriptTurnOf } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
@@ -534,6 +534,15 @@ function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
     || message.kind === 'system'
     || message.kind === 'compaction'
     || message.kind === 'command'
+}
+
+/** A compaction card WITHOUT an admitted numeric model turn: real standalone
+ * control evidence whose disclosure is owned by the CARD itself. It must never
+ * read a Thought/Work root action or follow the numeric Context route (the
+ * fold's placement anchor is not semantic ownership). Numeric compaction keeps
+ * the existing recent-turn Context rule. */
+function isStandaloneCompactionDisclosure(message: TranscriptMessage): boolean {
+  return message.kind === 'compaction' && transcriptTurnOf(message) === undefined
 }
 
 /** Whether a generic foldable message is a Thought-owned Focus secondary.
@@ -10940,12 +10949,15 @@ export class TuiApp {
   /** Message-only convenience over {@link setTranscriptSearchTarget} for a
    * caller that resolved a card without an occurrence identity (the search
    * overlay always uses the full target). */
-  revealSearchMatch(message: TranscriptMessage): void {
+  revealSearchMatch(message: TranscriptMessage & { turn: number }): void {
+    // A turn-less control/standalone card has no semantic turn to anchor a
+    // weak-match reveal; callers with a real Fold search match pass its
+    // placement-anchored occurrence identity instead.
     this.setTranscriptSearchTarget({
       query: '',
       match: {
         id: -1,
-        turn: 'turn' in message ? message.turn : 0,
+        turn: message.turn,
         occurrence: 0,
         source: { kind: 'message' },
         sourceOccurrence: 0,
@@ -10976,9 +10988,11 @@ export class TuiApp {
     if (!this.searchRevealGranted) return undefined
     if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
     const message = this.searchTarget?.message
-    if (message === undefined || !('turn' in message)) return undefined
+    if (message === undefined) return undefined
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined) return undefined
     if (!this.focusRootHidesSearchTarget(message)) return undefined
-    return message.turn
+    return turn
   }
 
   /** The plan inspection's owner turn, but ONLY when collapsed Focus actually
@@ -10987,10 +11001,12 @@ export class TuiApp {
    * collapsed Thought, and the row proof needs it materialized). */
   private planInspectionTurn(): number | undefined {
     const message = this.planInspection?.message
-    if (message === undefined || !('turn' in message)) return undefined
+    if (message === undefined) return undefined
     if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined) return undefined
     if (!this.focusRootHidesSearchTarget(message)) return undefined
-    return message.turn
+    return turn
   }
 
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
@@ -11517,9 +11533,10 @@ export class TuiApp {
    * the real owner via the callers' early return). */
   private messageOverrideContributes(message: TranscriptMessage): boolean {
     if (this.openWorkRunMembers.has(message)) return false
-    if (isFocusDisplayPreset(this.displayState.preset) && 'turn' in message
+    const turn = transcriptTurnOf(message)
+    if (turn !== undefined && isFocusDisplayPreset(this.displayState.preset)
       && isFocusSecondaryDisclosure(message)
-      && this.focusProjectionExpandedTurnsBase().has(message.turn)) return false
+      && this.focusProjectionExpandedTurnsBase().has(turn)) return false
     return true
   }
 
@@ -11606,7 +11623,8 @@ export class TuiApp {
   private eligibleFocusRootTurns(): number[] {
     const projected = new Set<number>()
     for (const message of this.messages) {
-      if ('turn' in message) projected.add(message.turn)
+      const turn = transcriptTurnOf(message)
+      if (turn !== undefined) projected.add(turn)
     }
     const turns: number[] = []
     for (const activity of this.turnActivities.values()) {
@@ -11724,8 +11742,9 @@ export class TuiApp {
    * must keep its override. */
   private clearFocusSecondaryExpansionsForTurns(turns: ReadonlySet<number>): void {
     for (const message of this.expandedOverride.keys()) {
-      if (!('turn' in message)) continue
-      if (!turns.has(message.turn)) continue
+      const turn = transcriptTurnOf(message)
+      if (turn === undefined) continue
+      if (!turns.has(turn)) continue
       if (!isFocusSecondaryDisclosure(message)) continue
       // The settled surfaced-interaction card (question / Plan review) keeps
       // its own disclosure override across a root collapse, so it is EXEMPT
@@ -12065,13 +12084,15 @@ export class TuiApp {
       if (!Number.isFinite(boundary)) return this.focusExpandedTurns
       const derived = new Set<number>()
       for (const message of this.messages) {
-        if ('turn' in message && message.turn >= boundary) derived.add(message.turn)
+        const turn = transcriptTurnOf(message)
+        if (turn !== undefined && turn >= boundary) derived.add(turn)
       }
       return derived
     }
     const union = new Set(this.focusExpandedTurns)
     for (const message of this.messages) {
-      if ('turn' in message && message.turn >= boundary) union.add(message.turn)
+      const turn = transcriptTurnOf(message)
+      if (turn !== undefined && turn >= boundary) union.add(turn)
     }
     return union
   }
@@ -13070,9 +13091,9 @@ export class TuiApp {
       // volatile inputs (live tail / displayed-subject running) stay
       // render-time and deliberately do not churn this signature — but every
       // structural fact the cached clock's `isLive` reads MUST be here, or a
-      // cached card keeps a stale liveness (e.g. a boundary with no proven
-      // point sidecar appended after an open span flips `trailing` without
-      // touching start/end).
+      // cached card keeps a stale liveness (e.g. a synthetic/untimed boundary
+      // row appended after an open span flips `trailing` without touching
+      // start/end).
       clock === undefined
         ? ''
         : `${clock.startedAt}\u0000${clock.endedAt ?? ''}\u0000${clock.open ? '1' : '0'}\u0000${clock.trailing ? '1' : '0'}`,
@@ -17788,6 +17809,19 @@ export class TuiApp {
       } else {
         this.expandedOverride.set(message, true)
       }
+    } else if (isStandaloneCompactionDisclosure(message)) {
+      // The standalone card's surface default can be ON (fullscreen Full's
+      // master) or OFF (mouse-owned fullscreen Focus/Compact), so its click
+      // must flip the EFFECTIVE state. Writing `true` first would be a no-op
+      // under a bulk-ON master, and deleting a negative override would let the
+      // master reopen it — exactly the unclosable-card failure.
+      const expanded = this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary())
+      if (expanded) {
+        this.expandedOverride.set(message, false)
+        if (revokesSearchReveal) this.suppressSearchReveal()
+      } else {
+        this.expandedOverride.set(message, true)
+      }
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
       if (revokesSearchReveal) this.suppressSearchReveal()
@@ -21049,8 +21083,9 @@ export class TuiApp {
    * not pollute each other). Both count: regular mode full-reveals ANY
    * expanded root. */
   private isInsideExpandedFocus(message: TranscriptMessage, boundary: number): boolean {
-    if (!isFocusDisplayPreset(this.displayState.preset) || !('turn' in message)) return false
-    const turn = message.turn
+    if (!isFocusDisplayPreset(this.displayState.preset)) return false
+    const turn = transcriptTurnOf(message)
+    if (turn === undefined) return false
     return this.focusExpandedTurns.has(turn) || this.isRegularCtrlOExpandedTurn(turn, boundary)
   }
 
@@ -21248,7 +21283,39 @@ export class TuiApp {
         || this.expandedOverride.get(message) === true
         || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
-    return (message.kind === 'system' || message.kind === 'tool' || message.kind === 'compaction')
+    // A compaction row WITHOUT an admitted numeric turn is standalone control
+    // evidence (a real upstream `turn: null` transaction, or an unprovable
+    // fragment). Its per-card owner must agree with the card's actual click
+    // action: a granted search reveal first (a new navigation re-opens), then
+    // the explicit card choice INCLUDING false, then the surface default. The
+    // negative choice is what lets a click close the card while a bulk master
+    // stays ON; a bare OR of the master would make the card unclosable.
+    if (isStandaloneCompactionDisclosure(message)) {
+      if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
+      const override = this.expandedOverride.get(message)
+      if (this.fullscreen !== undefined) {
+        // Fullscreen keeps the card's explicit positive OR negative choice;
+        // the Full master is only the bulk default beneath it. Focus/Compact
+        // have no generic master for this card and start folded.
+        if (override !== undefined) return override
+        return this.transcriptDetailExpanded
+          && this.displayState.preset !== 'compact'
+          && !isFocusDisplayPreset(this.displayState.preset)
+      }
+      // Regular has ONE operable keyboard master for this card. A negative
+      // choice parked by a fullscreen click is not an active veto here: the
+      // master expansion must open it on the first press (a positive choice,
+      // e.g. a real search dismissal, may still open it while the master is
+      // off). The existing collapse normalization clears the parked override.
+      return this.transcriptDetailExpanded || override === true
+    }
+    // A numeric compaction keeps the existing recent-turn Context rule.
+    if (message.kind === 'compaction' && message.turn !== undefined) {
+      return message.turn >= boundary
+        || this.expandedOverride.get(message) === true
+        || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
+    }
+    return (message.kind === 'system' || message.kind === 'tool')
       && (message.turn >= boundary
         || this.expandedOverride.get(message) === true
         || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)))
@@ -21312,7 +21379,9 @@ export class TuiApp {
           ? undefined
           : insideFocusSecondary || insideOpenWorkRun
             ? (this.fullscreen !== undefined ? 'click' : undefined)
-            : this.ordinaryFoldHint()
+            : isStandaloneCompactionDisclosure(message) && this.fullscreen !== undefined
+              ? 'click'
+              : this.ordinaryFoldHint()
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
     // per-card override AND for any REGULAR expanded root (the surface
     // contract — no mouse, so a capped diff would be unreadable); fullscreen

@@ -122,6 +122,41 @@ const BOUNDARY_DESCRIPTION = 'pagination boundary sentinel'
 const COMMAND_TURN = 58
 const COMMAND_ID = 'presentation-mid-turn-command'
 const COMMAND_NAME = 'model'
+/** The command's Work member identity: a real process row BEFORE the command. */
+const LIFETIME_TOOL_CALL = 'presentation-lifetime-call'
+const LIFETIME_TOOL_ARGS = '{"command":"lifetime-work"}'
+/** A numeric (in-turn automatic) compaction fixture inside its real Turn. */
+const NUMERIC_TURN = 56
+const NUMERIC_COMPACTION_ID = 'presentation-numeric-compaction'
+const NUMERIC_COMPACTION_ERROR = 'numeric fixture failure'
+/** A standalone (official `turn: null`) compaction AFTER a closed turn and
+ * BEFORE the next legitimate one. */
+const STANDALONE_AFTER_TURN = 57
+const STANDALONE_COMPACTION_ID = 'presentation-standalone-compaction'
+const STANDALONE_COMPACTION_ERROR = 'standalone fixture failure'
+
+/**
+ * Deterministic fixture clock for the durable seed. `Session.append` stamps
+ * `Date.now()`, and real wall-clock milliseconds can coalesce a whole turn —
+ * that would make an absolute Activity-boundary assertion vacuous. The seed
+ * only needs strictly increasing event times, so advance one millisecond per
+ * append and restore the real clock immediately afterwards. Production code is
+ * untouched; the live transient keeps its own explicit times.
+ */
+function withFixtureClock(body) {
+  const originalNow = Date.now
+  let current = 1_700_000_000_000
+  Date.now = () => {
+    const value = current
+    current += 1
+    return value
+  }
+  try {
+    return body()
+  } finally {
+    Date.now = originalNow
+  }
+}
 
 function appendTurn(session, turn, text, context = false) {
   session.append('turn/start', { turn })
@@ -144,6 +179,29 @@ function appendTurn(session, turn, text, context = false) {
   }), { surfaceOp: 'append' })
   session.append('step/start', { turn, step: 0 })
   if (turn === COMMAND_TURN) {
+    // A real Process member BEFORE the command, so the target Work's Activity
+    // lifetime is proven: the tool settles first and the command run is its
+    // first real following boundary. Log-only (no surface op) so the fixture's
+    // 50-message pagination tuning stays untouched — the transcript fold and
+    // both official readers consume the same durable events regardless.
+    session.append('tool/call', {
+      turn,
+      step: 0,
+      callId: LIFETIME_TOOL_CALL,
+      name: 'bash',
+      arguments: LIFETIME_TOOL_ARGS,
+    })
+    session.append('tool/result', {
+      turn,
+      step: 0,
+      message: {
+        id: 'presentation-lifetime-result',
+        role: 'tool',
+        toolCallId: LIFETIME_TOOL_CALL,
+        content: [{ type: 'text', text: 'lifetime result' }],
+        source: { kind: 'tool', callId: LIFETIME_TOOL_CALL },
+      },
+    }, { surfaceOp: 'append' })
     // Real official command lifecycle INSIDE one model turn: DSH opens no model
     // turn for a command, so this card is a turn-less control row between the
     // turn's opening prompt and its own final answer. The fixture writes events,
@@ -196,6 +254,13 @@ function appendTurn(session, turn, text, context = false) {
       files: [{ path: 'late-boundary.txt', description: 'must be excluded' }],
     })
   }
+  if (turn === NUMERIC_TURN) {
+    // A real typed compaction lifecycle INSIDE the open turn: the official
+    // numeric owner is this turn. A failed bracket is the simplest valid
+    // successful-admission/no-summary lifecycle and never mutates the surface.
+    session.append('compaction/start', { compactionId: NUMERIC_COMPACTION_ID, turn })
+    session.append('compaction/end', { compactionId: NUMERIC_COMPACTION_ID, turn, error: NUMERIC_COMPACTION_ERROR })
+  }
   session.append('step/end', { turn, step: 0 })
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
@@ -231,11 +296,25 @@ async function createHost() {
   const session = ctx.get('sessions').create(SessionId('presentation-session'), {
     meta: { cwd: '/tmp/dsh-d1-3-presentation', createdAt: 4_000 },
   })
-  for (let turn = 0; turn < 60; turn += 1) {
-    // The extra counted surface message shifts the 50-message initial page so
-    // the boundary turn's assistant is the oldest included message.
-    appendTurn(session, turn, `prompt ${turn}`, turn === 0 || turn === 59)
-  }
+  withFixtureClock(() => {
+    for (let turn = 0; turn < 60; turn += 1) {
+      // The extra counted surface message shifts the 50-message initial page so
+      // the boundary turn's assistant is within the oldest included turn. The
+      // lifetime Work's real tool result (turn 58) is surface-visible and REPLACES
+      // the latest turn's extra context row, so the page composition stays tuned.
+      appendTurn(session, turn, `prompt ${turn}`, turn === 0)
+      if (turn === STANDALONE_AFTER_TURN) {
+        // A standalone maintenance transaction BETWEEN two real turns: the
+        // official `turn: null` owner must stay independent of both.
+        session.append('compaction/start', { compactionId: STANDALONE_COMPACTION_ID, turn: null })
+        session.append('compaction/end', {
+          compactionId: STANDALONE_COMPACTION_ID,
+          turn: null,
+          error: STANDALONE_COMPACTION_ERROR,
+        })
+      }
+    }
+  })
 
   const agentFiber = ctx.plugin(() => {})
   const agent = {
@@ -369,6 +448,25 @@ async function main() {
     })
     assert.ok(boundaryDelivery !== undefined, 'fixture did not retain the boundary delivery declaration')
     assert.ok(boundaryAssistant !== undefined, 'fixture did not retain the boundary closing assistant')
+    const lifetimeCommandRun = directSnapshot.durableEvents.find(event => event.type === 'command/run'
+      && event.data?.commandId === COMMAND_ID)
+    const lifetimeToolResult = directSnapshot.durableEvents.find(event => event.type === 'tool/result'
+      && event.data?.message?.toolCallId === LIFETIME_TOOL_CALL)
+    const lifetimeClosingAssistant = directSnapshot.durableEvents.find(event => event.type === 'assistant/message'
+      && event.data?.turn === COMMAND_TURN)
+    assert.ok(lifetimeCommandRun !== undefined, 'fixture did not retain the lifetime command run')
+    assert.ok(lifetimeToolResult !== undefined, 'fixture did not retain the lifetime tool result')
+    assert.ok(lifetimeClosingAssistant !== undefined, 'fixture did not retain the later assistant boundary')
+    // STRICT seed ordering is part of the proof: if the whole turn shared one
+    // millisecond, a command-free fold could still land on the same time and the
+    // absolute assertion below would be vacuous.
+    assert.ok(lifetimeToolResult.time < lifetimeCommandRun.time,
+      'fixture ordering: the member settles STRICTLY before the real command boundary')
+    assert.ok(lifetimeCommandRun.time < lifetimeClosingAssistant.time,
+      'fixture ordering: a later boundary follows STRICTLY after the real command point')
+    const standaloneCompactionEnd = directSnapshot.durableEvents.find(event => event.type === 'compaction/end'
+      && event.data?.compactionId === STANDALONE_COMPACTION_ID)
+    assert.ok(standaloneCompactionEnd !== undefined, 'fixture did not retain the standalone compaction bracket')
 
     const initialBinding = sessions.binding(SessionId('presentation-session'))
     assert.ok(initialBinding !== undefined)
@@ -458,8 +556,8 @@ async function main() {
       const blocks = focusProjection(projection)
       const roots = blocks.filter(block => block.kind === 'activity' && block.activity.turn === COMMAND_TURN)
       assert.equal(roots.length, 1, `${label}: the mid-turn command Turn owns one Focus summary`)
-      assert.deepEqual(roots[0].actionStats, { total: 0, types: [] },
-        `${label}: the command never contributes an Action to the summary`)
+      assert.deepEqual(roots[0].actionStats, { total: 1, types: [['bash', 1]] },
+        `${label}: the real seeded tool is the ONLY Action — the command never contributes one`)
       const commands = blocks.filter(block => block.kind === 'message'
         && block.message.kind === 'command'
         && block.message.name === COMMAND_NAME)
@@ -477,6 +575,36 @@ async function main() {
         && event.data?.commandId === COMMAND_ID && event.data?.kind === 'success'),
         `${label}: the command settlement survived the reader path`)
       commandSeqs.push(runEvents[0].seq)
+      // ABSOLUTE lifetime fact (not comparator equality): the seeded Work member
+      // settles before the real command run, so the target Activity must freeze
+      // at that command run's first-visible time — a shared-but-wrong projector
+      // cannot pass this. The lifetime owner is the canonical tool row, matched
+      // by its own durable arguments.
+      const lifetimeOfTargetWork = projection.lifetimes.find(fact => fact.owner?.kind === 'tool'
+        && fact.owner.args === LIFETIME_TOOL_ARGS)
+      assert.ok(lifetimeOfTargetWork !== undefined, `${label}: the target Work lifetime is projected`)
+      assert.equal(lifetimeOfTargetWork.endedAt, lifetimeCommandRun.time,
+        `${label}: the target Work closes at the real command run first-visible time`)
+      assert.equal(lifetimeOfTargetWork.open, false, `${label}: the closed target Work is not open`)
+      assert.ok(lifetimeOfTargetWork.endedAt >= lifetimeToolResult.time,
+        `${label}: the member-end floor never regresses the proven boundary`)
+      // Standalone vs numeric compaction admission on the SAME durable slice:
+      // the null card owns no semantic turn and stays after its closed turn;
+      // the numeric card keeps its real in-turn owner.
+      const compactionRows = projection.messages.filter(message => message.kind === 'compaction')
+      const standalone = compactionRows.find(message => message.error === STANDALONE_COMPACTION_ERROR)
+      assert.ok(standalone !== undefined, `${label}: the standalone compaction card is visible`)
+      assert.equal('turn' in standalone, false, `${label}: the standalone card owns no model turn`)
+      const standaloneIndex = projection.messages.indexOf(standalone)
+      const closingTurnIndex = projection.messages.findIndex(message => message.kind === 'assistant'
+        && message.text === `answer ${STANDALONE_AFTER_TURN}`)
+      const nextPromptIndex = projection.messages.findIndex(message => message.kind === 'user'
+        && message.text === `prompt ${STANDALONE_AFTER_TURN + 1}`)
+      assert.ok(closingTurnIndex >= 0 && closingTurnIndex < standaloneIndex && standaloneIndex < nextPromptIndex,
+        `${label}: the standalone card keeps its real inter-turn chronology`)
+      const numeric = compactionRows.find(message => message.error === NUMERIC_COMPACTION_ERROR)
+      assert.ok(numeric !== undefined, `${label}: the numeric compaction card is visible`)
+      assert.equal(numeric.turn, NUMERIC_TURN, `${label}: the numeric card keeps its real in-turn owner`)
     }
     assert.equal(commandSeqs[0], commandSeqs[1],
       'both readers observe the SAME command lifecycle event')
@@ -508,6 +636,10 @@ async function main() {
       midTurnCommandTurn: COMMAND_TURN,
       midTurnCommandSeqs: commandSeqs,
       midTurnCommandRoots: 1,
+      lifetimeCommandRunTime: lifetimeCommandRun.time,
+      lifetimeToolResultTime: lifetimeToolResult.time,
+      numericCompactionTurn: NUMERIC_TURN,
+      standaloneCompactionEndSeq: standaloneCompactionEnd.seq,
     }))
   } finally {
     shadow?.dispose()

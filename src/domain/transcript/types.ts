@@ -251,7 +251,18 @@ export type TranscriptMessage =
    */
   | {
     kind: 'compaction'
-    turn: number
+    /**
+     * The model-turn ownership ADMITTED when this row first became visible:
+     * the official `compaction/start` (or end-only) durable `data.turn` when
+     * it is a safe non-negative integer. Absent for a standalone transaction
+     * (`turn: null`) AND for an unprovable summary-first/legacy fragment — the
+     * card then belongs to no model turn's display region. Official `null` and
+     * unknown are the same PRESENTATION fact here (neither admits a numeric
+     * owner) without a second transaction-owner ledger. Zero is a legal owner;
+     * never test truthiness. This is FIRST-ADMISSION ownership, not a
+     * maintenance lock: later id-matched events never re-home the row.
+     */
+    turn?: number
     /** The summary body (markdown), filled when compaction/summary lands. */
     text: string
     /** Shadowed history items (the shadowedSeqs count). */

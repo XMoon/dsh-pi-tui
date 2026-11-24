@@ -40,6 +40,7 @@ import {
   isPostTurnReplayEvidence,
   isSurfacedContext,
   isSurfacedInteractionTool,
+  transcriptTurnOf,
 } from '../../domain/transcript/semantics.ts'
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
 import {
@@ -173,7 +174,10 @@ export type FocusProjectedBlock =
 export function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
   if (message.kind === 'command') return undefined
   if (message.kind === 'compaction' && message.sourceCommand !== undefined) return undefined
-  return 'turn' in message ? message.turn : undefined
+  // The ONE numeric semantic reader: a standalone compaction (no admitted
+  // owner) and every other turn-less row are Focus BOUNDARIES, never a guess
+  // from the current/open turn or the fold's placement anchor.
+  return transcriptTurnOf(message)
 }
 
 /**
@@ -394,13 +398,14 @@ function focusPrimaryRegion(
 function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<number, CompactActionStats> {
   const accumulators = new Map<number, CompactActionStatsAccumulator>()
   for (const message of messages) {
-    if (!('turn' in message)) continue
+    const turn = transcriptTurnOf(message)
+    if (turn === undefined) continue
     const source = compactActionSourceOf(message)
     if (source === undefined) continue
-    let accumulator = accumulators.get(message.turn)
+    let accumulator = accumulators.get(turn)
     if (accumulator === undefined) {
       accumulator = newCompactActionStats()
-      accumulators.set(message.turn, accumulator)
+      accumulators.set(turn, accumulator)
     }
     addCompactActionStats(accumulator, source)
   }

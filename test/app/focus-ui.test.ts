@@ -17,7 +17,7 @@ import { afterEach, test } from 'node:test'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '../../src/transcript.ts'
+import { TranscriptFolder, windowMessages, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
@@ -1165,7 +1165,7 @@ test('regular search reveal of a NON-recent root full-reveals its process (no de
   // The search reveals the OLDEST turn — NOT inside the recent boundary:
   // regular mode must still full-reveal its process (a manual root is
   // never a dead compact timeline).
-  const oldestTool = folder.messages().find(m => m.kind === 'tool' && m.turn === 1)
+  const oldestTool = folder.messages().find((m): m is Extract<TranscriptMessage, { kind: 'tool' }> => m.kind === 'tool' && m.turn === 1)
   assert.ok(oldestTool !== undefined, 'fixture: the oldest turn has a tool card')
   app.revealSearchMatch(oldestTool)
   await vt.waitForRender()
@@ -3618,7 +3618,7 @@ test('search-revealing an old tool does not Thought-expand unrelated surfaced co
   app.setTranscriptDetailExpanded(true)
   show(app, folder)
   await vt.waitForRender()
-  const tool = folder.messages().find(message => message.kind === 'tool' && message.turn === 1)
+  const tool = folder.messages().find((message): message is Extract<TranscriptMessage, { kind: 'tool' }> => message.kind === 'tool' && message.turn === 1)
   assert.ok(tool !== undefined, 'fixture: the old tool exists')
   const collapsed = vt.getViewport().join('\n')
   assert.ok(!collapsed.includes('old context detail line'), 'precondition: the old context starts folded')
@@ -5162,4 +5162,228 @@ test('a terminal Turn error still paints exactly one bounded Focus summary', asy
   assert.ok(/Failed/.test(joined), `the terminal reason is named:\n${joined}`)
   assert.ok(joined.includes('Action:'), `the bounded Action slot remains:\n${joined}`)
   app.stop()
+})
+
+// ---------------------------------------------------------------------------
+// PR2 C02: standalone compaction stays independent of the Focus root
+// ---------------------------------------------------------------------------
+
+/** PR2 R1-01 fixture: two REAL Turns + one numeric in-turn Context compaction
+ *  + one REAL standalone (`turn: null`) compaction between them. The body-only
+ *  markers prove a collapsed card cannot satisfy a visible-body assertion. */
+function standaloneCompactionFolder(): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('pr2-u1'), role: 'user',
+      content: [{ type: 'text', text: 'first prompt' }], source: { kind: 'user' },
+    }, T0 + 1_000, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('pr2-c1'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo first' }),
+    }, T0 + 2_000, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pr2-r1'), role: 'tool', toolCallId: ToolCallId('pr2-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-c1') },
+      },
+    }, T0 + 5_000, 3),
+    // A NUMERIC in-turn automatic compaction stays a normal Context card of its
+    // real turn (never a standalone fence and never a second root).
+    eventAt('compaction/start', { compactionId: 'pr2-numeric', turn: 1 }, T0 + 6_000, 4),
+    eventAt('compaction/summary', {
+      compactionId: 'pr2-numeric', summary: [{ type: 'text', text: 'NUMERIC_SUMMARY_BODY' }],
+      shadowedSeqs: [0], shadowedTokenCount: 20,
+    }, T0 + 7_000, 5),
+    eventAt('compaction/end', { compactionId: 'pr2-numeric', turn: 1 }, T0 + 8_000, 6),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pr2-a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'first final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 9_000, 7),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 10_000, 8),
+    // The REAL upstream idle maintenance shape: `turn: null` BETWEEN turns.
+    eventAt('compaction/start', { compactionId: 'pr2-standalone', turn: null }, T0 + 11_000, 9),
+    eventAt('compaction/summary', {
+      compactionId: 'pr2-standalone', summary: [{ type: 'text', text: 'STANDALONE_SUMMARY_BODY' }],
+      shadowedSeqs: [0], shadowedTokenCount: 10,
+    }, T0 + 12_000, 10),
+    eventAt('compaction/end', { compactionId: 'pr2-standalone', turn: null }, T0 + 13_000, 11),
+    eventAt('turn/start', { turn: 2 }, T0 + 14_000, 12),
+    eventAt('user/message', {
+      id: MessageId('pr2-u2'), role: 'user',
+      content: [{ type: 'text', text: 'second prompt' }], source: { kind: 'user' },
+    }, T0 + 15_000, 13),
+    eventAt('tool/call', {
+      turn: 2, step: 0, callId: ToolCallId('pr2-c2'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo second' }),
+    }, T0 + 16_000, 14),
+    eventAt('tool/result', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('pr2-r2'), role: 'tool', toolCallId: ToolCallId('pr2-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-c2') },
+      },
+    }, T0 + 17_000, 15),
+    eventAt('assistant/message', {
+      turn: 2, step: 0,
+      message: {
+        id: MessageId('pr2-a2'), role: 'assistant',
+        content: [{ type: 'text', text: 'second final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 18_000, 16),
+    eventAt('turn/end', { turn: 2, reason: { kind: 'completed' } }, T0 + 19_000, 17),
+  ])
+  return folder
+}
+
+test('fullscreen Focus: the standalone compaction owns its real click action and never a root key', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'focus' },
+  })
+  app.start()
+  startedApps.add(app)
+  t.after(() => app.dispose())
+  const folder = standaloneCompactionFolder()
+  app.setFullscreen(true)
+  show(app, folder)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.equal(countFocusHeaders(joined), 2, 'only the two REAL turns own a Focus root')
+  assert.equal(countFocusHeaders(joined, true), 0, 'both real roots start collapsed')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'), 'the standalone card starts folded')
+  assert.ok(!joined.includes('NUMERIC_SUMMARY_BODY'), 'the numeric card starts folded')
+  const cardRows = view.map((line, index) => line.includes('Context compacted') ? index : -1)
+    .filter(index => index >= 0)
+  assert.equal(cardRows.length, 2, 'both compaction cards render once')
+  const cardLine = view[(cardRows.at(-1) ?? -1) + 1] ?? ''
+  assert.ok(cardLine.includes('click to expand'),
+    `the card advertises its actual mouse action:\n${cardLine}`)
+  assert.ok(!cardLine.includes('ctrl+o to expand'),
+    `the card must not advertise a root key that cannot open it:\n${cardLine}`)
+  const standaloneTitleRow = (): number => {
+    const rows = vt.getViewport()
+      .map((line, index) => line.includes('Context compacted') ? index : -1)
+      .filter(index => index >= 0)
+    return (rows.at(-1) ?? 0) + 1
+  }
+
+  // A real pointer click flips the visible card state; the Focus roots stay
+  // untouched in both directions.
+  click(vt, 10, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the standalone body opens through its own card click:\n${joined}`)
+  assert.equal(countFocusHeaders(joined), 2, 'opening the card mints no Focus root')
+  assert.equal(countFocusHeaders(joined, true), 0, 'opening the card never opens a Thought root')
+  // A different cell: Pi's double-click word-selection window must not turn
+  // the pair into a text selection instead of two card toggles.
+  click(vt, 25, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the second click closes the card again:\n${joined}`)
+  assert.equal(countFocusHeaders(joined, true), 0, 'closing the card never touches a Thought root')
+
+  // Fullscreen Focus Ctrl+O owns the Thought roots, not this card.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `root Ctrl+O must not open the standalone card:\n${joined}`)
+  app.setFullscreen(false)
+})
+
+test('fullscreen Full: a master-ON standalone card still closes and reopens through its own click', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+  })
+  app.start()
+  startedApps.add(app)
+  t.after(() => app.dispose())
+  const folder = standaloneCompactionFolder()
+  app.setFullscreen(true)
+  show(app, folder)
+  await vt.waitForRender()
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'precondition: the Full master is ON')
+  let view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the master-ON default opens the standalone card:\n${joined}`)
+  assert.ok(joined.includes('NUMERIC_SUMMARY_BODY'),
+    `the master-ON default expands the numeric control card too:\n${joined}`)
+  const standaloneTitleRow = (): number => {
+    const rows = vt.getViewport()
+      .map((line, index) => line.includes('Context compacted') ? index : -1)
+      .filter(index => index >= 0)
+    return (rows.at(-1) ?? 0) + 1
+  }
+  // Under a bulk-ON default the first click must CLOSE the card instead of
+  // writing a no-op `true` that leaves the OR-expression (and the card) open.
+  click(vt, 3, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the first click closes the standalone card under master ON:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master stays ON')
+  assert.ok(joined.includes('NUMERIC_SUMMARY_BODY'),
+    'the unrelated numeric Context card keeps its master default')
+  view = vt.getViewport()
+  const closedHintRow = view[standaloneTitleRow()] ?? ''
+  assert.ok(closedHintRow.includes('click to expand'),
+    `the closed card advertises the actual click owner under Full master ON:\n${closedHintRow}`)
+  assert.ok(!closedHintRow.includes('ctrl+o to expand'),
+    `the card must not advertise a key that a negative choice defeats:\n${closedHintRow}`)
+  // A second click (different cell: avoids the double-click word selection)
+  // reopens it while the master is still ON.
+  click(vt, 25, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the second click reopens the standalone card under master ON:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master still stays ON')
+  // Third click: park an explicit NEGATIVE choice while the master is ON.
+  click(vt, 3, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the negative choice closes the card again:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master is still ON')
+  // Turn the Full master OFF, then return to the REGULAR surface. The parked
+  // negative choice must not veto regular's sole operable keyboard owner: the
+  // FIRST Ctrl+O expansion opens this card, and the next Ctrl+O folds it.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'precondition: the Full master is OFF')
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `precondition: the negative choice leaves the card folded on regular:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'precondition: regular master OFF')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal(app.isTranscriptDetailExpanded(), true,
+    'the first regular expansion turns the master ON')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the FIRST regular expansion opens the card despite the parked negative choice:\n${joined}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the second press folds the master again')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the regular collapse folds the card again:\n${joined}`)
 })

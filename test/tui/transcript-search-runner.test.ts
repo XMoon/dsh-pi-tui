@@ -31,6 +31,7 @@ import {
 } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { countFocusHeaders } from '../support/focus-header.ts'
 
 /** Capture the production TuiApp the runner starts (without replacing it). */
 function captureApps(): { apps: TuiApp[]; restore: () => void } {
@@ -395,6 +396,138 @@ test('runner Focus search: command detail needs no root reveal, hidden Process d
   app.closeTranscriptSearch()
   await fixture.settleRender()
   assert.ok(app.focusExpandedTurnsForTest().has(0), 'a manual grant is never revoked by a search dismissal')
+})
+
+test('runner Focus search: an off-window standalone compaction hit re-windows to its own card without a root', async (t) => {
+  const TURN_COUNT = 25
+  const marker = 'ZQX_STANDALONE_SEARCH_MARKER'
+  const events: SessionEvent[] = []
+  let seq = 0
+  const push = (type: string, data: Record<string, unknown>): void => {
+    events.push(event(type, data, seq))
+    seq += 1
+  }
+  push('turn/start', { turn: 0 })
+  push('user/message', {
+    id: MessageId('pr2-search-user'), role: 'user',
+    content: [{ type: 'text', text: 'first turn' }],
+    source: { kind: 'user' },
+  })
+  push('tool/call', { turn: 0, step: 0, callId: ToolCallId('pr2-sc'), name: 'bash', arguments: '{}' })
+  push('tool/result', {
+    turn: 0, step: 0,
+    message: {
+      id: MessageId('pr2-sr'), role: 'tool', toolCallId: ToolCallId('pr2-sc'),
+      content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-sc') },
+    },
+  })
+  push('assistant/message', {
+    turn: 0, step: 0,
+    message: {
+      id: MessageId('pr2-sa'), role: 'assistant',
+      content: [{ type: 'text', text: 'first final' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  })
+  push('turn/end', { turn: 0, reason: { kind: 'completed' } })
+  // The REAL standalone maintenance shape after completed turn 0, with a body
+  // marker unique to this card (no turn prompt/answer contains `z`).
+  push('compaction/start', { compactionId: 'pr2-search-compaction', turn: null })
+  push('compaction/summary', {
+    compactionId: 'pr2-search-compaction',
+    summary: [{ type: 'text', text: marker }],
+    shadowedSeqs: [0], shadowedTokenCount: 10,
+  })
+  push('compaction/end', { compactionId: 'pr2-search-compaction', turn: null })
+  // Enough legitimate later turns to put turn 0 (and its standalone card)
+  // outside the production current window (20 turns), not merely off-screen.
+  for (let turn = 1; turn < TURN_COUNT; turn += 1) {
+    push('turn/start', { turn })
+    push('user/message', {
+      id: MessageId(`pr2-search-user-${turn}`), role: 'user',
+      content: [{ type: 'text', text: `ordinary prompt ${turn}` }],
+      source: { kind: 'user' },
+    })
+    push('assistant/message', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`pr2-search-a-${turn}`), role: 'assistant',
+        content: [{ type: 'text', text: `ordinary answer ${turn}` }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    })
+    push('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  // Fold-index precondition: the production window excludes turn 0 and the
+  // standalone card before search begins.
+  const folder = new TranscriptFolder()
+  folder.apply(events)
+  const beforeWindow = folder.window({ maxTurns: 20 })
+  assert.ok(beforeWindow.firstTurn !== undefined && beforeWindow.firstTurn > 0,
+    `precondition: the current window starts after turn 0 (got ${String(beforeWindow.firstTurn)})`)
+  assert.ok(!beforeWindow.messages.some(message => message.kind === 'compaction'),
+    'precondition: the standalone card is outside the current window, not merely off-screen')
+
+  const fixture = await mountSearchRunner(t, TURN_COUNT, [], 'unused', events)
+  const { app, projections } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'precondition: every real Turn starts collapsed')
+
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  projections.reset()
+  app.resetSearchPresentationDiagnosticsForTest()
+  fixture.input('z')
+  await fixture.settleRender()
+  assert.equal(projections.count(), 1,
+    'the off-window standalone hit projects its containing window exactly once')
+  assert.equal(app.transcriptSearchPresentationForTest()?.matchTurn, 0,
+    'the returned anchor is the standalone card placement of turn A')
+  const target = app.transcriptSearchPresentationForTest()?.message
+  assert.equal(target?.kind, 'compaction', 'the standalone card itself is the search target')
+  const revealed = fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.equal((revealed.match(new RegExp(marker, 'gu')) ?? []).length, 1,
+    `the containing window paints the standalone body exactly once:\n${revealed}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'the placement anchor never grants a Thought root for turn A')
+  assert.equal(countFocusHeaders(revealed, true), 0,
+    'the revealed card does not open any real Focus root')
+  assert.equal(countFocusHeaders(revealed), 1,
+    'the containing window holds exactly the one real Turn A root')
+
+  // Dismiss through the REAL full-search route. The existing dismissal policy
+  // promotes the CURRENT reveal into the card's own durable disclosure — never
+  // into a Focus root for turn A. The card therefore stays body-visible and can
+  // be closed by its own click afterwards.
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined,
+    'the real dismiss cleared the search target')
+  let after = fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.ok(after.includes('Context compacted'), 'the containing card row remains visible')
+  assert.ok(after.includes(marker),
+    `the existing dismissal policy promotes the card detail itself:\n${after}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'dismissing the standalone hit promotes no Thought root')
+  assert.equal(countFocusHeaders(after, true), 0, 'no Focus root is left open')
+  // The promoted owner is the CARD: its own click closes it and still opens
+  // no root.
+  const cardRow = fixture.vt.getViewport()
+    .map((line, index) => line.includes('Context compacted') ? index : -1)
+    .filter(index => index >= 0)
+    .at(-1)
+  assert.ok(cardRow !== undefined && cardRow >= 0, 'the compaction card row exists after dismiss')
+  fixture.input(`\x1b[<0;10;${(cardRow ?? 0) + 1}M`)
+  fixture.input(`\x1b[<0;10;${(cardRow ?? 0) + 1}m`)
+  await fixture.settleRender()
+  after = fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.ok(!after.includes(marker), `the card-local click closes the promoted detail:\n${after}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'closing the card still promotes no Thought root')
+  assert.equal(countFocusHeaders(after, true), 0, 'the root stays collapsed')
 })
 
 test('runner Focus search: a fail-open Work member never promotes a phantom Work', async (t) => {
