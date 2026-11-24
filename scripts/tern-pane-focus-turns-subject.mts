@@ -480,7 +480,10 @@ try {
         originalAppend.call(this, 'command/done', {
           commandId: 'focus-command-mid-turn',
           kind: 'success',
-          text: 'model switched mid-turn',
+          // A genuinely FOLDABLE outcome: the collapsed card paints the bounded
+          // first line; the native detail body (the marker) only appears after
+          // the client's own command-detail toggle.
+          text: 'model switched mid-turn\nCOMMAND-DETAIL-MARKER the remaining steps continue with the newly selected model and the card body stays independently operable.',
         })
         note({ kind: 'command.injected', commandId: 'focus-command-mid-turn', after: toolCallId })
       }

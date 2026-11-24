@@ -592,8 +592,9 @@ test('the composed Focus binding reveals only what each semantic hit really hide
   // The harness's initial publish can precede the renderer mount; repaint once
   // so the REAL composed subject paints its transcript before the search.
   h.surface.repaint()
-  await settle()
   const painted = (needle: string): boolean => h.texts().some(text => text.includes(needle))
+  await waitUntil('the composed transcript paints its one summary',
+    () => h.texts().join('\n').includes('Turn complete'))
   const summaryCount = (): number => (h.texts().join('\n').match(/Turn complete/g) ?? []).length
 
   assert.equal(painted('PROCESS_B_RESULT_MARKER'), false, 'precondition: the hidden Process body is folded')

@@ -366,6 +366,33 @@ export default async function (h) {
     h.capture('focus-command-trailing-1280x800-dark',
       'the same Turn has the command at its raw tail before any continuation is evidenced')
 
+    // The command card owns its OWN disclosure, independent of the Turn root.
+    // A genuinely foldable outcome proves the client-native detail toggle (not
+    // a fixture-injected flag).
+    const commandHeadIn = snapshot => snapshot.nodes.find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('/model switch'))
+    const commandDetailVisible = () => h.texts(h.snapshot()).some(line => line.includes('COMMAND-DETAIL-MARKER'))
+    const toggleCommandDetail = async (label) => {
+      const snapshot = h.snapshot()
+      const head = commandHeadIn(snapshot)
+      const clicked = head !== undefined && await h.click(snapshot.chains, head)
+      h.check(label, clicked)
+      return clicked
+    }
+    if (!await toggleCommandDetail('the standalone command detail toggles through the real client pointer')) {
+      finish(h, extra)
+      return
+    }
+    if (!await waitFor(h, 'the command detail body appears after the client toggle', commandDetailVisible)) {
+      finish(h, extra)
+      return
+    }
+    h.check('the standalone command detail toggle never opens a second Focus summary',
+      rootIds(liveNodes(h)).length === 1, JSON.stringify(rootIds(liveNodes(h))))
+    h.capture('focus-command-detail-collapsed-1280x800-dark',
+      'the standalone command card owns its own native detail disclosure')
+
     // Phase 2 — a real same-Turn continuation (the second Tool call) lands: the
     // command is bridged and reflows ahead of the one collapsed summary.
     writeFileSync(join(h.root, 'release-tool-step.json'), `${JSON.stringify({ release: true })}\n`)
@@ -411,6 +438,21 @@ export default async function (h) {
       finish(h, extra)
       return
     }
+
+    // The reflowed command keeps its own disclosure operable and independent of
+    // the one summary.
+    if (!commandDetailVisible()) {
+      if (!await toggleCommandDetail('the bridged command detail toggles after the reflow')) {
+        finish(h, extra)
+        return
+      }
+      if (!await waitFor(h, 'the bridged command detail body appears after the reflow toggle', commandDetailVisible)) {
+        finish(h, extra)
+        return
+      }
+    }
+    h.check('the bridged command detail never opens a second Focus summary',
+      rootIds(liveNodes(h)).length === 1, JSON.stringify(rootIds(liveNodes(h))))
 
     // Phase 3 — opening the one root keeps the command physically between the
     // two canonical Work runs and independent of their disclosure.
@@ -476,6 +518,22 @@ export default async function (h) {
     h.capture('focus-command-expanded-1280x800-dark',
       'the same Turn opened: Work A, the independent command row, then Work B')
 
+    // The command's OWN detail still toggles while the root is open: closing it
+    // must neither collapse the root nor disturb the two Work runs.
+    if (!await toggleCommandDetail('the expanded root keeps the command detail independently operable')) {
+      finish(h, extra)
+      return
+    }
+    if (!await waitFor(h, 'the command detail closes while the root stays open',
+      () => !commandDetailVisible())) {
+      finish(h, extra)
+      return
+    }
+    h.check('the command detail toggle never closes the one open root',
+      liveNodes(h).get(rootIdForCommand)?.p.collapsed === false
+        && workIds(liveNodes(h), rootIdForCommand).length === 2,
+      JSON.stringify({ root: liveNodes(h).get(rootIdForCommand)?.p.collapsed }))
+
     const closeSnap = h.snapshot()
     const closeHead = headWithText(closeSnap, 'Working')
     const beforeCloseCommand = eventRows(h).length
@@ -504,6 +562,25 @@ export default async function (h) {
       finish(h, extra)
       return
     }
+
+    // After the root closes, the command is standalone again and still owns its
+    // own detail disclosure: toggling it never reopens/collapses the root.
+    if (!commandDetailVisible()) {
+      if (!await toggleCommandDetail('the standalone command detail toggles after the root closes')) {
+        finish(h, extra)
+        return
+      }
+      if (!await waitFor(h, 'the command detail body appears after the root closes', commandDetailVisible)) {
+        finish(h, extra)
+        return
+      }
+    }
+    h.check('the closed root stays closed while the command detail toggles',
+      rootIds(liveNodes(h)).length === 1
+        && liveNodes(h).get(rootIds(liveNodes(h))[0])?.p.collapsed === true,
+      JSON.stringify({ roots: rootIds(liveNodes(h)), root: liveNodes(h).get(rootIds(liveNodes(h))[0])?.p }))
+    h.capture('focus-command-detail-after-close-1280x800-dark',
+      'the command detail stays independent of the closed Focus root')
   } else {
     if (!await waitFor(h, 'the official Ask User tool reaches its user-wait phase', () => {
       const rows = records(h)
