@@ -8,7 +8,7 @@
  * directly or fakes a Workspace.
  */
 
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -174,7 +174,9 @@ test('completes Host workspace files before creating the first session in that w
     // or native spawn exists. The outside sibling EXISTS and is canonical, so
     // the cwd/home refusals are the actual containment check rather than a
     // missing-path failure, and the refused attempt must not mutate it.
-    const outsideSibling = mkdtempSync(join(realpathSync(dirname(root)), 'split-process-outside-'))
+    const outsideSibling = join(realpathSync(dirname(root)),
+      `split-process-outside-${String(process.pid)}-${String(Date.now())}`)
+    mkdirSync(outsideSibling, { mode: 0o700 })
     try {
       const idsBeforeBoundary = await scene.sessionIds()
       await expect(scene.startClient({ label: '../../escape', cwd: primary, home: primaryHome }))
