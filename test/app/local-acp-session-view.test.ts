@@ -5524,7 +5524,7 @@ test('G-ACP2-PR2 LOAD-13: a subagent-edge overflow aborts the waiting read and f
   assert.equal(view.registry.hasClaim('LD15'), false, 'the failed load releases only this View')
 })
 
-test('G-ACP2-PR2 LIVE-01: a live close aborts an in-flight cold header read and leaves another View alive', async () => {
+test('G-ACP2-PR2 LIVE-01: a live close aborts an in-flight cold header read without publishing a late frame', async () => {
   const view = projectionView('L15')
   await view.resume()
   view.notifications.length = 0

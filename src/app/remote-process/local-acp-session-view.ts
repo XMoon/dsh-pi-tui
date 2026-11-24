@@ -4887,8 +4887,6 @@ const NO_PROJECTION_CAPABILITIES: AcpNegotiatedCapabilities = {
   notices: false,
 }
 
-/** A signal nothing aborts, used by read-only projections outside a replay barrier. */
-
 /** The bounded load replay window could not hold every live event. */
 function loadBackpressure(): LocalAcpViewError {
   return new LocalAcpViewError(
