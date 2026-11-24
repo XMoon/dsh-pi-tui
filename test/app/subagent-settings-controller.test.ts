@@ -518,7 +518,7 @@ test('start loads the current section and syncs both drafts from the effective v
   controller.dispose()
 })
 
-test('editing stages only; blank stages an explicit Reset that stays dirty when effective matches inherited', async () => {
+test('editing stages only; an explicit Reset is the ONE unset intent and stays dirty when effective matches inherited', async () => {
   const fixtureState = numericFixture()
   const { controller } = makeNumericController(fixtureState)
   controller.start()
@@ -526,16 +526,23 @@ test('editing stages only; blank stages an explicit Reset that stays dirty when 
 
   controller.setNumber('timeoutMs', '30000')
   assert.equal(controller.snapshot().dirty, true)
+  assert.deepEqual(controller.snapshot().dirtyFields, ['timeoutMs'], 'the dirty fields are the REAL patch keys')
   assert.equal(fixtureState.mutations.length, 0, 'editing never writes')
 
   controller.reset('maxOutputBytes')
   const snapshot = controller.snapshot()
   assert.deepEqual(snapshot.resetFields, ['maxOutputBytes'])
+  assert.deepEqual(snapshot.dirtyFields, ['timeoutMs', 'maxOutputBytes'], 'set and reset are both real staged fields')
   assert.equal(controller.textOf('maxOutputBytes'), '')
+  // A normal Stage equal to the served value removes ONLY that field's patch.
+  controller.setNumber('maxOutputBytes', '64000')
+  assert.deepEqual(controller.snapshot().dirtyFields, ['timeoutMs'])
+  assert.deepEqual(controller.snapshot().resetFields, [])
   // An explicit Reset is an intent even when the effective value equals base.
   controller.discard()
   controller.reset('maxOutputBytes')
   assert.equal(controller.snapshot().dirty, true)
+  assert.deepEqual(controller.snapshot().dirtyFields, ['maxOutputBytes'])
   controller.dispose()
 })
 
@@ -561,6 +568,7 @@ test('Save dispatches one exact-revision mutation and verifies from the same-gen
   assert.equal(snapshot.dirty, false)
   assert.equal(snapshot.saved, true)
   assert.equal(snapshot.status?.kind, 'verified')
+  assert.deepEqual(snapshot.dirtyFields, [], 'a verified save leaves no staged field')
   assert.deepEqual(snapshot.texts, { timeoutMs: '45000', maxOutputBytes: '128000' })
   assert.deepEqual(fixtureState.effective, { timeoutMs: 45_000, maxOutputBytes: 128_000 })
   controller.dispose()
@@ -581,7 +589,7 @@ test('a staged Reset dispatches the official unset and the next readback decides
   controller.dispose()
 })
 
-test('an invalid draft is refused before dispatch and keeps the field error reachable', async () => {
+test('an invalid or blank draft is refused before dispatch and NEVER becomes an implicit Reset', async () => {
   const fixtureState = numericFixture()
   const { controller } = makeNumericController(fixtureState)
   controller.start()
@@ -592,10 +600,19 @@ test('an invalid draft is refused before dispatch and keeps the field error reac
     await drainMicrotasks()
     assert.equal(fixtureState.mutations.length, 0, `${JSON.stringify(invalid)} must never dispatch`)
     assert.match(controller.snapshot().issues.timeoutMs ?? '', /safe positive integer/u)
+    assert.deepEqual(controller.snapshot().dirtyFields, ['timeoutMs'], 'the invalid draft is retained as a patch entry')
   }
-  assert.equal(controller.snapshot().dirty, true, 'the invalid draft is retained')
-  // A whitespace-only field is the documented empty-field Reset, not a set.
-  controller.setNumber('timeoutMs', '  ')
+  // A blank/whitespace-only field is an INVALID draft, never the official unset:
+  // the unset has exactly one entry, the explicit Reset.
+  for (const blank of ['', '   ']) {
+    controller.setNumber('timeoutMs', blank)
+    controller.save()
+    await drainMicrotasks()
+    assert.equal(fixtureState.mutations.length, 0, `${JSON.stringify(blank)} must never dispatch an unset`)
+    assert.match(controller.snapshot().issues.timeoutMs ?? '', /required/u)
+  }
+  controller.reset('timeoutMs')
+  assert.deepEqual(controller.snapshot().issues, {}, 'the explicit Reset carries no numeric issue')
   controller.save()
   await drainMicrotasks()
   assert.equal(fixtureState.mutations.length, 1)
@@ -742,4 +759,136 @@ test('the numeric controller treats the served Shell executor identity as curren
   await drainMicrotasks()
   assert.equal(mutations.length, 0, 'the stale executor page never dispatches')
   controller.dispose()
+})
+
+test('the post-save readback must serve the SAME executor row, even when the caps agree', async () => {
+  interface ShellSection {
+    readonly executor: 'bash' | 'pwsh'
+    readonly timeoutMs: number
+    readonly maxOutputBytes: number
+  }
+  const generation = {}
+  let revision = 1
+  let serve: 'bash' | 'pwsh' = 'bash'
+  let effective: ShellSection = { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 }
+  const inherited: ShellSection = { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 }
+  const mutations: { readonly patch: SectionPatch<ShellSection> }[] = []
+  let afterAccept: (() => void) | undefined
+  const port: HostNumericSettingsPort<ShellSection> = {
+    read: () => ({
+      kind: 'ready', generation, revision,
+      effective: { ...effective, executor: serve },
+      inherited: { ...inherited, executor: serve },
+      overridden: {
+        executor: false,
+        timeoutMs: effective.timeoutMs !== inherited.timeoutMs,
+        maxOutputBytes: effective.maxOutputBytes !== inherited.maxOutputBytes,
+      },
+    }),
+    refresh: async () => {},
+    mutate: async (patch, expectedRevision, expectedGeneration) => {
+      mutations.push({ patch })
+      if (expectedRevision !== revision || expectedGeneration !== generation) return { kind: 'conflict', reason: 'revision changed' }
+      const next = { ...effective }
+      for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+        const edit = patch[field]
+        if (edit === undefined) continue
+        next[field] = edit.kind === 'reset' ? inherited[field] : edit.value
+      }
+      effective = next
+      revision += 1
+      // The Host accepts the batch, then starts serving the OTHER executor row
+      // with identical caps in the SAME generation.
+      afterAccept?.()
+      return { kind: 'accepted' }
+    },
+  }
+  const fields: readonly HostNumericSettingsField<ShellSection>[] = [
+    { key: 'timeoutMs', label: 'Command timeout (ms)' },
+    { key: 'maxOutputBytes', label: 'Output cap per stream (bytes)' },
+  ]
+  const controller = new HostNumericSettingsController<ShellSection>({
+    port,
+    fields,
+    valueIdentity: value => value.executor,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  controller.start()
+  await drainMicrotasks()
+
+  // 1. A normal set: the accepted caps are applied, but the readback now serves
+  //    pwsh. Same generation and the requested value are NOT a proof.
+  controller.setNumber('timeoutMs', '45000')
+  afterAccept = () => { serve = 'pwsh' }
+  controller.save()
+  await drainMicrotasks()
+  let snapshot = controller.snapshot()
+  assert.equal(mutations.length, 1)
+  assert.equal(snapshot.status?.kind, 'unverified', 'a swapped served row is never Verified')
+  assert.match(snapshot.status?.text ?? '', /different row/u)
+  assert.equal(snapshot.dirty, true, 'the captured draft is retained')
+  assert.deepEqual(snapshot.dirtyFields, ['timeoutMs'])
+  assert.equal(snapshot.current, false, 'the captured row is no longer the served one')
+  controller.save()
+  await drainMicrotasks()
+  assert.equal(mutations.length, 1, 'no blind replay after the unverified settlement')
+  controller.dispose()
+
+  // 2. The ALL-RESET negative: official unset values equal the inherited ones,
+  //    so only the executor identity can distinguish the rows.
+  serve = 'bash'
+  effective = { executor: 'bash', timeoutMs: 90_000, maxOutputBytes: 10_000 }
+  revision += 1
+  const resetController = new HostNumericSettingsController<ShellSection>({
+    port,
+    fields,
+    valueIdentity: value => value.executor,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  resetController.start()
+  await drainMicrotasks()
+  resetController.reset('timeoutMs')
+  resetController.reset('maxOutputBytes')
+  afterAccept = () => { serve = 'pwsh' }
+  resetController.save()
+  await drainMicrotasks()
+  snapshot = resetController.snapshot()
+  assert.equal(mutations.length, 2)
+  assert.deepEqual(mutations[1]?.patch, {
+    timeoutMs: { kind: 'reset' },
+    maxOutputBytes: { kind: 'reset' },
+  })
+  assert.equal(snapshot.status?.kind, 'unverified', 'an all-reset readback from another row is never Verified')
+  assert.deepEqual(snapshot.dirtyFields, ['timeoutMs', 'maxOutputBytes'])
+  resetController.dispose()
+
+  // 3. Positive control: the SAME executor with a legitimately new revision is
+  //    a real Verified settlement, and the next Save uses the new capture.
+  serve = 'bash'
+  revision += 1
+  const positive = new HostNumericSettingsController<ShellSection>({
+    port,
+    fields,
+    valueIdentity: value => value.executor,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  positive.start()
+  await drainMicrotasks()
+  afterAccept = undefined
+  positive.setNumber('timeoutMs', '12')
+  positive.save()
+  await drainMicrotasks()
+  snapshot = positive.snapshot()
+  assert.equal(snapshot.status?.kind, 'verified')
+  assert.deepEqual(snapshot.dirtyFields, [])
+  assert.equal(snapshot.current, true)
+  positive.setNumber('timeoutMs', '13')
+  positive.save()
+  await drainMicrotasks()
+  assert.equal(positive.snapshot().status?.kind, 'verified', 'the new capture settles at the advanced revision')
+  assert.equal(mutations.length, 4)
+  positive.dispose()
 })

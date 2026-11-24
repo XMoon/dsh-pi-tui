@@ -1326,7 +1326,7 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   )
   assert.equal(recorder.calls.length, 1, 'the discarded draft never reached the Host')
 
-  // ── Shell execution: both caps in ONE official mutation ───────────────────
+  // ── Shell execution: the grouped Detail tenant, ONE official batch ────────
   await ui.vt.sendInput('\x1b') // Agent rows -> the category rail
   await ui.vt.waitForRender()
   await ui.vt.sendInput('\x1b[H') // the rail walk is absolute from About
@@ -1336,27 +1336,66 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   for (let step = 0; step < 8 && !/> Shell execution/u.test(ui.vt.getViewport().join('\n')); step += 1) {
     await settingsKey(ui, '\x1b[B')
   }
-  await clickUiPainted(ui, 'Shell execution')
+  const shellFrame = (): string => ui.vt.getViewport().join('\n')
+  // Selecting the row is NOT a mount; the painted `Open…` body entry IS.
+  await clickUiPainted(ui, '> Shell execution')
+  assert.doesNotMatch(shellFrame(), /Command timeout \(ms\)/u, 'a row click only selects the row')
+  assert.match(shellFrame(), /Open…/u, 'the Detail preview paints its explicit OPEN entry')
+  assert.equal(recorder.calls.length, 1, 'selecting the row never writes and never mounts the group')
+  await clickUiPainted(ui, 'Open…')
   await waitForFrame(
-    () => ui.vt.getViewport().join('\n'),
-    frame => /Settings · Tools · Shell execution/u.test(frame) && /Command timeout \(ms\)\s+60000/u.test(frame),
-    () => ui.vt.waitForRender(), 'the real Root opens the Shell-execution page',
+    () => shellFrame(),
+    frame => /Settings · Tools · Shell execution/u.test(frame) && /Command timeout \(ms\)\s+60000 ms/u.test(frame),
+    () => ui.vt.waitForRender(), 'the real Root opens the grouped Shell tenant',
   )
   const shellOpened = readySection(port.shellExecutionSettings.read())
+  // A field click only SELECTS; the explicit Edit opens the raw Input.
   await clickUiPainted(ui, 'Command timeout (ms)')
+  assert.doesNotMatch(shellFrame(), /Value:|Edit Command timeout/u, 'a field click never starts the editor')
+  await clickUiPainted(ui, 'Edit [Enter]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Edit Command timeout \(ms\)/u.test(frame) && /Stage \[Enter\]/u.test(frame),
+    () => ui.vt.waitForRender(), 'the explicit Edit opens the field Input',
+  )
   await settingsKey(ui, '\x15')
   await settingsKey(ui, '45000')
-  await clickUiPainted(ui, 'Apply [Enter]')
+  await clickUiPainted(ui, 'Stage [Enter]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Command timeout \(ms\)\s+45000 ms/u.test(frame) && /1 unsaved change/u.test(frame),
+    () => ui.vt.waitForRender(), 'Stage only stages the local draft',
+  )
+  assert.equal(recorder.calls.length, 1, 'Stage never dispatches an official mutation')
+  assert.equal(readySection(port.shellExecutionSettings.read()).effective.timeoutMs, 60_000,
+    'the Host still serves the old timeout')
+  // The second field gets its OWN explicit Edit -> Stage.
   await clickUiPainted(ui, 'Output cap per stream (bytes)')
+  await clickUiPainted(ui, 'Edit [Enter]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Edit Output cap per stream \(bytes\)/u.test(frame),
+    () => ui.vt.waitForRender(), 'the second field opens its own editor',
+  )
   await settingsKey(ui, '\x15')
   await settingsKey(ui, '128000')
-  await clickUiPainted(ui, 'Apply [Enter]')
+  await clickUiPainted(ui, 'Stage [Enter]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /2 unsaved changes/u.test(frame) && /Command timeout \(ms\)\s+45000 ms/u.test(frame)
+      && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(frame),
+    () => ui.vt.waitForRender(), 'both local drafts stay in the same group',
+  )
+  assert.equal(recorder.calls.length, 1, 'two local Stages still write nothing')
+  assert.equal(readySection(port.shellExecutionSettings.read()).effective.maxOutputBytes, 64_000,
+    'the second cap has not moved either')
   await clickUiPainted(ui, 'Save [S]')
   await waitForFrame(
-    () => ui.vt.getViewport().join('\n'),
-    frame => /Status: Verified/u.test(frame),
-    () => ui.vt.waitForRender(), 'the two-cap official write verifies',
+    () => shellFrame(),
+    frame => /Status\s+Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'ONE Save verifies the grouped batch',
   )
+  assert.equal(recorder.calls.length, 2)
   assert.deepEqual(recorder.calls.at(-1), {
     ns: 'bash-sandbox',
     ops: [
@@ -1371,6 +1410,70 @@ test('Root pointer journeys save the real Agent-loop and Shell-execution pages t
   const liveShell = ctx.shell as unknown as { config: { timeoutMs: { get(): number }; maxOutputBytes: { get(): number } } }
   assert.equal(liveShell.config.timeoutMs.get(), 45_000)
   assert.equal(liveShell.config.maxOutputBytes.get(), 128_000)
+  assert.match(shellFrame(), /Settings · Tools · Shell execution/u, 'Save stays in the SAME group')
+
+  // ── second batch: set ONE cap and officially unset the other ─────────────
+  const second = readySection(port.shellExecutionSettings.read())
+  await clickUiPainted(ui, 'Command timeout (ms)')
+  await clickUiPainted(ui, 'Edit [Enter]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Edit Command timeout \(ms\)/u.test(frame),
+    () => ui.vt.waitForRender(), 'the fresh Edit re-opens the field',
+  )
+  await settingsKey(ui, '\x15')
+  await settingsKey(ui, '5000')
+  await clickUiPainted(ui, 'Stage [Enter]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Command timeout \(ms\)\s+5000 ms/u.test(frame),
+    () => ui.vt.waitForRender(), 'the next timeout is staged locally',
+  )
+  await clickUiPainted(ui, 'Output cap per stream (bytes)')
+  await clickUiPainted(ui, 'Details…')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Reset to inherited…/u.test(frame) && new RegExp(`Inherited\\s+${second.inherited.maxOutputBytes} bytes`, 'u').test(frame),
+    () => ui.vt.waitForRender(), 'the selected field Advanced paints the REAL inherited value',
+  )
+  await clickUiPainted(ui, 'Reset to inherited…')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Reset staged/u.test(frame) && /2 unsaved changes/u.test(frame),
+    () => ui.vt.waitForRender(), 'the official unset is STAGED, never written immediately',
+  )
+  assert.equal(recorder.calls.length, 2, 'no official write before the explicit Save')
+  assert.deepEqual(readySection(port.shellExecutionSettings.read()).effective, {
+    executor: 'bash', timeoutMs: 45_000, maxOutputBytes: 128_000,
+  }, 'the Host section really keeps the previous batch until Save')
+  await clickUiPainted(ui, 'Save [S]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Status\s+Verified/u.test(frame),
+    () => ui.vt.waitForRender(), 'the mixed set + official unset batch verifies',
+  )
+  assert.equal(recorder.calls.length, 3)
+  assert.deepEqual(recorder.calls.at(-1), {
+    ns: 'bash-sandbox',
+    ops: [
+      { op: 'set', path: ['timeoutMs'], value: 5_000 },
+      { op: 'unset', path: ['maxOutputBytes'] },
+    ],
+    revision: second.revision,
+  })
+  const afterReset = readySection(port.shellExecutionSettings.read()).effective
+  assert.deepEqual(afterReset, {
+    executor: 'bash', timeoutMs: 5_000, maxOutputBytes: second.inherited.maxOutputBytes,
+  }, 'the readback is the REAL inherited cap, never a guessed default')
+  assert.equal(liveShell.config.timeoutMs.get(), 5_000)
+  assert.equal(liveShell.config.maxOutputBytes.get(), second.inherited.maxOutputBytes)
+  await clickUiPainted(ui, 'Back [Esc]')
+  await waitForFrame(
+    () => shellFrame(),
+    frame => /Settings · Tools · Rows/u.test(frame) && /> Shell execution\s+Timeout 5000 ms/u.test(frame)
+      && new RegExp(`Value\\s+Timeout 5000 ms · Output cap ${second.inherited.maxOutputBytes} bytes`, 'u').test(frame),
+    () => ui.vt.waitForRender(), 'the Rows summary and its Detail preview follow the official readback',
+  )
 })
 
 test('the scoped Details Reset on the real Agent-loop tenant sends the official unset and reads the Host back', async t => {
