@@ -39,20 +39,21 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  rmSync,
+  rmdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { userInfo } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import * as xterm from '@xterm/headless'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 
-import { alive, saveFile, restoreFile, waitForCondition } from '../../lib/split-smoke-processes.mjs'
+import { alive, saveFile, restoreFile, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent, writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
-import { managedHostGateReason } from './managed-host-m6-2b.mjs'
+import { installedArtifactBuildId, managedHostGateReason, unitBelongsToRun } from './managed-host-m6-2b.mjs'
 import { waitForComposerMode, waitForComposerText } from './shell-tui-driving.mjs'
 
 const SYSTEMCTL = '/usr/bin/systemctl'
@@ -350,6 +351,7 @@ async function captureHostIdentity(context, label, expectedInstance) {
     TIMEOUTS.process,
   )
   recordHostIdentity(context, record)
+  trackRunOwnedHost(context, record)
   return record
 }
 
@@ -381,27 +383,106 @@ function injectLaunchdEnvironment(original, environment) {
 
 function assertPlistValid(path) {
   const lint = spawnSync(PLUTIL, ['-lint', path], { encoding: 'utf8', timeout: 15_000 })
-  assert(lint.status === 0, `${CASE_ID}: plutil -lint rejected the edited plist: ${lint.stderr?.slice(-500)}`)
+  assert(lint.status === 0, `${CASE_ID}: plutil -lint rejected the plist: ${lint.stderr?.slice(-500)}`)
   const decoded = spawnSync(PLUTIL, ['-convert', 'json', '-o', '-', path], { encoding: 'utf8', timeout: 15_000 })
-  assert(decoded.status === 0, `${CASE_ID}: plutil could not decode the edited plist`)
+  assert(decoded.status === 0, `${CASE_ID}: plutil could not decode the plist`)
   return JSON.parse(decoded.stdout)
 }
 
+/** The exact file identity this run recorded: (dev, ino, content hash, mode, uid). */
+function fileIdentity(path) {
+  const info = lstatSync(path)
+  return {
+    dev: String(info.dev),
+    ino: String(info.ino),
+    sha256: sha256File(path),
+    mode: info.mode & 0o777,
+    uid: info.uid,
+    regular: info.isFile(),
+    symlink: info.isSymbolicLink(),
+  }
+}
+
+function sameFileIdentity(left, right) {
+  return left !== undefined && right !== undefined
+    && left.dev === right.dev && left.ino === right.ino && left.sha256 === right.sha256
+}
+
+/** Refuse every mutation unless the current file is still the one this run wrote. */
+function assertRunOwnedFile(path, expected, label) {
+  let current
+  try {
+    current = fileIdentity(path)
+  } catch {
+    throw new SplitSmokeAssertionError(`${CASE_ID}: ${label}: the run-owned file is missing or unreadable; preserving every resource`)
+  }
+  if (!current.regular || current.symlink || current.uid !== process.getuid() || !sameFileIdentity(expected, current)) {
+    throw new SplitSmokeAssertionError(`${CASE_ID}: ${label}: the file identity changed after this run wrote it; preserving every resource`)
+  }
+}
+
+/** Prove the freshly installed systemd definition is THIS run's unit. */
+function assertSystemdDefinitionOwned(installation, service) {
+  const content = readFileSync(service.unitPath, 'utf8')
+  const reason = unitBelongsToRun(content, {
+    scopeId: service.scopeId,
+    publishedBuildId: installedArtifactBuildId(installation),
+  })
+  assert(reason === null, `${CASE_ID}: the installed unit is not this run's definition (${String(reason)}); preserving it`)
+  const props = managerFacts(service)
+  assert(props.LoadState === 'loaded' && props.FragmentPath !== undefined
+    && realpathSync(props.FragmentPath) === realpathSync(service.unitPath),
+  `${CASE_ID}: the manager does not load this exact unit file; preserving it`)
+}
+
+/** Prove the freshly installed LaunchAgent is THIS run's plist. */
+function assertLaunchdDefinitionOwned(service) {
+  const decoded = assertPlistValid(service.plistPath)
+  assert(decoded.Label === service.label
+    && decoded['X-DshPiTuiOwner'] === 'local-host-launchd-v1'
+    && decoded['X-DshPiTuiScopeId'] === service.scopeId,
+  `${CASE_ID}: the installed plist is not this run's definition; preserving it`)
+}
+
 /**
- * Apply the minimal test service environment to ONE run-owned definition and
- * record its identity. The original definition is restored by the caller.
+ * Create or verify the ONE run-owned systemd drop-in directory. A pre-existing
+ * directory is admitted only when it is empty; this run removes only the exact
+ * file it created and the directory only when this run created it and it is
+ * empty.
  */
-function writeServiceEnvironment(service, original, environment) {
+function ensureOwnedDropInDirectory(service, ownership) {
+  if (existsSync(service.dropInDir)) {
+    const entries = readdirSync(service.dropInDir)
+    assert(entries.length === 0 || (entries.length === 1 && entries[0] === basename(service.dropInPath)),
+      `${CASE_ID}: the profile drop-in directory already contains foreign files; preserving it`)
+    return
+  }
+  mkdirSync(service.dropInDir, { mode: 0o755 })
+  ownership.dropInDirCreated = true
+}
+
+/**
+ * Apply the minimal test service environment to ONE run-owned definition. The
+ * current file identity is re-proven before every write; the exact bytes this
+ * run wrote are recorded for the terminal restore.
+ */
+function writeServiceEnvironment(installation, service, ownership, environment) {
   if (service.kind === 'systemd') {
-    mkdirSync(service.dropInDir, { recursive: true, mode: 0o755 })
+    assertSystemdDefinitionOwned(installation, service)
+    ensureOwnedDropInDirectory(service, ownership)
+    if (ownership.dropIn !== undefined) {
+      assertRunOwnedFile(service.dropInPath, ownership.dropIn, 'systemd test drop-in')
+    }
     writeFileSync(service.dropInPath, renderSystemdDropIn(environment), { mode: 0o600 })
+    ownership.dropIn = fileIdentity(service.dropInPath)
     const reload = systemctl(['--user', 'daemon-reload'])
     assert(reload.status === 0, `${CASE_ID}: systemctl --user daemon-reload failed: ${reload.stderr.slice(-500)}`)
-    const stat = statSync(service.dropInPath)
-    return { path: service.dropInPath, sha256: sha256File(service.dropInPath), mode: stat.mode & 0o777 }
+    return
   }
-  const edited = injectLaunchdEnvironment(original, environment)
-  writeFileSync(service.plistPath, edited, { mode: 0o600 })
+  assertRunOwnedFile(service.plistPath, ownership.current, 'installed LaunchAgent plist')
+  assertLaunchdDefinitionOwned(service)
+  const edited = injectLaunchdEnvironment(ownership.original.bytes.toString('utf8'), environment)
+  writeFileSync(service.plistPath, edited, { mode: ownership.original.mode })
   const decoded = assertPlistValid(service.plistPath)
   const anchors = decoded.EnvironmentVariables ?? {}
   assert(typeof anchors.DSH_HOME === 'string' && typeof anchors.SPLIT_PROCESS_DSH_ANCHOR === 'string'
@@ -409,18 +490,35 @@ function writeServiceEnvironment(service, original, environment) {
   for (const [key, value] of Object.entries(environment)) {
     assert(anchors[key] === value, `${CASE_ID}: the edited plist did not retain ${key}`)
   }
-  const stat = statSync(service.plistPath)
-  return { path: service.plistPath, sha256: sha256File(service.plistPath), mode: stat.mode & 0o777 }
+  ownership.current = fileIdentity(service.plistPath)
 }
 
-function restoreServiceDefinition(service, saved) {
+/**
+ * Restore ONLY this run's definition to its freshly installed bytes. A changed
+ * file is preserved and reported, never overwritten.
+ */
+function restoreOwnedDefinition(installation, service, ownership) {
   if (service.kind === 'systemd') {
-    rmSync(service.dropInDir, { recursive: true, force: true })
+    assertSystemdDefinitionOwned(installation, service)
+    if (ownership.dropIn !== undefined) {
+      assertRunOwnedFile(service.dropInPath, ownership.dropIn, 'systemd test drop-in')
+      unlinkSync(service.dropInPath)
+    }
+    if (ownership.dropInDirCreated && existsSync(service.dropInDir)) {
+      assert(readdirSync(service.dropInDir).length === 0,
+        `${CASE_ID}: the run-owned drop-in directory is not empty after removing this run's file; preserving it`)
+      rmdirSync(service.dropInDir)
+    }
     const reload = systemctl(['--user', 'daemon-reload'])
     assert(reload.status === 0, `${CASE_ID}: cleanup systemctl --user daemon-reload failed`)
     return
   }
-  restoreFile(service.plistPath, saved)
+  assertRunOwnedFile(service.plistPath, ownership.current, 'edited LaunchAgent plist')
+  restoreFile(service.plistPath, ownership.original)
+  const restored = fileIdentity(service.plistPath)
+  assert(restored.sha256 === ownership.original.sha256 && restored.mode === ownership.original.mode,
+    `${CASE_ID}: the restored plist doesn't match the installed bytes; preserving it`)
+  ownership.current = restored
 }
 
 // ── file fixtures / probes ─────────────────────────────────────────────────
@@ -474,45 +572,113 @@ function sessionIds(dshHome) {
   return ids
 }
 
-function sessionWithText(dshHome, marker) {
-  for (const sessionId of sessionIds(dshHome)) {
-    const events = hostSessionEvents(dshHome, sessionId)
-    if (events === undefined) continue
-    if (!events.some(event => JSON.stringify(event).includes(marker))) continue
-    return { sessionId, events }
-  }
-  return undefined
-}
-
-function turnSettledAfter(events, marker) {
-  const index = events.findIndex(event => JSON.stringify(event).includes(marker))
-  if (index < 0) return false
-  return events.slice(index).some(event => event.type === 'turn/end')
-}
-
-async function waitSessionTurn(dshHome, marker, label) {
-  return await waitForValue(() => {
-    const hit = sessionWithText(dshHome, marker)
-    return hit !== undefined && turnSettledAfter(hit.events, marker) ? hit : undefined
-  }, label, TIMEOUTS.session)
-}
-
 function eventData(event) {
   return event?.data ?? {}
 }
 
-function toolResultText(event) {
-  const content = eventData(event).message?.content
+function contentText(content) {
   if (!Array.isArray(content)) return ''
   return content.map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : '')).join('\n')
+}
+
+/** A user/session message carries its content at the event root; a tool result nests it under `message`. */
+function messageText(event) {
+  const data = eventData(event)
+  return contentText(data.content ?? data.message?.content)
+}
+
+function toolResultText(event) {
+  return messageText(event)
+}
+
+function toolCallIdOf(event) {
+  return String(eventData(event).callId ?? '')
 }
 
 function toolResultCallId(event) {
   return String(eventData(event).message?.toolCallId ?? '')
 }
 
-function findToolResult(events, callIdPrefix) {
-  return events.find(event => event.type === 'tool/result' && toolResultCallId(event).startsWith(callIdPrefix))
+/** The Client's own opened Session id from its authoritative surface status. */
+async function clientSessionId(client, label) {
+  const status = await waitForSurfaceStatus(
+    client,
+    record => record.sessionOpen === true && typeof record.openSessionId === 'string' && record.openSessionId !== '',
+    `${label} opened Session`,
+  )
+  return status.openSessionId
+}
+
+/**
+ * One exact authored prompt and the turn/end that settles it, read from the
+ * KNOWN Client Session. The prompt must appear exactly once before that
+ * settlement; a substring match in another session/turn can never satisfy it.
+ */
+function exactUserTurn(dshHome, sessionId, prompt) {
+  const events = hostSessionEvents(dshHome, sessionId)
+  if (events === undefined) return undefined
+  const starts = events.flatMap((event, index) => event.type === 'user/message' && messageText(event).includes(prompt) ? [index] : [])
+  if (starts.length !== 1) return undefined
+  const start = starts[0]
+  const end = events.findIndex((event, index) => index > start && event.type === 'turn/end')
+  if (end < 0) return undefined
+  return { events, start, end }
+}
+
+async function waitExactTurn(dshHome, sessionId, prompt, label) {
+  return await waitForValue(() => exactUserTurn(dshHome, sessionId, prompt), label, TIMEOUTS.session)
+}
+
+/** The ONE committed tool call/result pair for the exact committed call id. */
+function exactToolCall(turn, callId) {
+  const matches = turn.events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event, index }) => index > turn.start && index < turn.end && event.type === 'tool/call' && toolCallIdOf(event) === callId)
+  assert(matches.length === 1, `${CASE_ID}: expected exactly one tool/call ${callId}, found ${String(matches.length)}`)
+  return matches[0]
+}
+
+function exactToolResult(turn, callId) {
+  const call = exactToolCall(turn, callId)
+  const matches = turn.events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event, index }) => index > call.index && index < turn.end && event.type === 'tool/result' && toolResultCallId(event) === callId)
+  assert(matches.length === 1, `${CASE_ID}: expected exactly one tool/result ${callId}, found ${String(matches.length)}`)
+  return matches[0].event
+}
+
+// ── raw-shell positive/negative control ────────────────────────────────────
+
+/**
+ * The exact harmless probe the REAL system shell runs without any Host
+ * bootstrap. The control proves the explicit directory is usable and every
+ * default/shims directory is NOT discoverable before the Host starts.
+ */
+const RAW_SHELL_PRECHECK = [
+  'for p in dsh-pr1-user-probe dsh-pr1-mise-probe dsh-pr1-cargo-probe dsh-pr1-pnpm-probe dsh-pr1-client-only-probe; do',
+  'if command -v "$p" >/dev/null 2>&1; then printf "PR1_RAW_PRESENT=%s\\n" "$p"; else printf "PR1_ABSENT=%s\\n" "$p"; fi;',
+  'done;',
+  'dsh-pr1-shadow-probe;',
+  'printf "PR1_RAW_SHELL=%s\\n" "${DSH_SHELL:-unset}"',
+].join(' ')
+
+function runRawShellPrecheck({ env, nonce, label }) {
+  const result = spawnSync('/bin/sh', ['-c', RAW_SHELL_PRECHECK], {
+    cwd: env.HOME,
+    env,
+    encoding: 'utf8',
+    timeout: 30_000,
+  })
+  assert(result.status === 0, `${CASE_ID}: ${label}: the raw-shell precheck exited ${String(result.status)}: ${(result.stderr ?? '').slice(-800)}`)
+  const text = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
+  assert(text.includes(`PR1_SHADOW=EXPLICIT_FIRST:${nonce}`),
+    `${CASE_ID}: ${label}: the raw shell could not execute the explicit program: ${text.slice(-1200)}`)
+  assert(!text.includes('DEFAULT_SHADOWED'), `${CASE_ID}: ${label}: the raw shell executed the default same-name program`)
+  assert(!text.includes('PR1_RAW_PRESENT='), `${CASE_ID}: ${label}: a default/shims program was already discoverable before the Host started: ${text.slice(-1200)}`)
+  for (const probe of ['dsh-pr1-user-probe', 'dsh-pr1-mise-probe', 'dsh-pr1-cargo-probe', 'dsh-pr1-pnpm-probe', 'dsh-pr1-client-only-probe']) {
+    assert(text.includes(`PR1_ABSENT=${probe}`), `${CASE_ID}: ${label}: the raw shell did not report ${probe} absent`)
+  }
+  assert(text.includes('PR1_RAW_SHELL=unset'), `${CASE_ID}: ${label}: the raw shell unexpectedly carried the managed DSH shell environment`)
 }
 
 // ── probe output assertions ────────────────────────────────────────────────
@@ -572,18 +738,20 @@ async function selectFullAccess(client, label) {
  * danger-full-access preset, submit the fixed foreground marker and return the
  * settled Session events with the correlated bash tool result.
  */
-async function runForegroundProbe(context, client, { marker, nonce, label }) {
+async function runForegroundProbe(context, client, { prompt, nonce, label }) {
   await client.waitFor(record => record.m4a0 === 'ready', `${label} Client ready`, 180_000)
   await submitText(client, `pr1-seed-${nonce}`, `${label} seed prompt`)
-  await waitSessionTurn(context.dshHome, `pr1-seed-${nonce}`, `${label} seed turn settlement`)
+  const sessionId = await clientSessionId(client, label)
+  await waitExactTurn(context.dshHome, sessionId, `pr1-seed-${nonce}`, `${label} seed turn settlement`)
   await selectFullAccess(client, label)
-  await submitText(client, `${marker} ${nonce}`, `${label} probe prompt`)
-  const settled = await waitSessionTurn(context.dshHome, `${marker} ${nonce}`, `${label} probe turn settlement`)
-  const result = findToolResult(settled.events, 'pr1-foreground-')
-  assert(result !== undefined, `${CASE_ID}: ${label}: no correlated bash tool result was committed`)
+  const promptText = `${prompt} ${nonce}`
+  await submitText(client, promptText, `${label} probe prompt`)
+  const turn = await waitExactTurn(context.dshHome, sessionId, promptText, `${label} probe turn settlement`)
+  const result = exactToolResult(turn, `pr1-foreground-${sessionId}`)
   const text = toolResultText(result)
   assert(eventData(result).message?.isError !== true, `${CASE_ID}: ${label}: the bash tool result is an error: ${text.slice(-1200)}`)
-  return { ...settled, result, text }
+  assert(!text.includes('[exit code:'), `${CASE_ID}: ${label}: an earlier probe exited nonzero: ${text.slice(-1200)}`)
+  return { sessionId, events: turn.events, result, text }
 }
 
 // ── public Direct TUI (negative control) ───────────────────────────────────
@@ -611,12 +779,17 @@ class PublicDirectTui {
       .map(([key, value]) => `${key}=${shellQuote(value)}`)
       .join(' ')
     const command = `${assignments} ${shellQuote(executable)} ${shellQuote(entry)} --profile pi-tui`
+    this.disposed = false
     if (this.platform === 'darwin') {
       const start = spawnSync('tmux', [
         '-L', this.socket, '-f', '/dev/null',
         'new-session', '-d', '-s', 'direct', '-x', '120', '-y', '40', '-c', cwd, command,
       ], { encoding: 'utf8', timeout: 30_000 })
       assert(start.status === 0, `${CASE_ID}: the Direct tmux pane did not start: ${(start.stderr ?? '').slice(-600)}`)
+      const panes = this.tmuxSend(['list-panes', '-t', 'direct', '-F', '#{pane_pid}'])
+      this.panePid = Number((panes.stdout ?? '').trim())
+      assert(Number.isSafeInteger(this.panePid) && this.panePid > 0,
+        `${CASE_ID}: the Direct tmux pane published no real pane PID`)
       return
     }
     this.term = new xterm.Terminal({ cols: 120, rows: 40, disableStdin: true, allowProposedApi: true })
@@ -630,6 +803,12 @@ class PublicDirectTui {
     this.child.stderr.setEncoding('utf8')
     this.child.stdout.on('data', chunk => this.term.write(chunk))
     this.child.stderr.on('data', chunk => this.term.write(chunk))
+    this.exit = new Promise(resolveExit => this.child.once('close', (code, signal) => resolveExit({ code, signal })))
+  }
+
+  /** The OS process this Direct surface owns; the selected receipt names it. */
+  pid() {
+    return this.platform === 'darwin' ? this.panePid : this.child?.pid
   }
 
   tmuxSend(args) {
@@ -671,11 +850,28 @@ class PublicDirectTui {
   }
 
   async dispose() {
+    if (this.disposed) return
+    this.disposed = true
     if (this.platform === 'darwin') {
-      spawnSync('tmux', ['-L', this.socket, 'kill-server'], { encoding: 'utf8', timeout: 20_000 })
+      const kill = spawnSync('tmux', ['-L', this.socket, 'kill-server'], { encoding: 'utf8', timeout: 20_000 })
+      const stderr = kill.stderr ?? ''
+      assert(kill.status === 0 || /no server running/u.test(stderr),
+        `${CASE_ID}: the Direct tmux server could not be killed: ${stderr.slice(-500)}`)
+      await waitForValue(() => (this.panePid !== undefined && !alive(this.panePid) ? true : undefined),
+        'Direct pane process exit', 20_000)
+      const session = spawnSync('tmux', ['-L', this.socket, 'has-session', '-t', 'direct'], { encoding: 'utf8', timeout: 10_000 })
+      assert(session.status !== 0, `${CASE_ID}: the Direct tmux session survived its killed server`)
       return
     }
-    try { process.kill(-this.child.pid, 'SIGTERM') } catch { /* gone */ }
+    if (this.child === undefined || this.child.exitCode !== null) return
+    const waitExit = async (timeoutMs) => Promise.race([
+      this.exit.then(() => true, () => true),
+      sleep(timeoutMs).then(() => false),
+    ])
+    try { process.kill(-this.child.pid, 'SIGTERM') } catch { /* already gone */ }
+    if (await waitExit(15_000)) return
+    try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
+    assert(await waitExit(10_000), `${CASE_ID}: the Direct PTY process group survived SIGTERM/SIGKILL`)
   }
 }
 
@@ -688,6 +884,35 @@ async function directSubmit(tui, text, label) {
 }
 
 // ── the case ───────────────────────────────────────────────────────────────
+
+/** Track one authenticated Host with the runner's identity-checked backstop. */
+function trackRunOwnedHost(context, record) {
+  if (typeof context.trackDetachedPid !== 'function') return
+  context.trackDetachedPid(record.hostPid, record.schema === 2 ? record.hostKernelIdentity : record.hostStarttime)
+}
+
+/** Stop the public Host and prove every Host THIS CASE started has exited. */
+async function stopRunOwnedHosts(context, installation, ownedHosts, label) {
+  const stopped = assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, label)
+  await waitForValue(
+    () => (ownedHosts.every(host => !alive(host.pid)) ? true : undefined),
+    `${label}: every run-owned Host exited`,
+    60_000,
+  )
+  for (const host of ownedHosts) context.untrackDetachedPid?.(host.pid)
+  return stopped
+}
+
+/** The ONE Session containing the exact authored prompt; any ambiguity fails. */
+async function uniqueSessionForPrompt(dshHome, prompt, label) {
+  return await waitForValue(() => {
+    const matches = sessionIds(dshHome).filter(sessionId => {
+      const events = hostSessionEvents(dshHome, sessionId) ?? []
+      return events.some(event => event.type === 'user/message' && messageText(event).includes(prompt))
+    })
+    return matches.length === 1 ? matches[0] : undefined
+  }, `${label} unique Session`, TIMEOUTS.session)
+}
 
 export async function runHostDefaultEnvironment(context) {
   const gate = nativeManagerGate()
@@ -710,27 +935,54 @@ export async function runHostDefaultEnvironment(context) {
   const probes = createProbeFixtures(workDir, hostHome, nonce)
   mountHostWorkFixture(installation, workDir)
 
+  // Run-owned admission BEFORE any cleanup authority exists: a pre-existing
+  // definition or Host record is never this invocation's resource.
+  assert(!definitionPresent(service),
+    `${CASE_ID}: refusing to run beside a pre-existing service definition (${definitionPathOf(service)})`)
+  assert(publishedRecords(dshHome).length === 0,
+    `${CASE_ID}: refusing to run beside a pre-existing published Host record`)
+
   const clients = []
-  const serviceEnvironment = {
-    PATH: `${probes.explicitBin}:/usr/bin:/bin`,
-    HOME: hostHome,
+  const rawEnvironment = { PATH: `${probes.explicitBin}:/usr/bin:/bin`, HOME: hostHome }
+  const detachedEnvironment = {
+    ...rawEnvironment,
     C1_SCENARIO: 'host-default-environment',
     C1_WORK_ROOT: hostWorkRoot,
     PR1_API_KEY: sentinel,
   }
-  const savedDefinition = { value: undefined }
-  let installed = false
+  // Every tool override is pinned at the RUN-OWNED service boundary, so a
+  // manager environment cannot change which candidate this case exercises.
+  const managedEnvironment = {
+    ...detachedEnvironment,
+    XDG_DATA_HOME: join(hostHome, '.local', 'share'),
+    MISE_DATA_DIR: join(hostHome, '.local', 'share', 'mise'),
+    ASDF_DATA_DIR: join(hostHome, '.asdf'),
+    CARGO_HOME: join(hostHome, '.cargo'),
+    GOBIN: join(hostHome, 'go', 'bin'),
+    VOLTA_HOME: join(hostHome, '.volta'),
+    BUN_INSTALL: join(hostHome, '.bun'),
+    PNPM_HOME: probes.pnpmDir,
+  }
+  const ownership = { original: undefined, current: undefined, dropIn: undefined, dropInDirCreated: false }
+  const ownedHosts = []
+  let detachedStarted = false
+  let detachedStopped = false
+  let managedStarted = false
+  let managedStopped = false
+  let directTui
   let failure
   let evidence
   try {
     // ── P1: the detached Host augments the inherited PATH ──────────────────
-    assert(!definitionPresent(service), `${CASE_ID}: the case must begin with no installed service definition`)
+    runRawShellPrecheck({ env: rawEnvironment, nonce, label: 'P1 before the detached Host' })
     const detached = assertStatus(
-      runDaemon(installation, ['start'], serviceEnvironment),
+      runDaemon(installation, ['start'], detachedEnvironment),
       { host: 'ready', manager: 'process', unit: 'none' },
       'P1 detached daemon start',
     )
+    detachedStarted = true
     const detachedRecord = await captureHostIdentity(context, 'P1 detached', detached.instance)
+    ownedHosts.push(detachedRecord)
     assert(detachedRecord.instanceId.slice(0, 8) === detached.instance, 'P1: the authenticated instance does not match the status instance')
     const clientA = createManagedClient(context, {
       cwd: workspace,
@@ -738,27 +990,33 @@ export async function runHostDefaultEnvironment(context) {
       label: 'P1 Client A',
     })
     clients.push(clientA)
-    const p1 = await runForegroundProbe(context, clientA, { marker: 'pr1-foreground-probe', nonce: `p1-${nonce}`, label: 'P1 Client A' })
+    const p1 = await runForegroundProbe(context, clientA, { prompt: 'pr1-foreground-probe', nonce: `p1-${nonce}`, label: 'P1 Client A' })
     assertProbeOutput(p1.text, { nonce, augmented: true, label: 'P1 detached Host' })
 
     // ── P2a: the real Direct process never receives this augmentation ──────
-    const directMarker = `pr1-foreground-probe p2-direct-${nonce}`
-    const directTui = new PublicDirectTui(installation, {
+    directTui = new PublicDirectTui(installation, {
       cwd: workspace,
-      env: { HOME: hostHome, PATH: `${probes.explicitBin}:/usr/bin:/bin`, C1_SCENARIO: 'host-default-environment', C1_WORK_ROOT: directWorkRoot, PR1_API_KEY: sentinel },
+      env: { ...rawEnvironment, C1_SCENARIO: 'host-default-environment', C1_WORK_ROOT: directWorkRoot, PR1_API_KEY: sentinel },
     })
+    const directPid = directTui.pid()
+    assert(Number.isSafeInteger(directPid), 'P2: the Direct surface published no OS PID')
+    context.recordProcessIdentity?.({ role: 'direct-client', pid: directPid })
     try {
-      await directSubmit(directTui, `pr1-seed-p2-direct-${nonce}`, 'P2 Direct seed')
-      await waitSessionTurn(dshHome, `pr1-seed-p2-direct-${nonce}`, 'P2 Direct seed turn settlement')
+      const directSeed = `pr1-seed-p2-direct-${nonce}`
+      await directSubmit(directTui, directSeed, 'P2 Direct seed')
+      const directSession = await uniqueSessionForPrompt(dshHome, directSeed, 'P2 Direct seed')
+      await waitExactTurn(dshHome, directSession, directSeed, 'P2 Direct seed turn settlement')
       await directSubmit(directTui, '/yolo', 'P2 Direct full access')
       await waitForValue(async () => ((await directTui.viewport()).includes('[yolo]') ? true : undefined), 'P2 Direct footer full access', 30_000)
-      await directSubmit(directTui, directMarker, 'P2 Direct probe')
-      const directSettled = await waitSessionTurn(dshHome, directMarker, 'P2 Direct probe settlement')
-      const directResult = findToolResult(directSettled.events, 'pr1-foreground-')
-      assert(directResult !== undefined, 'P2: the Direct process committed no correlated bash tool result')
+      const directPrompt = `pr1-foreground-probe p2-direct-${nonce}`
+      await directSubmit(directTui, directPrompt, 'P2 Direct probe')
+      const directTurn = await waitExactTurn(dshHome, directSession, directPrompt, 'P2 Direct probe settlement')
+      const directResult = exactToolResult(directTurn, `pr1-foreground-${directSession}`)
+      assert(eventData(directResult).message?.isError !== true, 'P2: the Direct bash tool result is an error')
       assertProbeOutput(toolResultText(directResult), { nonce, augmented: false, label: 'P2 Direct Host' })
     } finally {
       await directTui.dispose()
+      directTui = undefined
     }
 
     // ── P2b: two Clients with different synthetic env share ONE Host ───────
@@ -768,27 +1026,28 @@ export async function runHostDefaultEnvironment(context) {
       label: 'P2 Client B',
     })
     clients.push(clientB)
-    const p2 = await runForegroundProbe(context, clientB, { marker: 'pr1-foreground-probe', nonce: `p2-b-${nonce}`, label: 'P2 Client B' })
+    const p2 = await runForegroundProbe(context, clientB, { prompt: 'pr1-foreground-probe', nonce: `p2-b-${nonce}`, label: 'P2 Client B' })
     assertProbeOutput(p2.text, { nonce, augmented: true, label: 'P2 managed Host / Client B' })
     const afterClients = assertStatus(runDaemon(installation, ['status'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' }), { host: 'ready', manager: 'process' }, 'P2 same Host after a different Client env')
     assert(afterClients.instance === detached.instance && afterClients.pid === detached.pid,
       'P2: the Client environment changed the Host identity')
 
     // ── P3: the real manager runs the augmented Host ───────────────────────
-    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'P3 stop the detached Host')
-    await waitForValue(() => (alive(detachedRecord.hostPid) ? undefined : true), 'P3 detached Host exit', TIMEOUTS.process)
+    await stopRunOwnedHosts(context, installation, ownedHosts, 'P3 stop the detached Host')
+    detachedStopped = true
     const installedResult = runDaemon(installation, ['install'])
     assert(installedResult.status === 0, `P3 daemon install failed: ${installedResult.stderr.slice(-800)}`)
-    installed = true
     assert(definitionPresent(service), 'P3 daemon install did not create the owned service definition')
     const afterInstall = assertStatus(runDaemon(installation, ['status']), { host: 'stopped' }, 'P3 status directly after install')
     assert(afterInstall.unit === (service.kind === 'systemd' ? service.unit : service.label),
       `P3: the installed definition is not attributed (unit=${String(afterInstall.unit)})`)
     if (service.kind === 'systemd') {
+      assertSystemdDefinitionOwned(installation, service)
       const installedFacts = managerFacts(service)
       assert(installedFacts.ActiveState === 'inactive' && installedFacts.pid === 0,
         `P3: daemon install must leave the unit inactive (ActiveState=${String(installedFacts.ActiveState)}, MainPID=${String(installedFacts.pid)})`)
     } else {
+      assertLaunchdDefinitionOwned(service)
       const notLoaded = runLaunchctl(['print', `gui/${String(service.uid)}/${service.label}`])
       assert(notLoaded.status === 113,
         `P3: daemon install must not load or start the LaunchAgent (launchctl print exited ${String(notLoaded.status)})`)
@@ -802,15 +1061,19 @@ export async function runHostDefaultEnvironment(context) {
     for (const anchor of anchorKeys) {
       assert(generatedDefinition.includes(anchor), `P3: the generated definition lost the official anchor ${anchor}`)
     }
-    savedDefinition.value = saveFile(definitionPathOf(service))
-    const serviceEnvironmentState = writeServiceEnvironment(service, savedDefinition.value.bytes.toString('utf8'), serviceEnvironment)
+    ownership.original = { ...saveFile(definitionPathOf(service)), ...fileIdentity(definitionPathOf(service)) }
+    ownership.current = fileIdentity(definitionPathOf(service))
+    writeServiceEnvironment(installation, service, ownership, managedEnvironment)
+    runRawShellPrecheck({ env: managedEnvironment, nonce, label: 'P3 before the managed Host' })
     const managed = runDaemon(installation, ['start'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' })
     const managedStatus = assertStatus(managed, {
       host: 'ready',
       manager: service.kind === 'systemd' ? 'systemd' : 'launchd',
       unit: service.kind === 'systemd' ? service.unit : service.label,
     }, 'P3 managed daemon start')
+    managedStarted = true
     const managedRecord = await captureHostIdentity(context, 'P3 managed', managedStatus.instance)
+    ownedHosts.push(managedRecord)
     assert(managedRecord.instanceId.slice(0, 8) === managedStatus.instance, 'P3: the authenticated instance does not match status')
     assert(Number(managedStatus.pid) === managedRecord.hostPid, 'P3: the status PID is not the authenticated Host PID')
     const installedManagerFacts = managerFacts(service)
@@ -824,26 +1087,33 @@ export async function runHostDefaultEnvironment(context) {
       label: 'P3 Client',
     })
     clients.push(clientC)
-    const p3 = await runForegroundProbe(context, clientC, { marker: 'pr1-foreground-probe', nonce: `p3-${nonce}`, label: 'P3 managed Host' })
+    const p3 = await runForegroundProbe(context, clientC, { prompt: 'pr1-foreground-probe', nonce: `p3-${nonce}`, label: 'P3 managed Host' })
     assertProbeOutput(p3.text, { nonce, augmented: true, label: 'P3 managed Host' })
     assert(!JSON.stringify(p3.events).includes(sentinel), 'P3: the fake sensitive value leaked into the Session events')
 
     // ── P4: background job settlement + official ctx.subprocess spawn ──────
-    await submitText(clientC, `pr1-background-probe p4-${nonce}`, 'P4 background probe')
-    const p4Events = await waitSessionTurn(dshHome, `pr1-background-probe p4-${nonce}`, 'P4 background turn settlement')
-    const p4Result = findToolResult(p4Events.events, 'pr1-background-')
-    assert(p4Result !== undefined, 'P4: no correlated background bash tool result was committed')
+    const backgroundPrompt = `pr1-background-probe p4-${nonce}`
+    await submitText(clientC, backgroundPrompt, 'P4 background probe')
+    const backgroundTurn = await waitExactTurn(dshHome, p3.sessionId, backgroundPrompt, 'P4 background turn settlement')
+    const backgroundResult = exactToolResult(backgroundTurn, `pr1-background-${p3.sessionId}`)
+    const backgroundText = toolResultText(backgroundResult)
+    const jobId = /started background job (\S+)/u.exec(backgroundText)?.[1]
+    assert(typeof jobId === 'string' && jobId !== '',
+      `P4: the background bash result carried no job id: ${backgroundText.slice(-1200)}`)
     const jobEvent = await waitForC1WorkEvent(hostWorkRoot,
-      event => event.kind === 'job-event' && event.event === 'settled' && typeof event.output === 'string' && event.output.includes(`PR1_USER=default:${nonce}`),
-      'P4 official background job settled with its stdout token', 180_000)
+      event => event.kind === 'job-event' && event.jobId === jobId && event.event === 'settled'
+        && event.status === 'completed' && typeof event.output === 'string' && event.output.includes(`PR1_USER=default:${nonce}`),
+      `P4 exact background job ${jobId} settled with its stdout token`, 180_000)
     assert(jobEvent.status === 'completed',
       `P4: the official background job did not complete: ${String(jobEvent.status)}`)
-    await submitText(clientC, `pr1-subprocess-probe p4-${nonce}`, 'P4 subprocess probe')
+    const subprocessPrompt = `pr1-subprocess-probe p4-${nonce}`
+    await submitText(clientC, subprocessPrompt, 'P4 subprocess probe')
+    await waitExactTurn(dshHome, p3.sessionId, subprocessPrompt, 'P4 subprocess turn settlement')
     const subprocessEvent = await waitForC1WorkEvent(hostWorkRoot,
-      event => event.kind === 'subprocess-probe' && event.exitCode === 0 && typeof event.stdout === 'string' && event.stdout.includes(`PR1_USER=default:${nonce}`),
-      'P4 official ctx.subprocess bare spawn returned the probe token', 180_000)
+      event => event.kind === 'subprocess-probe' && event.sessionId === p3.sessionId && event.exitCode === 0
+        && typeof event.stdout === 'string' && event.stdout.includes(`PR1_USER=default:${nonce}`),
+      'P4 official ctx.subprocess bare spawn returned the probe token for the exact Session', 180_000)
     assert(subprocessEvent.stderr === '', 'P4: the official ctx.subprocess spawn wrote an unexpected stderr')
-    await waitSessionTurn(dshHome, `pr1-subprocess-probe p4-${nonce}`, 'P4 subprocess turn settlement')
 
     // ── P5: warm reuse, restart and unchanged service bytes ────────────────
     const warm = assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'P5 warm start')
@@ -854,7 +1124,7 @@ export async function runHostDefaultEnvironment(context) {
       label: 'P5 warm Client',
     })
     clients.push(warmClient)
-    const p5Warm = await runForegroundProbe(context, warmClient, { marker: 'pr1-foreground-probe', nonce: `p5-warm-${nonce}`, label: 'P5 warm Host' })
+    const p5Warm = await runForegroundProbe(context, warmClient, { prompt: 'pr1-foreground-probe', nonce: `p5-warm-${nonce}`, label: 'P5 warm Host' })
     assertProbeOutput(p5Warm.text, { nonce, augmented: true, label: 'P5 warm Host' })
     const beforeRestartDefinition = { sha256: sha256File(definitionPathOf(service)), mode: statSync(definitionPathOf(service)).mode & 0o777 }
     const beforeRestartDropIn = service.kind === 'systemd'
@@ -863,6 +1133,7 @@ export async function runHostDefaultEnvironment(context) {
     const restarted = assertStatus(runDaemon(installation, ['restart'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' }), { host: 'ready' }, 'P5 restart')
     assert(restarted.instance !== managedStatus.instance, 'P5: restart did not create a new Host instance')
     const restartedRecord = await captureHostIdentity(context, 'P5 restarted', restarted.instance)
+    ownedHosts.push(restartedRecord)
     assert(restartedRecord.instanceId.slice(0, 8) === restarted.instance, 'P5: the restarted authenticated instance does not match status')
     assert(Number(restarted.pid) === restartedRecord.hostPid, 'P5: the restarted status PID is not the authenticated Host PID')
     assert(sha256File(definitionPathOf(service)) === beforeRestartDefinition.sha256
@@ -879,17 +1150,20 @@ export async function runHostDefaultEnvironment(context) {
       label: 'P5 Client',
     })
     clients.push(clientD)
-    const p5 = await runForegroundProbe(context, clientD, { marker: 'pr1-foreground-probe', nonce: `p5-${nonce}`, label: 'P5 restarted Host' })
+    const p5 = await runForegroundProbe(context, clientD, { prompt: 'pr1-foreground-probe', nonce: `p5-${nonce}`, label: 'P5 restarted Host' })
     assertProbeOutput(p5.text, { nonce, augmented: true, label: 'P5 restarted Host' })
 
     // ── P6: inherit cold start leaves the explicit PATH exactly as given ────
-    assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, 'P6 stop the managed Host')
-    await waitForValue(() => (alive(restartedRecord.hostPid) ? undefined : true), 'P6 managed Host exit', TIMEOUTS.process)
-    const inheritEnvironment = { ...serviceEnvironment, DSH_PI_TUI_HOST_PATH_MODE: 'inherit' }
-    const originalDefinition = savedDefinition.value.bytes.toString('utf8')
-    const inheritDefinition = writeServiceEnvironment(service, originalDefinition, inheritEnvironment)
+    await stopRunOwnedHosts(context, installation, ownedHosts, 'P6 stop the managed Host')
+    managedStopped = true
+    const inheritEnvironment = { ...managedEnvironment, DSH_PI_TUI_HOST_PATH_MODE: 'inherit' }
+    writeServiceEnvironment(installation, service, ownership, inheritEnvironment)
+    runRawShellPrecheck({ env: rawEnvironment, nonce, label: 'P6 before the inherit Host' })
     const inherited = assertStatus(runDaemon(installation, ['start'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' }), { host: 'ready', manager: service.kind === 'systemd' ? 'systemd' : 'launchd' }, 'P6 inherit cold start')
+    managedStarted = true
+    managedStopped = false
     const inheritedRecord = await captureHostIdentity(context, 'P6 inherit', inherited.instance)
+    ownedHosts.push(inheritedRecord)
     assert(inheritedRecord.instanceId.slice(0, 8) === inherited.instance, 'P6: the inherited authenticated instance does not match status')
     const clientE = createManagedClient(context, {
       cwd: workspace,
@@ -897,14 +1171,14 @@ export async function runHostDefaultEnvironment(context) {
       label: 'P6 Client',
     })
     clients.push(clientE)
-    const p6 = await runForegroundProbe(context, clientE, { marker: 'pr1-foreground-probe', nonce: `p6-${nonce}`, label: 'P6 inherit Host' })
+    const p6 = await runForegroundProbe(context, clientE, { prompt: 'pr1-foreground-probe', nonce: `p6-${nonce}`, label: 'P6 inherit Host' })
     assertProbeOutput(p6.text, { nonce, augmented: false, label: 'P6 inherit Host' })
-    assert(inheritDefinition.sha256 !== undefined, 'P6: the inherit service state was not recorded')
 
     evidence = {
       status: 'PASS',
-      scope: service.kind === 'systemd' ? 'REAL_SYSTEMD_USER_L6' : 'REAL_LAUNCHD_USER_L6',
+      scope: service.kind === 'systemd' ? 'PACKED_REAL_SYSTEMD_PROCESS' : 'PACKED_REAL_LAUNCHD_PROCESS',
       nonce,
+      rawShellPrecheck: true,
       augmentedBareCommands: true,
       explicitSameNameFirst: true,
       sensitiveValueScrubbed: true,
@@ -916,8 +1190,9 @@ export async function runHostDefaultEnvironment(context) {
       inheritDisablesAugmentation: true,
       backgroundJobSettled: true,
       officialSubprocessSpawn: true,
+      exactSessionTurnCallCorrelation: true,
       instances: [detached.instance, managedStatus.instance, restarted.instance, inherited.instance],
-      serviceSha256: serviceEnvironmentState.sha256,
+      serviceSha256: ownership.original.sha256,
     }
     trace(`${CASE_ID}-pass`, {
       hostInstances: evidence.instances.length,
@@ -929,48 +1204,44 @@ export async function runHostDefaultEnvironment(context) {
   } finally {
     // ── P7: public stop/uninstall, definition restore and scoped quiescence ─
     const cleanupErrors = []
+    let hostStopUnconfirmed = false
     for (const client of clients) {
       try { await client.dispose() } catch (error) { cleanupErrors.push(`Client dispose: ${error instanceof Error ? error.message : String(error)}`) }
     }
-    try {
-      // The independent Host exists without any installed definition, so the
-      // public stop is always attempted; a no-Host stop is an idempotent 0.
-      if (definitionPresent(service) || publishedRecords(dshHome).length > 0) {
-        const stopped = runDaemon(installation, ['stop'])
-        if (stopped.status !== 0) cleanupErrors.push(`daemon stop exited ${String(stopped.status)}: ${stopped.stderr.slice(-400)}`)
-      }
-      if (definitionPresent(service)) {
-        if (savedDefinition.value !== undefined) {
-          restoreServiceDefinition(service, savedDefinition.value)
-        }
-        const uninstalled = runDaemon(installation, ['uninstall'])
-        if (uninstalled.status !== 0) cleanupErrors.push(`daemon uninstall exited ${String(uninstalled.status)}: ${uninstalled.stderr.slice(-400)}`)
-      }
-    } catch (error) {
-      cleanupErrors.push(`service cleanup: ${error instanceof Error ? error.message : String(error)}`)
+    if (directTui !== undefined) {
+      try { await directTui.dispose() } catch (error) { cleanupErrors.push(`Direct dispose: ${error instanceof Error ? error.message : String(error)}`) }
     }
-    try {
-      if (installed && definitionPresent(service)) {
-        // The public uninstall owns the definition; a survivor is a real failure.
-        cleanupErrors.push(`the owned service definition survived uninstall: ${definitionPathOf(service)}`)
+    if ((detachedStarted && !detachedStopped) || (managedStarted && !managedStopped)) {
+      try {
+        await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 public stop')
+      } catch (error) {
+        hostStopUnconfirmed = true
+        cleanupErrors.push(`public stop did not prove every run-owned Host gone: ${error instanceof Error ? error.message : String(error)}`)
       }
-      const liveRecords = publishedRecords(dshHome).filter(record => typeof record.hostPid === 'number' && alive(record.hostPid))
-      if (liveRecords.length > 0) {
-        await waitForCondition(() => liveRecords.every(record => !alive(record.hostPid)), 'P7 all run-owned Hosts exited', 30_000).catch(() => {})
-        for (const record of liveRecords) {
-          if (alive(record.hostPid)) {
-            try { process.kill(record.hostPid, 'SIGKILL') } catch { /* gone */ }
-            cleanupErrors.push(`the run-owned Host ${String(record.hostPid)} survived public stop`)
-          }
+    }
+    if (ownership.original === undefined && definitionPresent(service)) {
+      cleanupErrors.push('a service definition appeared during this run without a proven run ownership; it was preserved')
+    }
+    if (ownership.original !== undefined) {
+      if (hostStopUnconfirmed) {
+        cleanupErrors.push('the owned service definition was preserved because the Host stop was not confirmed')
+      } else {
+        try {
+          assertRunOwnedFile(definitionPathOf(service), ownership.current, 'owned service definition before uninstall')
+          restoreOwnedDefinition(installation, service, ownership)
+          const uninstalled = runDaemon(installation, ['uninstall'])
+          if (uninstalled.status !== 0) throw new Error(`daemon uninstall exited ${String(uninstalled.status)}: ${uninstalled.stderr.slice(-400)}`)
+          assert(!definitionPresent(service), 'the owned service definition survived public uninstall')
+        } catch (error) {
+          cleanupErrors.push(`service cleanup: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
-    } catch (error) {
-      cleanupErrors.push(`quiescence: ${error instanceof Error ? error.message : String(error)}`)
     }
     if (cleanupErrors.length > 0) {
       const message = `${CASE_ID}: NOT_QUIESCED: ${cleanupErrors.join('; ')}`
-      if (failure instanceof Error) failure = new SplitSmokeAssertionError(`${failure.message}; ${message}`)
-      else failure = new SplitSmokeAssertionError(message)
+      failure = failure instanceof Error
+        ? new SplitSmokeAssertionError(`${failure.message}; ${message}`)
+        : new SplitSmokeAssertionError(message)
     }
   }
   if (failure !== undefined) throw failure

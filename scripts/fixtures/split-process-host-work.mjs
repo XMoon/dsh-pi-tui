@@ -1234,12 +1234,14 @@ function createScopedMcpB1Workload(ctx, { root, record }) {
  * of a shell failure, and every present tool is really executed.
  */
 const PR1_FOREGROUND_COMMAND = [
+  'status=0;',
   'for p in dsh-pr1-user-probe dsh-pr1-mise-probe dsh-pr1-cargo-probe dsh-pr1-pnpm-probe dsh-pr1-client-only-probe; do',
-  'if command -v "$p" >/dev/null 2>&1; then "$p"; else printf "PR1_ABSENT=%s\\n" "$p"; fi;',
+  'if command -v "$p" >/dev/null 2>&1; then "$p" || status=1; else printf "PR1_ABSENT=%s\\n" "$p"; fi;',
   'done;',
-  'dsh-pr1-shadow-probe;',
+  'dsh-pr1-shadow-probe || status=1;',
   'printf "PR1_SHELL=%s\\n" "${DSH_SHELL:-unset}";',
-  'printf "PR1_SECRET=%s\\n" "${PR1_API_KEY:-unset}"',
+  'printf "PR1_SECRET=%s\\n" "${PR1_API_KEY:-unset}";',
+  'exit "$status"',
 ].join(' ')
 /** The ONE harmless background command this scenario may request. */
 const PR1_BACKGROUND_COMMAND = 'dsh-pr1-user-probe'
