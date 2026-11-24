@@ -674,7 +674,11 @@ class RemoteActivityObservation implements ActivityObservation {
   private revision = 0
   private error: string | undefined
   private disposed = false
-  private readonly priorityQueue: string[] = []
+  /** The fixed priority tiers, highest first: actual active/eligible, the
+   *  current/recovery candidate, then ordinary positive-hint candidates. Roster
+   *  order is preserved inside a tier, so a late current/eligible row can never
+   *  sit behind a long hinted prefix at initial open. */
+  private readonly priorityTiers: [string[], string[], string[]] = [[], [], []]
   private readonly discoveryQueue: string[] = []
   /** The ONE in-flight read of a row. The token is the operation identity: an
    *  older read settling can never retire a newer request's ownership. */
@@ -724,6 +728,7 @@ class RemoteActivityObservation implements ActivityObservation {
     if (this.disposed) return
     // Commit identity/epoch state BEFORE any listener runs: a callback that
     // reads the snapshot must see the new roster, never a half-applied one.
+    const previousCurrent = this.currentSessionId
     this.rosterRevision = rosterRevision
     this.currentSessionId = currentSessionId
     const authorized = rows.filter(row => row.origin !== 'subagent').map(row => row.id)
@@ -737,8 +742,11 @@ class RemoteActivityObservation implements ActivityObservation {
       this.pendingWork.delete(id)
       this.inflight.get(id)?.controller.abort(new Error('the Session left the roster'))
     }
+    const admitted: string[] = []
     for (const id of authorized) {
-      if (!this.rows.has(id)) this.rows.set(id, this.freshRow(id))
+      if (this.rows.has(id)) continue
+      this.rows.set(id, this.freshRow(id))
+      admitted.push(id)
     }
     this.rosterOrder = authorized
     this.receipts.prune(authorized)
@@ -748,8 +756,29 @@ class RemoteActivityObservation implements ActivityObservation {
     this.pruneQueues()
     this.revision += 1
     this.emit()
-    this.scheduleRosterWork()
+    // Only NEWLY admitted rows and a changed current Session are dirty here. A
+    // title/preset/order/updatedAt repaint or an unrelated add/remove must never
+    // re-read stable active candidates (their epoch/witness/pair are unchanged);
+    // a generation replacement deliberately repopulates everything instead.
+    this.scheduleAdmittedWork(admitted)
+    if (previousCurrent !== currentSessionId && currentSessionId !== undefined) {
+      this.schedulePriority(currentSessionId, { front: true })
+    }
     this.pump()
+  }
+
+  /** Schedule the ONE necessary initial read of each newly admitted row. */
+  private scheduleAdmittedWork(admitted: readonly string[]): void {
+    for (const id of admitted) {
+      const row = this.rows.get(id)
+      if (row === undefined) continue
+      if (this.rowIsCandidate(row)) {
+        this.schedulePriority(id)
+        continue
+      }
+      if (this.discoverySettled(row) || this.discoveryReceiptHeld(row)) continue
+      this.scheduleDiscovery(id)
+    }
   }
 
   setPriorityIds(ids: ReadonlySet<string>): void {
@@ -819,7 +848,7 @@ class RemoteActivityObservation implements ActivityObservation {
     this.clearTimer()
     for (const entry of this.inflight.values()) entry.controller.abort(new Error('the Session activity observation was disposed'))
     this.inflight.clear()
-    this.priorityQueue.length = 0
+    this.clearPriorityTiers()
     this.discoveryQueue.length = 0
     for (const off of this.offs.splice(0)) off()
     this.abortCleanup()
@@ -963,7 +992,7 @@ class RemoteActivityObservation implements ActivityObservation {
     if (Object.is(current, this.capturedGeneration)) return
     this.capturedGeneration = current
     for (const entry of this.inflight.values()) entry.controller.abort(new Error('the Connection generation was replaced'))
-    this.priorityQueue.length = 0
+    this.clearPriorityTiers()
     this.discoveryQueue.length = 0
     this.clearTimer()
     // Every proof (and every discovery receipt) belongs to the replaced
@@ -994,7 +1023,7 @@ class RemoteActivityObservation implements ActivityObservation {
    *  its last-known roster and the next real generation re-proves what it can. */
   private revokeGeneration(): void {
     for (const entry of this.inflight.values()) entry.controller.abort(new Error('the Connection generation was lost'))
-    this.priorityQueue.length = 0
+    this.clearPriorityTiers()
     this.discoveryQueue.length = 0
     this.clearTimer()
     this.receipts.clear()
@@ -1161,7 +1190,8 @@ class RemoteActivityObservation implements ActivityObservation {
   }
 
   private schedulePriority(sessionId: string, options: { readonly front?: boolean } = {}): void {
-    if (this.disposed || !this.rows.has(sessionId)) return
+    const candidate = this.rows.get(sessionId)
+    if (this.disposed || candidate === undefined) return
     if (this.inflight.has(sessionId)) {
       // The row is being read under an older epoch: coalesce the newer work so
       // it is dispatched when that read settles, never silently dropped.
@@ -1170,10 +1200,40 @@ class RemoteActivityObservation implements ActivityObservation {
     }
     const discoveryIndex = this.discoveryQueue.indexOf(sessionId)
     if (discoveryIndex >= 0) this.discoveryQueue.splice(discoveryIndex, 1)
-    const priorityIndex = this.priorityQueue.indexOf(sessionId)
-    if (priorityIndex >= 0) this.priorityQueue.splice(priorityIndex, 1)
-    if (options.front === true) this.priorityQueue.unshift(sessionId)
-    else this.priorityQueue.push(sessionId)
+    this.removePriority(sessionId)
+    const tier = this.priorityTierOf(candidate)
+    const queue = this.priorityTiers[tier]!
+    if (options.front === true) queue.unshift(sessionId)
+    else queue.push(sessionId)
+  }
+
+  /** The fixed dispatch tier of one candidate (see `priorityTiers`). */
+  private priorityTierOf(row: ActivityRow): 0 | 1 | 2 {
+    if (this.priorityIds.has(row.sessionId)) return 0
+    if (row.running === true) return 0
+    if (row.attention === 'question' || row.attention === 'approval' || row.attention === 'plan-review') return 0
+    if (row.sessionId === this.currentSessionId) return 1
+    if (!row.runningProven && this.listSaysRunning(row.sessionId)) return 1
+    return 2
+  }
+
+  private removePriority(sessionId: string): void {
+    for (const queue of this.priorityTiers) {
+      const index = queue.indexOf(sessionId)
+      if (index >= 0) queue.splice(index, 1)
+    }
+  }
+
+  private priorityQueued(sessionId: string): boolean {
+    return this.priorityTiers.some(queue => queue.includes(sessionId))
+  }
+
+  private priorityEmpty(): boolean {
+    return this.priorityTiers.every(queue => queue.length === 0)
+  }
+
+  private clearPriorityTiers(): void {
+    for (const queue of this.priorityTiers) queue.length = 0
   }
 
   private scheduleDiscovery(sessionId: string): void {
@@ -1182,7 +1242,7 @@ class RemoteActivityObservation implements ActivityObservation {
       if (this.pendingWork.get(sessionId) !== 'priority') this.pendingWork.set(sessionId, 'discovery')
       return
     }
-    if (this.priorityQueue.includes(sessionId) || this.discoveryQueue.includes(sessionId)) return
+    if (this.priorityQueued(sessionId) || this.discoveryQueue.includes(sessionId)) return
     this.discoveryQueue.push(sessionId)
   }
 
@@ -1199,8 +1259,10 @@ class RemoteActivityObservation implements ActivityObservation {
 
   private pruneQueues(): void {
     const authorize = (id: string): boolean => this.rows.has(id)
-    for (let index = this.priorityQueue.length - 1; index >= 0; index -= 1) {
-      if (!authorize(this.priorityQueue[index])) this.priorityQueue.splice(index, 1)
+    for (const queue of this.priorityTiers) {
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        if (!authorize(queue[index])) queue.splice(index, 1)
+      }
     }
     for (let index = this.discoveryQueue.length - 1; index >= 0; index -= 1) {
       if (!authorize(this.discoveryQueue[index])) this.discoveryQueue.splice(index, 1)
@@ -1217,8 +1279,9 @@ class RemoteActivityObservation implements ActivityObservation {
       if (total >= ACTIVITY_READ_CAPACITY) return
       const discoveryPending = this.discoveryQueue.length > 0
       const priorityLimit = discoveryPending ? ACTIVITY_PRIORITY_CONCURRENCY : ACTIVITY_READ_CAPACITY
-      if (this.priorityQueue.length > 0 && this.activePriority < priorityLimit) {
-        const sessionId = this.priorityQueue.shift()!
+      const nextTier = this.priorityTiers.find(queue => queue.length > 0)
+      if (nextTier !== undefined && this.activePriority < priorityLimit) {
+        const sessionId = nextTier.shift()!
         this.startPriority(sessionId)
         continue
       }
@@ -1340,7 +1403,7 @@ class RemoteActivityObservation implements ActivityObservation {
       }
     }
     this.pump()
-    if (this.priorityQueue.length === 0 && this.activePriority === 0) this.armRecheck()
+    if (this.priorityEmpty() && this.activePriority === 0) this.armRecheck()
   }
 
   /** Commit one exact state+projection pair onto the current row epoch. */

@@ -113,13 +113,25 @@ test('L5 the REAL Client store drives the Browser owner roster and its Workspace
   // invalidates the membership and re-proves a fresh baseline; the panel never
   // closes and its roster survives.
   const revisionBefore = presentation.latest()?.workspace?.revision ?? 0
+  const snapshotsBefore = presentation.snapshots.length
   client.connection.reconnect()
+  // The invalidation is a REAL published frame BEFORE the recovered baseline:
+  // the panel states the membership proof is gone rather than retaining it.
+  await waitFor('the real carrier loss publishes the invalidation frame', () =>
+    presentation.snapshots.slice(snapshotsBefore).some(snapshot =>
+      snapshot.workspace?.state === 'unavailable' && snapshot.workspace.baselineProven === false))
   await waitFor('the Workspace baseline is re-proven after the real reconnect', () => {
     const workspace = presentation.latest()?.workspace
     return workspace !== undefined && workspace.baselineProven && workspace.revision > revisionBefore
   })
+  const recovered = presentation.latest()?.workspace
   assert.equal(presentation.latest()?.rows.some(entry => entry.id === CURRENT), true,
     'the same panel keeps its real roster across the reconnect')
-  assert.equal(presentation.latest()?.workspace?.state, 'ready',
+  assert.equal(recovered?.state, 'ready',
     'the recovered Workspace membership is a real current baseline, not a stale paint')
+  // The recovered baseline is a real fresh baseline frame (not a retained old
+  // one plus a delta): the invalidation frame above already proved the proof was
+  // revoked in between, and the baseline revision advanced after it.
+  assert.equal(Array.isArray(recovered?.facts), true,
+    'the recovered workspace snapshot is a real baseline, never an undefined carry-over')
 })

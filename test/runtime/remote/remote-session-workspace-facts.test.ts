@@ -1613,3 +1613,77 @@ test('R18 an official running transition while the Browser is CLOSED invalidates
       'the untouched sibling keeps its receipt across the other row status transition')
   })
 })
+
+test('R19 an unrelated roster metadata/add/remove change never re-reads a stable candidate pair', async () => {
+  const listed = [row('cur'), row('stable'), row('gone')]
+  const listedRunning = { cur: true, stable: true, gone: false }
+  const hints: Record<string, unknown> = {}
+  const h = harness({
+    listed,
+    listedRunning,
+    states: {
+      cur: { result: { running: true, pendingInput: [] } },
+      stable: { result: { running: true, pendingInput: [] } },
+    },
+    projections: { cur: { result: emptyQuestions }, stable: { result: emptyQuestions } },
+    projectionsBySession: hints as never,
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, 'cur')
+    await waitFor(() => h.stateCalls.includes('cur') && h.stateCalls.includes('stable'), 'the two candidates get their ONE pair')
+    await flushTurns()
+    const stablePair = {
+      state: h.stateCalls.filter(id => id === 'stable').length,
+      projection: h.projectionCalls.filter(id => id === 'stable').length,
+    }
+    // An unrelated title/updatedAt change, a new idle row and a removal: none of
+    // these is a relevant change for the stable candidate.
+    const next = [
+      row('cur', { updatedAt: 2 }),
+      row('stable', { updatedAt: 9, title: 'Renamed elsewhere' }),
+      row('added'),
+    ]
+    for (const id of Object.keys(listedRunning)) if (id === 'gone') delete (listedRunning as Record<string, boolean>)[id]
+    ;(listedRunning as Record<string, boolean>).added = false
+    listed.splice(0, listed.length, ...next)
+    observation.setRoster(next, 2, 'cur')
+    await waitFor(() => h.projectionCalls.includes('added') || h.stateCalls.includes('added'),
+      'the NEWLY admitted row receives its necessary initial read')
+    await flushTurns()
+    assert.deepEqual({
+      state: h.stateCalls.filter(id => id === 'stable').length,
+      projection: h.projectionCalls.filter(id => id === 'stable').length,
+    }, stablePair, 'the stable blocked/complete pair was not re-read by an unrelated roster change')
+  })
+})
+
+test('R20 the priority tiers keep a late current row ahead of hinted candidates while discovery stays live', async () => {
+  const hinted = Array.from({ length: 6 }, (_, index) => `hint-${index}`)
+  const listed = [...hinted.map(id => row(id)), row('current-late'), row('plain')]
+  const hints: Record<string, unknown> = Object.fromEntries(hinted.map(id => [id, {
+    values: { userQuestions: { active: [{ callId: `q-${id}`, state: 'continued', questions: [{ id: 'q', question: 'Continue?' }] }], settled: [] } },
+    state: 'idle',
+  }]))
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const h = harness({
+    listed,
+    listedRunning: Object.fromEntries(listed.map(id => [id, false])),
+    states: Object.fromEntries(listed.map(id => [id, { result: { running: false, pendingInput: [] } }])),
+    projections: Object.fromEntries(listed.map(id => [id, { result: emptyQuestions }])),
+    projectionsBySession: hints as never,
+    stateGate: async () => { await gate },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, 'current-late')
+    // The current row is LAST in the roster but tier 1; the hinted rows are
+    // tier 2. The first actual priority dispatch must be the current row.
+    await waitFor(() => h.stateCalls.length >= 1, 'the first priority dispatch starts')
+    assert.equal(h.stateCalls[0], 'current-late',
+      'a late current row precedes the hinted candidates in the fixed dispatch tiers')
+    release()
+    await waitFor(() => h.projectionCalls.includes('plain'), 'the reserved discovery lane stays live')
+    await flushTurns()
+    release()
+  })
+})

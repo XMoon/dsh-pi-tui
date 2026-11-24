@@ -860,6 +860,9 @@ test('R17 an explicit refresh owns exactly ONE projection chain and an older cha
   owner.refresh()
   await waitUntil('the held refresh chain starts', () => calls.length === 1)
   owner.refresh()
+  // The newer chain must DISPATCH its own batch (not merely inherit the title
+  // the previous refresh already proved).
+  await waitUntil('the newer refresh chain dispatches', () => calls.length >= 2)
   await waitUntil('the newer refresh chain settles', () => presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
   held.splice(0).forEach(release => { release() })
   await new Promise<void>(resolve => setImmediate(resolve))
