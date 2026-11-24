@@ -755,8 +755,11 @@ async function terminateOwnedEntry(handle, reason) {
       try {
         signal('SIGTERM')
       } catch (error) {
-        if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
-        await waitForEntryClose(handle, `${reason}: exited before SIGTERM`, KILL_GRACE_MS)
+        try {
+          await waitForEntryClose(handle, `${reason}: refused the SIGTERM as an exited leader`, TERM_GRACE_MS)
+        } catch {
+          throw error
+        }
         await assertHostGroupGone(handle, reason)
         if (handle === activeQualificationClient) activeQualificationClient = undefined
         syncQualificationClientReceipt?.()
@@ -770,7 +773,11 @@ async function terminateOwnedEntry(handle, reason) {
           try {
             signal('SIGKILL')
           } catch (error) {
-            if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
+            try {
+              await waitForEntryClose(handle, `${reason}: refused the SIGKILL as an exited leader`, TERM_GRACE_MS)
+            } catch {
+              throw error
+            }
           }
         }
         await waitForEntryClose(handle, `${reason}: SIGKILL`, KILL_GRACE_MS)
@@ -1527,8 +1534,11 @@ async function terminateHost(handle, reason) {
   try {
     kill('SIGTERM')
   } catch (error) {
-    if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
-    await waitForHostClose(handle, `Host ${String(handle.child.pid)} exited before SIGTERM`, KILL_GRACE_MS)
+    try {
+      await waitForHostClose(handle, `Host ${String(handle.child.pid)} refused the SIGTERM as an exited leader`, TERM_GRACE_MS)
+    } catch {
+      throw error
+    }
     await assertHostGroupGone(handle, reason)
     syncHostReceipt()
     return handle.exitResult
@@ -1540,7 +1550,11 @@ async function terminateHost(handle, reason) {
       try {
         kill('SIGKILL')
       } catch (error) {
-        if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
+        try {
+          await waitForHostClose(handle, `Host ${String(handle.child.pid)} refused the SIGKILL as an exited leader`, TERM_GRACE_MS)
+        } catch {
+          throw error
+        }
       }
     }
     try {
