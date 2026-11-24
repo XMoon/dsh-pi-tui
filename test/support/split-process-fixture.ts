@@ -282,7 +282,8 @@ interface SupervisorReceipt {
   sceneRoot?: string
   candidate?: { sha256?: string }
   installation?: { dshHome?: string; profileDir?: string; workDir?: string }
-  scope?: { scopeId?: string }
+  scope?: { scopeId?: string; hostSeat?: { path?: string; name?: string } }
+  worker?: { pid?: number; ppid?: number; birth?: string }
   host?: { pid?: number; birth?: string; pgid?: number }
   processClients?: Array<{
     clientId?: string
