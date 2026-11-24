@@ -752,11 +752,27 @@ async function terminateOwnedEntry(handle, reason) {
         syncQualificationHelpersReceipt?.()
         return
       }
-      signal('SIGTERM')
+      try {
+        signal('SIGTERM')
+      } catch (error) {
+        if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
+        await waitForEntryClose(handle, `${reason}: exited before SIGTERM`, KILL_GRACE_MS)
+        await assertHostGroupGone(handle, reason)
+        if (handle === activeQualificationClient) activeQualificationClient = undefined
+        syncQualificationClientReceipt?.()
+        syncQualificationHelpersReceipt?.()
+        return
+      }
       try {
         await waitForEntryClose(handle, `${reason}: SIGTERM`, TERM_GRACE_MS)
       } catch {
-        signal('SIGKILL')
+        if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
+          try {
+            signal('SIGKILL')
+          } catch (error) {
+            if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
+          }
+        }
         await waitForEntryClose(handle, `${reason}: SIGKILL`, KILL_GRACE_MS)
       }
     }
@@ -1508,11 +1524,25 @@ async function terminateHost(handle, reason) {
     if (scene?.kind === 'process') killProcessHost(handle, signal, `terminateHost:${reason}`)
     else killOwnedHost(handle, signal)
   }
-  kill('SIGTERM')
+  try {
+    kill('SIGTERM')
+  } catch (error) {
+    if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} exited before SIGTERM`, KILL_GRACE_MS)
+    await assertHostGroupGone(handle, reason)
+    syncHostReceipt()
+    return handle.exitResult
+  }
   try {
     await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason}`, TERM_GRACE_MS)
   } catch {
-    kill('SIGKILL')
+    if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
+      try {
+        kill('SIGKILL')
+      } catch (error) {
+        if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) throw error
+      }
+    }
     try {
       await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason} SIGKILL`, KILL_GRACE_MS)
     } catch (error) {
