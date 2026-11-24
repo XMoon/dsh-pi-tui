@@ -305,7 +305,7 @@ test('L5/L4: the exact Inspector read is cold, non-activating, retained-safe and
   owner.open()
   await waitFor('the real owner roster lists Y', () =>
     presentation.latest()?.rows.some(entry => entry.id === Y) === true)
-  presentation.requests[0]!.onInspectorSelection!(Y)
+  presentation.requests[0]!.onInspectorSelection!({ sessionId: Y, origin: 'browse' })
   await waitFor('the selected Y exact Inspector cut', () =>
     presentation.latest()?.inspector?.state === 'ready'
     && presentation.latest()?.inspector?.sessionId === Y)

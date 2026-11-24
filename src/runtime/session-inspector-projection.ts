@@ -171,7 +171,7 @@ function usageOf(value: unknown): SessionInspectorUsage | undefined {
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens,
-    ...(cacheDenominator > 0 ? { cacheHitPct: 100 * cacheReadTokens / cacheDenominator } : {}),
+    ...(cacheDenominator > 0 ? { cacheHitPct: (cacheReadTokens / cacheDenominator) * 100 } : {}),
   }
 }
 
@@ -193,7 +193,7 @@ function contextOf(value: unknown): SessionInspectorContext | undefined {
   const legalWindow = windowTokens !== undefined && windowTokens > 0 ? windowTokens : undefined
   if (usedTokens === undefined && legalWindow === undefined) return undefined
   const percent = usedTokens !== undefined && legalWindow !== undefined
-    ? Math.min(100, Math.max(0, Math.round(100 * usedTokens / legalWindow)))
+    ? Math.min(100, Math.max(0, Math.round((usedTokens / legalWindow) * 100)))
     : undefined
   return {
     ...(usedTokens === undefined ? {} : { usedTokens }),

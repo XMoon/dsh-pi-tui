@@ -191,6 +191,7 @@ import { ScheduleWorkspacePanel } from './tui/schedule/workspace-panel.ts'
 import type {
   SessionBrowserReadSnapshot,
   SessionBrowserSubject,
+  SessionInspectorSelection,
 } from './app/command/session-browser-presentation.ts'
 import type { WorkspaceFactsFrame } from './runtime/session-workspace-facts-port.ts'
 import type { SessionMarkdownReadResult } from './runtime/session-markdown-port.ts'
@@ -2175,9 +2176,10 @@ export interface SessionWorkspaceOpenOptions {
   readonly onQueryChange: (raw: string) => void
   readonly onResume: (sessionId: string) => void
   /** Session Workspace PR2: the renderer's committed-frame typed selection
-   *  report. The shared read owner owns the debounced exact read; this lease
-   *  only forwards it while THIS record owns the physical screen. */
-  readonly onInspectorSelection?: (sessionId: string | undefined) => void
+   *  report, with Browse/Search provenance. The shared read owner owns the
+   *  debounced exact read; this lease only forwards it while THIS record owns
+   *  the physical screen. */
+  readonly onInspectorSelection?: (selection: SessionInspectorSelection | undefined) => void
   /** Session Workspace PR2: ONE explicit full Session-id Markdown read for the
    *  local Reader. The command bridge composes the open, reader and runner
    *  cancellation signals; this lease only forwards it while THIS record owns
@@ -2203,7 +2205,10 @@ export interface SessionWorkspaceOpenOptions {
 /** The returned control of ONE open Session Workspace, fenced by THIS lease
  *  record: a stale handle can never repaint or close a newer screen. */
 export interface SessionWorkspaceHandle {
-  setSnapshot(snapshot: SessionBrowserReadSnapshot, initialQuery?: string): void
+  setSnapshot(
+    snapshot: SessionBrowserReadSnapshot,
+    options?: string | { readonly initialQuery?: string; readonly inspectorOnly?: boolean },
+  ): void
   updateWorkspaces(frame: WorkspaceFactsFrame): void
   workspaceUnavailable(message: string): void
   /** M5-U-D: ONE accepted official Activity sample for the accepted roster
@@ -28710,8 +28715,8 @@ export class TuiApp {
         if (this.workspaceLease === record) options.onResume(sessionId)
       },
       ...(options.onInspectorSelection === undefined ? {} : {
-        onInspectorSelection: (sessionId: string | undefined) => {
-          if (this.workspaceLease === record) options.onInspectorSelection?.(sessionId)
+        onInspectorSelection: (selection: SessionInspectorSelection | undefined) => {
+          if (this.workspaceLease === record) options.onInspectorSelection?.(selection)
         },
       }),
       readMarkdown: (sessionId, signal) => {
@@ -28770,9 +28775,13 @@ export class TuiApp {
     })
     const owns = (): boolean => !this.disposed && !disposed && this.workspaceLease === record
     return {
-      setSnapshot: (snapshot, initialQuery) => {
+      setSnapshot: (snapshot, options) => {
         if (!owns()) return
-        panel.setSnapshot(snapshot, initialQuery === undefined ? undefined : { initialQuery })
+        const normalized = typeof options === 'string' ? { initialQuery: options } : options
+        panel.setSnapshot(snapshot, normalized === undefined ? undefined : {
+          ...(normalized.initialQuery === undefined ? {} : { initialQuery: normalized.initialQuery }),
+          ...(normalized.inspectorOnly === true ? { inspectorOnly: true } : {}),
+        })
       },
       updateWorkspaces: (frame) => {
         if (!owns()) return

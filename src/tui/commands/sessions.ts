@@ -19,6 +19,7 @@ import type {
   SessionBrowserPresentation,
   SessionBrowserReadSnapshot,
   SessionBrowserDirectorySettlement,
+  SessionInspectorSelection,
 } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
@@ -298,8 +299,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         // PR2: the renderer's committed-frame typed selection crosses the SAME
         // per-open lease; the shared read owner owns the debounce/read/fences.
         ...(request.onInspectorSelection === undefined ? {} : {
-          onInspectorSelection: (sessionId: string | undefined) => {
-            if (!state.disposed) request.onInspectorSelection?.(sessionId)
+          onInspectorSelection: (selection: SessionInspectorSelection | undefined) => {
+            if (!state.disposed) request.onInspectorSelection?.(selection)
           },
         }),
         readMarkdown: async (sessionId, signal) => {
@@ -365,7 +366,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         isDisposed: () => state.disposed || handle.isDisposed(),
         setSnapshot: (snapshot, snapshotOptions) => {
           if (state.disposed) return
-          handle.setSnapshot(snapshot, snapshotOptions?.initialQuery)
+          handle.setSnapshot(snapshot, snapshotOptions === undefined ? undefined : {
+            ...(snapshotOptions.initialQuery === undefined ? {} : { initialQuery: snapshotOptions.initialQuery }),
+            ...(snapshotOptions.inspectorOnly === true ? { inspectorOnly: true } : {}),
+          })
           const workspace = snapshot.workspace
           if (workspace?.state === 'unavailable' && workspace.revision !== state.workspaceRevision) {
             state.workspaceRevision = workspace.revision

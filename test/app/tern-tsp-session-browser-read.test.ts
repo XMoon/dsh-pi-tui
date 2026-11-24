@@ -885,6 +885,9 @@ const INS_B = 'session-b'
 const INS_C = 'session-c'
 const INS_DEBOUNCE_MS = 150
 
+const browse = (sessionId: string) => ({ sessionId, origin: 'browse' as const })
+const search = (sessionId: string) => ({ sessionId, origin: 'search' as const })
+
 const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
 interface DeferredRead {
@@ -1022,10 +1025,10 @@ test('INS-O1 a settled selection is ONE read after the debounce; rapid moves coa
   await delay(INS_DEBOUNCE_MS + 50)
   assert.equal(probe.states.length, 0, 'no selection means zero Inspector sources and zero reads')
 
-  h.request.onInspectorSelection!(INS_A)
-  h.request.onInspectorSelection!(INS_B)
+  h.request.onInspectorSelection!(browse(INS_A))
+  h.request.onInspectorSelection!(browse(INS_B))
   await delay(50)
-  h.request.onInspectorSelection!(INS_C)
+  h.request.onInspectorSelection!(browse(INS_C))
   await waitUntil('the final selected read', () => probe.sourcesOf(INS_C)[0]?.reads === 1)
   assert.equal(probe.sourcesOf(INS_A)[0]?.reads ?? 0, 0, 'the superseded A never reads')
   assert.equal(probe.sourcesOf(INS_B)[0]?.reads ?? 0, 0, 'the superseded B never reads')
@@ -1041,7 +1044,7 @@ test('INS-O1 a settled selection is ONE read after the debounce; rapid moves coa
     h.presentation.latest()?.inspector?.state === 'ready'
     && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 1)
   const reads = probe.sourcesOf(INS_C)[0]!.reads
-  h.request.onInspectorSelection!(INS_C)
+  h.request.onInspectorSelection!(browse(INS_C))
   await delay(INS_DEBOUNCE_MS + 50)
   assert.equal(probe.sourcesOf(INS_C)[0]!.reads, reads, 'a same-id repaint never starts a second read')
   assert.equal(probe.sourcesOf(INS_C).length, 1, 'a same-id repaint never recreates the source')
@@ -1054,12 +1057,12 @@ test('INS-O1 a settled selection is ONE read after the debounce; rapid moves coa
 test('INS-O2 A→B→A keeps ONE physical flight; only the latest A read commits', async (t) => {
   const probe = new InspectorProbe()
   const h = await inspectorOwner(t, probe)
-  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(browse(INS_A))
   await waitUntil('the first A read', () => probe.sourcesOf(INS_A)[0]?.reads === 1)
 
-  h.request.onInspectorSelection!(INS_B)
+  h.request.onInspectorSelection!(browse(INS_B))
   await delay(20)
-  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(browse(INS_A))
   await delay(INS_DEBOUNCE_MS + 70)
   assert.equal(probe.sourcesOf(INS_A).length, 2, 'A→B→A opens a fresh A source')
   assert.equal(probe.sourcesOf(INS_B)[0]!.reads, 0, 'the B intent never becomes a read while A is unsettled')
@@ -1083,7 +1086,7 @@ test('INS-O2 A→B→A keeps ONE physical flight; only the latest A read commits
 test('INS-O3 same-source changes coalesce ONE trailing read and a source replacement revokes the old cut', async (t) => {
   const probe = new InspectorProbe()
   const h = await inspectorOwner(t, probe)
-  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(browse(INS_A))
   await waitUntil('the first exact read', () => probe.sourcesOf(INS_A)[0]?.reads === 1)
   probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
   await waitUntil('the first exact cut', () => h.presentation.latest()?.inspector?.state === 'ready')
@@ -1129,10 +1132,92 @@ test('INS-O3 same-source changes coalesce ONE trailing read and a source replace
     && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 5)
 })
 
+test('INS-O3b a re-armed debounce supersedes an earlier due intent while the flight is held', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  h.request.onInspectorSelection!(browse(INS_A))
+  await waitUntil('the held first exact read', () => probe.sourcesOf(INS_A)[0]?.reads === 1)
+  const source = probe.states[0]!
+
+  // Expire the first debounce while the physical flight is still held.
+  source.invalidate('changed')
+  await delay(INS_DEBOUNCE_MS + 40)
+  assert.equal(source.probe.reads, 1, 'the expired intent must not start beside the held flight')
+
+  // A newer change at the same source re-arms the ONLY current deadline.
+  source.invalidate('changed')
+  await delay(40)
+  source.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
+  await delay(40)
+  assert.equal(source.probe.reads, 1,
+    'the old due flag must not dispatch before the latest debounce deadline')
+  await waitUntil('the one latest trailing read', () => source.probe.reads === 2)
+  source.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 2) })
+  await waitUntil('the latest trailing cut', () =>
+    (h.presentation.latest()?.inspector as { data?: SessionInspectorData } | undefined)?.data?.stats?.turns === 2)
+  await delay(INS_DEBOUNCE_MS + 50)
+  assert.equal(source.probe.reads, 2, 'the latest debounce never leaves an extra queued read behind')
+})
+
+test('INS-O10 an accepted Search result removal retires the Inspector in the SAME publication', async (t) => {
+  const probe = new InspectorProbe()
+  const presentation = new PresentationProbe()
+  let page: { readonly items: readonly { readonly sessionId: string; readonly snippet: string }[]; readonly hasMore: boolean } = {
+    items: [{ sessionId: INS_A, snippet: 'host hit' }],
+    hasMore: false,
+  }
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => [row(INS_A), row(INS_B)],
+    search: async () => page,
+  }), { sessionWorkspaceFacts: inspectorFactsOf(probe) })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open()
+  await waitUntil('the main roster keeps X', () => presentation.latest()?.rows.some(entry => entry.id === INS_A) === true)
+  const request = presentation.requests[0]!
+  request.onQueryChange('needle')
+  await waitUntil('the accepted Host search hit', () =>
+    presentation.latest()?.searchState === 'ready'
+    && presentation.latest()?.searchResults.some(result => result.row.id === INS_A) === true)
+  request.onInspectorSelection!(search(INS_A))
+  await waitUntil('the Search Inspector read', () => probe.sourcesOf(INS_A)[0]?.reads === 1)
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
+  await waitUntil('the Search Inspector cut', () => presentation.latest()?.inspector?.state === 'ready')
+
+  // The same still-legal id changing Browse <-> Search provenance keeps the
+  // ONE source and does not gratuitously reopen or re-read.
+  request.onInspectorSelection!(browse(INS_A))
+  request.onInspectorSelection!(search(INS_A))
+  await delay(INS_DEBOUNCE_MS + 40)
+  assert.equal(probe.states.length, 1, 'provenance alone never opens a second source')
+  assert.equal(probe.states[0]!.probe.reads, 1, 'provenance alone never starts another read')
+  assert.equal(presentation.latest()?.inspector?.state, 'ready')
+
+  // Hold a trailing read, then remove the SELECTED HIT from the accepted search
+  // while the main roster still lists X. The first publication of the new
+  // accepted search state must already carry no stale Inspector cut.
+  probe.states[0]!.invalidate('changed')
+  await waitUntil('the held trailing read', () => probe.states[0]!.probe.reads === 2)
+  page = { items: [], hasMore: false }
+  request.onQueryChange('other')
+  await waitUntil('the replacement accepted search state', () =>
+    presentation.latest()?.searchState === 'ready'
+    && presentation.latest()?.searchResults.length === 0)
+  assert.equal(presentation.latest()?.inspector, undefined,
+    'the accepted search snapshot cannot keep the old X Inspector cut')
+
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 9) })
+  await delay(50)
+  assert.equal(presentation.latest()?.inspector, undefined,
+    'a late held read cannot resurrect the removed Search target')
+  assert.equal(probe.states[0]!.probe.disposed, 1, 'the removed Search target source is released')
+  assert.ok(presentation.latest()?.rows.some(entry => entry.id === INS_A) === true,
+    'the main roster still lists X: removal is search-scoped, not roster-scoped')
+})
+
 test('INS-O4 a metadata-only roster revision keeps the cut; a removed target clears it and invalidates a late read', async (t) => {
   const probe = new InspectorProbe()
   const h = await inspectorOwner(t, probe)
-  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(browse(INS_A))
   await waitUntil('the ready Inspector cut', () => probe.states[0]?.probe.reads === 1)
   probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
   await waitUntil('the published exact cut', () => h.presentation.latest()?.inspector?.state === 'ready')
@@ -1160,7 +1245,7 @@ test('INS-O4 a metadata-only roster revision keeps the cut; a removed target cle
 test('INS-O5 retire/dispose clears the timer/source and ignores the late settlement', async (t) => {
   const probe = new InspectorProbe()
   const h = await inspectorOwner(t, probe)
-  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(browse(INS_A))
   await waitUntil('the pending exact read', () => probe.states[0]?.probe.reads === 1)
   const snapshots = h.presentation.snapshots.length
   h.owner.dispose()
@@ -1177,7 +1262,7 @@ test('INS-O6 an omitted Inspector capability is a truthful unavailable state wit
   t.after(() => { owner.dispose(); diag.dispose() })
   owner.open()
   await waitUntil('the roster without a facts port', () => presentation.latest()?.rows.length === 1)
-  presentation.requests[0]!.onInspectorSelection!(INS_A)
+  presentation.requests[0]!.onInspectorSelection!(browse(INS_A))
   await waitUntil('the unavailable Inspector state', () =>
     presentation.latest()?.inspector?.state === 'unavailable')
   assert.equal(presentation.latest()?.inspector?.sessionId, INS_A)
@@ -1189,7 +1274,7 @@ test('INS-O7 a synchronous open-time selection is ignored until the handle and f
       const handle = super.open(request)
       // A real renderer may paint during open; the read owner must not admit a
       // read before its handle is installed and its first roster accepted.
-      request.onInspectorSelection?.(INS_A)
+      request.onInspectorSelection?.(browse(INS_A))
       return handle
     }
   }
@@ -1197,7 +1282,7 @@ test('INS-O7 a synchronous open-time selection is ignored until the handle and f
   const presentation = new SyncReportingProbe()
   const h = await inspectorOwner(t, probe, { presentation })
   assert.equal(probe.states.length, 0, 'the open-time report starts no source/read')
-  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(browse(INS_A))
   await waitUntil('the post-open selection source', () => probe.sourcesOf(INS_A).length === 1)
 })
 
@@ -1205,7 +1290,7 @@ test('INS-O8 a typed direct resume that closes the panel starts no Inspector rea
   class SyncReportingProbe extends PresentationProbe {
     override open(request: SessionBrowserPanelRequest): SessionBrowserPanelHandle {
       const handle = super.open(request)
-      request.onInspectorSelection?.(INS_A)
+      request.onInspectorSelection?.(browse(INS_A))
       return handle
     }
   }

@@ -48,6 +48,7 @@ import type {
   SessionBrowserReadSnapshot,
   SessionBrowserRow,
   SessionBrowserSearchResult,
+  SessionInspectorSelection,
 } from '../../app/command/session-browser-presentation.ts'
 import type {
   SessionActivityFact,
@@ -121,8 +122,9 @@ export interface SessionWorkspacePanelHost {
    *  editor keeps its manual absolute-path verification only. */
   readonly onListDirectory?: HostDirectoryBrowsePort['list']
   /** Session Workspace PR2: report the ONE typed Session this committed frame
-   *  really painted (never a folder/show-more/reader/directory target). */
-  readonly onInspectorSelection?: (sessionId: string | undefined) => void
+   *  really painted, with the actual Browse/Search provenance (never a
+   *  folder/show-more/reader/directory target). */
+  readonly onInspectorSelection?: (selection: SessionInspectorSelection | undefined) => void
   /** The user's own close gesture (Esc at the root list). */
   readonly onClose: () => void
 }
@@ -590,14 +592,18 @@ export class SessionWorkspacePanel implements Component {
   /** The exact typed Session target of the frame being published: only a real
    *  painted main-Session row in Browse/Search results. Folder, Show more, New,
    *  Add, Reader, the inline directory editor and any unpainted id are absent. */
-  private inspectorTargetOfFrame(): string | undefined {
+  private inspectorTargetOfFrame(): SessionInspectorSelection | undefined {
     if (this.directoryEntryActive || this.focus === 'reader') return undefined
     if (this.searchMode) {
       const selected = this.selectedSearchSessionId
-      return selected !== undefined && this.lastPaintedResultIds.includes(selected) ? selected : undefined
+      return selected !== undefined && this.lastPaintedResultIds.includes(selected)
+        ? { sessionId: selected, origin: 'search' }
+        : undefined
     }
     const selected = this.selectedBrowseSessionId()
-    return selected !== undefined && this.lastPaintedBrowseIds.includes(selected) ? selected : undefined
+    return selected !== undefined && this.lastPaintedBrowseIds.includes(selected)
+      ? { sessionId: selected, origin: 'browse' }
+      : undefined
   }
   /** The ONE view of the frame being painted (built once per render). */
   private paintView: SessionWorkspaceView | undefined
@@ -624,8 +630,17 @@ export class SessionWorkspacePanel implements Component {
 
   /** Ordinary snapshots refresh results and the roster. Only the one-shot
    *  `initialQuery` option may write the editor, and never after a real edit. */
-  setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: { readonly initialQuery?: string }): void {
+  setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: {
+    readonly initialQuery?: string
+    readonly inspectorOnly?: boolean
+  }): void {
     if (this.disposed) return
+    if (options?.inspectorOnly === true) {
+      // PR2 paints nothing from the Inspector: keep the data, do not re-render
+      // or disturb the current editor/focus/activity revision.
+      this.snapshot = snapshot
+      return
+    }
     if (snapshot.listRevision !== this.activitySampleRevision) {
       // The roster was re-accepted: the previous sample belongs to the OLD
       // revision and may not be painted over the new one. An old positive

@@ -757,6 +757,13 @@ export class TspSessionBrowser {
       isDisposed: () => panel.disposed,
       setSnapshot: (snapshot, options) => {
         if (this.current() !== panel) return
+        if (options?.inspectorOnly === true) {
+          // PR2 paints no Inspector data: store the full snapshot for the owner/
+          // later consumer, but do not advance the native revision, invalidate a
+          // painted action token, normalize selection or request a rerender.
+          panel.snapshot = snapshot
+          return
+        }
         if (options?.initialQuery !== undefined && !panel.initialQueryApplied) {
           panel.initialQueryApplied = true
           if (!panel.queryEdited) {
@@ -1260,6 +1267,8 @@ export class TspSessionBrowser {
     const selected = panel.page === 'browse' && !panel.directoryEntry
       ? selectedSessionRow(panel)
       : undefined
-    panel.request.onInspectorSelection?.(selected?.id)
+    panel.request.onInspectorSelection?.(selected === undefined
+      ? undefined
+      : { sessionId: selected.id, origin: queryMode(panel) ? 'search' : 'browse' })
   }
 }

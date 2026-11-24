@@ -49,6 +49,17 @@ export interface SessionBrowserWorkspaceSnapshot {
   readonly activityError?: string
 }
 
+/** The renderer's ONE real painted typed Session selection, with the actual
+ *  Browse/Search mode that painted it. There is one selection, never a second
+ *  store: the owner uses the provenance ONLY to validate that a Search target
+ *  is still an accepted result (a Browse target is validated against the main
+ *  roster). A query string alone cannot prove the mode: PiTUI keeps its query
+ *  when Esc returns to Browse. */
+export interface SessionInspectorSelection {
+  readonly sessionId: string
+  readonly origin: 'browse' | 'search'
+}
+
 /** The ONE selected-Session Inspector state of an open renderer. PR2 delivers
  *  the data/state only (no paint); a consumer must match `sessionId` against
  *  the CURRENT typed selection before presenting it, and an old exact cut is
@@ -129,17 +140,23 @@ export interface SessionBrowserPanelRequest {
    *  TSP native presentation never receives it. */
   readonly onListDirectory?: HostDirectoryBrowsePort['list']
   /** Session Workspace PR2: the renderer's ONE real typed selection report,
-   *  emitted from a committed frame's painted rows only. `undefined` clears.
-   *  Optional solely for presenters/fixtures without the seam; both production
-   *  renderers forward it. */
-  readonly onInspectorSelection?: (sessionId: string | undefined) => void
+   *  emitted from a committed frame's painted rows only, with Browse/Search
+   *  provenance. `undefined` clears. Optional solely for presenters/fixtures
+   *  without the seam; both production renderers forward it. */
+  readonly onInspectorSelection?: (selection: SessionInspectorSelection | undefined) => void
   readonly onClose: () => void
 }
 
 export interface SessionBrowserPanelHandle {
   isDisposed(): boolean
-  /** Ordinary snapshots update results; only this one-shot option may seed editor text. */
-  setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: { readonly initialQuery?: string }): void
+  /** Ordinary snapshots update results; only this one-shot option may seed
+   *  editor text. `inspectorOnly` marks a publication whose ONLY changed field
+   *  is the selected-Session Inspector data (PR2 paints none): presenters store
+   *  it but must not advance native action/target revision or request a render. */
+  setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: {
+    readonly initialQuery?: string
+    readonly inspectorOnly?: boolean
+  }): void
   close(): void
 }
 

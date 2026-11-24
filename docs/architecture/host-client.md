@@ -1657,7 +1657,15 @@ without touching the roster summary or the activity sample:
   read, and fences every result by the panel, selection/source epoch and the
   request identity. A roster removal clears the selection at the acceptance
   boundary; retire aborts the source/request without waiting for the network.
-  A late or stale result is inert. The DTO carries no Session-switch authority:
+  The report carries the presenter's actual Browse/Search provenance. A Search
+  target must still be an ACCEPTED search result (main roster membership alone
+  is insufficient): its source/timer/flight is retired synchronously at the
+  search/roster acceptance boundary, before that accepted state is published.
+  A same-id provenance change keeps the source and cut. An Inspector-only
+  publication is explicitly marked: presenters store the detached data without
+  advancing native action/target revision or requesting a render while no
+  Inspector UI is painted. A late or stale result is inert. The DTO carries no
+  Session-switch authority:
   the renderer may present it later, while the existing Browser Resume owner
   remains the only switch authority. This seam is data-only; a later visual
   surface consumes it without changing the read owner.

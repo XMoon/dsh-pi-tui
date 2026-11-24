@@ -362,9 +362,11 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   prefetch, periodic read, global transcript cache or second read source.
 - **The typed painted row is the ONE selected-Session Inspector trigger.**
   Every committed frame reports the exact selected main Session row it really
-  painted in Browse or Search Results; a Folder, New, Add, Show more, the
-  Reader, the inline directory editor or an unpainted id reports no Session
-  target. The shared `SessionBrowserReadOwner` (never the renderer) owns the
+  painted in Browse or Search Results, with its actual Browse/Search
+  provenance; a Folder, New, Add, Show more, the Reader, the inline directory
+  editor or an unpainted id reports no Session target. A selected Search target
+  is retired at the search-acceptance boundary when that accepted result
+  disappears, even if its Session remains in the main roster. The shared `SessionBrowserReadOwner` (never the renderer) owns the
   debounced exact read: a settled selection reaches at most ONE passive
   projection read through
   [`SessionWorkspaceFactsPort.openInspector`](./host-client.md#selected-session-inspector-exact-projection-read),
