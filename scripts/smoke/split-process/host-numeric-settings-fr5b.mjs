@@ -374,6 +374,7 @@ export async function runHostNumericSettingsFr5B(context) {
       clientA.send(character)
       await sleep(40)
     }
+    clientA.send('\r') // stage the first field locally
     const firstStage = await waitForPattern(clientA, /1 unsaved change/u, 'FR5-B Shell first stage A')
     assert(/Command timeout \(ms\)\s+45000 ms/u.test(firstStage)
       && /Current: 60000 ms · Unsaved/u.test(firstStage),
