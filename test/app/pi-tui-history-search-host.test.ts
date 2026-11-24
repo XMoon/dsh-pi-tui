@@ -6250,36 +6250,70 @@ test('a source replacement during the OLD Owner writer wait cannot answer from t
     stat: (id, options) => first.stat(id, options),
     open: (id, access, options) => first.open(id, access, options),
   }
+  const third: HistorySearchPersistenceLike = {
+    identity: Symbol('query-replace-third'),
+    list: options => first.list(options),
+    stat: (id, options) => first.stat(id, options),
+    open: (id, access, options) => first.open(id, access, options),
+  }
   let current = first
-  const ctx = new Context()
-  const service = directService(ctx, {
+  const ctx1 = new Context()
+  const searchService = directService(ctx1, {
     ...deps,
     sessionPersistence: () => current,
   }, profileDir)
-  const internals = service as unknown as {
+  const searchInternals = searchService as unknown as {
     awaitWrites(signal: AbortSignal): Promise<void>
   }
-  const originalAwait = internals.awaitWrites
+  const originalSearchAwait = searchInternals.awaitWrites
   try {
-    await waitDirectReady(service)
-    const ready = await service.search({ scope: 'session', sessionId: 'mutable-session', query: 'mutable first', limit: 5 }, new AbortController().signal)
-    assert.equal(ready.kind, 'ready')
-    if (ready.kind !== 'ready') throw new Error('expected ready')
-    const item = ready.items[0]!
+    await waitDirectReady(searchService)
     let replaced = false
-    // The replacement lands while the Owner read is inside its writer wait,
-    // AFTER admission and BEFORE the state answer. This is the real supported
-    // provider-replacement window the previous pre-await check could not see.
-    internals.awaitWrites = async (signal: AbortSignal) => {
-      await originalAwait.call(service, signal)
+    // The replacement lands while the Owner SEARCH is inside its writer wait,
+    // AFTER admission and BEFORE the state answer.
+    searchInternals.awaitWrites = async (signal: AbortSignal) => {
+      await originalSearchAwait.call(searchService, signal)
       if (!replaced) {
         replaced = true
         current = second
       }
     }
-    const search = await service.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
+    const search = await searchService.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
     assert.equal(search.kind, 'incomplete', JSON.stringify(search))
-    const read = await service.readText({
+  } finally {
+    searchInternals.awaitWrites = originalSearchAwait
+    await searchService.dispose()
+    await ctx1.fiber.dispose()
+  }
+
+  // Fresh ready state for readText's own post-await replacement boundary.
+  current = second
+  const ctx2 = new Context()
+  const readService = directService(ctx2, {
+    ...deps,
+    sessionPersistence: () => current,
+  }, profileDir)
+  const readInternals = readService as unknown as {
+    awaitWrites(signal: AbortSignal): Promise<void>
+  }
+  const originalReadAwait = readInternals.awaitWrites
+  try {
+    await waitDirectReady(readService)
+    const ready = await readService.search({
+      scope: 'session', sessionId: 'mutable-session', query: 'mutable first', limit: 5,
+    }, new AbortController().signal)
+    assert.equal(ready.kind, 'ready')
+    if (ready.kind !== 'ready') throw new Error('expected ready')
+    const item = ready.items[0]!
+    let replaced = false
+    readInternals.awaitWrites = async (signal: AbortSignal) => {
+      await originalReadAwait.call(readService, signal)
+      if (!replaced) {
+        replaced = true
+        current = third
+      }
+    }
+    const read = await readService.readText({
       sessionId: item.sessionId,
       messageId: item.messageId,
       contentSha256: item.contentSha256,
@@ -6289,9 +6323,9 @@ test('a source replacement during the OLD Owner writer wait cannot answer from t
     assert.notEqual(read.kind, 'ready', JSON.stringify(read))
     assert.equal(read.kind, 'incomplete', JSON.stringify(read))
   } finally {
-    internals.awaitWrites = originalAwait
-    await service.dispose()
-    await ctx.fiber.dispose()
+    readInternals.awaitWrites = originalReadAwait
+    await readService.dispose()
+    await ctx2.fiber.dispose()
   }
 })
 
@@ -6360,13 +6394,28 @@ test('a temporary missing-service gap preserves accepted input and recovers thro
     ctx.emit('session/event', liveSession as never, acceptedEvent as never)
     assert.equal((service as unknown as { pending: Map<string, unknown> }).pending.size, 1,
       'the recoverable gap must buffer the accepted event')
+    // The bounded drain must not consume the payload while the source service
+    // is absent; retaining it is the only safe responsibility.
+    const drainInternals = service as unknown as {
+      enqueueDrain(): void
+      drainPendingStep(): void
+      pending: Map<string, unknown>
+    }
+    drainInternals.enqueueDrain()
+    drainInternals.drainPendingStep()
+    await Promise.resolve()
+    assert.equal(drainInternals.pending.size, 1,
+      'a missing source must not consume the accepted payload')
 
     // The replacement official binding becomes available again on the SAME
-    // mounted index. The next full pass must not reuse the prior proof, must
-    // replay the official source and must retain the accepted occurrence.
+    // mounted index. The OWNER read must observe presence first (search-first
+    // recovery), downgrade to incomplete/unproven and never reuse the prior
+    // proof; only the next full pass may prove coverage.
     persistenceCurrent = replacementPersistence
     sessionsCurrent = firstSessions
     queryCurrent = firstQuery
+    const beforePass = await service.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
+    assert.equal(beforePass.kind, 'incomplete', JSON.stringify(beforePass))
     const openBefore = calls.openCalls()
     await verifyFullPass(service)
     await waitDirectReady(service)
@@ -6379,8 +6428,7 @@ test('a temporary missing-service gap preserves accepted input and recovers thro
     assert.equal(recovered.kind, 'ready')
     assert.ok(recovered.kind === 'ready' && recovered.items.some(item => item.preview === 'mutable gap third'),
       'the accepted event must survive the temporary service gap')
-    const internals = service as unknown as { serviceGap: boolean; priorProofReuseAllowed: boolean; pending: Map<string, unknown> }
-    assert.equal(internals.serviceGap, false)
+    const internals = service as unknown as { priorProofReuseAllowed: boolean; pending: Map<string, unknown> }
     assert.equal(internals.priorProofReuseAllowed, false, 'proof reuse must stay retired for this Host lifetime')
     assert.equal(internals.pending.size, 0)
 
@@ -6501,6 +6549,109 @@ test('a pending accepted event on an unchanged live Session never manufactures a
     )
     assert.equal(answer.kind, 'ready')
     assert.ok(answer.kind === 'ready' && answer.items.length === 1)
+  } finally {
+    release()
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a restored cold Session with preexisting history cannot keep the early proof hit ready', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-restored-root-')
+  const profileDir = life.tempDir('dsh-history-restored-profile-')
+  const early = proofSource(root)
+  const late = proofSource(root, {
+    header: testHeader('proof-late', '/repo/late'),
+    location: { kind: 'jsonl', path: join(root, 'sessions', 'proof-late.jsonl.zstd') },
+    revisionToken: 'rev-late',
+  })
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, early, probe.authority)
+  const { deps, calls } = mutableDeps(early, [late])
+  const basePersistence = deps.sessionPersistence()!
+  const lateName = String(late.header.id)
+  let latched: () => void = () => {}
+  const latchedSignal = new Promise<void>(resolve => { latched = resolve })
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const gated: HistorySearchPersistenceLike = {
+    identity: basePersistence.identity,
+    list: options => basePersistence.list(options),
+    stat: (id, options) => basePersistence.stat(id, options),
+    open: async (id, access, options) => {
+      if (String(id) === lateName) {
+        latched()
+        await gate
+      }
+      return basePersistence.open(id, access, options)
+    },
+  }
+  const earlyId = String(early.header.id)
+  const earlyLive = { id: early.header.id, header: early.header }
+  let restored = false
+  const sessions: HistorySearchSessionsLike = {
+    list: () => (restored ? [earlyLive] : []),
+    get: id => (restored && String(id) === earlyId ? earlyLive : undefined),
+  }
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    sessionPersistence: () => gated,
+    sessions: () => sessions,
+    revisionAuthority: async () => probe.authority,
+  }, profileDir)
+  const internals = service as unknown as {
+    pointCounters: { replayAttempted: number; replayCompleted: number }
+    pending: Map<string, unknown>
+    reconcilePending: Set<string>
+    state: { kind: string }
+  }
+  try {
+    // The early Session is a real cold proof hit; the later official read is
+    // held so the restored registration can land after the hit but before the
+    // round's final identity audit.
+    await latchedSignal
+    const acceptedThird = {
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 1003,
+      data: {
+        target: 'next-turn',
+        start: 2,
+        inserted: [{
+          id: 'restored-third',
+          role: 'user',
+          content: [{ type: 'text', text: 'restored preexisting third' }],
+          source: { kind: 'user', rpcId: 'rpc-restored-third' },
+        }],
+      },
+    }
+    early.events.push(acceptedThird)
+    restored = true
+    ctx.emit('session/created', earlyLive as never)
+    assert.notEqual(internals.state.kind, 'ready', 'a restored Session must not publish the old ready epoch')
+    // Let the existing per-ID repair prove the restored identity before the
+    // late read releases; it must derive the new history without an event.
+    const deadline = Date.now() + 15_000
+    while (internals.pointCounters.replayCompleted < 1 && Date.now() < deadline) {
+      // Bounded observation of the real point-repair settlement counter.
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.pointCounters.replayCompleted, 1,
+      'the restored identity should be proved by exactly one per-ID repair')
+    release()
+    await waitDirectReady(service)
+    const answer = await service.search(
+      { scope: 'session', sessionId: earlyId, query: 'restored preexisting third', limit: 5 },
+      new AbortController().signal,
+    )
+    assert.equal(answer.kind, 'ready')
+    assert.ok(answer.kind === 'ready' && answer.items.length === 1)
+    assert.equal(internals.pending.size, 0)
+    assert.equal(internals.reconcilePending.size, 0)
+    assert.equal(internals.pointCounters.replayAttempted, 1, 'the restored registration must not duplicate its repair')
+    assert.equal(calls.openCalls(), 1, 'only the later cold source is officially opened')
   } finally {
     release()
     await service.dispose()
