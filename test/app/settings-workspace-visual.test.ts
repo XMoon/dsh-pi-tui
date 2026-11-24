@@ -289,6 +289,10 @@ interface HarnessOptions {
   }
   /** Make the shell-execution mutation reject with this reason. */
   shellExecutionWriteFailure?: string
+  /** Hold an ADMITTED Shell-execution batch (the real in-flight Save window). */
+  shellExecutionWriteGate?: () => Promise<void>
+  /** Apply the batch but answer `outcome-unconfirmed` (a lost ACK). */
+  shellExecutionUnconfirmed?: boolean
   /** FR5-B: the official session-log contributor (absent = row hidden). */
   sessionLog?: { readonly enabled: boolean; readonly inherited?: boolean; readonly unreadable?: boolean }
   /** Make the session-log mutation reject with this reason. */
@@ -530,8 +534,24 @@ interface Harness {
   readonly advanceAgentLoopRevision: () => void
   /** Replace the fake Agent-loop Host generation (a Host A -> B replacement). */
   readonly replaceAgentLoopGeneration: () => void
-  /** FR5-B: every active-shell field write, in dispatch order. */
-  readonly shellExecutionWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every ADMITTED active-shell batch with the exact captured fence. */
+  readonly shellExecutionBatches: () => readonly {
+    readonly patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').ShellExecutionSettings>
+    readonly revision: number
+    readonly generation: object
+    readonly executor: 'bash' | 'pwsh'
+    readonly outcome: 'accepted' | 'rejected' | 'conflict' | 'outcome-unconfirmed'
+  }[]
+  /** Every call that really entered the shell mutate port (refused or admitted). */
+  readonly shellExecutionAttempts: () => number
+  /** Every EXPLICIT Shell-execution refresh the page requested. */
+  readonly shellExecutionRefreshes: () => number
+  /** Advance the fake shell revision without a write (another writer). */
+  readonly advanceShellRevision: () => void
+  /** Replace the fake shell Host generation (a Host A -> B replacement). */
+  readonly replaceShellGeneration: () => void
+  /** Start serving the OTHER executor row (same generation, same caps). */
+  readonly switchShellExecutor: (executor: 'bash' | 'pwsh') => void
   /** FR5-B: every session-log field write, in dispatch order. */
   readonly sessionLogWrites: () => readonly HostSectionWrite[]
   /** Advance the fake session-log revision without a write (an external edit). */
@@ -647,7 +667,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const agentLoopWriteGate = (): Promise<void> => options.agentLoopWriteGate === undefined
     ? Promise.resolve()
     : options.agentLoopWriteGate()
-  const shellGeneration = {}
+  let shellGeneration: object = {}
   let shellRevision = 1
   let shellValue: {
     executor: 'bash' | 'pwsh'
@@ -664,7 +684,18 @@ function setup(options: HarnessOptions = {}): Harness {
     inheritedMaxOutputBytes: options.shellExecution.inheritedMaxOutputBytes ?? options.shellExecution.maxOutputBytes,
     ...(options.shellExecution.unreadable === true ? { unreadable: true } : {}),
   }
-  const shellExecutionWrites: HostSectionWrite[] = []
+  const shellExecutionBatches: {
+    patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').ShellExecutionSettings>
+    revision: number
+    generation: object
+    executor: 'bash' | 'pwsh'
+    outcome: 'accepted' | 'rejected' | 'conflict' | 'outcome-unconfirmed'
+  }[] = []
+  let shellExecutionAttempts = 0
+  let shellExecutionRefreshes = 0
+  const shellExecutionWriteGate = (): Promise<void> => options.shellExecutionWriteGate === undefined
+    ? Promise.resolve()
+    : options.shellExecutionWriteGate()
   let sessionLogGeneration: object = {}
   let sessionLogRevision = 1
   let sessionLogValue: { enabled: boolean; inherited: boolean; unreadable?: boolean } | undefined =
@@ -1294,29 +1325,46 @@ function setup(options: HarnessOptions = {}): Harness {
             },
           }
         },
-        refresh: async () => {},
+        refresh: async () => { shellExecutionRefreshes += 1 },
         mutate: async (
           patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').ShellExecutionSettings>,
           revision: number,
           generation: object,
+          executor: 'bash' | 'pwsh',
         ) => {
-          if (shellValue === undefined) return { kind: 'rejected' as const, reason: 'No active shell executor row is mounted.' }
-          if (revision !== shellRevision || generation !== shellGeneration) {
+          shellExecutionAttempts += 1
+          const record = {
+            patch,
+            revision,
+            generation,
+            executor,
+            outcome: 'accepted' as const as 'accepted' | 'rejected' | 'conflict' | 'outcome-unconfirmed',
+          }
+          shellExecutionBatches.push(record)
+          if (shellValue === undefined) {
+            record.outcome = 'rejected'
+            return { kind: 'rejected' as const, reason: 'No active shell executor row is mounted.' }
+          }
+          if (revision !== shellRevision || generation !== shellGeneration || executor !== shellValue.executor) {
+            record.outcome = 'conflict'
             return { kind: 'conflict' as const, reason: 'the shell executor section changed since it was read' }
           }
           if (options.shellExecutionWriteFailure !== undefined) {
+            record.outcome = 'rejected'
             return { kind: 'rejected' as const, reason: options.shellExecutionWriteFailure }
           }
+          await shellExecutionWriteGate()
           for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
             const edit = patch[field]
             if (edit === undefined) continue
-            shellExecutionWrites.push(edit.kind === 'reset'
-              ? { field, op: 'reset' }
-              : { field, op: 'set', value: edit.value })
             const inherited: number = field === 'timeoutMs' ? shellValue.inheritedTimeoutMs : shellValue.inheritedMaxOutputBytes
             shellValue = { ...shellValue, [field]: edit.kind === 'reset' ? inherited : edit.value }
           }
           shellRevision += 1
+          if (options.shellExecutionUnconfirmed === true) {
+            record.outcome = 'outcome-unconfirmed'
+            return { kind: 'outcome-unconfirmed' as const, reason: 'the Host reply was lost' }
+          }
           return { kind: 'accepted' as const }
         },
       },
@@ -1491,7 +1539,14 @@ function setup(options: HarnessOptions = {}): Harness {
     agentLoopRefreshes: () => agentLoopRefreshes,
     advanceAgentLoopRevision: () => { agentLoopRevision += 1 },
     replaceAgentLoopGeneration: () => { agentLoopGeneration = { host: 'agent-loop-b' } },
-    shellExecutionWrites: () => shellExecutionWrites,
+    shellExecutionBatches: () => shellExecutionBatches,
+    shellExecutionAttempts: () => shellExecutionAttempts,
+    shellExecutionRefreshes: () => shellExecutionRefreshes,
+    advanceShellRevision: () => { shellRevision += 1 },
+    replaceShellGeneration: () => { shellGeneration = {} },
+    switchShellExecutor: executor => {
+      if (shellValue !== undefined) shellValue = { ...shellValue, executor }
+    },
     sessionLogWrites: () => sessionLogWrites,
     advanceSessionLogRevision: () => { sessionLogRevision += 1 },
     replaceSessionLogGeneration: () => { sessionLogGeneration = {} },
@@ -3737,10 +3792,40 @@ test('the Agent tenant refuses a stale captured read and recovers through explic
   h.dispose()
 })
 
-test('the real Root Shell-execution page saves both caps in ONE official mutation', async () => {
+/** Enter the Tools Rows level, select the Shell row and open the grouped
+ *  tenant through its REAL explicit entry (the painted `Open…` in the Detail
+ *  preview, or Enter in the narrow single-pane layout). */
+async function openShellGroup(h: Harness, entry: 'open' | 'enter' = 'open'): Promise<void> {
+  await h.open('Tools')
+  await key(h, '\r')
+  await highlightRow(h, 'Shell execution')
+  if (entry === 'enter') {
+    await key(h, '\r')
+    return
+  }
+  await clickPainted(h, '> Shell execution')
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'a row click only selects the row')
+  await clickPainted(h, 'Open…')
+  await settle(h, 4)
+}
+
+/** Stage ONE grouped field through the real pointer route (select -> Edit ->
+ *  type -> Stage). */
+async function stageShellField(h: Harness, label: string, value: string): Promise<void> {
+  await clickPainted(h, label)
+  await clickPainted(h, 'Edit [Enter]', true)
+  await h.vt.waitForRender()
+  await key(h, '\x15')
+  for (const character of value) await key(h, character)
+  await clickPainted(h, 'Stage [Enter]', true)
+  await h.vt.waitForRender()
+}
+
+test('the real Root Shell group is entered explicitly and saves both caps in ONE official batch', async () => {
   const h = setup({
-    columns: 160,
-    rows: 44,
+    columns: 200,
+    rows: 50,
     shellExecution: {
       executor: 'bash',
       timeoutMs: 60_000,
@@ -3751,26 +3836,68 @@ test('the real Root Shell-execution page saves both caps in ONE official mutatio
   })
   await h.open('Tools')
   await key(h, '\r')
-  await clickPainted(h, 'Shell execution')
-  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  await highlightRow(h, 'Shell execution')
+  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'selection alone never mounts the group')
+  // Tab is a PURE Rows -> Detail focus transfer: still no mount and no Host read.
+  await key(h, '\t')
+  assert.match(h.view(), /Open…/u, 'the Detail preview paints its explicit OPEN entry')
+  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'Tab never mounts the group')
+  assert.match(h.view(), /not editable while the backend is not current|Open…/u)
+  assert.doesNotMatch(h.view(), /read-only here · no candidate is available right now/u,
+    'a hosted numeric row never paints the false no-candidate note')
+  assert.equal(h.shellExecutionAttempts(), 0)
+  await clickPainted(h, 'Open…')
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u, 'the SAME lease paints the grouped tenant')
   assert.match(h.view(), /Host model-tool executor · POSIX Bash/u)
-  assert.match(h.view(), /Command timeout \(ms\)\s+60000/u)
-  assert.match(h.view(), /Output cap per stream \(bytes\)\s+64000/u)
+  assert.match(h.view(), /Command timeout \(ms\)\s+60000 ms/u, 'the first field is selected with unit')
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+64000 bytes/u)
+  assert.doesNotMatch(h.view(), /Value:|Edit Command timeout/u, 'entering the group never opens the Input')
+  assert.match(h.view(), /Categories/u, 'the parent rail stays readable behind the tenant')
+  assert.match(h.view(), /Changes are staged until Save\./u)
+  const opened = h.view()
+  const refreshesAtOpen = h.shellExecutionRefreshes()
 
-  await clickPainted(h, 'Command timeout (ms)')
-  await key(h, '\x15')
-  for (const character of '45000') await key(h, character)
-  await clickPainted(h, 'Apply [Enter]', true)
+  // A field click only SELECTS; the explicit Edit opens the editor on it.
   await clickPainted(h, 'Output cap per stream (bytes)')
+  assert.match(h.view(), /^.*> Output cap per stream \(bytes\)/mu)
+  assert.doesNotMatch(h.view(), /Edit Output cap per stream/u, 'a field click never edits')
+  await clickPainted(h, 'Edit [Enter]', true)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Edit Output cap per stream \(bytes\)/u)
+  assert.match(h.view(), /Current value\s+64000 bytes/u)
+  assert.match(h.view(), /Stage \[Enter\] · Cancel \[Esc\]/u)
   await key(h, '\x15')
   for (const character of '128000') await key(h, character)
-  await clickPainted(h, 'Apply [Enter]', true)
+  await clickPainted(h, 'Stage [Enter]', true)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u)
+  assert.match(h.view(), /Current: 64000 bytes · Unsaved/u, 'the served Current stays distinct from the draft')
+  assert.match(h.view(), /1 unsaved change · Shell execution/u)
+  assert.equal(h.shellExecutionAttempts(), 0, 'Stage never dispatches a Host write')
+  assert.equal(h.shellExecutionAttempts(), 0)
+  assert.match(h.view(), /Timeout 60000 ms/u, 'the parent Row still projects the served value')
+
+  // The first field through the same explicit route.
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+  assert.match(h.view(), /2 unsaved changes · Shell execution/u)
+  assert.match(h.view(), /Command timeout \(ms\)\s+45000 ms/u)
+  assert.equal(h.shellExecutionAttempts(), 0, 'two local stages still write nothing')
+  assert.equal(h.shellExecutionRefreshes(), refreshesAtOpen, 'staging never refreshes the Host')
+
+  // Select the SECOND field again so the Save is made from that selection.
+  await clickPainted(h, 'Output cap per stream (bytes)')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
-  assert.deepEqual(h.shellExecutionWrites(), [
-    { field: 'timeoutMs', op: 'set', value: 45_000 },
-    { field: 'maxOutputBytes', op: 'set', value: 128_000 },
-  ])
+  assert.equal(h.shellExecutionAttempts(), 1, 'ONE Save enters the official mutate once')
+  assert.equal(h.shellExecutionBatches().length, 1, 'ONE Save is ONE official batch')
+  const batch = h.shellExecutionBatches()[0]!
+  assert.deepEqual(batch.patch, {
+    timeoutMs: { kind: 'set', value: 45_000 },
+    maxOutputBytes: { kind: 'set', value: 128_000 },
+  })
+  assert.equal(batch.revision, 1, 'the batch carries the captured revision')
+  assert.equal(batch.executor, 'bash', 'the batch carries the captured served executor')
   assert.deepEqual(h.hostSections().shell, {
     executor: 'bash',
     timeoutMs: 45_000,
@@ -3778,30 +3905,460 @@ test('the real Root Shell-execution page saves both caps in ONE official mutatio
     inheritedTimeoutMs: 60_000,
     inheritedMaxOutputBytes: 32_000,
   })
-  assert.match(h.view(), /Status: Verified/u)
+  assert.match(h.view(), /Status\s+Verified/u, 'the authoritative readback is stated once')
+  assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save never leaves the group')
+  assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the field selection survives the save')
+  assert.match(h.view(), /Timeout 45000 ms/u, 'the parent Row follows the verified readback')
+  assert.doesNotMatch(h.view(), /Save \[S\]|unsaved change/u, 'a verified group advertises no second Save')
+  void opened
+
+  // Back returns to the SAME Rows selection with the fresh row.
   await clickPainted(h, 'Back [Esc]', true)
+  await settle(h, 4)
   assert.match(h.view(), /Settings · Tools · Rows/u)
+  assert.match(h.view(), /Shell execution\s+Timeout 45000 ms/u)
+  assert.equal(h.shellExecutionAttempts(), 1, 'leaving never writes again')
   h.dispose()
 })
 
-test('the real Root Shell page accepts a positive finite decimal cap', async () => {
+test('the real Root Shell group accepts the official positive-finite shapes and refuses blank/invalid text', async () => {
   const h = setup({
     columns: 160,
     rows: 44,
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
   })
-  await h.open('Tools')
-  await key(h, '\r')
-  await clickPainted(h, 'Shell execution')
-  await clickPainted(h, 'Command timeout (ms)')
-  await key(h, '\x15')
-  for (const character of '1.5') await key(h, character)
-  await clickPainted(h, 'Apply [Enter]', true)
+  await openShellGroup(h)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+
+  // Blank and whitespace are `Value is required.`; nothing is staged or written.
+  for (const bad of ['', '   ']) {
+    await clickPainted(h, 'Command timeout (ms)')
+    await clickPainted(h, 'Edit [Enter]', true)
+    await h.vt.waitForRender()
+    await key(h, '\x15')
+    for (const character of bad) await key(h, character)
+    await clickPainted(h, 'Stage [Enter]', true)
+    await h.vt.waitForRender()
+    assert.match(h.view(), /Value is required\./u, 'a blank/whitespace draft keeps the real error')
+    assert.match(h.view(), /Value:\s*/u, 'the raw Input stays open instead of an implicit Reset')
+    assert.equal(h.shellExecutionAttempts(), 0)
+    await key(h, '\x1b') // Cancel
+    await h.vt.waitForRender()
+    assert.doesNotMatch(h.view(), /unsaved change/u, 'a cancelled invalid draft never stages')
+  }
+  for (const bad of ['0', '-1', 'NaN', 'Infinity', '12garbage']) {
+    await clickPainted(h, 'Command timeout (ms)')
+    await clickPainted(h, 'Edit [Enter]', true)
+    await h.vt.waitForRender()
+    await key(h, '\x15')
+    for (const character of bad) await key(h, character)
+    await clickPainted(h, 'Stage [Enter]', true)
+    await h.vt.waitForRender()
+    assert.match(h.view(), /Enter a positive finite number\./u, `${JSON.stringify(bad)} keeps the real error`)
+    assert.equal(h.shellExecutionAttempts(), 0)
+    await key(h, '\x1b')
+    await h.vt.waitForRender()
+  }
+  // A legal decimal (and a scientific notation) stage, then a normal no-op.
+  await stageShellField(h, 'Command timeout (ms)', '1.5')
+  assert.match(h.view(), /Command timeout \(ms\)\s+1\.5 ms/u)
+  await stageShellField(h, 'Command timeout (ms)', '1e3')
+  assert.match(h.view(), /Command timeout \(ms\)\s+1000 ms/u, 'the browse paints the canonical value')
+  await stageShellField(h, 'Command timeout (ms)', '60000')
+  assert.match(h.view(), /No changes/u, 'an equal stage is a real no-op')
+  assert.doesNotMatch(h.view(), /unsaved change|Save \[S\]/u)
+  assert.equal(h.shellExecutionAttempts(), 0)
+  h.dispose()
+})
+
+test('the Root Shell Advanced stages the SELECTED field reset and ONE Save sends the mixed batch', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 50,
+    shellExecution: {
+      executor: 'bash',
+      timeoutMs: 60_000,
+      maxOutputBytes: 64_000,
+      inheritedTimeoutMs: 60_000,
+      inheritedMaxOutputBytes: 32_000,
+    },
+  })
+  await openShellGroup(h)
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await clickPainted(h, 'Output cap per stream (bytes)')
+  await clickPainted(h, 'Details…')
+  await settle(h, 4)
+  assert.match(h.view(), /Output cap per stream \(bytes\)/u)
+  assert.match(h.view(), /Effective\s+64000 bytes/u)
+  assert.match(h.view(), /Inherited\s+32000 bytes/u, 'the real served inherited value is painted')
+  assert.match(h.view(), /Comparison\s+Differs from base/u)
+  assert.match(h.view(), /Revision\s+\d+/u)
+  assert.match(h.view(), /Reset stages the official unset\./u)
+  assert.match(h.view(), /The USER patch may retain the inherited value\./u)
+  assert.match(h.view(), /The Host readback decides the value\./u)
+  assert.equal(h.shellExecutionAttempts(), 0, 'opening Advanced never writes')
+  await clickPainted(h, 'Reset to inherited…')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Reset staged/u, 'the official unset is staged')
+  assert.match(h.view(), /Current: 64000 bytes · Unsaved/u, 'Reset staged is not the inherited value')
+  assert.match(h.view(), /2 unsaved changes · Shell execution/u)
+  assert.equal(h.shellExecutionAttempts(), 0, 'reset staging never writes')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
-  assert.deepEqual(h.shellExecutionWrites(), [{ field: 'timeoutMs', op: 'set', value: 1.5 }])
-  assert.match(h.view(), /Status: Verified/u)
+  assert.equal(h.shellExecutionBatches().length, 1)
+  assert.deepEqual(h.shellExecutionBatches()[0]!.patch, {
+    timeoutMs: { kind: 'set', value: 45_000 },
+    maxOutputBytes: { kind: 'reset' },
+  })
+  assert.deepEqual(h.hostSections().shell, {
+    executor: 'bash',
+    timeoutMs: 45_000,
+    maxOutputBytes: 32_000,
+    inheritedTimeoutMs: 60_000,
+    inheritedMaxOutputBytes: 32_000,
+  })
+  assert.match(h.view(), /Status\s+Verified/u)
   h.dispose()
+
+  // An explicit Reset is an INTENT even when effective == inherited.
+  const equal = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: {
+      executor: 'bash',
+      timeoutMs: 60_000,
+      maxOutputBytes: 32_000,
+      inheritedTimeoutMs: 60_000,
+      inheritedMaxOutputBytes: 32_000,
+    },
+  })
+  await openShellGroup(equal)
+  await clickPainted(equal, 'Output cap per stream (bytes)')
+  await clickPainted(equal, 'Details…')
+  await equal.vt.waitForRender()
+  assert.match(equal.view(), /Matches base/u, 'the equal inherited state is stated truthfully')
+  await clickPainted(equal, 'Reset to inherited…')
+  await equal.vt.waitForRender()
+  assert.match(equal.view(), /Reset staged/u, 'effective == inherited is still a real dirty reset')
+  assert.match(equal.view(), /1 unsaved change/u)
+  await clickPainted(equal, 'Save [S]', true)
+  await settle(equal, 12)
+  assert.deepEqual(equal.shellExecutionBatches()[0]!.patch, { maxOutputBytes: { kind: 'reset' } })
+  assert.deepEqual(equal.hostSections().shell, {
+    executor: 'bash',
+    timeoutMs: 60_000,
+    maxOutputBytes: 32_000,
+    inheritedTimeoutMs: 60_000,
+    inheritedMaxOutputBytes: 32_000,
+  })
+  equal.dispose()
+})
+
+test('the Root Shell group guards parent navigation, local Discard, Refresh and its leave question', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 50,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000, inheritedMaxOutputBytes: 32_000 },
+  })
+  await openShellGroup(h)
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+
+  // Dirty Back opens the page's OWN leave question; Keep preserves the draft.
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /1 unsaved change · Shell execution/u)
+  assert.match(h.view(), /Save keeps you here\./u)
+  assert.match(h.view(), /Discard and leave loses staged values\./u)
+  assert.match(h.rowsPlain().at(-1) ?? '', /Save \[S\] · Discard and leave \[D\] · Keep \[Esc\]/u)
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  assert.match(h.view(), /Command timeout \(ms\)\s+45000 ms/u, 'Keep preserves the draft')
+
+  // A parent ROW/category click is the SAME one leave gate (never a silent drop).
+  await clickPainted(h, 'Visual tools')
+  assert.match(h.view(), /Discard and leave loses staged values\./u, 'a parent row click opens the leave question')
+  await key(h, '\x1b') // Keep the parent-leave question: the draft survives
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+
+  // The local Discard stays; the Refresh question discards without leaving.
+  await key(h, 'd')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Discard unsaved changes\?/u)
+  assert.match(h.view(), /Staged values are lost; nothing is written\./u)
+  await key(h, 'd')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  assert.doesNotMatch(h.view(), /unsaved change/u, 'the local discard stays on the group')
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+  const refreshes = h.shellExecutionRefreshes()
+  await key(h, 'r')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Refresh discards unsaved edits\./u)
+  await key(h, 'r')
+  await settle(h, 8)
+  assert.equal(h.shellExecutionRefreshes(), refreshes + 1, 'the confirmed refresh re-reads once')
+  assert.doesNotMatch(h.view(), /unsaved change/u)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Refresh never leaves the group')
+
+  // Save from the leave question stays; Discard and leave closes to Rows.
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  await key(h, 's')
+  await settle(h, 12)
+  assert.equal(h.shellExecutionBatches().length, 1)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save and the question stay in the same group')
+  await stageShellField(h, 'Command timeout (ms)', '44000')
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  await key(h, 'd')
+  await settle(h, 8)
+  assert.match(h.view(), /Settings · Tools · Rows/u, 'Discard and leave returns to the Rows level')
+  assert.equal(h.shellExecutionBatches().length, 1, 'leaving never writes again')
+
+  // The Input and the Advanced disclosure refuse every parent route outright.
+  await key(h, '\r') // the SAME Rows selection: its forward action re-opens the group
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  await clickPainted(h, 'Command timeout (ms)')
+  await clickPainted(h, 'Edit [Enter]', true)
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Visual tools')
+  assert.doesNotMatch(h.view(), /Discard unsaved changes\?|Save keeps you here/u, 'a raw Input never opens a parent question')
+  assert.match(h.view(), /Value:\s*/u, 'the Input keeps its keys')
+  await key(h, '\x1b')
+  await key(h, '?')
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Visual tools')
+  assert.doesNotMatch(h.view(), /Discard unsaved changes\?|Save keeps you here/u, 'Advanced never opens a parent question')
+  h.dispose()
+})
+
+test('the Root Shell group refuses stale captures and never claims an accepted row it cannot re-prove', async () => {
+  // Another writer moves the revision before Save: zero dispatch.
+  const stale = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(stale)
+  await stageShellField(stale, 'Command timeout (ms)', '45000')
+  stale.advanceShellRevision()
+  await key(stale, 's')
+  await settle(stale, 8)
+  assert.equal(stale.shellExecutionAttempts(), 0, 'a stale captured read never dispatches')
+  assert.match(stale.view(), /Last-known|Not saved/u)
+  assert.match(stale.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the draft is retained')
+  stale.dispose()
+
+  // A same-generation/revision executor switch is refused before dispatch.
+  const switched = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(switched)
+  await stageShellField(switched, 'Command timeout (ms)', '45000')
+  switched.switchShellExecutor('pwsh')
+  await key(switched, 's')
+  await settle(switched, 8)
+  assert.equal(switched.shellExecutionAttempts(), 0, 'a swapped served row never dispatches')
+  switched.dispose()
+
+  // Accepted, then the Host serves the OTHER row: never Verified.
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const accepted = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+    shellExecutionWriteGate: async () => { entered(); await gate },
+  })
+  await openShellGroup(accepted)
+  await stageShellField(accepted, 'Command timeout (ms)', '45000')
+  await clickPainted(accepted, 'Save [S]', true)
+  await waitForFrame(
+    () => accepted.view(),
+    frame => /Saving…/u.test(frame),
+    () => accepted.vt.waitForRender(), 'the admitted batch paints its pending state',
+  )
+  await started
+  accepted.switchShellExecutor('pwsh')
+  release()
+  await settle(accepted, 12)
+  assert.equal(accepted.shellExecutionBatches().length, 1, 'the admitted batch is dispatched exactly once')
+  assert.doesNotMatch(accepted.view(), /Status\s+Verified/u, 'another served row is never Verified')
+  assert.match(accepted.view(), /Unverified/u)
+  assert.match(accepted.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the captured draft is retained')
+  assert.equal(accepted.shellExecutionAttempts(), 1, 'no blind replay')
+  accepted.dispose()
+
+  // A definite refusal keeps the requested value and never retries by itself.
+  const refused = setup({
+    columns: 160,
+    rows: 44,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+    shellExecutionWriteFailure: 'the official validator refused the caps',
+  })
+  await openShellGroup(refused)
+  await stageShellField(refused, 'Command timeout (ms)', '45000')
+  await clickPainted(refused, 'Save [S]', true)
+  await settle(refused, 12)
+  assert.match(refused.view(), /Not saved/u)
+  assert.match(refused.view(), /the official validator refused the caps/u)
+  assert.equal(refused.shellExecutionAttempts(), 1, 'a definite refusal is dispatched once, never retried')
+  assert.match(refused.view(), /Refresh \[R\]/u, 'the refused state offers its real recovery')
+  refused.dispose()
+})
+
+test('the Root Shell group stays reachable and safe at the frozen short and zero-body grants', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 50,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(h)
+  // 44x8: the second field, its selected-span reveal, the dirty leave copy and
+  // the complete compact actions stay reachable.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  await key(h, '\x1b[B')
+  assert.match(h.view(), /Output cap per stream \(bytes\)/u, 'the second field is reachable at 44x8')
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  await key(h, '\x15')
+  for (const character of '128000') await key(h, character)
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u)
+  await key(h, '\x1b') // dirty Back -> the compact leave bar
+  await h.vt.waitForRender()
+  const leaveBar = (h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, '')
+  assert.match(leaveBar, /Save \[S\] · Discard \[D\] · Keep \[Esc\]/u, `the 44x8 leave bar keeps all three complete actions: ${JSON.stringify(leaveBar)}`)
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /1 unsaved change/u, 'Keep preserves the draft at 44x8')
+
+  // 200x2: NO body row -> only the tenant's own Back is admitted; every hidden
+  // action and the local Tab are inert, and the draft survives.
+  h.vt.resize(200, 2)
+  await h.vt.waitForRender()
+  await settle(h, 4)
+  assert.match((h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, ''), /^Back \[Esc\]$/u, `the zero-body bar paints only Back: ${JSON.stringify(h.rowsPlain().at(-1))}`)
+  const before = h.view()
+  await key(h, '\t')
+  await key(h, 's')
+  await key(h, 'x')
+  await key(h, '?')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.equal(h.shellExecutionAttempts(), 0, 'no hidden action may write from a zero-body frame')
+  assert.equal(h.view(), before, 'no hidden frame change happened')
+  // Restoring the grant paints the same draft and a FRESH action.
+  h.vt.resize(200, 50)
+  await h.vt.waitForRender()
+  await settle(h, 6)
+  assert.match(h.view(), /Command timeout \(ms\)\s+128000|\d+ unsaved change/u, 'the draft survives the grant loss')
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.equal(h.shellExecutionAttempts(), 1, 'the restored grant admits a fresh Save')
+  h.dispose()
+})
+
+test('a held Shell Save is refused across a resize and a fresh click still saves once', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 50,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(h)
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await h.vt.waitForRender()
+  const barRow = h.rowsPlain().length - 1
+  const saveCol = cellIndexOf(h, barRow, 'Save [S]')
+  press(h, barRow, saveCol)
+  await h.vt.waitForRender()
+  // A WIDTH-ONLY resize keeps the physical last row: the release lands on a
+  // real cell, but the painted geometry it was admitted against is stale.
+  h.vt.resize(120, 50)
+  release(h, barRow, saveCol)
+  await settle(h, 10)
+  assert.equal(h.shellExecutionAttempts(), 0, 'a pre-repaint release never writes')
+  assert.match(h.view(), /Settings · Tools · Shell execution/u, 'the group survives the resize')
+  assert.match(h.view(), /45000 ms/u, 'the draft survives the refused gesture')
+  // The repaint happened (every line fits the new width); a fresh pointer Save
+  // after the fork's multi-click window writes exactly once.
+  assert.ok(h.rowsPlain().every(line => visibleWidth(line) <= 120), 'the frame repainted at the new width')
+  // The fork withholds a second press on the SAME cell inside its multi-click
+  // window (bounded observation: the manual held pair above must expire it).
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  const freshRow = h.rowsPlain().length - 1
+  const freshCol = cellIndexOf(h, freshRow, 'Save [S]')
+  press(h, freshRow, freshCol)
+  await h.vt.waitForRender()
+  release(h, freshRow, freshCol)
+  await settle(h, 12)
+  assert.equal(h.shellExecutionAttempts(), 1, 'a fresh gesture after the repaint saves once')
+  assert.equal(h.shellExecutionBatches().length, 1)
+  h.dispose()
+})
+
+test('the Shell group is reachable through the real medium and narrow entries', async () => {
+  // Medium (100x40): the Detail preview's painted Open… entry.
+  const medium = setup({ columns: 100, rows: 40, shellExecution: { executor: 'pwsh', timeoutMs: 60_000, maxOutputBytes: 64_000 } })
+  await openShellGroup(medium)
+  assert.match(medium.view(), /Settings · Tools · Shell execution/u)
+  assert.match(medium.view(), /Host model-tool executor · Windows PowerShell/u)
+  await key(medium, '\t') // the Shell group's Tab is a LOCAL field move, never the Root's
+  assert.match(medium.view(), /^.*> Output cap per stream \(bytes\)/mu, 'Tab moves the field selection inside the group')
+  assert.match(medium.view(), /Settings · Tools · Shell execution/u, 'the Root never takes the grouped Tab')
+  medium.dispose()
+
+  // Narrow (44x20): the Rows level IS the whole frame; Enter on the row is the
+  // explicit entry, and the same group renders inside the one column.
+  const narrow = setup({ columns: 44, rows: 20, shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 } })
+  await openShellGroup(narrow, 'enter')
+  assert.match(narrow.view(), /Settings · Tools · Shell execution/u)
+  assert.match(narrow.view(), /Command timeout \(ms\)/u)
+  await key(narrow, '\x1b[B')
+  await key(narrow, '\r')
+  await narrow.vt.waitForRender()
+  await key(narrow, '\x15')
+  for (const character of '45000') await key(narrow, character)
+  await key(narrow, '\r')
+  await narrow.vt.waitForRender()
+  assert.match(narrow.view(), /1 unsaved change/u)
+  await clickPainted(narrow, 'Save [S]', true)
+  await settle(narrow, 12)
+  assert.equal(narrow.shellExecutionBatches().length, 1, 'the narrow entry reaches the same one batch')
+  narrow.dispose()
+})
+
+test('an unavailable or unreadable Shell section stays a truthful read-only group', async () => {
+  const unavailable = setup({ columns: 200, rows: 50 })
+  await openShellGroup(unavailable)
+  assert.match(unavailable.view(), /Host model-tool executor · unavailable/u)
+  assert.match(unavailable.view(), /No active shell executor row is mounted\./u)
+  assert.doesNotMatch(unavailable.view(), /Edit \[Enter\]|Details \[\?\]/u, 'a missing row advertises no editor')
+  assert.equal(unavailable.shellExecutionAttempts(), 0)
+  unavailable.dispose()
+
+  const unreadable = setup({
+    columns: 200,
+    rows: 50,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000, unreadable: true },
+  })
+  await openShellGroup(unreadable)
+  assert.match(unreadable.view(), /Host model-tool executor · unreadable/u)
+  assert.match(unreadable.view(), /Shell execution values are unreadable\./u)
+  assert.doesNotMatch(unreadable.view(), /Edit \[Enter\]|Details \[\?\]/u)
+  unreadable.dispose()
 })
 
 test('Host owns Backend, the Web UI page, the ACP access page and Session log; Tools keeps no duplicate row', async () => {
@@ -12032,8 +12589,9 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
       }
       h.dispose()
 
-      // The Shell execution page keeps its staged form under the same frozen
-      // sizes (the shared numeric renderer's other consumer).
+      // The Shell group tenant holds the same frozen sizes (the shared numeric
+      // renderer's other consumer): explicit edit -> local stage -> the dirty
+      // leave question, all inside the real Detail pane.
       const shell = setup({
         columns,
         rows,
@@ -12043,19 +12601,28 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
       await shell.open('Tools')
       await key(shell, '\r')
       await highlightRow(shell, 'Shell execution')
-      await key(shell, '\r')
+      await key(shell, '\r') // Enter open -> the grouped tenant
       await settle(shell)
       const shellFrame = shell.view()
       assert.match(shellFrame, /Settings · Tools · Shell execution/u, `${columns}x${rows} ${theme}: shell page identity`)
       assert.match(shellFrame, /Windows/u, `${columns}x${rows} ${theme}: the Host executor identity`)
       assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows} ${theme}: shell Esc affordance`)
-      await key(shell, 'x')
+      await key(shell, '\r') // explicit Edit on the selected first field
+      await shell.vt.waitForRender()
+      assert.match(shell.view(), /Edit Command timeout \(ms\)/u, `${columns}x${rows} ${theme}: shell raw Input`)
+      await key(shell, '\x15')
+      for (const character of '45000') await key(shell, character)
+      await key(shell, '\r') // Stage: local only
+      await shell.vt.waitForRender()
+      assert.match(shell.rowsPlain().at(-1) ?? '', /Save \[S\]/u, `${columns}x${rows} ${theme}: the dirty group paints Save`)
+      await key(shell, '\x1b') // dirty Back -> the page's own leave question
+      await shell.vt.waitForRender()
+      assert.match(shell.rowsPlain().at(-1) ?? '', /Keep \[Esc\]/u, `${columns}x${rows} ${theme}: the leave question's Keep`)
+      assert.match(shell.view(), /Save keeps you here\./u, `${columns}x${rows} ${theme}: the leave facts stay readable`)
+      await key(shell, 'd') // Discard and leave
       await settle(shell)
-      assert.match(shell.view(), /Save \[S\]/u, `${columns}x${rows} ${theme}: shell Save affordance`)
-      await key(shell, '\x1b')
-      await settle(shell)
-      await key(shell, 'y')
-      await settle(shell)
+      assert.match(shell.view(), /Settings · Tools · Rows/u, `${columns}x${rows} ${theme}: the group leaves to Rows`)
+      assert.deepEqual(shell.shellExecutionBatches(), [], `${columns}x${rows} ${theme}: the matrix never writes`)
       shell.dispose()
     }
   }
@@ -12074,6 +12641,17 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
     assert.match(h.view(), /Current value\s+4/u)
     assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u)
     h.dispose()
+
+    const shell = setup({ columns: 120, rows: 40, doc: { theme: 'plugin:acme/acme', iconStyle }, themes: custom, shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 } })
+    await shell.open('Tools')
+    await key(shell, '\r')
+    await highlightRow(shell, 'Shell execution')
+    await key(shell, '\r')
+    await settle(shell)
+    assert.match(shell.view(), /Settings · Tools · Shell execution/u, `custom/${iconStyle}: the grouped tenant chrome stays`)
+    assert.match(shell.view(), /Command timeout \(ms\)\s+60000 ms/u)
+    assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
+    shell.dispose()
   }
 })
 

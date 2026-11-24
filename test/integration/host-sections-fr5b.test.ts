@@ -283,8 +283,10 @@ test('the saved Shell-execution caps reach the active executor and its next real
   assert.equal(reset.effective.maxOutputBytes, 64_000, 'the reset cap reads the inherited bundle value')
   // The official unset may materialize OR remove the USER key; the CURRENT
   // effective value is the authority. Only the sibling override must survive.
-  assert.deepEqual(plane.userConfig('bash-sandbox'), { timeoutMs: 5_000 },
-    'the reset cap leaves no stale USER override while the sibling timeout stays')
+  const resetUser = (plane.userConfig('bash-sandbox') ?? {}) as { timeoutMs?: number; maxOutputBytes?: number }
+  assert.equal(resetUser.timeoutMs, 5_000, 'the sibling timeout override stays')
+  assert.ok(resetUser.maxOutputBytes === undefined || resetUser.maxOutputBytes === 64_000,
+    `the official unset leaves either no USER cap or the inherited value, never another number: ${JSON.stringify(resetUser)}`)
   assert.equal(liveShell().config.maxOutputBytes.get(), 64_000)
 })
 

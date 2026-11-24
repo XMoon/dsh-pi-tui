@@ -1291,12 +1291,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             {
               key: 'timeoutMs' as const,
               label: 'Command timeout (ms)',
+              unit: 'ms',
               validate: positiveFiniteText,
               invalidHint: 'Enter a positive finite number.',
             },
             {
               key: 'maxOutputBytes' as const,
               label: 'Output cap per stream (bytes)',
+              unit: 'bytes',
               validate: positiveFiniteText,
               invalidHint: 'Enter a positive finite number.',
             },
@@ -1321,14 +1323,18 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             fields,
             spec: {
               title: 'Shell execution',
+              commitMode: 'grouped',
               sourceHeading: source => source.kind === 'ready'
                 ? `Host model-tool executor · ${source.effective.executor === 'bash' ? 'POSIX Bash' : 'Windows PowerShell'}`
-                : 'Host model-tool executor · unavailable',
+                : source.kind === 'unavailable'
+                  ? 'Host model-tool executor · unavailable'
+                  : 'Host model-tool executor · unreadable',
               help: [
-                'These are the official model-tool shell caps of the Host-served executor. Both fields save as one revision-checked Host mutation.',
-                'New shell executions use the caps; a running subprocess keeps its current timeout. The ! / !! user-shell policy is separate.',
-                'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
+                'The caps belong to the Host-served executor row; the Host chooses the executor, not this client.',
+                'This is not the ! / !! user-shell sandbox policy.',
               ],
+              effect: 'New shell executions use the caps; a running subprocess keeps its current timeout.',
+              scope: 'DSH Host profile · Host-served model-tool shell executor',
             },
             requestRender,
             done,
@@ -4487,8 +4493,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           freshness: shellExecutionSettings.kind === 'ready'
             ? configReadiness === 'ready' ? 'ready' : 'last-known'
             : shellExecutionSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
-          description: 'Stage the command timeout and per-stream output cap of the Host-served model-tool shell executor, then Save. '
-            + 'Both fields are one revision-checked Host mutation. New shell executions use them; a running subprocess keeps its current timeout. '
+          description: 'Open the Shell execution group and stage the command timeout and per-stream output cap of the Host-served model-tool shell executor, then Save. '
+            + 'Both fields are one revision-checked Host mutation; nothing is written before Save. New shell executions use them; a running subprocess keeps its current timeout. '
             + 'The executor row is chosen by the Host, not this client. This is not the ! / !! user-shell sandbox policy.',
           specialist: 'shell-execution-settings',
         },

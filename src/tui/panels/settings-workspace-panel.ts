@@ -424,8 +424,10 @@ export interface SettingsWorkspacePanelIntents {
   ) => EmbeddedSpecialistPage | undefined
   /** FR5-B: the ONE numeric page shared by the Agent-loop and Shell-execution
    *  rows, mounted in this workspace body under the SAME screen lease. SUX-01:
-   *  the Agent-loop route is the inline Detail tenant and takes the Root's
-   *  explicit `change`/`details` entry intent; the Shell route stays staged. */
+   *  the Agent-loop route is the inline single-value Detail tenant and takes the
+   *  Root's explicit `change`/`details` entry intent. SUX-02: the Shell route is
+   *  the grouped Detail tenant (two fields, one Save) entered by its explicit
+   *  open. */
   readonly createHostNumericSettingsPage?: (
     kind: 'agent-loop' | 'shell-execution',
     done: () => void,
@@ -753,8 +755,8 @@ export interface EmbeddedSpecialistPage extends Component {
    *  {@link paintedBarSpans} of the same frame). */
   activateBarSpan?(id: string): void
   /**
-   * SUX-01: the ONE guarded parent-navigation seam of a Detail TENANT (the
-   * Agent loop page hosted inside the real Detail pane). It answers `allow`
+   * SUX-01/02: the ONE guarded parent-navigation seam of a numeric Detail
+   * TENANT hosted inside the real Detail pane. It answers `allow`
    * when nothing local would be lost, or `refuse` when the page keeps the keys
    * (a raw input, a disclosure, a pending write) or opened its OWN question —
    * in which case it invokes the captured continuation only after the user
@@ -1365,7 +1367,7 @@ export class SettingsWorkspacePanel implements Component {
   /** The panel cells the LAST specialist frame granted the picker, and the
    *  press identity a release must still match. */
   private paintedSpecialistBox: ContentBox | undefined
-  /** SUX-01: the mounted Agent-loop Detail tenant's local last line (its own
+  /** SUX-01/02: the mounted numeric Detail tenant's local last line (its own
    *  Action Bar). It becomes this frame's ONE physical last row at x=0, exactly
    *  like a full-width hosted page's own bar. */
   private tenantBarLine: string | undefined
@@ -1969,7 +1971,7 @@ export class SettingsWorkspacePanel implements Component {
     // category, so it must be decided before the legacy panes project. While
     // it is mounted its hit map is the picker's own last-painted geometry and
     // the rows/detail panes publish nothing.
-    // SUX-01 EXCEPTION: the Agent-loop Detail TENANT is hosted INSIDE the real
+    // SUX-01/02 EXCEPTION: a numeric Detail TENANT is hosted INSIDE the real
     // Detail pane of the normal projection, so it keeps painting the parent rail
     // and Rows. It never takes this full-width route.
     if (this.specialistPage !== undefined && !this.detailTenantActive()) return this.renderSpecialistPage(plan)
@@ -3001,7 +3003,7 @@ export class SettingsWorkspacePanel implements Component {
         continue
       }
       if (this.detailTenantActive()) {
-        // SUX-01: the mounted Agent-loop tenant IS the Detail projection: its
+        // SUX-01/02: the mounted numeric tenant IS the Detail projection: its
         // body is painted here and its own bar becomes the physical last row.
         // The legacy Detail (facts/buttons/options) is never composed for this
         // frame, so no old choice/fact/manage target can be published.
@@ -3190,9 +3192,9 @@ export class SettingsWorkspacePanel implements Component {
   private categoryLine(id: SettingsWorkspaceCategoryId | undefined): string {
     if (id === undefined) return ''
     const selected = id === this.categoryId
-    // SUX-01: while the Detail tenant owns the active device, the parent rail is
-    // passive CONTEXT: the selected label stays bold textStrong but the primary
-    // navigation cursor is not painted on a pane the user is not driving.
+    // SUX-01/02: while the Detail tenant owns the active device, the parent rail
+    // is passive CONTEXT: the selected label stays bold textStrong but the
+    // primary navigation cursor is not painted on a pane the user is not driving.
     const marker = selected && !this.detailTenantActive() ? color.primary('> ') : '  '
     const label = CATEGORY_LABELS[id]
     // Cursor glyph = role 6 (`primary`), the selected row's own text = role 8
@@ -3268,9 +3270,9 @@ export class SettingsWorkspacePanel implements Component {
     // WHOLE when it does not fit — a half-cut note would read as a different
     // statement.
     const note =
-      // SUX-01: the single-value row's own explicit entries already state what
-      // is possible; a generic "read-only here" note would contradict them.
-      this.singleAgentRow(row) ? ''
+      // SUX-01/02: a hosted numeric row's own explicit entries already state
+      // what is possible; a generic "read-only here" note would contradict them.
+      this.detailTenantRow(row) ? ''
         // A specialist row whose page is refused right now (a non-current
         // authority) must state WHAT is refused.
         : row?.specialist !== undefined && row.specialistAvailable === false
@@ -3627,7 +3629,7 @@ export class SettingsWorkspacePanel implements Component {
         // preview owns the explicit `Change [Enter]` / `Details…` actions.
         return undefined
       case 'shell-execution-settings':
-        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Shell execution…' }
+        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Open…' }
       case 'web-ui':
         return this.intents.createWebUiPage === undefined ? undefined : { label: 'Open Web UI…' }
       case 'acp-access':
@@ -4236,10 +4238,10 @@ export class SettingsWorkspacePanel implements Component {
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
-    // SUX-01: the Agent tenant is hosted inside the REAL Detail pane, so it must
-    // be entered only when that pane really grants a content row — a body row
-    // that the pane header would consume is not enough.
-    if (row.specialist === 'agent-loop-settings') {
+    // SUX-01/02: a numeric tenant is hosted inside the REAL Detail pane, so it
+    // must be entered only when that pane really grants a content row — a body
+    // row that the pane header would consume is not enough.
+    if (row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings') {
       const plan = planSettingsChrome(
         this.projectionWidth(),
         this.intents.rows(),
@@ -4425,16 +4427,26 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  // ── the SUX-01 Detail tenant (Agent loop) ─────────────────────────────────
+  // ── the numeric Detail tenants (Agent single value / Shell group) ───────────
 
   /**
-   * Whether the ONE mounted specialist is the Agent-loop Detail TENANT. The
-   * authority is the real mounted slot plus its row id — never the
-   * selected-but-not-entered row, the category, the terminal width or the mere
-   * presence of a factory.
+   * Whether the ONE mounted specialist is one of the two numeric Detail
+   * TENANTS (the Agent single value or the Shell grouped fields). The authority
+   * is the real mounted slot plus its row id — never the selected-but-not-
+   * entered row, the category, the terminal width or the mere presence of a
+   * factory.
    */
   private detailTenantActive(): boolean {
-    return this.specialistPage !== undefined && this.specialistRow === 'agent-loop'
+    return this.specialistPage !== undefined
+      && (this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution')
+  }
+
+  /** Whether this ROW's visible route is a hosted numeric Detail tenant. It is
+   *  the ENTRY-side question (both rows), while `singleAgentRow` below stays
+   *  the Agent-only presentation fact. */
+  private detailTenantRow(row: SettingsWorkspaceRow | undefined): boolean {
+    if (this.intents.createHostNumericSettingsPage === undefined) return false
+    return row?.specialist === 'agent-loop-settings' || row?.specialist === 'shell-execution-settings'
   }
 
   /** The ONE row whose visible route is the inline single-value Detail. */
@@ -4487,7 +4499,7 @@ export class SettingsWorkspacePanel implements Component {
     const sourceRow = this.rowId
     const continuation = (): void => {
       if (this.disposed) return
-      if (this.specialistPage !== instance || this.specialistRow !== 'agent-loop') return
+      if (this.specialistPage !== instance || this.specialistRow !== sourceRow) return
       if (this.categoryId !== sourceCategory || this.rowId !== sourceRow) return
       if (!this.legalLeaveTarget(target)) {
         // The destination vanished while the question was open. The user already
@@ -5072,11 +5084,14 @@ export class SettingsWorkspacePanel implements Component {
         return
       }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
-      // SUX-01: a pure region-focus Tab exit of the clean tenant is the ROOT's
-      // own focus transaction, so it runs through the tenant's ONE leave gate
-      // first. A page that keeps the keys (raw input, disclosure, saving, dirty)
-      // refuses and then consumes the key as its own local input.
-      if (this.detailTenantActive() && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
+      // SUX-01: a pure region-focus Tab exit of the clean Agent single value is
+      // the ROOT's own focus transaction, so it runs through the tenant's ONE
+      // leave gate first. A page that keeps the keys (raw input, disclosure,
+      // saving, dirty) refuses and then consumes the key as its own local input.
+      // SUX-02: the Shell group's Tab is a LOCAL field move and is never taken
+      // by the Root — the child receives it (and refuses it at zero body rows).
+      if (this.detailTenantActive() && this.specialistRow === 'agent-loop'
+        && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
         const tabForward = matchesKey(data, 'tab')
         // A narrow frame paints ONE region: there is no second region to focus.
         if (this.currentLayout() === 'narrow') return
@@ -6661,14 +6676,14 @@ export class SettingsWorkspacePanel implements Component {
         // Enter/Right. The Computer Use row belongs here: on the single-pane
         // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
         // affordance does not exist and this click is the ONLY pointer route to
-        // the embedded page. SUX-01: the Agent loop row is NO LONGER one of
-        // them — its explicit Change/Details entry stays a separate gesture.
-        if (target.id === 'subagent-settings' || target.id === 'shell-execution' || target.id === 'computer-use') {
+        // the embedded page. SUX-01/02: the Agent loop and Shell execution rows
+        // are NO LONGER here — their explicit Change/Details/Open entry stays a
+        // separate gesture.
+        if (target.id === 'subagent-settings' || target.id === 'computer-use') {
           const row = this.selectedRow()
           const specialist = row?.specialist
           if (row !== undefined
-            && (specialist === 'subagent-settings' || specialist === 'shell-execution-settings'
-              || specialist === 'computer-use')) this.openSpecialist(row)
+            && (specialist === 'subagent-settings' || specialist === 'computer-use')) this.openSpecialist(row)
         }
         return
       }
@@ -6771,11 +6786,11 @@ export class SettingsWorkspacePanel implements Component {
           return
         }
         if (page === 'detail' && this.focus !== 'detail') {
-          // SUX-01: an ordinary Detail cell of the single-value PREVIEW is a
-          // PURE focus transfer. Only the explicit Change/Enter/Right/`?`
+          // SUX-01/02: an ordinary Detail cell of a hosted numeric PREVIEW is a
+          // PURE focus transfer. Only the explicit Change/Edit/Enter/Right/`?`
           // gestures mount the tenant (and with it the page's own editor), so a
           // passive click never starts the refresh or the raw Input.
-          if (this.singleAgentRow(this.selectedRow())) { this.leaveDetailTo('detail'); return }
+          if (this.detailTenantRow(this.selectedRow())) { this.leaveDetailTo('detail'); return }
           this.enterDetail()
         } else this.takeColumnFocus(page)
         return

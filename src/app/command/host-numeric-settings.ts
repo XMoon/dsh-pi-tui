@@ -22,6 +22,9 @@ export interface HostNumericSettingsStatus {
 export interface HostNumericSettingsField<T extends object> {
   readonly key: keyof T & string
   readonly label: string
+  /** The unit the field's numeric value is expressed in (painted beside the
+   *  value in the grouped browse). Absent = the label already carries it. */
+  readonly unit?: string
   /** The owning field's accepted numeric text. Defaults to the Agent-loop
    *  safe-positive-integer contract. */
   readonly validate?: (text: string) => boolean
@@ -69,6 +72,9 @@ export interface HostNumericSettingsSnapshot<T extends object> {
   readonly texts: Readonly<Partial<Record<keyof T & string, string>>>
   /** Fields with an explicit staged Reset (dirty even when effective = base). */
   readonly resetFields: readonly (keyof T & string)[]
+  /** The REAL staged patch keys in the section's field order. Dirty counts and
+   *  per-field markers project THIS list; display text is never the authority. */
+  readonly dirtyFields: readonly (keyof T & string)[]
   readonly issues: Readonly<Partial<Record<keyof T & string, string>>>
   readonly status?: HostNumericSettingsStatus
   readonly notice?: string
@@ -132,6 +138,7 @@ export class HostNumericSettingsController<T extends object> {
       ...(live.kind === 'ready' ? { currentGeneration: live.generation } : {}),
       texts: Object.fromEntries(this.texts) as Readonly<Partial<Record<keyof T & string, string>>>,
       resetFields: this.resetFields(),
+      dirtyFields: this.dirtyFields(),
       issues: Object.fromEntries(this.issues) as Readonly<Partial<Record<keyof T & string, string>>>,
       ...(this.state.status === undefined ? {} : { status: this.state.status }),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
@@ -150,6 +157,12 @@ export class HostNumericSettingsController<T extends object> {
       if (this.state.patch[field.key]?.kind === 'reset') reset.push(field.key)
     }
     return reset
+  }
+
+  /** The staged patch projected onto the section's own field order: ONE derived
+   *  answer for the dirty count, the per-field markers and the requested values. */
+  private dirtyFields(): readonly (keyof T & string)[] {
+    return this.deps.fields.filter(field => this.state.patch[field.key] !== undefined).map(field => field.key)
   }
 
   private dirty(): boolean {
@@ -172,6 +185,11 @@ export class HostNumericSettingsController<T extends object> {
     return true
   }
 
+  /** Stage ONE field's plain numeric text. It NEVER stages an official Reset:
+   *  a blank/whitespace/invalid draft is retained as an invalid draft with its
+   *  real issue (the page pre-validates, and this inner contract refuses as
+   *  well), while `reset(field)` is the ONE explicit unset intent. A valid text
+   *  equal to the current effective value removes only THIS field's patch. */
   setNumber(key: keyof T & string, text: string): void {
     if (!this.editable()) return
     const source = this.state.source as Ready<T>
@@ -181,12 +199,9 @@ export class HostNumericSettingsController<T extends object> {
     // The controller only ever serves number fields; the typed section patch is
     // narrowed to the one number entry this page can stage.
     const patch = { ...this.state.patch } as Record<string, FieldPatch<number>>
-    if (text.trim() === '') patch[key] = { kind: 'reset' }
-    else {
-      const value = Number(text)
-      if (value === source.effective[key] && this.numberValid(key, text)) delete patch[key]
-      else patch[key] = { kind: 'set', value }
-    }
+    const value = Number(text)
+    if (value === source.effective[key] && this.numberValid(key, text)) delete patch[key]
+    else patch[key] = { kind: 'set', value }
     this.state.patch = patch as SectionPatch<T>
     this.state.status = undefined
     this.validate()
@@ -287,11 +302,13 @@ export class HostNumericSettingsController<T extends object> {
     this.issues.clear()
     if (this.state.source.kind !== 'ready') return false
     for (const field of this.deps.fields) {
-      const text = this.texts.get(field.key)
-      if (text === undefined || text.trim() === '') continue
-      if (!this.numberValid(field.key, text)) {
-        this.issues.set(field.key, field.invalidHint ?? 'Enter a safe positive integer (1 or greater).')
-      }
+      const entry = this.state.patch[field.key]
+      if (entry === undefined) continue
+      // An explicit Reset carries no numeric text of its own; its empty staged
+      // text is NOT "the user cleared a field".
+      if (entry.kind === 'reset') continue
+      const issue = this.numberIssue(field.key, this.texts.get(field.key) ?? '')
+      if (issue !== undefined) this.issues.set(field.key, issue)
     }
     return this.issues.size === 0
   }
@@ -339,6 +356,14 @@ export class HostNumericSettingsController<T extends object> {
         } else if (readback.kind !== 'ready' || readback.generation !== base.generation) {
           this.state.refreshRequired = true
           this.state.status = { kind: 'unverified', text: 'Unverified · the accepted write has no current Host readback; refresh before retrying.' }
+        } else if (this.deps.valueIdentity !== undefined
+          && this.deps.valueIdentity(readback.effective) !== this.deps.valueIdentity(base.effective)) {
+          // F-S2-01: the accepted write landed on the row this page captured, but
+          // the Host now serves a DIFFERENT row (the Shell executor). Same
+          // generation/revision and even identical caps cannot prove the written
+          // row; the only honest verdict is Unverified until an explicit Refresh.
+          this.state.refreshRequired = true
+          this.state.status = { kind: 'unverified', text: 'Unverified · the Host now serves a different row; refresh before retrying.' }
         } else {
           const setMatches = Object.entries(patch).every(([field, entry]) => {
             const op = entry as FieldPatch<unknown>

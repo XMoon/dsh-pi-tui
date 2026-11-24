@@ -709,12 +709,18 @@ specialist-page contract below).
 `/settings → Agent → Parallel tool calls` is the first real single-value DETAIL
 TENANT: it is edited INSIDE the workspace's real Detail pane, so the parent
 Categories/Rows stay painted and readable while it holds the active device.
-`/settings → Tools → Shell execution` remains a full-width staged specialist
-page. Both share ONE numeric renderer and ONE per-open controller inside the
-existing Settings lease; the Agent route is the `single` presentation and the
-Shell route the `staged` one. The Root keeps the physical Action Bar and the ONE
-Esc affordance, and a painted control delegates to the SAME page/controller path
-a key press uses.
+`/settings → Tools → Shell execution` is the second real numeric DETAIL TENANT:
+the same hosted presentation edited as ONE GROUP of two fields inside the same
+real Detail pane. Both numeric rows share ONE page implementation and ONE
+per-open controller inside the existing Settings lease; the Agent route commits
+as `single` (one Confirm = stage + save) and the Shell route as `grouped`
+(local field stages + ONE explicit Save). The Root keeps the physical Action
+Bar and the ONE Esc affordance, and a painted control delegates to the SAME
+page/controller path a key press uses. The Shell row keeps its internal
+`shell-execution` id, category, order, scope, freshness,
+`shell-execution-settings` tag and the Host-served effective caps/executor
+summary; it is entered only through its explicit forward action (`Enter`/`Right`
+from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
 
 - **Row identity and entry.** The `Agent` row keeps its internal `agent-loop`
   id, category, order, scope, freshness and `agent-loop-settings` specialist
@@ -755,6 +761,8 @@ a key press uses.
   one stage→save handoff: it retires that editor's admission before it stages,
   refuses any key delivered by its own synchronous callback, and re-proves the
   captured text and source identity before the single mutation is dispatched.
+  The grouped Shell route below follows the same explicit-entry rule through its
+  own `Open…`/`Edit` affordances.
 - **Authority and status.** Effective/inherited/revision/generation, official
   availability and the write result stay owned by the ConfigPort and the
   existing per-open controller; the page paints the current value, the
@@ -770,32 +778,69 @@ a key press uses.
   (`Discard and leave [D]` / `Leave anyway [D]`, plus `Keep [Esc]`). The
   captured continuation re-proves the SAME mounted page instance and the SAME
   source category/row before it applies the captured destination, and a
-  destination that vanished in the meantime is refused instead of applied. A
-  clean page leaves on the same gesture (Tab retires it and returns the original
-  Rows selection). The lease/focus mechanics are owned by
+  destination that vanished in the meantime is refused instead of applied. For
+  the Agent single value a clean page leaves on the same gesture (Tab retires it
+  and returns the original Rows selection); the Shell group's Tab is a LOCAL
+  field move and the Root never takes it. The lease/focus mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 
-`Shell execution` keeps the staged form. Each field paints the current effective
-value and its `Differs from base` / `Matches base` relation to the base, an
-explicit `[Reset]` per field and `Status: …` feedback. These comparison labels
-are not USER-layer override presence claims. The fixed status line reports
-`Ready`, `Unavailable`, `Unreadable` or `Last-known · read-only` from the
-captured read and the live section; it never says Ready for a missing,
-unreadable or superseded authority. A field's `[Reset]` action is painted as a
-complete segment and its pointer span is derived from that same painted line; a
-width that cannot host the whole word drops the Reset target entirely.
+- **Group browse.** Entering the group selects the FIRST field and never opens
+  the raw Input. The group paints both fields' labels/units and candidate
+  values, the served `Current` for every staged field, and the real
+  `N unsaved change(s)` count projected from the controller's patch keys.
+  `Up`/`Down` clamp on the two fields, `Tab`/`Shift+Tab` wrap between them, and
+  a field row click only SELECTS. `Enter`/`Right` or the painted `Edit` opens
+  the CURRENT field's Input; `Stage` (a complete painted span) validates and
+  stages that field locally and returns to the browse. `Details`/`?` opens the
+  selected field's Advanced disclosure.
+- **ONE Save, ONE batch.** The grouped Save is admitted only while the patch is
+  current, valid, non-pending and its dirty facts (the count, or one complete
+  staged field block) and the Save span were really painted. It dispatches the
+  whole set/reset patch as ONE revision-checked official mutation on the
+  captured executor row, keeps the group and its field selection, and paints
+  the Host readback as `Verified`. Empty/whitespace/invalid Input keeps the raw
+  text and the field's REAL issue with zero write; a normal Stage equal to the
+  served value removes only that field's patch (`No changes` only when the whole
+  patch is empty), and an empty text is never an implicit unset.
+- **Selected-field Advanced and reset.** `Details` opens the CURRENT field's
+  effective/inherited/comparison/revision/scope, the Host executor identity and
+  the reset semantics. `Reset to inherited…` (or `x` there) stages the official
+  `unset` of THAT field and returns to the browse: no second confirmation and
+  no write. A reset is a real dirty intent even when the effective value equals
+  the inherited one, and `Reset staged` is never painted as the inherited
+  value. A later legal Stage of another field keeps it; staging the same value
+  of the reset field removes only that field's intent. The Host readback decides
+  the value after Save; neither USER-field deletion nor `overridden=false` is a
+  success criterion.
+- **Dirty navigation.** A dirty Back and a dirty parent row/category/pane click
+  are the SAME one leave gate: the page opens
+  `Save [S] · Discard and leave [D] · Keep [Esc]` (compact `Discard [D]` when the
+  width needs it). `Save` saves and STAYS, `Keep` retains the group/field/draft,
+  and `Discard and leave` clears the local patch before re-proving the captured
+  destination. A plain `Discard` in the browse opens `Discard unsaved changes?`
+  and stays; `Refresh` asks before it discards the draft and re-reads. The raw
+  Input, the Advanced disclosure and a pending/unknown write refuse every parent
+  route outright. Unknown outcomes offer only `Leave anyway [D] · Keep [Esc]`;
+  leaving does not undo a possibly applied Host write.
+- **Bar-only and short grants.** A grant that paints no body row admits only the
+  page's own Back/Keep/Cancel/Wait, and the Root never takes the grouped Tab for
+  a parent focus move. A short body keeps the selected field's value/unit, its
+  served `Current`, the real state/dirty count and complete actions before the
+  secondary prose; an action whose complete span does not fit is dropped WHOLE
+  and its shortcut key stays inert until a repaint admits it.
+- **Authority and status.** Effective/inherited/revision/generation and the
+  executor identity stay owned by the ConfigPort and the per-open controller;
+  the page paints the same `Verified` / `No changes` / `Not saved` /
+  `Unverified` / `Outcome unconfirmed` vocabulary and the `Last-known`/read-only
+  states as the single route. A superseded capture or a replaced served executor
+  row refuses the edit until an explicit Refresh, and an accepted write whose
+  readback serves a DIFFERENT executor row is `Unverified` even when the caps
+  look identical.
 
 Numeric validation follows the owning field: the Agent field requires a safe
 positive integer (`Number.isSafeInteger(n) && n>=1`), while the Shell fields
-require a positive finite number as the Host runtime does. In the staged Shell
-form an empty field stages the official Reset and invalid text keeps the draft
-without dispatching; in the Agent tenant an empty or invalid field never resets.
-Save sends ONE exact-revision/revision-checked Host mutation for the page's
-namespace and reports `Not saved`, `Unverified` or `Outcome unconfirmed`
-exactly as the Host settlement and same-generation readback prove; a stale
-captured page is read-only until an explicit refresh. Reset stages the official
-field `unset`, then shows the Host's CURRENT readback; neither USER-field
-deletion nor `overridden=false` is a success criterion.
+require a positive finite number as the Host runtime does (decimal and
+scientific text are legal, and the browse paints the canonical number).
 
 - `Shell execution` edits the two numeric caps (`timeoutMs`, `maxOutputBytes`) of
   the Host-served model-tool executor row in ONE mutation. The executor-row
