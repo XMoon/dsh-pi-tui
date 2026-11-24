@@ -672,9 +672,11 @@ export async function runReadAuthority(context) {
           && record.generationId !== beforeReconnect.generationId,
         'UA Client A reconnected on a new generation',
         120_000)
-      // The recovering handle invalidated the old generation's membership and
-      // consumed a FRESH baseline from the new one — same logical handle, no
-      // duplicate stream, no retry of the failed generation.
+      // The recovering observation invalidated the old generation's membership
+      // and consumed a FRESH baseline from the new one. The installed transport
+      // may deliver that baseline through the ONE legal replacement logical
+      // handle (the qualification probe's `handle` sequence increments once),
+      // never a duplicate stream and never a retry of the failed generation.
       const invalidated = await waitProbe(clientA, recoveringNonce,
         record => record.phase === 'workspaces-frame' && record.type === 'invalidated',
         'UA recovering membership invalidated on the real carrier loss', 120_000)
@@ -695,6 +697,15 @@ export async function runReadAuthority(context) {
         Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
       assert(freshMember !== undefined,
         `UA the fresh recovering baseline lost the current Workspace membership: ${JSON.stringify(freshBaseline.items)}`)
+      // Logical-handle provenance: the recovery is either the SAME handle
+      // (in-place resume) or exactly ONE replacement handle; anything else is a
+      // duplicate/retry. The installed rc.5 mux ends the logical stream on a
+      // real generation rollover, so the observed shape is the legal one-new-
+      // handle path (recorded in the case log, not asserted as a fixed number).
+      assert(typeof invalidated.handle === 'number' && typeof freshBaseline.handle === 'number',
+        `UA the recovering frames carry no logical-handle identity: ${JSON.stringify({ invalidated, freshBaseline })}`)
+      assert(freshBaseline.handle === invalidated.handle || freshBaseline.handle === invalidated.handle + 1,
+        `UA the recovering baseline skipped logical handles: ${invalidated.handle} -> ${freshBaseline.handle}`)
       await waitProbe(clientA, recoveringNonce, record => record.phase === 'workspaces-ended',
         'UA recovering Workspace stream ended', 150_000)
 
