@@ -697,15 +697,29 @@ export async function runReadAuthority(context) {
         Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
       assert(freshMember !== undefined,
         `UA the fresh recovering baseline lost the current Workspace membership: ${JSON.stringify(freshBaseline.items)}`)
-      // Logical-handle provenance: the recovery is either the SAME handle
-      // (in-place resume) or exactly ONE replacement handle; anything else is a
-      // duplicate/retry. The installed rc.5 mux ends the logical stream on a
-      // real generation rollover, so the observed shape is the legal one-new-
-      // handle path (recorded in the case log, not asserted as a fixed number).
+      // Logical-handle provenance must discriminate the two accepted branches.
+      // A terminal escape needs its REAL provenance (a different defined live
+      // Connection, a real error class and the failed handle settled); the
+      // retryable carrier branch must recover on the SAME logical handle.
       assert(typeof invalidated.handle === 'number' && typeof freshBaseline.handle === 'number',
         `UA the recovering frames carry no logical-handle identity: ${JSON.stringify({ invalidated, freshBaseline })}`)
-      assert(freshBaseline.handle === invalidated.handle || freshBaseline.handle === invalidated.handle + 1,
-        `UA the recovering baseline skipped logical handles: ${invalidated.handle} -> ${freshBaseline.handle}`)
+      const terminal = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-terminal',
+        'UA recovering terminal provenance record', 3_000).catch(() => undefined)
+      if (terminal !== undefined) {
+        assert(terminal.handle === invalidated.handle,
+          `UA the terminal record names a different logical handle: ${JSON.stringify(terminal)}`)
+        assert(terminal.attemptKnown === true && terminal.liveDefined === true
+          && terminal.attemptIsLive === false && terminal.replacedInTime === true,
+          `UA a replacement was authorized without a different defined live Connection: ${JSON.stringify(terminal)}`)
+        assert(typeof terminal.errorName === 'string' && terminal.errorName.length > 0,
+          `UA the terminal record carries no actual error class: ${JSON.stringify(terminal)}`)
+        assert(freshBaseline.handle === invalidated.handle + 1,
+          `UA the terminal branch did not open exactly ONE replacement handle: ${invalidated.handle} -> ${freshBaseline.handle}`)
+      } else {
+        assert(freshBaseline.handle === invalidated.handle,
+          `UA the retryable carrier branch changed the logical handle without a terminal record: ${invalidated.handle} -> ${freshBaseline.handle}`)
+      }
       await waitProbe(clientA, recoveringNonce, record => record.phase === 'workspaces-ended',
         'UA recovering Workspace stream ended', 150_000)
 

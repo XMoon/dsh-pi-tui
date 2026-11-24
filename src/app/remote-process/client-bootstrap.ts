@@ -1430,13 +1430,35 @@ async function startSurfaceLocalClient(
                   }
                   // The failure belongs to the Connection that owned the real
                   // physical attempt: only a defined live generation DIFFERENT
-                  // from it is a legal replacement trigger.
+                  // from it is a legal replacement trigger. Emit the actual
+                  // terminal provenance BEFORE any replacement decision.
                   const attempted = handle.attemptedGeneration?.()
-                  if (!await waitForNewGeneration(attempted)) {
+                  const liveAtFailure = generation.getSnapshot()
+                  const startedWaiting = Date.now()
+                  const replacedInTime = await waitForNewGeneration(attempted)
+                  emit({
+                    phase: 'workspaces-terminal',
+                    handle: logicalHandle,
+                    errorClass: error instanceof Error ? (error.constructor?.name ?? 'Error') : typeof error,
+                    errorName: error instanceof Error ? error.name : undefined,
+                    errorCode: typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : undefined,
+                    message: String(error instanceof Error ? error.message : error).slice(0, 240),
+                    attemptKnown: attempted !== undefined,
+                    liveDefined: liveAtFailure !== undefined,
+                    attemptIsLive: attempted !== undefined && liveAtFailure !== undefined && Object.is(attempted, liveAtFailure),
+                    waitedMs: Date.now() - startedWaiting,
+                    replacedInTime,
+                    frames,
+                    deadlineReached: Date.now() >= deadlineAt,
+                  })
+                  if (!replacedInTime) {
                     failed = error instanceof Error ? error.message : String(error)
                     break
                   }
                   if (frames >= maxFrames || Date.now() >= deadlineAt) break
+                  // The failed logical handle is settled BEFORE the ONE legal
+                  // replacement is constructed (no duplicate physical streams).
+                  handle.dispose()
                   logicalHandle += 1
                   emit({ phase: 'workspaces-handle', handle: logicalHandle })
                   handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, 'recovering')
