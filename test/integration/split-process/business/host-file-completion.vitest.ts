@@ -8,8 +8,8 @@
  * directly or fakes a Workspace.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { expect, test } from 'vitest'
@@ -171,19 +171,26 @@ test('completes Host workspace files before creating the first session in that w
 
     // Input boundary on the REAL started Scene: a path-unsafe label, an
     // escaping cwd/home and an unknown handle are refused before any directory
-    // or native spawn exists.
-    const idsBeforeBoundary = await scene.sessionIds()
-    await expect(scene.startClient({ label: '../../escape', cwd: primary, home: primaryHome }))
-      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
-    await expect(scene.startClient({ label: 'boundary-cwd', cwd: join(root, '..', 'outside'), home: primaryHome }))
-      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
-    await expect(scene.startClient({ label: 'boundary-home', cwd: primary, home: join(root, '..', 'outside') }))
-      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
-    await expect(scene.request('CLOSE_PROCESS_CLIENT', { clientId: 'unknown-process-client' }))
-      .rejects.toThrow(/CLOSE_PROCESS_CLIENT|unknown|not registered/u)
-    expect(await scene.sessionIds()).toEqual(idsBeforeBoundary)
-    expect(readdirSync(root).filter(name => name.startsWith('escape'))).toEqual([])
-    expect(existsSync(join(root, '..', 'outside'))).toBe(false)
+    // or native spawn exists. The outside sibling EXISTS and is canonical, so
+    // the cwd/home refusals are the actual containment check rather than a
+    // missing-path failure, and the refused attempt must not mutate it.
+    const outsideSibling = mkdtempSync(join(realpathSync(dirname(root)), 'split-process-outside-'))
+    try {
+      const idsBeforeBoundary = await scene.sessionIds()
+      await expect(scene.startClient({ label: '../../escape', cwd: primary, home: primaryHome }))
+        .rejects.toThrow(/INPUT_UNQUALIFIED/u)
+      await expect(scene.startClient({ label: 'boundary-cwd', cwd: outsideSibling, home: primaryHome }))
+        .rejects.toThrow(/must be inside the Scene root/u)
+      await expect(scene.startClient({ label: 'boundary-home', cwd: primary, home: outsideSibling }))
+        .rejects.toThrow(/must be inside the Scene root/u)
+      await expect(scene.request('CLOSE_PROCESS_CLIENT', { clientId: 'unknown-process-client' }))
+        .rejects.toThrow(/CLOSE_PROCESS_CLIENT|unknown|not registered/u)
+      expect(await scene.sessionIds()).toEqual(idsBeforeBoundary)
+      expect(readdirSync(root).filter(name => name.startsWith('escape'))).toEqual([])
+      expect(readdirSync(outsideSibling)).toEqual([])
+    } finally {
+      rmSync(outsideSibling, { recursive: true, force: true })
+    }
 
     const primaryClient = await scene.startClient({ label: 'workspace-primary', cwd: primary, home: primaryHome })
     const secondaryClient = await scene.startClient({ label: 'workspace-secondary', cwd: secondary, home: secondaryHome })

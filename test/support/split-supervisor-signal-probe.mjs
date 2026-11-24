@@ -368,8 +368,26 @@ async function loadKernelHelpers() {
     read: identity.readKernelProcess,
     classify: contract.classifyKernelLiveness,
     serialize: contract.serializeKernelIdentity,
+    groupMembers: identity.listKernelGroupMembers,
   }
   return kernelHelpers
+}
+
+/**
+ * terminal | live | unknown for one owned process group. A same-birth Linux
+ * Z/X/x task is readable but NOT a live member; an unreadable group is unknown
+ * ownership, never an empty (terminal) group.
+ */
+function processGroupTerminalState(kernel, pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 0) return 'unknown'
+  const members = kernel.groupMembers(pgid)
+  if (!Array.isArray(members)) return 'unknown'
+  for (const member of members) {
+    const state = kernel.classify(member).state
+    if (state === 'unknown') return 'unknown'
+    if (state === 'alive') return 'live'
+  }
+  return 'terminal'
 }
 
 /** live | foreign (PID reused) | gone | unknown | unproven (no recorded birth). */
@@ -480,8 +498,11 @@ function checkProcessReceiptResources(receipt, kernel) {
     if (state !== 'gone' && state !== 'foreign') {
       problems.push(`Host generation ${String(host.generation)} process is ${state}: ${String(host.pid)}`)
     }
-    if (host.pgid !== undefined && groupAlive(host.pgid)) {
-      problems.push(`Host generation ${String(host.generation)} process group still alive: ${String(host.pgid)}`)
+    if (host.pgid !== undefined) {
+      const groupState = processGroupTerminalState(kernel, host.pgid)
+      if (groupState !== 'terminal') {
+        problems.push(`Host generation ${String(host.generation)} process group is ${groupState}: ${String(host.pgid)}`)
+      }
     }
   }
   for (const client of receipt.processClients ?? []) {
@@ -507,8 +528,11 @@ function checkProcessReceiptResources(receipt, kernel) {
     if (state !== 'gone' && state !== 'foreign') {
       problems.push(`fallback Host PID is ${state}: ${String(fallback.pid)}`)
     }
-    if (fallback.pgid !== undefined && groupAlive(fallback.pgid)) {
-      problems.push(`fallback Host process group still alive: ${String(fallback.pgid)}`)
+    if (fallback.pgid !== undefined) {
+      const groupState = processGroupTerminalState(kernel, fallback.pgid)
+      if (groupState !== 'terminal') {
+        problems.push(`fallback Host process group is ${groupState}: ${String(fallback.pgid)}`)
+      }
     }
   }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor?.pid)}`)
@@ -611,6 +635,35 @@ function assertProcessSiblingStillLive(kernel, snapshot, label) {
   if (!existsSync(snapshot.sceneRoot ?? '')) fail(`${label}: the sibling Scene root disappeared`)
 }
 
+/**
+ * The target's captured identities must still be the SAME live processes at
+ * the trigger: Worker, Host, both Client shells and every business Client. The
+ * sibling wait can last minutes, so the earlier checkpoint alone is not a live
+ * target proof.
+ */
+function assertProcessTargetStillLive(kernel, target, label) {
+  const workerState = identityLiveness(kernel, target.worker?.pid, target.worker?.birth)
+  if (workerState !== 'live') fail(`${label}: the target Worker is ${workerState}`)
+  const host = (target.hosts ?? []).find(value => value.exited !== true)
+  if (host === undefined) fail(`${label}: the target receipt lost its Host`)
+  const hostState = identityLiveness(kernel, host.pid, host.birth)
+  if (hostState !== 'live') fail(`${label}: the target Host is ${hostState}`)
+  const clients = target.processClients ?? []
+  if (clients.length < 2) fail(`${label}: the target receipt lost one of its two Clients`)
+  for (const client of clients) {
+    const shellState = identityLiveness(kernel, client.shellPid, client.shellBirth)
+    if (shellState !== 'live') {
+      fail(`${label}: the target Client ${String(client.label)} shell is ${shellState}`)
+    }
+    for (const business of client.businessIdentities ?? []) {
+      const state = identityLiveness(kernel, business.pid, business.birth)
+      if (state !== 'live') {
+        fail(`${label}: the target Client ${String(client.label)} business PID ${String(business.pid)} is ${state}`)
+      }
+    }
+  }
+}
+
 async function main() {
 const mode = arg('--mode')
 const signal = arg('--signal') ?? 'SIGTERM'
@@ -690,6 +743,8 @@ let child
 let vitestPid
 /** The probe-owned Vitest main identity captured immediately after spawn. */
 let probeMainIdentity
+/** The probe-owned external sentinel identity captured in the process branch. */
+let sentinelIdentity
 let siblingChild
 let siblingRunId
 let siblingStopFile
@@ -797,7 +852,14 @@ let siblingSnapshot
 try {
   let deadline
   const kernel = processMode ? await loadKernelHelpers() : undefined
-  if (processMode) probeMainIdentity = captureProbeMainIdentity(kernel, child, 'probe-owned Vitest main')
+  if (processMode) {
+    probeMainIdentity = captureProbeMainIdentity(kernel, child, 'probe-owned Vitest main')
+    // The sentinel is probe-owned too: capture its exact kernel identity once
+    // and reclassify it at the terminal claim instead of trusting a numeric PID.
+    const observation = kernel.read(sentinel.pid)
+    if (observation.kind !== 'alive') fail('the external sentinel is not a live kernel process at capture')
+    sentinelIdentity = { pid: sentinel.pid, birth: kernel.serialize(observation.identity) }
+  }
   if (upgradeMode && siblingChild !== undefined) {
     siblingReceipt = await waitUntil(() => {
       const current = latestUpgradeReceipt(tmpBase, siblingRunId)
@@ -934,6 +996,14 @@ try {
       const workerRow = rows.get(killedWorkerPid)
       if (workerRow === undefined || workerRow.ppid !== vitestPid) {
         fail(`worker PID ${String(killedWorkerPid)} is no longer a child of the probe-owned Vitest main`)
+      }
+      if (mode === 'process-worker-kill' && at === 'clients-ready') {
+        // The sibling checkpoint may be awaited for minutes after the target
+        // checkpoint: the SAME target and sibling identities must still be live
+        // at the trigger itself, not only when they were first observed.
+        if (siblingSnapshot === undefined) fail('the clients-ready sibling snapshot is missing at the trigger')
+        assertProcessTargetStillLive(kernel, receipt, 'clients-ready target at the signal trigger')
+        assertProcessSiblingStillLive(kernel, siblingSnapshot, 'clients-ready sibling at the signal trigger')
       }
       if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
@@ -1343,7 +1413,12 @@ try {
   if (problems.length > 0) fail(problems.join('; '))
   checkNoLingeringPaths(receipt)
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
-  if (!pidAlive(sentinel.pid)) fail(`external sentinel PID ${String(sentinel.pid)} died; the probe touched an unrelated process`)
+  const sentinelState = processMode && sentinelIdentity !== undefined
+    ? identityLiveness(kernel, sentinelIdentity.pid, sentinelIdentity.birth)
+    : (pidAlive(sentinel.pid) ? 'live' : 'gone')
+  if (sentinelState !== 'live') {
+    fail(`external sentinel PID ${String(sentinel.pid)} is ${sentinelState}; the probe touched an unrelated process`)
+  }
   console.log(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FACTS ${JSON.stringify({
     mode,
     at,

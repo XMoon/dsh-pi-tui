@@ -62,6 +62,10 @@ import {
   serializeKernelIdentity,
   waitForOwnedMutation,
 } from './split-upgrade-native-contract.mjs'
+import {
+  assertKernelGroupSignalOwnership,
+  kernelGroupLiveMemberPids,
+} from './split-kernel-group-ownership.mjs'
 
 const SUPERVISOR_STARTED_AT = new Date().toISOString()
 const HOST_READY_TIMEOUT_MS = 180_000
@@ -437,41 +441,21 @@ async function waitForHostRecord(target, predicate, label, timeoutMs) {
   throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
 }
 
+/** The production kernel readers the shared group-ownership predicate uses. */
+function processKernelReaders() {
+  return { read: pid => readKernelProcess(pid), listMembers: pgid => listKernelGroupMembers(pgid) }
+}
+
 /**
- * The exact ownership proof for ONE Process Scene Host signal: the recorded
- * kernel birth is still the live PID, it is still its own detached
- * group/session leader, and it is still a member of that exact group. The
- * production kernel-group authority is read immediately before every signal;
- * an unknown/absent/foreign fact refuses the signal instead of falling back to
- * a bare PID.
+ * The exact ownership proof for ONE Process Scene Host signal, delegated to the
+ * ONE shared predicate: the recorded kernel birth is still the live PID, it is
+ * still its own detached group/session leader, and the exact leader PID plus
+ * its birth is still a LIVE member of that group. The production kernel-group
+ * authority is read immediately before EVERY signal; an unknown/absent/foreign
+ * fact refuses the signal instead of falling back to a bare PID.
  */
 function assertProcessHostSignalOwnership(handle, reason) {
-  if (typeof handle.birth !== 'string' || handle.birth === '') {
-    throw new Error(`${reason}: the process Host has no captured kernel birth; refusing to signal`)
-  }
-  const pid = handle.child.pid
-  if (!Number.isInteger(pid) || pid <= 0) {
-    throw new Error(`${reason}: the process Host has no real PID; refusing to signal`)
-  }
-  const observation = readKernelProcess(pid)
-  if (observation.kind !== 'alive') {
-    throw new Error(`${reason}: the process Host PID ${String(pid)} is not the live kernel process captured at spawn`)
-  }
-  if (serializeKernelIdentity(observation.identity) !== handle.birth) {
-    throw new Error(`${reason}: the process Host PID ${String(pid)} was replaced by another process; refusing to signal`)
-  }
-  if (observation.identity.pgid !== pid || observation.identity.sid !== pid) {
-    throw new Error(`${reason}: the process Host PID ${String(pid)} is not its own group/session leader; refusing to signal`)
-  }
-  const members = listKernelGroupMembers(pid)
-  if (!Array.isArray(members)) {
-    throw new Error(`${reason}: the process Host group ${String(pid)} cannot be enumerated (${String(members?.code)}); refusing to signal`)
-  }
-  if (!members.some(member => member?.kind === 'alive'
-    && serializeKernelIdentity(member.identity) === handle.birth)) {
-    throw new Error(`${reason}: the captured Host is no longer a member of group ${String(pid)}; refusing to signal`)
-  }
-  return observation
+  return assertKernelGroupSignalOwnership(processKernelReaders(), handle.child.pid, handle.birth, reason)
 }
 
 function killProcessHost(handle, signal, reason) {
@@ -541,11 +525,10 @@ async function assertHostGroupGone(handle, reason) {
   // a live descendant means the generation cannot be called quiesced.
   await waitForGroupGone(pgid, 3_000)
   if (scene?.kind === 'process') {
-    const members = listKernelGroupMembers(pgid)
-    if (!Array.isArray(members)) {
-      throw new Error(`${reason}: Host process group ${String(pgid)} cannot be enumerated (${String(members?.code)})`)
-    }
-    const live = members.filter(member => member?.kind === 'alive').map(member => member.identity.pid)
+    // A same-birth Linux Z/X/x task is readable but NOT a live member; only the
+    // product classifier may decide liveness, and an unreadable group is
+    // unknown ownership rather than an empty (quiesced) group.
+    const live = kernelGroupLiveMemberPids(processKernelReaders(), pgid, reason)
     if (live.length > 0) {
       throw new Error(`${reason}: Host process group ${String(pgid)} still has live members: ${JSON.stringify(live)}`)
     }
@@ -1102,10 +1085,17 @@ function assertProcessFallbackOwnership(pid, scratch, registered, reason) {
     throw new Error(`${reason}: fallback Host PID ${String(pid)} does not carry this Scene's DSH home`)
   }
   const observation = readKernelProcess(pid)
-  if (observation.kind !== 'alive') {
-    throw new Error(`${reason}: fallback Host PID ${String(pid)} has no live kernel identity`)
+  const liveness = classifyKernelLiveness(observation)
+  if (liveness.state !== 'alive') {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} has no live kernel identity (${liveness.state})`)
   }
   const identity = observation.identity
+  // The ownership snapshot and this later identity read must describe the SAME
+  // kernel process, exactly like the Client identity capture: a torn or re-used
+  // read is unknown ownership, never a signallable candidate.
+  if (serializeKernelIdentity(identity) !== snapshot.birth) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} changed between its ownership snapshot and its kernel identity`)
+  }
   // The detached Host is the leader of its OWN process group AND session; only
   // such a group can be signalled as one owned unit.
   if (identity.pgid !== pid || identity.sid !== pid) {
@@ -1176,7 +1166,15 @@ async function reclaimFallbackHost(pid, origin, scratch, reason, processOwner) {
   // A detached Host candidate is its own process-group leader. In a process
   // Scene the strict proof above already rejected any other shape; there is no
   // bare-PID fallback because a group-signal failure is not an ownership proof.
+  //
+  // Every signal re-proves the exact captured ownership IMMEDIATELY before it,
+  // including the TERM -> KILL escalation. A leader that already exited while
+  // members remain cannot authorize signalling the numeric group: that is
+  // refused and the evidence is preserved instead of a blanket reclaim.
   const signalGroup = signal => {
+    if (strict !== undefined) {
+      assertKernelGroupSignalOwnership(processKernelReaders(), pid, strict.birth, `${reason}: ${signal}`)
+    }
     try {
       process.kill(-pid, signal)
     } catch (error) {
@@ -2533,6 +2531,12 @@ async function handleBootstrapProcess(message) {
     throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_PROCESS requires the expected candidate SHA256')
   }
   const tmpBase = validateTmpBase(message.tmpBase)
+  // The resource owner mirrors the Worker wrapper's canonical-input contract: a
+  // symlink alias is refused BEFORE any receipt, root or install exists. The
+  // historical validators keep resolving aliases for their other consumers.
+  if (tmpBase !== message.tmpBase) {
+    throw new Error(`INPUT_UNQUALIFIED: BOOTSTRAP_PROCESS requires a canonical tmpBase, not a symlink alias: ${message.tmpBase} -> ${tmpBase}`)
+  }
   initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid }, {
     kind: 'process',
     sceneId: message.sceneId,

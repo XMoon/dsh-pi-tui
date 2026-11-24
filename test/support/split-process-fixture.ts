@@ -19,7 +19,7 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { readKernelProcess } from '../../src/runtime/native-process/identity.ts'
+import { readKernelProcess, type KernelProcessIdentity } from '../../src/runtime/native-process/identity.ts'
 import { readOfficialClientRecords } from './split-process-client.ts'
 import { SupervisorClient } from './split-supervisor-client.ts'
 
@@ -262,21 +262,6 @@ function listSessionIds(dshHome: string): string[] {
     }
   }
   return ids
-}
-
-/** One serialized kernel birth for a live PID, or undefined when unreadable. */
-function kernelBirthOf(pid: number | null | undefined): string | undefined {
-  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined
-  try {
-    const observation = readKernelProcess(pid)
-    if (observation.kind !== 'alive') return undefined
-    // A same-birth Linux Z/X/x is not a live process; the product classifier
-    // is the ONE authority for that distinction.
-    if (nativeContract.classifyKernelLiveness(observation).state !== 'alive') return undefined
-    return nativeContract.serializeKernelIdentity(observation.identity)
-  } catch {
-    return undefined
-  }
 }
 
 interface SupervisorReceipt {
@@ -691,8 +676,10 @@ class ProcessScene implements SplitProcessScene {
       && otherSeat !== ownSeat, 'the two parallel Scenes share the Host seat')
     assert(other.host?.pid !== host.ready?.localHost?.hostPid, 'the two parallel Scenes share a Host process')
     assert(other.worker?.pid !== own.worker?.pid, 'the two parallel Scenes share a Worker PID')
-    assert(typeof other.worker?.ppid === 'number' && typeof own.worker?.ppid === 'number',
-      'a parallel Scene Worker has no real PPID')
+    // Both real Workers of one audit are children of THIS Vitest main; the PPID
+    // is shared by design, and #isReceiptSceneLive re-proves the live edge.
+    assert(other.worker?.ppid === process.ppid && own.worker?.ppid === process.ppid,
+      'a parallel Scene Worker is not a child of this Vitest main')
     // The serialized birth is the start timestamp; on Linux two distinct
     // processes started in the same clock tick carry the same string. The
     // live check below binds each birth to its own PID, so PID inequality plus
@@ -724,16 +711,40 @@ class ProcessScene implements SplitProcessScene {
     return this.#receipts().find(receipt => receipt.runId === this.runId)
   }
 
-  #isSameLiveKernel(pid: number | null | undefined, birth: string | undefined, label: string): boolean {
+  /** The fresh live kernel identity of one captured PID/birth, or undefined. */
+  #liveKernelIdentity(
+    pid: number | null | undefined,
+    birth: string | undefined,
+    label: string,
+  ): KernelProcessIdentity | undefined {
     assert(typeof pid === 'number' && Number.isInteger(pid) && pid > 0, `${label}: no real PID`)
     assert(typeof birth === 'string' && birth !== '', `${label}: no recorded kernel birth`)
-    const live = kernelBirthOf(pid)
-    if (live === undefined) return false
-    return live === birth
+    const observation = readKernelProcess(pid)
+    if (observation.kind !== 'alive') return undefined
+    if (nativeContract.classifyKernelLiveness(observation).state !== 'alive') return undefined
+    return nativeContract.serializeKernelIdentity(observation.identity) === birth
+      ? observation.identity
+      : undefined
   }
 
-  /** Re-prove the receipt names live, still-same kernel identities. */
+  #isSameLiveKernel(pid: number | null | undefined, birth: string | undefined, label: string): boolean {
+    return this.#liveKernelIdentity(pid, birth, label) !== undefined
+  }
+
+  /**
+   * Re-prove the receipt names live, still-same kernel identities: both real
+   * Workers, the Host and every Client shell/business process. A Worker must
+   * still be a live child of THIS Vitest main (the same parent edge the receipt
+   * recorded), so a dead Worker whose Host/Clients survive is not mistaken for
+   * the live Scene.
+   */
   #isReceiptSceneLive(other: SupervisorReceipt): boolean {
+    assert(other.worker !== undefined, 'the parallel Scene receipt has no Worker identity')
+    const worker = this.#liveKernelIdentity(other.worker.pid, other.worker.birth,
+      'the parallel Scene Worker')
+    if (worker === undefined) return false
+    assert(other.worker.ppid === process.ppid && worker.ppid === process.ppid,
+      'the parallel Scene Worker is not a live child of this Vitest main')
     let live = this.#isSameLiveKernel(other.host?.pid, other.host?.birth,
       'the parallel Scene Host')
     for (const entry of other.processClients ?? []) {

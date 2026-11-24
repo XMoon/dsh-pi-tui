@@ -649,8 +649,9 @@ It requires two private inputs:
 The project's files run with real file parallelism. An explicit
 `SPLIT_VITEST_RUN_ID` together with the SAME value in
 `SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes the files report a `parallel-ready`
-checkpoint and prove that the other real Scene's Host and Client kernel
-identities are live at the same time; select the project's files together and
+checkpoint and prove that the other real Scene's Worker (with its live Vitest
+parent edge), Host and Client kernel identities are live at the same time;
+select the project's files together and
 use a fresh private run root per round:
 
 ```sh

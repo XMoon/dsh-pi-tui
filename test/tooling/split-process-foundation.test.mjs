@@ -17,6 +17,7 @@ import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -35,6 +36,11 @@ import {
   assertPostReadCandidateIdentity,
   inspectImmutableSplitCandidate,
 } from '../../scripts/lib/split-smoke-profile.mjs'
+import {
+  assertKernelGroupSignalOwnership,
+  kernelGroupLiveMemberPids,
+} from '../support/split-kernel-group-ownership.mjs'
+import { serializeKernelIdentity } from '../support/split-upgrade-native-contract.mjs'
 import { createSplitProcessScene } from '../support/split-process-fixture.ts'
 import { readOfficialClientRecords } from '../support/split-process-client.ts'
 import { SupervisorClient } from '../support/split-supervisor-client.ts'
@@ -156,6 +162,48 @@ test('a candidate that disappears after its bytes are read is a changed input', 
   })
 })
 
+test('the group-signal predicate binds ownership to the exact PID birth and ignores terminated members', () => {
+  const shared = { platform: 'linux', ppid: 1, pgid: 4242, sid: 4242, uid: 501 }
+  const leader = { kind: 'alive', identity: { ...shared, pid: 4242, startTicks: '777', state: 'S' } }
+  const birth = serializeKernelIdentity(leader.identity)
+  const readers = (observation, members) => ({ read: () => observation, listMembers: () => members })
+
+  // Positive control: the exact live leader that owns its group/session.
+  assert.equal(
+    assertKernelGroupSignalOwnership(readers(leader, [leader]), 4242, birth, 'probe').identity.pid,
+    4242,
+  )
+
+  // Two distinct Linux processes started in ONE clock tick share the serialized
+  // birth, so a same-birth member with another PID does not prove that the
+  // captured leader still owns the group.
+  const sameTickStranger = { kind: 'alive', identity: { ...shared, pid: 5151, startTicks: '777', state: 'S' } }
+  assert.equal(serializeKernelIdentity(sameTickStranger.identity), birth)
+  assert.throws(
+    () => assertKernelGroupSignalOwnership(readers(leader, [sameTickStranger]), 4242, birth, 'probe'),
+    /no longer the live leader/u,
+  )
+
+  // A reused numeric PID is refused even though the group would still answer.
+  const reused = { kind: 'alive', identity: { ...shared, pid: 4242, startTicks: '778', state: 'S' } }
+  assert.throws(
+    () => assertKernelGroupSignalOwnership(readers(reused, [reused]), 4242, birth, 'probe'),
+    /replaced by another process/u,
+  )
+
+  // A same-birth Z/X/x task is a readable group member but NOT a live member.
+  const terminated = { kind: 'alive', identity: { ...shared, pid: 4242, startTicks: '777', state: 'Z' } }
+  assert.deepEqual(
+    kernelGroupLiveMemberPids({ listMembers: () => [terminated] }, 4242, 'probe'),
+    [],
+  )
+  // An unreadable group is unknown ownership, never a terminal empty group.
+  assert.throws(
+    () => kernelGroupLiveMemberPids({ listMembers: () => ({ kind: 'unknown', code: 'READ_FAILED' }) }, 4242, 'probe'),
+    /cannot be enumerated/u,
+  )
+})
+
 test('a symlinked private tmp base is refused before a Supervisor is forked', async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('base-alias-')
@@ -234,6 +282,35 @@ test('a Worker/Supervisor candidate disagreement is refused before any install o
       await assert.rejects(supervisor.request(type, payload, { timeoutMs: 30_000 }), /no process scene/u)
     }
     assert.deepEqual(readdirSync(tmpBase).filter(name => name !== 'split-resources'), [])
+  } finally {
+    await supervisor.close({ timeoutMs: 30_000, allowKill: false })
+  }
+})
+
+test('a symlinked private tmp base is refused at the Process BOOTSTRAP boundary before any receipt or root', async t => {
+  const life = testLifecycle(t)
+  const root = realpathSync(life.tempDir('split-process-bootstrap-alias-'))
+  const canonicalBase = privateBase(life, root, 'base')
+  const alias = join(root, 'base-alias')
+  symlinkSync(canonicalBase, alias, 'dir')
+  const candidate = immutableCandidate(root, 'candidate')
+  const supervisor = new SupervisorClient({ runId: `split-process-alias-${String(process.pid)}` })
+  try {
+    // The resource owner mirrors the Worker's canonical-input contract; the
+    // refusal happens before a durable receipt, Scene root or install exists.
+    await assert.rejects(
+      supervisor.request('BOOTSTRAP_PROCESS', {
+        tarball: candidate,
+        expectedSha256: sha256(candidate),
+        tmpBase: alias,
+        workerPid: process.pid,
+        workerPpid: process.ppid,
+        sceneId: 'tmp-base-alias-probe',
+      }, { timeoutMs: 60_000 }),
+      /BOOTSTRAP_PROCESS requires a canonical tmpBase/u,
+    )
+    assert.equal(existsSync(join(canonicalBase, 'split-resources')), false)
+    assert.deepEqual(readdirSync(canonicalBase), [])
   } finally {
     await supervisor.close({ timeoutMs: 30_000, allowKill: false })
   }
