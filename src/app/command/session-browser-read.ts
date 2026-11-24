@@ -119,6 +119,9 @@ interface ActiveRead {
   /** How many Connection generation changes this open observed. A change that
    *  landed BEFORE a terminal failure is still the legal rebind trigger. */
   workspaceEpoch: number
+  /** The attempt identity of the last terminal Workspace failure: only a live
+   *  generation different from THIS identity may open one new logical handle. */
+  workspaceFailedGeneration: unknown
   workspaceGenerationOff: (() => void) | undefined
   /** The accepted roster's painted semantics: the ONE input of the roster
    *  delta, so an unchanged official list never bumps the revision or restarts
@@ -688,6 +691,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   const startRefresh = (panel: ActiveRead): void => {
     if (!isActive(panel) || panel.refreshing || panel.listState === 'loading') return
     panel.refreshing = true
+    const revisionAtStart = panel.listRevision
     runOwned('session browser list refresh', () => options.reader.list(panel.subject.currentSessionId, panel.controller.signal), {
       diag: options.diag,
       sessionId: options.sessionId,
@@ -710,11 +714,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           // A real roster delta owns its ONE enrichment chain (and its existing
           // search policy): never start a second chain beside it.
           applyRosterChange(panel, true)
-        } else {
+        } else if (panel.listRevision === revisionAtStart) {
           // An unchanged explicit/pull refresh still re-reads the accepted
           // metadata: the raw list can be unchanged while a projection (a
           // preset selected by another Client) moved. It retires any unfinished
-          // older chain first, so exactly ONE writer owns this generation.
+          // older chain first, so exactly ONE writer owns this generation. When
+          // a pushed semantic acceptance already enriched this window, the
+          // refresh completion does not restart an identical chain.
           panel.projectionGeneration += 1
           startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
         }
@@ -800,6 +806,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
       panel.workspaceEpoch += 1
       if (!isActive(panel) || !panel.workspaceTerminal) return
+      const live = facts.connectionGeneration?.()
+      if (live === undefined) return
+      if (panel.workspaceFailedGeneration !== undefined
+        && Object.is(live, panel.workspaceFailedGeneration)) return
       startWorkspaceFollow(panel)
     })
   }
@@ -826,6 +836,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       return
     }
     panel.workspaceTerminal = false
+    panel.workspaceFailedGeneration = undefined
     panel.workspaceHandle = handle
     // The handle IDENTITY is this observation's generation. A rebind after a
     // terminal failure replaces `panel.workspaceHandle`, so a late frame or a
@@ -839,18 +850,19 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
      *  already gone either way. */
     const rebindAfterTerminal = (): void => {
       if (!isActive(panel) || panel.workspaceHandle !== undefined) return
-      const failedGeneration = handle.provenGeneration?.()
+      const failedAttempt = handle.attemptedGeneration?.()
       const liveGeneration = options.sessionWorkspaceFacts?.connectionGeneration?.()
-      if (failedGeneration !== undefined && liveGeneration !== undefined) {
-        // A terminal failure on the generation this handle actually reached is
-        // NOT retried: only a replacement generation (a different live identity)
-        // may open one new logical handle. A change that the handle already
-        // adopted cannot be the recovery trigger again.
-        if (Object.is(failedGeneration, liveGeneration)) return
+      if (failedAttempt !== undefined) {
+        // The failure belongs to the Connection that owned the real physical
+        // attempt. Only a DEFINED live identity different from that attempt
+        // opens one new logical handle; an unknown live identity never guesses.
+        if (liveGeneration === undefined || Object.is(failedAttempt, liveGeneration)) return
         startWorkspaceFollow(panel)
         return
       }
-      if (panel.workspaceEpoch === openedEpoch) return
+      // No real physical attempt could start (the opening was disconnected):
+      // the first DEFINED live generation is the legal recovery trigger.
+      if (liveGeneration === undefined) return
       startWorkspaceFollow(panel)
     }
     runOwned('session workspace follow', async () => {
@@ -865,6 +877,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       isCancellation: () => cancellation(panel),
       onResult: () => {
         if (!isActive(panel) || !ownsHandle()) return
+        // Commit terminal state AND the attempt identity before publishing the
+        // unavailable frame: the recovery decision must never read a disposed
+        // handle's identity.
+        panel.workspaceFailedGeneration = handle.attemptedGeneration?.()
         panel.workspaceTerminal = true
         disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
@@ -872,6 +888,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       },
       onError: () => {
         if (!isActive(panel) || !ownsHandle()) return
+        panel.workspaceFailedGeneration = handle.attemptedGeneration?.()
         panel.workspaceTerminal = true
         disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
@@ -966,7 +983,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
    *  between the two can never be lost. No official refresh request is issued:
    *  the Client Session Manager owns list arrival. */
   const startObservableList = (panel: ActiveRead, observable: SessionReaderObservableList): void => {
+    // Input-first acceptance: a subscription notification before the initial
+    // event-loop turn is not applied (the latest snapshot is taken after the
+    // turn instead), so the loading frame and focus boundary are painted
+    // before any typed direct match/Resume or roster paint can run.
+    let inputTurnPassed = false
     panel.listSubscription = observable.subscribe(() => {
+      if (!inputTurnPassed) return
       applyObservableList(panel, observable.getSnapshot(), false)
     })
     runOwned('session browser list', async () => {
@@ -975,12 +998,16 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       // settle into it (the shared input-first ordering for both renderers).
       await scheduler.yield()
       if (cancellation(panel)) throw cancellationError('session browser list cancelled')
-      return observable.getSnapshot()
+      // Commit the gate and take/apply the LATEST official snapshot in this
+      // same owner continuation: no captured DTO can be overtaken by a newer
+      // publication between an async resolution and an onResult callback.
+      inputTurnPassed = true
+      applyObservableList(panel, observable.getSnapshot(), true)
     }, {
       diag: options.diag,
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel),
-      onResult: (snapshot) => { applyObservableList(panel, snapshot, true) },
+      onResult: () => {},
       onError: (error) => { applyListError(panel, error) },
     })
   }
@@ -1109,6 +1136,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         workspaceError: undefined,
         workspaceTerminal: false,
         workspaceEpoch: 0,
+        workspaceFailedGeneration: undefined,
         workspaceGenerationOff: undefined,
         rosterSemantics: '',
         activityHandle: undefined,

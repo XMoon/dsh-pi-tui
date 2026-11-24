@@ -1428,8 +1428,8 @@ async function startSurfaceLocalClient(
                   // The failure belongs to the generation the handle actually
                   // ADOPTED, not to its opening identity: a replacement already
                   // adopted by this handle cannot be the recovery trigger again.
-                  const adopted = (handle as { provenGeneration?(): unknown }).provenGeneration?.()
-                  if (!await waitForNewGeneration(adopted !== undefined ? adopted : openedGeneration)) {
+                  const attempted = (handle as { attemptedGeneration?(): unknown }).attemptedGeneration?.()
+                  if (!await waitForNewGeneration(attempted)) {
                     failed = error instanceof Error ? error.message : String(error)
                     break
                   }

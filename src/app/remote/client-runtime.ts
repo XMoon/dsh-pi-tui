@@ -600,6 +600,9 @@ interface RemoteClientDomainState {
   sessionFiber?: Fiber
   jobsFiber?: Fiber
   completion?: Promise<MountedRemoteClientDomains>
+  /** The wait-for-first-generation subscription; released by the DOMAIN
+   *  ownership on every disposal/unwind path, never only by `complete()`. */
+  initialGenerationOff?: () => void
   disposed: boolean
 }
 
@@ -607,6 +610,12 @@ interface RemoteClientDomainState {
 async function shutdownDomainState(state: RemoteClientDomainState): Promise<unknown[]> {
   if (state.disposed) return []
   state.disposed = true
+  // The staged identity subscription belongs to this domain state: clear the
+  // slot BEFORE releasing it, and release it on every unwind/disposal path
+  // (pre-complete disposal, Jobs-install failure, readiness abort).
+  const initialGenerationOff = state.initialGenerationOff
+  state.initialGenerationOff = undefined
+  initialGenerationOff?.()
   for (const fiber of [state.jobsFiber, state.sessionFiber, state.fileUploadFiber]) {
     await fiber?.dispose()
   }
@@ -707,14 +716,15 @@ export async function mountRemoteClientDomainPrerequisites(
   // already observes a possibly rolling Connection). It is retained for the
   // domain lifetime and only its own subscription is released.
   let initialGeneration = connection.generation.getSnapshot()
-  let initialOff: (() => void) | undefined
   if (initialGeneration === undefined) {
-    initialOff = connection.generation.subscribe(() => {
+    const off = connection.generation.subscribe(() => {
       initialGeneration ??= connection.generation.getSnapshot()
       if (initialGeneration === undefined) return
-      initialOff?.()
-      initialOff = undefined
+      if (state.initialGenerationOff !== off) return
+      state.initialGenerationOff = undefined
+      off()
     })
+    state.initialGenerationOff = off
   }
 
   return {
@@ -737,8 +747,9 @@ export async function mountRemoteClientDomainPrerequisites(
           } finally {
             // The domain identity is retained for its lifetime; only the
             // wait-for-first subscription is released here.
-            initialOff?.()
-            initialOff = undefined
+            const off = state.initialGenerationOff
+            state.initialGenerationOff = undefined
+            off?.()
           }
           const jobs = context.get('jobs') as unknown as IJobs
           if (jobs === undefined) throw new Error('remote client domains: the official Jobs Client did not install')

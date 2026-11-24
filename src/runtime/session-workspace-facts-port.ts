@@ -106,11 +106,13 @@ export interface WorkspaceFactsHandle extends AsyncIterable<WorkspaceFactsFrame>
    * stale membership.
    */
   isCurrent(): boolean
-  /** The generation identity this handle has ADOPTED (or failed on). The owner
-   *  uses it to distinguish a terminal failure on the generation the handle
-   *  actually reached from a failure after a replacement already arrived: only
-   *  a NEW live generation may open one new logical handle. */
-  provenGeneration?(): unknown
+  /** The official Connection generation of the handle's LAST physical attempt
+   *  (the real `$stream` open). The owner uses it to distinguish a terminal
+   *  failure on the generation actually attempted from a failure after a
+   *  replacement already exists: only a defined live identity DIFFERENT from
+   *  this one may open one new logical handle. Undefined when no real physical
+   *  attempt could start (e.g. the opening was disconnected). */
+  attemptedGeneration?(): unknown
   /** Release this open generation exactly once. Async SDK quiescence is
    *  initiated and observed inside the handle (never a bare floating promise). */
   dispose(): void

@@ -303,7 +303,17 @@ function harness(options: {
     sessions,
     remote: {
       session,
-      workspace: options.workspace ?? { create: async () => ({ ok: false, error: {} }), follow: () => { throw new Error('no workspace stream in this case') } },
+      workspace: options.workspace ?? (options.workspaceStream === undefined
+        ? { create: async () => ({ ok: false, error: {} }), follow: () => { throw new Error('no workspace stream in this case') } }
+        : {
+            create: async () => ({ ok: false, error: {} }),
+            // The scripted official stream drives the logical items itself; the
+            // physical follow opened through `open` only needs a real handle.
+            follow: () => ({
+              [Symbol.asyncIterator]: async function* (): AsyncGenerator<never> { await new Promise(() => {}) },
+              dispose: () => {},
+            }),
+          }),
     },
     connection: { generation: generationSource },
     events: options.events ?? silentSessionStatusEvents(),
@@ -867,9 +877,17 @@ function scriptedWorkspaceStream(
       lastOptions = options
       let finish!: () => void
       const live = new Promise<void>(resolve => { finish = resolve })
+      // The official supervisor opens ONE physical follow per physical
+      // generation through the same `open` callback the adapter owns.
+      const physical: unknown[] = []
       const iterator = (async function* (): AsyncGenerator<RemoteStreamItemLike<RemoteWorkspaceFollowFrameLike>> {
         let acceptedGeneration: number | undefined
+        let openedGeneration: number | undefined
         for (const item of script(options)) {
+          if (item.generation !== openedGeneration) {
+            openedGeneration = item.generation
+            physical.push(options.open(new AbortController().signal))
+          }
           onItem?.(item.generation)
           const emitCarrierFailure = options.carrierFailed !== undefined && emitCarrierFailures
           if (item.generation !== acceptedGeneration && emitCarrierFailure && accepted.length > 0 && item.generation > 1) {
@@ -899,6 +917,8 @@ function scriptedWorkspaceStream(
         [Symbol.asyncIterator]: () => iterator,
         dispose: async () => {
           disposeCount += 1
+          for (const handle of physical) (handle as { dispose?(): void }).dispose?.()
+          physical.length = 0
           finish()
         },
         restart: () => {},
@@ -932,6 +952,12 @@ test('UA-12 a recovering follow invalidates membership on a carrier failure and 
     assert.equal(next.done, false)
     frames.push(next.value)
   }
+  // The REAL adapter records the official Connection that owned the physical
+  // open (never a consumer-supplied value): the attempt identity is the live
+  // generation captured in the official `open` callback.
+  const attempted = (handle as { attemptedGeneration?(): unknown }).attemptedGeneration?.()
+  assert.deepEqual(attempted, { id: 'gen-1' },
+    'the recovering handle recorded the official physical-attempt generation')
   handle.dispose()
   await iterator.next()
   assert.deepEqual(frames, [
@@ -1134,6 +1160,12 @@ test('UA-12 a recovering follow adopts a Connection replacement and keeps the ne
     assert.equal(next.done, false)
     frames.push(next.value)
   }
+  // The REAL adapter records the official Connection that owned the physical
+  // open (never a consumer-supplied value): the attempt identity is the live
+  // generation captured in the official `open` callback.
+  const attempted = (handle as { attemptedGeneration?(): unknown }).attemptedGeneration?.()
+  assert.deepEqual(attempted, { id: 'gen-1' },
+    'the recovering handle recorded the official physical-attempt generation')
   handle.dispose()
   await iterator.next()
   assert.deepEqual(frames, [
@@ -1780,5 +1812,85 @@ test('R22 a COMBINED running+witness publication commits both inputs before disp
     h.notifyList()
     await waitFor(() => h.stateCalls.filter(id => id === 'x').length > beforeTransition,
       'a later unproven positive with the same witness is still a genuine transition')
+  })
+})
+
+test('R23 an official removal not yet consumed by the caller roster never dispatches or commits that row', async () => {
+  const listed = [row('x'), row('y')]
+  const hints = { x: { values: { userQuestions: { active: [{ callId: 'q-x', state: 'continued', questions: [{ id: 'q', question: 'Continue?' }] }], settled: [] } }, state: 'idle' } }
+  const h = harness({
+    listed,
+    listedRunning: { x: true, y: false },
+    states: { x: { result: { running: false, pendingInput: [] } }, y: { result: { running: false, pendingInput: [] } } },
+    projections: { x: { result: emptyQuestions }, y: { result: emptyQuestions } },
+    projectionsBySession: hints as never,
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    await waitFor(() => h.stateCalls.includes('x'), 'x receives its hinted pair')
+    const beforeRemoval = h.stateCalls.filter(id => id === 'x').length
+    // The official store removes x from `ids`; the caller roster still holds it
+    // until the Browser consumes the removal notification.
+    listed.splice(0, listed.length, row('y'))
+    h.notifyList()
+    await flushTurns()
+    // Unrelated churn on the surviving sibling must not dispatch the removed id.
+    listed[0] = row('y', { updatedAt: 5, title: 'Renamed elsewhere' })
+    h.notifyList()
+    await flushTurns()
+    assert.equal(h.stateCalls.filter(id => id === 'x').length, beforeRemoval,
+      'an id outside the current official corpus never dispatches a read')
+    // The caller consumes the removal, then re-adds x as a NEW incarnation.
+    observation.setRoster(listed, 2, undefined)
+    listed.push(row('x'))
+    h.notifyList()
+    observation.setRoster(listed, 3, undefined)
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length > beforeRemoval,
+      'the re-added incarnation receives its necessary read')
+  })
+})
+
+test('R24 a falling-only running transition fences the held read and schedules the latest work once', async () => {
+  const listed = [row('x')]
+  const hints = { x: { values: { userQuestions: { active: [{ callId: 'q-x', state: 'continued', questions: [{ id: 'q', question: 'Continue?' }] }], settled: [] } }, state: 'idle' } }
+  const listedRunning: Record<string, boolean> = { x: false }
+  const gates: Array<() => void> = []
+  const h = harness({
+    listed,
+    listedRunning,
+    states: { x: { result: { running: false, pendingInput: [] } } },
+    projections: { x: { result: emptyQuestions } },
+    projectionsBySession: hints as never,
+    stateGate: () => new Promise<void>((resolve) => { gates.push(resolve) }),
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    await waitFor(() => h.stateCalls.includes('x'), 'the hinted pair is in flight')
+    const held = h.stateCalls.filter(id => id === 'x').length
+    // A replacement generation arrives with the latest-known positive: the
+    // recovery intent coalesces behind the held read (never a second pair beside
+    // it).
+    listedRunning.x = true
+    h.setGeneration('gen-2')
+    await flushTurns()
+    assert.equal(h.stateCalls.filter(id => id === 'x').length, held,
+      'the recovery intent coalesces behind the held read')
+    // The official bit FALLS with an unchanged hint while that read is held.
+    listedRunning.x = false
+    h.notifyList()
+    await flushTurns()
+    const heldCount = h.stateCalls.filter(id => id === 'x').length
+    // Release the held read: its completion is fenced (epoch), and the latest
+    // authorized work is dispatched exactly once.
+    gates.splice(0).forEach(release => { release() })
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length > heldCount,
+      'the latest work is dispatched once after the falling transition')
+    const afterSchedule = h.stateCalls.filter(id => id === 'x').length
+    h.notifyList()
+    await flushTurns()
+    assert.equal(h.stateCalls.filter(id => id === 'x').length, afterSchedule,
+      'an unchanged follow-up notification adds no extra pair')
+    gates.splice(0).forEach(release => { release() })
+    await flushTurns()
   })
 })

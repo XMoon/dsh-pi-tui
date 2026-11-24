@@ -86,8 +86,9 @@ async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_
  *  case can prove WHEN a frame really reaches (or cannot reach) the UI. */
 class ControlledFactsHandle implements WorkspaceFactsHandle {
   disposed = 0
-  /** The generation whose baseline this controlled handle last proved. */
-  proven: object | undefined
+  /** The official Connection generation of this controlled handle's last
+   *  physical attempt (the real adapter captures it in the official open). */
+  attempted: object | undefined
   private readonly queue: WorkspaceFactsFrame[] = []
   private resolveNext: ((result: IteratorResult<WorkspaceFactsFrame>) => void) | undefined
   private rejectNext: ((error: unknown) => void) | undefined
@@ -136,8 +137,8 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
     return !this.done && this.signal?.aborted !== true
   }
 
-  provenGeneration(): unknown {
-    return this.proven
+  attemptedGeneration(): unknown {
+    return this.attempted
   }
 
   dispose(): void {
@@ -291,6 +292,8 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
       }
       state.followCalls += 1
       const handle = new ControlledFactsHandle(signal)
+      // The physical attempt belongs to the Connection that owns this open.
+      handle.attempted = currentGeneration
       handles.push(handle)
       return handle
     },
@@ -303,6 +306,9 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
     readActivityCalls: state.readActivityCalls,
     setFacts: (facts) => { state.facts = facts },
     notifyGeneration: () => {
+      // A notified replacement is a NEW Connection identity: an old attempt
+      // cannot be retried against it.
+      currentGeneration = {}
       generationLive = true
       for (const listener of [...generationListeners]) listener()
     },
@@ -1165,17 +1171,19 @@ test('a terminal failure on the generation this handle already proved never reop
   await h.vt.waitForRender()
   assert.equal(h.facts.handles.length, 1, 'one open = one logical follow')
   // The handle is opened on A and proves A's baseline.
-  h.facts.handles[0]!.proven = h.facts.generation()
+  h.facts.handles[0]!.attempted = h.facts.generation()
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-a', path: '/ws', title: 'a-project', sessionIds: [CURRENT] },
   ))
   await waitUntil(() => h.view().includes('a-project'), 'the first baseline paints')
   // A real replacement B arrives INSIDE this same handle, which then proves B.
   const second = h.facts.rollGeneration()
+  // The official supervisor's NEW physical attempt on B: the attempt identity
+  // is captured by the open, never by the test's baseline push.
+  h.facts.handles[0]!.attempted = second
   h.facts.handles[0]!.push(baseline(
     { workspaceId: 'ws-b', path: '/ws', title: 'b-project', sessionIds: [CURRENT] },
   ))
-  h.facts.handles[0]!.proven = second
   await waitUntil(() => h.view().includes('b-project'), 'the replacement baseline is proved on the same handle')
   // The handle now fails on B. Retrying B is NOT legal: the generation this
   // handle already proved cannot be its own recovery trigger.

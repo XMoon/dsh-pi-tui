@@ -700,10 +700,6 @@ class RemoteActivityObservation implements ActivityObservation {
    *  It is dispatched once when the owning read settles, so no newer epoch is
    *  lost behind an old blocked response. */
   private readonly pendingWork = new Map<string, 'priority' | 'discovery'>()
-  /** The caller-accepted authorized membership (`ids` minus subagents). A row
-   *  still present in `rows` after an official removal is NOT dispatchable until
-   *  the caller accepts the new roster. */
-  private authorizedIds = new Set<string>()
   private activePriority = 0
   private activeDiscovery = 0
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -766,7 +762,6 @@ class RemoteActivityObservation implements ActivityObservation {
       admitted.push(id)
     }
     this.rosterOrder = authorized
-    this.authorizedIds = new Set(authorized)
     this.receipts.prune(authorized)
     this.receipts.pruneStale(id => this.witnessOf(id), id => this.officialRunningOf(id))
     // The official running projection is published in the SAME roster frame.
@@ -884,10 +879,12 @@ class RemoteActivityObservation implements ActivityObservation {
     if (!this.isInitialGeneration()) return
     const listed = this.sessions.list.getSnapshot()
     if (listed.phase !== 'ready') return
+    const listedIds = new Set(listed.ids.map(id => String(id)))
     for (const [id, row] of this.rows) {
-      // `byId` is not the roster: an id the caller has not accepted (e.g. an
-      // official removal not yet consumed) can never dispatch a read.
-      if (!this.authorizedIds.has(id)) continue
+      // `byId` is not membership: THIS publication's `ids` is. A removed id
+      // whose caller roster has not been consumed yet can never refresh a hint
+      // or dispatch a read.
+      if (!listedIds.has(id)) continue
       const entry = listed.byId[id]
       if (entry === undefined) continue
       row.running = entry.running
@@ -920,12 +917,14 @@ class RemoteActivityObservation implements ActivityObservation {
     const listed = this.sessions.list.getSnapshot()
     if (listed.phase !== 'ready') return
     const baseline = this.isInitialGeneration()
+    const listedIds = new Set(listed.ids.map(id => String(id)))
     let changed = false
     let scheduled = false
     for (const [id, row] of this.rows) {
-      // `byId` is not the roster: an id the caller has not accepted (e.g. an
-      // official removal not yet consumed) can never dispatch a read.
-      if (!this.authorizedIds.has(id)) continue
+      // `byId` is not membership: THIS publication's `ids` is. A removed id
+      // whose caller roster has not been consumed yet can never refresh a hint
+      // or dispatch a read.
+      if (!listedIds.has(id)) continue
       const entry = listed.byId[id]
       const witness = this.witnessOf(id)
       const listRunning = entry?.running === true
@@ -955,16 +954,16 @@ class RemoteActivityObservation implements ActivityObservation {
       // while the same positive stays unproven must not re-dirty a queued or
       // in-flight recovery read. The current exact state/status proves the fact,
       // never the replayed row.
-      if (runningTransition) {
-        // A running-only transition is a RELEVANT source change even though the
-        // replayed bit is never proof: retire this row's precise evidence/epoch
-        // (an in-flight old-bit read must never commit or stamp a receipt), then
-        // schedule the targeted recovery read only for a rising unproven bit.
+      if (runningTransition && !row.runningProven) {
+        // An unproven row's running-only transition is a RELEVANT source change
+        // in BOTH directions: retire its precise evidence/epoch (an in-flight
+        // old-bit read must never commit or stamp a receipt), then re-evaluate
+        // the latest intent once — a candidate pair, otherwise ordinary
+        // unresolved discovery. A proven row keeps its current status/state
+        // authority; the replayed list bit never revokes it.
         changed = this.invalidateRow(row) || changed
-        if (listRunning && !row.runningProven && this.rowIsCandidate(row)) {
-          this.scheduleAfterRelevantChange(row)
-          scheduled = true
-        }
+        this.scheduleAfterRelevantChange(row)
+        scheduled = true
       }
     }
     if (changed) {
@@ -1359,7 +1358,7 @@ class RemoteActivityObservation implements ActivityObservation {
 
   private startPriority(sessionId: string): void {
     const row = this.rows.get(sessionId)
-    if (row === undefined) return
+    if (row === undefined || !this.dispatchable(row)) return
     const controller = new AbortController()
     const token = Symbol(`priority:${sessionId}`)
     // Capture the row witnesses AT DISPATCH: a receipt belongs to the source
@@ -1402,7 +1401,7 @@ class RemoteActivityObservation implements ActivityObservation {
 
   private startDiscovery(sessionId: string): void {
     const row = this.rows.get(sessionId)
-    if (row === undefined) return
+    if (row === undefined || !this.dispatchable(row)) return
     const controller = new AbortController()
     const token = Symbol(`discovery:${sessionId}`)
     const epoch = row.epoch
@@ -1515,8 +1514,24 @@ class RemoteActivityObservation implements ActivityObservation {
   private committable(row: ActivityRow, epoch: number, generation: RemoteConnectionGeneration): boolean {
     if (this.disposed || this.capturedGeneration === undefined) return false
     if (this.rows.get(row.sessionId) !== row || row.epoch !== epoch) return false
+    // `ids` membership is authorization: an official removal not yet consumed by
+    // the caller roster still forbids committing that row's read.
+    if (!this.officialIdsOf(this.sessions.list.getSnapshot()).has(row.sessionId)) return false
     const current = this.generation.getSnapshot()
     return current !== undefined && Object.is(current, generation) && Object.is(current, this.capturedGeneration)
+  }
+
+  /** The CURRENT official main corpus ids (never `byId`, which is a catalog). */
+  private officialIdsOf(snapshot: { readonly ids: readonly unknown[] }): ReadonlySet<string> {
+    return new Set(snapshot.ids.map(id => String(id)))
+  }
+
+  /** The accepted row incarnation AND current official membership: the ONE
+   *  dispatch gate for a read. */
+  private dispatchable(row: ActivityRow): boolean {
+    return !this.disposed
+      && this.rows.get(row.sessionId) === row
+      && this.officialIdsOf(this.sessions.list.getSnapshot()).has(row.sessionId)
   }
 
   private bumpRow(): void {
@@ -1657,9 +1672,11 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   /** The adopted Connection generation; undefined while the Connection is
    *  lost (the membership proof is revoked with it). */
   private capturedGeneration: RemoteConnectionGeneration | undefined
-  /** The generation of the LAST ACCEPTED BASELINE. A terminal failure is legal
-   *  to reopen only when this does not name the live generation. */
-  private provenBaselineGeneration: RemoteConnectionGeneration | undefined
+  /** The official Connection generation of the LAST PHYSICAL attempt (the real
+   *  official supervisor open). Kept on terminal completion even after an
+   *  invalidation/disposal, so a failure before baseline still belongs to its
+   *  attempt generation. */
+  private attemptedPhysicalGeneration: RemoteConnectionGeneration | undefined
   /** The `single-generation` raw official follow (opened exactly once). */
   private raw: (AsyncIterable<RemoteWorkspaceFollowFrameLike> & { dispose(): void }) | undefined
   private logical: RemoteLogicalStreamLike<RemoteWorkspaceFollowFrameLike> | undefined
@@ -1705,10 +1722,9 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     return Object.is(this.generation.getSnapshot(), this.capturedGeneration)
   }
 
-  /** The generation whose baseline this handle last PROVED (never merely
-   *  adopted): the owner's legal-rebind discriminator. */
-  generationIdentity(): RemoteConnectionGeneration | undefined {
-    return this.provenBaselineGeneration
+  /** The official Connection generation of the last real physical attempt. */
+  attemptedGeneration(): RemoteConnectionGeneration | undefined {
+    return this.attemptedPhysicalGeneration
   }
 
   dispose(): void {
@@ -1741,9 +1757,8 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     if (this.disposed) return
     if (this.invalidations.length > 0 && this.invalidations[this.invalidations.length - 1] === reason) return
     this.invalidations.push(reason)
-    // The membership is no longer proven: a terminal failure after this point
-    // must be able to reopen on the live generation.
-    this.provenBaselineGeneration = undefined
+    // The attempt identity is NOT cleared here: a physical attempt that fails
+    // before its baseline still belongs to the Connection it was opened on.
     this.resumeDeadline ??= Date.now() + WORKSPACE_RESUME_TIMEOUT_MS
     const wake = this.wake
     this.wake = undefined
@@ -1789,7 +1804,6 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           }
           baselined = true
         }
-        if (mapped?.type === 'baseline') this.provenBaselineGeneration = this.capturedGeneration
         if (mapped !== undefined) yield mapped
       }
     } finally {
@@ -1829,7 +1843,12 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   private async *generationStream(official: RemoteWorkspaceStreamSource): AsyncGenerator<WorkspaceFactsFrame> {
     const logical = official.stream({
       name: 'Session Workspace membership',
-      open: signal => this.workspace.follow(signal),
+      open: signal => {
+        // The attempt identity is the official Connection that owns THIS
+        // physical open, captured immediately before the method-bound follow.
+        this.attemptedPhysicalGeneration = this.generation.getSnapshot()
+        return this.workspace.follow(signal)
+      },
       // Upstream's exact classification: an accepted baseline that then ends is
       // a carrier loss (the Gateway retries); an end BEFORE the opening
       // baseline is a real protocol/availability failure.
@@ -2081,11 +2100,7 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
   }
 
   followWorkspaces(signal?: AbortSignal, mode: WorkspaceFollowMode = 'single-generation'): WorkspaceFactsHandle {
-    const handle = new RemoteWorkspaceFactsHandle(this.source, signal, mode)
-    // The port's optional identity member: the owner distinguishes a terminal
-    // failure on the handle's ADOPTED generation from one whose generation is
-    // already gone.
-    return Object.assign(handle, { provenGeneration: () => handle.generationIdentity() })
+    return new RemoteWorkspaceFactsHandle(this.source, signal, mode)
   }
 
   observeConnectionGeneration(listener: () => void): () => void {
