@@ -2797,15 +2797,21 @@ test('a held tenant gesture is refused across BOTH resize directions and cross o
   await settle(h, 6)
   assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant is mounted at 80x24')
   assert.match(h.view(), /Details…/u)
-  // A) GROW: press INSIDE the tenant, resize, release on the SAME cells. The
-  // admitted paint/box no longer exists, so nothing may activate.
+  // A) GROW: press INSIDE the tenant at 80x24, grow, and release on the SAME
+  // semantic target's ACTUAL new cells. The child origin moves (x=42 -> x=104),
+  // so only a real stale-gesture fence can refuse this — a hit miss would be no
+  // evidence at all.
   const detailsRow = rowOf(h, 'Details…')
   const detailsCol = cellIndexOf(h, detailsRow, 'Details…')
   press(h, detailsRow, detailsCol)
   await h.vt.waitForRender()
   h.vt.resize(200, 50)
   await h.vt.waitForRender()
-  release(h, detailsRow, detailsCol)
+  const grownRow = rowOf(h, 'Details…')
+  const grownCol = cellIndexOf(h, grownRow, 'Details…')
+  assert.ok(grownRow !== detailsRow || grownCol !== detailsCol,
+    `the resize really moved the admitted target cells: ${detailsRow},${detailsCol} -> ${grownRow},${grownCol}`)
+  release(h, grownRow, grownCol)
   await settle(h, 8)
   assert.doesNotMatch(h.view(), /Effective/u, 'a straddling grow gesture never opens the disclosure')
   assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'and never changes the parent selection')
@@ -2857,14 +2863,41 @@ test('a mounted tenant with a bar-only grant admits no hidden action', async () 
   await key(h, 'r')
   await settle(h, 4)
   assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'a hidden official refresh is never requested')
+  // The WIDE zero-body grant (200x2) paints NO parent pane either: Tab and
+  // Shift+Tab may never focus a region the frame does not paint.
+  h.vt.resize(200, 2)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u)
+  await key(h, '\t')
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Tab keeps the SAME tenant at a zero-grant frame')
+  assert.doesNotMatch(h.view(), /Settings · Categories/u, 'no invisible destination is focused')
+  await key(h, '\x1b[Z') // Shift+Tab
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Shift+Tab keeps the SAME tenant too')
+  assert.doesNotMatch(h.view(), /Settings · Categories|Settings · Agent · Rows/u)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'no Tab direction refreshes')
+  assert.deepEqual(h.agentLoopWrites(), [], 'and none writes')
   // The page's own Back is the ONE admitted action at this grant.
   await key(h, '\x1b')
   await settle(h, 6)
   assert.match(h.view(), /Settings · Agent · Rows/u)
-  // A restored grant admits a fresh explicit Change again.
+  // A restored grant paints the destination AND its fresh Tab really takes it.
   h.vt.resize(160, 44)
   await h.vt.waitForRender()
-  await key(h, '\r')
+  await key(h, '\r') // back into the tenant (the raw Input opens)
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u)
+  await key(h, '\x1b') // Cancel -> the CLEAN tenant
+  await settle(h, 4)
+  await key(h, '\t')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Categories/u, 'a VISIBLE Tab destination really takes focus')
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'and the rail is the focused pane')
+  // And from the rail a fresh explicit Change still writes exactly once.
+  await key(h, '\r') // rail -> Rows
+  await settle(h, 4)
+  await key(h, '\r') // the row -> the tenant Input
   await settle(h, 6)
   await key(h, '\x15')
   await key(h, '7')
@@ -2933,24 +2966,20 @@ test('a release delivered before the resize repaint never activates the tenant',
   const confirmCol = cellIndexOf(h, confirmRow, 'Confirm [Enter]')
   press(h, confirmRow, confirmCol)
   await h.vt.waitForRender()
-  // No wait: the release lands inside the resize window, when the painted
-  // geometry is already stale.
-  h.vt.resize(80, 24)
+  // A WIDTH-ONLY resize keeps the row count, so the release below really lands
+  // on the physical last row: the same cell exists, only the painted geometry
+  // is stale. No wait — this is the pre-repaint window.
+  h.vt.resize(80, 50)
   release(h, confirmRow, confirmCol)
   await settle(h, 10)
-  assert.deepEqual(h.agentLoopWrites(), [], 'a pre-repaint release never writes')
+  assert.deepEqual(h.agentLoopWrites(), [], 'a pre-repaint release on a reachable cell never writes')
   assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant survives the resize')
-  // A rows-only shrink keeps the columns but changes the body grant: the same
-  // pre-repaint release is refused by the geometry fence too.
-  const bodyRow = rowOf(h, 'Value')
-  const bodyCol = cellIndexOf(h, bodyRow, 'Value')
-  press(h, bodyRow, bodyCol)
-  await h.vt.waitForRender()
-  h.vt.resize(80, 12)
-  release(h, bodyRow, bodyCol)
-  await settle(h, 8)
-  assert.deepEqual(h.agentLoopWrites(), [], 'a pre-repaint release on a body cell never writes')
-  // A fresh gesture after the repaint works.
+  // The repaint really happened: every painted line now fits the new width.
+  assert.ok(h.rowsPlain().every(line => visibleWidth(line) <= 80), 'the frame repainted at the new width')
+  // A fresh gesture after the repaint works. The fork withholds a second press
+  // on the SAME cell inside its multi-click window, so this manual held pair
+  // must let that window expire before the fresh click on the same Confirm.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
   await clickPainted(h, 'Confirm [Enter]', true)
   await settle(h, 12)
   assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 5 }],
