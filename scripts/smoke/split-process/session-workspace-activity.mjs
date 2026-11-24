@@ -51,27 +51,44 @@ export async function runSessionWorkspaceActivity(context) {
   assert(!(await viewportText(clientA)).includes('[1] Proceed'),
     "U-D A painted X's question modal while its committed Session was Y")
 
-  // ── The grouped list proves X as a Needs row, from the real sources ────────
+  // ── The grouped list proves X as a Needs row under the official folder ────
   await submitPrompt(clientA, '/sessions', 'U-D open the Session Workspace')
   // The PR2 Session Workspace header is `Sessions · N`; the retired
   // `Workspace:` scope header is not part of the surface any more.
   await clientA.waitForScreen('Sessions ·', 'U-D Session Workspace frame', 60_000)
-  const deadline = Date.now() + 60_000
-  let frame = await viewportText(clientA)
-  while (!frame.includes('Needs attention') && Date.now() < deadline) {
+  const folderLine = lines => lines.find(line => /▾ .+ · 2 .*Current/u.test(line))
+  const xLine = lines => lines.find(line => line.includes(shortSessionId(sessionX)))
+  const yLine = lines => lines.find(line => line.includes(shortSessionId(sessionY)))
+  const revoked = lines => lines.some(line => line.includes('Workspace membership unavailable')
+    || line.includes('Skills invalidation stream'))
+  const proofDeadline = Date.now() + 60_000
+  let frameLines = await clientA.viewport()
+  while (!(folderLine(frameLines) !== undefined
+    && xLine(frameLines)?.includes('Needs attention')
+    && yLine(frameLines) !== undefined) && Date.now() < proofDeadline) {
     await sleep(100)
-    frame = await viewportText(clientA)
+    frameLines = await clientA.viewport()
   }
-  assert(frame.includes('Needs attention'), `U-D the workspace never proved a Needs row:\n${frame}`)
-  assert(frame.includes(shortSessionId(sessionX)), `U-D the Needs row does not name Session X:\n${frame}`)
-  assert(!frame.includes('[1] Proceed'), `U-D the workspace painted the answerable modal:\n${frame}`)
+  assert(folderLine(frameLines) !== undefined,
+    `U-D the workspace never painted the official Workspace folder with both members:\n${frameLines.join('\n')}`)
+  assert(xLine(frameLines)?.includes('Needs attention'),
+    `U-D the exact X row does not carry the Needs fact:\n${frameLines.join('\n')}`)
+  assert(yLine(frameLines) !== undefined,
+    `U-D the official folder does not contain committed Session Y:\n${frameLines.join('\n')}`)
+  assert(!frameLines.join('\n').includes('[1] Proceed'), 'U-D the workspace painted the answerable modal')
   // The tree's initial cursor is the current Session; the Needs row is its
-  // sibling, so select it through the REAL arrow keys before the read-only
-  // Peek (the PR2 tree is Workspace-grouped, not a flat Needs section).
+  // sibling, so select it through the REAL arrow keys BEFORE the drop and
+  // prove the exact painted cursor rather than repairing it after recovery.
+  await selectPaintedSessionRow(clientA, sessionX, 'U-D select the Needs row before the drop')
+  const selectedLines = await clientA.viewport()
+  assert(selectedLines.find(line => line.startsWith('> '))?.includes(shortSessionId(sessionX)),
+    `U-D the real painted cursor is not on X before the drop:\n${selectedLines.join('\n')}`)
+  assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+    'U-D Client A left committed Session Y before the carrier drop')
+  assert(folderLine(selectedLines) !== undefined, 'U-D the folder proof vanished before the carrier drop')
+  trace('ud-workspace-needs', { sessionX, sessionY, folder: folderLine(selectedLines)?.trim(), frame: selectedLines })
+
   // ── Real carrier drop while the Workspace stays OPEN ──────────────────────
-  // A generation rollover must re-prove the membership in the SAME panel: the
-  // list and the Needs row are restored on the new Connection without closing
-  // or reopening the Browser, and the surface never falls back to the chat.
   const generationBeforeDrop = lastSurfaceStatus(clientA)?.generationId
   assert(typeof generationBeforeDrop === 'number', 'U-D Client A had no connected generation before the carrier drop')
   clientA.signalBusiness('SIGUSR1')
@@ -81,21 +98,57 @@ export async function runSessionWorkspaceActivity(context) {
       && record.generationId !== generationBeforeDrop,
     'U-D Client A reconnected on a new generation while the Workspace stayed open',
     120_000)
-  const recoveryDeadline = Date.now() + 120_000
-  let recoveryFrame = await viewportText(clientA)
-  while (!(recoveryFrame.includes('Sessions ·') && recoveryFrame.includes('Needs attention')) && Date.now() < recoveryDeadline) {
-    await sleep(100)
-    recoveryFrame = await viewportText(clientA)
+
+  // The real revocation interval: the panel keeps its header/rows but the
+  // OFFICIAL FOLDER PROOF is withdrawn (flat fallback). A folder line must be
+  // absent here — the old predicate (header + Needs substring) also held in
+  // this flat state, which is exactly the false positive being fixed.
+  const fallbackDeadline = Date.now() + 60_000
+  let fallbackLines = await clientA.viewport()
+  while (!(revoked(fallbackLines)
+    && folderLine(fallbackLines) === undefined
+    && fallbackLines.some(line => line.includes('Sessions ·'))) && Date.now() < fallbackDeadline) {
+    await sleep(50)
+    fallbackLines = await clientA.viewport()
   }
-  assert(recoveryFrame.includes('Sessions ·'),
-    `U-D the Workspace did not survive the carrier drop (no list header):\n${recoveryFrame}`)
-  assert(recoveryFrame.includes('Needs attention'),
-    `U-D the fresh membership did not re-prove the Needs row in the still-open Workspace:\n${recoveryFrame}`)
-  assert(recoveryFrame.includes(shortSessionId(sessionX)),
-    `U-D the fresh membership lost the Needs row's Session identity:\n${recoveryFrame}`)
-  trace('ud-workspace-carrier-recovery', { sessionX, sessionY, generationBeforeDrop, frame: recoveryFrame.split('\n') })
-  await selectPaintedSessionRow(clientA, sessionX, 'U-D select the Needs row')
-  trace('ud-workspace-needs', { sessionX, sessionY, frame: frame.split('\n') })
+  assert(revoked(fallbackLines),
+    `U-D no real membership revocation was observed after the carrier drop:\n${fallbackLines.join('\n')}`)
+  assert(folderLine(fallbackLines) === undefined,
+    `U-D the flat fallback still painted an official folder proof:\n${fallbackLines.join('\n')}`)
+  trace('ud-workspace-flat-fallback', { sessionX, sessionY, frame: fallbackLines })
+
+  // The fresh official membership must be a POSITIVE folder paint with the same
+  // X and Y, no revocation notice, X still selected and Y still committed.
+  const recoveredDeadline = Date.now() + 120_000
+  let recoveredLines = await clientA.viewport()
+  while (!(folderLine(recoveredLines) !== undefined
+    && xLine(recoveredLines)?.includes('Needs attention')
+    && yLine(recoveredLines) !== undefined
+    && !revoked(recoveredLines)
+    && recoveredLines.find(line => line.startsWith('> '))?.includes(shortSessionId(sessionX)))
+    && Date.now() < recoveredDeadline) {
+    await sleep(100)
+    recoveredLines = await clientA.viewport()
+  }
+  assert(folderLine(recoveredLines) !== undefined,
+    `U-D the panel never re-proved the official folder after the drop:\n${recoveredLines.join('\n')}`)
+  assert(xLine(recoveredLines)?.includes('Needs attention'),
+    `U-D the recovered folder lost X's Needs fact:\n${recoveredLines.join('\n')}`)
+  assert(yLine(recoveredLines) !== undefined,
+    `U-D the recovered folder lost committed Session Y:\n${recoveredLines.join('\n')}`)
+  assert(!revoked(recoveredLines),
+    `U-D the recovery frame still carries a revocation notice:\n${recoveredLines.join('\n')}`)
+  assert(recoveredLines.find(line => line.startsWith('> '))?.includes(shortSessionId(sessionX)),
+    `U-D the carrier recovery lost the painted X cursor:\n${recoveredLines.join('\n')}`)
+  assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+    'U-D Client A left committed Session Y during the carrier recovery')
+  trace('ud-workspace-carrier-recovery', {
+    sessionX,
+    sessionY,
+    generationBeforeDrop,
+    folder: folderLine(recoveredLines)?.trim(),
+    frame: recoveredLines,
+  })
 
   // ── Space Peek: read-only, no answer affordance, no Host write ────────────
   const eventsBeforePeek = (hostSessionEvents(dshHome, sessionX) ?? []).length

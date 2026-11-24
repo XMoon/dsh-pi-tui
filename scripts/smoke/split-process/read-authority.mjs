@@ -561,6 +561,100 @@ export async function runReadAuthority(context) {
       })
     }
 
+    // ── UA-05c: a persisted `continued` Question survives a REAL Host restart.
+    //    Same isolated DSH_HOME/profile, clean Host stop, new Host boot and a
+    //    new Client: the COLD session must be listed and its unanswered timed
+    //    call must be read exactly (attention + callId) without retain or
+    //    migration, and the incremental observation must publish the same fact.
+    {
+      const coldHold = join(workDir, 'ua-cold-question.release')
+      const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX } =
+        await startDualSurfaceScene('question', 'ua-cold', {
+          C1_TIMED_QUESTION: '1',
+          SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.timedPatchPath,
+          C1_HOLD_AFTER_TIMED: coldHold,
+        })
+      const triggerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+      await submitPrompt(clientB, 'm5c-question-trigger', 'UA cold question trigger')
+      const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+        'UA cold question tool/call', 120_000)
+      const callId = call.data.callId
+      assert(typeof callId === 'string' && callId !== '', 'UA cold question carries no callId')
+      await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'after-timed-held' && event.sessionId === sessionX,
+        'UA cold question held after continued', 120_000)
+      // The durable continued call is NEVER answered here.
+      await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+        'UA cold timed question result', 120_000)
+      writeFileSync(coldHold, 'release\n', { mode: 0o600 })
+      await sleep(1_000)
+      for (const [side, client] of [['B', clientB], ['A', clientA]]) {
+        client.signalBusiness('SIGTERM')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 0 && exit.signal === null,
+          `UA cold Client ${side} exit was ${JSON.stringify(exit)}`)
+        await client.dispose()
+      }
+      await stopC1Host(host)
+      assert(host.exited === true && host.exitResult?.code === 0 && host.exitResult?.signal === null,
+        `UA cold Host did not shut down normally: ${JSON.stringify(host.exitResult)}`)
+      // A NEW Host on the SAME isolated profile/DSH_HOME, then a NEW Client.
+      const coldHost = await tools.startC1Host('question', 'ua-cold-restart')
+      assert(coldHost.ready.pid !== hostBefore.hostPid, 'UA cold restart reused the old Host PID')
+      const cold = await tools.startC1Client('UA cold A', {
+        SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
+      })
+      try {
+        const read = await readFactsUntil(cold.client, record => {
+          const fact = (record.facts ?? []).find(entry => entry.sessionId === sessionX)
+          return fact !== undefined
+            && Array.isArray(fact.continuedQuestionCallIds)
+            && fact.continuedQuestionCallIds.includes(callId)
+        }, 'UA cold exact read of the persisted continued session', 120_000)
+        const row = rowOf(read, sessionX, 'UA cold persisted X row')
+        const fact = factOf(read, sessionX, 'UA cold persisted X fact')
+        assert(fact.attention === 'question' && fact.attentionSourceState === 'known',
+          `UA cold continued attention was ${JSON.stringify({ attention: fact.attention, source: fact.attentionSourceState })}`)
+        assert(Array.isArray(fact.pendingKinds) && !fact.pendingKinds.includes('question'),
+          `UA the cold timed-out question still reports a Gateway pending: ${JSON.stringify(fact.pendingKinds)}`)
+        assert((row.retainedBy?.tuiMainView ?? 0) === 0,
+          `UA the cold read retained the session: ${JSON.stringify(row.retainedBy)}`)
+        // No migration/activation: the session keeps its identity and the Host
+        // event log is still the SAME durable file (the call is unchanged).
+        const coldCalls = (hostSessionEvents(dshHome, sessionX) ?? [])
+          .filter(event => event.type === 'tool/call' && event.data?.callId === callId)
+        assert(coldCalls.length === 1, 'UA the cold session was migrated or re-triggered')
+        // The incremental observation over the cold rows publishes the same
+        // continued fact (real state/projections via the production adapter).
+        const activityNonce = signalProbe(cold.client, { op: 'activity', windowMs: 4_000 })
+        const activitySnap = await waitProbe(cold.client, activityNonce,
+          record => record.phase === 'activity-snapshot'
+            && (record.facts ?? []).some(entry => entry.sessionId === sessionX
+              && Array.isArray(entry.continuedQuestionCallIds)
+              && entry.continuedQuestionCallIds.includes(callId)),
+          'UA cold incremental observation fact', 60_000)
+        const activityResult = await waitProbe(cold.client, activityNonce,
+          record => record.phase === 'activity-result', 'UA cold activity result', 60_000)
+        trace('ua-05c', {
+          oldHostPid: hostBefore.hostPid,
+          newHostPid: coldHost.ready.pid,
+          sessionX,
+          continuedCallId: callId,
+          attention: fact.attention,
+          retainedBy: row.retainedBy ?? {},
+          coldActivityCounters: activityResult.counters,
+          coldSnapshotRevision: activitySnap.revision,
+        })
+      } finally {
+        cold.client.signalBusiness('SIGTERM')
+        await cold.client.waitForExit(60_000).catch(() => {})
+        await cold.client.dispose()
+        await stopC1Host(coldHost.host)
+      }
+    }
+
     // ── UA-07/09/10: the official Workspace follow baseline + a REAL Session
     //    create increment, then a real mux rollover and a fresh-generation read.
     {
