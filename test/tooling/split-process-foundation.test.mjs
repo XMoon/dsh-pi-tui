@@ -18,10 +18,12 @@ import {
   chmodSync,
   copyFileSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -29,7 +31,10 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { npmDshVersion, PACKAGE_ROOT } from '../../scripts/lib/dsh-distribution.mjs'
-import { inspectImmutableSplitCandidate } from '../../scripts/lib/split-smoke-profile.mjs'
+import {
+  assertPostReadCandidateIdentity,
+  inspectImmutableSplitCandidate,
+} from '../../scripts/lib/split-smoke-profile.mjs'
 import { readOfficialClientRecords } from '../support/split-process-client.ts'
 import { SupervisorClient } from '../support/split-supervisor-client.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -135,6 +140,19 @@ test('the immutable candidate preflight refuses every input bypass class', async
   assert.throws(() => inspectImmutableSplitCandidate(badVersion), /candidate package mismatch|INFRA_INSTALL_FAILURE/u)
   const badPin = immutableCandidate(root, 'bad-pin', manifestOf({ pin: '0.2.1-rc.4' }))
   assert.throws(() => inspectImmutableSplitCandidate(badPin), error => error?.code === 'INPUT_DSH_PIN_MISMATCH')
+})
+
+test('a candidate that disappears after its bytes are read is a changed input', t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('post-read-candidate-')
+  const candidate = immutableCandidate(root, 'post-read')
+  const before = lstatSync(candidate)
+  rmSync(candidate)
+  assert.throws(() => assertPostReadCandidateIdentity(candidate, before), error => {
+    assert.equal(error.code, 'INPUT_CANDIDATE_CHANGED')
+    assert.match(error.message, /after its bytes were read/u)
+    return true
+  })
 })
 
 test('a Worker/Supervisor candidate disagreement is refused before any install or Scene root', async t => {

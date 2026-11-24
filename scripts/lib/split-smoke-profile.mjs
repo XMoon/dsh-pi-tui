@@ -81,6 +81,53 @@ export function inspectSplitCandidate(explicitPath) {
   return { tarball, manifest, candidateSha256, targetDshVersion }
 }
 
+const candidateStatIdentity = stats => ({
+  dev: stats.dev,
+  ino: stats.ino,
+  size: stats.size,
+  mode: stats.mode,
+  nlink: stats.nlink,
+})
+
+/**
+ * The independent post-read identity proof for one explicit candidate path:
+ * the path still canonicalizes to itself, is still the same regular single-link
+ * owned file, and its full stat identity equals the pre-read snapshot. A
+ * disappearance or replacement is the stable changed-input refusal, never a raw
+ * filesystem error.
+ */
+export function assertPostReadCandidateIdentity(real, before) {
+  let afterReal
+  try {
+    afterReal = realpathSync(real)
+  } catch (error) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED',
+      `the candidate path cannot be canonicalized after its bytes were read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (afterReal !== real) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate path was replaced while its bytes were being read')
+  }
+  let after
+  try {
+    after = lstatSync(real)
+  } catch (error) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED',
+      `the candidate path disappeared or became unreadable after its bytes were read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1
+    || (typeof process.getuid === 'function' && after.uid !== before.uid)) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate file shape changed while its bytes were being read')
+  }
+  const statBefore = candidateStatIdentity(before)
+  const statAfter = candidateStatIdentity(after)
+  if (statAfter.dev !== statBefore.dev || statAfter.ino !== statBefore.ino
+    || statAfter.size !== statBefore.size || statAfter.mode !== statBefore.mode
+    || statAfter.nlink !== statBefore.nlink) {
+    throw inputRefusal('INPUT_CANDIDATE_CHANGED', 'the candidate tarball changed while its bytes were being read')
+  }
+  return after
+}
+
 /**
  * The immutable single-package input preflight for the split-process business
  * Project.
@@ -143,8 +190,7 @@ export function inspectImmutableSplitCandidate(explicitPath) {
   if (outside !== '..' && !outside.startsWith(`..${sep}`)) {
     refuse('INPUT_CANDIDATE_INSIDE_CHECKOUT', 'the candidate tarball must live outside this checkout')
   }
-  const identityOf = stats => ({ dev: stats.dev, ino: stats.ino, size: stats.size, mode: stats.mode, nlink: stats.nlink })
-  const statBefore = identityOf(before)
+  const statBefore = candidateStatIdentity(before)
   let bytes
   try {
     bytes = readFileSync(real)
@@ -153,31 +199,30 @@ export function inspectImmutableSplitCandidate(explicitPath) {
       `the candidate tarball cannot be read (${String(error?.code ?? error?.name ?? 'unknown')})`)
   }
   const candidateSha256 = createHash('sha256').update(bytes).digest('hex')
-  // Independent post-read identity: canonical path, regular-file shape, single
-  // owner link and the stat identity captured before the read must all still
-  // describe the same immutable file.
-  let afterReal
+  assertPostReadCandidateIdentity(real, before)
+  let qualified
   try {
-    afterReal = realpathSync(real)
+    qualified = inspectSplitCandidate(real)
   } catch (error) {
-    refuse('INPUT_CANDIDATE_CHANGED',
-      `the candidate path cannot be canonicalized after its bytes were read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+    // A disappearance or replacement during the requalification read is still
+    // the same changed input; a malformed manifest on the SAME inode keeps its
+    // own classification.
+    let current
+    try {
+      current = lstatSync(real)
+    } catch {
+      current = undefined
+    }
+    if (current === undefined || current.isSymbolicLink() || !current.isFile()
+      || current.dev !== before.dev || current.ino !== before.ino
+      || current.size !== before.size || current.mode !== before.mode
+      || current.nlink !== before.nlink || current.uid !== before.uid
+      || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs) {
+      refuse('INPUT_CANDIDATE_CHANGED',
+        `the candidate changed while its requalification was running (${String(error?.code ?? error?.name ?? 'unknown')})`)
+    }
+    throw error
   }
-  if (afterReal !== real) {
-    refuse('INPUT_CANDIDATE_CHANGED', 'the candidate path was replaced while its bytes were being read')
-  }
-  const after = lstatSync(real)
-  if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1
-    || (typeof process.getuid === 'function' && after.uid !== before.uid)) {
-    refuse('INPUT_CANDIDATE_CHANGED', 'the candidate file shape changed while its bytes were being read')
-  }
-  const statAfter = identityOf(after)
-  if (statAfter.dev !== statBefore.dev || statAfter.ino !== statBefore.ino
-    || statAfter.size !== statBefore.size || statAfter.mode !== statBefore.mode
-    || statAfter.nlink !== statBefore.nlink) {
-    refuse('INPUT_CANDIDATE_CHANGED', 'the candidate tarball changed while its bytes were being read')
-  }
-  const qualified = inspectSplitCandidate(real)
   if (qualified.tarball !== real || qualified.candidateSha256 !== candidateSha256) {
     refuse('INPUT_CANDIDATE_CHANGED', 'the candidate bytes changed between the content read and the candidate preflight')
   }
