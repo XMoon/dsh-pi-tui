@@ -778,6 +778,12 @@ class RemoteActivityObservation implements ActivityObservation {
    *  replayed list can also be the pre-reconnect snapshot). */
   private onStatusEvent(sessionId: string, running: boolean): void {
     if (this.disposed) return
+    // The forwarded event carries no generation identity. Accept it only while
+    // this observation has ADOPTED the live generation: during a loss or a
+    // replacement the revocation path owns the facts, and a late event of the
+    // previous pump can never re-prove running on the new generation.
+    const live = this.generation.getSnapshot()
+    if (live === undefined || this.capturedGeneration === undefined || !Object.is(live, this.capturedGeneration)) return
     const row = this.rows.get(String(sessionId))
     if (row === undefined) return
     if (!this.applyProvenRunning(row, running, 'status')) return
@@ -1186,11 +1192,25 @@ class RemoteActivityObservation implements ActivityObservation {
     for (const id of this.rosterOrder) {
       const row = this.rows.get(id)
       if (row === undefined) continue
-      if (row.running === true || id === this.currentSessionId || this.priorityIds.has(id) || row.attention !== 'unknown' || row.continuedQuestionCallIds !== undefined) {
-        ids.push(id)
-      }
+      if (this.rowIsActive(row)) ids.push(id)
     }
     return ids
+  }
+
+  /** Whether one row still has a CURRENT active trigger.
+   *
+   *  A measured fact (`none` included) is never a trigger by itself: after the
+   *  eligibility/running/hint reason that kept a row active is gone, it leaves
+   *  the recheck set instead of being sampled every 20 s forever. A real
+   *  pending/continued observation IS an active trigger, and so is a still
+   *  positive official hint. */
+  private rowIsActive(row: ActivityRow): boolean {
+    if (row.running === true) return true
+    if (row.sessionId === this.currentSessionId) return true
+    if (this.priorityIds.has(row.sessionId)) return true
+    if (row.attention === 'question' || row.attention === 'approval' || row.attention === 'plan-review') return true
+    if ((row.continuedQuestionCallIds?.length ?? 0) > 0) return true
+    return this.hintIsCandidate(this.hintValuesOf(row.sessionId))
   }
 
   /** Arm the ONE recheck only while at least one active row exists. Ordinary
@@ -1201,8 +1221,13 @@ class RemoteActivityObservation implements ActivityObservation {
     if (active.length === 0) return
     this.timer = setTimeout(() => {
       this.timer = undefined
-      if (this.disposed) return
-      for (const id of active) this.schedulePriority(id)
+      if (this.disposed || this.error !== undefined) return
+      // Re-derive the active set at FIRE time: the eligibility/running/hint
+      // reason that armed this timer may be gone by now, and a measured `none`
+      // is never a trigger.
+      const current = this.activeRowIds()
+      if (current.length === 0) return
+      for (const id of current) this.schedulePriority(id)
       this.pump()
     }, ACTIVITY_RECHECK_MS)
   }

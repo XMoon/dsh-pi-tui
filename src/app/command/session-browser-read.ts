@@ -759,6 +759,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
     panel.workspaceTerminal = false
     panel.workspaceHandle = handle
+    // The handle IDENTITY is this observation's generation. A rebind after a
+    // terminal failure replaces `panel.workspaceHandle`, so a late frame or a
+    // late completion from the OLD handle must never paint into, or clear, the
+    // newer membership.
+    const ownsHandle = (): boolean => !panel.disposed && panel.workspaceHandle === handle
     if (panel.workspaceGenerationOff === undefined && facts.observeConnectionGeneration !== undefined) {
       panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
         if (!isActive(panel) || !panel.workspaceTerminal) return
@@ -767,22 +772,22 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
     runOwned('session workspace follow', async () => {
       for await (const frame of handle) {
-        if (cancellation(panel)) return
+        if (cancellation(panel) || !ownsHandle()) return
         applyWorkspaceFrame(panel, frame)
       }
-      if (!cancellation(panel)) clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+      if (!cancellation(panel) && ownsHandle()) clearWorkspaceFacts(panel, 'Workspace membership unavailable')
     }, {
       diag: options.diag,
       sessionId: options.sessionId,
       isCancellation: () => cancellation(panel),
       onResult: () => {
-        if (!isActive(panel)) return
+        if (!isActive(panel) || !ownsHandle()) return
         panel.workspaceTerminal = true
         disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
       },
       onError: () => {
-        if (!isActive(panel)) return
+        if (!isActive(panel) || !ownsHandle()) return
         panel.workspaceTerminal = true
         disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')

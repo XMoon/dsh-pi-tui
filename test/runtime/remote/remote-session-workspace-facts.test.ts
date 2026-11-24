@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   ACTIVITY_READ_CAPACITY,
+  ACTIVITY_RECHECK_MS,
   RemoteSessionWorkspaceFacts,
   type RemoteStreamItemLike,
   SESSION_FACTS_READ_CONCURRENCY,
@@ -1031,5 +1032,49 @@ test('UA-11 the exact state sample establishes running only while list/status ha
     await new Promise<void>(resolve => setImmediate(resolve))
     assert.equal(observation.getSnapshot().facts[0]?.running, false,
       'a later exact state can never override a current status event')
+  })
+})
+
+test('UA-11 a measured none row leaves the active recheck set; a running row keeps ONE bounded recheck', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const settle = async (): Promise<void> => { await new Promise<void>(resolve => setImmediate(resolve)) }
+  // A) The only active reason is local eligibility; the exact pair proves
+  //    `none`, then the eligibility is revoked. Nothing keeps it active.
+  const idleHarness = harness({
+    listed: [activityRow('idle')],
+    listedRunning: { idle: false },
+    states: { idle: { result: { running: false, pendingInput: [] } } },
+    projections: { idle: { result: emptyQuestions } },
+  })
+  await withObservation(idleHarness, async (observation) => {
+    observation.setPriorityIds(new Set(['idle']))
+    observation.setRoster([activityRow('idle')], 1, undefined)
+    await waitFor(() => observation.getSnapshot().facts[0]?.attention === 'none', 'the exact pair proves none')
+    const measured = idleHarness.stateCalls.length
+    // The revocation itself re-reads the affected id exactly once (contract).
+    observation.setPriorityIds(new Set())
+    await waitFor(() => idleHarness.stateCalls.length === measured + 1, 'the revoked id is re-read once')
+    const settled = idleHarness.stateCalls.length
+    await settle()
+    t.mock.timers.tick(ACTIVITY_RECHECK_MS)
+    await settle()
+    t.mock.timers.tick(ACTIVITY_RECHECK_MS)
+    await settle()
+    assert.equal(idleHarness.stateCalls.length, settled,
+      'a measured none row must leave the active set instead of being sampled every 20 s forever')
+  })
+  // B) Positive control: a running row really is rechecked by the ONE timer.
+  const runningHarness = harness({
+    listed: [activityRow('run')],
+    listedRunning: { run: true },
+    states: { run: { result: { running: true, pendingInput: [] } } },
+    projections: { run: { result: emptyQuestions } },
+  })
+  await withObservation(runningHarness, async (observation) => {
+    observation.setRoster([activityRow('run')], 1, undefined)
+    await waitFor(() => runningHarness.stateCalls.length === 1, 'the first priority sample lands')
+    await settle()
+    t.mock.timers.tick(ACTIVITY_RECHECK_MS)
+    await waitFor(() => runningHarness.stateCalls.length === 2, 'the active row keeps ONE bounded recheck')
   })
 })

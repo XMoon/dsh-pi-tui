@@ -188,6 +188,8 @@ interface FactsSource {
   readonly readActivityCalls: { count: number }
   /** Replace the facts a NEW roster commit publishes. */
   setFacts(facts: readonly SessionActivityFact[]): void
+  /** Fire the official Connection generation change for a terminal rebind. */
+  notifyGeneration(): void
 }
 
 function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource {
@@ -198,10 +200,15 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
     facts: initial,
     readActivityCalls: { count: 0 },
   }
+  const generationListeners = new Set<() => void>()
   const port: SessionWorkspaceFactsPort = {
     readActivity: () => {
       state.readActivityCalls.count += 1
       throw new Error('the Session Browser never takes a whole-roster Activity sample')
+    },
+    observeConnectionGeneration: (listener: () => void) => {
+      generationListeners.add(listener)
+      return () => { generationListeners.delete(listener) }
     },
     observeActivity: (signal): ActivityObservation => {
       let rosterRevision = 0
@@ -275,6 +282,7 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
     get followCalls() { return state.followCalls },
     readActivityCalls: state.readActivityCalls,
     setFacts: (facts) => { state.facts = facts },
+    notifyGeneration: () => { for (const listener of [...generationListeners]) listener() },
   }
 }
 
@@ -1090,6 +1098,35 @@ test('a failed official Workspace stream keeps the roster usable without members
   await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the failed stream is visible')
   assert.ok(h.view().includes('Workspace membership unavailable'), 'a failed stream removes the folder authority')
   assert.ok(h.view().includes('Current session'), 'the retained flat session roster remains navigable')
+})
+
+test('a terminal Workspace failure opens exactly ONE new handle on a NEW Connection generation and its fresh baseline paints', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  assert.equal(h.facts.handles.length, 1, 'one open = one logical follow')
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-old', path: '/ws', title: 'old-project', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('old-project'), 'the first baseline paints')
+  // A real terminal failure ends the handle: the panel states the truthful
+  // unavailable fact and does NOT retry the same generation.
+  h.facts.handles[0]!.fail(new Error('the Host denied the Workspace follow'))
+  await waitUntil(() => h.view().includes('Workspace membership unavailable'),
+    'the terminal failure is visible')
+  assert.equal(h.facts.handles[0]!.disposed, 1, 'the ended handle is disposed exactly once')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.facts.handles.length, 1, 'no same-generation retry opens a second handle')
+  // A NEW official Connection generation allows exactly ONE new logical handle.
+  h.facts.notifyGeneration()
+  await waitUntil(() => h.facts.handles.length === 2, 'a new generation opens ONE new handle')
+  h.facts.handles[1]!.push(baseline(
+    { workspaceId: 'ws-new', path: '/ws', title: 'new-project', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('new-project'), 'the fresh baseline restores membership in the SAME panel')
+  h.facts.notifyGeneration()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.facts.handles.length, 2, 'a generation change without a new terminal failure opens nothing')
 })
 
 test('an active close owns the stream end and paints no stale scope failure', async () => {
