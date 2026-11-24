@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import * as acp from '@agentclientprotocol/sdk'
@@ -66,6 +66,15 @@ function openTurn(events) {
   return undefined
 }
 
+async function waitForFile(path, label, timeoutMs = 120_000) {
+  await waitFor(() => existsSync(path) ? true : undefined, label, timeoutMs)
+}
+
+function resetHold(root) {
+  rmSync(`${root}.entered`, { force: true })
+  rmSync(`${root}.release`, { force: true })
+}
+
 function commandEvents(events, name) {
   return events.filter(event => event.type === 'command/run' && event.data?.name === name)
 }
@@ -89,6 +98,8 @@ export async function runAcpCommandInvocation(context) {
   const { EntryProcess, entries, base, dshHome, workDir, installation, trace } = context
   const scene = createC1Scene(context)
   const hostCwd = realpathSync(workDir)
+  const holdRoot = join(workDir, 'acp-command-compaction-hold')
+  resetHold(holdRoot)
   const clients = []
   let peer
   let host
@@ -114,6 +125,7 @@ export async function runAcpCommandInvocation(context) {
 
     const started = await scene.startC1Host('acp-command', 'command A host', {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
+      C1_COMPACT_HOLD: holdRoot,
     })
     host = started.host
     const ready = started.ready
@@ -230,34 +242,69 @@ export async function runAcpCommandInvocation(context) {
       const events = hostSessionEvents(dshHome, sessionId) ?? []
       return openTurn(events) === undefined ? true : undefined
     }, 'CMD-07 no open root turn before manual compaction')
-    const beforeCompact = hostSessionEvents(dshHome, sessionId).length
-    const compact = await client.request(acp.methods.agent.session.prompt, {
+    // CMP-03: a real standard `session/cancel` is delivered while the official
+    // summarizer is held. The deferred decision aborts the exact captured
+    // controller; the official failed bracket closes without a summary.
+    resetHold(holdRoot)
+    const beforeCancel = hostSessionEvents(dshHome, sessionId).length
+    const cancelledRequest = client.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt: promptText('/compact'),
     })
-    assert(compact?.stopReason === 'end_turn', `CMD-07: /compact must end_turn (${JSON.stringify(compact)})`)
+    await waitForFile(`${holdRoot}.entered`, 'CMD-07 the held summarizer before ACP cancel')
+    await client.notify(acp.methods.agent.session.cancel, { sessionId })
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const cancelled = await cancelledRequest
+    assert(cancelled?.stopReason === 'cancelled',
+      `CMD-07: the precommit ACP cancel must stopReason cancelled (${JSON.stringify(cancelled)})`)
+    const cancelEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(beforeCancel)
+    const cancelStart = cancelEvents.find(event => event.type === 'compaction/start')
+    assert(cancelStart?.data?.turn === null, 'CMD-07: the cancelled attempt has a real turn:null start')
+    assert(cancelStart?.data?.sourceCommandId === undefined, 'CMD-07: ACP never fabricates a sourceCommandId')
+    const cancelId = cancelStart?.data?.compactionId
+    assert(typeof cancelId === 'string' && cancelId.length > 0, 'CMD-07: the cancelled attempt has a real compactionId')
+    assert(cancelEvents.some(event => event.type === 'compaction/end'
+      && event.data?.compactionId === cancelId && typeof event.data?.error === 'string'),
+    'CMD-07: the cancelled attempt has its matching failed end')
+    assert(!cancelEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === cancelId),
+      'CMD-07: a precommit cancel never commits a summary')
+    trace('acp-command/cancel', { compactionId: cancelId, stopReason: cancelled.stopReason })
+
+    // CMP-01: the same Session then runs one real successful manual compaction
+    // through the exact retained engine. ACP must NOT fabricate command/run or
+    // sourceCommandId.
+    resetHold(holdRoot)
+    const beforeCompact = hostSessionEvents(dshHome, sessionId).length
+    const compactRequest = client.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: promptText('/compact'),
+    })
+    await waitForFile(`${holdRoot}.entered`, 'CMD-08 the held summarizer before successful commit')
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const compact = await compactRequest
+    assert(compact?.stopReason === 'end_turn', `CMD-08: /compact must end_turn (${JSON.stringify(compact)})`)
     trace('acp-command/after-compact', { stopReason: compact.stopReason })
     const compactEvents = await waitFor(() => {
       const events = hostSessionEvents(dshHome, sessionId).slice(beforeCompact)
       return events.some(event => event.type === 'compaction/start') && events.some(event => event.type === 'compaction/end')
         ? events
         : undefined
-    }, 'CMD-07 the durable compaction bracket')
+    }, 'CMD-08 the durable compaction bracket')
     const start = compactEvents.find(event => event.type === 'compaction/start')
-    assert(start?.data?.turn === null, 'CMD-07: ACP manual compaction is a turn:null maintenance transaction')
-    assert(start?.data?.sourceCommandId === undefined, 'CMD-07: ACP never fabricates a sourceCommandId')
+    assert(start?.data?.turn === null, 'CMD-08: ACP manual compaction is a turn:null maintenance transaction')
+    assert(start?.data?.sourceCommandId === undefined, 'CMD-08: ACP never fabricates a sourceCommandId')
     const id = start?.data?.compactionId
-    assert(typeof id === 'string' && id.length > 0, 'CMD-07: the official compactionId must be real')
+    assert(typeof id === 'string' && id.length > 0, 'CMD-08: the official compactionId must be real')
     assert(compactEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === id),
-      'CMD-07: the same compactionId must have its summary')
+      'CMD-08: the same compactionId must have its summary')
     assert(compactEvents.some(event => event.type === 'compaction/end' && event.data?.compactionId === id && event.data?.error === undefined),
-      'CMD-07: the same compactionId must close cleanly')
-    assert(commandEvents(compactEvents, 'compact').length === 0, 'CMD-07: /compact is not the command-wrapper lifecycle')
+      'CMD-08: the same compactionId must close cleanly')
+    assert(commandEvents(compactEvents, 'compact').length === 0, 'CMD-08: /compact is not the command-wrapper lifecycle')
     const compactText = updatesFor(updates, sessionId)
       .filter(update => update?.sessionUpdate === 'agent_message_chunk')
       .map(update => update.content?.text ?? '')
       .join('')
-    assert(/Compacted \d+ history items/.test(compactText), `CMD-07: the real result text must reach the client (${JSON.stringify(compactText)})`)
+    assert(/Compacted \d+ history items/.test(compactText), `CMD-08: the real result text must reach the client (${JSON.stringify(compactText)})`)
 
     // Invalid arguments are refused before the official engine is called.
     const beforeInvalid = hostSessionEvents(dshHome, sessionId).length
@@ -267,14 +314,14 @@ export async function runAcpCommandInvocation(context) {
         sessionId,
         prompt: promptText('/compact extra'),
       })
-      assert(false, 'CMD-08: invalid /compact arguments must be refused')
+      assert(false, 'CMD-09: invalid /compact arguments must be refused')
     } catch (error) {
       invalidError = error
     }
     assert(invalidError?.data?.code === 'LOCAL_ACP_COMMAND_INVALID_INPUT',
-      `CMD-08: invalid /compact must carry its stable code (${JSON.stringify(invalidError?.data)})`)
+      `CMD-09: invalid /compact must carry its stable code (${JSON.stringify(invalidError?.data)})`)
     assert(hostSessionEvents(dshHome, sessionId).length === beforeInvalid,
-      'CMD-08: invalid /compact arguments cause no Host write')
+      'CMD-09: invalid /compact arguments cause no Host write')
 
     // SKL-01: the ordinary prompt path is the native loader path; the durable
     // injection is the official `skill-invocation` source, never a fabricated
@@ -283,12 +330,12 @@ export async function runAcpCommandInvocation(context) {
       sessionId,
       prompt: promptText(`/${SKILL_NAME}`),
     })
-    assert(skill?.stopReason === 'end_turn', `CMD-09: the Skill prompt must end_turn (${JSON.stringify(skill)})`)
+    assert(skill?.stopReason === 'end_turn', `CMD-10: the Skill prompt must end_turn (${JSON.stringify(skill)})`)
     const skillEvents = hostSessionEvents(dshHome, sessionId)
     const injection = skillEvents.find(event => event.type === 'user/message'
       && event.data?.source?.kind === 'skill-invocation'
       && event.data?.source?.name === SKILL_NAME)
-    assert(injection !== undefined, `CMD-09: the official pre-step must inject ${SKILL_NAME} (${JSON.stringify(skillEvents.slice(-8))})`)
+    assert(injection !== undefined, `CMD-10: the official pre-step must inject ${SKILL_NAME} (${JSON.stringify(skillEvents.slice(-8))})`)
 
     // ROUTE-01: an unknown slash remains ordinary prose, never a command.
     const beforeUnknown = commandEvents(hostSessionEvents(dshHome, sessionId), 'unknown').length
@@ -296,9 +343,39 @@ export async function runAcpCommandInvocation(context) {
       sessionId,
       prompt: promptText('/unknown-command is prose'),
     })
-    assert(unknown?.stopReason === 'end_turn', 'CMD-10: an unknown slash remains a normal prompt')
+    assert(unknown?.stopReason === 'end_turn', 'CMD-11: an unknown slash remains a normal prompt')
     assert(commandEvents(hostSessionEvents(dshHome, sessionId), 'unknown').length === beforeUnknown,
-      'CMD-10: an unknown slash creates no Host command lifecycle')
+      'CMD-11: an unknown slash creates no Host command lifecycle')
+
+    // LIFE-02: Close during a held official command closes delivery but waits
+    // for the original Promise. A second close is idempotent and a later
+    // resume on the SAME connection proves the View was released only after
+    // that terminal.
+    resetHold(holdRoot)
+    const closePrompt = client.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: promptText('/compact'),
+    })
+    await waitForFile(`${holdRoot}.entered`, 'CMD-12 the held summarizer before close')
+    let closeSettled = false
+    const closeRequest = client.request(acp.methods.agent.session.close, { sessionId }).then(value => {
+      closeSettled = true
+      return value
+    })
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+    assert(closeSettled === false, 'CMD-12: close cannot detach while the official command Promise is held')
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    assert(Object.keys(await closeRequest).length === 0, 'CMD-12: close answers only after the command terminal')
+    const closePromptResult = await closePrompt
+    assert(closePromptResult?.stopReason === 'cancelled',
+      `CMD-12: the held precommit command settles cancelled (${JSON.stringify(closePromptResult)})`)
+    assert(Object.keys(await client.request(acp.methods.agent.session.close, { sessionId })).length === 0,
+      'CMD-12: a repeated close stays idempotent')
+    const resumedAfterClose = await client.request(acp.methods.agent.session.resume, { sessionId, cwd: hostCwd })
+    assert(typeof resumedAfterClose === 'object' && resumedAfterClose !== null,
+      'CMD-12: the same connection can attach again only after the real terminal')
+    await client.request(acp.methods.agent.session.close, { sessionId })
+    trace('acp-command/close', { stopReason: closePromptResult.stopReason })
 
     const facts = {
       caseId: CASE_ID,

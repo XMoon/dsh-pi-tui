@@ -353,12 +353,6 @@ export function classifyCompactOutcome(
       message: 'compaction is unavailable because this process has an active compaction, or the agent is not idle',
     }
   }
-  // The ONLY client-cancelled outcome is an ACP-owned abort that provably did
-  // not write the irreversible summary. A committed summary wins even when the
-  // abort raced the same synchronous stack.
-  if (acpAborted && facts.summarySeq === undefined) {
-    return { kind: 'cancelled' }
-  }
   if (facts.summarySeq !== undefined) {
     // A summary without the matching replacement/end is a PARTIAL commit:
     // classify it as indeterminate, never as a whole successful compaction.
@@ -383,10 +377,24 @@ export function classifyCompactOutcome(
       message: 'the compaction changed the session history but did not complete cleanly',
     }
   }
+  // The ONLY client-cancelled outcome is an ACP-owned abort with the EXACT
+  // reversible transaction proof: our own captured start/compactionId, the
+  // official failed bracket (a matching end with error), no summary, no
+  // checkpoint and no conflicting fact. A missing observation is never
+  // converted into a fabricated cancellation.
+  if (acpAborted) {
+    const exactReversible = facts.compactionId !== undefined
+      && facts.startSeq !== undefined
+      && facts.summarySeq === undefined
+      && facts.endSeq !== undefined
+      && facts.endError !== undefined
+      && facts.checkpointSeen === false
+      && facts.conflict === false
+    return exactReversible ? { kind: 'cancelled' } : indeterminateCompact()
+  }
   if (facts.startSeq !== undefined) {
     // A durable start without a summary is still reversible: the official
     // failed bracket is the real terminal, never a fabricated cancellation.
-    if (acpAborted) return { kind: 'cancelled' }
     if (facts.endSeq !== undefined) {
       return {
         kind: 'failure',

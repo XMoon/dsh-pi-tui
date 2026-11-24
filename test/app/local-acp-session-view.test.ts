@@ -981,6 +981,8 @@ test('the production Host command access binds only the audited identities and t
   const skills = {
     async snapshot() { return skillsSnapshot },
   }
+  let scopedSkills: unknown = skills
+  const globalSkills = skills
   const context = {
     reflect: { get(name: string) {
       if (name === 'workspaceController') return { create: async () => ({ workspace: { workspaceId: 'ws', path: '/w' } }) }
@@ -1008,10 +1010,10 @@ test('the production Host command access binds only the audited identities and t
             ...skillLoader ? ['@deepseek-ai/dsh-tool-skill'] : [],
           ].map(moduleName => ({ moduleName })),
         }],
-        serviceFor: (_agent: object, service: string) => service === 'compaction' ? scopedEngine : service === 'skills' ? skills : undefined,
+        serviceFor: (_agent: object, service: string) => service === 'compaction' ? scopedEngine : service === 'skills' ? scopedSkills : undefined,
       }
       if (name === 'workingDirectory') return { get: () => '/w' }
-      if (name === 'skills') return skills
+      if (name === 'skills') return globalSkills
       if (name === 'compaction') return rootEngine
       return undefined
     } },
@@ -1060,6 +1062,10 @@ test('the production Host command access binds only the audited identities and t
   skillsSnapshot = { ...skillsSnapshot, complete: false }
   await assert.rejects(access.readNativeSkills(agent, session, new AbortController().signal), (error: unknown) =>
     (error as { code?: string }).code === 'unavailable')
+  scopedSkills = undefined
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), { kind: 'absent' },
+    'a global registry is never adopted when the retained scope has no Skill service')
+  scopedSkills = skills
   skillLoader = false
   assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), { kind: 'absent' })
   assert.equal(skillLoader, false)

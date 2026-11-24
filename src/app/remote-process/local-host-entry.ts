@@ -838,20 +838,19 @@ function hasNativeSkillLoader(agent: LiveAgentViewIdentity, presets: AgentPreset
   return retainedModules(agent, presets)?.includes('@deepseek-ai/dsh-tool-skill') === true
 }
 
-/** Resolve the exact Skill registry (scoped first, then the global service). */
+/** Resolve ONLY the exact retained Skill registry; never the global fallback. */
 function readSkillRegistry(
   agent: LiveAgentViewIdentity,
   presets: AgentPresetRegistryLike,
-  global: SkillRegistryLike | undefined,
 ): SkillRegistryLike | undefined {
   if (!hasContext(agent)) return undefined
   let scoped: unknown
   try {
     scoped = presets.serviceFor(agent, 'skills')
   } catch {
-    scoped = undefined
+    return undefined
   }
-  const registry = (scoped as SkillRegistryLike | undefined) ?? global
+  const registry = scoped as SkillRegistryLike | undefined
   return registry !== undefined && typeof registry.snapshot === 'function' ? registry : undefined
 }
 
@@ -929,7 +928,6 @@ export function createHostAcpSessionAccess(
   const commands = context.reflect.get('commands') as CommandRuntimeLike | undefined
   const agentPresets = context.reflect.get('agentPresets') as AgentPresetRegistryLike | undefined
   const workingDirectory = context.reflect.get('workingDirectory') as WorkingDirectoryLike | undefined
-  const skills = context.reflect.get('skills') as SkillRegistryLike | undefined
   // The official canonical-history/title read plane is REQUIRED for a truthful
   // load/list advertisement: without it the listener advertises neither.
   const sessionQuery = context.reflect.get('sessionQuery') as SessionQueryReadLike | undefined
@@ -1256,7 +1254,7 @@ export function createHostAcpSessionAccess(
         return { kind: 'absent' }
       }
       if (workingDirectory === undefined) return { kind: 'absent' }
-      const registry = readSkillRegistry(agent, agentPresets, skills)
+      const registry = readSkillRegistry(agent, agentPresets)
       if (registry === undefined) return { kind: 'absent' }
       const cwd = workingDirectory.get(session)
       if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/')) {

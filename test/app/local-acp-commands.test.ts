@@ -169,9 +169,20 @@ test('compact cancellation wins only before the summary; committed results never
   const aborted = new AbortController()
   aborted.abort(cancelReason)
   assert.equal(aborted.signal.reason === cancelReason, true)
-  // A precommit start + failed end is the client's one truthful cancelled class.
+  // A precommit start + matching FAILED end + no summary/checkpoint is the
+  // client's one truthful cancelled class.
   assert.deepEqual(classifyCompactOutcome({ kind: 'rejected', error: new Error('aborted') },
-    facts({ compactionId: 'c1', startSeq: 3, endSeq: 5 }), true), { kind: 'cancelled' })
+    facts({ compactionId: 'c1', startSeq: 3, endSeq: 5, endError: 'cancelled' }), true), { kind: 'cancelled' })
+  // A post-dispatch abort without the exact own transaction proof is
+  // INDETERMINATE, never a fabricated cancellation.
+  assert.equal(classifyCompactOutcome({ kind: 'rejected', error: new Error('aborted') },
+    facts(), true).kind, 'failure')
+  assert.equal(classifyCompactOutcome({ kind: 'rejected', error: new Error('aborted') },
+    facts({ compactionId: 'c1', startSeq: 3 }), true).kind, 'failure')
+  assert.equal(classifyCompactOutcome({ kind: 'rejected', error: new Error('aborted') },
+    facts({ compactionId: 'c1', startSeq: 3, endSeq: 5 }), true).kind, 'failure')
+  assert.equal(classifyCompactOutcome({ kind: 'rejected', error: new Error('aborted') },
+    facts({ compactionId: 'c1', startSeq: 3, endSeq: 5, endError: 'cancelled', checkpointSeen: true }), true).kind, 'failure')
   // A summary already committed: the abort race cannot rewrite it as cancelled.
   const committed = classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'cancelled' } },
     facts({ compactionId: 'c1', startSeq: 3, summarySeq: 4, endSeq: 6 }), true)

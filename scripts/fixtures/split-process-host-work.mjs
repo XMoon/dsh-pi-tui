@@ -1570,6 +1570,15 @@ class C1Model extends LlmAdapter {
 
     if (this.scenario === 'acp-command') {
       if (options.purpose === 'compaction') {
+        const hold = process.env.C1_COMPACT_HOLD
+        if (typeof hold === 'string' && hold !== '') {
+          appendFileSync(`${hold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
+          const deadline = Date.now() + 30_000
+          while (!existsSync(`${hold}.release`)) {
+            if (Date.now() > deadline) throw new Error('acp-command compaction hold timed out')
+            await new Promise(resolveWait => setTimeout(resolveWait, 25))
+          }
+        }
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: 'acp command compaction summary' }
         yield { type: 'block-end', index: 0, block: { type: 'text', text: 'acp command compaction summary' } }

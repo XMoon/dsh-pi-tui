@@ -116,6 +116,9 @@ export async function openSdkClient(endpoint, onUpdate) {
     async request(method, params) {
       return await deadline(connection.agent.request(method, params), `ACP ${method}`)
     },
+    async notify(method, params) {
+      await deadline(connection.agent.notify(method, params), `ACP notify ${method}`)
+    },
     async close() {
       // Destroying the socket is the complete teardown here; the SDK's close()
       // can throw/reject after a peer EOF, which must never mask the verdict.
