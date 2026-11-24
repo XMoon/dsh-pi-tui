@@ -402,6 +402,45 @@ export async function runAcpCommandInvocation(context) {
     rmSync(turnHold, { force: true })
     trace('acp-command/busy', { code: busy.data.code })
 
+    // TUI-01 follow-up: after the exact ACP terminal, the Shared TUI submits
+    // an ordinary prompt and then its OWN native /compact wrapper. Both must be
+    // real turns/commands; the ACP command must not leave a permanent Working.
+    const tuiBefore = hostSessionEvents(dshHome, sessionId).length
+    tui.client.send('follow the ACP compaction with one ordinary TUI prompt\r')
+    const tuiUser = await waitForHostSessionEventAfter(dshHome, sessionId, tuiBefore,
+      event => event.type === 'user/message'
+        && String(event.data?.content?.[0]?.text ?? '').includes('follow the ACP compaction'),
+      'TUI-01 the follow-up ordinary TUI prompt entered the Host')
+    await waitForHostSessionEventAfter(dshHome, sessionId, tuiBefore,
+      event => event.type === 'turn/end',
+      'TUI-01 the follow-up ordinary TUI prompt completed')
+    resetHold(holdRoot)
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const nativeBefore = hostSessionEvents(dshHome, sessionId).length
+    tui.client.send('/compact\r')
+    const nativeRun = await waitForHostSessionEventAfter(dshHome, sessionId, nativeBefore,
+      event => event.type === 'command/run' && event.data?.name === 'compact',
+      'TUI-01 the native TUI /compact command wrapper')
+    const nativeCommandId = nativeRun.data?.commandId
+    assert(typeof nativeCommandId === 'string', 'TUI-01: the native wrapper has a real commandId')
+    await waitForHostSessionEventAfter(dshHome, sessionId, nativeBefore,
+      event => event.type === 'compaction/start'
+        && event.data?.sourceCommandId === nativeCommandId,
+      'TUI-01 the native /compact sourceCommandId association')
+    await waitForHostSessionEventAfter(dshHome, sessionId, nativeBefore,
+      event => event.type === 'command/done' && event.data?.commandId === nativeCommandId,
+      'TUI-01 the native /compact command/done')
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const frame = (await tui.client.viewport()).join('\n')
+      if ((frame.match(/Compacted \d+ history item/g) ?? []).length >= 2) break
+      await new Promise(resolveWait => setTimeout(resolveWait, 50))
+    }
+    const nativeFrame = (await tui.client.viewport()).join('\n')
+    assert((nativeFrame.match(/Compacted \d+ history item/g) ?? []).length >= 2,
+      'TUI-01: the native TUI /compact painted its real card')
+    assert(!/Working/.test(nativeFrame), 'TUI-01: no permanent Working state after the native command')
+    trace('acp-command/tui-followup', { sessionId, nativeCommandId })
+
     // LIFE-02: Close during a held official command closes delivery but waits
     // for the original Promise. A second close is idempotent and a later
     // resume on the SAME connection proves the View was released only after
