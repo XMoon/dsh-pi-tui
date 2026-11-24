@@ -30,6 +30,9 @@ const CASE_ID = 'acp.command-invocation'
 const HISTORY_PROMPT = 'acp-command history first'
 const FEEDBACK_TEXT = 'acp command smoke feedback'
 const SKILL_NAME = 'acp-command-smoke'
+const SECOND_SKILL_NAME = 'acp-command-smoke-second'
+const DISABLED_SKILL_NAME = 'acp-command-smoke-disabled'
+const SCOPE_B_SKILL_NAME = 'acp-command-scope-b'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -141,6 +144,48 @@ export async function runAcpCommandInvocation(context) {
       '',
     ].join('\n'), { mode: 0o600 })
 
+    const secondSkillDir = join(hostCwd, '.agents', 'skills', SECOND_SKILL_NAME)
+    mkdirSync(secondSkillDir, { recursive: true, mode: 0o700 })
+    writeFileSync(join(secondSkillDir, 'SKILL.md'), [
+      '---',
+      `name: ${SECOND_SKILL_NAME}`,
+      'description: A second real human-invocable project Skill.',
+      'user-invocable: true',
+      '---',
+      '',
+      '# ACP command smoke second Skill',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
+    const disabledSkillDir = join(hostCwd, '.agents', 'skills', DISABLED_SKILL_NAME)
+    mkdirSync(disabledSkillDir, { recursive: true, mode: 0o700 })
+    writeFileSync(join(disabledSkillDir, 'SKILL.md'), [
+      '---',
+      `name: ${DISABLED_SKILL_NAME}`,
+      'description: A real Skill that forbids human invocation.',
+      'user-invocable: false',
+      '---',
+      '',
+      '# ACP command smoke disabled Skill',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
+    const scopeBDir = join(workDir, 'acp-command-scope-b')
+    mkdirSync(scopeBDir, { recursive: true, mode: 0o700 })
+    execFileSync('git', ['init', '--quiet'], { cwd: scopeBDir, stdio: 'ignore' })
+    const scopeBSkillDir = join(scopeBDir, '.agents', 'skills', SCOPE_B_SKILL_NAME)
+    mkdirSync(scopeBSkillDir, { recursive: true, mode: 0o700 })
+    writeFileSync(join(scopeBSkillDir, 'SKILL.md'), [
+      '---',
+      `name: ${SCOPE_B_SKILL_NAME}`,
+      'description: A real project Skill owned by the second workspace.',
+      'user-invocable: true',
+      '---',
+      '',
+      '# ACP command scope B Skill',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
     const started = await scene.startC1Host('acp-command', 'command A host', {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
       C1_COMPACT_HOLD: holdRoot,
@@ -154,9 +199,10 @@ export async function runAcpCommandInvocation(context) {
       writeFileSync(join(lifecycleControl, name), JSON.stringify({ action, sessionId: targetSession, ...fields }), { mode: 0o600 })
     }
     const lifecycleAction = async (action, targetSession, kind, label, fields = {}) => {
+      const before = readC1WorkEvents(hostWorkRoot).length
       lifecycleSignal(action, targetSession, fields)
       return await waitForC1WorkEvent(hostWorkRoot,
-        event => event.kind === kind && event.sessionId === targetSession, label, 120_000)
+        (event, index) => index >= before && event.kind === kind && event.sessionId === targetSession, label, 120_000)
     }
     let accessSequence = 0
     const acpAccess = async (peerProcess, label, value) => {
@@ -170,6 +216,9 @@ export async function runAcpCommandInvocation(context) {
         `${label} acp-access`, 120_000)
     }
     const settle = promise => promise.then(value => ({ value }), error => ({ error }))
+    const latestCatalogNames = targetSession => updatesFor(updates, targetSession)
+      .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
+      ?.availableCommands?.map(command => command.name)
     const promptEvidence = () => {
       const path = installation.surfaceLlm?.promptEvidencePath
       if (typeof path !== 'string') return []
@@ -232,12 +281,16 @@ export async function runAcpCommandInvocation(context) {
       // The official filesystem provider may announce its initial project
       // Skill after the first complete command-only catalog. Wait for the
       // complete replacement that contains the real project Skill.
-      return latest !== undefined && catalogNames({ update: latest }).includes(SKILL_NAME)
+      const names = latest === undefined ? [] : catalogNames({ update: latest })
+      return names.includes(SKILL_NAME) && names.includes(SECOND_SKILL_NAME)
         ? latest
         : undefined
-    }, 'CMD-04 the complete catalog with the real project Skill', 60_000)
+    }, 'CMD-04 the complete catalog with the real project Skills', 60_000)
     const initialNames = catalogNames({ update: catalog })
     assert(initialNames.includes('feedback'), `CMD-04: the real /feedback command must be advertised (${JSON.stringify(initialNames)})`)
+    assert(initialNames.includes(SECOND_SKILL_NAME), 'CMD-04: the second human-invocable Skill must be advertised')
+    assert(!initialNames.includes(DISABLED_SKILL_NAME), 'CMD-04: user-invocable=false must never be advertised')
+    assert(!initialNames.includes(SCOPE_B_SKILL_NAME), 'CMD-04: the other workspace Skill must not leak into A')
     assert(initialNames.includes('compact'), `CMD-04: the real /compact command must be advertised (${JSON.stringify(initialNames)})`)
     assert(initialNames.includes(SKILL_NAME), `CMD-04: the real human Skill must be advertised (${JSON.stringify(initialNames)})`)
     assert(initialNames.every(name => typeof name === 'string' && !name.startsWith('/')), 'CMD-04: catalog names carry no slash')
@@ -994,6 +1047,90 @@ export async function runAcpCommandInvocation(context) {
     `CMD-10: the real provider must receive the official Skill body marker (${JSON.stringify(skillPromptRecords)})`)
     assert(!skillEvents.some(event => event.type === 'command/run' && event.data?.name === SKILL_NAME),
       'CMD-10: the human-only Skill is never a Host command route')
+
+    // SKL-01: a second real human-invocable Skill follows the same ordinary
+    // native path. The provider record is read from the exact request offset.
+    const secondSkillEvidenceStart = promptEvidence().length
+    const secondSkill = await client.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: promptText(`/${SECOND_SKILL_NAME}`),
+    })
+    assert(secondSkill?.stopReason === 'end_turn', `CMD-10: the second Skill prompt must end_turn (${JSON.stringify(secondSkill)})`)
+    const secondSkillEvents = hostSessionEvents(dshHome, sessionId)
+    assert(secondSkillEvents.some(event => event.type === 'user/message'
+      && event.data?.source?.kind === 'skill-invocation'
+      && event.data?.source?.name === SECOND_SKILL_NAME),
+    `CMD-10: the official pre-step must inject ${SECOND_SKILL_NAME}`)
+    const secondSkillRecords = promptEvidence().slice(secondSkillEvidenceStart)
+    assert(secondSkillRecords.some(record => typeof record.userText === 'string'
+      && record.userText.includes('# ACP command smoke second Skill')),
+    `CMD-10: the real provider must receive the second Skill body marker (${JSON.stringify(secondSkillRecords)})`)
+
+    // SKL-02 negative: user-invocable=false is absent from the catalog and is
+    // never a native injection. The raw slash remains the ordinary prompt.
+    const disabledEvidenceStart = promptEvidence().length
+    const disabledSkill = await client.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: promptText(`/${DISABLED_SKILL_NAME}`),
+    })
+    assert(disabledSkill?.stopReason === 'end_turn', `CMD-10: the disabled Skill must remain ordinary text (${JSON.stringify(disabledSkill)})`)
+    const disabledSkillEvents = hostSessionEvents(dshHome, sessionId)
+    assert(!disabledSkillEvents.some(event => event.type === 'user/message'
+      && event.data?.source?.kind === 'skill-invocation'
+      && event.data?.source?.name === DISABLED_SKILL_NAME),
+    'CMD-10: a non-human-invocable Skill is never injected')
+    const disabledSkillRecords = promptEvidence().slice(disabledEvidenceStart)
+    assert(disabledSkillRecords.length > 0, 'CMD-10: the ordinary disabled-name prompt must still reach the provider')
+    assert(!disabledSkillRecords.some(record => typeof record.userText === 'string'
+      && record.userText.includes('# ACP command smoke disabled Skill')),
+    `CMD-10: the disabled Skill body must never enter the provider (${JSON.stringify(disabledSkillRecords)})`)
+
+    // CAT-02 scope: change the exact Session's effective working directory
+    // through the official service; a second attached Session stays on A.
+    const scopePeer = await client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })
+    const scopePeerSession = scopePeer.sessionId
+    await waitFor(() => {
+      const names = latestCatalogNames(scopePeerSession)
+      return names?.includes(SKILL_NAME) && names.includes(SECOND_SKILL_NAME) ? names : undefined
+    }, 'CAT-02 the scope peer initial catalog', 60_000)
+    const peerCatalogBefore = latestCatalogNames(scopePeerSession)
+    assert(peerCatalogBefore?.includes(SKILL_NAME) && peerCatalogBefore.includes(SECOND_SKILL_NAME),
+      `CAT-02: the peer Session starts on workspace A (${JSON.stringify(peerCatalogBefore)})`)
+    const mainChangeBefore = hostSessionEvents(dshHome, sessionId).length
+    const scopeSet = await lifecycleAction('set-working-directory', sessionId, 'lifecycle-working-directory-set',
+      'CAT-02 set the exact Session working directory', { path: scopeBDir })
+    const scopeBCwd = String(scopeSet.cwd ?? scopeBDir)
+    await waitFor(() => (hostSessionEvents(dshHome, sessionId) ?? []).slice(mainChangeBefore)
+      .some(event => event.type === 'working-directory/change' && event.data?.cwd === scopeBCwd) ? true : undefined,
+    'CAT-02 the real working-directory/change event', 60_000)
+    const bCatalog = await waitFor(() => {
+      const names = latestCatalogNames(sessionId)
+      return names?.includes(SCOPE_B_SKILL_NAME) && !names.includes(SKILL_NAME)
+        && !names.includes(SECOND_SKILL_NAME) && !names.includes(DISABLED_SKILL_NAME)
+        && names.includes('feedback') && names.includes('compact') ? names : undefined
+    }, 'CAT-02 the B workspace complete catalog', 60_000)
+    assert(!bCatalog.includes(SKILL_NAME) && !bCatalog.includes(SECOND_SKILL_NAME),
+      `CAT-02: A Skills must not appear in B (${JSON.stringify(bCatalog)})`)
+    const peerCatalogAfter = latestCatalogNames(scopePeerSession)
+    assert(peerCatalogAfter?.includes(SKILL_NAME) && peerCatalogAfter.includes(SECOND_SKILL_NAME)
+      && !peerCatalogAfter.includes(SCOPE_B_SKILL_NAME),
+    `CAT-02: the peer Session remains on A (${JSON.stringify(peerCatalogAfter)})`)
+    assert(!(hostSessionEvents(dshHome, scopePeerSession) ?? [])
+      .some(event => event.type === 'working-directory/change'),
+    'CAT-02: changing A never changes the peer effective directory')
+    const restoreBefore = hostSessionEvents(dshHome, sessionId).length
+    const scopeRestore = await lifecycleAction('set-working-directory', sessionId, 'lifecycle-working-directory-set',
+      'CAT-02 restore the original working directory', { path: hostCwd })
+    const restoredCwd = String(scopeRestore.cwd ?? hostCwd)
+    await waitFor(() => (hostSessionEvents(dshHome, sessionId) ?? []).slice(restoreBefore)
+      .some(event => event.type === 'working-directory/change' && event.data?.cwd === restoredCwd) ? true : undefined,
+    'CAT-02 the restored working-directory/change event', 60_000)
+    await waitFor(() => {
+      const names = latestCatalogNames(sessionId)
+      return names?.includes(SKILL_NAME) && names.includes(SECOND_SKILL_NAME)
+        && !names.includes(SCOPE_B_SKILL_NAME) && names.includes('feedback') && names.includes('compact') ? names : undefined
+    }, 'CAT-02 the restored A complete catalog', 60_000)
+    await client.request(acp.methods.agent.session.close, { sessionId: scopePeerSession })
 
     // ROUTE-01: an unknown slash remains ordinary prose, never a command.
     const beforeUnknown = commandEvents(hostSessionEvents(dshHome, sessionId), 'unknown').length

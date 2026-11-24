@@ -3880,32 +3880,42 @@ test('a model change is refused as VIEW_BUSY while this View owns an unsettled p
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
 })
 
-test('a model change is refused as VIEW_BUSY while this View owns an unsettled command', async () => {
+test('a model validation pending before a command is rejected as VIEW_BUSY and the command still completes', async () => {
   const view = projectionView('S-model-command')
   view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
   await view.resume()
-  const entered = deferred<void>()
-  const release = deferred<unknown>()
+  const validationEntered = deferred<void>()
+  const validationRelease = deferred<void>()
+  let observed: AcpModelCurrentness | undefined
+  view.access.selectModelImpl = async (_agent, _session, _request, _signal, stillCurrent) => {
+    validationEntered.resolve()
+    await validationRelease.promise
+    observed = stillCurrent()
+    throw new AcpModelError('LOCAL_ACP_MODEL_VIEW_BUSY', 'view busy', -32046)
+  }
+  const selection = view.registry.setModelOption(
+    view.conn, view.access,
+    { sessionId: 'S-model-command', configId: 'model', value: '["p1","b"]' },
+    new AbortController().signal,
+  )
+  await validationEntered.promise
+  const commandEntered = deferred<void>()
+  const commandRelease = deferred<unknown>()
   view.access.executeStandaloneCommandImpl = async () => {
-    entered.resolve()
-    return await release.promise
+    commandEntered.resolve()
+    return await commandRelease.promise
   }
   const command = view.registry.promptSession(
     view.conn, view.access,
     { sessionId: 'S-model-command', prompt: [{ type: 'text', text: '/feedback held model' }] },
     new AbortController().signal, false, async () => {},
   )
-  await entered.promise
-  await assert.rejects(
-    view.registry.setModelOption(
-      view.conn, view.access,
-      { sessionId: 'S-model-command', configId: 'model', value: '["p1","b"]' },
-      new AbortController().signal,
-    ),
-    isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'),
-  )
-  assert.equal(view.access.selectModelCalls.length, 0, 'a held command blocks the Host model write')
-  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  await commandEntered.promise
+  validationRelease.resolve()
+  await assert.rejects(selection, isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'))
+  assert.equal(observed, 'view-busy', 'the final currentness gate sees the command slot')
+  assert.equal(view.access.selectModelCalls.length, 1, 'the Host model write is rejected once')
+  commandRelease.resolve({ result: { kind: 'success', text: 'ok' } })
   assert.deepEqual(await command, { stopReason: 'end_turn' })
 })
 
@@ -6843,16 +6853,30 @@ test('a held catalog snapshot that loses its epoch never delivers its stale repl
   assert.deepEqual(delivered, ['compact'], 'the stale held replacement never reaches the client')
 })
 
-test('session/load publishes the complete catalog for its exact attached Session', async () => {
-  const view = projectionView('CAT4', {
-    history: { header: { sessionId: 'CAT4', cwd: '/w' }, events: [] },
-  })
+test('session/load holds the first history notification and publishes the catalog only after the replay barrier', async () => {
+  const history: AcpSessionHistory = {
+    header: { sessionId: 'CAT5', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'load question' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'load answer' }] } } },
+    ],
+  }
+  const view = projectionView('CAT5', { history })
   view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
-  await view.load()
-  await waitUntil(() => view.catalogNotifications.length === 1, 'the load catalog is delivered')
+  const held = view.holdProjection()
+  const loading = view.load()
+  await held.entered
+  assert.equal(view.catalogNotifications.length, 0, 'the catalog waits for the replay barrier')
+  held.release()
+  await loading
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the complete catalog is delivered after load')
   const names = (view.catalogNotifications[0] as { availableCommands: Array<{ name: string }> })
     .availableCommands.map(row => row.name)
   assert.deepEqual(names, ['feedback'])
+  assert.equal(view.notifications.filter(update => update.sessionUpdate === 'user_message_chunk').length, 1,
+    'the held history user message is delivered exactly once')
+  assert.equal(view.notifications.filter(update => update.sessionUpdate === 'agent_message_chunk').length, 1,
+    'the held history assistant message is delivered exactly once')
 })
 
 test('a compact settled through end but held before flush is not aborted by a late cancel', async () => {

@@ -2603,6 +2603,11 @@ export async function apply(ctx) {
         record('lifecycle-action-no-agent', { action: action.action, sessionId: action.sessionId })
         return
       }
+      if (action.action === 'set-working-directory') {
+        const cwd = await ctx.workingDirectory.set(agent, String(action.path))
+        record('lifecycle-working-directory-set', { sessionId: action.sessionId, path: String(action.path), cwd })
+        return
+      }
       if (action.action === 'flush-now') {
         await ctx.sessions.flush(agent.session)
         record('lifecycle-flush-complete', { sessionId: action.sessionId })
