@@ -1957,7 +1957,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const events = eventsOf(observation.events, sessionId)
         const outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, true)
         if (outcome !== 'complete') {
+          // Accepted work (or its ordinary drain) that advanced past this live
+          // observation's expected checkpoint invalidated the candidate. The
+          // mandatory authoritative replay must survive as a coalesced point
+          // intent until a current observation actually settles it — the same
+          // ownership the terminal-stale branch below uses. The replay is
+          // bounded by real observed events, not a blind retry loop.
           await this.markSessionDirty(sessionId)
+          if (outcome === 'stale') this.scheduleSessionRepair(sessionId, 'rebuild')
           return outcome
         }
         const terminal = await this.commitWitness(witness, () => {

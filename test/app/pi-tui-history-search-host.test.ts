@@ -23,7 +23,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
@@ -39,6 +39,7 @@ import {
   type HistorySearchRequest,
   type HistorySearchResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
+import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
 import {
   HISTORY_SEARCH_MAX_PENDING_EVENTS,
   PiTuiHistorySearchHostService,
@@ -132,12 +133,32 @@ async function waitForReady(wire: HistoryHost, label: string, timeoutMs = 30_000
 
 /** Admit one prompt through the official SessionController prompt path. */
 async function prompt(wire: HistoryHost, sessionId: string, requestId: string, text: string): Promise<void> {
-  await wire.host.ctx.sessionController.prompt({
+  await promptHost(wire.host, sessionId, requestId, text)
+}
+
+/** The same official prompt path over a bare Host fixture (no Client wire). */
+async function promptHost(host: Host, sessionId: string, requestId: string, text: string): Promise<void> {
+  await host.ctx.sessionController.prompt({
     requestId: requestId as never,
     sessionId: SessionId(sessionId),
     mode: 'queue',
     content: [{ type: 'text', text }] as never,
   }, new AbortController().signal)
+}
+
+/** ONE authenticated Owner Gateway search over a bare Host fixture. */
+async function realSearch(
+  host: Host,
+  owner: PeerScope,
+  request: HistorySearchRequest,
+): Promise<HistorySearchResponse> {
+  return parseHistorySearchResponse(await host.ctx.typertGateway.invoke({
+    namespace: PI_TUI_HISTORY_SEARCH_NAMESPACE,
+    method: 'search',
+    args: { request },
+    peer: owner,
+    signal: new AbortController().signal,
+  }))
 }
 
 function sha256(text: string): string {
@@ -692,7 +713,7 @@ function historyDebugProbeScript(historyModuleUrl: string): string {
   return `
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, symbols } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { PiTuiHistorySearchHostService } from ${JSON.stringify(historyModuleUrl)}
 
@@ -4239,6 +4260,239 @@ test('the round finish requires the full traversal proof even with no outstandin
   }
 })
 
+test('a real accepted event during retained-index startup reaches the point replay and the Gateway', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'history-search-r12-retained', {
+    pluginManagerProfile: true,
+    withoutHostRuntime: true,
+  })
+  let runtime1: { dispose(): Promise<void> } | undefined
+  let runtime2: { dispose(): Promise<void> } | undefined
+  let m3: Awaited<ReturnType<typeof createRemoteHostRuntime>> | undefined
+  const persistence = host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+  const realList = persistence.list
+  const query = host.ctx.sessionQuery as unknown as HistorySearchQueryLike
+  const realObserve = query.observeSession
+  let releaseList: () => void = () => {}
+  let releasePoint: () => void = () => {}
+  try {
+    runtime1 = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    m3 = await createRemoteHostRuntime(host.ctx)
+    const peer = host.ctx.connection.browserPeer
+    const sessionId = 'history-r12-retained'
+    const waitGateway = async (label: string, request: HistorySearchRequest): Promise<HistorySearchResponse> => {
+      const started = Date.now()
+      for (;;) {
+        const answer = await realSearch(host, peer, request)
+        if (answer.kind === 'ready') return answer
+        if (answer.kind === 'unavailable') throw new Error(`${label}: ${JSON.stringify(answer)}`)
+        if (Date.now() - started > 15_000) throw new Error(`${label}: timeout (${answer.kind})`)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+    }
+    await host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+    await promptHost(host, sessionId, 'req-r12-first', 'hsp-r12-first')
+    await waitGateway('retained first incarnation', { scope: 'all', query: '', limit: 1 })
+    const service1 = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
+      index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    }
+    const retained = service1.index.checkpointOf(sessionId)
+    assert.ok(retained !== undefined, 'the first incarnation must retain a real Session checkpoint')
+    assert.ok(retained.nextSeq > 0)
+
+    // Reopen the SAME real Host (official persistence/Session/gateway) with a
+    // SECOND production runtime incarnation: only the service/index lifetime changes.
+    await runtime1.dispose()
+    runtime1 = undefined
+
+    let listEntered!: () => void
+    const listReached = new Promise<void>(resolve => { listEntered = resolve })
+    const listGate = new Promise<void>(resolve => { releaseList = resolve })
+    persistence.list = async (options) => {
+      listEntered()
+      await listGate
+      return realList.call(persistence, options)
+    }
+    const pointGate = new Promise<void>(resolve => { releasePoint = resolve })
+    let pointGated = false
+    query.observeSession = async (id, options) => {
+      if (!pointGated && String(id) === sessionId) {
+        pointGated = true
+        await pointGate
+      }
+      return realObserve.call(query, id, options)
+    }
+    runtime2 = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    await listReached
+
+    // A real accepted event arrives through the official SessionController while
+    // the retained-index roster read is held: ordinary pending before the reset.
+    await promptHost(host, sessionId, 'req-r12-second', 'hsp-r12-second')
+    const service2Proxy = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
+      index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+      pending: Map<string, unknown>
+      sessionRepairFlights: Map<string, unknown>
+      rebuildRequests: Set<string>
+      reconcilePending: Set<string>
+      state: { kind: string }
+      coverage: string
+    }
+    const service2 = ((service2Proxy as unknown as Record<symbol, unknown>)[symbols.original] ?? service2Proxy) as typeof service2Proxy
+    const pendingStarted = Date.now()
+    while (!service2.pending.has(sessionId) && Date.now() - pendingStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(service2.pending.has(sessionId), true, 'the real accepted event must be buffered before the list is released')
+    releaseList()
+    const pointStarted = Date.now()
+    while (!pointGated && Date.now() - pointStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(pointGated, true, JSON.stringify({
+      state: service2.state,
+      coverage: service2.coverage,
+      checkpoint: service2.index.checkpointOf(sessionId),
+      pending: service2.pending.size,
+      flights: [...service2.sessionRepairFlights.keys()],
+      rebuilds: [...service2.rebuildRequests],
+      reconcile: [...service2.reconcilePending],
+    }))
+    const afterDrain = service2.index.checkpointOf(sessionId)
+    assert.ok(afterDrain !== undefined)
+    assert.equal(service2.pending.size, 0)
+    assert.ok(afterDrain.nextSeq > retained.nextSeq, 'the ordinary drain must advance the retained checkpoint before the point observation')
+    releasePoint()
+    const readyStarted = Date.now()
+    let replayed: HistorySearchResponse
+    for (;;) {
+      replayed = await realSearch(host, peer, { scope: 'all', query: 'hsp-r12-second', limit: 25 })
+      if (replayed.kind === 'ready' || replayed.kind === 'unavailable') break
+      if (Date.now() - readyStarted > 15_000) {
+        assert.fail(JSON.stringify({
+          kind: replayed.kind,
+          state: service2.state,
+          coverage: service2.coverage,
+          pending: [...service2.pending.keys()],
+          flights: [...service2.sessionRepairFlights.entries()].map(([id, flight]) => [id, (flight as { kind?: string }).kind]),
+          rebuilds: [...service2.rebuildRequests],
+          reconcile: [...service2.reconcilePending],
+          checkpoint: service2.index.checkpointOf(sessionId),
+        }))
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(replayed.kind, 'ready', JSON.stringify(replayed))
+    if (replayed.kind !== 'ready') throw new Error('expected ready')
+    const second = replayed
+    assert.equal(second.items.length, 1)
+    assert.equal(second.items[0]?.sessionId, sessionId)
+    assert.equal(second.items[0]?.preview, 'hsp-r12-second')
+    const first = await realSearch(host, peer, { scope: 'all', query: 'hsp-r12-first', limit: 25 })
+    assert.equal(first.kind, 'ready', JSON.stringify(first))
+    if (first.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(first.items.length, 1)
+  } finally {
+    releaseList()
+    releasePoint()
+    persistence.list = realList
+    query.observeSession = realObserve
+    await runtime1?.dispose()
+    await runtime2?.dispose()
+    await m3?.dispose()
+    await host.dispose()
+  }
+})
+
+test('a real Session born and retired during a held roster scan survives the old roster through the Gateway', async (t) => {
+  const wire = await historyHost(testLifecycle(t), 'history-search-r12-roster')
+  const internals = wire.service() as unknown as {
+    deps: { sessionPersistence(): HistorySearchPersistenceLike | undefined }
+    verifySources(): Promise<void>
+    index: {
+      checkpointOf(id: string): { nextSeq: number; sourceState: string; dirty: boolean } | undefined
+      occurrenceCount(): number
+    }
+    sessionRepairFlights: Map<string, { promise: Promise<unknown> }>
+    pending: Map<string, unknown>
+  }
+  const ctx = wire.host.ctx
+  const rawPersistence = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+  const originalPersistence = internals.deps.sessionPersistence
+  let releaseList: () => void = () => {}
+  try {
+    await wire.host.harness.create(SessionId('history-r12-roster-a'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await promptHost(wire.host, 'history-r12-roster-a', 'req-r12-roster-a', 'hsp-r12-roster-a')
+    await waitForSettled(wire, { scope: 'all', query: 'hsp-r12-roster-a', limit: 25 }, 'roster fixture readiness')
+
+    // The OLD roster names A only; the pass is then latched before B is born.
+    const oldRoster = await rawPersistence.list()
+    let listEntered!: () => void
+    const listReached = new Promise<void>(resolve => { listEntered = resolve })
+    const listGate = new Promise<void>(resolve => { releaseList = resolve })
+    const blocked: HistorySearchPersistenceLike = {
+      identity: rawPersistence.identity,
+      list: async () => {
+        listEntered()
+        await listGate
+        return oldRoster
+      },
+      stat: (id, options) => rawPersistence.stat(id, options),
+      open: (id, access, options) => rawPersistence.open(id, access, options),
+    }
+    internals.deps.sessionPersistence = () => blocked
+    const pass = internals.verifySources()
+    await listReached
+
+    // B is a REAL Session: official create, durable accepted prompt, then normal
+    // AgentHandle retirement, all while the old roster is held.
+    const b = await ctx.agents.create({
+      sessionId: SessionId('history-r12-roster-b'),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+      meta: { cwd: wire.host.anchorDir },
+    })
+    await promptHost(wire.host, 'history-r12-roster-b', 'req-r12-roster-b', 'hsp-r12-roster-b')
+    const createdStarted = Date.now()
+    while (
+      (internals.index.checkpointOf('history-r12-roster-b') === undefined || internals.pending.size > 0)
+      && Date.now() - createdStarted < 10_000
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(internals.index.checkpointOf('history-r12-roster-b') !== undefined, 'the real accepted event must index B before retirement')
+    await b.dispose()
+    const retiredStarted = Date.now()
+    while (internals.sessionRepairFlights.size > 0 && Date.now() - retiredStarted < 10_000) {
+      await Promise.allSettled([...internals.sessionRepairFlights.values()].map(entry => entry.promise))
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+
+    // Release the pre-B roster. B is absent from it, but was born after the
+    // round-local cut and must keep its derived rows.
+    releaseList()
+    await pass
+    assert.ok(internals.index.checkpointOf('history-r12-roster-b') !== undefined, 'the old roster must not delete a Session born after its cut')
+    assert.ok(internals.index.occurrenceCount() >= 1)
+
+    // Restore the current official source: its roster now names B's durable log,
+    // so the next full pass reconciles B and the authenticated Owner search answers.
+    internals.deps.sessionPersistence = originalPersistence
+    await internals.verifySources()
+    const hit = await waitForSettled(wire, { scope: 'all', query: 'hsp-r12-roster-b', limit: 25 }, 'retired B occurrence')
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+    assert.equal(hit.items[0]?.sessionId, 'history-r12-roster-b')
+    const a = await wire.search({ scope: 'all', query: 'hsp-r12-roster-a', limit: 25 })
+    assert.equal(a.kind, 'ready', JSON.stringify(a))
+    if (a.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(a.items.length, 1)
+  } finally {
+    internals.deps.sessionPersistence = originalPersistence
+    releaseList()
+    await wire.dispose()
+  }
+})
+
 test('a required initial replay invalidated by ordinary pending is handed to the point repair owner', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r10-replay-handoff-')
@@ -4338,10 +4592,8 @@ test('a required initial replay invalidated by ordinary pending is handed to the
       state: internals.state,
       coverage: internals.coverage,
     }))
-    const boundaryStarted = Date.now()
-    while ((internals.index.checkpointOf('r10-a')?.nextSeq !== 5 || internals.pending.size !== 0) && Date.now() - boundaryStarted < 3_000) {
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
+    // The point observation must already see the coldStart's OWN drain result.
+    // Waiting here would let a separately scheduled drain mask the race.
     assert.equal(internals.index.checkpointOf('r10-a')?.nextSeq, 5)
     assert.equal(internals.pending.size, 0)
     releasePoint()
