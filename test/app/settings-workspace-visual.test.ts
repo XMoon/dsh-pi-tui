@@ -2908,13 +2908,11 @@ test('a mounted tenant with a bar-only grant admits no hidden action', async () 
   await key(h, '\x1b[Z') // Shift+Tab
   await settle(h, 6)
   assert.match(h.view(), /Settings · Agent · Rows/u, 'a VISIBLE Shift+Tab destination really takes focus')
-  await key(h, '\r') // back into the tenant for the fresh Change below
+  // From the Rows focus that Shift+Tab really produced, ONE explicit entry opens
+  // the tenant's raw Input and still writes exactly once.
+  await key(h, '\r') // Rows -> the tenant Input
   await settle(h, 6)
-  // And from the rail a fresh explicit Change still writes exactly once.
-  await key(h, '\r') // rail -> Rows
-  await settle(h, 4)
-  await key(h, '\r') // the row -> the tenant Input
-  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the explicit entry still mounts the tenant')
   await key(h, '\x15')
   await key(h, '7')
   await clickPainted(h, 'Confirm [Enter]', true)
