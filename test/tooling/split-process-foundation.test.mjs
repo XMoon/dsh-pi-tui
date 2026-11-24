@@ -22,7 +22,6 @@ import {
   linkSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -30,7 +29,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
@@ -385,8 +383,9 @@ test('the installed-entry qualification operations are refused before any proces
   }
 })
 
-test('the real close waiter ignores exitCode until the inherited stdout closes', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'close-authority-'))
+test('the real close waiter ignores exitCode until the inherited stdout closes', async t => {
+  const life = testLifecycle(t)
+  const directory = realpathSync(life.tempDir('close-authority-'))
   const release = join(directory, 'release')
   const grandchild = [
     "const fs = require('node:fs')",
@@ -431,6 +430,5 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
     assert.equal(closeFired, true)
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    rmSync(directory, { recursive: true, force: true })
   }
 })
