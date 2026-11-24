@@ -752,10 +752,13 @@ a key press uses.
   Advanced disclosure, a confirmation or a pending/unknown write holds the keys
   the tenant refuses every parent category/row/pane/Tab/Back path; a definite
   dirty draft and an ambiguous outcome open the page's OWN leave question
-  (`Discard and leave [D]` / `Leave anyway [D]`, plus `Keep [Esc]`) whose
-  captured destination is re-proved when it is applied. A clean page leaves on
-  the same gesture (Tab retires it and returns the original Rows selection).
-  The lease/focus mechanics are owned by [overlay-focus.md](./overlay-focus.md).
+  (`Discard and leave [D]` / `Leave anyway [D]`, plus `Keep [Esc]`). The
+  captured continuation re-proves the SAME mounted page instance and the SAME
+  source category/row before it applies the captured destination, and a
+  destination that vanished in the meantime is refused instead of applied. A
+  clean page leaves on the same gesture (Tab retires it and returns the original
+  Rows selection). The lease/focus mechanics are owned by
+  [overlay-focus.md](./overlay-focus.md).
 
 `Shell execution` keeps the staged form. Each field paints the current effective
 value and its `Differs from base` / `Matches base` relation to the base, an
