@@ -75,6 +75,28 @@ test('tarball smoke flags a CI workspace path', (t) => {
   assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
 })
 
+test('tarball smoke allows only the fixed Linuxbrew runtime directories', (t) => {
+  const life = testLifecycle(t)
+  const { tarball } = leakTarball(life, "['/home/linuxbrew/.linuxbrew/bin', '/home/linuxbrew/.linuxbrew/sbin']")
+  const result = runSmoke(tarball)
+  assert.match(result.stdout, /ok\s+no workspace absolute paths in packaged files/)
+})
+
+test('tarball smoke still flags descendants of each Linuxbrew runtime path', (t) => {
+  const life = testLifecycle(t)
+  for (const leaked of [
+    '/home/linuxbrew/.linuxbrew/bin/private/source.ts',
+    '/home/linuxbrew/.linuxbrew/sbin/private/source.ts',
+    '/home/linuxbrew/.linuxbrew/lib/private.ts',
+    '/home/linuxbrew/private/file',
+  ]) {
+    const { tarball } = leakTarball(life, `const leaked = '${leaked}'`)
+    const result = runSmoke(tarball)
+    assert.notEqual(result.status, 0, `${leaked}\n${result.stdout}`)
+    assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
+  }
+})
+
 test('tarball smoke allows escaped slash sequences in regex literals', (t) => {
   const life = testLifecycle(t)
   const fakeCursorPattern = String.raw`const marker = /(\\x1b_pi:c\\x07)\\x1b_pi:fc\\x07(.*?)(?:\\x1b_pi:\\/fc\\x07|$)/s;`

@@ -21,6 +21,7 @@
 
 ### 修复
 
+- **Daemon Host 能发现常见工具**：由 systemd、launchd 或 detached 启动的 Host 在官方启动前会把已存在的常见用户工具目录补到继承的 `PATH` 后面（如 `~/.local/bin`、mise/asdf shims、Cargo/Go/Volta/Bun/pnpm 的 bin 目录以及平台包管理器目录），因此在继承的 `PATH` 未覆盖这些目录、且工具已正确安装时，Agent 的 Shell、后台 Job 和子进程可以避免反复 `mise exec` 或修改 `.zshrc`。原有 `PATH` 顺序保持不变，同名系统工具仍可能优先；在 Host 的实际环境中设置 `DSH_PI_TUI_HOST_PATH_MODE=inherit` 可完全关闭补充。该设置只影响冷启动，已有的 managed Host 升级后执行 `daemon restart` 生效。
 - **一个 Turn 只显示一张 Focus 摘要**：进行中的回答里执行会话内命令（如 `/model`）或手动压缩时，Focus 不再出现两张内容相同的实时状态卡片；命令卡片仍按真实时间顺序单独显示一次，展开后保留命令前后的 Work 顺序与最终回答。
 
 

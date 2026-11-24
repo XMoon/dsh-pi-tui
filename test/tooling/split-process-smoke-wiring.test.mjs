@@ -571,6 +571,13 @@ test('every registry entry declares a conservative platform list and the audited
     // existing Host selection path, then an independent Host restart; its
     // packed-candidate Darwin selected run passed.
     'surface.blank-session-default-sync',
+    // PR1 Host default environment drives the public installed daemon
+    // commands, the real launchd/systemd profile definition, the shared Split
+    // harness and the official standard-preset bash/ctx.subprocess path with
+    // run-owned probes; its packed-candidate Darwin selected run passed with
+    // four Host generations, one Direct negative and quiesced cleanup. The
+    // Linux arm is the same case behind the attested isolated systemd gate.
+    'daemon-control.host-default-environment',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {

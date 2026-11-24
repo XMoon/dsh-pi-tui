@@ -121,6 +121,11 @@ const SCENARIOS = new Set([
   // official ToolRuntime and the official projections do every write.
   'plan-review',
   'team-board',
+  // PR1 Host default environment: fixed harmless PATH probes through the
+  // official standard-preset `bash` tool (foreground and background) plus one
+  // real `ctx.subprocess` spawn. The probes are run-owned executables; the
+  // scenario exposes no arbitrary command input.
+  'host-default-environment',
 ])
 
 /**
@@ -1222,8 +1227,27 @@ function createScopedMcpB1Workload(ctx, { root, record }) {
   }, 'b1-workload-owner')
 }
 
+/**
+ * PR1 Host default environment: the fixed harmless command the scripted model
+ * may request. The Command probes the run-owned executables by BARE name; the
+ * `command -v` guard makes an absent tool an explicit `PR1_ABSENT` fact instead
+ * of a shell failure, and every present tool is really executed.
+ */
+const PR1_FOREGROUND_COMMAND = [
+  'status=0;',
+  'for p in dsh-pr1-user-probe dsh-pr1-mise-probe dsh-pr1-cargo-probe dsh-pr1-pnpm-probe dsh-pr1-client-only-probe; do',
+  'if command -v "$p" >/dev/null 2>&1; then "$p" || status=1; else printf "PR1_ABSENT=%s\\n" "$p"; fi;',
+  'done;',
+  'dsh-pr1-shadow-probe || status=1;',
+  'printf "PR1_SHELL=%s\\n" "${DSH_SHELL:-unset}";',
+  'printf "PR1_SECRET=%s\\n" "${PR1_API_KEY:-unset}";',
+  'exit "$status"',
+].join(' ')
+/** The ONE harmless background command this scenario may request. */
+const PR1_BACKGROUND_COMMAND = 'dsh-pr1-user-probe'
+
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry, subprocessProbe) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -1234,6 +1258,7 @@ class C1Model extends LlmAdapter {
     this.markdownFileProbe = markdownFileProbe
     this.po4c = po4c
     this.probeRegistry = probeRegistry
+    this.subprocessProbe = subprocessProbe
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
@@ -1341,6 +1366,48 @@ class C1Model extends LlmAdapter {
     if (registry !== undefined) this.record('live-registry', registry)
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
+
+    if (this.scenario === 'host-default-environment') {
+      // The ONLY authored markers this scenario accepts. Each maps to a fixed
+      // harmless command below; no prompt text can become a command.
+      const background = userText.includes('pr1-background-probe')
+      const foreground = userText.includes('pr1-foreground-probe')
+      const subprocess = userText.includes('pr1-subprocess-probe')
+      if (subprocess && !this.toolIssued.has(`pr1-subprocess-${sessionId}`)) {
+        this.toolIssued.add(`pr1-subprocess-${sessionId}`)
+        if (this.subprocessProbe === undefined) {
+          throw new Error('m4-c1-host-work: host-default-environment requires the ctx.subprocess probe')
+        }
+        await this.subprocessProbe(sessionId)
+      } else if ((background || foreground) && !this.toolIssued.has(`pr1-${background ? 'background' : 'foreground'}-${sessionId}`)) {
+        this.toolIssued.add(`pr1-${background ? 'background' : 'foreground'}-${sessionId}`)
+        const args = background
+          ? { command: PR1_BACKGROUND_COMMAND, description: 'Run the Host PATH probe in the background', run_in_background: true }
+          : { command: PR1_FOREGROUND_COMMAND, description: 'Run the Host PATH probes' }
+        yield {
+          type: 'block-start',
+          index: 0,
+          blockType: 'tool-call',
+        }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `pr1-${background ? 'background' : 'foreground'}-${sessionId}`,
+            name: 'bash',
+            arguments: JSON.stringify(args),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `host-default-environment answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `host-default-environment answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
 
     if (this.scenario === 'acp-transient') {
       // A provider whose streamed text IS its committed text: the two deltas
@@ -2474,10 +2541,29 @@ export async function apply(ctx) {
         selfAgentLive: agentIds.includes(sessionId),
       }
     }
+  // PR1: one REAL bare-command spawn through the official `ctx.subprocess`
+  // service. It is the same provider `dsh-tool-bash` uses; this fixture never
+  // substitutes the executor or its credential/PATH scrub.
+  const subprocessProbe = scenario === 'host-default-environment'
+    ? async sessionId => {
+        const subprocess = ctx.get('subprocess')
+        if (subprocess === undefined) throw new Error('m4-c1-host-work: the official ctx.subprocess service is unavailable')
+        const handle = subprocess.spawn({
+          argv: ['dsh-pr1-user-probe'],
+          cwd: root,
+          stdio: { stdin: 'ignore', stdout: { maxBytes: 8192 }, stderr: { maxBytes: 8192 } },
+          graceMs: 10_000,
+        })
+        const outcome = await handle.done
+        const stdout = handle.collected.stdout === undefined ? '' : handle.collected.stdout.readFrom(0).text
+        const stderr = handle.collected.stderr === undefined ? '' : handle.collected.stderr.readFrom(0).text
+        record('subprocess-probe', { sessionId, exitCode: outcome.exitCode, signal: outcome.signal, stdout, stderr })
+      }
+    : undefined
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry)
+  }, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry, subprocessProbe)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 

@@ -181,6 +181,25 @@ supported Daemon platform in this contract.
   `stop`/`restart`/`uninstall` never boot it out or replace it; only a
   not-running, PID-less loaded definition is safe to unload.
 
+## Host startup environment
+
+The real Linux/macOS Host entry performs ONE startup environment bootstrap
+before the official profile boot snapshots `process.env`: it appends the
+common user and platform tool directories that already exist (the user home's
+`.local/bin` and `bin`, the mise/asdf shims, the Cargo/Go/Volta/Bun/pnpm
+directories and the platform package-manager plus system directories) to the
+PATH inherited from the OS manager or the detached launcher. The inherited PATH
+keeps its exact bytes and order, so an explicitly configured service PATH keeps
+precedence and a same-name system tool may win; only `process.env.PATH`
+changes, no shell, Client or Profile environment is imported, and the service
+definition, manager identity and other environment variables are untouched.
+`DSH_PI_TUI_HOST_PATH_MODE=inherit` in the ACTUAL Host environment disables the
+augmentation completely; unset or `augment` is the default, and any other value
+is a fixed startup failure. The bootstrap runs once on a Linux/macOS Host cold
+start (systemd, launchd, detached and internal process qualification); Direct,
+Client and Windows paths never run it, and a candidate directory that appears
+later requires a Host restart to be adopted.
+
 ## Host log emission contract
 
 The Host process owns the bytes written to its stdout/stderr sinks; `daemon
