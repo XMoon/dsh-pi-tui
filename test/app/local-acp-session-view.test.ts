@@ -6851,3 +6851,96 @@ test('a failed catalog re-read retains the last delivered complete catalog and l
   const names = (view.catalogNotifications[1] as { availableCommands: Array<{ name: string }> }).availableCommands.map(row => row.name)
   assert.deepEqual(names, ['compact', 'feedback'])
 })
+
+test('a compact settled through end but held before flush is not aborted by a late cancel', async () => {
+  const view = projectionView('CMP7')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  let startSeq = 0
+  let summarySeq = 0
+  let endSeq = 0
+  view.access.executeManualCompactImpl = async (_agent, _session, signal) => {
+    view.commit('compaction/start', { compactionId: 'c7', turn: null })
+    startSeq = view.lastSeq()
+    view.commit('compaction/summary', {
+      compactionId: 'c7', summary: [{ type: 'text', text: 'summary' }],
+      shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 1,
+      provider: 'p', model: 'm',
+    })
+    summarySeq = view.lastSeq()
+    view.commit('compaction/end', { compactionId: 'c7', turn: null })
+    endSeq = view.lastSeq()
+    entered.resolve()
+    await release.promise
+    assert.equal(signal.aborted, false, 'the end-before-flush window is not a cancellation boundary')
+    return { compactionId: 'c7', startSeq, summarySeq, endSeq, shadowedSeqs: [1], shadowedTokenCount: 1 }
+  }
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMP7', prompt: [{ type: 'text', text: '/compact' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  view.registry.cancelSession(view.conn, view.access, 'CMP7')
+  await Promise.resolve()
+  assert.equal(view.access.manualCompactCalls[0]?.signal.aborted, false)
+  release.resolve()
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
+
+test('a failed command result notification is OUTPUT_FAILED, never a business cancellation or retry', async () => {
+  const view = projectionView('CMD5')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'Feedback recorded.' } })
+  await view.resume()
+  await assert.rejects(
+    view.registry.promptSession(
+      view.conn, view.access,
+      { sessionId: 'CMD5', prompt: [{ type: 'text', text: '/feedback hi' }] },
+      new AbortController().signal, false,
+      async () => { throw new Error('wire write failed') },
+    ),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_OUTPUT_FAILED',
+  )
+  assert.equal(view.access.standaloneCommandCalls.length, 1, 'the official command ran exactly once and was never retried')
+})
+
+test('Close during a held command never retires the scoped MCP lease before the original Promise', async () => {
+  const view = projectionView('CMD6', { mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.mountScopedMcpImpl = async (agent, session) => makeScopedLease(agent, session)
+  const retireCalls: string[] = []
+  const retire = deferred<void>()
+  view.access.retireScopedMcpImpl = async lease => {
+    retireCalls.push(lease.serverNames.join(','))
+    await retire.promise
+  }
+  const entered = deferred<void>()
+  const release = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  await view.load()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD6', prompt: [{ type: 'text', text: '/feedback held' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  let closed = false
+  const closing = view.registry.closeSession(view.conn, view.access, 'CMD6').then(value => {
+    closed = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(closed, false)
+  assert.deepEqual(retireCalls, [], 'the MCP lease is not retired before the command terminal')
+  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await closing, {})
+  await waitUntil(() => retireCalls.length === 1, 'the exact MCP lease retires after the command terminal')
+  retire.resolve()
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
