@@ -3423,3 +3423,53 @@ test('an old roster cannot delete a Session created and retired during its scan'
     await ctx.fiber.dispose()
   }
 })
+
+test('a normal live drain uses the index status predicate, not a checkpoint scan', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r803-')
+  const source = mutableSource('/repo/r803', 'r803')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number; listSessions(): unknown[] }
+  }
+  const event = {
+    type: 'agent/inbox/spliced',
+    seq: 3,
+    time: 18_000,
+    data: {
+      target: 'next-turn',
+      start: 3,
+      inserted: [{
+        id: 'r803-live',
+        role: 'user',
+        content: [{ type: 'text', text: 'r803 normal live event' }],
+        source: { kind: 'user', rpcId: 'rpc-r803' },
+      }],
+    },
+  }
+  const realList = internals.index.listSessions.bind(internals.index)
+  let listCalls = 0
+  try {
+    await waitDirectReady(service)
+    internals.index.listSessions = () => {
+      listCalls += 1
+      return realList()
+    }
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+    await waitDirectReady(service)
+    assert.equal(internals.index.occurrenceCount(), 3)
+    assert.equal(listCalls, 0, 'the writer completeness path must not materialize all checkpoint rows')
+    const hit = await service.search({ scope: 'all', query: 'r803 normal live event', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    internals.index.listSessions = realList
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})

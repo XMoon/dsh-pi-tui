@@ -2539,12 +2539,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (this.hasUnheldPending()) this.enqueueDrain()
       return
     }
-    const checkpoints = this.index.listSessions()
-    if (checkpoints.some(checkpoint => checkpoint.dirty)) {
+    const incomplete = this.index.incompleteReason()
+    if (incomplete === 'dirty') {
       this.state = { kind: 'incomplete', reason: 'reconciling' }
       return
     }
-    if (checkpoints.some(checkpoint => checkpoint.uncertainSources > 0)) {
+    if (incomplete === 'uncertain') {
       this.state = { kind: 'incomplete', reason: 'source-uncertain' }
       return
     }
