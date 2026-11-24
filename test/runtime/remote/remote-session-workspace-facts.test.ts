@@ -16,6 +16,7 @@ import test from 'node:test'
 import {
   ACTIVITY_READ_CAPACITY,
   ACTIVITY_RECHECK_MS,
+  WORKSPACE_RESUME_TIMEOUT_MS,
   RemoteSessionWorkspaceFacts,
   type RemoteStreamItemLike,
   SESSION_FACTS_READ_CONCURRENCY,
@@ -838,7 +839,7 @@ function scriptedWorkspaceStream(
     readonly carrierFailed?: (error: Error) => void
   }) => readonly { readonly generation: number; readonly frame: RemoteWorkspaceFollowFrameLike }[],
   onItem?: (generation: number) => void,
-  options: { readonly emitCarrierFailure?: boolean } = {},
+  behaviour: { readonly emitCarrierFailure?: boolean; readonly stall?: boolean } = {},
 ): {
   readonly source: RemoteSessionWorkspaceFactsSource['workspaceStream']
   readonly accepted: number[]
@@ -846,7 +847,7 @@ function scriptedWorkspaceStream(
   readonly carrierFailures: Error[]
   readonly disposed: () => number
 } {
-  const emitCarrierFailures = options.emitCarrierFailure !== false
+  const emitCarrierFailures = behaviour.emitCarrierFailure !== false
   const accepted: number[] = []
   const carrierFailures: Error[] = []
   let lastOptions: Parameters<RemoteSessionWorkspaceFactsSource['workspaceStream']['stream']>[0] | undefined
@@ -876,6 +877,11 @@ function scriptedWorkspaceStream(
               accepted.push(item.generation)
             },
           }
+        }
+        if (behaviour.stall === true) {
+          // The physical carrier is lost with NO further item: a real
+          // reconnect delivers or a truthful terminal failure ends the follow.
+          options.carrierFailed?.(new TestRemoteStreamCarrierError('api gateway: Remote stream WebSocket closed'))
         }
         await live
       })()
@@ -1044,7 +1050,9 @@ test('UA-11 the exact state sample establishes running only while list/status ha
 
 test('UA-11 a measured none row leaves the active recheck set; a running row keeps ONE bounded recheck', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const settle = async (): Promise<void> => { await new Promise<void>(resolve => setImmediate(resolve)) }
+  // Node's mock timers do not touch setImmediate: this flushes the pending
+  // promise chain between two virtual clock advances.
+  const flushTurns = async (): Promise<void> => { await new Promise<void>(resolve => setImmediate(resolve)) }
   // A) The only active reason is local eligibility; the exact pair proves
   //    `none`, then the eligibility is revoked. Nothing keeps it active.
   const idleHarness = harness({
@@ -1062,11 +1070,11 @@ test('UA-11 a measured none row leaves the active recheck set; a running row kee
     observation.setPriorityIds(new Set())
     await waitFor(() => idleHarness.stateCalls.length === measured + 1, 'the revoked id is re-read once')
     const settled = idleHarness.stateCalls.length
-    await settle()
+    await flushTurns()
     t.mock.timers.tick(ACTIVITY_RECHECK_MS)
-    await settle()
+    await flushTurns()
     t.mock.timers.tick(ACTIVITY_RECHECK_MS)
-    await settle()
+    await flushTurns()
     assert.equal(idleHarness.stateCalls.length, settled,
       'a measured none row must leave the active set instead of being sampled every 20 s forever')
   })
@@ -1080,7 +1088,7 @@ test('UA-11 a measured none row leaves the active recheck set; a running row kee
   await withObservation(runningHarness, async (observation) => {
     observation.setRoster([activityRow('run')], 1, undefined)
     await waitFor(() => runningHarness.stateCalls.length === 1, 'the first priority sample lands')
-    await settle()
+    await flushTurns()
     t.mock.timers.tick(ACTIVITY_RECHECK_MS)
     await waitFor(() => runningHarness.stateCalls.length === 2, 'the active row keeps ONE bounded recheck')
   })
@@ -1125,4 +1133,28 @@ test('UA-12 a recovering follow adopts a Connection replacement and keeps the ne
     { type: 'upsert', workspace: { workspaceId: 'extra', path: '/host/extra', title: 'Workspace extra', sessionIds: [] } },
   ])
   assert.deepEqual(stream.accepted, [1, 2], 'both physical generations accept their own baseline')
+})
+
+test('UA-12 a recovering follow that never resumes after a carrier loss fails truthfully at the bounded deadline', async (t) => {
+  const stream = scriptedWorkspaceStream(() => [
+    { generation: 1, frame: { type: 'baseline', value: { items: [workspaceView('old')] } } },
+  ], undefined, { stall: true })
+  const h = harness({ workspaceStream: stream.source })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  const iterator = handle[Symbol.asyncIterator]()
+  const baseline = await iterator.next()
+  assert.deepEqual(baseline.value, {
+    type: 'baseline',
+    items: [{ workspaceId: 'old', path: '/host/old', title: 'Workspace old', sessionIds: [] }],
+  })
+  const invalidated = await iterator.next()
+  assert.deepEqual(invalidated.value, { type: 'invalidated', reason: 'reconnecting' })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  // The physical generation is gone and no resumed item ever arrives: the
+  // follow must fail truthfully at the bounded deadline instead of hanging.
+  const pending = iterator.next()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  t.mock.timers.tick(WORKSPACE_RESUME_TIMEOUT_MS)
+  await assert.rejects(pending, /did not resume on the new Connection generation/)
+  handle.dispose()
 })

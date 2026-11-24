@@ -169,6 +169,11 @@ export const ACTIVITY_READ_CAPACITY = ACTIVITY_PRIORITY_CONCURRENCY + ACTIVITY_D
  *  while it stays active. Ordinary idle rows are never re-sampled. */
 export const ACTIVITY_RECHECK_MS = 20_000
 
+/** How long a `recovering` Workspace follow waits for the resumed official
+ *  stream to prove a fresh baseline after an invalidation. A stream that never
+ *  resumes is a truthful terminal failure, never an indefinite hang. */
+export const WORKSPACE_RESUME_TIMEOUT_MS = 20_000
+
 const PENDING_KINDS: readonly SessionPendingKind[] = ['question', 'approval', 'other']
 const USER_QUESTIONS_PROJECTION_KEY = 'userQuestions'
 const INBOX_PROJECTION_KEY = 'inbox'
@@ -1295,6 +1300,9 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   private readonly generationOff: (() => void) | undefined
   private readonly invalidations: WorkspaceInvalidatedReason[] = []
   private wake: (() => void) | undefined
+  /** When set, the resumed stream must prove a fresh baseline before this
+   *  instant or the follow fails truthfully. */
+  private resumeDeadline: number | undefined
   private disposed = false
 
   constructor(
@@ -1361,6 +1369,7 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     if (this.disposed) return
     if (this.invalidations.length > 0 && this.invalidations[this.invalidations.length - 1] === reason) return
     this.invalidations.push(reason)
+    this.resumeDeadline ??= Date.now() + WORKSPACE_RESUME_TIMEOUT_MS
     const wake = this.wake
     this.wake = undefined
     wake?.()
@@ -1459,11 +1468,24 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           yield* this.drainInvalidations()
           continue
         }
+        const deadline = this.resumeDeadline
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+        const deadlinePromise = deadline === undefined
+          ? new Promise<never>(() => {})
+          : new Promise<{ readonly kind: 'deadline' }>((resolve) => {
+            deadlineTimer = setTimeout(() => resolve({ kind: 'deadline' }), Math.max(0, deadline - Date.now()))
+          })
         const raced = await Promise.race([
           pending.then((result): { readonly kind: 'item'; readonly result: IteratorResult<RemoteStreamItemLike<RemoteWorkspaceFollowFrameLike>> } => ({ kind: 'item', result })),
           new Promise<{ readonly kind: 'wake' }>((resolve) => { this.wake = () => resolve({ kind: 'wake' }) }),
+          deadlinePromise,
         ])
+        clearTimeout(deadlineTimer)
         this.wake = undefined
+        if (raced.kind === 'deadline') {
+          this.resumeDeadline = undefined
+          throw new Error('the Host Workspace stream did not resume on the new Connection generation')
+        }
         if (raced.kind === 'wake') continue
         pending = undefined
         if (raced.result.done === true) return
@@ -1494,6 +1516,7 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           }
           item.accept()
           acceptedGeneration = item.generation
+          this.resumeDeadline = undefined
           yield frame
           continue
         }
