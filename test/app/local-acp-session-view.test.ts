@@ -3880,6 +3880,35 @@ test('a model change is refused as VIEW_BUSY while this View owns an unsettled p
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
 })
 
+test('a model change is refused as VIEW_BUSY while this View owns an unsettled command', async () => {
+  const view = projectionView('S-model-command')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  await view.resume()
+  const entered = deferred<void>()
+  const release = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  const command = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'S-model-command', prompt: [{ type: 'text', text: '/feedback held model' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  await assert.rejects(
+    view.registry.setModelOption(
+      view.conn, view.access,
+      { sessionId: 'S-model-command', configId: 'model', value: '["p1","b"]' },
+      new AbortController().signal,
+    ),
+    isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'),
+  )
+  assert.equal(view.access.selectModelCalls.length, 0, 'a held command blocks the Host model write')
+  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await command, { stopReason: 'end_turn' })
+})
+
 test('a prompt admitted while model validation is pending is rejected at the last View busy gate', async () => {
   const view = promptView('S-model-race')
   await view.attach()
@@ -6784,6 +6813,46 @@ test('a failed catalog re-read retains the last delivered complete catalog and l
   await waitUntil(() => view.catalogNotifications.length === 2, 'a later successful read publishes the replacement')
   const names = (view.catalogNotifications[1] as { availableCommands: Array<{ name: string }> }).availableCommands.map(row => row.name)
   assert.deepEqual(names, ['compact', 'feedback'])
+})
+
+test('a held catalog snapshot that loses its epoch never delivers its stale replacement', async () => {
+  const view = projectionView('CAT3')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.readNativeSkillsImpl = async () => ({ kind: 'available', cwd: '/w', skills: [] })
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the initial catalog is delivered')
+  const entered = deferred<void>()
+  const release = deferred<AcpNativeSkillCatalog>()
+  view.access.readNativeSkillsImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback', 'compact'])
+  view.registry.onCommandCatalogInvalidated()
+  await entered.promise
+  // A newer invalidation lands while the first snapshot is held. The stale
+  // read must lose its epoch after the await; only the newest complete catalog
+  // may reach the client.
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  view.registry.onCommandCatalogInvalidated()
+  view.access.readNativeSkillsImpl = async () => ({ kind: 'available', cwd: '/w', skills: [] })
+  release.resolve({ kind: 'available', cwd: '/w', skills: [] })
+  await waitUntil(() => view.catalogNotifications.length === 2, 'the newest complete catalog is delivered')
+  const delivered = (view.catalogNotifications[1] as { availableCommands: Array<{ name: string }> })
+    .availableCommands.map(row => row.name)
+  assert.deepEqual(delivered, ['compact'], 'the stale held replacement never reaches the client')
+})
+
+test('session/load publishes the complete catalog for its exact attached Session', async () => {
+  const view = projectionView('CAT4', {
+    history: { header: { sessionId: 'CAT4', cwd: '/w' }, events: [] },
+  })
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  await view.load()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the load catalog is delivered')
+  const names = (view.catalogNotifications[0] as { availableCommands: Array<{ name: string }> })
+    .availableCommands.map(row => row.name)
+  assert.deepEqual(names, ['feedback'])
 })
 
 test('a compact settled through end but held before flush is not aborted by a late cancel', async () => {

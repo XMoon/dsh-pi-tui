@@ -2593,6 +2593,8 @@ export async function apply(ctx) {
             error: typeof event.data?.error === 'string' ? event.data.error : undefined,
             hasSummary: event.data?.summary !== undefined,
             hasCheckpoint: event.data?.checkpoint !== undefined,
+            commandId: typeof event.data?.commandId === 'string' ? event.data.commandId : undefined,
+            feedbackText: event.type === 'feedback/record' && typeof event.data?.text === 'string' ? event.data.text : undefined,
           })),
         })
         return

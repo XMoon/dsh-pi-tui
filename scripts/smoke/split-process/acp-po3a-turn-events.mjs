@@ -149,9 +149,19 @@ async function openAcpClient(scopeDir) {
   }
 }
 
-function sendRequest(client, id, method, params) {
+async function sendRequest(client, id, method, params) {
   client.send({ jsonrpc: '2.0', id, method, params })
-  return client.next(120_000)
+  const notifications = []
+  for (;;) {
+    const message = await client.next(120_000)
+    if (message?.id === id && (message.result !== undefined || message.error !== undefined)) {
+      // Notifications emitted before the response are part of the case's
+      // observable stream; put the raw messages back for later readers.
+      for (const notification of notifications.reverse()) client.queue.unshift(notification)
+      return message
+    }
+    notifications.push(message)
+  }
 }
 
 /**
@@ -637,8 +647,27 @@ export async function runAcpPo3aTurnEvents(context) {
     const { client: conn4 } = await openInitialized(scopeDir, 'G fourth connection')
     const resumeG2 = await sendRequest(conn4, 2, 'session/resume', { sessionId: sessionA, cwd: hostCwd })
     assert(resumeG2?.error === undefined, 'G: a new connection must attach Session A after the teardown')
-    assert(await conn4.silent(2_000),
-      'G: the old generation turn must never be replayed to the new View')
+    // PR3A adds the complete command catalog as the baseline attach update.
+    // It is not old-turn output; allow only that notification while still
+    // failing on any user/agent/tool frame from the disconnected generation.
+    const observedAfterResume = []
+    const silenceDeadline = Date.now() + 2_000
+    while (Date.now() < silenceDeadline) {
+      try {
+        observedAfterResume.push(await conn4.next(silenceDeadline - Date.now()))
+      } catch {
+        break
+      }
+    }
+    const unexpectedAfterResume = observedAfterResume.filter(message => {
+      if (message?.id !== undefined && (message.result !== undefined || message.error !== undefined)) return false
+      const catalog = message?.update?.sessionUpdate === 'available_commands_update'
+        || (message?.method === 'session/update'
+          && message.params?.update?.sessionUpdate === 'available_commands_update')
+      return !catalog
+    })
+    assert(unexpectedAfterResume.length === 0,
+      `G: the old generation turn must never be replayed to the new View (${JSON.stringify(unexpectedAfterResume)})`)
     await assertSameHost(identityBefore, 'G Host after the physical ACP disconnect')
     const closeG2 = await sendRequest(conn4, 3, 'session/close', { sessionId: sessionA })
     assert(closeG2?.error === undefined && typeof closeG2?.result === 'object',

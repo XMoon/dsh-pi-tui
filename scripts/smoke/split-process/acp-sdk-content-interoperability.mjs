@@ -231,16 +231,22 @@ function assistantMessage(flight) {
 }
 
 /** Compare complete typed text envelopes without printing private text on failure. */
-function assertTextChunks(updates, message, sessionId, messageId = updates[0]?.update?.messageId) {
+function assertTextChunks(updates, message, sessionId, messageId) {
   requireFact(message.content.every(block => block.type === 'text'), 'committed assistant text blocks')
-  // A streamed message is delivered under the attempt's own opaque ACP message
-  // id (the durable message id is not a wire id), so the stable identity is
-  // read from the delivered attempt and must hold for every chunk of it.
-  requireFact(typeof messageId === 'string' && messageId !== '', 'one stable ACP message id for the attempt')
+  // PR3A adds the baseline command catalog/config notifications to the attach
+  // window. They are not assistant content; compare the text chunks only.
+  const textUpdates = updates.filter(update => update.update?.sessionUpdate === 'agent_message_chunk')
+  const attemptId = messageId ?? textUpdates[0]?.update?.messageId
+  requireFact(typeof attemptId === 'string' && attemptId !== '', 'one stable ACP message id for the attempt')
   const expected = message.content.map(content => ({
-    sessionId, update: { sessionUpdate: 'agent_message_chunk', messageId, content },
+    sessionId, update: { sessionUpdate: 'agent_message_chunk', messageId: attemptId, content },
   }))
-  requireFact(isDeepStrictEqual(updates, expected), 'complete ordered typed text chunks equal the committed text bytes and one stable attempt message id')
+  requireFact(isDeepStrictEqual(textUpdates, expected), 'complete ordered typed text chunks equal the committed text bytes and one stable attempt message id')
+}
+
+function contentUpdates(updates) {
+  return updates.filter(params => params.update?.sessionUpdate !== 'available_commands_update'
+    && params.update?.sessionUpdate !== 'config_option_update')
 }
 
 function imageRef(block) {
@@ -470,23 +476,25 @@ async function outputScene(context) {
     // Transient contract: the two standard text deltas arrive as they stream and
     // the never-streamed durable image is appended at the exact-seq join, all
     // under ONE stable ACP message id (which may differ from the durable id).
-    requireFact(mixed.updates.length === 3 && mixed.updates.every(params => params.update.sessionUpdate === 'agent_message_chunk'),
+    const mixedUpdates = contentUpdates(mixed.updates)
+    requireFact(mixedUpdates.length === 3 && mixedUpdates.every(params => params.update.sessionUpdate === 'agent_message_chunk'),
       'two streamed text deltas plus the durable image, no more')
-    requireFact(new Set(mixed.updates.map(params => params.update.messageId)).size === 1,
-      `one attempt uses one stable ACP message id (got ${JSON.stringify(mixed.updates.map(params => params.update.messageId))})`)
+    requireFact(new Set(mixedUpdates.map(params => params.update.messageId)).size === 1,
+      `one attempt uses one stable ACP message id (got ${JSON.stringify(mixedUpdates.map(params => params.update.messageId))})`)
     for (const index of [0, 1]) {
-      assertTextChunks([mixed.updates[index]], { content: [message.content[index === 0 ? 0 : 2]] }, sessionId, mixed.updates[0].update.messageId)
+      assertTextChunks([mixedUpdates[index]], { content: [message.content[index === 0 ? 0 : 2]] }, sessionId, mixedUpdates[0].update.messageId)
     }
-    const mixedBytes = assertImage(mixed.updates[2].update.content, ref, proof)
-    requireFact(Buffer.byteLength(mixed.updates[2].update.content.data) > 256 * 1024, 'typed image logical payload exceeds 256 KiB')
+    const mixedBytes = assertImage(mixedUpdates[2].update.content, ref, proof)
+    requireFact(Buffer.byteLength(mixedUpdates[2].update.content.data) > 256 * 1024, 'typed image logical payload exceeds 256 KiB')
 
     const imageOnly = await run('po4c:assistant-image-only:v1', 'assistant image only with image input disabled')
     const onlyMessage = assistantMessage(imageOnly)
-    requireFact(isDeepStrictEqual(onlyMessage.content.map(block => block.type), ['image']) && imageOnly.updates.length === 1,
+    const onlyUpdates = contentUpdates(imageOnly.updates)
+    requireFact(isDeepStrictEqual(onlyMessage.content.map(block => block.type), ['image']) && onlyUpdates.length === 1,
       'one committed image-only assistant yields exactly one SDK notification')
-    requireFact(imageOnly.updates[0].update.sessionUpdate === 'agent_message_chunk'
-      && imageOnly.updates[0].update.messageId === onlyMessage.id, 'image-only committed message identity')
-    assertImage(imageOnly.updates[0].update.content, imageRef(onlyMessage.content[0]), proof)
+    requireFact(onlyUpdates[0].update.sessionUpdate === 'agent_message_chunk'
+      && onlyUpdates[0].update.messageId === onlyMessage.id, 'image-only committed message identity')
+    assertImage(onlyUpdates[0].update.content, imageRef(onlyMessage.content[0]), proof)
 
     const tool = await run('po4c:tool-content:v1', 'ordered tool result')
     const callEvents = tool.turnEvents.filter(event => event.type === 'tool/call')
@@ -496,19 +504,20 @@ async function outputScene(context) {
     const result = results[0].data.message
     requireFact(result.isError === false && result.toolCallId === call.callId, 'real successful tool result attribution')
     requireFact(isDeepStrictEqual(result.content.map(block => block.type), ['text', 'image', 'text']), 'ordered committed tool content')
-    requireFact(isDeepStrictEqual(tool.updates.map(params => params.update.sessionUpdate), ['tool_call', 'tool_call_update', 'agent_message_chunk']),
+    const toolUpdates = contentUpdates(tool.updates)
+    requireFact(isDeepStrictEqual(toolUpdates.map(params => params.update.sessionUpdate), ['tool_call', 'tool_call_update', 'agent_message_chunk']),
       'one tool start, one complete result and one final assistant chunk')
-    const start = tool.updates[0].update
+    const start = toolUpdates[0].update
     requireFact(start.toolCallId === call.callId && start.title === call.name && start.kind === 'other'
       && start.status === 'in_progress', 'standard tool start from committed tool/call')
-    const update = tool.updates[1].update
+    const update = toolUpdates[1].update
     requireFact(update.toolCallId === call.callId && update.status === 'completed' && update.content.length === 3, 'complete successful tool update')
     for (const index of [0, 2]) requireFact(isDeepStrictEqual(update.content[index], { type: 'content', content: result.content[index] }),
       'opaque tool text bytes remain complete and ordered')
     const toolRef = imageRef(result.content[1])
     requireFact(update.content[1].type === 'content', 'standard tool image content wrapper')
     assertImage(update.content[1].content, toolRef, await storeProof('tool.png'))
-    assertTextChunks(tool.updates.slice(2), assistantMessage(tool), sessionId)
+    assertTextChunks(toolUpdates.slice(2), assistantMessage(tool), sessionId)
 
     const failed = await run('po4c:tool-failed:v1', 'real failed tool status')
     const failedCall = failed.turnEvents.filter(event => event.type === 'tool/call')
@@ -516,16 +525,17 @@ async function outputScene(context) {
     requireFact(failedCall.length === 1 && failedResults.length === 1, 'one real failed tool call/result')
     const failedResult = failedResults[0].data.message
     requireFact(failedResult.isError === true && failedResult.toolCallId === failedCall[0].data.callId, 'official isError and exact failed callId')
-    requireFact(isDeepStrictEqual(failed.updates.map(params => params.update.sessionUpdate), ['tool_call', 'tool_call_update', 'agent_message_chunk']), 'failed tool update sequence')
-    requireFact(failed.updates[0].update.toolCallId === failedResult.toolCallId && failed.updates[0].update.status === 'in_progress'
-      && failed.updates[1].update.toolCallId === failedResult.toolCallId && failed.updates[1].update.status === 'failed', 'official failure becomes standard failed status')
-    assertTextChunks(failed.updates.slice(2), assistantMessage(failed), sessionId)
+    const failedUpdates = contentUpdates(failed.updates)
+    requireFact(isDeepStrictEqual(failedUpdates.map(params => params.update.sessionUpdate), ['tool_call', 'tool_call_update', 'agent_message_chunk']), 'failed tool update sequence')
+    requireFact(failedUpdates[0].update.toolCallId === failedResult.toolCallId && failedUpdates[0].update.status === 'in_progress'
+      && failedUpdates[1].update.toolCallId === failedResult.toolCallId && failedUpdates[1].update.status === 'failed', 'official failure becomes standard failed status')
+    assertTextChunks(failedUpdates.slice(2), assistantMessage(failed), sessionId)
 
     const missing = await run('po4c:missing-image:v1', 'missing verified Store object', 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED')
     const missingRef = imageRef(assistantMessage(missing).content[0])
     const missingProof = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4c-missing-image-rejected'
       && event.attachmentId === missingRef.attachmentId && event.pid === identity.hostPid, 'SDK official missing object rejection')
-    requireFact(missingProof.code === 'ATTACHMENT_NOT_FOUND' && missing.updates.length === 0, 'absent Store object sends no image or partial assistant event')
+    requireFact(missingProof.code === 'ATTACHMENT_NOT_FOUND' && contentUpdates(missing.updates).length === 0, 'absent Store object sends no image or partial assistant event')
     const healthy = await run('po4c:health', 'healthy after missing Store object')
     assertTextChunks(healthy.updates, assistantMessage(healthy), sessionId)
     return {

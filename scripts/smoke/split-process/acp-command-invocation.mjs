@@ -170,6 +170,11 @@ export async function runAcpCommandInvocation(context) {
         `${label} acp-access`, 120_000)
     }
     const settle = promise => promise.then(value => ({ value }), error => ({ error }))
+    const promptEvidence = () => {
+      const path = installation.surfaceLlm?.promptEvidencePath
+      if (typeof path !== 'string') return []
+      return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    }
     const captureError = async (label, promise) => {
       const outcome = await promise
       if (outcome.error !== undefined) return outcome.error
@@ -284,6 +289,32 @@ export async function runAcpCommandInvocation(context) {
       .map(update => update.content?.text ?? '')
       .join('')
     assert(feedbackText.includes('Feedback'), `CMD-06: the official feedback result text must reach the client (${JSON.stringify(feedbackText)})`)
+    const feedbackCommandId = commandEvents(feedbackEvents, 'feedback')[0]?.data?.commandId
+
+    // CMD-01: the official handler's blank-input refusal is a real business
+    // failure and writes no feedback record. The same durable facts are then
+    // re-read through the official `ctx.sessionQuery.readSession`, not the raw
+    // event file alone.
+    const beforeBlankFeedback = hostSessionEvents(dshHome, sessionId).length
+    const blankFeedback = await settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: promptText('/feedback'),
+    }))
+    assert(blankFeedback.error?.data?.code === 'LOCAL_ACP_COMMAND_FAILED',
+      `CMD-01: blank /feedback must be the official handler refusal (${JSON.stringify(blankFeedback.value ?? blankFeedback.error?.data)})`)
+    const blankFeedbackEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(beforeBlankFeedback)
+    assert(!blankFeedbackEvents.some(event => event.type === 'feedback/record'),
+      'CMD-01: a refused blank /feedback never writes a feedback/record')
+    await lifecycleAction('flush-now', sessionId, 'lifecycle-flush-complete',
+      'CMD-01 flush before the official Session Query readback')
+    const feedbackQuery = await lifecycleAction('cold-read', sessionId, 'lifecycle-cold-read',
+      'CMD-01 official sessionQuery feedback readback')
+    const feedbackQueryEvents = feedbackQuery.events ?? []
+    assert(feedbackQueryEvents.some(event => event.type === 'feedback/record' && event.feedbackText === FEEDBACK_TEXT),
+      `CMD-01: official Session Query must expose the feedback record (${JSON.stringify(feedbackQueryEvents.slice(-8))})`)
+    assert(feedbackQueryEvents.some(event => event.type === 'command/run' && event.commandId === feedbackCommandId)
+      && feedbackQueryEvents.some(event => event.type === 'command/done' && event.commandId === feedbackCommandId),
+    `CMD-01: official Session Query must pair command/run+done for the feedback id (${JSON.stringify(feedbackQueryEvents.slice(-10))})`)
 
     // TUI-01: a REAL Shared TUI is attached to the same Host Session while
     // ACP executes the command. The TUI transcript paints the official
@@ -946,6 +977,7 @@ export async function runAcpCommandInvocation(context) {
     // SKL-01: the ordinary prompt path is the native loader path; the durable
     // injection is the official `skill-invocation` source, never a fabricated
     // ACP body and never a second loader.
+    const skillEvidenceStart = promptEvidence().length
     const skill = await client.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt: promptText(`/${SKILL_NAME}`),
@@ -956,6 +988,12 @@ export async function runAcpCommandInvocation(context) {
       && event.data?.source?.kind === 'skill-invocation'
       && event.data?.source?.name === SKILL_NAME)
     assert(injection !== undefined, `CMD-10: the official pre-step must inject ${SKILL_NAME} (${JSON.stringify(skillEvents.slice(-8))})`)
+    const skillPromptRecords = promptEvidence().slice(skillEvidenceStart)
+    assert(skillPromptRecords.some(record => typeof record.userText === 'string'
+      && record.userText.includes('# ACP command smoke Skill')),
+    `CMD-10: the real provider must receive the official Skill body marker (${JSON.stringify(skillPromptRecords)})`)
+    assert(!skillEvents.some(event => event.type === 'command/run' && event.data?.name === SKILL_NAME),
+      'CMD-10: the human-only Skill is never a Host command route')
 
     // ROUTE-01: an unknown slash remains ordinary prose, never a command.
     const beforeUnknown = commandEvents(hostSessionEvents(dshHome, sessionId), 'unknown').length
