@@ -1065,6 +1065,7 @@ test('the production Host command access binds only the audited identities and t
   // The standard composition mounts tool-skill against the global skills
   // service; when the retained scope publishes no scoped service that global
   // registry is the effective authority.
+  skillsSnapshot = { ...skillsSnapshot, complete: true }
   scopedSkills = undefined
   assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), {
     kind: 'available',
