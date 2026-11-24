@@ -626,10 +626,10 @@ export class HistorySearchIndex {
   }
 
   /**
-   * O(1)-bound status probe for the short-writer completeness check. It never
-   * materializes checkpoint rows: the EXISTS probes are evaluated by SQLite and
-   * return at most one scalar row. This replaces the corpus-sized
-   * `listSessions().some(...)` scan on the Owner write tail.
+   * Fixed-size status result for the short-writer completeness check. The
+   * EXISTS probes are evaluated by SQLite without materializing checkpoint rows
+   * in JavaScript. This replaces the corpus-sized `listSessions().some(...)`
+   * scan on the Owner write tail.
    */
   incompleteReason(): 'dirty' | 'uncertain' | undefined {
     this.assertOpen()
@@ -657,14 +657,6 @@ export class HistorySearchIndex {
       this.db.prepare('DELETE FROM history_sessions WHERE session_id = ?').run(sessionId)
     })
     if (removedOccurrences > 0) this.contentRevision += 1
-  }
-
-  /** Delete every derived Session not present in the authoritative set. */
-  deleteSessionsExcept(keep: ReadonlySet<string>): string[] {
-    const existing = this.listSessions().map(row => row.sessionId)
-    const removed = existing.filter(sessionId => !keep.has(sessionId))
-    for (const sessionId of removed) this.deleteSession(sessionId)
-    return removed
   }
 
   /** Drop one Session's derived rows before a full rebuild from its official log. */
