@@ -1245,7 +1245,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
         createModelsPage,
         createAccountPage,
-        createHostNumericSettingsPage: (kind, done, onAuthoritativeChange) => {
+        createHostNumericSettingsPage: (kind, done, onAuthoritativeChange, entry) => {
           const requestRender = (): void => { if (!app.isDisposed()) app.requestRender() }
           const runOwnedTask = (label: string, task: () => Promise<void>): void => {
             runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId })
@@ -1263,18 +1263,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               controller,
               fields,
               spec: {
-                title: 'Agent loop',
+                title: 'Parallel tool calls',
+                commitMode: 'single',
+                // SUX-01: the single-value Detail tenant paints ONE current
+                // value, its effect sentence and the Advanced disclosure; the
+                // staged Apply/Save form below belongs to the Shell route only.
                 sourceHeading: source => source.kind === 'ready'
                   ? `Host profile · effective settings · revision ${source.revision}`
                   : `Host profile · ${source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
-                help: [
-                  'The effective value is the current official agent-loop setting; Differs from base compares it with the inherited base.',
-                  'The next Agent step samples the new parallel cap. Tool calls already dispatched are never rewritten.',
-                  'Reset stages the official unset operation and then shows the Host readback; the USER patch may keep the inherited value.',
-                ],
+                help: [],
+                effect: 'Applies to the next Agent step.',
+                dispatched: 'Already dispatched calls are unchanged.',
+                scope: 'Host profile · every agent on this Host',
               },
               requestRender,
               done,
+              entryIntent: entry === 'details' ? 'details' : 'change',
             })
           }
           const shell = runner.config.shellExecutionSettings
@@ -4437,22 +4441,21 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           },
         },
         {
-          // FR5-B: the ONE Agent-loop numeric specialist entry. The page stages
-          // the official `agent-loop.maxParallelToolCalls` field; this row never
-          // writes it directly.
+          // SUX-01: the ONE Agent-loop single-value setting. It is edited INSIDE
+          // the real Detail pane (its `id`/category/order/specialist tag stay the
+          // documented internal identity); this row itself never writes anything.
           id: 'agent-loop',
           category: 'agent',
-          label: 'Agent loop',
+          label: 'Parallel tool calls',
           summary: agentLoopSettings.kind === 'ready'
-            ? `Parallel tool calls: ${agentLoopSettings.effective.maxParallelToolCalls}`
-            : `Parallel tool calls: ${agentLoopSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'}`,
+            ? String(agentLoopSettings.effective.maxParallelToolCalls)
+            : agentLoopSettings.kind === 'unavailable' ? 'Unavailable' : 'Unreadable',
           scope: 'Host profile · effective official settings',
           freshness: agentLoopSettings.kind === 'ready'
             ? configReadiness === 'ready' ? 'ready' : 'last-known'
             : agentLoopSettings.kind === 'unavailable' ? 'unavailable' : 'read-error',
-          description: 'Stage the official agent-loop parallel tool-call cap in one page, then Save. '
-            + 'The next Agent step reads the new cap; tool calls already dispatched are unchanged. '
-            + 'Reset sends the official field unset and shows the Host readback.',
+          description: 'Maximum concurrent tool calls per Agent step. '
+            + 'The next Agent step uses this value; already dispatched calls are unchanged.',
           specialist: 'agent-loop-settings',
         },
         {

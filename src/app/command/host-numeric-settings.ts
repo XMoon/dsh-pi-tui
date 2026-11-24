@@ -260,13 +260,27 @@ export class HostNumericSettingsController<T extends object> {
     for (const field of this.deps.fields) this.texts.set(field.key, String(source.effective[field.key]))
   }
 
-  private numberValid(key: keyof T & string, text: string): boolean {
-    if (text.trim() === '') return false
+  /**
+   * The field's own text contract: `undefined` = accepted, otherwise the REAL
+   * reason the text is refused (the caller paints it next to the field). One
+   * implementation serves the draft validation AND the single-value page's
+   * pre-stage check, so no second numeric rule set can appear.
+   */
+  numberIssue(key: keyof T & string, text: string): string | undefined {
+    if (text.trim() === '') return 'Value is required.'
     const field = this.deps.fields.find(candidate => candidate.key === key)
-    if (field?.validate !== undefined) return field.validate(text)
-    if (!/^\d+$/u.test(text.trim())) return false
+    if (field?.validate !== undefined) {
+      return field.validate(text) ? undefined : field.invalidHint ?? 'Enter a positive finite number.'
+    }
+    if (!/^\d+$/u.test(text.trim())) return field?.invalidHint ?? 'Enter a safe positive integer (1 or greater).'
     const value = Number(text)
     return Number.isSafeInteger(value) && value >= 1
+      ? undefined
+      : field?.invalidHint ?? 'Enter a safe positive integer (1 or greater).'
+  }
+
+  private numberValid(key: keyof T & string, text: string): boolean {
+    return this.numberIssue(key, text) === undefined
   }
 
   private validate(): boolean {

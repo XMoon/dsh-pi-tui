@@ -410,7 +410,7 @@ const CASE_REGISTRY = Object.freeze([
   Object.freeze({
     suite: 'host-settings',
     id: 'host-settings.fr5b',
-    title: 'two authenticated Split Clients save the migrated General preferences, the session-log switch, the Agent-loop page and the active-shell caps, and refuse a stale two-Client revision',
+    title: 'two authenticated Split Clients save the Host category next-start preferences, the session-log switch, the single-value Agent-loop page and the active-shell caps, and refuse a stale two-Client revision',
     run: runHostNumericSettingsFr5B,
   }),
   Object.freeze({

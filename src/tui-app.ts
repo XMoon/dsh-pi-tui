@@ -2057,11 +2057,13 @@ export interface SettingsWorkspaceOpenOptions {
     onAuthoritativeChange: () => void,
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
   /** FR5-B: the one numeric page shared by the Agent-loop and Shell-execution
-   *  Settings rows, in the SAME Settings lease. */
+   *  Settings rows, in the SAME Settings lease. SUX-01: the Agent-loop route is
+   *  the inline Detail tenant and consumes the Root's explicit entry intent. */
   readonly createHostNumericSettingsPage?: (
     kind: 'agent-loop' | 'shell-execution',
     done: () => void,
     onAuthoritativeChange: () => void,
+    entry?: 'change' | 'details',
   ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
   /**
    * C2-R4: the ONE embedded Web Search / Fetch settings page factory. It is

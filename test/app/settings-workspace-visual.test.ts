@@ -272,6 +272,12 @@ interface HarnessOptions {
   agentLoop?: { readonly maxParallelToolCalls: number; readonly inherited?: number; readonly unreadable?: boolean }
   /** Make the Agent-loop mutation reject with this reason. */
   agentLoopWriteFailure?: string
+  /** Hold an ADMITTED Agent-loop mutation (the real in-flight write window). */
+  agentLoopWriteGate?: () => Promise<void>
+  /** Apply the Agent-loop mutation but answer `outcome-unconfirmed` (lost ACK). */
+  agentLoopUnconfirmed?: boolean
+  /** Accept the Agent-loop mutation without applying it (readback disagrees). */
+  agentLoopIgnoreWrite?: boolean
   /** FR5-B: the ACTIVE Host shell executor row (absent = unavailable). */
   shellExecution?: {
     readonly executor: 'bash' | 'pwsh'
@@ -518,6 +524,12 @@ interface Harness {
   readonly subagentLimitsWrites: () => readonly { maxDepth?: number; maxActiveSubagents?: number }[]
   /** FR5-B: every Agent-loop field write, in dispatch order. */
   readonly agentLoopWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every EXPLICIT Agent-loop refresh the page requested. */
+  readonly agentLoopRefreshes: () => number
+  /** Advance the fake Agent-loop revision without a write (another writer). */
+  readonly advanceAgentLoopRevision: () => void
+  /** Replace the fake Agent-loop Host generation (a Host A -> B replacement). */
+  readonly replaceAgentLoopGeneration: () => void
   /** FR5-B: every active-shell field write, in dispatch order. */
   readonly shellExecutionWrites: () => readonly HostSectionWrite[]
   /** FR5-B: every session-log field write, in dispatch order. */
@@ -622,7 +634,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const limitsBase = { maxDepth: 1, maxActiveSubagents: 8 }
   // FR5-B: the official Agent-loop, active-shell and session-log sections. A
   // section the case does not supply is genuinely absent (no fabricated default).
-  const agentLoopGeneration = {}
+  let agentLoopGeneration: object = { host: 'agent-loop-a' }
   let agentLoopRevision = 1
   let agentLoopValue: { maxParallelToolCalls: number; inherited: number; unreadable?: boolean } | undefined =
     options.agentLoop === undefined ? undefined : {
@@ -631,6 +643,10 @@ function setup(options: HarnessOptions = {}): Harness {
       ...(options.agentLoop.unreadable === true ? { unreadable: true } : {}),
     }
   const agentLoopWrites: HostSectionWrite[] = []
+  let agentLoopRefreshes = 0
+  const agentLoopWriteGate = (): Promise<void> => options.agentLoopWriteGate === undefined
+    ? Promise.resolve()
+    : options.agentLoopWriteGate()
   const shellGeneration = {}
   let shellRevision = 1
   let shellValue: {
@@ -1213,7 +1229,7 @@ function setup(options: HarnessOptions = {}): Harness {
             overridden: { maxParallelToolCalls: agentLoopValue.maxParallelToolCalls !== agentLoopValue.inherited },
           }
         },
-        refresh: async () => {},
+        refresh: async () => { agentLoopRefreshes += 1 },
         mutate: async (
           patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').AgentLoopSettings>,
           revision: number,
@@ -1228,14 +1244,25 @@ function setup(options: HarnessOptions = {}): Harness {
           if (options.agentLoopWriteFailure !== undefined) {
             return { kind: 'rejected' as const, reason: options.agentLoopWriteFailure }
           }
+          // An ADMITTED write can be held: the Saving latch and every refusal of
+          // a duplicate request are observed across a real in-flight mutation.
+          // The dispatch itself is recorded BEFORE the hold: the request really
+          // left the Client.
+          const applied = edit.kind === 'reset' ? agentLoopValue.inherited : edit.value
           agentLoopWrites.push(edit.kind === 'reset'
             ? { field: 'maxParallelToolCalls', op: 'reset' }
             : { field: 'maxParallelToolCalls', op: 'set', value: edit.value })
-          agentLoopValue = {
-            ...agentLoopValue,
-            maxParallelToolCalls: edit.kind === 'reset' ? agentLoopValue.inherited : edit.value,
+          await agentLoopWriteGate?.()
+          if (agentLoopValue === undefined) return { kind: 'rejected' as const, reason: 'Agent loop is not mounted.' }
+          if (options.agentLoopIgnoreWrite !== true) {
+            agentLoopValue = { ...agentLoopValue, maxParallelToolCalls: applied }
+            agentLoopRevision += 1
           }
-          agentLoopRevision += 1
+          if (options.agentLoopUnconfirmed === true) {
+            // The Host applied the value but the reply was lost: the Client can
+            // only prove an ambiguous outcome.
+            return { kind: 'outcome-unconfirmed' as const, reason: 'the Host reply was lost' }
+          }
           return { kind: 'accepted' as const }
         },
       },
@@ -1461,6 +1488,9 @@ function setup(options: HarnessOptions = {}): Harness {
     subagentWrites: () => subagentWrites,
     subagentLimitsWrites: () => subagentLimitsWrites,
     agentLoopWrites: () => agentLoopWrites,
+    agentLoopRefreshes: () => agentLoopRefreshes,
+    advanceAgentLoopRevision: () => { agentLoopRevision += 1 },
+    replaceAgentLoopGeneration: () => { agentLoopGeneration = { host: 'agent-loop-b' } },
     shellExecutionWrites: () => shellExecutionWrites,
     sessionLogWrites: () => sessionLogWrites,
     advanceSessionLogRevision: () => { sessionLogRevision += 1 },
@@ -1632,9 +1662,18 @@ async function highlightRow(h: Harness, label: string): Promise<void> {
 }
 
 /** One Root-level pointer click on a painted control (press -> repaint -> release). */
+let lastPointerCell: { readonly row: number; readonly col: number; readonly at: number } | undefined
 async function clickPainted(h: Harness, text: string, last = false): Promise<void> {
   const row = last ? h.rowsPlain().length - 1 : rowOf(h, text)
   const col = cellIndexOf(h, row, text)
+  // The fork treats a second press on the SAME cell inside its multi-click
+  // window as a double-click and withholds the click. Two REAL gestures on the
+  // same control must be two clicks, so wait that window out.
+  if (lastPointerCell !== undefined && lastPointerCell.row === row && lastPointerCell.col === col) {
+    const remaining = 600 - (Date.now() - lastPointerCell.at)
+    if (remaining > 0) await new Promise<void>(resolve => setTimeout(resolve, remaining))
+  }
+  lastPointerCell = { row, col, at: Date.now() }
   press(h, row, col)
   // The Root requests a render after admitting a body press; the page's next
   // painted frame is what the release must resolve against.
@@ -2209,13 +2248,15 @@ test('Agent paints the single Subagent entry among its availability-gated rows a
     'Default permission',
     'Subagent settings',
     'User shell sandbox policy',
-    'Agent loop',
+    'Parallel tool calls',
   ].map(label => rows.findIndex(line => line.includes(label)))
   for (const [index, row] of order.entries()) {
     assert.ok(row >= 0, `Agent paints ${JSON.stringify(order[index])}:\n${h.view()}`)
   }
   assert.deepEqual([...order].sort((left, right) => left - right), order, 'the Agent rows keep the frozen order')
-  assert.match(h.view(), /Agent loop/u, 'the Agent loop specialist row is painted')
+  assert.match(h.view(), /Parallel tool calls\s+Unavailable/u,
+    'the Agent single-value row is painted with its TRUTHFUL state (no section is served here)')
+  assert.doesNotMatch(h.view(), /Agent loop/u, 'the retired visible name is gone')
   assert.doesNotMatch(h.view(), /Agent settings…/u, 'the legacy launcher is retired')
   // Browsing the rows (L1 -> L2 back) writes nothing at all.
   assert.equal(h.replacements(), 0, 'reading the Agent rows writes no document')
@@ -2666,54 +2707,1033 @@ test('the real Settings Root row and delegated spans complete the Subagent point
 
 // ── FR5-B: the numeric specialist pages and the General migration ──────────
 
-test('the real Root numeric Agent-loop page stages, saves, resets and discards through the official section', async () => {
-  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+test('the real Root Agent Detail tenant is entered explicitly and edits the cap with ONE Confirm', async () => {
+  const h = setup({ columns: 200, rows: 50, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
   await h.open('Agent')
   await key(h, '\r') // L0 -> L1
-  await clickPainted(h, 'Agent loop')
-  assert.match(h.view(), /Settings · Agent · Agent loop/u)
-  assert.match(h.view(), /Host profile · effective settings · revision 1/u)
-  assert.match(h.view(), /Parallel tool calls\s+10\s+\[Reset\]/u)
-  assert.match(h.view(), /Comparison: Differs from base/u)
-
-  // Root row/field click -> the page's own single-line edit -> painted Apply.
+  // A row click only SELECTS: no page, no Host read, no write.
   await clickPainted(h, 'Parallel tool calls')
-  assert.match(h.view(), /Edit Parallel tool calls/u)
-  await key(h, '\x15') // clear the captured value
-  await key(h, '4')
-  await clickPainted(h, 'Apply [Enter]', true)
-  assert.match(h.view(), /Parallel tool calls\s+4/u)
-  assert.equal(h.agentLoopWrites().length, 0, 'Apply only stages the field draft')
-  await clickPainted(h, 'Save [S]', true)
+  assert.match(h.view(), /Parallel tool calls\s+10/u, 'the row paints the authoritative effective value')
+  assert.doesNotMatch(h.view(), /Parallel tool calls:\s*\d/u,
+    `the retired label+summary repetition is gone:\n${h.view()}`)
+  assert.doesNotMatch(h.view(), /Current value/u, 'selection alone never mounts the tenant')
+  assert.doesNotMatch(h.view(), /Agent loop/u, 'the retired visible name is gone')
+  assert.equal(h.agentLoopWrites().length, 0)
+  // Tab is a PURE Rows -> Detail focus transfer: still no mount and no write.
+  await key(h, '\t')
+  assert.match(h.view(), /Change \[Enter\]/u, 'the Detail preview paints its explicit entry')
+  assert.match(h.view(), /Details…/u, 'and the scoped disclosure')
+  assert.doesNotMatch(h.view(), /Current value/u, 'Tab never mounts the page')
+  // The painted preview entry opens the SAME Detail pane; the first settled read
+  // goes straight to the raw Input (the typed entry intent is consumed once).
+  await clickPainted(h, 'Change [Enter]')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the same lease paints the tenant')
+  assert.match(h.view(), /Current value\s+10/u, 'the child paints the authoritative current value')
+  assert.match(h.view(), /Value:\s*/u, 'the explicit entry landed on the raw Input')
+  assert.match(h.view(), /Categories|Rows/u, 'the parent rail stays readable behind the tenant')
+  // ONE Confirm: digits + one painted Confirm is the WHOLE journey.
+  await key(h, '\x15')
+  await key(h, '3')
+  await clickPainted(h, 'Confirm [Enter]', true)
   await settle(h, 12)
-  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 4 }])
-  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 4, inherited: 2 })
-  assert.match(h.view(), /Status: Verified/u)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 3 }],
+    'one Confirm dispatches exactly ONE official field set')
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 3, inherited: 2 })
+  assert.match(h.view(), /Current value\s+3/u, 'the authoritative readback is painted in place')
+  assert.match(h.view(), /Verified/u, 'the ONE settlement feedback is shown once')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant stays mounted after success')
+  assert.doesNotMatch(h.view(), /Save \[S\]|Apply \[Enter\]/u, 'no second Apply/Save key exists')
+  // Back returns to the ORIGINAL Rows selection with the fresh summary.
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  assert.match(h.view(), /Parallel tool calls\s+3/u, 'the Row follows the official readback')
+  assert.equal(h.agentLoopWrites().length, 1, 'leaving never writes again')
+  h.dispose()
+})
 
-  // An explicit painted Reset stages the official unset; Save dispatches it.
-  await clickPainted(h, '[Reset]')
-  assert.match(h.view(), /Reset staged/u)
-  await clickPainted(h, 'Save [S]', true)
+test('an ordinary Detail click on the single-value preview only transfers focus', async () => {
+  for (const [columns, rows] of [[200, 50], [120, 40]] as const) {
+    const h = setup({ columns, rows, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+    await h.open('Agent')
+    await key(h, '\r')
+    await highlightRow(h, 'Parallel tool calls')
+    assert.doesNotMatch(h.view(), /Current value/u, 'selection alone never mounts')
+    // The preview's Detail column: an ordinary FACT cell and a BLANK cell are
+    // pure focus transfers — no tenant, no refresh, no raw Input.
+    const factRow = rowOf(h, 'Value')
+    const factCol = cellIndexOf(h, factRow, 'Value')
+    press(h, factRow, factCol)
+    await h.vt.waitForRender()
+    release(h, factRow, factCol)
+    await settle(h)
+    assert.match(h.view(), /\[Details\]/u, `the Detail column now owns the focus:\n${h.view()}`)
+    assert.doesNotMatch(h.view(), /Current value/u, 'a fact click never mounts the tenant')
+    assert.doesNotMatch(h.view(), /Refresh \[R\]/u, 'no tenant bar exists after a passive click')
+    assert.doesNotMatch(h.view(), /Value:\s/u, 'and the raw Input never opened')
+    const blankRow = rows - 6
+    press(h, blankRow, columns - 30)
+    await h.vt.waitForRender()
+    release(h, blankRow, columns - 30)
+    await settle(h)
+    assert.doesNotMatch(h.view(), /Current value/u, 'a blank Detail cell is the same pure transfer')
+    assert.doesNotMatch(h.view(), /Refresh \[R\]/u)
+    assert.deepEqual(h.agentLoopWrites(), [], 'no passive click ever writes')
+    // The explicit painted entries are the ONLY mount gestures.
+    await clickPainted(h, 'Change [Enter]')
+    assert.match(h.view(), /Current value\s+10/u, 'the explicit Change mounts the SAME tenant')
+    assert.match(h.view(), /Value:\s*/u, 'and lands on the raw Input')
+    assert.match(h.view(), /Confirm \[Enter\] · Cancel \[Esc\]/u, 'the tenant bar is the child-owned one')
+    h.dispose()
+  }
+})
+
+test('a held tenant gesture is refused across BOTH resize directions and cross owners', async () => {
+  const h = setup({ columns: 80, rows: 24, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x1b') // Cancel the entry Input -> the clean tenant
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant is mounted at 80x24')
+  assert.match(h.view(), /Details…/u)
+  // A) GROW: press INSIDE the tenant at 80x24, grow, and release on the SAME
+  // semantic target's ACTUAL new cells. The child origin moves (x=42 -> x=104),
+  // so only a real stale-gesture fence can refuse this — a hit miss would be no
+  // evidence at all.
+  const detailsRow = rowOf(h, 'Details…')
+  const detailsCol = cellIndexOf(h, detailsRow, 'Details…')
+  press(h, detailsRow, detailsCol)
+  await h.vt.waitForRender()
+  h.vt.resize(200, 50)
+  await h.vt.waitForRender()
+  const grownRow = rowOf(h, 'Details…')
+  const grownCol = cellIndexOf(h, grownRow, 'Details…')
+  assert.ok(grownRow !== detailsRow || grownCol !== detailsCol,
+    `the resize really moved the admitted target cells: ${detailsRow},${detailsCol} -> ${grownRow},${grownCol}`)
+  release(h, grownRow, grownCol)
+  await settle(h, 8)
+  assert.doesNotMatch(h.view(), /Effective/u, 'a straddling grow gesture never opens the disclosure')
+  assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'and never changes the parent selection')
+  // A fresh gesture at the NEW geometry works.
+  await clickPainted(h, 'Details…')
+  assert.match(h.view(), /Effective\s+10/u, 'a fresh gesture opens the Advanced disclosure')
+  await key(h, '?') // close the disclosure again
+  await settle(h, 4)
+  // B) CROSS OWNER: a parent press released inside the child body activates
+  // neither side; a child press released over a parent row changes nothing.
+  const rowRow = rowOf(h, 'Subagent settings')
+  press(h, rowRow, 40)
+  await h.vt.waitForRender()
+  release(h, rowRow, cellIndexOf(h, rowOf(h, 'Details…'), 'Details…'))
+  await settle(h, 6)
+  assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'a parent press never selects through the child body')
+  assert.doesNotMatch(h.view(), /> Subagent settings {2,}/u, 'the parent selection never moved')
+  assert.doesNotMatch(h.view(), /Effective/u, 'and never activates the child')
+  const bodyRow = rowOf(h, 'Details…')
+  const bodyCol = cellIndexOf(h, bodyRow, 'Details…')
+  press(h, bodyRow, bodyCol)
+  await h.vt.waitForRender()
+  release(h, rowRow, 40)
+  await settle(h, 6)
+  assert.match(h.view(), /Parallel tool calls {2,}10(?:\s|$)/u, 'the parent row selection is unchanged')
+  assert.doesNotMatch(h.view(), /> Subagent settings {2,}/u)
+  assert.doesNotMatch(h.view(), /Effective/u, 'the child body action is unchanged')
+  h.dispose()
+})
+
+test('a mounted tenant with a bar-only grant admits no hidden action', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x1b') // Cancel -> the clean tenant
+  await settle(h, 6)
+  const refreshesBefore = h.agentLoopRefreshes()
+  h.vt.resize(44, 2) // ZERO body rows: the child really gets a bar-only grant
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'the bar-only row paints ONLY the page Back')
+  await key(h, '\r')
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Value:/u, 'a hidden raw Input is never started')
+  await key(h, '?')
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Effective/u, 'a hidden disclosure is never opened')
+  await key(h, 'r')
+  await settle(h, 4)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'a hidden official refresh is never requested')
+  // A zero-body grant in BOTH layouts paints no parent pane and no body, so Tab
+  // and Shift+Tab may never focus a region the frame does not paint.
+  for (const [columns, rows] of [[200, 2], [100, 2]] as const) {
+    h.vt.resize(columns, rows)
+    await h.vt.waitForRender()
+    assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u)
+    await key(h, '\t')
+    await settle(h, 4)
+    assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, `${columns}x${rows}: Tab keeps the SAME tenant at a zero-grant frame`)
+    assert.doesNotMatch(h.view(), /Settings · Categories/u, `${columns}x${rows}: no invisible destination is focused`)
+    await key(h, '\x1b[Z') // Shift+Tab
+    await settle(h, 4)
+    assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, `${columns}x${rows}: Shift+Tab keeps the SAME tenant too`)
+    assert.doesNotMatch(h.view(), /Settings · Categories|Settings · Agent · Rows/u)
+    assert.doesNotMatch(h.view(), /Discard and leave|Leave anyway/u, 'a clean page opens no hidden question')
+    assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'no Tab direction refreshes')
+    assert.deepEqual(h.agentLoopWrites(), [], 'and none writes')
+  }
+  // The page's own Back is the ONE admitted action at this grant.
+  await key(h, '\x1b')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  // A restored grant paints the destination AND its fresh Tab really takes it.
+  h.vt.resize(160, 44)
+  await h.vt.waitForRender()
+  await key(h, '\r') // back into the tenant (the raw Input opens)
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u)
+  await key(h, '\x1b') // Cancel -> the CLEAN tenant
+  await settle(h, 4)
+  await key(h, '\t')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Categories/u, 'a VISIBLE Tab destination really takes focus')
+  assert.match(h.view(), /\[Categories \(10\)\]/u, 'and the rail is the focused pane')
+  // The other direction is symmetric: a visible Shift+Tab from the clean tenant
+  // steps back to the Rows pane it really paints.
+  await key(h, '\r') // rail -> Rows
+  await settle(h, 4)
+  await key(h, '\r') // the row -> the tenant Input
+  await settle(h, 6)
+  await key(h, '\x1b') // Cancel -> clean
+  await settle(h, 4)
+  await key(h, '\x1b[Z') // Shift+Tab
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u, 'a VISIBLE Shift+Tab destination really takes focus')
+  // From the Rows focus that Shift+Tab really produced, ONE explicit entry opens
+  // the tenant's raw Input and still writes exactly once.
+  await key(h, '\r') // Rows -> the tenant Input
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the explicit entry still mounts the tenant')
+  await key(h, '\x15')
+  await key(h, '7')
+  await clickPainted(h, 'Confirm [Enter]', true)
   await settle(h, 12)
-  assert.deepEqual(h.agentLoopWrites()[1], { field: 'maxParallelToolCalls', op: 'reset' })
-  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 2, inherited: 2 },
-    'the Host readback decides the value; Reset does not promise USER deletion')
-  assert.match(h.view(), /Status: Verified/u)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 7 }])
+  h.dispose()
+})
 
-  // Dirty Back asks the page's own question; Keep returns, Discard leaves.
-  await clickPainted(h, 'Parallel tool calls')
+test('a medium frame keeps its ordinary clean Tab and never opens a hidden question', async () => {
+  // (a) VISIBLE medium frame (80x24): the ordinary clean Tab paths really work.
+  const clean = setup({ columns: 80, rows: 24, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await clean.open('Agent')
+  await key(clean, '\r')
+  await highlightRow(clean, 'Parallel tool calls')
+  await key(clean, '\r')
+  await key(clean, '\x1b') // Cancel -> the clean tenant
+  await settle(clean, 6)
+  assert.match(clean.view(), /Settings · Agent · Parallel tool calls/u)
+  await key(clean, '\t')
+  await settle(clean, 6)
+  assert.match(clean.view(), /Settings · Categories/u, 'medium clean Tab really leaves to the rail')
+  assert.match(clean.view(), /\[Categories \(10\)\]/u, 'and the rail is the focused pane')
+  await key(clean, '\r') // rail -> Rows
+  await settle(clean, 4)
+  await key(clean, '\r') // the row -> the tenant Input
+  await settle(clean, 6)
+  await key(clean, '\x1b') // Cancel -> clean
+  await settle(clean, 4)
+  await key(clean, '\x1b[Z') // Shift+Tab
+  await settle(clean, 6)
+  assert.match(clean.view(), /Settings · Agent · Rows/u, 'medium clean Shift+Tab really leaves to Rows')
+  clean.dispose()
+
+  // (b) DIRTY page at a zero-body grant: Tab may neither leave nor open the
+  // page's parent-leave question, because no frame region is painted at all.
+  const dirty = setup({
+    columns: 160,
+    rows: 40,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'read-only profile',
+  })
+  await dirty.open('Agent')
+  await key(dirty, '\r')
+  await highlightRow(dirty, 'Parallel tool calls')
+  await key(dirty, '\r')
+  await key(dirty, '\x15')
+  await key(dirty, '6')
+  await clickPainted(dirty, 'Confirm [Enter]', true)
+  await settle(dirty, 12)
+  dirty.vt.resize(200, 2)
+  await dirty.vt.waitForRender()
+  assert.match(dirty.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'the zero-grant bar paints only Back')
+  await key(dirty, '\t')
+  await settle(dirty, 4)
+  assert.match(dirty.view(), /Settings · Agent · Parallel tool calls/u, 'Tab keeps the SAME dirty tenant')
+  assert.match(dirty.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'and never opens the hidden parent-leave question')
+  await key(dirty, '\x1b[Z')
+  await settle(dirty, 4)
+  assert.match(dirty.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'Shift+Tab opens no hidden question either')
+  assert.deepEqual(dirty.agentLoopWrites(), [], 'and no Tab direction writes')
+  dirty.dispose()
+})
+
+test('a bar-only grant also covers the Advanced, Input and confirmation states', async () => {
+  // Advanced: x/r must be inert at zero body rows.
+  const advanced = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await advanced.open('Agent')
+  await key(advanced, '\r')
+  await highlightRow(advanced, 'Parallel tool calls')
+  await key(advanced, '\r')
+  await key(advanced, '\x1b')
+  await settle(advanced, 6)
+  await key(advanced, '?') // the Advanced disclosure
+  await settle(advanced, 6)
+  const advancedRefreshes = advanced.agentLoopRefreshes()
+  advanced.vt.resize(44, 2)
+  await advanced.vt.waitForRender()
+  assert.match(advanced.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u)
+  await key(advanced, 'x')
+  await settle(advanced, 4)
+  assert.doesNotMatch(advanced.view(), /The Host readback decides the value\./u, 'no hidden reset question')
+  await key(advanced, 'r')
+  await settle(advanced, 4)
+  assert.equal(advanced.agentLoopRefreshes(), advancedRefreshes, 'no hidden refresh from Advanced either')
+  assert.deepEqual(advanced.agentLoopWrites(), [])
+  advanced.dispose()
+
+  // Confirmation: a painted Confirm is never admitted by a NEWER bar-only frame.
+  const confirming = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await confirming.open('Agent')
+  await key(confirming, '\r')
+  await highlightRow(confirming, 'Parallel tool calls')
+  await key(confirming, '\r')
+  await key(confirming, '\x1b')
+  await settle(confirming, 6)
+  await key(confirming, '?')
+  await settle(confirming, 6)
+  await key(confirming, 'x')
+  await settle(confirming, 6)
+  assert.match(confirming.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'the grant hosts the whole risk copy')
+  confirming.vt.resize(44, 2)
+  await confirming.vt.waitForRender()
+  assert.match(confirming.rowsPlain().at(-1) ?? '', /^Keep \[Esc\]\s*$/u, 'the confirmation bar degrades to Keep')
+  await key(confirming, '\r')
+  await settle(confirming, 6)
+  assert.deepEqual(confirming.agentLoopWrites(), [], 'a dropped Confirm span is never keyboard-admitted')
+  confirming.dispose()
+})
+
+test('a release delivered before the resize repaint never activates the tenant', async () => {
+  const h = setup({ columns: 200, rows: 50, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
   await key(h, '\x15')
   await key(h, '5')
-  await clickPainted(h, 'Apply [Enter]', true)
-  await clickPainted(h, 'Back [Esc]', true)
-  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
-  await clickPainted(h, 'Keep [Esc]', true)
-  assert.match(h.view(), /Parallel tool calls\s+5/u)
-  await clickPainted(h, 'Back [Esc]', true)
-  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
-  await clickPainted(h, 'Discard [Y]', true)
+  await settle(h, 6)
+  const confirmRow = rowOf(h, 'Confirm [Enter]')
+  const confirmCol = cellIndexOf(h, confirmRow, 'Confirm [Enter]')
+  press(h, confirmRow, confirmCol)
+  await h.vt.waitForRender()
+  // A WIDTH-ONLY resize keeps the row count, so the release below really lands
+  // on the physical last row: the same cell exists, only the painted geometry
+  // is stale. No wait — this is the pre-repaint window.
+  h.vt.resize(80, 50)
+  release(h, confirmRow, confirmCol)
+  await settle(h, 10)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a pre-repaint release on a reachable cell never writes')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant survives the resize')
+  // The repaint really happened: every painted line now fits the new width.
+  assert.ok(h.rowsPlain().every(line => visibleWidth(line) <= 80), 'the frame repainted at the new width')
+  // A fresh gesture after the repaint works. The fork withholds a second press
+  // on the SAME cell inside its multi-click window, so this manual held pair
+  // must let that window expire before the fresh click on the same Confirm.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 5 }],
+    'a fresh gesture after the repaint writes once')
+  h.dispose()
+})
+
+test('a forced teardown while a tenant write is in flight leaves a fresh tenant clean', async () => {
+  let releaseWrite: (() => void) | undefined
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteGate: () => new Promise<void>(resolve => { releaseWrite = resolve }),
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '9')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Saving…/u)
+  assert.equal(h.agentLoopWrites().length, 1)
+  // The tenant refuses every user leave while the write is owned, so the only
+  // forced teardown is the app's own disposal. The admitted write keeps its
+  // owner and completes exactly once.
+  h.dispose()
+  releaseWrite?.()
+  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  assert.equal(h.agentLoopWrites().length, 1, 'the owned write completes exactly once after the teardown')
+  // A newly mounted tenant is a FRESH instance: it never inherits the retired
+  // page's Saving/Verified state.
+  const fresh = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 9, inherited: 2 } })
+  await fresh.open('Agent')
+  await key(fresh, '\r')
+  await highlightRow(fresh, 'Parallel tool calls')
+  await key(fresh, '\r')
+  await settle(fresh, 6)
+  assert.doesNotMatch(fresh.view(), /Saving…|Verified|Not saved/u, 'a fresh tenant never inherits a retired settlement')
+  assert.match(fresh.view(), /Current value\s+9/u)
+  fresh.dispose()
+})
+
+test('the short-screen leave question scrolls under the wheel and refuses a hidden confirm', async () => {
+  const h = setup({
+    columns: 44,
+    rows: 24,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'read-only profile',
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [], 'the Host refused the write before it landed')
+  // ONE body row: the leave copy cannot fit whole, so the bar keeps only Keep.
+  h.vt.resize(44, 3)
+  await h.vt.waitForRender()
+  await key(h, '\x1b') // leaving a dirty page asks its OWN question
+  await settle(h, 6)
+  const before = h.view()
+  assert.match(before, /Keep \[Esc\]/u)
+  assert.doesNotMatch(h.rowsPlain().at(-1) ?? '', /Discard and leave/u, 'an unreadable copy never offers the action')
+  wheel(h, 1, 20, true)
+  await settle(h, 4)
+  assert.notEqual(h.view(), before, 'the wheel really scrolls the short question body')
+  await key(h, 'd')
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'no hidden discard/leave from a dropped action')
+  assert.deepEqual(h.agentLoopWrites(), [], 'no write is ever dispatched')
+  await key(h, '\x1b') // Keep
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Keep returns to the same dirty page')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh \[R\] · Back \[Esc\]/u, 'the refused draft is read-only here')
+  h.dispose()
+})
+
+test('a second workspace cannot be leased while a tenant write is owned, and a remount is fresh', async () => {
+  let releaseWrite: (() => void) | undefined
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteGate: () => new Promise<void>(resolve => { releaseWrite = resolve }),
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '9')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Saving…/u)
+  assert.equal(h.agentLoopWrites().length, 1, 'the write really left the Client')
+  // A freshly mounted page can only be a page of a NEW workspace, and the app
+  // takes exactly ONE workspace lease: a second `/settings` is refused while the
+  // tenant owns the in-flight write. (The tenant itself refuses every user leave
+  // in the same window, so no fresh page can exist beside it by contract.)
+  assert.throws(() => h.invoke('settings'), /a workspace screen is already leased/u)
+  assert.equal(h.agentLoopWrites().length, 1)
+  // The owned write settles on the SAME page, exactly once.
+  releaseWrite?.()
+  await settle(h, 12)
+  assert.match(h.view(), /Current value\s+9/u)
+  assert.match(h.view(), /Verified/u)
+  assert.equal(h.agentLoopWrites().length, 1, 'the settlement never replays or duplicates the write')
+  // After the settlement the page is clean, so a remount in the SAME app yields
+  // a FRESH instance: its own read, no inherited Saving/Verified, no new write.
+  await key(h, '\x1b')
+  await settle(h, 6)
   assert.match(h.view(), /Settings · Agent · Rows/u)
-  assert.equal(h.agentLoopWrites().length, 2, 'discard never sends another Host write')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Value:\s*9/u, 'the remounted tenant seeds its own authoritative value')
+  assert.doesNotMatch(h.view(), /Saving…|Verified/u, 'a remounted tenant never inherits a retired settlement')
+  assert.equal(h.agentLoopWrites().length, 1, 'and never replays the retired write')
+  h.dispose()
+})
+
+test('a raw Input already open is degraded by a bar-only grant without losing its text', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r') // the raw Input opens on the explicit entry
+  await key(h, '\x15')
+  await key(h, '5')
+  await settle(h, 4)
+  assert.match(h.view(), /Value: 5/u)
+  const refreshesBefore = h.agentLoopRefreshes()
+  h.vt.resize(44, 2) // bar-only while the Input is already open
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Cancel \[Esc\]\s*$/u, 'the bar-only row paints the Input Cancel')
+  await key(h, '7') // typing must not edit a body that is not painted
+  await key(h, '\r') // and Enter must not confirm it
+  await settle(h, 6)
+  assert.deepEqual(h.agentLoopWrites(), [], 'no hidden confirm can write')
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'and no hidden refresh runs')
+  // The page's own Cancel closes the Input; restoring the grant shows the
+  // untouched authoritative value, and a fresh Input works.
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  h.vt.resize(160, 44)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Current value\s+10/u, 'the refused typing never reached the controller')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Value: 10/u, 'a fresh explicit Change seeds the real current value')
+  h.dispose()
+})
+
+test('the short-screen refresh question scrolls under the wheel and recovers', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'read-only profile',
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [], 'the Host refused the write')
+  const refreshesBefore = h.agentLoopRefreshes()
+  await key(h, 'r') // a dirty page asks its OWN refresh question
+  await settle(h, 6)
+  h.vt.resize(44, 3) // ONE body row: the copy cannot fit whole
+  await h.vt.waitForRender()
+  const before = h.view()
+  assert.match(before, /Keep \[Esc\]/u)
+  wheel(h, 1, 20, true)
+  await settle(h, 4)
+  assert.notEqual(h.view(), before, 'the wheel scrolls the refresh question body')
+  await key(h, 'r')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'an unread refresh copy never accepts its action')
+  await key(h, '\x1b') // Keep
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Keep returns to the same dirty page')
+  // With a grant that really hosts the copy, the SAME action is admitted.
+  h.vt.resize(160, 44)
+  await h.vt.waitForRender()
+  await key(h, 'r')
+  await settle(h, 6)
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh \[R\]/u, 'the wide grant paints the refresh action')
+  await key(h, '\r')
+  await settle(h, 8)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore + 1, 'the really painted action refreshes once')
+  h.dispose()
+})
+
+test('a wrapped reset risk statement still has to be painted before Confirm exists', async () => {
+  const h = setup({ columns: 44, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r') // the tenant's raw Input
+  await key(h, '\x1b') // Cancel -> the clean Detail
+  await settle(h, 6)
+  // POINTER ENTRY on the short screen: the painted Details affordance opens the
+  // disclosure, and the painted Reset action opens the guarded confirmation.
+  await clickPainted(h, 'Details…')
+  await settle(h, 6)
+  assert.match(h.view(), /Effective\s+10/u, 'the painted Details affordance opened the disclosure')
+  for (let step = 0; step < 12; step += 1) {
+    if (h.rowsPlain().some(line => line.includes('Reset to inherited…'))) break
+    wheel(h, 4, 20, true)
+    await settle(h, 4)
+  }
+  assert.ok(h.rowsPlain().some(line => line.includes('Reset to inherited…')), `the wheel reached the painted Reset action:\n${h.view()}`)
+  await clickPainted(h, 'Reset to inherited…')
+  await settle(h, 6)
+  const first = h.view()
+  // The 44-cell risk copy wraps, so the last statement is NOT on screen yet.
+  assert.doesNotMatch(first, /The Host readback decides the value\./u,
+    `the wrapped risk copy cannot fit the first frame:\n${first}`)
+  assert.doesNotMatch(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u,
+    'Confirm does not exist while a risk statement is unread')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.deepEqual(h.agentLoopWrites(), [], 'Enter cannot confirm an unread risk statement')
+  // MOUSE ONLY: the wheel over the REAL tenant body walks the scrollable
+  // confirmation until every fragment was painted. Without it a pointer-only
+  // user could never reach the fragments that gate Confirm.
+  for (let step = 0; step < 8; step += 1) {
+    if (/Confirm \[Enter\]/u.test(h.rowsPlain().at(-1) ?? '')) break
+    wheel(h, 4, 20, true)
+    await settle(h, 4)
+  }
+  assert.match(h.view(), /The Host readback decides the value\./u, 'the wheel really reached the last fragment')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'Confirm appears only after the whole copy')
+  // A wheel over the BAR row is outside the body box: it scrolls nothing.
+  wheel(h, 7, 20, true)
+  await settle(h, 4)
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u,
+    'the bar keeps its own painted actions')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }],
+    'a pointer Confirm dispatches exactly ONE official unset')
+  // A pointer Cancel closes the question without any further write.
+  await key(h, '?')
+  await settle(h, 6)
+  await key(h, 'x')
+  await settle(h, 6)
+  await clickPainted(h, 'Cancel [Esc]', true)
+  await settle(h, 6)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }],
+    'the pointer Cancel performs zero writes')
+  assert.match(h.view(), /Reset \[X\]/u, 'Cancel returns to the Advanced disclosure')
+  h.dispose()
+})
+
+test('the mounted tenant leaves the visible parent rail to its own wheel owner', async () => {
+  const h = setup({ columns: 200, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant is mounted')
+  // At 200x8 the 10-category rail has 3 content rows and its selected item sits
+  // in a window that can still move: a wheel over the RAIL must scroll it.
+  assert.doesNotMatch(h.view(), /^ {2}Host\b/mu, 'the rail does not start on Host')
+  wheel(h, 4, 5, false)
+  await settle(h, 6)
+  assert.match(h.view(), /^ {2}Host\b/mu, 'the wheel over the visible Categories pane scrolls the rail')
+  assert.match(h.view(), /Current value\s+10/u, 'the tenant body keeps its own state')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u, 'the tenant bar is untouched')
+  assert.deepEqual(h.agentLoopWrites(), [], 'scrolling a parent pane never writes')
+  h.dispose()
+})
+
+test('the Agent tenant proves no-op, invalid text and Cancel never reach the Host', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 3, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r') // Enter change -> the tenant's Input
+  assert.match(h.view(), /Value:\s*3/u, 'the Input captures the current value')
+  await key(h, '\x15')
+  await key(h, '0')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 8)
+  assert.match(h.view(), /Enter a safe positive integer \(1 or greater\)\./u, 'the real field error is painted')
+  assert.match(h.view(), /Value:\s*0/u, 'the refused raw text is retained')
+  assert.deepEqual(h.agentLoopWrites(), [], 'invalid text never writes and never resets')
+  await key(h, '\x15')
+  await key(h, '0003')
+  assert.match(h.view(), /Value sends\s+3/u, 'the canonical value that would be sent is visible')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 8)
+  assert.deepEqual(h.agentLoopWrites(), [], 'an equal effective value is a real no-op')
+  assert.match(h.view(), /No changes/u, 'the no-op is stated, never a fake Verified')
+  // Cancel drops the raw Input with zero patch and zero write.
+  await key(h, '\r') // Enter change again from the clean Detail
+  assert.match(h.view(), /Value:\s*/u)
+  await key(h, '\x15')
+  await key(h, '9')
+  await key(h, '\u001b') // Esc -> Cancel
+  await settle(h, 6)
+  assert.match(h.view(), /Current value\s+3/u, 'Cancel restores the truthful current value')
+  assert.deepEqual(h.agentLoopWrites(), [], 'Cancel dispatched nothing')
+  await key(h, '\u001b') // Esc -> Back to Rows
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  h.dispose()
+})
+
+test('the Agent tenant refuses every invalid raw value with zero writes and a real field error', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 3, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  const invalid: Array<{ readonly raw: string; readonly error: RegExp }> = [
+    { raw: '', error: /Value is required\./u },
+    { raw: '   ', error: /Value is required\./u },
+    { raw: '-1', error: /Enter a safe positive integer \(1 or greater\)\./u },
+    { raw: '1.5', error: /Enter a safe positive integer \(1 or greater\)\./u },
+    { raw: '1e3', error: /Enter a safe positive integer \(1 or greater\)\./u },
+    { raw: 'abc', error: /Enter a safe positive integer \(1 or greater\)\./u },
+    { raw: '9007199254740993', error: /Enter a safe positive integer \(1 or greater\)\./u },
+  ]
+  for (const probe of invalid) {
+    await key(h, '\x15')
+    if (probe.raw !== '') await key(h, probe.raw)
+    await clickPainted(h, 'Confirm [Enter]', true)
+    await settle(h, 6)
+    const frame = h.view()
+    assert.match(frame, probe.error, `the real field error for ${JSON.stringify(probe.raw)}\n${frame}`)
+    assert.doesNotMatch(frame, /Verified|No changes|Saving…/u, `${JSON.stringify(probe.raw)} never dispatches or claims success`)
+    // The raw text is retained (exactly what the user typed, still editable).
+    assert.equal(h.agentLoopWrites().length, 0, `${JSON.stringify(probe.raw)} wrote nothing`)
+  }
+  // A legal value still works from this same Input.
+  await key(h, '\x15')
+  await key(h, '9')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 9 }])
+  h.dispose()
+})
+
+test('the Agent tenant paints a definite refusal as Not saved and guards a dirty parent leave', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'the Host refused the write',
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.equal(h.agentLoopWrites().length, 0, 'a refused write is not recorded as applied')
+  const failed = h.view()
+  assert.match(failed, /Not saved/u, 'the definite refusal is named')
+  assert.match(failed, /the Host refused the write/u, 'the real reason is painted')
+  assert.match(failed, /Requested\s+6/u, 'the requested value stays visible')
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 10, inherited: 2 },
+    'the authoritative value never moved')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh \[R\] · Back \[Esc\]/u, 'recovery is Refresh, never a blind retry')
+  // A parent leave with the retained draft opens the child's OWN question; Keep
+  // preserves the draft and the page, the discard+leave closes it exactly once.
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /Discard and leave \[D\] \| *Keep \[Esc\]|Discard and leave \[D\] · Keep \[Esc\]/u)
+  assert.match(h.view(), /Discard unsaved changes\?/u)
+  await key(h, '\u001b')
+  assert.match(h.view(), /Requested\s+6/u, 'Keep returns to the same page with the draft')
+  await clickPainted(h, 'Back [Esc]', true)
+  await clickPainted(h, 'Discard and leave [D]', true)
+  await settle(h, 8)
+  assert.match(h.view(), /Settings · Agent · Rows/u, 'the acknowledged leave closes the tenant once')
+  assert.match(h.view(), /Parallel tool calls\s+10/u, 'the Row still speaks the authoritative value')
+  assert.equal(h.agentLoopWrites().length, 0, 'discarding never sends another write')
+  h.dispose()
+})
+
+test('an ambiguous Agent outcome is never Verified and a Refresh restores the real authority', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopUnconfirmed: true,
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '4')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.equal(h.agentLoopWrites().length, 1, 'the lost-ACK request was dispatched once')
+  const ambiguous = h.view()
+  assert.match(ambiguous, /Outcome unconfirmed/u, 'a lost ACK is never Verified')
+  assert.doesNotMatch(ambiguous, /Verified/u)
+  assert.match(ambiguous, /possibly saved/u, 'the page states that it may have been applied')
+  assert.match(ambiguous, /Requested\s+4/u)
+  // The parent leave acknowledges a possibly-applied write; it never claims to
+  // undo it and never replays the request.
+  await clickPainted(h, 'Back [Esc]', true)
+  assert.match(h.view(), /The Host may have applied this change\./u)
+  assert.match(h.view(), /Leaving does not undo it\./u)
+  assert.match(h.view(), /Leave anyway \[D\]/u)
+  await key(h, '\u001b')
+  assert.match(h.view(), /Outcome unconfirmed/u, 'Keep leaves the page untouched')
+  // Refresh is an explicit CONFIRMATION in this dirty state: it discards the
+  // draft and re-reads the real authority, then STAYS on the same Detail.
+  await clickPainted(h, 'Refresh [R]', true)
+  assert.match(h.view(), /Refresh discards unsaved edits\./u, 'Refresh asks before discarding the draft')
+  assert.match(h.view(), /The Host may have applied this change\./u)
+  await clickPainted(h, 'Refresh [R]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Current value\s+4/u, 'the authoritative readback is now the current value')
+  assert.doesNotMatch(h.view(), /Outcome unconfirmed/u, 'the ambiguity clears only through the real read')
+  assert.equal(h.agentLoopWrites().length, 1, 'Refresh never replays the old request')
+  // A deliberate fresh Change still works against the current authority.
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '5')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites()[1], { field: 'maxParallelToolCalls', op: 'set', value: 5 })
+  h.dispose()
+})
+
+test('an accepted Agent write the Host did not adopt is Unverified, never Verified', async () => {
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopIgnoreWrite: true,
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '4')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.equal(h.agentLoopWrites().length, 1, 'exactly one request was dispatched')
+  assert.match(h.view(), /Unverified/u, 'an accepted write whose readback disagrees is Unverified')
+  assert.doesNotMatch(h.view(), /Verified/u)
+  assert.match(h.view(), /refresh to review/u)
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 10, inherited: 2 },
+    'the Host never adopted the value')
+  await clickPainted(h, 'Refresh [R]', true)
+  assert.match(h.view(), /Refresh discards unsaved edits\./u, 'the dirty draft needs its own confirmation')
+  await clickPainted(h, 'Refresh [R]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Current value\s+10/u)
+  assert.equal(h.agentLoopWrites().length, 1, 'no automatic retry')
+  h.dispose()
+})
+
+test('the Agent tenant Reset journey opens Advanced first and sends the official unset once per Confirm', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  // `?` is the scoped Details command: it opens Advanced WITHOUT an edit detour.
+  await key(h, '?')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u)
+  assert.match(h.view(), /Effective\s+10/u)
+  assert.match(h.view(), /Inherited\s+2/u)
+  assert.match(h.view(), /Differs from base/u)
+  assert.match(h.view(), /Revision\s+1/u)
+  assert.match(h.view(), /Reset sends the official unset\./u)
+  assert.match(h.view(), /The USER patch may retain the inherited value\./u)
+  assert.doesNotMatch(h.view(), /Value:\s*/u, 'Advanced shares the SAME pane, never a second editor')
+  // Cancel the confirmation: zero patch, zero write, back on Advanced.
+  await clickPainted(h, 'Reset to inherited…')
+  assert.match(h.view(), /The Host readback decides the value\./u)
+  await key(h, '\u001b')
+  assert.match(h.view(), /Effective\s+10/u, 'Cancel returns to Advanced without a write')
+  assert.deepEqual(h.agentLoopWrites(), [])
+  // Confirm sends the official unset and shows the Host readback.
+  await key(h, 'x')
+  assert.match(h.view(), /Reset sends the official unset\./u)
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }])
+  assert.deepEqual(h.hostSections().agentLoop, { maxParallelToolCalls: 2, inherited: 2 },
+    'the readback decides the value; Reset never promises USER deletion')
+  assert.match(h.view(), /Current value\s+2/u)
+  assert.match(h.view(), /Verified/u)
+  // Effective == inherited is STILL a real explicit intent: the next Confirm
+  // dispatches the official unset again instead of a set(inherited).
+  await key(h, '?')
+  assert.match(h.view(), /Matches base/u)
+  await key(h, 'x')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.equal(h.agentLoopWrites().length, 2, 'the second explicit Reset really dispatched')
+  assert.deepEqual(h.agentLoopWrites()[1], { field: 'maxParallelToolCalls', op: 'reset' })
+  h.dispose()
+})
+
+test('the Agent tenant refuses parent navigation while editing and guards a dirty leave', async () => {
+  const h = setup({ columns: 200, rows: 50, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  assert.match(h.view(), /Value:\s*10/u)
+  // A parent category click during a raw Input is refused: same page, no write.
+  await clickPainted(h, 'Appearance')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant keeps the frame')
+  assert.match(h.view(), /Value:\s*10/u, 'the raw input is preserved')
+  assert.match(h.view(), /^ {2}Agent\b/mu, 'the rail keeps the same selection as passive context')
+  assert.doesNotMatch(h.view(), /^> Agent\b/mu, 'the parent rail never paints the primary cursor behind the tenant')
+  // Tab in the raw Input never transfers the parent region.
+  await key(h, '\t')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u)
+  assert.match(h.view(), /Value:\s*10/u)
+  await key(h, '\u001b') // Cancel the Input
+  await settle(h, 6)
+  assert.match(h.view(), /Current value\s+10/u)
+  // A clean tenant leaves on the FIRST Tab (the Root's own pure region focus,
+  // Detail -> Categories): the tenant is retired and no page is re-mounted.
+  await key(h, '\t')
+  await settle(h, 6)
+  assert.doesNotMatch(h.view(), /Current value/u, 'the clean tenant is retired by the region key')
+  assert.match(h.view(), /Settings · Categories/u)
+  assert.equal(h.agentLoopWrites().length, 0, 'navigation alone never writes')
+  h.dispose()
+})
+
+test('a narrow frame makes the clean tenant Tab inert and re-entry builds a FRESH page', async () => {
+  const h = setup({ columns: 72, rows: 24, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Current value\s+10/u)
+  await key(h, '\u001b') // Cancel the raw Input -> the clean Detail
+  await settle(h, 6)
+  assert.match(h.view(), /Current value\s+10/u)
+  // Narrow paints ONE region, so there is no region to Tab to: the tenant stays.
+  await key(h, '\t')
+  await settle(h, 6)
+  assert.match(h.view(), /Current value\s+10/u, 'a narrow Tab never leaves the tenant')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u)
+  // Esc retires it; a fresh Change builds a NEW page/controller with a fresh read.
+  await key(h, '\u001b')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Value:\s*10/u, 'the fresh page re-captures the current value')
+  assert.deepEqual(h.agentLoopWrites(), [], 'the whole navigation journey wrote nothing')
+  h.dispose()
+})
+
+test('a Host generation replacement invalidates the captured Agent read before Confirm', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  // A replacement Host generation keeps the SAME revision and value: only the
+  // generation identity can prove the captured read is stale.
+  h.replaceAgentLoopGeneration()
+  await key(h, '\r')
+  await settle(h, 8)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a replaced generation never dispatches')
+  assert.match(h.view(), /Host settings changed or are unavailable; cancel and refresh\./u,
+    'the real currentness refusal is painted')
+  assert.match(h.view(), /Value:\s*6/u, 'the raw text is retained')
+  await key(h, '\u001b')
+  await settle(h, 6)
+  assert.match(h.view(), /Last-known/u, 'the replaced read is labelled last-known')
+  await clickPainted(h, 'Refresh [R]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Change \[Enter\]/u, 'the explicit Refresh makes the new generation current')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '7')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 7 }],
+    'a new explicit Change writes against the NEW generation')
+  h.dispose()
+})
+
+test('the Agent tenant holds ONE admitted write through its latch and never requeues it', async () => {
+  let releaseWrite: (() => void) | undefined
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteGate: () => new Promise<void>(resolve => { releaseWrite = resolve }),
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '4')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Saving…/u, 'the admitted write paints its real pending state')
+  assert.equal(h.agentLoopWrites().length, 1, 'exactly one official request was dispatched')
+  // A duplicate Confirm/Enter/Esc/Tab dispatches nothing and does not leave the
+  // SAME Detail: the frame paints the real Wait, never a fake Back/Cancel.
+  assert.match(h.view(), /Saving… · Wait \[Esc\]/u, 'Saving paints its own state, not a Cancel')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\u001b')
+  await key(h, '\t')
+  assert.equal(h.agentLoopWrites().length, 1, 'a pending write is never duplicated')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the SAME Detail stays mounted')
+  assert.match(h.view(), /Saving…/u, 'the write keeps its responsibility through the refusals')
+  releaseWrite?.()
+  await settle(h, 12)
+  assert.match(h.view(), /Current value\s+4/u)
+  assert.match(h.view(), /Verified/u)
+  await key(h, '\u001b')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u, 'navigation succeeds only after the settlement')
+  assert.equal(h.agentLoopWrites().length, 1)
+  h.dispose()
+})
+
+test('the Agent tenant refuses a stale captured read and recovers through explicit Refresh only', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  assert.match(h.view(), /Value:\s*6/u)
+  // Another writer commits a NEW revision while the Input is open: the captured
+  // source is no longer current, so Confirm must refuse instead of writing.
+  h.advanceAgentLoopRevision()
+  // The painted frame is now semantically stale, so the pointer gesture is
+  // refused BEFORE it can arm (never completed against newer cells).
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 10)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a stale frame never arms a pointer Confirm')
+  // The keyboard reads the LIVE currentness and states the real reason.
+  await key(h, '\r')
+  await settle(h, 8)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a stale captured revision never dispatches')
+  assert.match(h.view(), /Value:\s*6/u, 'the raw text is retained')
+  assert.match(h.view(), /Host settings changed or are unavailable; cancel and refresh\./u,
+    'the real reason is painted instead of a silent drop')
+  // Cancel, then the read-only clean state offers the explicit Refresh.
+  await key(h, '\u001b')
+  await settle(h, 6)
+  assert.match(h.view(), /Last-known/u, 'the superseded read is labelled last-known, never Ready')
+  await clickPainted(h, 'Refresh [R]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Current value\s+10/u)
+  assert.match(h.view(), /Change \[Enter\]/u)
+  assert.deepEqual(h.agentLoopWrites(), [])
+  // A fresh explicit Change works against the CURRENT generation/revision.
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '7')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 7 }])
   h.dispose()
 })
 
@@ -10976,9 +11996,9 @@ test('the Host Backend row is reachable and operable at 108/76/75 columns and tw
   }
 })
 
-test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the frozen size and theme matrix', async () => {
+test('the single-value Agent tenant keeps its geometry, input and Esc across the frozen size and theme matrix', async () => {
   const sizes = [
-    [200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8],
+    [200, 50], [120, 40], [108, 24], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8],
   ] as const
   for (const [columns, rows] of sizes) {
     for (const theme of ['dark', 'light'] as const) {
@@ -10987,34 +12007,33 @@ test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the f
         rows,
         doc: { theme },
         agentLoop: { maxParallelToolCalls: 4, inherited: 2 },
-        shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000, inheritedTimeoutMs: 60_000 },
       })
       await h.open('Agent')
       await key(h, '\r')
-      await highlightRow(h, 'Agent loop')
-      await key(h, '\r')
+      await highlightRow(h, 'Parallel tool calls')
+      await key(h, '\r') // Enter change -> the SAME Detail tenant
       await settle(h)
       const openFrame = h.view()
-      assert.match(openFrame, /Settings · Agent · Agent loop/u, `${columns}x${rows} ${theme}: page identity`)
-      assert.match(openFrame, /Parallel tool calls/u, `${columns}x${rows} ${theme}: field`)
-      const bar = h.rowsPlain().at(-1) ?? ''
-      assert.match(bar, /Back \[Esc\]/u, `${columns}x${rows} ${theme}: complete Esc affordance`)
-      // Stage the explicit Reset so the dirty Save is painted, then discard it.
-      await key(h, 'x')
-      await settle(h)
-      const dirtyFrame = h.view()
-      assert.match(dirtyFrame, /Reset staged/u, `${columns}x${rows} ${theme}: staged reset`)
-      assert.match(dirtyFrame, /Save \[S\]/u, `${columns}x${rows} ${theme}: complete Save affordance`)
+      assert.match(openFrame, /Settings · Agent · Parallel tool calls/u, `${columns}x${rows} ${theme}: page identity`)
+      assert.match(openFrame, /Current value\s+4/u, `${columns}x${rows} ${theme}: the authoritative value`)
+      assert.match(openFrame, /Value:\s*4/u, `${columns}x${rows} ${theme}: the raw Input is the entry`)
+      assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u,
+        `${columns}x${rows} ${theme}: the ONE confirm affordance`)
+      // Cancel the Input: the clean Detail still owns the frame, then Back.
       await key(h, '\x1b')
       await settle(h)
-      await key(h, 'y')
+      assert.match(h.view(), /Current value\s+4/u, `${columns}x${rows} ${theme}: Cancel keeps the current value`)
+      assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows} ${theme}: complete Esc affordance`)
+      await key(h, '\x1b')
       await settle(h)
+      assert.match(h.view(), /Settings · Agent · Rows/u, `${columns}x${rows} ${theme}: Back returns to Rows`)
       for (const [index, line] of h.vt.getViewport().entries()) {
         assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} ${theme}: row ${index} fits the width`)
       }
       h.dispose()
 
-      // The Tools page under the same frozen sizes.
+      // The Shell execution page keeps its staged form under the same frozen
+      // sizes (the shared numeric renderer's other consumer).
       const shell = setup({
         columns,
         rows,
@@ -11041,20 +12060,81 @@ test('the FR5-B numeric pages stay complete and Exit/Save-reachable across the f
     }
   }
 
-  // A custom palette and the two icon styles keep the same page chrome.
+  // A custom palette and the two icon styles keep the same tenant chrome.
   const custom = new ThemeRegistry()
   custom.register({ id: 'acme', name: 'Acme', palette: { text: '#123456', primary: '#654321' } as never }, 'acme', 'acme')
   for (const iconStyle of ['symbols', 'minimal'] as const) {
     const h = setup({ columns: 120, rows: 40, doc: { theme: 'plugin:acme/acme', iconStyle }, themes: custom, agentLoop: { maxParallelToolCalls: 4 } })
     await h.open('Agent')
     await key(h, '\r')
-    await highlightRow(h, 'Agent loop')
+    await highlightRow(h, 'Parallel tool calls')
     await key(h, '\r')
     await settle(h)
-    assert.match(h.view(), /Settings · Agent · Agent loop/u, `custom/${iconStyle}: the page chrome stays`)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u)
+    assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, `custom/${iconStyle}: the tenant chrome stays`)
+    assert.match(h.view(), /Current value\s+4/u)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u)
     h.dispose()
   }
+})
+
+test('a too-narrow Rows bar drops the Details hint whole; the page-local ? still reaches Advanced', async () => {
+  const h = setup({ columns: 30, rows: 20, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  const bar = h.rowsPlain().at(-1) ?? ''
+  assert.doesNotMatch(bar, /Details \[\?\]/u, `the dropped hint publishes no cells:\n${bar}`)
+  // The Rows-level ? is admitted only with a really painted affordance.
+  await key(h, '?')
+  assert.doesNotMatch(h.view(), /Effective\s+10/u, 'a dropped affordance makes ? inert at Rows')
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  // The tenant's OWN page-local ? still opens the SAME Advanced disclosure:
+  // Enter change, Cancel the raw Input, then `?` inside the clean Detail.
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Value:\s*10/u)
+  await key(h, '\u001b')
+  await settle(h, 6)
+  await key(h, '?')
+  await settle(h, 6)
+  assert.match(h.view(), /Effective\s+10/u, 'the page-local disclosure stays reachable')
+  assert.match(h.view(), /Comparison\s+Differs from/u, 'the comparison fact survives a narrow width')
+  assert.deepEqual(h.agentLoopWrites(), [], 'no disclosure step writes')
+  h.dispose()
+})
+
+test('a resize between the tenant press and its release revokes every physical grant', async () => {
+  const h = setup({ columns: 200, rows: 50, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  // Hold the painted Confirm under the 200x50 frame, then resize before the
+  // release: the physical cells belong to a frame that no longer exists.
+  const barRow = h.rowsPlain().length - 1
+  const barCol = cellIndexOf(h, barRow, 'Confirm [Enter]')
+  press(h, barRow, barCol)
+  await h.vt.waitForRender()
+  h.vt.resize(80, 24)
+  await h.vt.waitForRender()
+  // Release on the NEW frame's own Confirm cells: only the stale revision/box
+  // identity can refuse this, so the fence itself is what is under test (the
+  // old coordinates would also miss the 24-row viewport for an unrelated
+  // reason).
+  const resizedRow = h.rowsPlain().length - 1
+  const resizedCol = cellIndexOf(h, resizedRow, 'Confirm [Enter]')
+  assert.ok(resizedRow !== barRow || resizedCol !== barCol, 'the resize really moved the Confirm cells')
+  release(h, resizedRow, resizedCol)
+  await settle(h, 8)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a straddling resize gesture never writes')
+  assert.match(h.view(), /Value:\s*6/u, 'the raw Input survives the resize')
+  // The new geometry's own painted Confirm works as a fresh gesture.
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 6 }])
+  h.dispose()
 })
 
 // L5: production-panel VirtualTerminal SGR coverage. The packed Direct smoke

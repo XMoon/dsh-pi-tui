@@ -962,6 +962,26 @@ owns only the lease, focus and write-lifecycle mechanics.
   Leaving the workspace is therefore always one reachable key (the Action Bar
   is pinned to the physical last row at every height, down to a one-row
   terminal).
+- **The Detail TENANT keeps the parent panes live under ONE leave gate.** A
+  single-value setting (`Agent → Parallel tool calls`) may be mounted INSIDE the
+  real Detail pane instead of taking the whole body: the parent Categories/Rows
+  stay painted, the tenant's own painted bar becomes the ONE physical last row
+  at column 0, and only the tenant's body cells belong to the child (its painted
+  body box is the admission for every body press; the parent gutters/header/
+  blank bar stay inert). This is the documented exception to "a mounted
+  specialist owns the whole body": it is not a second screen, lease or focus
+  owner. The pointer, `Tab`/`Shift+Tab` and pane-activation parent paths ask the
+  page's ONE leave query before any selection/focus mutation; the page's own
+  Esc/Left gradient remains its back, and a release of a body press is resolved
+  against the same painted body only. The page's refusal states, its own
+  dirty/ambiguous question and the continuation's instance/source/target
+  re-proof are owned by
+  [surface-settings.md](./surface-settings.md#host-numeric-pages-session-log-upload-and-the-host-category),
+  including that contract's passive-preview click exception to the ordinary
+  L1→L2 click rule; the passive parent selection styling by
+  [design-language.md](./design-language.md) §5.1 rule 7. A forced teardown
+  bypasses the gate: a write the page already admitted keeps its own owner and
+  can never be replayed or cancelled by the close.
 - **Width only projects panes.** Wide paints all three columns; medium derives its
   two columns purely from the current level (`categories + rows` at L0,
   `rows + details` otherwise); narrow paints the current level alone. A direct

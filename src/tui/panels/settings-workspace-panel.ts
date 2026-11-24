@@ -423,11 +423,14 @@ export interface SettingsWorkspacePanelIntents {
     onAuthoritativeChange: () => void,
   ) => EmbeddedSpecialistPage | undefined
   /** FR5-B: the ONE numeric page shared by the Agent-loop and Shell-execution
-   *  rows, mounted in this workspace body under the SAME screen lease. */
+   *  rows, mounted in this workspace body under the SAME screen lease. SUX-01:
+   *  the Agent-loop route is the inline Detail tenant and takes the Root's
+   *  explicit `change`/`details` entry intent; the Shell route stays staged. */
   readonly createHostNumericSettingsPage?: (
     kind: 'agent-loop' | 'shell-execution',
     done: () => void,
     onAuthoritativeChange: () => void,
+    entry?: 'change' | 'details',
   ) => EmbeddedSpecialistPage | undefined
   /**
    * C2-R4: the ONE Web Search / Fetch settings page factory. `done` returns to
@@ -749,6 +752,23 @@ export interface EmbeddedSpecialistPage extends Component {
   /** Invoke one delegated last-row intent (the id came from
    *  {@link paintedBarSpans} of the same frame). */
   activateBarSpan?(id: string): void
+  /**
+   * SUX-01: the ONE guarded parent-navigation seam of a Detail TENANT (the
+   * Agent loop page hosted inside the real Detail pane). It answers `allow`
+   * when nothing local would be lost, or `refuse` when the page keeps the keys
+   * (a raw input, a disclosure, a pending write) or opened its OWN question —
+   * in which case it invokes the captured continuation only after the user
+   * explicitly leaves. It never navigates or writes by itself.
+   */
+  requestParentLeave?(target: SpecialistParentLeaveTarget, leave: () => void): 'allow' | 'refuse'
+}
+
+/** The exact destination one USER parent navigation asks for: typed captured
+ *  identity (category + row + focus level), never a row index or old cell. */
+export interface SpecialistParentLeaveTarget {
+  readonly categoryId: SettingsWorkspaceCategoryId
+  readonly rowId: SettingsWorkspaceRowId | undefined
+  readonly focus: SettingsWorkspaceFocus
 }
 
 /** One pane the current frame actually paints: its level and absolute geometry.
@@ -760,7 +780,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-span' | 'service-install' | 'service-dismiss'
+  readonly kind: 'category' | 'row' | 'pane' | 'change' | 'details' | 'retry' | 'manage' | 'option' | 'confirm' | 'cancel' | 'about-action' | 'bar-escape' | 'bar-open' | 'bar-details' | 'bar-span' | 'service-install' | 'service-dismiss'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -779,6 +799,10 @@ interface PaintedBarLine {
   /** The painted OPEN hint's cell span (rail state): the pointer analogue of
    *  Enter/Right. Present only when every hint of that verb painted in full. */
   readonly openSpan?: { readonly startCol: number; readonly endCol: number }
+  /** The painted `Details [?]` hint's cell span (the scoped secondary
+   *  disclosure of the selected single-value row). Only a caller that really
+   *  admits that segment gets it. */
+  readonly detailsSpan?: { readonly startCol: number; readonly endCol: number }
 }
 
 /** The id every painted Esc affordance carries: it names the ONE semantic this
@@ -786,25 +810,32 @@ interface PaintedBarLine {
 const BAR_ESCAPE_ID = 'escape'
 /** The id the painted rail OPEN hint carries: it replays the Enter ladder. */
 const BAR_OPEN_ID = 'open'
+/** The id the painted `Details [?]` hint carries: it replays the scoped `?`
+ *  disclosure of the selected single-value row (never a forward Enter). */
+const BAR_DETAILS_ID = 'details'
 /** The ActionBar's OWN target kinds. EVERY gate that treats the physical last
  *  row as one bar gesture must use this predicate: the wheel-cancel rule and
  *  the root-owned release branch previously listed the kinds by hand, so a new
  *  bar kind could be half-wired (press armed, wheel cancel and release blind). */
 const isActionBarTargetKind = (kind: HitTarget['kind']): boolean =>
-  kind === 'bar-escape' || kind === 'bar-open' || kind === 'bar-span'
+  kind === 'bar-escape' || kind === 'bar-open' || kind === 'bar-details' || kind === 'bar-span'
 /** The painted forward hints that replay the Enter ladder: the category rail's
  *  open/focus entry and the Rows level's truthful row action. Only a hint that
  *  the LAST frame really painted whole becomes a pointer target; a dropped one
  *  publishes no geometry. */
 const BAR_OPEN_HINTS: readonly string[] = [
   'Right open', 'Enter open', 'Enter/Right focus',
-  'Right choose', 'Enter choose', 'Right details', 'Enter details',
+  'Right choose', 'Enter choose', 'Right change', 'Enter change',
+  'Right details', 'Enter details',
 ]
+/** The painted scoped-disclosure hint of the selected single-value row. It is
+ *  the pointer analogue of the page-local `?` key, never of Enter. */
+const BAR_DETAILS_HINTS: readonly string[] = ['Details [?]']
 
 /** One painted Detail action. A button publishes a hit target ONLY when the
  *  frame really painted it inside the pane width. */
 interface DetailButton {
-  readonly verb: 'change' | 'retry' | 'manage' | 'confirm' | 'cancel' | 'service-install' | 'service-dismiss'
+  readonly verb: 'change' | 'details' | 'retry' | 'manage' | 'confirm' | 'cancel' | 'service-install' | 'service-dismiss'
   readonly text: string
   /** The identity the painted button acts on: the candidate it commits, or the
    *  selected row it belongs to. It is the painted hit target's id. */
@@ -1334,6 +1365,10 @@ export class SettingsWorkspacePanel implements Component {
   /** The panel cells the LAST specialist frame granted the picker, and the
    *  press identity a release must still match. */
   private paintedSpecialistBox: ContentBox | undefined
+  /** SUX-01: the mounted Agent-loop Detail tenant's local last line (its own
+   *  Action Bar). It becomes this frame's ONE physical last row at x=0, exactly
+   *  like a full-width hosted page's own bar. */
+  private tenantBarLine: string | undefined
   private specialistPressed: {
     readonly x: number
     readonly y: number
@@ -1908,6 +1943,10 @@ export class SettingsWorkspacePanel implements Component {
     // longer carries the row (or selects a direct category) therefore fails and
     // settles the command's promise instead of waiting forever.
     this.consumeInitialSpecialist()
+    // A child's painted body box/bar belongs to ONE frame: a frame that does not
+    // really host a page body must not keep the previous frame's grant.
+    this.paintedSpecialistBox = undefined
+    this.tenantBarLine = undefined
     if (direct) {
       // The content column is on screen: the SELECTED page must exist. A page
       // the rail selected without creating it is created now — once, and only
@@ -1930,7 +1969,10 @@ export class SettingsWorkspacePanel implements Component {
     // category, so it must be decided before the legacy panes project. While
     // it is mounted its hit map is the picker's own last-painted geometry and
     // the rows/detail panes publish nothing.
-    if (this.specialistPage !== undefined) return this.renderSpecialistPage(plan)
+    // SUX-01 EXCEPTION: the Agent-loop Detail TENANT is hosted INSIDE the real
+    // Detail pane of the normal projection, so it keeps painting the parent rail
+    // and Rows. It never takes this full-width route.
+    if (this.specialistPage !== undefined && !this.detailTenantActive()) return this.renderSpecialistPage(plan)
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -1939,16 +1981,35 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, chromeGeometry(plan).bodyTop, targets, panes))
+    if (this.detailTenantActive() && this.tenantBarLine === undefined) this.paintTenantBarOnly(plan.width)
     this.paintedPanes = panes
     if (plan.actionRows === 1) {
-      const bar = this.renderActionBar(plan)
-      lines.push(bar.line)
-      if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
-      // The PAINTED open hint is a real pointer route on the single-pane frames:
-      // it replays the Enter ladder, so a pointer-only journey can leave the
-      // category rail without a keyboard step.
-      if (bar.openSpan !== undefined) {
-        targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: bar.openSpan.startCol, endCol: bar.openSpan.endCol })
+      if (this.detailTenantActive()) {
+        // The tenant's OWN bar is the ONE physical last row of this frame: it is
+        // installed from column 0 (never offset by the Detail pane), padded to
+        // the full width, and its own painted spans are the only bar geometry.
+        lines.push(fit(this.tenantBarLine ?? '', plan.width))
+        const page = this.specialistPage
+        const escape = page?.paintedEscapeSpan?.()
+        if (escape !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, escape))
+        for (const span of page?.paintedBarSpans?.() ?? []) {
+          targets.push({ kind: 'bar-span', id: span.id, row: lines.length - 1, startCol: span.startCol, endCol: span.endCol })
+        }
+      } else {
+        const bar = this.renderActionBar(plan)
+        lines.push(bar.line)
+        if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+        // The PAINTED open hint is a real pointer route on the single-pane frames:
+        // it replays the Enter ladder, so a pointer-only journey can leave the
+        // category rail without a keyboard step.
+        if (bar.openSpan !== undefined) {
+          targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: bar.openSpan.startCol, endCol: bar.openSpan.endCol })
+        }
+        // The scoped secondary disclosure of the selected single-value row: it
+        // replays the page-local `?`, never the forward Enter ladder.
+        if (bar.detailsSpan !== undefined) {
+          targets.push({ kind: 'bar-details', id: BAR_DETAILS_ID, row: lines.length - 1, startCol: bar.detailsSpan.startCol, endCol: bar.detailsSpan.endCol })
+        }
       }
     }
     this.paintedTargets = targets
@@ -2600,7 +2661,12 @@ export class SettingsWorkspacePanel implements Component {
    *  dropped segment publishes none. `openHints` admits which painted segments
    *  are the caller's forward/Enter affordances (never every `Enter *` hint on
    *  every level). */
-  private paintBar(segments: readonly ActionBarSegment[], width: number, openHints: readonly string[] = []): PaintedBarLine {
+  private paintBar(
+    segments: readonly ActionBarSegment[],
+    width: number,
+    openHints: readonly string[] = [],
+    detailsHints: readonly string[] = [],
+  ): PaintedBarLine {
     const layout = layoutActionBarRow(segments, width)
     if (layout.truncated || layout.spans.length === 0) return { line: color.textMuted(layout.text) }
     const escapeIndex = segments.length - 1
@@ -2609,10 +2675,14 @@ export class SettingsWorkspacePanel implements Component {
     // that painted in full: a truncated or dropped hint publishes no geometry,
     // exactly like the Esc affordance.
     let openSpan: { startCol: number; endCol: number } | undefined
+    let detailsSpan: { startCol: number; endCol: number } | undefined
     const openSpans: Array<{ startCol: number, endCol: number }> = []
     const painted = layout.spans.map(candidate => {
       if (openHints.includes(candidate.text)) {
         openSpans.push({ startCol: candidate.startCol, endCol: candidate.endCol })
+      }
+      if (detailsHints.includes(candidate.text)) {
+        detailsSpan = { startCol: candidate.startCol, endCol: candidate.endCol }
       }
       if (candidate.inputIndex !== escapeIndex) return color.textMuted(candidate.text)
       span = { startCol: candidate.startCol, endCol: candidate.endCol }
@@ -2631,6 +2701,7 @@ export class SettingsWorkspacePanel implements Component {
       line: painted.join(color.textMuted(ACTION_BAR_SEPARATOR)) + ' '.repeat(padding),
       span,
       ...(openSpan === undefined ? {} : { openSpan }),
+      ...(detailsSpan === undefined ? {} : { detailsSpan }),
     }
   }
 
@@ -2929,6 +3000,14 @@ export class SettingsWorkspacePanel implements Component {
           : visible.map(row => this.rowLine(row, pane.width)))
         continue
       }
+      if (this.detailTenantActive()) {
+        // SUX-01: the mounted Agent-loop tenant IS the Detail projection: its
+        // body is painted here and its own bar becomes the physical last row.
+        // The legacy Detail (facts/buttons/options) is never composed for this
+        // frame, so no old choice/fact/manage target can be published.
+        paneLines.set('detail', this.detailTenantLines(pane.width, contentRows, pane.x, contentTop))
+        continue
+      }
       const detail = this.detailLines(pane.width, contentRows)
       detailProjection = detail
       this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
@@ -2985,7 +3064,9 @@ export class SettingsWorkspacePanel implements Component {
     targets.push(...itemHits)
     // The pane fallback must cover the pane's WHOLE painted area (every content
     // row), so a click anywhere in a visible column can take that column's focus.
+    // The tenant's Detail cells are the CHILD's body, never a Root pane target.
     for (const pane of layout) {
+      if (pane.page === 'detail' && this.detailTenantActive()) continue
       for (let i = 0; i < contentRows; i += 1) {
         targets.push({ kind: 'pane', id: pane.page, row: contentTop + i, startCol: pane.x, endCol: pane.x + pane.width })
       }
@@ -3051,6 +3132,12 @@ export class SettingsWorkspacePanel implements Component {
       }
       return padBody(out, viewport, width)
     }
+    if (this.detailTenantActive()) {
+      // A narrow frame paints ONE region: with the tenant mounted that region is
+      // the Detail itself, so the parent rail/Rows publish no target at all.
+      panes.detail = { x: 0, width, contentTop: bodyTop, contentRows: viewport, maxOffset: 0 }
+      return padBody(this.detailTenantLines(width, viewport, 0, bodyTop), viewport, width)
+    }
     const detail = this.detailLines(width, viewport)
     this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
     this.paintedServiceInstallActions = detail.serviceInstallActionsVisible
@@ -3103,7 +3190,10 @@ export class SettingsWorkspacePanel implements Component {
   private categoryLine(id: SettingsWorkspaceCategoryId | undefined): string {
     if (id === undefined) return ''
     const selected = id === this.categoryId
-    const marker = selected ? color.primary('> ') : '  '
+    // SUX-01: while the Detail tenant owns the active device, the parent rail is
+    // passive CONTEXT: the selected label stays bold textStrong but the primary
+    // navigation cursor is not painted on a pane the user is not driving.
+    const marker = selected && !this.detailTenantActive() ? color.primary('> ') : '  '
     const label = CATEGORY_LABELS[id]
     // Cursor glyph = role 6 (`primary`), the selected row's own text = role 8
     // (bold textStrong): two anchors, one meaning each.
@@ -3132,7 +3222,10 @@ export class SettingsWorkspacePanel implements Component {
   private rowLine(row: SettingsWorkspaceRow | undefined, width: number): string {
     if (row === undefined) return ''
     const selected = row.id === this.rowId
-    const cursor = selected ? '> ' : '  '
+    // SUX-01: with the Detail tenant active the Rows list is passive context —
+    // the 2-cell gutter stays (layout) and the selected label keeps its bold
+    // textStrong, but the primary cursor belongs to the active Detail device.
+    const cursor = selected && !this.detailTenantActive() ? '> ' : '  '
     // The configured NAME is measured UNPADDED and owns its cells first (the
     // frozen hierarchy: the name stays identifiable, the list SUMMARY is what
     // truncates). Only a name that alone fills the pane drops the summary; the
@@ -3150,7 +3243,8 @@ export class SettingsWorkspacePanel implements Component {
     const rest = lead.slice(cursorText.length)
     if (selected) {
       // Role 8: the selected row is ONE emphasised run (label + value).
-      return `${color.primary(cursorText)}${color.textStrong(`${rest}${pad}${value}`)}`
+      const marker = this.detailTenantActive() ? cursorText : color.primary(cursorText)
+      return `${marker}${color.textStrong(`${rest}${pad}${value}`)}`
     }
     // Role 3/4: content in `text`, the secondary summary column in `textDim`.
     return `${cursorText}${color.text(`${rest}${pad}`)}${color.textDim(value)}`
@@ -3174,15 +3268,18 @@ export class SettingsWorkspacePanel implements Component {
     // WHOLE when it does not fit — a half-cut note would read as a different
     // statement.
     const note =
-      // A specialist row whose page is refused right now (a non-current
-      // authority) must state WHAT is refused.
-      row?.specialist !== undefined && row.specialistAvailable === false
-        ? 'not editable while the backend is not current'
-        : row !== undefined && row.edit === undefined
-          // A read-only field has no writable owner: the note must not imply
-          // that a candidate exists when none does.
-          ? 'read-only here · no candidate is available right now'
-          : ''
+      // SUX-01: the single-value row's own explicit entries already state what
+      // is possible; a generic "read-only here" note would contradict them.
+      this.singleAgentRow(row) ? ''
+        // A specialist row whose page is refused right now (a non-current
+        // authority) must state WHAT is refused.
+        : row?.specialist !== undefined && row.specialistAvailable === false
+          ? 'not editable while the backend is not current'
+          : row !== undefined && row.edit === undefined
+            // A read-only field has no writable owner: the note must not imply
+            // that a candidate exists when none does.
+            ? 'read-only here · no candidate is available right now'
+            : ''
     const noteAloneFits = buttons.length === 0 && note !== '' && visibleWidth(note) <= width
     const pinned = (buttons.length > 0 || noteAloneFits) && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
@@ -3479,7 +3576,13 @@ export class SettingsWorkspacePanel implements Component {
     // for the row's own Enter/Right, and it exists only while the row really
     // carries the specialist page, the composition supplies its factory AND the
     // row has not been refused availability.
-    if (row.specialist !== undefined && row.specialistAvailable !== false) {
+    // SUX-01: the single-value Agent row has TWO explicit entries into the SAME
+    // Detail tenant — the writable `Change [Enter]` and the scoped read-only/
+    // Advanced `Details…`. Neither is a second page or a separate lease.
+    if (this.singleAgentRow(row)) {
+      if (row.freshness === 'ready') buttons.push({ verb: 'change', text: 'Change [Enter]', id: row.id })
+      buttons.push({ verb: 'details', text: 'Details…', id: row.id })
+    } else if (row.specialist !== undefined && row.specialistAvailable !== false) {
       const special = this.specialistEntryFor(row.specialist)
       if (special !== undefined) {
         buttons.push({ verb: 'manage', text: special.label, id: row.id })
@@ -3520,7 +3623,9 @@ export class SettingsWorkspacePanel implements Component {
       case 'computer-use':
         return this.intents.createComputerUsePage === undefined ? undefined : { label: 'Manage Computer Use…' }
       case 'agent-loop-settings':
-        return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Agent loop…' }
+        // SUX-01: the single-value row paints NO `Manage…` button any more; its
+        // preview owns the explicit `Change [Enter]` / `Details…` actions.
+        return undefined
       case 'shell-execution-settings':
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Configure Shell execution…' }
       case 'web-ui':
@@ -3758,8 +3863,14 @@ export class SettingsWorkspacePanel implements Component {
    * row falls back to `details`. The Rows bar word and its pointer target use
    * THIS one answer, so the painted action is the action.
    */
-  private rowForwardAction(row: SettingsWorkspaceRow | undefined): 'open' | 'choose' | 'details' {
+  private rowForwardAction(row: SettingsWorkspaceRow | undefined): 'open' | 'choose' | 'change' | 'details' {
     if (row?.specialist !== undefined) {
+      // SUX-01: the single-value Agent row's forward verb is `change`: only a
+      // CURRENT authoritative value advertises a writable entry, while an
+      // unreadable/last-known row offers its truthful read-only `details`.
+      if (this.singleAgentRow(row)) {
+        return row.freshness === 'ready' ? 'change' : 'details'
+      }
       return row.specialistAvailable === false || this.specialistEntryFor(row.specialist) === undefined
         ? 'details'
         : 'open'
@@ -3817,20 +3928,34 @@ export class SettingsWorkspacePanel implements Component {
     } else if (this.focus === 'categories') {
       segments = this.navigationActionBarSegments()
     } else if (this.focus === 'rows') {
+      const singleRow = this.singleAgentRow(row)
       // C2-R6: on the Extensions Rows level Tab/Shift+Tab cycle the PLUGIN
       // GROUPS, so the bar advertises that instead of the root's `Tab panes`
       // region hint (which would be a false hint there). One group keeps the
       // root's own region hint: its Tab really is the focus key.
-      const groupHints = this.extensionGroupActionBarSegments()
+      const groupHints = singleRow ? [] : this.extensionGroupActionBarSegments()
       segments = [
         { text: 'Up/Down select', priority: 4 },
         { text: 'Left back', priority: 7 },
-        { text: `Right ${rowAction}`, priority: 6 },
-        { text: `Enter ${rowAction}`, priority: 5 },
+        // SUX-01: the single-value row's forward verb and its scoped secondary
+        // disclosure are the TWO highest content hints after Back, and the two
+        // halves of the SAME forward verb stay adjacent.
+        ...singleRow
+          ? [
+            { text: `Enter ${rowAction}`, priority: 7.7 },
+            ...(rowAction === 'change' ? [{ text: 'Right change', priority: 7.5 }] : []),
+            { text: 'Details [?]', priority: 7.4 },
+          ]
+          : [
+            { text: `Right ${rowAction}`, priority: 6 },
+            { text: `Enter ${rowAction}`, priority: 5 },
+          ],
         { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
-        ...(groupHints.length > 0
-          ? groupHints
-          : this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
+        ...(singleRow
+          ? []
+          : groupHints.length > 0
+            ? groupHints
+            : this.currentRows().length > 0 ? this.regionActionBarHints('panes', true) : []),
         { text: back, priority: 8 },
       ]
     } else {
@@ -3838,6 +3963,9 @@ export class SettingsWorkspacePanel implements Component {
       const detailScroll = (this.paintedPanes.detail?.maxOffset ?? 0) > 0
       segments = [
         ...(editable ? [{ text: 'Enter choose', priority: 6 }] : []),
+        // SUX-01: the Detail preview of the single-value row publishes the SAME
+        // scoped disclosure; the body `Details…` action is its second route.
+        ...(this.singleAgentRow(row) ? [{ text: 'Details [?]', priority: 7.3 }] : []),
         ...(detailScroll ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
         ...(detailScroll ? [{ text: 'PgUp/PgDn details', priority: 3 }] : []),
         { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
@@ -3854,7 +3982,12 @@ export class SettingsWorkspacePanel implements Component {
     // `Enter choose` is not a second pointer button (the Detail already paints
     // its own Change…/Manage… affordance).
     const openHints = this.focus === 'categories' || this.focus === 'rows' ? BAR_OPEN_HINTS : []
-    const rendered = this.paintBar(segments, plan.width, openHints)
+    // The scoped disclosure is admitted ONLY for the selected single-value row's
+    // Rows/Detail browse levels; every other caller paints no such segment.
+    const detailsHints = this.singleAgentRow(row) && (this.focus === 'rows' || this.focus === 'detail')
+      ? BAR_DETAILS_HINTS
+      : []
+    const rendered = this.paintBar(segments, plan.width, openHints, detailsHints)
     const choosing = this.choiceField() !== undefined
     this.paintedChoiceNavigation = choosing && rendered.line.includes('Up/Down')
     this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
@@ -4098,11 +4231,23 @@ export class SettingsWorkspacePanel implements Component {
    * retires the instance exactly once. The panel never reads or writes the
    * settings section itself.
    */
-  private openSpecialist(row: SettingsWorkspaceRow): void {
+  private openSpecialist(row: SettingsWorkspaceRow, entry?: 'change' | 'details'): void {
     if (row.specialist === undefined) return
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
+    // SUX-01: the Agent tenant is hosted inside the REAL Detail pane, so it must
+    // be entered only when that pane really grants a content row — a body row
+    // that the pane header would consume is not enough.
+    if (row.specialist === 'agent-loop-settings') {
+      const plan = planSettingsChrome(
+        this.projectionWidth(),
+        this.intents.rows(),
+        this.intents.notice() !== undefined,
+        this.choiceField() !== undefined,
+      )
+      if (chromeGeometry(plan).contentRows < 1) return
+    }
     // A grant that cannot paint the page's real content never starts it: the
     // allowlist picker needs a candidate row and the Web page needs one real row
     // (its list or its detail) above the single Action Bar. The two C2-R5 pages
@@ -4164,7 +4309,12 @@ export class SettingsWorkspacePanel implements Component {
         page = this.intents.createAcpAccessPage?.(done)
         break
       case 'agent-loop-settings':
-        page = this.intents.createHostNumericSettingsPage?.('agent-loop', done, changed)
+        page = this.intents.createHostNumericSettingsPage?.(
+          'agent-loop',
+          done,
+          changed,
+          entry === 'details' ? 'details' : 'change',
+        )
         break
       case 'shell-execution-settings':
         page = this.intents.createHostNumericSettingsPage?.('shell-execution', done, changed)
@@ -4173,8 +4323,10 @@ export class SettingsWorkspacePanel implements Component {
     if (page === undefined) return
     // The factory may run a synchronous callback that already changed the
     // workspace (a stale request): a page built for a superseded state must not
-    // be mounted.
-    if (this.disposed || this.categoryId !== row.category || this.rowId !== row.id) {
+    // be mounted, and it may never replace an instance another owner mounted
+    // during that same callback.
+    if (this.disposed || this.specialistPage !== undefined
+      || this.categoryId !== row.category || this.rowId !== row.id) {
       page.dispose()
       return
     }
@@ -4242,6 +4394,8 @@ export class SettingsWorkspacePanel implements Component {
     if (page === undefined) return
     this.specialistPage = undefined
     this.specialistRow = undefined
+    this.paintedSpecialistBox = undefined
+    this.tenantBarLine = undefined
     page.focused = false
     page.dispose()
     this.pressedGesture = undefined
@@ -4269,6 +4423,108 @@ export class SettingsWorkspacePanel implements Component {
     this.snapshot = this.source.readSnapshot()
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  // ── the SUX-01 Detail tenant (Agent loop) ─────────────────────────────────
+
+  /**
+   * Whether the ONE mounted specialist is the Agent-loop Detail TENANT. The
+   * authority is the real mounted slot plus its row id — never the
+   * selected-but-not-entered row, the category, the terminal width or the mere
+   * presence of a factory.
+   */
+  private detailTenantActive(): boolean {
+    return this.specialistPage !== undefined && this.specialistRow === 'agent-loop'
+  }
+
+  /** The ONE row whose visible route is the inline single-value Detail. */
+  private singleAgentRow(row: SettingsWorkspaceRow | undefined): boolean {
+    return row?.specialist === 'agent-loop-settings' && this.intents.createHostNumericSettingsPage !== undefined
+  }
+
+  /**
+   * Compose the tenant body inside the REAL Detail grant: the page receives the
+   * content rows PLUS this frame's ONE physical bar row, its own last line is
+   * captured as that bar, and its body is fitted/padded to the EXACT content
+   * rows. The painted box is the child's real body cells, so a press outside it
+   * can never reach the child.
+   */
+  private detailTenantLines(width: number, rows: number, x: number, top: number): string[] {
+    const page = this.specialistPage
+    if (page === undefined) return []
+    page.focused = true
+    page.setMaxRows(rows + 1)
+    const child = page.render(width).slice(0, rows + 1)
+    this.tenantBarLine = child[child.length - 1] ?? ''
+    this.paintedSpecialistBox = { x, top, width, rows }
+    const body: string[] = []
+    for (let index = 0; index < rows; index += 1) body.push(fit(child[index] ?? '', width))
+    return body
+  }
+
+  /** A frame with NO body row still grants the tenant its OWN bar: the real
+   *  Esc/wait of the current state stays reachable at the shortest terminals. */
+  private paintTenantBarOnly(width: number): void {
+    const page = this.specialistPage
+    if (page === undefined) return
+    page.focused = true
+    page.setMaxRows(1)
+    this.tenantBarLine = page.render(width)[0] ?? ''
+  }
+
+  /**
+   * The ONE user parent-leave gate of the mounted tenant. A clean page releases
+   * immediately; a page that holds a draft or an unknown outcome opens its own
+   * question and calls the captured continuation only after the user really
+   * confirms. The continuation re-proves the SAME mounted instance, the source
+   * selection and a still-legal destination before it retires anything.
+   */
+  private guardTenantLeave(target: SpecialistParentLeaveTarget, apply: () => void): boolean {
+    const page = this.specialistPage
+    if (page === undefined || !this.detailTenantActive()) { apply(); return true }
+    const instance = page
+    const sourceCategory = this.categoryId
+    const sourceRow = this.rowId
+    const continuation = (): void => {
+      if (this.disposed) return
+      if (this.specialistPage !== instance || this.specialistRow !== 'agent-loop') return
+      if (this.categoryId !== sourceCategory || this.rowId !== sourceRow) return
+      if (!this.legalLeaveTarget(target)) {
+        // The destination vanished while the question was open. The user already
+        // discarded, so the ONE safe disposition is the source level itself: the
+        // vanished target is refused (never applied, never requeued, never
+        // redirected to a same-named owner).
+        this.closeSpecialist()
+        this.leaveDetailTo('rows')
+        return
+      }
+      // The child already committed its question state and revoked its grants:
+      // this is the ONE retirement of the SAME instance before the transaction.
+      this.closeSpecialist()
+      apply()
+    }
+    if (page.requestParentLeave?.(target, continuation) === 'allow') {
+      this.closeSpecialist()
+      apply()
+      return true
+    }
+    return false
+  }
+
+  /** A destination is legal only if it is a member of the CURRENT directory and
+   *  one of the real focus levels (never a stale captured coordinate). */
+  private legalLeaveTarget(target: SpecialistParentLeaveTarget): boolean {
+    if (target.focus !== 'categories' && target.focus !== 'rows' && target.focus !== 'detail') return false
+    if (!this.isSelectableCategory(target.categoryId)) return false
+    if (isDirectCategory(target.categoryId)) return target.rowId === undefined
+    if (target.rowId === undefined) return false
+    return this.snapshot.rows.some(row => row.id === target.rowId && row.category === target.categoryId)
+  }
+
+  /** Whether the LAST frame really painted the scoped `Details` affordance of
+   *  the selected single-value row (the Rows bar span or its body action). */
+  private paintedDetailsAffordance(): boolean {
+    return this.paintedTargets.some(target => target.kind === 'bar-details' || target.kind === 'details')
   }
 
   /**
@@ -4816,6 +5072,32 @@ export class SettingsWorkspacePanel implements Component {
         return
       }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
+      // SUX-01: a pure region-focus Tab exit of the clean tenant is the ROOT's
+      // own focus transaction, so it runs through the tenant's ONE leave gate
+      // first. A page that keeps the keys (raw input, disclosure, saving, dirty)
+      // refuses and then consumes the key as its own local input.
+      if (this.detailTenantActive() && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
+        const tabForward = matchesKey(data, 'tab')
+        // A narrow frame paints ONE region: there is no second region to focus.
+        if (this.currentLayout() === 'narrow') return
+        const next: SettingsWorkspaceFocus = this.focus === 'categories'
+          ? (tabForward ? 'rows' : 'detail')
+          : this.focus === 'rows'
+            ? (tabForward ? 'detail' : 'categories')
+            : (tabForward ? 'categories' : 'rows')
+        // A frame that grants NO real content row at all (a wide OR medium
+        // zero-body grant) paints no parent pane and no body, so Tab could only
+        // focus an invisible region: refuse it. A frame that DOES grant content
+        // keeps the ordinary Tab path — a medium detail frame paints the sibling
+        // Rows pane even though the Categories destination belongs to the NEXT
+        // layout, so the check must be "does this frame grant any content row",
+        // never "is the destination pane painted in the CURRENT layout".
+        const granted = Object.values(this.paintedPanes)
+          .some(box => box !== undefined && box.contentRows >= 1)
+        if (!granted) { this.intents.requestRender(); return }
+        if (this.guardTenantLeave({ categoryId: this.categoryId, rowId: this.rowId, focus: next },
+          () => this.leaveDetailTo(next))) return
+      }
       this.specialistPage.handleInput(data)
       // The child's own model changed THIS frame's business content; the root
       // owns the physical paint, so it schedules the frame the next key reads.
@@ -4892,6 +5174,21 @@ export class SettingsWorkspacePanel implements Component {
     // yet. Only the back keys above are admitted. The page is the ONE owner of
     // that state, so the root asks it instead of duplicating the rule.
     if (this.categoryId === 'plugins' && this.pluginPage?.grantAwaitingPaint() === true) return
+    // SUX-01: the selected single-value row's scoped secondary disclosure. It is
+    // a page-local key, admitted ONLY from the Rows/Detail browse of the ACTUAL
+    // current row with a really painted affordance; it never intercepts another
+    // category, an open choice, a pending write or the extension Tab contract.
+    if (data === '?') {
+      const row = this.selectedRow()
+      if ((this.focus === 'rows' || this.focus === 'detail')
+        && this.singleAgentRow(row)
+        && this.choiceField() === undefined
+        && this.editPhase.kind !== 'pending'
+        && this.paintedDetailsAffordance()) {
+        this.enterDetail('details')
+      }
+      return
+    }
     // Tab / Shift+Tab re-focus the ONE navigation owner (plan §2.2). The key is
     // matched semantically, so legacy `\t` and every protocol's Tab byte agree.
     const tabForward = matchesKey(data, 'tab')
@@ -5217,6 +5514,20 @@ export class SettingsWorkspacePanel implements Component {
     // A category id that is not a member of the CURRENT directory can never be
     // selected — a painted id of a spent frame or a stale deep link included.
     if (!this.isSelectableCategory(category)) return
+    // SUX-01: while the Detail tenant is mounted, a user category/focus change
+    // is ONE guarded leave request (a pure same-target re-selection is not).
+    if (this.detailTenantActive()) {
+      if (category === this.categoryId && focus === this.focus) return
+      this.guardTenantLeave(
+        { categoryId: category, rowId: isDirectCategory(category) ? undefined : this.firstRowOf(category), focus },
+        () => this.applyCategorySelection(category, focus),
+      )
+      return
+    }
+    this.applyCategorySelection(category, focus)
+  }
+
+  private applyCategorySelection(category: SettingsWorkspaceCategoryId, focus: SettingsWorkspaceFocus): void {
     // C2-R5: a professional editor owns its own exit gradient. While it blocks
     // USER navigation (dirty Footer draft, in-flight save, Keybinding query/
     // detail/recorder/mutation) the rail — keyboard OR pointer — may not leave
@@ -5312,6 +5623,13 @@ export class SettingsWorkspacePanel implements Component {
    *  must not be disposed) under an operation that is still in flight. */
   private goBack(): void {
     if (this.focus === 'detail') {
+      // The tenant's own Esc never reaches here (the mounted page owns it), but
+      // the ONE shared leave gate still applies if it ever does.
+      if (this.detailTenantActive()) {
+        this.guardTenantLeave({ categoryId: this.categoryId, rowId: this.rowId, focus: 'rows' },
+          () => this.leaveDetailTo('rows'))
+        return
+      }
       this.leaveDetailTo('rows')
       return
     }
@@ -5374,8 +5692,20 @@ export class SettingsWorkspacePanel implements Component {
 
   private selectRow(id: SettingsWorkspaceRowId, focus?: SettingsWorkspaceFocus): void {
     const changedRow = id !== this.rowId
-    if (changedRow && this.specialistPage !== undefined) this.closeSpecialist()
     const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'rows')
+    // SUX-01: any row/category/focus change while the Detail tenant is mounted is
+    // ONE guarded user leave (the same row re-clicked to return to Rows is one
+    // too: it is a real level change, never an implicit edit).
+    if (this.detailTenantActive() && (changedRow || targetFocus !== 'detail')) {
+      this.guardTenantLeave({ categoryId: this.categoryId, rowId: id, focus: targetFocus },
+        () => this.applyRowSelection(id, changedRow, targetFocus))
+      return
+    }
+    this.applyRowSelection(id, changedRow, targetFocus)
+  }
+
+  private applyRowSelection(id: SettingsWorkspaceRowId, changedRow: boolean, targetFocus: SettingsWorkspaceFocus): void {
+    if (changedRow && this.specialistPage !== undefined) this.closeSpecialist()
     if (changedRow || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
       this.leaveDetailTo(targetFocus, () => {
         if (!changedRow) return
@@ -5405,7 +5735,7 @@ export class SettingsWorkspacePanel implements Component {
       // from the Rows level.
       const row = this.selectedRow()
       if (row?.specialist !== undefined) {
-        this.openSpecialist(row)
+        this.openSpecialist(row, this.singleAgentRow(row) ? 'change' : undefined)
         return
       }
       return this.beginChoice()
@@ -5418,19 +5748,23 @@ export class SettingsWorkspacePanel implements Component {
       this.leaveDetailTo('rows')
       return
     }
-    this.enterDetail()
+    this.enterDetail(this.singleAgentRow(this.selectedRow()) && this.rowForwardAction(this.selectedRow()) === 'details'
+      ? 'details'
+      : 'change')
   }
 
   /** Enter the one Detail level. Writable rows start choosing in the same
    *  transition; focus is committed before the candidate source is re-read. */
-  private enterDetail(): void {
+  private enterDetail(entry: 'change' | 'details' = 'change'): void {
     const row = this.selectedRow()
     // C2-R3: the specialist row has no L2 choice of its own — its ONE action
-    // mounts the embedded page in this same lease.
+    // mounts the embedded page in this same lease. The tenant's typed entry
+    // intent is captured here and the Root level/revision is committed BEFORE
+    // the factory runs, so a synchronous callback never sees a stale state.
     if (row?.specialist !== undefined) {
       this.focus = 'detail'
       this.bumpRevision()
-      this.openSpecialist(row)
+      this.openSpecialist(row, this.singleAgentRow(row) ? entry : undefined)
       return
     }
     if (this.focus === 'detail') return
@@ -5827,20 +6161,46 @@ export class SettingsWorkspacePanel implements Component {
     }
     if (this.specialistPage !== undefined) {
       const box = this.paintedSpecialistBox
-      if (box === undefined || !contentBoxContains(box, event.x, event.y)) return undefined
-      // A wheel may only scroll a body whose current grant really painted.
-      if (this.specialistPage.grantAwaitingPaint?.() === true) {
-        return event.type === 'wheel' ? { handled: true } : undefined
+      const inside = box !== undefined && contentBoxContains(box, event.x, event.y)
+      if (this.detailTenantActive()) {
+        // SUX-01: the tenant's BODY gestures are delivered through the cell
+        // press/click handlers with the BOX-sized event its painted grant uses.
+        // This screen-level handler owes it only the wheel INSIDE its painted
+        // body: re-delivering the terminal-sized press/click here would retire
+        // the child's admitted body press between its press and its release.
+        if (box !== undefined && inside) {
+          if (event.type !== 'wheel') return undefined
+          if (this.specialistPage.grantAwaitingPaint?.() === true) return { handled: true }
+          const result = this.specialistPage.handleMouse?.({
+            ...event,
+            x: event.x - box.x,
+            y: event.y - box.top,
+            screenX: event.screenX - box.x,
+            screenY: event.screenY - box.top,
+            width: box.width,
+            height: box.rows,
+          })
+          this.intents.requestRender()
+          return result
+        }
+        // Outside the tenant body the visible parent Categories/Rows keep their
+        // OWN wheel owner below (a hidden pane still owns nothing).
+      } else {
+        if (box === undefined || !inside) return undefined
+        // A wheel may only scroll a body whose current grant really painted.
+        if (this.specialistPage.grantAwaitingPaint?.() === true) {
+          return event.type === 'wheel' ? { handled: true } : undefined
+        }
+        const result = this.specialistPage.handleMouse?.({
+          ...event,
+          x: event.x - box.x,
+          y: event.y - box.top,
+          screenX: event.screenX - box.x,
+          screenY: event.screenY - box.top,
+        })
+        this.intents.requestRender()
+        return result
       }
-      const result = this.specialistPage.handleMouse?.({
-        ...event,
-        x: event.x - box.x,
-        y: event.y - box.top,
-        screenX: event.screenX - box.x,
-        screenY: event.screenY - box.top,
-      })
-      this.intents.requestRender()
-      return result
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -5990,32 +6350,38 @@ export class SettingsWorkspacePanel implements Component {
     if (this.specialistPage !== undefined) {
       const box = this.paintedSpecialistBox
       this.specialistPressed = undefined
-      if (box === undefined || !contentBoxContains(box, x, y)) return
-      // A press may only arm against a body whose CURRENT grant painted.
-      if (this.specialistPage.grantAwaitingPaint?.() === true) return
-      this.specialistPressed = {
-        x,
-        y,
-        columns: this.intents.columns(),
-        rows: this.intents.rows(),
-        revision: this.revision,
-        box,
+      // SUX-01: the tenant's parent panes stay addressable. A press OUTSIDE its
+      // painted body is simply not the child's (it falls through to the root's
+      // own category/row/pane map below); the gutters/header/blank bar publish
+      // no target there, so they stay inert.
+      if (box !== undefined && contentBoxContains(box, x, y)) {
+        // A press may only arm against a body whose CURRENT grant painted.
+        if (this.specialistPage.grantAwaitingPaint?.() === true) return
+        this.specialistPressed = {
+          x,
+          y,
+          columns: this.intents.columns(),
+          rows: this.intents.rows(),
+          revision: this.revision,
+          box,
+        }
+        this.specialistPage.handleMouse?.({
+          type: 'press',
+          button: 'left',
+          x: x - box.x,
+          y: y - box.top,
+          screenX: x,
+          screenY: y,
+          width: box.width,
+          height: box.rows,
+          shift: false,
+          alt: false,
+          ctrl: false,
+        })
+        this.intents.requestRender()
+        return
       }
-      this.specialistPage.handleMouse?.({
-        type: 'press',
-        button: 'left',
-        x: x - box.x,
-        y: y - box.top,
-        screenX: x,
-        screenY: y,
-        width: box.width,
-        height: box.rows,
-        shift: false,
-        alt: false,
-        ctrl: false,
-      })
-      this.intents.requestRender()
-      return
+      if (!this.detailTenantActive()) return
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -6134,31 +6500,37 @@ export class SettingsWorkspacePanel implements Component {
       const pressed = this.specialistPressed
       this.specialistPressed = undefined
       const box = this.paintedSpecialistBox
-      if (pressed === undefined || box === undefined) return
-      // A release must resolve against the SAME painted cells under the SAME
-      // root state: a resize, a scroll, a snapshot refresh or a picker-driven
-      // repaint between press and release refuses the gesture.
-      if (pressed.columns !== this.intents.columns()
-        || pressed.rows !== this.intents.rows()
-        || pressed.revision !== this.revision
-        || !sameContentBox(pressed.box, box)
-        || !contentBoxContains(box, x, y)) return
-      if (this.specialistPage.grantAwaitingPaint?.() === true) return
-      this.specialistPage.handleMouse?.({
-        type: 'click',
-        button: 'left',
-        x: x - box.x,
-        y: y - box.top,
-        screenX: x,
-        screenY: y,
-        width: box.width,
-        height: box.rows,
-        shift: false,
-        alt: false,
-        ctrl: false,
-      })
-      this.intents.requestRender()
-      return
+      // SUX-01: a release of a press that the tenant's body really admitted is
+      // resolved against that SAME body only; a release outside it is refused,
+      // never handed to a parent target.
+      if (pressed !== undefined) {
+        if (box === undefined) return
+        // A release must resolve against the SAME painted cells under the SAME
+        // root state: a resize, a scroll, a snapshot refresh or a picker-driven
+        // repaint between press and release refuses the gesture.
+        if (pressed.columns !== this.intents.columns()
+          || pressed.rows !== this.intents.rows()
+          || pressed.revision !== this.revision
+          || !sameContentBox(pressed.box, box)
+          || !contentBoxContains(box, x, y)) return
+        if (this.specialistPage.grantAwaitingPaint?.() === true) return
+        this.specialistPage.handleMouse?.({
+          type: 'click',
+          button: 'left',
+          x: x - box.x,
+          y: y - box.top,
+          screenX: x,
+          screenY: y,
+          width: box.width,
+          height: box.rows,
+          shift: false,
+          alt: false,
+          ctrl: false,
+        })
+        this.intents.requestRender()
+        return
+      }
+      if (!this.detailTenantActive()) return
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -6289,13 +6661,14 @@ export class SettingsWorkspacePanel implements Component {
         // Enter/Right. The Computer Use row belongs here: on the single-pane
         // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
         // affordance does not exist and this click is the ONLY pointer route to
-        // the embedded page.
-        if (target.id === 'subagent-settings' || target.id === 'agent-loop' || target.id === 'shell-execution' || target.id === 'computer-use') {
+        // the embedded page. SUX-01: the Agent loop row is NO LONGER one of
+        // them — its explicit Change/Details entry stays a separate gesture.
+        if (target.id === 'subagent-settings' || target.id === 'shell-execution' || target.id === 'computer-use') {
           const row = this.selectedRow()
           const specialist = row?.specialist
           if (row !== undefined
-            && (specialist === 'subagent-settings' || specialist === 'agent-loop-settings'
-              || specialist === 'shell-execution-settings' || specialist === 'computer-use')) this.openSpecialist(row)
+            && (specialist === 'subagent-settings' || specialist === 'shell-execution-settings'
+              || specialist === 'computer-use')) this.openSpecialist(row)
         }
         return
       }
@@ -6312,9 +6685,28 @@ export class SettingsWorkspacePanel implements Component {
         return
       }
       case 'change':
+        // SUX-01: the painted `Change [Enter]` of the single-value row IS the
+        // explicit writable entry into the SAME Detail tenant.
+        if (this.singleAgentRow(this.selectedRow())) { this.enterDetail('change'); return }
         if (this.focus === 'detail') this.beginChoice()
         else this.enterDetail()
         return
+      case 'details':
+        // The scoped secondary disclosure: read-only/Advanced entry of the SAME
+        // Detail tenant, never a second page and never the forward Enter route.
+        if (this.focus === 'detail') {
+          const row = this.selectedRow()
+          if (row?.id === target.id) this.openSpecialist(row, this.singleAgentRow(row) ? 'details' : undefined)
+          return
+        }
+        this.enterDetail('details')
+        return
+      case 'bar-details': {
+        // The painted `Details [?]` is the pointer analogue of the page-local
+        // `?`; it replays the SAME scoped command, never the forward ladder.
+        this.handleInput('?')
+        return
+      }
       case 'retry':
         this.takeColumnFocus('detail')
         this.retryCommit(target.id)
@@ -6371,8 +6763,21 @@ export class SettingsWorkspacePanel implements Component {
         // must never fabricate a level the keyboard cannot return from. Other
         // categories keep their normal column focus.
         if (this.categoryId === 'plugins' && page !== 'categories') return
-        if (page === 'detail' && this.focus !== 'detail') this.enterDetail()
-        else this.takeColumnFocus(page)
+        // SUX-01: a parent-pane switch while the tenant is mounted is the same
+        // guarded leave as the keyboard Tab/Left.
+        if (this.detailTenantActive() && page !== 'detail') {
+          this.guardTenantLeave({ categoryId: this.categoryId, rowId: this.rowId, focus: page },
+            () => this.leaveDetailTo(page))
+          return
+        }
+        if (page === 'detail' && this.focus !== 'detail') {
+          // SUX-01: an ordinary Detail cell of the single-value PREVIEW is a
+          // PURE focus transfer. Only the explicit Change/Enter/Right/`?`
+          // gestures mount the tenant (and with it the page's own editor), so a
+          // passive click never starts the refresh or the raw Input.
+          if (this.singleAgentRow(this.selectedRow())) { this.leaveDetailTo('detail'); return }
+          this.enterDetail()
+        } else this.takeColumnFocus(page)
         return
       }
     }
@@ -6526,6 +6931,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPage = undefined
     this.specialistRow = undefined
     this.paintedSpecialistBox = undefined
+    this.tenantBarLine = undefined
     this.specialistPressed = undefined
     // An external Settings teardown releases the hosted Plugin page's owner
     // exactly once; a focus yield never reaches this path.

@@ -1,11 +1,12 @@
 /**
  * FR5-B official Settings sections over real authenticated Split Clients.
  *
- * One Host with two authenticated Clients proves: the General migration of the
- * two startup preferences (same ids, real profile values), the Session log
- * upload switch and its official Reset readback, the Agent-loop numeric page,
- * the ACTIVE-shell two-cap page, and a two-Client stale-revision refusal that
- * never overwrites the winning profile bytes.
+ * One Host with two authenticated Clients proves: the Host category and the two
+ * next-start preferences its Web UI / ACP access pages own (same ids, real
+ * profile values), the Session log upload switch and its official Reset
+ * readback, the Agent-loop numeric page, the ACTIVE-shell two-cap page, and a
+ * two-Client stale-revision refusal that never overwrites the winning profile
+ * bytes.
  *
  * @module split-process/host-numeric-settings-fr5b
  */
@@ -116,8 +117,8 @@ export async function runHostNumericSettingsFr5B(context) {
   const originalPatch = existsSync(profilePatch) ? readFileSync(profilePatch, 'utf8') : ''
   try {
     // Real pre-existing PROFILE USER values prove the migrated preference rows
-    // read their ORIGINAL ids and values after moving to General (and remain
-    // writable through the same official profile patch).
+    // read their ORIGINAL ids and values on the Host pages that own them (and
+    // remain writable through the same official profile patch).
     const existingRows = existsSync(profilePatch) ? (parseYaml(readFileSync(profilePatch, 'utf8')) ?? []) : []
     assert(Array.isArray(existingRows), 'the isolated profile patch must be a row list')
     writeFileSync(profilePatch, `${JSON.stringify([
@@ -143,42 +144,60 @@ export async function runHostNumericSettingsFr5B(context) {
       clientPids: [clientAStarted.ready.pid, clientBStarted.ready.pid],
     })
 
-    // ── General order + the migrated Web/ACP startup preferences ───────────
-    await openCategory(clientA, 'General', 'FR5-B General')
-    const general = await frameOf(clientA)
-    for (const label of ['Backend', 'Start Web automatically', 'Start ACP automatically', 'Session log upload']) {
-      assert(general.includes(label), `General must paint ${label}: ${JSON.stringify(general)}`)
+    // ── Host order + the next-start preferences its pages own ──────────────
+    await openCategory(clientA, 'Host', 'FR5-B Host')
+    const hostRows = await frameOf(clientA)
+    const listedAt = (lines, label) => lines.findIndex(line => new RegExp(`^ {0,2}(?:> )?${escapeRegExp(label)}(?:\\s|$)`, 'u').test(line))
+    const hostLines = hostRows.split('\n')
+    const order = ['Backend', 'Web UI', 'ACP access', 'Session log upload'].map(label => listedAt(hostLines, label))
+    assert(order.every(index => index >= 0), `Host must paint every row in ${JSON.stringify(order)}: ${JSON.stringify(hostRows)}`)
+    assert(order.every((index, position) => position === 0 || index > order[position - 1]),
+      `the Host rows keep their frozen order: ${JSON.stringify(hostRows)}`)
+    for (const retired of ['Start Web automatically', 'Start ACP automatically',
+      'Auto-enable Web on Host startup', 'Auto-enable ACP on Host startup']) {
+      assert(!hostRows.includes(retired), `the retired Host row ${JSON.stringify(retired)} must not survive`)
     }
-    assert(!general.includes('Auto-enable Web on Host startup'), 'the old Web label must not survive')
-    assert(!general.includes('Auto-enable ACP on Host startup'), 'the old ACP label must not survive')
-    await selectFrame(clientA, frame => selectedRow(frame, 'Start Web automatically'), 'FR5-B Web preference row')
-    const webOn = await frameOf(clientA)
-    assert(/Start Web automatically[^\n]*\bOn\b/u.test(webOn), `the home overlay USER value must read On: ${JSON.stringify(webOn)}`)
-    clientA.send('\r')
-    await waitForText(clientA, 'Choose value', 'FR5-B Web preference choice')
-    await selectFrame(clientA, frame => /^.*> Off(?:\s|$)/mu.test(frame), 'FR5-B Web Off candidate')
-    clientA.send('\r')
-    await waitForPattern(clientA, /Verified/u, 'FR5-B Web preference verified')
-    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
-      'the migrated Web row writes the SAME official preference field')
-    trace('fr5b.general-web-migration', { existingUserValueRead: true, savedProfile: true })
 
-    // The ACP preference still writes its original id from the new location.
-    clientA.send('\x1b') // settled Detail -> Rows
-    await sleep(160)
-    await selectFrame(clientA, frame => selectedRow(frame, 'Start ACP automatically'), 'FR5-B ACP preference row')
+    // The seeded Web USER value is read on the page that OWNS it and written
+    // through the same official preference id (the General row is retired).
+    await selectFrame(clientA, frame => selectedRow(frame, 'Web UI'), 'FR5-B Web UI row')
     clientA.send('\r')
-    await waitForText(clientA, 'Choose value', 'FR5-B ACP preference choice')
-    await selectFrame(clientA, frame => /^.*> Off(?:\s|\n|\r)/mu.test(frame), 'FR5-B ACP Off candidate')
+    await waitForPattern(clientA, /Settings · Host · Web UI/u, 'FR5-B Web UI page')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Start automatically'), 'FR5-B Web start row')
+    const webOn = await frameOf(clientA)
+    assert(/Start automatically[^\n]*\bOn\b/u.test(webOn), `the Web page must read the seeded USER value On: ${JSON.stringify(webOn)}`)
     clientA.send('\r')
-    await waitForPattern(clientA, /Verified/u, 'FR5-B ACP preference verified')
+    await waitForText(clientA, 'Choose the value the next Host start applies:', 'FR5-B Web start choice')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Off'), 'FR5-B Web Off candidate')
+    clientA.send('\r')
+    await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B Web confirm step')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web preference verified')
+    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
+      'the Web page writes the SAME official preference field')
+    trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true })
+    clientA.send('\x1b') // the page -> the Host Rows
+    await sleep(200)
+
+    // The ACP preference still writes its original id from its own page.
+    await selectFrame(clientA, frame => selectedRow(frame, 'ACP access'), 'FR5-B ACP access row')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Settings · Host · ACP access/u, 'FR5-B ACP access page')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Start automatically'), 'FR5-B ACP start row')
+    clientA.send('\r')
+    await waitForText(clientA, 'Choose the value the next Host start applies:', 'FR5-B ACP start choice')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Off'), 'FR5-B ACP Off candidate')
+    clientA.send('\r')
+    await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B ACP confirm step')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP preference verified')
     assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === false,
-      'the migrated ACP row writes its original official preference field')
-    trace('fr5b.general-acp-migration', { savedProfile: true })
+      'the ACP page writes the SAME official preference id')
+    trace('fr5b.host-acp-preference', { savedProfile: true })
+    clientA.send('\x1b') // the page -> the Host Rows
+    await sleep(200)
 
     // ── Session log upload: risk text, Off, and Reset readback ─────────────
-    clientA.send('\x1b') // settled Detail -> Rows
-    await sleep(160)
     await selectFrame(clientA, frame => selectedRow(frame, 'Session log upload'), 'FR5-B Session log row')
     const sessionDetail = await waitForText(clientA, 'session log data with requests',
       'FR5-B Session log risk text')
@@ -203,7 +222,7 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(/\bOn\b/u.test(resetFrame), 'the Reset readback may be On and must be shown as the current value')
     trace('fr5b.session-log', { offPersisted: true, resetVerified: true, resetReadbackOn: true })
 
-    // ── Agent loop numeric page ────────────────────────────────────────────
+    // ── Agent loop: the single-value Detail tenant, ONE Confirm ────────────
     clientA.send('\x1b') // settled Detail -> Rows
     await sleep(160)
     clientA.send('\x1b') // Rows -> category rail
@@ -211,34 +230,54 @@ export async function runHostNumericSettingsFr5B(context) {
     await selectFrame(clientA, frame => /^> Agent(?:\s|$)/mu.test(frame), 'FR5-B Agent category')
     clientA.send('\r')
     await sleep(200)
-    await selectFrame(clientA, frame => selectedRow(frame, 'Agent loop'), 'FR5-B Agent loop row')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Parallel tool calls'), 'FR5-B Agent value row')
+    // ONE Enter from Rows is the whole entry: the tenant opens its raw Input in
+    // the SAME Detail pane (no field list, no Apply, no Save).
     clientA.send('\r')
-    await waitForPattern(clientA, /Settings · Agent · Agent loop/u, 'FR5-B Agent loop page')
-    await selectFrame(clientA, frame => selectedRow(frame, 'Parallel tool calls'), 'FR5-B Agent loop field')
-    clientA.send('\r')
-    await waitForText(clientA, 'Edit Parallel tool calls', 'FR5-B Agent loop input')
+    const agentInput = await waitForPattern(clientA, /Settings · Agent · Parallel tool calls/u, 'FR5-B Agent tenant')
+    assert(/Current value\s+\d+/u.test(agentInput), `the Agent tenant must paint the current value: ${JSON.stringify(agentInput)}`)
+    await waitForPattern(clientA, /Value:\s*/u, 'FR5-B Agent raw value input')
     clientA.send('\x15')
     await sleep(80)
     for (const character of '2') {
       clientA.send(character)
       await sleep(40)
     }
+    await sleep(140)
     clientA.send('\r')
-    await waitForPattern(clientA, /Status: Unsaved/u, 'FR5-B Agent loop staged')
-    await saveAndVerify(clientA, 'FR5-B Agent loop verified', /Status: Verified/u)
+    const agentVerified = await waitForPattern(clientA, /Verified/u, 'FR5-B Agent value verified')
+    assert(!/Apply \[Enter\]/u.test(agentVerified) && !/Save \[S\]/u.test(agentVerified),
+      'the migrated Agent journey never advertises a second Apply/Save key')
     assert(profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls === 2,
-      'the Agent-loop page writes the official profile field')
-    trace('fr5b.agent-loop', { savedProfile: true })
-    // Reset through the same page: official unset, Host readback.
-    await selectFrame(clientA, frame => selectedRow(frame, 'Parallel tool calls'), 'FR5-B Agent loop reset field')
+      'ONE Confirm writes the official profile field')
+    trace('fr5b.agent-loop', { savedProfile: true, singleConfirm: true })
+    // Reset through the scoped Details disclosure: the official unset, then the
+    // Host readback (never set(inherited)).
+    await sleep(140)
+    clientA.send('?')
+    await waitForPattern(clientA, /Reset to inherited…/u, 'FR5-B Agent Advanced disclosure')
+    await waitForPattern(clientA, /Inherited\s+\d+/u, 'FR5-B Agent inherited fact')
     clientA.send('x')
-    await waitForPattern(clientA, /Reset staged/u, 'FR5-B Agent loop reset staged')
-    await saveAndVerify(clientA, 'FR5-B Agent loop reset verified', /Status: Verified/u)
-    trace('fr5b.agent-loop-reset', { officialUnset: true, readback: true })
+    const resetQuestion = await waitForPattern(clientA, /The Host readback decides the value\./u, 'FR5-B Agent reset confirmation')
+    const inheritedMatch = /Inherited\s+(\d+)/u.exec(resetQuestion)
+    assert(inheritedMatch !== null, `the reset confirmation must paint the real inherited value: ${JSON.stringify(resetQuestion)}`)
+    const inherited = Number(inheritedMatch[1])
+    await waitForPattern(clientA, /Confirm \[Enter\]/u, 'FR5-B Agent reset confirm affordance')
+    clientA.send('\r')
+    const agentReset = await waitForPattern(clientA, /Verified/u, 'FR5-B Agent reset verified')
+    // The official unset's success criterion is the Host readback, never USER-key
+    // absence: an unset may legitimately materialize the inherited value.
+    assert(new RegExp(`Current value\\s+${inherited}(?:\\s|$)`, 'u').test(agentReset),
+      `the reset readback must paint the value the official unset leaves behind (inherited=${inherited}): ${JSON.stringify(agentReset)}`)
+    const persistedAfterReset = profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls
+    assert(persistedAfterReset === undefined || persistedAfterReset === inherited,
+      `the official unset leaves either no USER key or the inherited value, never a different number: ${JSON.stringify(persistedAfterReset)}`)
+    clientA.send('\x1b') // the clean tenant -> Rows
+    await sleep(200)
+    await waitForPattern(clientA, new RegExp(`Parallel tool calls\\s+${inherited}(?:\\s|$)`, 'u'), 'FR5-B Agent row readback')
+    trace('fr5b.agent-loop-reset', { officialUnset: true, readback: true, inherited })
 
     // ── Shell execution: two fields, one CAS, then a stale Client B ────────
-    clientA.send('\x1b') // Agent-loop page -> Agent rows
-    await sleep(160)
     clientA.send('\x1b') // Agent rows -> category rail
     await sleep(160)
     await selectFrame(clientA, frame => /^> Tools(?:\s|$)/mu.test(frame), 'FR5-B Tools category')
