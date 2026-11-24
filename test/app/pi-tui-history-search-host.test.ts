@@ -3550,6 +3550,10 @@ test('a destructive round barrier covers the interval between deletion commits',
   }
   const realEnqueue = internals.enqueueWrite.bind(service)
   let writeCalls = 0
+  let firstEntered!: () => void
+  const firstReached = new Promise<void>(resolve => { firstEntered = resolve })
+  let releaseFirst!: () => void
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
   let secondEntered!: () => void
   const secondReached = new Promise<void>(resolve => { secondEntered = resolve })
   let releaseSecond!: () => void
@@ -3564,6 +3568,10 @@ test('a destructive round barrier covers the interval between deletion commits',
     b.live = false
     internals.enqueueWrite = async work => {
       writeCalls += 1
+      if (writeCalls === 1) {
+        firstEntered()
+        await firstGate
+      }
       if (writeCalls === 2) {
         secondEntered()
         await secondGate
@@ -3571,6 +3579,12 @@ test('a destructive round barrier covers the interval between deletion commits',
       return realEnqueue(work)
     }
     const pass = internals.verifySources()
+    await firstReached
+    // Deletion is the FIRST destructive publication of this proven round. The
+    // barrier must already hold BEFORE the first deletion commits.
+    const beforeFirst = await service.search({ scope: 'all', query: 'r801b', limit: 25 }, new AbortController().signal)
+    assert.equal(beforeFirst.kind, 'incomplete', JSON.stringify(beforeFirst))
+    releaseFirst()
     await secondReached
     // The first absent Session is already deleted; the second writer turn has
     // not committed. The Owner must not see the surviving stale row as ready.
@@ -3582,6 +3596,7 @@ test('a destructive round barrier covers the interval between deletion commits',
     assert.equal(internals.index.checkpointOf('r801b-a'), undefined)
     assert.equal(internals.index.checkpointOf('r801b-b'), undefined)
   } finally {
+    releaseFirst()
     releaseSecond()
     internals.enqueueWrite = realEnqueue
     await service.dispose()
