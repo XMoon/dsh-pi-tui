@@ -4245,21 +4245,25 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
   await h.vt.waitForRender()
   assert.match(h.view(), /1 unsaved change/u, 'Keep preserves the draft at 44x8')
 
-  // 200x2: NO body row -> only the tenant's own Back is admitted; every hidden
-  // action and the local Tab are inert, and the draft survives.
-  h.vt.resize(200, 2)
-  await h.vt.waitForRender()
-  await settle(h, 4)
-  assert.match((h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, ''), /^Back \[Esc\]$/u, `the zero-body bar paints only Back: ${JSON.stringify(h.rowsPlain().at(-1))}`)
-  const before = h.view()
-  await key(h, '\t')
-  await key(h, 's')
-  await key(h, 'x')
-  await key(h, '?')
-  await key(h, '\r')
-  await settle(h, 6)
-  assert.equal(h.shellExecutionAttempts(), 0, 'no hidden action may write from a zero-body frame')
-  assert.equal(h.view(), before, 'no hidden frame change happened')
+  // 200/100/44 x 2: NO body row -> only the tenant's own Back is admitted;
+  // every hidden action and the local Tab are inert, and the draft survives.
+  for (const zeroWidth of [200, 100, 44] as const) {
+    h.vt.resize(zeroWidth, 2)
+    await h.vt.waitForRender()
+    await settle(h, 4)
+    assert.match((h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, ''), /^Back \[Esc\]$/u,
+      `${zeroWidth}x2 paints only the page's own Back: ${JSON.stringify(h.rowsPlain().at(-1))}`)
+    const before = h.view()
+    await key(h, '\t')
+    await key(h, 's')
+    await key(h, 'x')
+    await key(h, '?')
+    await key(h, '\r')
+    await key(h, '\x1b[B')
+    await settle(h, 6)
+    assert.equal(h.shellExecutionAttempts(), 0, `${zeroWidth}x2: no hidden action may write`)
+    assert.equal(h.view(), before, `${zeroWidth}x2: no hidden frame change happened`)
+  }
   // Restoring the grant paints the same draft and a FRESH action.
   h.vt.resize(200, 50)
   await h.vt.waitForRender()
@@ -12555,7 +12559,7 @@ test('the Host Backend row is reachable and operable at 108/76/75 columns and tw
 
 test('the single-value Agent tenant keeps its geometry, input and Esc across the frozen size and theme matrix', async () => {
   const sizes = [
-    [200, 50], [120, 40], [108, 24], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20], [44, 8],
+    [200, 50], [120, 40], [108, 24], [107, 24], [100, 40], [80, 24], [76, 24], [75, 24], [72, 24], [44, 20], [80, 10], [44, 8],
   ] as const
   for (const [columns, rows] of sizes) {
     for (const theme of ['dark', 'light'] as const) {
@@ -12617,12 +12621,29 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
       assert.match(shell.rowsPlain().at(-1) ?? '', /Save \[S\]/u, `${columns}x${rows} ${theme}: the dirty group paints Save`)
       await key(shell, '\x1b') // dirty Back -> the page's own leave question
       await shell.vt.waitForRender()
-      assert.match(shell.rowsPlain().at(-1) ?? '', /Keep \[Esc\]/u, `${columns}x${rows} ${theme}: the leave question's Keep`)
+      const leaveBar = (shell.rowsPlain().at(-1) ?? '').replace(/\s+$/u, '')
+      assert.match(leaveBar, /Keep \[Esc\]$/u, `${columns}x${rows} ${theme}: the leave question's Keep`)
       assert.match(shell.view(), /Save keeps you here\./u, `${columns}x${rows} ${theme}: the leave facts stay readable`)
-      await key(shell, 'd') // Discard and leave
+      let discarded = false
+      if (/Discard (?:and leave )?\[D\]/u.test(leaveBar)) {
+        await key(shell, 'd') // Discard and leave through its REALLY painted action
+        discarded = true
+      } else {
+        // A narrower child bar may keep only Save/Keep (plan §2.4 priority):
+        // the valid exit is the explicit Save, then the clean Back.
+        assert.match(leaveBar, /Save \[S\]/u, `${columns}x${rows} ${theme}: a two-item leave bar keeps Save and Keep`)
+        await key(shell, 's')
+        await settle(shell, 12)
+        await key(shell, '\x1b')
+      }
       await settle(shell)
       assert.match(shell.view(), /Settings · Tools · Rows/u, `${columns}x${rows} ${theme}: the group leaves to Rows`)
-      assert.deepEqual(shell.shellExecutionBatches(), [], `${columns}x${rows} ${theme}: the matrix never writes`)
+      if (discarded) {
+        assert.deepEqual(shell.shellExecutionBatches(), [], `${columns}x${rows} ${theme}: Discard and leave never writes`)
+      } else {
+        assert.deepEqual(shell.shellExecutionBatches().map(batch => batch.patch), [{ timeoutMs: { kind: 'set', value: 45_000 } }],
+          `${columns}x${rows} ${theme}: the two-item fallback really saved the staged draft`)
+      }
       shell.dispose()
     }
   }
