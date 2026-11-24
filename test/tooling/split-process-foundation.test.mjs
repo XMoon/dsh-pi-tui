@@ -40,7 +40,7 @@ import {
   assertKernelGroupSignalOwnership,
   kernelGroupLiveMemberPids,
 } from '../support/split-kernel-group-ownership.mjs'
-import { serializeKernelIdentity } from '../support/split-upgrade-native-contract.mjs'
+import { classifyKernelLiveness, serializeKernelIdentity } from '../support/split-upgrade-native-contract.mjs'
 import { createSplitProcessScene } from '../support/split-process-fixture.ts'
 import { readOfficialClientRecords } from '../support/split-process-client.ts'
 import { SupervisorClient } from '../support/split-supervisor-client.ts'
@@ -196,6 +196,14 @@ test('the group-signal predicate binds ownership to the exact PID birth and igno
   assert.deepEqual(
     kernelGroupLiveMemberPids({ listMembers: () => [terminated] }, 4242, 'probe'),
     [],
+  )
+  // The product classifier is what makes that same-birth terminated leader a
+  // terminal fact (the fallback reclaim must not escalate or report NOT_QUIESCED).
+  assert.equal(classifyKernelLiveness(terminated).state, 'gone')
+  // A genuinely live member keeps the group non-terminal.
+  assert.deepEqual(
+    kernelGroupLiveMemberPids({ listMembers: () => [leader] }, 4242, 'probe'),
+    [4242],
   )
   // An unreadable group is unknown ownership, never a terminal empty group.
   assert.throws(

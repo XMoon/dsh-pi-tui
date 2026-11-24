@@ -849,9 +849,10 @@ let childExited = false
 let killedWorkerPid
 let siblingReceipt
 let siblingSnapshot
+let kernel
 try {
   let deadline
-  const kernel = processMode ? await loadKernelHelpers() : undefined
+  kernel = processMode ? await loadKernelHelpers() : undefined
   if (processMode) {
     probeMainIdentity = captureProbeMainIdentity(kernel, child, 'probe-owned Vitest main')
     // The sentinel is probe-owned too: capture its exact kernel identity once
@@ -1463,8 +1464,30 @@ try {
   if (seatCheckReleaseFile !== undefined) {
     try { unlinkSync(seatCheckReleaseFile) } catch { /* not created */ }
   }
-  try { process.kill(-sentinel.pid, 'SIGKILL') } catch {
-    try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
+  if (processMode) {
+    // Destructive cleanup follows the SAME captured identity as the terminal
+    // check: never signal a numeric group/PID that may be gone, foreign or
+    // unclassifiable. A vanished/foreign sentinel is skipped; an unverifiable
+    // one fails the probe instead of being signalled.
+    if (sentinelIdentity !== undefined) {
+      const state = identityLiveness(kernel, sentinelIdentity.pid, sentinelIdentity.birth)
+      if (state === 'live') {
+        try { process.kill(-sentinelIdentity.pid, 'SIGKILL') } catch {
+          try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
+        }
+      } else if (state === 'unknown') {
+        console.error('SPLIT_SUPERVISOR_SIGNAL_PROBE_FAIL: the probe-owned sentinel identity is unverifiable; refusing destructive cleanup')
+        process.exitCode = 1
+      }
+    } else if (sentinel.exitCode === null && sentinel.signalCode === null) {
+      // The identity was never captured (early failure); an unreaped direct
+      // child handle still names this probe's own sentinel, so reclaim it.
+      try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
+    }
+  } else {
+    try { process.kill(-sentinel.pid, 'SIGKILL') } catch {
+      try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
+    }
   }
 }
 }

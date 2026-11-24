@@ -8,7 +8,7 @@
  * directly or fakes a Workspace.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -171,28 +171,25 @@ test('completes Host workspace files before creating the first session in that w
 
     // Input boundary on the REAL started Scene: a path-unsafe label, an
     // escaping cwd/home and an unknown handle are refused before any directory
-    // or native spawn exists. The outside sibling EXISTS and is canonical, so
-    // the cwd/home refusals are the actual containment check rather than a
-    // missing-path failure, and the refused attempt must not mutate it.
-    const outsideSibling = join(realpathSync(dirname(root)),
-      `split-process-outside-${String(process.pid)}-${String(Date.now())}`)
-    mkdirSync(outsideSibling, { mode: 0o700 })
-    try {
-      const idsBeforeBoundary = await scene.sessionIds()
-      await expect(scene.startClient({ label: '../../escape', cwd: primary, home: primaryHome }))
-        .rejects.toThrow(/INPUT_UNQUALIFIED/u)
-      await expect(scene.startClient({ label: 'boundary-cwd', cwd: outsideSibling, home: primaryHome }))
-        .rejects.toThrow(/must be inside the Scene root/u)
-      await expect(scene.startClient({ label: 'boundary-home', cwd: primary, home: outsideSibling }))
-        .rejects.toThrow(/must be inside the Scene root/u)
-      await expect(scene.request('CLOSE_PROCESS_CLIENT', { clientId: 'unknown-process-client' }))
-        .rejects.toThrow(/CLOSE_PROCESS_CLIENT|unknown|not registered/u)
-      expect(await scene.sessionIds()).toEqual(idsBeforeBoundary)
-      expect(readdirSync(root).filter(name => name.startsWith('escape'))).toEqual([])
-      expect(readdirSync(outsideSibling)).toEqual([])
-    } finally {
-      rmSync(outsideSibling, { recursive: true, force: true })
-    }
+    // or native spawn exists. The negative cwd/home input is the already
+    // existing canonical private base (the parent of the Scene root), so the
+    // refusal is the actual containment check rather than a missing-path
+    // failure and the Worker allocates nothing outside the Supervisor-owned
+    // Scene root. The refused starts must leave no Client reservation or owned
+    // directory behind.
+    const outsideBase = realpathSync(dirname(root))
+    const idsBeforeBoundary = await scene.sessionIds()
+    await expect(scene.startClient({ label: '../../escape', cwd: primary, home: primaryHome }))
+      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
+    await expect(scene.startClient({ label: 'boundary-cwd', cwd: outsideBase, home: primaryHome }))
+      .rejects.toThrow(/must be inside the Scene root/u)
+    await expect(scene.startClient({ label: 'boundary-home', cwd: primary, home: outsideBase }))
+      .rejects.toThrow(/must be inside the Scene root/u)
+    await expect(scene.request('CLOSE_PROCESS_CLIENT', { clientId: 'unknown-process-client' }))
+      .rejects.toThrow(/CLOSE_PROCESS_CLIENT|unknown|not registered/u)
+    expect(await scene.sessionIds()).toEqual(idsBeforeBoundary)
+    expect(readdirSync(root).filter(name => name.startsWith('escape'))).toEqual([])
+    expect(existsSync(join(root, 'process-clients'))).toBe(false)
 
     const primaryClient = await scene.startClient({ label: 'workspace-primary', cwd: primary, home: primaryHome })
     const secondaryClient = await scene.startClient({ label: 'workspace-secondary', cwd: secondary, home: secondaryHome })

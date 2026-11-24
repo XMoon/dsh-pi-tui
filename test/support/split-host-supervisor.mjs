@@ -517,6 +517,21 @@ async function waitForGroupGone(pgid, timeoutMs) {
   }
 }
 
+/**
+ * Bounded wait for one owned group to become terminal under the Process
+ * contract: only classifier-LIVE members keep it alive, so a same-birth Linux
+ * Z/X/x task is terminal and an unreadable group fails closed. Returns the
+ * remaining live member PIDs (empty = terminal).
+ */
+async function waitForKernelGroupTerminal(pgid, timeoutMs, reason) {
+  const started = Date.now()
+  for (;;) {
+    const live = kernelGroupLiveMemberPids(processKernelReaders(), pgid, reason)
+    if (live.length === 0 || Date.now() - started >= timeoutMs) return live
+    await sleep(50)
+  }
+}
+
 async function assertHostGroupGone(handle, reason) {
   const pgid = hostPgid(handle)
   if (!processGroupAlive(pgid)) return
@@ -1189,23 +1204,44 @@ async function reclaimFallbackHost(pid, origin, scratch, reason, processOwner) {
     return true
   }
   signalGroup('SIGTERM')
-  await waitForGroupGone(pid, TERM_GRACE_MS)
-  if (processGroupAlive(pid)) {
-    signalGroup('SIGKILL')
-    await waitForGroupGone(pid, KILL_GRACE_MS)
-  }
-  if (processGroupAlive(pid) || pidAlive(pid)) {
-    throw new Error(`${reason}: the fallback Host ${String(pid)} is still alive after TERM/KILL`)
-  }
-  if (strict !== undefined) {
-    const state = processIdentityState(strict.identity)
-    if (state !== 'gone' && state !== 'reused') {
-      throw new Error(`${reason}: the reclaimed fallback Host PID ${String(pid)} is still ${state}`)
+  if (strict === undefined) {
+    // Legacy Pilot/Upgrade policy is unchanged: numeric group liveness.
+    await waitForGroupGone(pid, TERM_GRACE_MS)
+    if (processGroupAlive(pid)) {
+      signalGroup('SIGKILL')
+      await waitForGroupGone(pid, KILL_GRACE_MS)
     }
-  } else {
+    if (processGroupAlive(pid) || pidAlive(pid)) {
+      throw new Error(`${reason}: the fallback Host ${String(pid)} is still alive after TERM/KILL`)
+    }
     const currentStarttime = readHostStarttime(pid)
     if (currentStarttime !== undefined && currentStarttime !== starttime) {
       throw new Error(`${reason}: the fallback Host PID ${String(pid)} was reused by another process during reclaim`)
+    }
+  } else {
+    // Process terminal classification uses the SAME shared contract as the
+    // signal fence: the grace wait counts only classifier-LIVE members, so a
+    // same-birth Z/X/x leader/group is terminal without a KILL escalation. Only
+    // a still-live captured leader may authorize the freshly fenced escalation;
+    // a gone/reused leader or an unreadable group never authorizes a signal.
+    let remaining = await waitForKernelGroupTerminal(pid, TERM_GRACE_MS, reason)
+    if (remaining.length > 0) {
+      const leaderState = processIdentityState(strict.identity)
+      if (leaderState === 'unknown') {
+        throw new Error(`${reason}: the fallback Host leader state is unverifiable; refusing the KILL escalation`)
+      }
+      if (leaderState === 'alive') {
+        signalGroup('SIGKILL')
+        remaining = await waitForKernelGroupTerminal(pid, KILL_GRACE_MS, reason)
+      }
+    }
+    const state = processIdentityState(strict.identity)
+    if (state === 'unknown') {
+      throw new Error(`${reason}: the reclaimed fallback Host PID ${String(pid)} is unverifiable`)
+    }
+    if (state === 'alive' || remaining.length > 0) {
+      const members = remaining.length > 0 ? `; live group members: ${JSON.stringify(remaining)}` : ''
+      throw new Error(`${reason}: the fallback Host PID ${String(pid)} is still ${state}${members}`)
     }
   }
   record.reclaimed = true
