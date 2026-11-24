@@ -604,19 +604,21 @@ export function projectFocus(
 }
 
 /**
- * The canonical structural blocks the expanded Focus TAIL consumes: one turn
- * group from its Thought-lead boundary onward. The held-back final is included,
- * so cluster membership is computed from exactly the raw adjacency the window
- * would give. `projectFocus` emits a canonical Work span as a nested `work`
- * block (F6); this exported seam lets the convergence oracle compare
+ * The canonical structural blocks the expanded Focus TAIL consumes: one logical
+ * Turn's primary presentation region from its Thought-lead boundary onward
+ * (bridged control rows included at their raw positions). The held-back final is
+ * included, so cluster membership is computed from exactly the raw adjacency the
+ * window would give. `projectFocus` emits a canonical Work span as a nested
+ * `work` block (F6); this exported seam lets the convergence oracle compare
  * Work/cluster boundary IDENTITY (owner and member objects) instead of display
  * strings (plan §25).
- * @param group - one turn's consecutive raw messages.
- * @param boundary - the group's Thought-lead boundary ({@link focusThoughtLeadBoundary}).
- *   Passed in so one expanded group computes the boundary once.
+ * @param region - one logical Turn's primary region members, in raw order.
+ * @param boundary - the region's Thought-lead boundary
+ *   ({@link focusThoughtLeadBoundary}). Passed in so one expanded region
+ *   computes the boundary once.
  */
-export function focusExpandedTailStructure(group: readonly TranscriptMessage[], boundary: number): TranscriptStructureBlock[] {
-  return projectTranscriptStructure(group.slice(boundary))
+export function focusExpandedTailStructure(region: readonly TranscriptMessage[], boundary: number): TranscriptStructureBlock[] {
+  return projectTranscriptStructure(region.slice(boundary))
 }
 
 /** Rows that remain visible outside the collapsed Thought as persistent
