@@ -116,11 +116,13 @@ export class AcpHostCommandError extends Error {
 }
 
 /**
- * The ONE operation-specific compact abort reason. It is an Error identity so
- * the official rejection chain can be checked for THIS operation instead of a
- * local boolean flag that an independent Host cancellation can race.
+ * A NEW operation-specific compact abort reason. The View stores this exact
+ * Error on one AcpOwnedCommand and uses its identity for that operation only;
+ * a stale/foreign operation's cause can never match it.
  */
-export const ACP_COMPACT_CANCEL_REASON: Error = Object.freeze(new Error('local-acp-compact-cancel'))
+export function acpCompactCancelReason(): Error {
+  return new Error('local-acp-compact-cancel')
+}
 
 /** The compact facts observed synchronously from the exact Session event stream. */
 export interface AcpCompactObservedFacts {
@@ -278,9 +280,13 @@ function causedBy(error: unknown, reason: unknown): boolean {
 }
 
 /** Whether one compact rejection was caused by THIS ACP operation's own abort. */
-export function isAcpCompactAbort(settlement: AcpCommandSettlement, signal: AbortSignal): boolean {
-  if (!signal.aborted || signal.reason !== ACP_COMPACT_CANCEL_REASON) return false
-  return settlement.kind === 'rejected' && causedBy(settlement.error, ACP_COMPACT_CANCEL_REASON)
+export function isAcpCompactAbort(
+  settlement: AcpCommandSettlement,
+  signal: AbortSignal,
+  expectedReason: Error,
+): boolean {
+  if (!signal.aborted || signal.reason !== expectedReason) return false
+  return settlement.kind === 'rejected' && causedBy(settlement.error, expectedReason)
 }
 
 /** Validate one official `CommandExecution` shape without trusting it. */

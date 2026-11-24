@@ -119,7 +119,7 @@ import {
   type AcpSessionReadRow,
 } from './local-acp-projections.ts'
 import {
-  ACP_COMPACT_CANCEL_REASON,
+  acpCompactCancelReason,
   AcpHostCommandError,
   catalogUpdate,
   classifyCompactOutcome,
@@ -1128,6 +1128,8 @@ interface AcpOwnedCommand {
    */
   readonly controller: AbortController
   readonly executionSignal: AbortSignal
+  /** This operation's unique ACP abort reason. */
+  readonly cancelReason: Error
   state: 'dispatching' | 'executing' | 'host-settled' | 'delivery-settled'
   /** True only while the official call is on the stack (sync prefix included). */
   invoked: boolean
@@ -1266,6 +1268,11 @@ interface InflightPrompt {
   ownTurnEnded: boolean
   /** The stable classification this flight settled with (set by failPrompt). */
   failureCode?: LocalAcpSessionErrorCode
+  /**
+   * A definite advertised-Skill pre-dispatch refusal: the official prompt was
+   * never invoked, so a concurrent Close has no Host write to settle.
+   */
+  definiteNoDispatch?: boolean
   /**
    * PO-3B: pending reverse permission requests keyed by their exact callId,
    * alive only for THIS flight's lifetime (never a second global registry).
@@ -2902,7 +2909,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // A prompt failure is not a close proof (R701-04): only a real Host
         // terminal (its own turn/end, an Agent disposal, or a definite
         // pre-insertion rejection) lets the close proceed.
-        const terminal = flight.ownTurnEnded || flight.failureCode === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+        const terminal = flight.ownTurnEnded
+          || flight.failureCode === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+          || flight.definiteNoDispatch === true
         if (!terminal) throw outcome
       }
     }
@@ -3252,6 +3261,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       messageId: randomUUID(),
       controller,
       executionSignal: controller.signal,
+      cancelReason: acpCompactCancelReason(),
       state: 'dispatching',
       invoked: false,
       cancelRequested: false,
@@ -3309,7 +3319,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         conflict: op.factConflict,
       }
       const outcome = route.kind === 'compact'
-        ? classifyCompactOutcome(settlement, facts, isAcpCompactAbort(settlement, op.controller.signal))
+        ? classifyCompactOutcome(settlement, facts, isAcpCompactAbort(settlement, op.controller.signal, op.cancelReason))
         : classifyStandaloneOutcome(settlement)
       const frames = await this.awaitCommandFrames(op)
       if (frames === 'failed' && !op.deliveryClosed && !requestSignal.aborted) {
@@ -3450,7 +3460,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       op.abortScheduled = false
       if (this.claims.get(claim.sessionId) !== claim || claim.commandOperation !== op || op.hostSettled) return
       if (op.summarySeq !== undefined) return
-      op.controller.abort(ACP_COMPACT_CANCEL_REASON)
+      op.controller.abort(op.cancelReason)
     })
   }
 
@@ -3683,6 +3693,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       try {
         preflight = await this.preflightAdvertisedSkill(claim, flight, access, skillPreflight.name, skillPreflight.epoch)
       } catch (error) {
+        flight.definiteNoDispatch = true
         flight.settleAdmission()
         this.failPrompt(claim, flight, error instanceof LocalAcpViewError
           ? error
@@ -3705,6 +3716,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // The preflight await may have outlived the provenance read at admission.
       const currentBeforeDispatch = access.currentTurn(request.sessionId, claim.exactAgent, claim.exactSession)
       if (currentBeforeDispatch.kind === 'stale') {
+        flight.definiteNoDispatch = true
         flight.settleAdmission()
         this.failPrompt(claim, flight, promptError(
           'LOCAL_ACP_PROMPT_STALE_AGENT',
@@ -3731,6 +3743,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       try {
         finalCommands = access.readCommandCatalog(claim.exactAgent as LiveAgentViewIdentity, claim.exactSession as object)
       } catch {
+        flight.definiteNoDispatch = true
         flight.settleAdmission()
         this.failPrompt(claim, flight, new LocalAcpViewError(
           'LOCAL_ACP_COMMAND_UNAVAILABLE',
@@ -3744,6 +3757,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         || claim.exactAgent !== skillAgent || claim.exactSession !== skillSession
         || (claim.catalogEpoch ?? 0) !== skillPreflight.epoch
         || finalCommands.effectiveNames.includes(skillPreflight.name)) {
+        flight.definiteNoDispatch = true
         flight.settleAdmission()
         this.failPrompt(claim, flight, new LocalAcpViewError(
           'LOCAL_ACP_COMMAND_STALE',

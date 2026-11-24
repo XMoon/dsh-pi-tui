@@ -968,12 +968,13 @@ test('the production Host command access binds only the audited identities and t
   const executed: Array<{ line: string; attachments: readonly unknown[]; signal: AbortSignal }> = []
   const compacted: Array<{ signal: AbortSignal; sourceCommandId?: unknown }> = []
   let modules = ['@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact']
-  const officialEngine = {
+  class OfficialEngine {
     async compactNow(_agent: object, signal: AbortSignal, sourceCommandId?: unknown) {
       compacted.push({ signal, ...sourceCommandId === undefined ? {} : { sourceCommandId } })
       return null
-    },
+    }
   }
+  const officialEngine = new OfficialEngine()
   const rootEngine = { async compactNow() { throw new Error('the root engine must never be used') } }
   let scopedEngine: unknown = officialEngine
   let skillsSnapshot: { skills: unknown[]; complete: boolean } = { skills: [], complete: true }
@@ -1024,7 +1025,7 @@ test('the production Host command access binds only the audited identities and t
       return undefined
     } },
   } as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
-  const access = createHostAcpSessionAccess(context)
+  const access = createHostAcpSessionAccess(context, undefined, OfficialEngine)
   const catalog = access.readCommandCatalog(agent, session)
   assert.deepEqual(catalog.effectiveNames, ['feedback', 'compact'])
   assert.equal(catalog.feedback, 'available')
@@ -1056,6 +1057,9 @@ test('the production Host command access binds only the audited identities and t
   await assert.rejects(access.readNativeSkills(agent, session, new AbortController().signal), (error: unknown) =>
     (error as { code?: string }).code === 'unavailable')
   serviceThrow = false
+  scopedEngine = { async compactNow() { return null } }
+  assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable',
+    'a same-shape nonofficial engine is not the anchored official implementation')
   scopedEngine = undefined
   assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable')
   assert.throws(() => access.executeManualCompact(agent, session, new AbortController().signal), (error: unknown) =>

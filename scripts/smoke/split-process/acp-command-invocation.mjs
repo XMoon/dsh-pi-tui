@@ -616,13 +616,40 @@ export async function runAcpCommandInvocation(context) {
     assert(!endFailEvents.some(event => event.type === 'compaction/end' && event.data?.compactionId === endFailId),
       'CMP-06: the replacement has no clean end')
     trace('acp-command/partial-replacement', { compactionId: endFailId })
-    // Official Session load is the cold canonical read: the persisted partial
-    // summary is visible, but no clean end is invented.
+    // Official Session load with negotiated compaction is the canonical read.
+    // First a COMPLETE control proves the replay channel emits compaction
+    // updates; then the partial Session proves no complete terminal for its id
+    // (zero optional frames would otherwise be vacuous).
+    const controlSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const controlSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: controlSession, prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(controlSeed?.stopReason === 'end_turn', 'CMP-06: control seed must end_turn')
+    resetHold(holdRoot)
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const controlCompact = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: controlSession, prompt: promptText('/compact'),
+    })
+    assert(controlCompact?.stopReason === 'end_turn', 'CMP-06: control compact must end_turn')
+    await client.request(acp.methods.agent.session.close, { sessionId: controlSession })
     await client.request(acp.methods.agent.session.close, { sessionId: endFailSession })
     const loadedUpdates = []
     const loadClient = await openSdkClient(endpoint, params => { loadedUpdates.push(params) })
     clients.push(loadClient)
-    await loadClient.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    await loadClient.request(acp.methods.agent.initialize, {
+      protocolVersion: 1, clientCapabilities: { session: { compaction: {} } },
+    })
+    const loadedControl = await loadClient.request(acp.methods.agent.session.load, {
+      sessionId: controlSession, cwd: hostCwd, mcpServers: [],
+    })
+    assert(typeof loadedControl === 'object' && loadedControl !== null, 'CMP-06: control session/load must answer')
+    const controlCompaction = loadedUpdates
+      .filter(params => params?.sessionId === controlSession && params.update?.sessionUpdate === 'compaction_update')
+      .map(params => params.update)
+    assert(controlCompaction.length > 0,
+      'CMP-06: negotiated load must emit the complete control compaction (positive control)')
     const loaded = await loadClient.request(acp.methods.agent.session.load, {
       sessionId: endFailSession, cwd: hostCwd, mcpServers: [],
     })
@@ -630,11 +657,11 @@ export async function runAcpCommandInvocation(context) {
     const loadedCompaction = loadedUpdates
       .filter(params => params?.sessionId === endFailSession && params.update?.sessionUpdate === 'compaction_update')
       .map(params => params.update)
-    // The official history projection does not turn a partial replacement
-    // into a clean compaction update. The durable summary is proven above; the
-    // cold read must at least not fabricate a complete one.
-    assert(loadedCompaction.length === 0,
-      `CMP-06: official load must not invent a complete compaction for the partial replacement (${JSON.stringify(loadedCompaction)})`)
+    assert(loadedCompaction.some(update => update.compactionId === endFailId
+      && update.summary !== undefined && update.status === 'in_progress'),
+    `CMP-06: official load must expose the partial summary as in_progress (${JSON.stringify(loadedCompaction)})`)
+    assert(!loadedCompaction.some(update => update.compactionId === endFailId && update.status !== 'in_progress'),
+      `CMP-06: official load must not invent a complete terminal for the partial replacement (${JSON.stringify(loadedCompaction)})`)
     await loadClient.request(acp.methods.agent.session.close, { sessionId: endFailSession })
 
     // CMP-05: hold the real official post-summary flush, send a late ACP

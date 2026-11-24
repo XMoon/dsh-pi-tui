@@ -800,9 +800,14 @@ so no callback can slip between the preflight's last await and the insertion.
 
 `/compact` uses the exact retained official `compaction` service selected from
 the Agent's audited composition. The composition must be one of the generated
-official preset identities and contain the audited compaction modules; an
-ambiguous custom composition or an unreadable service is unavailable rather
-than a guessed engine. It is NOT executed through a command wrapper:
+official preset identities, contain the audited compaction modules, and the
+resolved service must be an instance of the `BasicCompactionEngine` class
+resolved from the SAME installed DSH anchor; a custom implementation of the
+same shape, an ambiguous custom composition or an unreadable service is
+unavailable rather than a guessed engine. This identity check establishes the
+supported official engine implementation, not a general provider/isolate graph
+guarantee for arbitrary same-id profiles. It is NOT executed through a command
+wrapper:
 the View never fabricates `command/run`, `command/done` or `sourceCommandId`,
 and never takes the root/global compaction service. The original
 `compactNow` Promise is the execution terminal; `compaction/start`,

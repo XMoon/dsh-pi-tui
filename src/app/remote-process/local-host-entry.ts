@@ -327,6 +327,12 @@ interface OfficialDshModules {
   readonly loadLayeredEnv: (binName: string, cwd?: string) => unknown
   readonly resolveDshHome: () => string
   readonly resolveProfileDir: (name: string, home?: string) => string
+  /**
+   * The official basic compaction implementation class, resolved from the
+   * SAME installation anchor as the retained Host. Optional: without it the
+   * ACP compact capability is unavailable, never replaced by a root engine.
+   */
+  readonly compactionEngineClass?: Function
 }
 
 /** Resolve one published DSH subpath from the installation anchor supplied by the launcher. */
@@ -338,8 +344,18 @@ async function loadOfficialDsh(anchor: string): Promise<OfficialDshModules> {
   const appBoot = await importResolved('@deepseek-ai/dsh-app-boot')
   const homePaths = await importResolved('@deepseek-ai/dsh-home-paths')
   const commands = await importResolved('@deepseek-ai/dsh-commands')
+  let compactionEngineClass: Function | undefined
+  try {
+    const compaction = await importResolved('@deepseek-ai/dsh-compaction-basic')
+    const candidate = compaction.BasicCompactionEngine
+    if (typeof candidate === 'function') compactionEngineClass = candidate
+  } catch {
+    // The optional compact capability is absent when its public official
+    // implementation cannot be resolved from this anchor.
+  }
   return {
     parseCommand: commands.parseCommand as OfficialDshModules['parseCommand'],
+    ...(compactionEngineClass === undefined ? {} : { compactionEngineClass }),
     runProfile: profileBoot.runProfile as OfficialDshModules['runProfile'],
     loadLayeredEnv: appBoot.loadLayeredEnv as OfficialDshModules['loadLayeredEnv'],
     resolveDshHome: homePaths.resolveDshHome as OfficialDshModules['resolveDshHome'],
@@ -884,6 +900,7 @@ function readSkillRegistry(
 function auditedCompactionEngine(
   agent: LiveAgentViewIdentity,
   presets: AgentPresetRegistryLike | undefined,
+  expectedEngineClass: Function | undefined,
 ): CompactionEngineLike | undefined {
   if (presets === undefined || !hasContext(agent)) return undefined
   const inspection = retainedInspection(agent, presets)
@@ -901,7 +918,14 @@ function auditedCompactionEngine(
     throw new AcpHostCommandError('unavailable', 'the retained compaction service could not be resolved')
   }
   const engine = service as CompactionEngineLike | undefined
-  return engine !== undefined && typeof engine.compactNow === 'function' ? engine : undefined
+  if (engine === undefined || typeof engine.compactNow !== 'function') return undefined
+  if (expectedEngineClass === undefined) return undefined
+  try {
+    if (!(engine instanceof expectedEngineClass)) return undefined
+  } catch {
+    return undefined
+  }
+  return engine
 }
 
 /** Project one official command definition onto the detached wire row. */
@@ -931,6 +955,7 @@ function commandRow(definition: CommandDescriptorLike): AcpCommandCatalogRow {
 export function createHostAcpSessionAccess(
   context: import('@deepseek-ai/cordis').Context,
   parseCommand?: (line: string) => { readonly name: string; readonly rawInput: string } | undefined,
+  compactionEngineClass?: Function,
 ): HostAcpSessionAccess {
   const workspaceController = context.reflect.get('workspaceController') as WorkspaceControllerLike | undefined
   const sessionController = context.reflect.get('sessionController') as SessionControllerLike | undefined
@@ -1254,7 +1279,7 @@ export function createHostAcpSessionAccess(
       let compactState: AcpCommandCatalogRead['compact']
       if (compact === undefined) compactState = 'missing'
       else if (String(compact.definitionId) !== COMPACT_DEFINITION_ID) compactState = 'shadowed'
-      else compactState = auditedCompactionEngine(agent, agentPresets) === undefined ? 'unavailable' : 'available'
+      else compactState = auditedCompactionEngine(agent, agentPresets, compactionEngineClass) === undefined ? 'unavailable' : 'available'
       const rows: AcpCommandCatalogRow[] = []
       if (feedbackState === 'available' && feedback !== undefined) rows.push(commandRow(feedback))
       if (compactState === 'available' && compact !== undefined) rows.push(commandRow(compact))
@@ -1343,7 +1368,7 @@ export function createHostAcpSessionAccess(
       let engine: CompactionEngineLike | undefined
       try {
         definition = commands.find(agent as never, 'compact')
-        engine = auditedCompactionEngine(agent, agentPresets)
+        engine = auditedCompactionEngine(agent, agentPresets, compactionEngineClass)
       } catch {
         throw new AcpHostCommandError('unavailable', 'the official compaction composition could not be read')
       }
@@ -2325,7 +2350,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // The official Workspace/Session/Agent registries stay the sole authority;
       // only their callable methods are forwarded. A failure to read them is a
       // Host composition failure (the readiness audit already required them).
-      const sessionAccess = createHostAcpSessionAccess(handle.ctx, dsh.parseCommand)
+      const sessionAccess = createHostAcpSessionAccess(handle.ctx, dsh.parseCommand, dsh.compactionEngineClass)
       acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host'), sessionAccess })
       scratchOwner.acpController = acpController
       // Register the entry-owned controller as the root Host `piTuiAcpOwner`
