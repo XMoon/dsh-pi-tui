@@ -1824,13 +1824,13 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     }
   }
 
-  /** Whether the last physical attempt belongs to the CURRENT official
-   *  Connection. Never promotes a live snapshot into item provenance. */
-  private attemptIsCurrent(): boolean {
-    const current = this.generation.getSnapshot()
-    return current !== undefined
-      && this.attemptedPhysicalGeneration !== undefined
-      && Object.is(current, this.attemptedPhysicalGeneration)
+  /** Admission of one physical item against the current live Connection:
+   *  `admit` when the item's own attempt is the live Connection, `restart` when
+   *  a stale attempt must be retired (only while a live Connection exists), and
+   *  `skip` when no attempt identity exists or the Connection is lost. */
+  private attemptAdmission(current: RemoteConnectionGeneration | undefined): 'admit' | 'restart' | 'skip' {
+    if (current === undefined || this.attemptedPhysicalGeneration === undefined) return 'skip'
+    return Object.is(current, this.attemptedPhysicalGeneration) ? 'admit' : 'restart'
   }
 
   /** Drain the invalidations recorded by the callbacks. */
@@ -1897,7 +1897,6 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
         const item = raced.result.value
         if (this.disposed) return
         const current = this.generation.getSnapshot()
-        if (current === undefined) continue
         // A physical generation whose own signal was aborted can never be
         // applied: it belongs to a replaced carrier generation.
         if (item.signal.aborted) continue
@@ -1906,7 +1905,9 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
         // the attempt later). Its provenance must name the current Connection;
         // otherwise it is never admitted, and the official supervisor is asked
         // to retire that attempt (it remains the sole physical retry owner).
-        if (!this.attemptIsCurrent()) {
+        const admission = this.attemptAdmission(current)
+        if (admission === 'skip') continue
+        if (admission === 'restart') {
           this.logical?.restart()
           continue
         }
@@ -1921,9 +1922,15 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           acceptedGeneration = undefined
         }
         yield* this.drainInvalidations()
-        // The invalidation yield above can let a replacement land: recheck the
-        // SAME provenance immediately before acceptance.
-        if (!this.attemptIsCurrent()) {
+        // The invalidation yield above can let a replacement or a loss land:
+        // recheck disposed/aborted/live/attempt with the SAME conditions as the
+        // first gate, and only ask the official supervisor to retire a genuinely
+        // stale attempt against a still-live Connection.
+        if (this.disposed) return
+        if (item.signal.aborted) continue
+        const admissionAfter = this.attemptAdmission(this.generation.getSnapshot())
+        if (admissionAfter === 'skip') continue
+        if (admissionAfter === 'restart') {
           this.logical?.restart()
           continue
         }

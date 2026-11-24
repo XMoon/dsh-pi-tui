@@ -1371,6 +1371,10 @@ async function startSurfaceLocalClient(
             let frames = 0
             let frameSeq = 0
             let failed: string | undefined
+            // The LOGICAL handle sequence: a replacement constructed below is
+            // the only increment, so evidence can distinguish one-handle
+            // carrier recovery from a new logical handle.
+            let logicalHandle = 1
             /** The first generation DIFFERENT from the failed handle's opening
              *  one; a change already present resolves immediately. */
             const waitForNewGeneration = async (baseline: unknown): Promise<boolean> => {
@@ -1393,24 +1397,24 @@ async function startSurfaceLocalClient(
               frameSeq += 1
               switch (frame.type) {
                 case 'invalidated':
-                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, reason: frame.reason })
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, reason: frame.reason })
                   break
                 case 'baseline':
                 case 'replace':
-                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, items: frame.items })
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, items: frame.items })
                   break
                 case 'upsert':
-                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspace: frame.workspace })
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, workspace: frame.workspace })
                   break
                 case 'remove':
-                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceId: frame.workspaceId })
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, workspaceId: frame.workspaceId })
                   break
                 case 'order':
-                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceIds: frame.workspaceIds })
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, workspaceIds: frame.workspaceIds })
                   break
               }
             }
-            emit({ phase: 'workspaces-open', mode, windowMs, maxFrames })
+            emit({ phase: 'workspaces-open', handle: logicalHandle, mode, windowMs, maxFrames })
             try {
               consume: for (;;) {
                 try {
@@ -1424,15 +1428,17 @@ async function startSurfaceLocalClient(
                     failed = error instanceof Error ? error.message : String(error)
                     break
                   }
-                  // The failure belongs to the generation the handle actually
-                  // ADOPTED, not to its opening identity: a replacement already
-                  // adopted by this handle cannot be the recovery trigger again.
+                  // The failure belongs to the Connection that owned the real
+                  // physical attempt: only a defined live generation DIFFERENT
+                  // from it is a legal replacement trigger.
                   const attempted = handle.attemptedGeneration?.()
                   if (!await waitForNewGeneration(attempted)) {
                     failed = error instanceof Error ? error.message : String(error)
                     break
                   }
                   if (frames >= maxFrames || Date.now() >= deadlineAt) break
+                  logicalHandle += 1
+                  emit({ phase: 'workspaces-handle', handle: logicalHandle })
                   handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, 'recovering')
                 }
               }
