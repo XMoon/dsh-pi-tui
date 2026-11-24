@@ -24,7 +24,7 @@ import type { TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { TuiApp } from '../../src/tui-app.ts'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
@@ -285,6 +285,197 @@ test('an explicit Confirm applies the style immediately and persists a merged do
     await confirmSettingsChoice(t.vt, 'minimal', () => t.settings.writes.length > 1)
     assert.equal(t.app.currentIconStyle(), 'minimal', 'the same lease reaches every style')
     assert.equal(t.settings.writes.at(-1)?.iconStyle, 'minimal')
+  } finally {
+    if (!t.app.isDisposed()) t.app.dispose()
+  }
+})
+
+// ── The 200-column pointer-only scalar journey ──────────────────────────────
+
+const viewRows = (vt: VirtualTerminal): string[] => vt.getViewport().map(stripTerminalSequences)
+const barLine = (vt: VirtualTerminal): string => viewRows(vt).at(-1)!
+
+/** One native SGR left-button gesture on 0-based terminal cells. */
+function pressCell(vt: VirtualTerminal, row: number, column: number): void {
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+}
+function releaseCell(vt: VirtualTerminal, row: number, column: number): void {
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+}
+async function clickSettingsCell(vt: VirtualTerminal, row: number, column: number): Promise<void> {
+  pressCell(vt, row, column)
+  releaseCell(vt, row, column)
+  await vt.waitForRender()
+}
+
+/** The cell column of a painted needle on one row (ASCII fixture text). */
+const columnOn = (line: string, needle: string): number => {
+  const index = line.indexOf(needle)
+  assert.ok(index >= 0, `the painted row must contain ${JSON.stringify(needle)}: ${JSON.stringify(line)}`)
+  return visibleWidth(line.slice(0, index))
+}
+
+/** The painted row of one unique Rows/candidate line. */
+function rowOf(vt: VirtualTerminal, needle: string): number {
+  const row = viewRows(vt).findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the frame must contain ${JSON.stringify(needle)}:\n${viewRows(vt).join('\n')}`)
+  return row
+}
+
+/** Open the Appearance → Icon style choice with the pointer only. */
+async function openIconStyleChoiceByPointer(vt: VirtualTerminal): Promise<void> {
+  // Rail: click the WIDENED Appearance row cell x=25 (old content origin).
+  const appearanceRow = viewRows(vt).findIndex(line => line.slice(0, 30).trimEnd() === '  Appearance' || line.slice(0, 30).trimEnd() === '> Appearance')
+  assert.ok(appearanceRow >= 0, `the rail must paint Appearance:\n${viewRows(vt).join('\n')}`)
+  await clickSettingsCell(vt, appearanceRow, 25)
+  assert.match(viewRows(vt)[0]!, /Settings · Categories/u, 'the rail click keeps the keyboard on the rail')
+  // Rows: click the real Icon style row inside its widened pane.
+  const iconRow = rowOf(vt, 'Icon style')
+  const iconColumn = columnOn(viewRows(vt)[iconRow]!, 'Icon style')
+  assert.ok(iconColumn >= 32 && iconColumn < 102, `Icon style paints inside the widened Rows pane: ${iconColumn}`)
+  await clickSettingsCell(vt, iconRow, iconColumn + 1)
+  assert.match(viewRows(vt)[0]!, /Settings · Appearance · Rows/u, 'the Rows click selects and focuses its level')
+  // Rows forward: the painted Enter choose hint opens the same one-step choice.
+  const barRow = viewRows(vt).length - 1
+  const choose = columnOn(barLine(vt), 'Enter choose')
+  await clickSettingsCell(vt, barRow, choose + 2)
+  assert.match(viewRows(vt).join('\n'), /Choose value/u, 'the painted forward hint opens the native choice')
+}
+
+/** Click one painted Detail button by its visible word. */
+async function clickDetailButton(vt: VirtualTerminal, word: string): Promise<void> {
+  const rows = viewRows(vt)
+  const row = rows.findIndex(line => line.includes(word))
+  assert.ok(row >= 0, `the Detail must paint ${JSON.stringify(word)}:\n${rows.join('\n')}`)
+  const column = columnOn(rows[row]!, word)
+  await clickSettingsCell(vt, row, column + 1)
+}
+
+test('the 200-column scalar journey runs pointer-only from the rail to a settled write and back', async () => {
+  const t = setupSettings({ iconStyle: 'emoji' })
+  try {
+    t.vt.resize(120, 40)
+    await t.vt.waitForRender()
+    t.invoke()
+    await t.vt.waitForRender()
+    t.vt.resize(200, 40)
+    await t.vt.waitForRender()
+    // The widened rail and content boundaries from the real painted header.
+    const headerRow = rowOf(t.vt, 'Categories (10)')
+    assert.equal(columnOn(viewRows(t.vt)[headerRow]!, '[Categories (10)]'), 0, 'the rail starts at x=0')
+    assert.equal(columnOn(viewRows(t.vt)[headerRow]!, 'About'), 32, 'the content column starts at x=32')
+
+    await openIconStyleChoiceByPointer(t.vt)
+    // Candidate: click the symbol option row, then the pinned Confirm.
+    const candidateRow = viewRows(t.vt).findIndex(line => /^(?:> | {2})symbols/u.test(line.slice(104)))
+    assert.ok(candidateRow >= 0, `the symbol candidate paints inside the real Detail pane:\n${viewRows(t.vt).join('\n')}`)
+    const symbolColumn = viewRows(t.vt)[candidateRow]!.indexOf('symbols')
+    assert.ok(symbolColumn >= 104, `the candidate paints inside the real Detail pane: ${symbolColumn}`)
+    await clickSettingsCell(t.vt, candidateRow, symbolColumn + 1)
+    assert.match(viewRows(t.vt)[candidateRow]!.slice(104), /^> symbols/u, 'the pointer selects the symbol candidate')
+    await clickDetailButton(t.vt, 'Confirm')
+    for (let round = 0; round < 40 && t.settings.writes.length === 0; round += 1) await t.view()
+    assert.equal(t.settings.writes.length, 1, 'ONE pointer Confirm dispatches exactly one write')
+    assert.equal(t.app.currentIconStyle(), 'symbols', 'the runtime applies the pointer-chosen style')
+    assert.equal(t.settings.writes[0]?.iconStyle, 'symbols')
+    const last = t.settings.writes[0]!
+    assert.equal(last.theme, 'auto')
+    assert.equal(last.footer, 'full')
+    assert.equal(last.fullscreen, 'on')
+    assert.equal(last.busyEnter, 'queue')
+    // The settled result frame keeps the SAME row and names the verified state.
+    const settled = await t.view()
+    assert.match(settled, /Verified/u, 'the authoritative readback paints its verified state')
+    assert.match(settled, /> Icon style/u, 'the settled frame keeps the selected row')
+
+    // The old 120 Detail origin (x=68..101) is now inside the Rows pane: a fresh
+    // click there selects a Rows row and never reaches a Detail action.
+    const rowsFrame = viewRows(t.vt)
+    const statusRow = rowsFrame.findIndex(line => line.includes('Status line mode'))
+    assert.ok(statusRow >= 0)
+    const statusColumn = columnOn(rowsFrame[statusRow]!, 'Status line mode')
+    assert.ok(statusColumn < 104)
+    await clickSettingsCell(t.vt, statusRow, 80)
+    assert.match(viewRows(t.vt)[0]!, /Settings · Appearance · Rows/u, 'the old Detail-origin click selects the Rows level')
+    assert.match(viewRows(t.vt).join('\n'), /> Status line mode/u, 'the click selected the Rows row it painted')
+    assert.equal(t.settings.writes.length, 1, 'the overlapping-origin click writes nothing')
+    // The new 2-cell gutters (30/31 and 102/103) own no gesture.
+    for (const x of [30, 31, 102, 103] as const) {
+      await clickSettingsCell(t.vt, statusRow, x)
+    }
+    assert.match(viewRows(t.vt)[0]!, /Settings · Appearance · Rows/u, 'a gutter click never takes a new owner')
+    assert.match(viewRows(t.vt).join('\n'), /> Status line mode/u, 'a gutter click never moves the Rows selection')
+    assert.equal(t.settings.writes.length, 1, 'a gutter click never writes')
+
+    // Pointer-only return: Rows Back/Esc -> the rail, then Close exits.
+    const rowsBarRow = viewRows(t.vt).length - 1
+    const back = columnOn(barLine(t.vt), 'Back [Esc]')
+    await clickSettingsCell(t.vt, rowsBarRow, back + 2)
+    await t.vt.waitForRender()
+    assert.match(viewRows(t.vt)[0]!, /Settings · Categories/u, 'the painted Back returns to the rail')
+    const railBarRow = viewRows(t.vt).length - 1
+    const close = columnOn(barLine(t.vt), 'Close [Esc]')
+    await clickSettingsCell(t.vt, railBarRow, close + 2)
+    assert.doesNotMatch(t.vt.getViewport().join('\n'), /Settings ·/u, 'the painted Close exits the ONE Settings lease')
+
+    // ── Cancel path: open the choice again, hold a candidate press across a
+    // resize, then cancel with a fresh pointer gesture and zero writes.
+    t.vt.resize(200, 40)
+    await t.vt.waitForRender()
+    t.invoke()
+    await t.vt.waitForRender()
+    await openIconStyleChoiceByPointer(t.vt)
+    // The reopened choice starts on the persisted current option (`symbols`).
+    // Press a DIFFERENT, actually painted noncurrent option so an accidentally
+    // admitted release would move the selected candidate and be observable.
+    const detailColumn = (): number => {
+      const header = viewRows(t.vt).find(line => line.includes('Details'))
+      assert.ok(header !== undefined, 'the choice frame paints the Details pane')
+      const label = header.indexOf('Details')
+      return header[label - 1] === '[' ? label - 1 : label
+    }
+    const choiceRow = (label: string): number => {
+      const start = detailColumn()
+      return viewRows(t.vt).findIndex(line => new RegExp(`^(?:> | {2})${label}(?: |$)`).test(line.slice(start)))
+    }
+    const candidateSelected = (label: string): boolean => {
+      const start = detailColumn()
+      return viewRows(t.vt).some(line => new RegExp(`^> ${label}(?: |$)`).test(line.slice(start)))
+    }
+    const cancelSymbolRow = choiceRow('symbols')
+    const cancelMinimalRow = choiceRow('minimal')
+    assert.ok(cancelSymbolRow >= 0, `the current symbol candidate paints:\n${viewRows(t.vt).join('\n')}`)
+    assert.ok(cancelMinimalRow >= 0, `the noncurrent minimal candidate paints:\n${viewRows(t.vt).join('\n')}`)
+    assert.equal(candidateSelected('symbols'), true, 'the reopened choice starts on the persisted symbol candidate')
+    assert.equal(candidateSelected('minimal'), false, 'the different candidate is not selected at press time')
+    const minimalColumn = viewRows(t.vt)[cancelMinimalRow]!.indexOf('minimal')
+    pressCell(t.vt, cancelMinimalRow, minimalColumn + 1)
+    t.vt.resize(160, 40)
+    releaseCell(t.vt, cancelMinimalRow, minimalColumn + 1)
+    await t.vt.waitForRender()
+    assert.equal(t.settings.writes.length, 1, 'the straddling candidate release never writes')
+    assert.match(viewRows(t.vt).join('\n'), /Choose value/u, 'the refused release leaves the choice open')
+    assert.equal(candidateSelected('symbols'), true, 'the straddling release did not move the selected candidate')
+    assert.equal(candidateSelected('minimal'), false, 'the different candidate stayed unselected')
+    // A second release with NO fresh press is inert even after the repaint.
+    const repaintedMinimal = choiceRow('minimal')
+    assert.ok(repaintedMinimal >= 0)
+    releaseCell(t.vt, repaintedMinimal, viewRows(t.vt)[repaintedMinimal]!.indexOf('minimal') + 1)
+    await t.vt.waitForRender()
+    assert.equal(t.settings.writes.length, 1, 'a release without a fresh press never writes')
+    assert.equal(candidateSelected('symbols'), true, 'the unpaired release kept the original candidate')
+    // A FRESH gesture on a different cell of the same painted option row can
+    // select the intended candidate before Cancel, still with no write.
+    const freshMinimalRow = choiceRow('minimal')
+    await clickSettingsCell(t.vt, freshMinimalRow, detailColumn() + 50)
+    assert.equal(candidateSelected('minimal'), true, 'the fresh pointer selects the intended candidate')
+    assert.equal(candidateSelected('symbols'), false, 'the previous candidate is no longer selected')
+    assert.equal(t.settings.writes.length, 1, 'selecting a candidate never writes')
+    // The fresh pointer gesture on the painted Cancel abandons the choice.
+    await clickDetailButton(t.vt, 'Cancel')
+    await t.vt.waitForRender()
+    assert.equal(t.settings.writes.length, 1, 'Cancel writes nothing')
+    assert.doesNotMatch(viewRows(t.vt).join('\n'), /Choose value/u, 'Cancel leaves the choice')
   } finally {
     if (!t.app.isDisposed()) t.app.dispose()
   }

@@ -54,6 +54,19 @@ function columnOf(harness: WorkspaceHarness, row: number, needle: string): numbe
   return column
 }
 
+/** Slice one painted row by CELL columns (never JS character indices). */
+function sliceCells(line: string, startColumn: number, cells: number): string {
+  let column = 0
+  let out = ''
+  for (const glyph of line) {
+    const width = visibleWidth(glyph)
+    if (column >= startColumn && column < startColumn + cells) out += glyph
+    column += width
+    if (column >= startColumn + cells) break
+  }
+  return out
+}
+
 const bar = (harness: WorkspaceHarness): string => frameRows(harness).at(-1)!
 
 /** The plugin content owns the keyboard on the very first frame of `/plugins`. */
@@ -70,7 +83,9 @@ async function yieldToRail(harness: WorkspaceHarness): Promise<void> {
 // ── T05: the frozen breakpoint table ────────────────────────────────────────
 
 test('every breakpoint projects the frozen plugin columns in all three stages', async () => {
-  const widths = [44, 72, 75, 76, 80, 95, 96, 100, 107, 108, 119, 120, 140]
+  const widths = [44, 72, 75, 76, 80, 95, 96, 100, 107, 108, 119, 120, 140, 160, 200, 240]
+  // The frozen wide Categories rail width per live frame grant.
+  const WIDE_RAIL = new Map([[120, 22], [140, 24], [160, 26], [200, 30], [240, 30]])
   // §8.2 mandates BOTH heights for every listed width and all three stages.
   for (const height of [24, 40] as const) {
   for (const width of widths) {
@@ -91,12 +106,19 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
       assert.match(listRows[header]!, /Details/u, `${width}: the pair keeps the Details column`)
       assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 0, `${width}: the list starts at x=0`)
     } else {
-      // >=120: `Categories | List | Details`; the rail stays visible.
+      // >=120: `Categories | List | Details`; the rail stays visible and uses
+      // the SAME elastic Categories width as the Standard Settings projection.
+      const rail = WIDE_RAIL.get(width)
+      assert.ok(rail !== undefined, `${width}: the frozen wide rail table must know this width`)
       const header = rowOf(harness, 'Categories (10)')
       assert.equal(columnOf(harness, header, 'Categories (10)'), 0, `${width}: the rail owns the leading column`)
-      assert.equal(columnOf(harness, header, '[Plugins]'), 24, `${width}: the list starts after the rail + gutter`)
+      assert.equal(columnOf(harness, header, '[Plugins]'), rail + 2, `${width}: the list starts after the ${rail}-cell rail + gutter`)
       assert.match(listRows[header]!, /Details/u, `${width}: the third column is painted`)
-      assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, `${width}: the list body starts at x=24`)
+      const split = harness.panel.contentLayout()
+      assert.equal(split.dual, true, `${width}: the child really admits the business pair`)
+      assert.equal(columnOf(harness, header, 'Details'), rail + 2 + split.leftWidth + 2,
+        `${width}: the painted Details column agrees with the child's real split`)
+      assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), rail + 2, `${width}: the list body starts at x=${rail + 2}`)
     }
 
     // ── Plugin Details (Enter inside the List; still content focus) ──
@@ -128,15 +150,19 @@ test('every breakpoint projects the frozen plugin columns in all three stages', 
       assert.doesNotMatch(harness.view(), /Search: \//u, `${width}: a narrow rail paints no plugin content`)
       assert.match(harness.view(), /> Plugins/u, `${width}: Plugins stays selected`)
     } else {
+      const rail = width >= 120 ? (WIDE_RAIL.get(width) ?? 0) : 22
       const header = rowOf(harness, 'Categories (10)')
       assert.equal(columnOf(harness, header, '[Categories (10)]'), 0, `${width}: the rail is the ONE active device`)
-      assert.equal(columnOf(harness, header, 'Plugins'), 24, `${width}: the preview starts after the rail`)
+      assert.equal(columnOf(harness, header, 'Plugins'), rail + 2, `${width}: the preview starts after the rail + gutter`)
       if (width >= 120) {
         assert.match(railRows[header]!, /Details/u, `${width}: >=120 previews the Details column`)
+        const split = harness.panel.contentLayout()
+        assert.equal(columnOf(harness, header, 'Details'), rail + 2 + split.leftWidth + 2,
+          `${width}: the preview's Details column agrees with the child's real split`)
       } else {
         assert.doesNotMatch(railRows[header]!, /Details/u, `${width}: 76..119 previews Categories+List only`)
       }
-      assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 24, `${width}x${height}: the preview body starts at x=24`)
+      assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), rail + 2, `${width}x${height}: the preview body starts at x=${rail + 2}`)
     }
     harness.app.dispose()
   }
@@ -2055,3 +2081,290 @@ function hexToRgb(hex: string): number {
   const value = Number.parseInt(hex.replace('#', ''), 16)
   return ((value >> 16) & 0xff) << 16 | ((value >> 8) & 0xff) << 8 | (value & 0xff)
 }
+
+// ── The elastic wide rail: real pointer journey, gutters and the short floor ──
+
+test('the 200-column plugin page runs a pointer-only browse and never mistakes a gutter for an owner', async () => {
+  const harness = await open({ columns: 200, rows: 40 })
+  await contentFocus(harness)
+  const split = harness.panel.contentLayout()
+  assert.equal(split.dual, true, 'the 200x40 child admits the business pair')
+  assert.equal(split.leftWidth, 42, 'the fixture list keeps its frozen local split')
+  assert.equal(split.rightWidth, 124, 'the Details column wins the widened remainder')
+  assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 32, 'the child body starts after the 30-cell rail + gutter')
+  const reads = harness.snapshotCalls()
+
+  // 1) Back to the rail: the page keeps its instance, view and one read.
+  harness.vt.sendInput('\x1b')
+  await harness.waitForFrame()
+  assert.equal(harness.panel.currentView(), 'list')
+  assert.match(bar(harness), /Close \[Esc\]/u, 'the rail owns the physical last row')
+  assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), 32, 'the preview keeps the SAME content column')
+
+  // 2) The OLD child origin (x=25) is now inside the widened rail. Selecting the
+  // same category is inert: no card action, no operation and no second read.
+  await clickCell(harness, railRow(harness, 'Plugins'), 25)
+  assert.equal(harness.panel.currentView(), 'list')
+  assert.equal(harness.panel.focused, false, 'the rail click keeps the keyboard')
+  assert.equal(harness.snapshotCalls(), reads, 'the rail click starts no inventory read')
+  assert.deepEqual(harness.installCalls, [], 'the rail click starts no install')
+  assert.deepEqual(harness.removeBundle, [], 'the rail click removes nothing')
+  assert.deepEqual(harness.setBundle, [])
+  assert.deepEqual(harness.setPlugin, [])
+
+  // 3) The painted rail forward hint is the ONE pointer route into the List.
+  const focusHintRow = frameRows(harness).length - 1
+  const focusHint = bar(harness).indexOf('Enter/Right focus')
+  assert.ok(focusHint >= 0, `the rail bar paints its forward hint:\n${bar(harness)}`)
+  await clickCell(harness, focusHintRow, focusHint + 2)
+  assert.equal(harness.panel.focused, true, 'the painted hint hands the keyboard to the List')
+
+  // 4) Two FRESH gestures on the same card row: the first selects, the second
+  // opens the real Details view (the existing click semantics, no shortcut).
+  const cardRow = rowOf(harness, '@vendor/foo')
+  const cardColumn = columnOf(harness, cardRow, '@vendor/foo')
+  await clickCell(harness, cardRow, cardColumn + 2)
+  assert.equal(harness.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the first click only selects the card')
+  // A DIFFERENT word keeps the second gesture a single click: two clicks on the
+  // same word are the fork's text-selection double-click, not a disclosure.
+  await clickCell(harness, cardRow, cardColumn + 20)
+  assert.equal(harness.panel.currentView(), 'details', 'the fresh second gesture opens Details')
+  assert.equal(columnOf(harness, rowOf(harness, '[Details]'), '[Details]'), 76, 'the real Details column starts at x=76')
+
+  // 5) The visible Remove… action opens the full-width confirmation; clicking
+  // its Cancel row returns to Details with ZERO mutation.
+  const removeRow = rowOf(harness, 'Remove…')
+  await clickCell(harness, removeRow, columnOf(harness, removeRow, 'Remove…') + 1)
+  assert.equal(harness.panel.currentView(), 'confirm', 'the visible Remove… action opens the confirmation')
+  assert.doesNotMatch(harness.view(), /Categories \(10\)/u, 'the confirmation paints NO rail')
+  const confirmRows = frameRows(harness)
+  const titleRow = confirmRows.findIndex(line => line.includes('Remove @vendor/foo?'))
+  assert.ok(titleRow >= 0, 'the confirmation title paints')
+  assert.equal(columnOf(harness, titleRow, 'Remove @vendor/foo?'), 0, 'the full-width body starts at x=0')
+  assert.equal(visibleWidth(confirmRows[titleRow]!), 200, 'the confirmation body fills the live width')
+  assert.equal(visibleWidth(bar(harness)), 200, 'the ONE physical bar fills the live width')
+  const cancelRow = rowOf(harness, '> Cancel')
+  await clickCell(harness, cancelRow, 2)
+  assert.equal(harness.panel.currentView(), 'details', 'the pointer Cancel returns to Details')
+  assert.deepEqual(harness.removeBundle, [], 'cancelling the confirmation removes nothing')
+  assert.deepEqual(harness.installCalls, [], 'cancelling the confirmation installs nothing')
+  assert.equal(harness.snapshotCalls(), reads, 'browsing and cancelling re-read nothing')
+
+  // 6) Every gutter/blank cell is owner-less even when the same row hosts real
+  // rail and child targets.
+  const gutterRow = rowOf(harness, 'Search: /') + 1
+  for (const x of [30, 31] as const) {
+    await clickCell(harness, gutterRow, x)
+  }
+  assert.equal(harness.panel.focused, true, 'the outer 2-cell gutter never takes the rail owner')
+  const innerGutterBefore = harness.panel.selectedCardValue()
+  for (const x of [74, 75] as const) {
+    await clickCell(harness, gutterRow, x)
+  }
+  assert.equal(harness.panel.selectedCardValue(), innerGutterBefore, 'the inner 2-cell gutter never selects a card')
+  assert.equal(harness.panel.currentView(), 'details', 'the inner gutter never leaves the view')
+
+  // 7) Close the whole journey with the pointer only: Back/Close spans and the
+  // page's own Esc gradient.
+  let backIndex = bar(harness).indexOf('Back [Esc]')
+  assert.ok(backIndex >= 0, `the Details bar names its Back affordance:\n${bar(harness)}`)
+  await clickCell(harness, frameRows(harness).length - 1, backIndex + 2)
+  assert.equal(harness.panel.currentView(), 'list', 'the painted Back returns Details to the List')
+  backIndex = bar(harness).indexOf('Back [Esc]')
+  await clickCell(harness, frameRows(harness).length - 1, backIndex + 2)
+  assert.match(bar(harness), /Close \[Esc\]/u, 'the painted Back yields the List root to the rail')
+  const closeIndex = bar(harness).indexOf('Close [Esc]')
+  await clickCell(harness, frameRows(harness).length - 1, closeIndex + 2)
+  assert.doesNotMatch(harness.view(), /Settings ·/u, 'the painted Close exits the ONE Settings lease')
+  harness.app.dispose()
+})
+
+test('the 200-column short frame scrolls only the painted pane and keeps gutters/header/bar inert', async () => {
+  const harness = await open({ columns: 200, rows: 12 })
+  await contentFocus(harness)
+  const split = harness.panel.contentLayout()
+  assert.equal(split.dual, true, '7 real business body rows keep the pair')
+  assert.equal(split.leftWidth, 42)
+  const selected = harness.panel.selectedCardValue()
+  const listOf = (frame: readonly string[]): string[] => frame.map(line => sliceCells(line, 32, split.leftWidth))
+  const detailOf = (frame: readonly string[]): string[] => frame.map(line => sliceCells(line, 32 + split.leftWidth + 2, split.rightWidth))
+  const initial = frameRows(harness)
+  assert.ok(frameRows(harness).length >= 6, 'the short frame still paints its business body')
+
+  wheel(harness, 5, 32 + 5)
+  await harness.waitForFrame()
+  const afterList = frameRows(harness)
+  assert.notDeepEqual(listOf(afterList), listOf(initial), 'the pointer-targeted List column scrolled')
+  assert.deepEqual(detailOf(afterList), detailOf(initial), 'the Details column did not move')
+  assert.equal(harness.panel.selectedCardValue(), selected, 'a wheel never changes the selected card')
+
+  wheel(harness, 5, 32 + split.leftWidth + 2 + 5)
+  await harness.waitForFrame()
+  const afterDetail = frameRows(harness)
+  assert.deepEqual(listOf(afterDetail), listOf(afterList), 'the List column did not move')
+  assert.notDeepEqual(detailOf(afterDetail), detailOf(afterList), 'the pointer-targeted Details column scrolled')
+
+  const frozen = harness.view()
+  // The shared header, the ONE physical bar and BOTH 2-cell gutters are inert.
+  for (const [row, column] of [[3, 100], [frameRows(harness).length - 1, 10], [5, 30], [5, 31], [5, 74], [5, 75]] as const) {
+    wheel(harness, row, column)
+    await harness.waitForFrame()
+    assert.equal(harness.view(), frozen, `the wheel at (${row}, ${column}) owns no scroll`)
+  }
+  assert.equal(harness.panel.selectedCardValue(), selected)
+
+  // The widened rail is its own scroll owner: the plugin page opens with
+  // Plugins selected (the rail window already at its end), so an UP wheel proves
+  // the rail moves under the pointer and never the business pair.
+  wheel(harness, 5, 2, false)
+  await harness.waitForFrame()
+  assert.notDeepEqual(frameRows(harness).slice(4, 11).map(line => sliceCells(line, 0, 30)), initial.slice(4, 11).map(line => sliceCells(line, 0, 30)),
+    'the rail scrolled under the pointer')
+  assert.deepEqual(detailOf(frameRows(harness)), detailOf(afterDetail), 'the rail wheel never moved the Details column')
+  harness.app.dispose()
+})
+
+test('a held card press cannot open Details across a resize, and a short frame keeps ONE business column', async () => {
+  // Forward: press at 120, resize to 200 without a repaint, release -> refused.
+  const held = await open({ columns: 120, rows: 24 })
+  await contentFocus(held)
+  await selectCard(held, 'bundle:@vendor/foo')
+  const heldRow = rowOf(held, '@vendor/foo')
+  press(held, heldRow, columnOf(held, heldRow, '@vendor/foo') + 2)
+  held.vt.resize(200, 24)
+  release(held, heldRow, columnOf(held, heldRow, '@vendor/foo') + 2)
+  await held.waitForFrame()
+  assert.equal(held.panel.currentView(), 'list', 'the unpainted-width release never opens Details')
+  assert.equal(held.panel.focused, true, 'the content keeps the keyboard')
+  // A FRESH gesture on the repainted frame (a cell the stale press never used)
+  // still opens Details: the selected card is already current, so the one click
+  // runs the existing select-then-open semantics.
+  const freshRow = rowOf(held, '@vendor/foo')
+  await clickCell(held, freshRow, columnOf(held, freshRow, '@vendor/foo') + 20)
+  assert.equal(held.panel.currentView(), 'details', 'the repainted frame accepts a fresh gesture')
+  held.app.dispose()
+
+  // Reverse: a REAL held press at 200 on the selected card, a resize to 120
+  // WITH the repaint, then release at the newly painted card cell. The held
+  // press must be refused: List identity, no open and no Host operation.
+  const reverse = await open({ columns: 200, rows: 24 })
+  await contentFocus(reverse)
+  await selectCard(reverse, 'bundle:@vendor/foo')
+  const reverseRow200 = rowOf(reverse, '@vendor/foo')
+  press(reverse, reverseRow200, columnOf(reverse, reverseRow200, '@vendor/foo') + 2)
+  reverse.vt.resize(120, 24)
+  await reverse.waitForFrame()
+  const reverseRow120 = rowOf(reverse, '@vendor/foo')
+  release(reverse, reverseRow120, columnOf(reverse, reverseRow120, '@vendor/foo') + 2)
+  await reverse.waitForFrame()
+  assert.equal(reverse.panel.currentView(), 'list', 'the held 200 press released on the 120 frame never opens Details')
+  assert.equal(reverse.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the List keeps the same selected card identity')
+  assert.equal(reverse.panel.focused, true, 'the content keeps the keyboard')
+  assert.deepEqual(reverse.installCalls, [], 'the refused held release starts no install')
+  assert.deepEqual(reverse.updateCalls, [], 'the refused held release starts no update')
+  assert.deepEqual(reverse.removeBundle, [], 'the refused held release removes nothing')
+  // A fresh gesture on the 120 frame (a cell the held press never used) opens
+  // Details for the same card.
+  const reverseFreshRow = rowOf(reverse, '@vendor/foo')
+  await clickCell(reverse, reverseFreshRow, columnOf(reverse, reverseFreshRow, '@vendor/foo') + 20)
+  assert.equal(reverse.panel.currentView(), 'details', 'the 120 repaint accepts a fresh gesture')
+  assert.equal(reverse.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the fresh gesture opens the same card')
+  reverse.app.dispose()
+
+  // The six-real-business-row floor is a CHILD fact, not a terminal-width guess:
+  // at 120x10 and 200x10 the child paints ONE business column and the root's
+  // shared pane header names the same single column.
+  for (const columns of [120, 200] as const) {
+    const short = await open({ columns, rows: 10 })
+    await contentFocus(short)
+    assert.equal(short.panel.contentLayout().dual, false, `${columns}x10: the child degrades to ONE business column`)
+    const paneHeader = rowOf(short, '[Plugins]')
+    assert.doesNotMatch(frameRows(short)[paneHeader]!, /Details/u, `${columns}x10: the root header paints no Details column`)
+    assert.match(bar(short), /Back \[Esc\]/u, `${columns}x10: the ONE physical bar stays truthful`)
+    short.app.dispose()
+  }
+})
+
+test('the rail forward hint is a real pointer route into the plugin List at 80/120/200', async () => {
+  for (const columns of [80, 120, 200] as const) {
+    const harness = await open({ columns, rows: 40 })
+    await contentFocus(harness)
+    const page = harness.panel
+    const reads = harness.snapshotCalls()
+    harness.vt.sendInput('\x1b') // List root -> Categories rail, same page
+    await harness.waitForFrame()
+    assert.equal(harness.panel, page, `${columns}: the yield keeps the ONE page instance`)
+    assert.equal(harness.panel.focused, false, `${columns}: the rail owns the keyboard`)
+    const hintRow = frameRows(harness).length - 1
+    const hint = bar(harness).indexOf('Enter/Right focus')
+    assert.ok(hint >= 0, `${columns}: the rail paints its real forward hint:\n${bar(harness)}`)
+    await clickCell(harness, hintRow, hint + 2)
+    assert.equal(harness.panel.focused, true, `${columns}: the painted hint hands the keyboard to the List`)
+    assert.equal(harness.panel, page, `${columns}: the pointer focus transfer reuses the SAME page`)
+    assert.equal(harness.panel.currentView(), 'list', `${columns}: focusing never opens a sub-view`)
+    assert.equal(harness.snapshotCalls(), reads, `${columns}: focusing never re-reads the inventory`)
+    assert.deepEqual(harness.installCalls, [], `${columns}: focusing starts no install`)
+    assert.deepEqual(harness.removeBundle, [], `${columns}: focusing removes nothing`)
+    assert.deepEqual(harness.updateCalls, [], `${columns}: focusing updates nothing`)
+    // 80 focuses the content inside the medium pair (no rail, x=0); 120/200 keep
+    // the wide rail at 22/30 cells, so the List starts at 24/32.
+    const contentX = columns === 200 ? 32 : columns === 120 ? 24 : 0
+    assert.equal(columnOf(harness, rowOf(harness, 'Search: /'), 'Search: /'), contentX, `${columns}: the List keeps its real content origin`)
+    harness.app.dispose()
+  }
+})
+
+test('a held rail-forward press is refused by a resize and the repainted hint still works, while 44 keeps its route', async () => {
+  // A press recorded on the wide rail's forward hint cannot survive a resize
+  // whose frame has not painted.
+  const wide = await open({ columns: 120, rows: 40 })
+  await contentFocus(wide)
+  const page = wide.panel
+  wide.vt.sendInput('\x1b')
+  await wide.waitForFrame()
+  const hintRow = frameRows(wide).length - 1
+  const hint = bar(wide).indexOf('Enter/Right focus')
+  assert.ok(hint >= 0)
+  press(wide, hintRow, hint + 2)
+  wide.vt.resize(200, 40)
+  release(wide, hintRow, hint + 2)
+  await wide.waitForFrame()
+  assert.equal(wide.panel.focused, false, 'the straddling release never takes the keyboard')
+  assert.equal(wide.panel, page, 'the refused gesture keeps the ONE page')
+  // The repainted 200-column frame admits a FRESH click on its own hint.
+  const repaintedRow = frameRows(wide).length - 1
+  const repaintedHint = bar(wide).indexOf('Enter/Right focus')
+  assert.ok(repaintedHint >= 0)
+  // A different word than the straddled press: the fork treats a repeated click
+  // on the same word as a word-selection double click, not a disclosure.
+  await clickCell(wide, repaintedRow, repaintedHint + 15)
+  assert.equal(wide.panel.focused, true, 'a fresh click on the repainted hint really focuses the List')
+  wide.app.dispose()
+
+  // Narrow 44 keeps its EXISTING root forward route: the same painted hint
+  // transfers the focus and paints the real page (never a second owner).
+  const narrow = await open({ columns: 44, rows: 20 })
+  await contentFocus(narrow)
+  const narrowPage = narrow.panel
+  narrow.vt.sendInput('\x1b')
+  await narrow.waitForFrame()
+  assert.match(bar(narrow), /Enter\/Right focus/u, 'the narrow rail still names its real forward key')
+  const narrowHint = frameRows(narrow).length - 1
+  await clickCell(narrow, narrowHint, bar(narrow).indexOf('Enter/Right focus') + 2)
+  assert.equal(narrow.panel.focused, true, 'the narrow painted hint still enters the content')
+  assert.equal(narrow.panel, narrowPage, 'the narrow focus transfer reuses the page')
+  assert.match(narrow.view(), /Search: \//u, 'the narrow content frame paints the real list')
+  narrow.app.dispose()
+
+  // A width that drops the whole forward hint publishes no target: clicking its
+  // would-be cells leaves the rail in place.
+  const dropped = await open({ columns: 30, rows: 20 })
+  dropped.vt.sendInput('\x1b')
+  await dropped.waitForFrame()
+  assert.doesNotMatch(bar(dropped), /Enter\/Right focus|Right open|Enter open/u,
+    `the too-narrow rail drops the forward hint whole:\n${bar(dropped)}`)
+  const before = dropped.panel.focused
+  await clickCell(dropped, frameRows(dropped).length - 1, 4)
+  assert.equal(dropped.panel.focused, before, 'a dropped hint leaves no hidden pointer target')
+  dropped.app.dispose()
+})

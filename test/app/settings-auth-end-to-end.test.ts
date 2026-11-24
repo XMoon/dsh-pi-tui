@@ -645,6 +645,70 @@ test('mouse: a painted provider row opens its detail, the category rail switches
   h.close()
 })
 
+test('the 200-column auth rail/content boundaries keep their owners across pointer, gutter and resize', async () => {
+  const h = open(200, 40)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login')
+  await waitForFrame(h.view, frame => frame.includes('Acme Gateway'), () => h.vt.waitForRender(), 'the Models list must paint before the 200-column journey')
+  // The widened direct projection: 30-cell rail, 2-cell gutter, content from x=32.
+  const headerRow = rowOf(h, 'Categories (10)')
+  assert.equal(colOf(h, headerRow, 'Categories (10)'), 0, 'the rail starts at x=0')
+  assert.equal(colOf(h, headerRow, '[Models]'), 32, 'the focused Models content column starts after the widened rail + gutter')
+
+  // A real content-row click selects the provider detail inside its real cells.
+  const providerRow = rowOf(h, 'Acme Gateway')
+  const providerCol = colOf(h, providerRow, 'Acme Gateway')
+  assert.ok(providerCol >= 32, 'the provider identity paints inside the content column')
+  await click(h, providerRow, providerCol + 1)
+  await waitForFrame(h.view, frame => /Provider · Acme Gateway/u.test(frame), () => h.vt.waitForRender(), 'the provider row opens its detail')
+
+  // The provider detail's visible body Back is a real pointer route to the
+  // Models list (the page's own ladder, no root shortcut).
+  const providersRow = rowOf(h, '← Providers')
+  await click(h, providersRow, colOf(h, providersRow, '← Providers') + 1)
+  await waitForFrame(h.view, frame => /Models & Credentials/u.test(frame), () => h.vt.waitForRender(), 'the visible Back returns to the Models list')
+  assert.match(h.rows()[0]!, /Settings · Models/u)
+
+  // The widened rail cell x=25 (the old content origin) selects Account; the
+  // 2-cell gutter cells 30/31 belong to no owner.
+  const accountRow = railEntryRow(h, 'Account')
+  await click(h, accountRow, 25)
+  await waitForFrame(h.view, frame => /^> Account/mu.test(frame) && /DeepSeek Account/u.test(frame), () => h.vt.waitForRender(), 'the widened rail cell selects Account')
+  for (const x of [30, 31] as const) {
+    await click(h, accountRow, x)
+    assert.match(h.rows()[0]!, /Settings · Categories/u, 'a gutter click never takes the keyboard')
+    assert.match(h.view(), /^> Account/mu, 'a gutter click never changes the selection')
+  }
+
+  // A held Enter/Right focus press is refused by a resize; the repainted hint
+  // still focuses the SAME Account page through the existing Enter ladder.
+  const hintRow = h.rows().length - 1
+  const hint = h.rows()[hintRow]!.indexOf('Enter/Right focus')
+  assert.ok(hint >= 0, `the rail bar paints its real forward hint:\n${h.rows()[hintRow]}`)
+  press(h, hintRow, hint + 2)
+  h.vt.resize(160, 40)
+  release(h, hintRow, hint + 2)
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Categories/u, 'the straddling release never takes the keyboard')
+  h.vt.resize(200, 40)
+  await h.vt.waitForRender()
+  const freshHint = h.rows()[h.rows().length - 1]!.indexOf('Enter/Right focus')
+  assert.ok(freshHint >= 0)
+  await click(h, h.rows().length - 1, freshHint + 15)
+  await waitForFrame(h.view, frame => /Settings · Account/u.test(frame), () => h.vt.waitForRender(), 'the fresh painted hint focuses the Account page')
+
+  // The Account page's own visible Back returns to the rail without closing.
+  const accountBackRow = rowOf(h, '← Settings')
+  await click(h, accountBackRow, colOf(h, accountBackRow, '← Settings') + 1)
+  await waitForFrame(h.view, frame => /Settings · Categories/u.test(frame), () => h.vt.waitForRender(), 'the Account Back returns to the rail')
+  const closeRow = h.rows().length - 1
+  const closeIndex = h.rows()[closeRow]!.indexOf('Close [Esc]')
+  assert.ok(closeIndex >= 0)
+  await click(h, closeRow, closeIndex + 2)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the painted Close exits the ONE Settings lease')
+  h.close()
+})
+
 test('Esc from an auth page returns to the category rail and the outer Esc closes the workspace', async () => {
   const h = open()
   await h.vt.waitForRender()
