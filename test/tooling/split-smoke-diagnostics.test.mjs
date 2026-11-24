@@ -297,7 +297,7 @@ test('the report holds only the whitelisted fields inside its fixed budgets', (t
     ],
   })
   // 30 boundaries, 10 processes, 12 records each: the caps are 24 / 8 / 8.
-  for (let index = 0; index < 30; index += 1) diagnostics.checkpoint(`T08/phase-${String(index)}`)
+  for (let index = 0; index < 30; index += 1) diagnostics.checkpoint(`process-wait/phase-${String(index)}`)
   const stderr = captureStderr(() => diagnostics.reportFailure(
     new SplitSmokeWaitError('WAIT_TIMEOUT', { code: 'FRAME_WAIT_TIMEOUT', waitLabel: 'a fixed label', elapsedMs: 1234 }),
     { processes: failureHandles(10, 12) },
@@ -313,7 +313,7 @@ test('the report holds only the whitelisted fields inside its fixed budgets', (t
   assert.deepEqual(Object.keys(report).filter(key => !REPORT_KEYS.includes(key)), [],
     'the report may not grow a field outside the fixed schema')
   assert.equal(report.progress.length, 24, 'a checkpoint ring keeps at most 24 boundaries')
-  assert.equal(report.progress.at(-1).name, 'T08/phase-29', 'and it keeps the RECENT ones')
+  assert.equal(report.progress.at(-1).name, 'process-wait/phase-29', 'and it keeps the RECENT ones')
   assert.equal(report.processes.length, 8, 'at most 8 process summaries')
   for (const handle of report.processes) {
     assert.equal(handle.events.length, 8, 'at most 8 events per process')
@@ -531,6 +531,55 @@ async function rejection(run) {
   }
   assert.fail('the wait must fail')
 }
+
+test('a real process wait failure reports no terminal or record payload', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-wait-payload-')
+  const entry = join(dir, 'silent-exit.mjs')
+  writeFileSync(entry, 'process.exit(0)\n')
+  const probe = `
+    const { createSplitProcessScope } = await import(${JSON.stringify(pathToFileURL(PROCESSES_LIB).href)})
+    const scope = createSplitProcessScope()
+    const { EntryProcess, SurfaceEntryProcess } = scope
+    const options = {
+      cwd: ${JSON.stringify(dir)},
+      env: { ...process.env },
+      anchor: ${JSON.stringify(join(dir, 'anchor.json'))},
+      profile: 'pi-tui',
+      scratch: ${JSON.stringify(dir)},
+      workDir: ${JSON.stringify(dir)},
+      ...(process.platform === 'darwin' ? { darwinScope: scope.darwinScope } : {}),
+    }
+    const failures = []
+    const plain = new EntryProcess('probe-host', ${JSON.stringify(entry)}, options)
+    try { await plain.waitFor(record => record.m4a0 === 'ready', 'probe Host ready', 10_000) }
+    catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    const surface = new SurfaceEntryProcess(${JSON.stringify(entry)}, options)
+    try { await surface.waitForScreen('never painted', 'probe notice', 10_000) }
+    catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    await surface.dispose()
+    if (process.platform === 'darwin') await scope.darwinScope.stopServer()
+    process.stdout.write(JSON.stringify(failures))
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd: dir,
+  })
+  assert.equal(result.status, 0, `the probe process failed:\n${result.stderr}`)
+  const failures = JSON.parse(result.stdout)
+  assert.equal(failures.length, 2, `both waiters must fail: ${result.stderr}`)
+  for (const failure of failures) {
+    assert.equal(failure.category, 'PROCESS_EXITED')
+    // The reported context is bounded; the bytes stay where they belong: the
+    // private JSONL under KEEP, never the default error line.
+    assert.ok(!/records=|stderr=|raw=|viewport=/u.test(failure.message),
+      `a waiter error must not carry a payload dump: ${failure.message}`)
+    assert.ok(failure.message.length < 300, `a waiter error must stay short: ${failure.message}`)
+  }
+  assert.match(failures[0].message, /probe Host ready/u)
+  assert.match(failures[1].message, /probe notice/u)
+})
 
 // ── The default output never carries foreign text ───────────────────────────
 
