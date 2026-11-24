@@ -23,6 +23,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { TranscriptFolder, transcriptTimingOf, type TranscriptMessage } from '../../src/transcript.ts'
 import { projectTranscriptStructure, type TranscriptWorkSpan } from '../../src/tui/transcript/structure.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
@@ -543,6 +544,79 @@ test('a Tool whose LIVE materialization preceded the visible text stays before t
   assert.deepEqual(logicalRows(cold), ['tool:c1', 'assistant:text at two'])
   assert.deepEqual(logicalRows(live), logicalRows(cold))
   assert.deepEqual(structureKinds(cold), ['work', 'message'])
+  for (const [lane, folder] of [['cold', cold], ['live', live]] as const) {
+    const activity = folder.turnActivities().get(1)
+    assert.ok(activity !== undefined)
+    const assistant = folder.messages().find(message =>
+      message.kind === 'assistant' && message.text === 'text at two')
+    assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+    assert.equal(assistantStepIntermediateOf(activity, assistant), false,
+      `${lane}: the PROVEN preceding side never becomes a following-call fact`)
+    const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+    const rows = blocks.flatMap(block => block.kind === 'work'
+      ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
+    assert.equal(rows.filter(row => row.kind === 'assistant' && row.text === 'text at two').length, 0,
+      `${lane}: the proven-preceding case keeps the latest Assistant as the pending final`)
+  }
+})
+
+// ── T6b: a real following call separated by a legitimate command boundary ──
+
+/** The positive interleaved order with a command between the actual call and
+ *  the durable settlement: display relocation is blocked, execution order is
+ *  still proven. */
+function interleavedWithCommandBoundaryEvents(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('c1', 1, 0, T0 + 1_500, 2, 'a'),
+    toolCall({ callId: 'c2', name: 'read', turn: 1, step: 1, time: T0 + 3_000, seq: 3, args: '{}' }),
+    toolResult('c2', 1, 1, T0 + 4_000, 4, 'b'),
+    eventAt('command/run', {
+      commandId: CommandId('order-cmd'), name: 'model', source: { kind: 'user' },
+    }, T0 + 4_500, 5),
+    eventAt('command/done', {
+      commandId: CommandId('order-cmd'), kind: 'success', text: 'switched',
+    }, T0 + 4_600, 6),
+    assistantSettlement({
+      turn: 1, step: 1, time: T0 + 5_000, seq: 7, text: 'let me check',
+      stream: [
+        textChunk(T0 + 2_000, 0, 'let me check'),
+        toolCallDeltaChunk(T0 + 3_000, 1, 'c2', 'read'),
+      ],
+    }),
+  ]
+}
+
+function interleavedWithCommandBoundaryLive(): TranscriptFolder {
+  const events = interleavedWithCommandBoundaryEvents()
+  const folder = new TranscriptFolder()
+  folder.hydrate([events[0]!, events[1]!, events[2]!])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 1, time: T0 + 2_000,
+    chunk: { type: 'text-delta', index: 0, text: 'let me check' },
+  })
+  folder.apply([events[3]!, events[4]!, events[5]!, events[6]!, events[7]!])
+  return folder
+}
+
+test('a real following call separated by a command boundary records the same fact live and cold', () => {
+  const cold = foldEvents(interleavedWithCommandBoundaryEvents())
+  const live = interleavedWithCommandBoundaryLive()
+  for (const [lane, folder] of [['cold', cold], ['live', live]] as const) {
+    const activity = folder.turnActivities().get(1)
+    assert.ok(activity !== undefined)
+    const assistant = folder.messages().find(message =>
+      message.kind === 'assistant' && message.text === 'let me check')
+    assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+    assert.equal(assistantStepIntermediateOf(activity, assistant), true,
+      `${lane}: the execution order survives a blocked display relocation`)
+    const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+    const rows = blocks.flatMap(block => block.kind === 'work'
+      ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
+    assert.equal(rows.filter(row => row.kind === 'assistant' && row.text === 'let me check').length, 1,
+      `${lane}: the proven-following Assistant is visible before turn/end`)
+  }
 })
 
 // ── T7: display-order invariants under displacement and re-application ─────

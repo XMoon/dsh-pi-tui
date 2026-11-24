@@ -3519,18 +3519,16 @@ export class TranscriptFolder {
    * requested-but-never-started call (no card) and an older-step call are not
    * continuation. */
   private assistantStepHasFollowingActualCall(turn: number, step: number): boolean {
-    const key = stepKey(turn, step)
-    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
-    const declared = this.declaredToolCallsByStep.get(key)
-    if (assistantIndex === undefined || declared === undefined) return false
+    const declared = this.declaredToolCallsByStep.get(stepKey(turn, step))
+    if (declared === undefined) return false
     for (const callId of declared) {
-      const rawIndex = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
-      if (rawIndex === undefined) continue
-      const relation = this.laneDisplayByDisplaced.get(rawIndex)
-      const following = relation !== undefined
-        ? relation.anchor === assistantIndex && relation.position === 'after'
-        : rawIndex > assistantIndex
-      if (following) return true
+      if (!this.toolCardIndexOf.has(toolCallKey(turn, step, callId))) continue
+      // PURE order evidence: an actual card plus its proven start time on the
+      // following side of the visible Conversation. Display reachability
+      // (whether the lane row can be relocated across a boundary) is a separate
+      // invariant and must never decide causal qualification; an unprovable or
+      // equal order is not "following".
+      if (this.toolRowEvidence(turn, step, callId)?.position === 'after') return true
     }
     return false
   }
@@ -5587,19 +5585,30 @@ export class TranscriptFolder {
             }
           }
           // A real tool/call proves the candidate intermediate ONLY when it is
-          // not a late event for an older step. Same-step text-then-call and a
-          // later-step call are valid continuation; an older-step late call is
-          // not. The settled-candidate case marks the step directly; the
-          // streaming case is confirmed by the existing candidate authority.
+          // not a late event for an older step. A MATERIALLY PROVEN same-step
+          // call on the preceding side is not continuation even though its
+          // formal event arrives after the text settlement; an unproven/equal
+          // same-step order keeps the historical observed-order compatibility
+          // (the pure evidence proves neither side). A later-step call is
+          // continuation by step identity.
+          const provenPrecedingSameStepCall = (step: number): boolean =>
+            event.data.step === step
+            && this.toolRowEvidence(callTurn, event.data.step, key)?.position === 'before'
           const candidate = activity.messageCandidate
           if (candidate !== undefined) {
-            if (event.data.step >= candidate.step) {
+            if (event.data.step > candidate.step
+              || (event.data.step === candidate.step && !provenPrecedingSameStepCall(candidate.step))) {
               this.confirmMessageCandidate(activity)
             }
           } else {
             const latest = activity.lastAssistantStep
-            if (latest !== undefined && event.data.step >= latest
+            if (latest !== undefined && event.data.step > latest
               && activity.settledSteps.has(latest)
+              && !activity.intermediateAssistantSteps.has(latest)) {
+              activity.intermediateAssistantSteps.add(latest)
+            } else if (latest !== undefined && event.data.step === latest
+              && activity.settledSteps.has(latest)
+              && !provenPrecedingSameStepCall(latest)
               && !activity.intermediateAssistantSteps.has(latest)) {
               activity.intermediateAssistantSteps.add(latest)
             }

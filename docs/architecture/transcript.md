@@ -209,9 +209,14 @@ projectTranscriptStructure()
   as the pending final unless the Folder recorded authoritative continuation
   for that exact step (a real `tool/call` or a new step after its settlement,
   or a later output that confirmed its streaming candidate). The settlement
-  reconciles both arrival orders: a cold fold that observed the same-step
-  actual call BEFORE its settlement records the fact from the call's proven
-  display side, so live and cold agree. A late older-step
+  and the formal call event share ONE pure order authority: the actual card's
+  step identity plus its proven start time relative to the first visible
+  Assistant text, never the optional display relocation or the raw row
+  position. A proven preceding same-step call does not confirm the text; an
+  unprovable or equal order keeps the historical observed-order compatibility
+  for the formal call, while a settlement never infers a following side it
+  cannot prove. Display reachability remains an independent invariant. A late
+  older-step
   Assistant/Thinking, an orphan/result-only diagnostic, a retry diagnostic or
   an independent control row never confirms it; display kind and physical order
   are never the authority. After `turn/end` the qualified final classifier owns
