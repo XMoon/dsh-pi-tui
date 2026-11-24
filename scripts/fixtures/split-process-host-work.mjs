@@ -32,7 +32,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'm4-c1-host-work'
-export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'sessions', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
+export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'sessions', 'sessionQuery', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
 
 const SCENARIOS = new Set([
   'long-turn',
@@ -2545,6 +2545,26 @@ export async function apply(ctx) {
           record('lifecycle-end-failure-restored', { restored: owned })
         }, 'lifecycle-end-failure-restore')
         record('lifecycle-end-failure-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'cold-read') {
+        // CMP-06 cold phase: the official logical-log read validates and
+        // replays the persisted Session WITHOUT making it live or attaching a
+        // client. The smoke compares the exact ids and bracket facts only.
+        const snapshot = await ctx.sessionQuery.readSession(SessionId(String(action.sessionId)))
+        record('lifecycle-cold-read', {
+          sessionId: action.sessionId,
+          inheritedEventCount: snapshot.inheritedEventCount,
+          events: snapshot.events.map(event => ({
+            type: event.type,
+            seq: event.seq,
+            compactionId: event.data?.compactionId,
+            turn: event.data?.turn,
+            error: typeof event.data?.error === 'string' ? event.data.error : undefined,
+            hasSummary: event.data?.summary !== undefined,
+            hasCheckpoint: event.data?.checkpoint !== undefined,
+          })),
+        })
         return
       }
       if (agent === undefined) {

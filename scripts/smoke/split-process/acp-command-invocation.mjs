@@ -870,6 +870,9 @@ export async function runAcpCommandInvocation(context) {
       .map(params => params.update)
     assert(controlCompaction.length > 0,
       'CMP-06: negotiated load must emit the complete control compaction (positive control)')
+    const controlId = controlCompaction[0]?.compactionId
+    assert(typeof controlId === 'string' && controlId.length > 0,
+      'CMP-06: the control compaction has its real id')
     const loaded = await loadClient.request(acp.methods.agent.session.load, {
       sessionId: endFailSession, cwd: hostCwd, mcpServers: [],
     })
@@ -1325,6 +1328,81 @@ export async function runAcpCommandInvocation(context) {
     } finally {
       writeFileSync(offRelease, '1', { mode: 0o600 })
     }
+
+    // CMP-06/CMP-05 cold phase: close the old delivery owners, stop the old
+    // Host, and read the persisted Sessions through the official
+    // `ctx.sessionQuery.readSession` on a genuine new Host owner BEFORE any
+    // client reactivates them. The complete control must cold-read with a
+    // successful end; the partial replacement and the failed flush must not.
+    for (const client of clients) {
+      try { await client.close() } catch { /* the old connection is already closed */ }
+    }
+    clients.length = 0
+    if (!tui.client.exited) await scene.exitC1Client(tui.client, 'COLD TUI exit')
+    if (peer !== undefined) {
+      try { await peer.shutdown() } catch { /* the global backstop owns a stuck child */ }
+      peer = undefined
+    }
+    const coldLifecycleControl = join(workDir, 'acp-command-cold-lifecycle')
+    mkdirSync(coldLifecycleControl, { recursive: true, mode: 0o700 })
+    const oldHostPid = hostIdentity.hostPid
+    await scene.stopC1Host(host)
+    host = undefined
+    const second = await scene.startC1Host('acp-command', 'command cold host', {
+      DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
+      C1_LIFECYCLE_CONTROL: coldLifecycleControl,
+    })
+    host = second.host
+    const coldIdentity = await scene.hostIdentityFacts(host)
+    assert(coldIdentity.hostPid !== oldHostPid,
+      `CMP-06: the cold read must run on a genuine new Host owner (${JSON.stringify({ oldHostPid, coldIdentity })})`)
+    const coldRead = async (targetSession, label) => {
+      const name = `action-${String(++lifecycleSequence)}-cold-read.json`
+      writeFileSync(join(coldLifecycleControl, name), JSON.stringify({
+        action: 'cold-read', sessionId: targetSession,
+      }), { mode: 0o600 })
+      return await waitForC1WorkEvent(second.workRoot,
+        event => event.kind === 'lifecycle-cold-read' && event.sessionId === targetSession,
+        label, 120_000)
+    }
+    const coldControl = await coldRead(controlSession, 'CMP-06 the complete control cold read')
+    const coldControlEvents = coldControl.events.filter(event => event.compactionId === controlId)
+    assert(coldControlEvents.some(event => event.type === 'compaction/start')
+      && coldControlEvents.some(event => event.type === 'compaction/summary' && event.hasSummary === true)
+      && coldControlEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
+    `CMP-06: the complete control must cold-read with a successful end (${JSON.stringify(coldControlEvents)})`)
+    const coldPartial = await coldRead(endFailSession, 'CMP-06 the partial replacement cold read')
+    const coldPartialEvents = coldPartial.events.filter(event => event.compactionId === endFailId)
+    assert(coldPartialEvents.some(event => event.type === 'compaction/start')
+      && coldPartialEvents.some(event => event.type === 'compaction/summary' && event.hasSummary === true)
+      && !coldPartialEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
+    `CMP-06: the partial replacement must cold-read without a successful end (${JSON.stringify(coldPartialEvents)})`)
+    // The failed first flush is a separate readback fact: the operation had
+    // already committed, so a later real flush may have persisted the clean
+    // bracket. Keep this read distinct from the partial replacement instead of
+    // reclassifying the original COMMITTED_WITH_ERROR reply.
+    const coldFlush = await coldRead(flushSession, 'CMP-05 the failed flush cold read')
+    const coldFlushEvents = coldFlush.events.filter(event => event.compactionId === flushId)
+    assert(coldFlushEvents.some(event => event.type === 'compaction/start')
+      && coldFlushEvents.every(event => event.compactionId === flushId),
+    `CMP-05: the failed-flush readback must preserve its exact id (${JSON.stringify(coldFlushEvents)})`)
+    const coldHeld = await coldRead(flushRejectSession, 'CMP-05 the held failure cold read')
+    const coldHeldEvents = coldHeld.events.filter(event => event.compactionId === liveId)
+    assert(coldHeldEvents.some(event => event.type === 'compaction/start'),
+      `CMP-05: the held failure must cold-read its own real start (${JSON.stringify(coldHeldEvents)})`)
+    trace('acp-command/cold-read', {
+      oldHostPid,
+      newHostPid: coldIdentity.hostPid,
+      controlId,
+      partialId: endFailId,
+      flushId,
+      heldId: liveId,
+      controlTypes: coldControlEvents.map(event => event.type),
+      partialTypes: coldPartialEvents.map(event => event.type),
+      flushTypes: coldFlushEvents.map(event => event.type),
+      flushHasCleanEnd: coldFlushEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
+      heldTypes: coldHeldEvents.map(event => event.type),
+    })
 
     const facts = {
       caseId: CASE_ID,
