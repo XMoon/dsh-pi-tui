@@ -908,37 +908,36 @@ class RemoteActivityObservation implements ActivityObservation {
     for (const [id, row] of this.rows) {
       const entry = listed.byId[id]
       const witness = this.witnessOf(id)
+      const listRunning = entry?.running === true
+      // One official list snapshot can change BOTH inputs (the pinned Client
+      // batches a refreshed baseline: running + projection blocks land in the
+      // same publication). Commit BOTH witnesses from THIS snapshot BEFORE any
+      // branch can continue: otherwise a combined change leaves one input stale
+      // and a later unchanged publication looks like a new transition.
+      const witnessChanged = witness !== row.witness
+      const runningTransition = listRunning !== row.listRunning
+      row.witness = witness
+      row.listRunning = listRunning
       const runningChanged = baseline && entry !== undefined && row.running !== entry.running
         ? this.applyProvenRunning(row, entry.running, 'list')
         : false
-      if (runningChanged) {
+      if (runningChanged || witnessChanged) {
+        // A relevant running/witness change invalidates ONCE and schedules ONCE,
+        // even when both arrived in the same publication.
         changed = true
         this.invalidateRow(row)
         this.scheduleAfterRelevantChange(row)
         scheduled = true
         continue
       }
-      if (witness !== row.witness) {
-        row.witness = witness
-        changed = true
-        this.invalidateRow(row)
+      // A latest-known positive running fact this generation has not proven is a
+      // SCHEDULING trigger on a genuine transition only: an unrelated publication
+      // while the same positive stays unproven must not re-dirty a queued or
+      // in-flight recovery read. The current exact state/status proves the fact,
+      // never the replayed row.
+      if (runningTransition && listRunning && !row.runningProven && this.rowIsCandidate(row)) {
         this.scheduleAfterRelevantChange(row)
         scheduled = true
-        continue
-      }
-      // The list may carry a fresh positive running fact for a row this
-      // generation has not proven (e.g. after a reconnect). Only a genuine
-      // TRANSITION of the official bit schedules the targeted read: an unrelated
-      // publication while the same positive stays unproven must not re-dirty a
-      // queued/inflight recovery read. It is scheduling evidence only — the
-      // current exact state/status proves the fact, never the replayed row.
-      const listRunning = entry?.running === true
-      if (listRunning !== row.listRunning) {
-        row.listRunning = listRunning
-        if (listRunning && !row.runningProven && this.rowIsCandidate(row)) {
-          this.scheduleAfterRelevantChange(row)
-          scheduled = true
-        }
       }
     }
     if (changed) {
@@ -950,6 +949,7 @@ class RemoteActivityObservation implements ActivityObservation {
     // otherwise sit in the queue with nothing to pump it.
     if (changed || scheduled) this.pump()
   }
+
 
   /** One current-generation official Agent status event. It is the recovery
    *  path's currentness proof (the list store replays the same fact, but a

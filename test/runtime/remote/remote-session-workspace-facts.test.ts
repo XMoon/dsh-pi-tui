@@ -1732,3 +1732,53 @@ test('R21 an unrelated list publication never re-dirties a held recovery read (a
       'a genuine positive transition still schedules the targeted recovery read')
   })
 })
+
+test('R22 a COMBINED running+witness publication commits both inputs before dispatch, so no later unchanged notification re-dirties it', async () => {
+  const listed = [row('x'), row('z')]
+  const listedRunning: Record<string, boolean> = { x: false, z: false }
+  const hints: Record<string, unknown> = {}
+  const states: Record<string, unknown> = { x: { failure: { code: 'gateway/internal' } } }
+  let releases: Array<() => void> = []
+  const h = harness({
+    listed,
+    listedRunning,
+    states: states as never,
+    projections: { x: { result: emptyQuestions }, z: { result: emptyQuestions } } as never,
+    projectionsBySession: hints as never,
+    stateGate: () => new Promise<void>((resolve) => { releases.push(resolve) }),
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    // One official snapshot changes BOTH the relevant hint and the late
+    // positive running bit (a refreshed baseline batches both).
+    listedRunning.x = true
+    hints.x = { values: { userQuestions: { active: [{ callId: 'q1', state: 'continued', questions: [{ id: 'q', question: 'Continue?' }] }], settled: [] } }, state: 'idle' }
+    h.notifyList()
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length >= 1, 'the combined publication schedules ONE read (held)')
+    const held = h.stateCalls.filter(id => id === 'x').length
+    // An unrelated unchanged publication while the held read is in flight must
+    // not look like a second transition.
+    listed[1] = row('z', { updatedAt: 5, title: 'Renamed elsewhere' })
+    h.notifyList()
+    await flushTurns()
+    releases.splice(0).forEach(release => { release() })
+    await waitFor(() => h.projectionCalls.filter(id => id === 'x').length >= 1, 'the held pair completes')
+    await flushTurns()
+    assert.equal(h.stateCalls.filter(id => id === 'x').length, held,
+      'the combined publication was committed once: the later unchanged notification adds no pair')
+    // Symmetric: true→false WITH a witness change commits the false baseline, so
+    // a later true with the same witness is a genuine transition and schedules.
+    const beforeSymmetric = h.stateCalls.filter(id => id === 'x').length
+    listedRunning.x = false
+    hints.x = { values: { userQuestions: { active: [{ callId: 'q2', state: 'continued', questions: [{ id: 'q2', question: 'Continue?' }] }], settled: [] } }, state: 'idle' }
+    h.notifyList()
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length > beforeSymmetric, 'the witness change schedules its own read')
+    releases.splice(0).forEach(release => { release() })
+    await flushTurns()
+    const beforeTransition = h.stateCalls.filter(id => id === 'x').length
+    listedRunning.x = true
+    h.notifyList()
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length > beforeTransition,
+      'a later unproven positive with the same witness is still a genuine transition')
+  })
+})
