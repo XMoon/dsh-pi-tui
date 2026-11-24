@@ -1412,6 +1412,11 @@ async function startSurfaceLocalClient(
               state: (...args: never[]) => unknown
               projections: (...args: never[]) => unknown
             }
+            // The generated namespace installs each method as a GETTER
+            // (`configurable: true`), so a plain assignment throws. The probe
+            // swaps the descriptors and restores the ORIGINAL descriptors.
+            const stateDescriptor = Object.getOwnPropertyDescriptor(target, 'state')
+            const projectionsDescriptor = Object.getOwnPropertyDescriptor(target, 'projections')
             const originalState = target.state
             const originalProjections = target.projections
             const counters = { state: 0, projections: 0, inFlight: 0, peak: 0 }
@@ -1447,8 +1452,16 @@ async function startSurfaceLocalClient(
               emit({ phase: 'activity-snapshot', revision: snapshot.revision, rosterRevision: snapshot.rosterRevision })
             }
             const unsubscribe = observation.subscribe(record)
-            target.state = counted('state', originalState)
-            target.projections = counted('projections', originalProjections)
+            Object.defineProperty(target, 'state', {
+              configurable: true,
+              enumerable: true,
+              value: counted('state', originalState),
+            })
+            Object.defineProperty(target, 'projections', {
+              configurable: true,
+              enumerable: true,
+              value: counted('projections', originalProjections),
+            })
             try {
               // The qualification probe composes no root interaction delivery,
               // so it proves the CURRENT-session priority input only.
@@ -1460,8 +1473,8 @@ async function startSurfaceLocalClient(
             } finally {
               unsubscribe()
               observation.dispose()
-              target.state = originalState
-              target.projections = originalProjections
+              if (stateDescriptor !== undefined) Object.defineProperty(target, 'state', stateDescriptor)
+              if (projectionsDescriptor !== undefined) Object.defineProperty(target, 'projections', projectionsDescriptor)
             }
             emit({
               phase: 'activity-result',
