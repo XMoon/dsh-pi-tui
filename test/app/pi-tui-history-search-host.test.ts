@@ -1389,6 +1389,10 @@ test('an unsafe sidecar keeps the index closed until a later write proves it saf
     source.events.push(recoveryEvent)
     source.revision += 1
     deliver(recoveryEvent)
+    // The failed round's full traversal never completed. The successful live
+    // write proves the store safe; a complete full pass is still the proof that
+    // closes the round and publishes ready.
+    await (service as unknown as { verifySources(): Promise<void> }).verifySources()
     await waitDirectReady(service)
     const recovered = await service.search({ scope: 'all', query: 'recovered sidecar', limit: 25 }, new AbortController().signal)
     assert.equal(recovered.kind, 'ready', JSON.stringify(recovered))
@@ -3702,7 +3706,7 @@ test('a failed/partial first pass cannot become ready through a point repair alo
   }
 })
 
-test('a stale first pass stops before an unvisited persisted Session and its repair cannot prove coverage', async (t) => {
+test('a stale first pass continues the full traversal and repairs the stale identity', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r801a-stale-')
   const a = mutableSource('/repo/r801a-stale-a', 'r801a-stale-a')
@@ -3747,13 +3751,13 @@ test('a stale first pass stops before an unvisited persisted Session and its rep
   try {
     await waitNotLoading()
     assert.equal(replaced, true)
-    // A may already be repaired by the coalesced stale-round intent; what
-    // matters for coverage is that B was never visited.
-    assert.equal(internals.index.checkpointOf('r801a-stale-b'), undefined)
-    let answer = await service.search({ scope: 'all', query: 'r801a-stale-b', limit: 25 }, new AbortController().signal)
-    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+    // The stale A handoff does not abandon the remaining official traversal:
+    // the persisted-only B was visited and indexed in the same cold round.
+    assert.equal(internals.index.checkpointOf('r801a-stale-b')?.nextSeq, 3)
 
-    // Repair A alone; B was never visited, so coverage must stay unproven.
+    // The stale A handoff stays pending; the next accepted event gives it the
+    // bounded repair it needs. The round remains the ONE owner of both IDs and
+    // can finish once both settle.
     a.events.push({
       type: 'agent/inbox/spliced',
       seq: 3,
@@ -3775,11 +3779,9 @@ test('a stale first pass stops before an unvisited persisted Session and its rep
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     assert.equal(internals.index.checkpointOf('r801a-stale-a')?.nextSeq, 4)
-    assert.equal(internals.index.checkpointOf('r801a-stale-b'), undefined)
-    answer = await service.search({ scope: 'all', query: 'r801a-stale-b', limit: 25 }, new AbortController().signal)
-    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+    assert.equal(internals.index.checkpointOf('r801a-stale-b')?.nextSeq, 3)
 
-    // A full pass visits B before coverage can be proven.
+    // B's later content is picked up by the next complete pass.
     b.events.push({
       type: 'agent/inbox/spliced',
       seq: 3,
@@ -3929,6 +3931,303 @@ test('a normal live writer turn stays corpus-independent at 100/1000/10000 check
     assert.equal(internals.index.occurrenceCount(), 5)
   } finally {
     internals.index.listSessions = realList
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a point repair completion cannot release the round before the full traversal finishes', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r9a-')
+  const a = mutableSource('/repo/r9a-a', 'r9a-a')
+  const b = mutableSource('/repo/r9a-b', 'r9a-b')
+  const c = mutableSource('/repo/r9a-c', 'r9a-c')
+  a.live = true
+  b.live = true
+  c.live = false
+  const { deps } = mutableDeps(a, [b, c])
+  const persistence = deps.sessionPersistence()
+  const query = deps.sessionQuery()
+  const realOpen = persistence.open.bind(persistence)
+  const realObserve = query.observeSession.bind(query)
+  let bEntered!: () => void
+  const bReached = new Promise<void>(resolve => { bEntered = resolve })
+  let releaseB!: () => void
+  const bGate = new Promise<void>(resolve => { releaseB = resolve })
+  let cEntered!: () => void
+  const cReached = new Promise<void>(resolve => { cEntered = resolve })
+  let releaseC!: () => void
+  const cGate = new Promise<void>(resolve => { releaseC = resolve })
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): unknown }
+    scheduleSessionRepair(sessionId: string, kind: 'rebuild' | 'disposal'): void
+    verifySources(): Promise<void>
+    coverageRound?: { deletionsSettled: boolean }
+  }
+  try {
+    await waitDirectReady(service)
+    a.present = false
+    a.live = false
+    c.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 24_000,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'r9a-c-new',
+          role: 'user',
+          content: [{ type: 'text', text: 'r9a C changed during traversal' }],
+          source: { kind: 'user', rpcId: 'rpc-r9a-c' },
+        }],
+      },
+    })
+    c.revision += 1
+    query.observeSession = async (id, options) => {
+      if (String(id) === 'r9a-b') {
+        bEntered()
+        await bGate
+      }
+      return realObserve(id, options)
+    }
+    persistence.open = async (id, mode, options) => {
+      if (String(id) === 'r9a-c') {
+        cEntered()
+        await cGate
+      }
+      return realOpen(id, mode, options)
+    }
+    internals.scheduleSessionRepair('r9a-b', 'rebuild')
+    await bReached
+    const pass = internals.verifySources()
+    for (let attempt = 0; attempt < 500 && internals.coverageRound?.deletionsSettled !== true; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 2))
+    }
+    releaseB()
+    await cReached
+    // B's point repair has settled; C is still unvisited, so the round must
+    // stay incomplete even though the deletion already settled. Exercise the
+    // exact round-finish sink the point settlement calls (structural witness
+    // for the scheduling interleaving).
+    ;(service as unknown as { finishCoverageRound(): void }).finishCoverageRound()
+    const interim = await service.search({ scope: 'all', query: 'r9a C changed', limit: 25 }, new AbortController().signal)
+    assert.equal(interim.kind, 'incomplete', JSON.stringify(interim))
+    releaseC()
+    await pass
+    await waitDirectReady(service)
+    assert.equal(internals.index.checkpointOf('r9a-a'), undefined)
+    const hit = await service.search({ scope: 'all', query: 'r9a C changed during traversal', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    releaseB()
+    releaseC()
+    persistence.open = realOpen
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('unproven coverage rebuilds a prior-incarnation live checkpoint instead of trusting the no-read path', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r9b-')
+  const source = mutableSource('/repo/r9b', 'r9b')
+  source.live = true
+  const firstDeps = mutableDeps(source).deps
+  const firstCtx = new Context()
+  const first = directService(firstCtx, firstDeps, profileDir)
+  try {
+    await waitDirectReady(first)
+    const old = await first.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(old.kind, 'ready', JSON.stringify(old))
+  } finally {
+    await first.dispose()
+    await firstCtx.fiber.dispose()
+  }
+
+  // A new incarnation changes the accepted prefix without changing seq/header.
+  source.events[0] = {
+    type: 'agent/inbox/spliced',
+    seq: 0,
+    time: 1000,
+    data: {
+      target: 'next-turn',
+      start: 0,
+      inserted: [{
+        id: 'msg-r9b-new',
+        role: 'user',
+        content: [{ type: 'text', text: 'r9b new incarnation first' }],
+        source: { kind: 'user', rpcId: 'rpc-r9b-new' },
+      }],
+    },
+  }
+  source.revision += 1
+  const secondDeps = mutableDeps(source).deps
+  const secondPersistence = secondDeps.sessionPersistence()
+  const realList = secondPersistence.list.bind(secondPersistence)
+  let aborted = false
+  secondPersistence.list = async options => {
+    if (!aborted) {
+      aborted = true
+      throw new Error('R9B injected first-pass list abort')
+    }
+    return realList(options)
+  }
+  const secondCtx = new Context()
+  const second = directService(secondCtx, secondDeps, profileDir)
+  const internals = second as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    verifySources(): Promise<void>
+  }
+  try {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const answer = await second.search({ scope: 'all', query: 'r9b', limit: 25 }, new AbortController().signal)
+      if (answer.kind !== 'loading') break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(aborted, true)
+    assert.equal(internals.index.checkpointOf('r9b')?.nextSeq, 3)
+    let answer = await second.search({ scope: 'all', query: 'r9b new incarnation first', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+
+    // Coverage is still unproven; the retained prior-incarnation checkpoint,
+    // matching header and current live object are NOT a proof of this Host's
+    // observed source. A complete pass must rebuild from the current source.
+    await internals.verifySources()
+    await waitDirectReady(second)
+    const hit = await second.search({ scope: 'all', query: 'r9b new incarnation first', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    secondPersistence.list = realList
+    await second.dispose()
+    await secondCtx.fiber.dispose()
+  }
+})
+
+test('a bounded startup burst completes the round on the final drain', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r9-burst-')
+  const source = mutableSource('/repo/r9-burst', 'r9-burst')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const persistence = deps.sessionPersistence()
+  const realList = persistence.list
+  let listEntered!: () => void
+  const listReached = new Promise<void>(resolve => { listEntered = resolve })
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  const query = deps.sessionQuery()
+  const realObserve = query.observeSession.bind(query)
+  let burstDelivered = false
+  const deliverBurst = (): void => {
+    if (burstDelivered) return
+    burstDelivered = true
+    for (let seq = 3; seq < 603; seq += 1) {
+      const event = {
+        type: 'agent/inbox/spliced',
+        seq,
+        time: 25_000 + seq,
+        data: {
+          target: 'next-turn',
+          start: seq,
+          inserted: [{
+            id: `r9-burst-${String(seq)}`,
+            role: 'user',
+            content: [{ type: 'text', text: `r9 burst ${String(seq)}` }],
+            source: { kind: 'user', rpcId: `rpc-r9-burst-${String(seq)}` },
+          }],
+        },
+      }
+      source.events.push(event)
+      internals.observeLiveEvent(liveSessionOf(source), event)
+    }
+  }
+  query.observeSession = async (id, options) => {
+    const observation = await realObserve(id, options)
+    // The timer fires after the replay's synchronous short writes/terminal and
+    // before the round can finish across the startup yield.
+    if (!burstDelivered && String(id) === 'r9-burst') setTimeout(deliverBurst, 0)
+    return observation
+  }
+  try {
+    persistence.list = async () => {
+      listEntered()
+      await listGate
+      return realList.call(persistence)
+    }
+    await listReached
+    releaseList()
+    const readyStarted = Date.now()
+    let ready = false
+    while (Date.now() - readyStarted < 3_000) {
+      const answer = await service.search({ scope: 'all', query: 'r9 burst 602', limit: 25 }, new AbortController().signal)
+      if (answer.kind === 'ready') {
+        ready = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(ready, true, 'the final drain must not wait for the 30 s timer')
+    assert.equal(burstDelivered, true)
+    assert.equal(internals.index.checkpointOf('r9-burst')?.nextSeq, 603)
+    const hit = await service.search({ scope: 'all', query: 'r9 burst 602', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    releaseList()
+    persistence.list = realList
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('the round finish requires the full traversal proof even with no outstanding payload', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r9-traversal-proof-')
+  const source = mutableSource('/repo/r9-traversal-proof')
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    coverageRound?: {
+      expected: Set<string> | undefined
+      settled: Set<string>
+      deletionsSettled: boolean
+      invalidating: boolean
+      traversed: boolean
+    }
+    finishCoverageRound(): void
+  }
+  try {
+    await waitDirectReady(service)
+    internals.coverageRound = {
+      expected: undefined,
+      settled: new Set(),
+      deletionsSettled: true,
+      invalidating: true,
+      traversed: false,
+    }
+    internals.finishCoverageRound()
+    assert.notEqual(internals.coverageRound, undefined, 'a pending traversal cannot be released by an empty obligation set')
+    if (internals.coverageRound === undefined) throw new Error('expected round')
+    internals.coverageRound.traversed = true
+    internals.finishCoverageRound()
+    assert.equal(internals.coverageRound, undefined)
+  } finally {
     await service.dispose()
     await ctx.fiber.dispose()
   }

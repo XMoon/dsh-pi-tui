@@ -479,6 +479,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     readonly settled: Set<string>
     deletionsSettled: boolean
     invalidating: boolean
+    /** The full official-ID traversal of THIS round has finished. */
+    traversed: boolean
   } | undefined
   /** A pass or repair failed to read the official source; a later full pass clears it. */
   private sourceFaulted = false
@@ -1235,6 +1237,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.restoreHeldBatch(sessionId, batch)
       throw error
     }
+    // A completed ordinary drain is a terminal owner of the round's accepted
+    // work too; a finished traversal must not wait for the periodic timer.
+    this.finishCoverageRound()
   }
 
   private drainPendingStep(): void {
@@ -1538,8 +1543,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // so cold start always rebuilds from the official source.
       const outcome = await this.withFullSessionOwnership(sessionId, () =>
         this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true }))
-      if (outcome !== 'complete') return false
-      this.settleRoundSession(sessionId)
+      // A failed source/write aborts coverage. A stale/pending handoff is an
+      // ordinary accepted-work obligation owned by the point repair; keep
+      // traversing the remaining authoritative IDs.
+      if (outcome === 'failed') return false
+      if (outcome === 'complete') this.settleRoundSession(sessionId)
       // The pending live batch is a SHORT commit: it must use the ONE serial
       // writer and settle before the cold pass continues.
       const drained = await this.enqueueWrite(() => {
@@ -1548,6 +1556,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (drained !== 'committed') return false
       await yieldEventLoop()
     }
+    if (this.coverageRound !== undefined) this.coverageRound.traversed = true
     // Sessions born during the warmup window were buffered by the listener
     // before they could appear in the persisted enumeration.
     for (const sessionId of [...this.pending.keys()]) {
@@ -1561,8 +1570,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       counters.sessionsVisited += 1
       const outcome = await this.withFullSessionOwnership(sessionId, () =>
         this.rebuildLiveSession(sessionId, persistence, sessions, query))
-      if (outcome !== 'complete') return false
-      this.settleRoundSession(sessionId)
+      if (outcome === 'failed') return false
+      if (outcome === 'complete') this.settleRoundSession(sessionId)
     }
     this.finishCoverageRound()
     this.refreshCompleteness()
@@ -1985,6 +1994,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.restoreHeldBatch(sessionId, batch)
       throw error
     }
+    this.finishCoverageRound()
   }
 
   // ── external-source verification ────────────────────────────────────────
@@ -2064,6 +2074,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (result === 'complete') this.settleRoundSession(sessionId)
         else this.markRoundInvalidating()
       }
+      if (this.coverageRound !== undefined) this.coverageRound.traversed = true
       // Accepted live events that arrived during the pass merge in order BEFORE
       // the completeness decision. Each writer turn commits at most one bounded
       // chunk, so this wait never hides an unbounded live burst behind one task.
@@ -2119,6 +2130,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     counters: HistorySearchPhaseCounters,
   ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
+    // First/full coverage has NOT been established. A clean on-disk checkpoint
+    // from another incarnation (or an earlier aborted pass) plus a matching live
+    // object cannot prove this Host observed the complete current source; DSH
+    // seed events do not republish on session/event. Force an authoritative
+    // current-incarnation rebuild for every unproven ID.
+    if (this.coverage !== 'proven') {
+      this.markRoundInvalidating()
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+    }
     let checkpoint = this.index?.checkpointOf(sessionId)
     if (
       checkpoint !== undefined
@@ -2212,7 +2232,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // while the SAME enumerated live object (or its absence) and no buffered
     // accepted event still hold: a post-enumeration same-ID replacement must
     // keep the index incomplete, never inherit a stale ready claim.
-    if (this.pending.has(sessionId) || sessions.get(sessionId) !== record.liveObject) {
+    if (this.pending.has(sessionId)) {
+      // The buffered accepted facts are the obligation. The bounded drain owns
+      // their terminal settlement; manufacturing a separate reconcile barrier
+      // here would leave no point flight to release it after the final chunk.
+      this.markReconcileNeeded('reconciling')
+      return 'stale'
+    }
+    if (sessions.get(sessionId) !== record.liveObject) {
       this.reconcilePending.add(sessionId)
       this.markReconcileNeeded('reconciling')
       return 'stale'
@@ -2568,6 +2595,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // An unresolved destructive obligation survives a new round; only a
       // complete same-round proof may release it.
       invalidating: previous?.invalidating ?? false,
+      traversed: false,
     }
   }
 
@@ -2591,6 +2619,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private finishCoverageRound(): void {
     const round = this.coverageRound
     if (round === undefined) return
+    if (!round.traversed) return
     if (!round.deletionsSettled) return
     if (round.expected !== undefined && round.expected.size !== round.settled.size) return
     if (this.sourceFaulted || this.indexFaulted) return

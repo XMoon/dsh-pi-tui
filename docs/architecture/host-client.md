@@ -1643,7 +1643,15 @@ verified epoch stays readable during a read-only background check; a keyset
 cursor becomes stale only when committed content actually changes. An
 unresolved accepted-coverage obligation is fail-closed: it is settled only by a
 current authoritative replay, never by a timeout, repeated roster absence or an
-equal checkpoint alone.
+equal checkpoint alone. A full round finishes only after its official-ID
+traversal has completed and every required deletion, accepted payload, repair
+and terminal settlement has settled; a point completion observed while the
+traversal is still pending cannot release the global barrier. While coverage is
+unproven, each authoritative ID requires a current-incarnation authoritative
+replay: a clean prior-process checkpoint plus a matching live identity is not a
+proof of this Host's observed source. A completed final ordinary pending drain
+is also a terminal owner and can settle the traversed round without waiting for
+the periodic timer.
 
 The search is a literal Unicode lower-case substring match over the first
 accepted text. `all` addresses every accessible Session of the authenticated
