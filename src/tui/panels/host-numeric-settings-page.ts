@@ -217,10 +217,6 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private advancedSignature: string | undefined
   private advancedFactLines: readonly number[] = []
   /** The grouped Reset is published only once its own receipt holds. */
-  private paintedResetAction = false
-  /** The question's necessary copy fragments read in THIS instance. */
-  private questionSeen = new Set<number>()
-  private questionSignature: string | undefined
   /** The reset confirmation's risk fragments projected by the LAST render. */
   private riskLines: readonly { readonly line: number }[] = []
   private riskSignature: string | undefined
@@ -322,7 +318,6 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     this.paintedConfirm = false
     this.paintedActions.clear()
     this.paintedSaveFacts = false
-    this.paintedResetAction = false
   }
   private changed(): void { this.revoke(); this.intents.requestRender() }
 
@@ -982,10 +977,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       this.advancedFactLines = advancedFacts
       for (let index = 0; index < bodyRows; index += 1) this.advancedSeen.add(offset + index)
       resetReady = advancedFacts.length > 0 && advancedFacts.every(line => this.advancedSeen.has(line))
-      if (resetReady) {
-        content.push(advancedAction)
-        this.paintedResetAction = true
-      }
+      if (resetReady) content.push(advancedAction)
     } else if (this.advancedFactLines.length > 0) {
       this.advancedFactLines = []
       this.advancedSeen.clear()
@@ -1027,25 +1019,14 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       this.riskLines = []
     }
     const frameComplete = mustSee.every(lineIndex => visible.has(lineIndex)) && inputAdmissible
-    // A question's copy is a READ receipt: every necessary fragment must have
-    // been painted inside THIS instance/width/grant. A jump that never shows a
-    // fragment cannot answer it; a sequential scroll can.
-    if (this.question !== undefined && this.question.kind !== 'reset' && !this.single) {
-      const signature = `${this.questionIdentity()}|${width}|${this.rowGrant}`
-      if (this.questionSignature !== signature) {
-        this.questionSignature = signature
-        this.questionSeen.clear()
-      }
-      for (const lineIndex of mustSee) if (visible.has(lineIndex)) this.questionSeen.add(lineIndex)
-    } else {
-      this.questionSeen.clear()
-    }
+    // Ordinary questions answer from the CURRENT frame only: every necessary
+    // fragment must be visible at once. Optional requested detail may scroll;
+    // an insufficient grant publishes only Keep. The Agent single Reset keeps
+    // its separate cumulative risk-fragment receipt.
     const questionRead = this.question === undefined ? false
       : this.question.kind === 'reset'
         ? this.resetRiskRead(width, risk)
-        : this.single
-          ? mustSee.every(lineIndex => visible.has(lineIndex))
-          : mustSee.every(lineIndex => this.questionSeen.has(lineIndex))
+        : mustSee.every(lineIndex => visible.has(lineIndex))
     const complete = questionRead || (this.question === undefined && frameComplete)
     if (this.question !== undefined && questionRead) this.paintedQuestion = this.questionIdentity()
     // A question's ONE accept target is admitted only once its necessary copy
@@ -1061,7 +1042,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       || saveFacts.dirty.some(block => block.complete && block.lines.length > 0
         && block.lines.every(lineIndex => visible.has(lineIndex)))
     while (lines.length < bodyRows) lines.push(fit('', width))
-    lines.push(this.renderTenantBar(snapshot, width, complete, maxOffset > 0))
+    lines.push(this.renderTenantBar(snapshot, width, complete, maxOffset > 0, resetReady))
     this.awaitingPaint = false
     this.paint = { width, rows: this.rowGrant, identity: this.gestureIdentity(), targets, maxOffset, scrollStart: 0, scrollEnd: bodyRows }
     return lines
@@ -1309,7 +1290,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
           : currentWidth <= rowWidth ? color.textDim(current)
             : `  ${color.textDim(truncateToWidth(current, Math.max(1, rowWidth - 2), '…', false))}`
         const valueComplete = currentWidth <= rowWidth
-        const oneLine = 2 + prefixWidth + 1 + currentWidth + 2 + suffix.length <= rowWidth
+        // Composed: '  ' + prefix + ' ' + value + ' · ' + suffix (3 cells).
+        const oneLine = 2 + prefixWidth + 1 + currentWidth + 3 + visibleWidth(suffix) <= rowWidth
         if (oneLine) {
           lines.push({ text: `  ${color.textDim(prefix)} ${color.textDim(current)} · ${color.textDim(suffix)}`, field: field.key })
         } else if (2 + prefixWidth + 1 + currentWidth <= rowWidth) {
@@ -1380,7 +1362,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       // canonical fact is required even for text that is already canonical.
       const prompt = 'Value: '
       const window = Math.max(0, width - visibleWidth(prompt) - 1)
-      const rawVisible = visibleWidth(raw.trim()) <= window
+      // The editor's own window is measured on the FULL buffer (legal leading/
+      // trailing whitespace included), not on the trimmed numeric text.
+      const rawVisible = visibleWidth(raw) <= window
       if (canonical !== undefined && (canonical !== raw.trim() || !rawVisible)) {
         // The canonical numeric fact is admissible only when its COMPLETE value
         // (and unit) really fits the row: a clipped canonical line can never
@@ -1572,7 +1556,13 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     return { lines, mustSee, risk: [] }
   }
 
-  private renderTenantBar(snapshot: HostNumericSettingsSnapshot<T>, width: number, complete: boolean, scrollable: boolean): string {
+  private renderTenantBar(
+    snapshot: HostNumericSettingsSnapshot<T>,
+    width: number,
+    complete: boolean,
+    scrollable: boolean,
+    resetReady: boolean,
+  ): string {
     const bodyRows = Math.max(0, this.rowGrant - 1)
     let segments: BarSegment[]
     if (snapshot.saving) {
@@ -1628,7 +1618,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       ]
     } else if (this.advanced) {
       segments = [
-        ...((this.single ? this.editable(snapshot) : this.paintedResetAction)
+        ...((this.single ? this.editable(snapshot) : resetReady)
           ? [{ text: 'Reset [X]', priority: 900, action: 'reset' as const }]
           : []),
         ...(scrollable ? [{ text: 'Up/Down scroll', priority: 400 }] : []),
