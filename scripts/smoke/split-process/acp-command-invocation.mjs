@@ -379,7 +379,7 @@ export async function runAcpCommandInvocation(context) {
     const turnHold = join(workDir, 'acp-command-turn-hold')
     rmSync(`${turnHold}.entered`, { force: true })
     rmSync(`${turnHold}.release`, { force: true })
-    writeFileSync(turnHold, '1', { mode: 0o600 })
+    writeFileSync(turnHold, `${sessionId}\n`, { mode: 0o600 })
     const busyBefore = hostSessionEvents(dshHome, sessionId).length
     tui.client.send('hold the foreign turn\r')
     await waitForHostSessionEventAfter(dshHome, sessionId, busyBefore,

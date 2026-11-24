@@ -1592,16 +1592,21 @@ class C1Model extends LlmAdapter {
       }
       const turnHold = process.env.C1_TURN_HOLD
       if (typeof turnHold === 'string' && turnHold !== '' && existsSync(turnHold)) {
-        appendFileSync(`${turnHold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
-        const deadline = Date.now() + 30_000
-        while (!existsSync(`${turnHold}.release`)) {
-          if (options.signal?.aborted === true) {
-            throw options.signal.reason instanceof Error
-              ? options.signal.reason
-              : new Error('acp-command turn hold aborted')
+        const targets = readFileSync(turnHold, 'utf8').split('\n').map(line => line.trim()).filter(Boolean)
+        if (targets.includes(sessionId)) {
+          appendFileSync(`${turnHold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
+          appendFileSync(`${turnHold}.entered.${sessionId}`, `${String(process.pid)}\n`, { mode: 0o600 })
+          const deadline = Date.now() + 30_000
+          const release = `${turnHold}.release.${sessionId}`
+          while (!existsSync(`${turnHold}.release`) && !existsSync(release)) {
+            if (options.signal?.aborted === true) {
+              throw options.signal.reason instanceof Error
+                ? options.signal.reason
+                : new Error('acp-command turn hold aborted')
+            }
+            if (Date.now() > deadline) throw new Error('acp-command turn hold timed out')
+            await new Promise(resolveWait => setTimeout(resolveWait, 25))
           }
-          if (Date.now() > deadline) throw new Error('acp-command turn hold timed out')
-          await new Promise(resolveWait => setTimeout(resolveWait, 25))
         }
       }
       const answer = `acp command answer ${token} ${'acp command long context '.repeat(6_000)}`
