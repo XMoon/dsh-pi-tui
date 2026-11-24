@@ -2456,6 +2456,7 @@ export async function apply(ctx) {
     const actions = new Set()
     const flushFailureSessions = new Set()
     const flushSummarySeen = new Set()
+    const flushHoldSessions = new Map()
     let killAfterSummarySession
     const sessions = ctx.sessions
     const originalFlush = sessions.flush
@@ -2464,6 +2465,16 @@ export async function apply(ctx) {
       // summary; the engine's earlier start/admission flush keeps its real
       // behavior, and a different Session can never consume this fault.
       const sessionId = String(args[0]?.id ?? '')
+      const holdRelease = flushHoldSessions.get(sessionId)
+      if (holdRelease !== undefined && flushSummarySeen.has(sessionId)) {
+        flushHoldSessions.delete(sessionId)
+        record('lifecycle-flush-held', { sessionId, release: holdRelease })
+        const deadline = Date.now() + 30_000
+        while (!existsSync(holdRelease)) {
+          if (Date.now() > deadline) throw new Error('m4-c1-host-work: held flush timed out')
+          await new Promise(resolveWait => setTimeout(resolveWait, 25))
+        }
+      }
       if (flushFailureSessions.has(sessionId) && flushSummarySeen.has(sessionId)) {
         flushFailureSessions.delete(sessionId)
         flushSummarySeen.delete(sessionId)
@@ -2491,8 +2502,33 @@ export async function apply(ctx) {
         record('lifecycle-kill-after-summary-armed', { sessionId: action.sessionId })
         return
       }
+      if (action.action === 'arm-hold-flush') {
+        flushHoldSessions.set(String(action.sessionId), String(action.release))
+        record('lifecycle-flush-hold-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'arm-end-failure') {
+        const target = String(action.sessionId)
+        const session = agent.session
+        const originalAppend = session.append
+        session.append = function lifecycleAppend(...args) {
+          if (String(this?.id ?? target) === target && args[0] === 'compaction/end') {
+            record('lifecycle-end-failure-hit', { sessionId: target })
+            throw new Error('m4-c1-host-work: injected compaction/end failure')
+          }
+          return originalAppend.apply(this, args)
+        }
+        ctx.effect(() => () => { if (session.append !== lifecycleAppend) session.append = originalAppend }, 'lifecycle-end-failure-restore')
+        record('lifecycle-end-failure-armed', { sessionId: action.sessionId })
+        return
+      }
       if (agent === undefined) {
         record('lifecycle-action-no-agent', { action: action.action, sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'flush-now') {
+        await ctx.sessions.flush(agent.session)
+        record('lifecycle-flush-complete', { sessionId: action.sessionId })
         return
       }
       if (action.action === 'cancel') {

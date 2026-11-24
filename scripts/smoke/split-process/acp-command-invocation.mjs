@@ -136,12 +136,12 @@ export async function runAcpCommandInvocation(context) {
     })
     host = started.host
     const hostWorkRoot = started.workRoot
-    const lifecycleSignal = (action, targetSession) => {
+    const lifecycleSignal = (action, targetSession, fields = {}) => {
       const name = `action-${String(++lifecycleSequence)}-${action}.json`
-      writeFileSync(join(lifecycleControl, name), JSON.stringify({ action, sessionId: targetSession }), { mode: 0o600 })
+      writeFileSync(join(lifecycleControl, name), JSON.stringify({ action, sessionId: targetSession, ...fields }), { mode: 0o600 })
     }
-    const lifecycleAction = async (action, targetSession, kind, label) => {
-      lifecycleSignal(action, targetSession)
+    const lifecycleAction = async (action, targetSession, kind, label, fields = {}) => {
+      lifecycleSignal(action, targetSession, fields)
       return await waitForC1WorkEvent(hostWorkRoot,
         event => event.kind === kind && event.sessionId === targetSession, label, 120_000)
     }
@@ -529,6 +529,97 @@ export async function runAcpCommandInvocation(context) {
       code: flushError.data.code,
       durableTypes: flushEvents.map(event => event.type),
     })
+
+    // CMP-06: a real partial replacement. The test-only fixture wraps the
+    // exact official Session.append and fails the clean `compaction/end` after
+    // the real summary was appended. The ACP result must be indeterminate, and
+    // the durable log must show summary-without-end.
+    const endFailSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const endFailSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: endFailSession, prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(endFailSeed?.stopReason === 'end_turn', 'CMP-06: the end-failure seed must end_turn')
+    await lifecycleAction('arm-end-failure', endFailSession, 'lifecycle-end-failure-armed', 'CMP-06 arm the official end failure')
+    resetHold(holdRoot)
+    const beforeEndFail = hostSessionEvents(dshHome, endFailSession).length
+    const endFailRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: endFailSession, prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMP-06 the held summarizer before end failure')
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const endFailError = await captureError('CMP-06 end failure', endFailRequest)
+    await lifecycleAction('flush-now', endFailSession, 'lifecycle-flush-complete', 'CMP-06 persist the real partial summary')
+    assert(endFailError?.data?.code === 'LOCAL_ACP_COMMAND_INDETERMINATE',
+      `CMP-06: summary without a clean end must be INDETERMINATE (${JSON.stringify(endFailError?.data)})`)
+    const endFailEvents = (hostSessionEvents(dshHome, endFailSession) ?? []).slice(beforeEndFail)
+    const endFailStart = endFailEvents.find(event => event.type === 'compaction/start')
+    const endFailId = endFailStart?.data?.compactionId
+    assert(typeof endFailId === 'string', 'CMP-06: the partial replacement has a real start id')
+    assert(endFailEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === endFailId),
+      'CMP-06: the real summary is present')
+    assert(!endFailEvents.some(event => event.type === 'compaction/end' && event.data?.compactionId === endFailId),
+      'CMP-06: the replacement has no clean end')
+    trace('acp-command/partial-replacement', { compactionId: endFailId })
+    // Official Session load is the cold canonical read: the persisted partial
+    // summary is visible, but no clean end is invented.
+    await client.request(acp.methods.agent.session.close, { sessionId: endFailSession })
+    const loadedUpdates = []
+    const loadClient = await openSdkClient(endpoint, params => { loadedUpdates.push(params) })
+    clients.push(loadClient)
+    await loadClient.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    const loaded = await loadClient.request(acp.methods.agent.session.load, {
+      sessionId: endFailSession, cwd: hostCwd, mcpServers: [],
+    })
+    assert(typeof loaded === 'object' && loaded !== null, 'CMP-06: official session/load must answer')
+    const loadedCompaction = loadedUpdates
+      .filter(params => params?.sessionId === endFailSession && params.update?.sessionUpdate === 'compaction_update')
+      .map(params => params.update)
+    // The official history projection does not turn a partial replacement
+    // into a clean compaction update. The durable summary is proven above; the
+    // cold read must at least not fabricate a complete one.
+    assert(loadedCompaction.length === 0,
+      `CMP-06: official load must not invent a complete compaction for the partial replacement (${JSON.stringify(loadedCompaction)})`)
+    await loadClient.request(acp.methods.agent.session.close, { sessionId: endFailSession })
+
+    // CMP-05: hold the real official post-summary flush, send a late ACP
+    // cancel while it is held, then release. Commit wins; cancellation is not
+    // fabricated and the clean bracket survives.
+    const holdFlushSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const holdFlushSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: holdFlushSession, prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(holdFlushSeed?.stopReason === 'end_turn', 'CMP-05: the held-flush seed must end_turn')
+    const flushRelease = join(workDir, 'acp-command-flush-release')
+    rmSync(flushRelease, { force: true })
+    resetHold(holdRoot)
+    const beforeHeldFlush = hostSessionEvents(dshHome, holdFlushSession).length
+    const heldFlushRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: holdFlushSession, prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMP-05 the held summarizer before the held flush')
+    await lifecycleAction('arm-hold-flush', holdFlushSession, 'lifecycle-flush-hold-armed', 'CMP-05 arm the held flush', { release: flushRelease })
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-flush-held' && event.sessionId === holdFlushSession,
+      'CMP-05 the real flush is held', 120_000)
+    await client.notify(acp.methods.agent.session.cancel, { sessionId: holdFlushSession })
+    await new Promise(resolveWait => setTimeout(resolveWait, 50))
+    writeFileSync(flushRelease, '1', { mode: 0o600 })
+    const heldFlushOutcome = await heldFlushRequest
+    assert(heldFlushOutcome.error?.data?.code !== 'cancelled'
+      && heldFlushOutcome.value?.stopReason !== 'cancelled',
+    `CMP-05: a late cancel during the post-summary flush is never cancelled (${JSON.stringify(heldFlushOutcome.error?.data ?? heldFlushOutcome.value)})`)
+    const heldFlushEvents = (hostSessionEvents(dshHome, holdFlushSession) ?? []).slice(beforeHeldFlush)
+    const heldFlushStart = heldFlushEvents.find(event => event.type === 'compaction/start')
+    const heldFlushId = heldFlushStart?.data?.compactionId
+    assert(typeof heldFlushId === 'string', 'CMP-05: the held flush has a real id')
+    assert(heldFlushEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === heldFlushId),
+      'CMP-05: the summary survived the late cancel')
+    trace('acp-command/held-flush', { compactionId: heldFlushId })
 
     // Invalid arguments are refused before the official engine is called.
     const beforeInvalid = hostSessionEvents(dshHome, sessionId).length
