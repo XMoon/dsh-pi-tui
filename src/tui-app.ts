@@ -12726,6 +12726,11 @@ export class TuiApp {
       if (block.kind === 'work') spans.push(block.span)
     }
     const turns = [...new Set(this.streamingToolPreviews.map(preview => preview.turn))].sort((a, b) => a - b)
+    // ONE raw-tail admission per pass: it does not depend on the preview turn,
+    // and every preview group must not rescan the window.
+    const liveTailAttachTurn = focusExpandedTurns === undefined
+      ? undefined
+      : focusLiveTailAttachTurn(this.messages, this.turnActivities)
     const pending: StreamingToolPreview[] = []
     for (const turn of turns) {
       const previews = this.streamingToolPreviewsForTurn(turn)
@@ -12750,7 +12755,7 @@ export class TuiApp {
             // belongs to this open Turn. An independent trailing boundary (a
             // turn-less command/summary, a fused compaction control, a foreign
             // or completed Turn) keeps the live run standalone AFTER it.
-            const containerPath = focusLiveTailAttachTurn(this.messages, this.turnActivities) === turn
+            const containerPath = liveTailAttachTurn === turn
               ? [{ kind: 'focus-root' as const, turn }]
               : undefined
             blocks.splice(insertion, 0, {
