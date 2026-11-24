@@ -2710,6 +2710,9 @@ function focusPreparingPlacement(
     return { byRootOwner: new Map(), byWorkOwner: new Map(), standalone: [] }
   }
   const activities = options.turnActivities ?? EMPTY_TURN_ACTIVITIES
+  // The EXPANDED projection proves the physical placement of the live run: the
+  // caller's frame may show every root collapsed, but the Work/root ownership of
+  // the raw tail is the same canonical region policy either way.
   const expandedBlocks = projectFocus(messages, activities, new Set(activities.keys()), true)
   const structure = projectTranscriptStructure(messages)
   const trailing = structure.at(-1)
@@ -2717,10 +2720,14 @@ function focusPreparingPlacement(
   let workOwner: TranscriptMessage | undefined
   let turn: number | undefined
   if (trailing?.kind === 'work') {
-    turn = trailing.span.turn
-    if (activities.get(turn)?.completed === false) {
-      const projected = expandedBlocks.findLast(block => block.kind === 'work' && block.span.owner === trailing.span.owner)
+    // The exact trailing canonical Work owns the preview. Its owning root is
+    // the ONE summary of that Turn, admitted only while the Turn is still open
+    // (a completed / foreign preview never attaches to a historical root).
+    const tailTurn = trailing.span.turn
+    if (activities.get(tailTurn)?.completed === false) {
+      const projected = expandedBlocks.find(block => block.kind === 'work' && block.span.owner === trailing.span.owner)
       if (projected?.kind === 'work') {
+        turn = tailTurn
         rootOwner = projected.focusPresentationOwner
         workOwner = rootOwner === undefined ? undefined : trailing.span.owner
       }
@@ -2733,8 +2740,11 @@ function focusPreparingPlacement(
       && 'turn' in lastMessage
       && !(lastMessage.kind === 'compaction' && lastMessage.sourceCommand !== undefined)
       && activities.get(lastMessage.turn)?.completed === false) {
+      // A root reaches the raw tail only when the trailing row belongs to that
+      // same open Turn; a turn-less command / hard boundary after the region
+      // takes the standalone route below instead of a fabricated Focus path.
       turn = lastMessage.turn
-      const projected = expandedBlocks.findLast(block => block.kind === 'activity' && block.activity.turn === turn)
+      const projected = expandedBlocks.find(block => block.kind === 'activity' && block.activity.turn === turn)
       rootOwner = projected?.kind === 'activity' ? projected.owner : undefined
     }
   }

@@ -468,7 +468,7 @@ test('Focus materializes one native Thought root per occurrence and nests collap
   assert.equal(nodesOf(expanded, 'tool').length, 0, 'opening only the root does not materialize hidden Work members')
 })
 
-test('same-turn Focus occurrences split by a session command share expansion without merging roots', () => {
+test('one logical Focus root nests both Works while the mid-turn command stays physically ordered', () => {
   const folder = apply([
     ev('turn/start', { turn: 1 }, 0),
     userMessage(1, 'user-1', 'inspect both stages'),
@@ -485,28 +485,48 @@ test('same-turn Focus occurrences split by a session command share expansion wit
   ])
   const messages = folder.messages()
   const keys = new TranscriptNodeKeys()
-  const collapsed = flatten(messages, {
-    preset: 'focus', scopePrefix: 's1-', turnActivities: folder.turnActivities(), window: LATEST_WINDOW,
-  }, keys)
+  const base = {
+    preset: 'focus' as const,
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    window: LATEST_WINDOW,
+  }
+  const collapsed = flatten(messages, base, keys)
   const roots = nodesOf(collapsed, 'section').filter(node => node.parent === 'main')
-  assert.equal(roots.length, 2, 'the turnless command splits two distinct Thought occurrences')
-  assert.notEqual(roots[0]!.id, roots[1]!.id, 'occurrence ids use distinct message owners')
-  assert.ok(collapsed.some(node => node.parent === 'main' && descendantText(collapsed, node.id).includes('session healthy')),
-    'the turnless command remains a standalone row between the roots')
+  assert.equal(roots.length, 1, 'one logical Turn paints exactly one native Thought root')
+  assert.equal(roots[0]!.props['collapsible'], true)
+  assert.equal(roots[0]!.props['collapsed'], true, 'the root starts collapsed')
+  assert.equal(nodesOf(collapsed, 'tool').length, 0, 'collapsed Focus materializes no hidden Work tool')
+  const collapsedCommand = collapsed.filter(node => node.kind === 'card'
+    && descendantText(collapsed, node.id).includes('session healthy'))
+  assert.equal(collapsedCommand.length, 1, 'the bridged command stays one visible control card')
+  assert.equal(collapsedCommand[0]!.parent, 'main', 'while collapsed the command is a top-level sibling of the root')
+  assert.equal(nodesOf(collapsed, 'section').length, 1, 'no second Thought root / parallel Action disclosure')
 
-  const expanded = flatten(messages, {
-    preset: 'focus', scopePrefix: 's1-', turnActivities: folder.turnActivities(), window: LATEST_WINDOW,
-    expandedFocusTurns: new Set([1]),
-  }, keys)
+  const expanded = flatten(messages, { ...base, expandedFocusTurns: new Set([1]) }, keys)
   const expandedRoots = nodesOf(expanded, 'section').filter(node => node.parent === 'main')
-  assert.deepEqual(expandedRoots.map(node => node.id), roots.map(node => node.id), 'both occurrence node identities stay stable')
-  assert.ok(expandedRoots.every(node => node.props['collapsed'] === false),
-    'one Turn disclosure choice opens both occurrence roots')
+  assert.equal(expandedRoots.length, 1, 'opening reuses the one root')
+  assert.equal(expandedRoots[0]!.id, roots[0]!.id, 'the root node identity is stable')
+  assert.equal(expandedRoots[0]!.props['collapsed'], false)
+  const workSections = nodesOf(expanded, 'section').filter(node => node.parent === expandedRoots[0]!.id)
+  assert.equal(workSections.length, 2, 'the two canonical Work spans nest under the one root')
+  assert.deepEqual(new Set(workSections.map(node => node.id)).size, 2)
+  const commandCard = expanded.filter(node => node.kind === 'card'
+    && descendantText(expanded, node.id).includes('session healthy'))
+  assert.equal(commandCard.length, 1, 'the command card renders exactly once when the root is open')
+  assert.equal(commandCard[0]!.parent, expandedRoots[0]!.id,
+    'the command is physically nested below the root for placement only')
+  // The command is NOT claimed by either Work span: its parent is the root.
+  assert.ok(workSections.every(section => commandCard[0]!.id !== section.id
+    && !commandCard[0]!.id.startsWith(`${section.id}.`)), 'the command keeps no semantic Work ancestry')
+  const order = [workSections[0]!.id, commandCard[0]!.id, workSections[1]!.id].map(id => expanded.findIndex(node => node.id === id))
+  assert.ok(order[0]! < order[1]! && order[1]! < order[2]!,
+    `the command keeps its exact A -> command -> B position under the root: ${order.join(',')}`)
   assert.equal(nodesOf(expanded, 'tool').length, 0, 'the inner Work owners remain independently collapsed')
-  const finals = expanded.filter(node => node.parent === 'main' && descendantText(expanded, node.id).includes('one final answer'))
+  const finals = expanded.filter(node => node.parent === 'main'
+    && descendantText(expanded, node.id).includes('one final answer'))
   assert.equal(finals.length, 1, 'the qualified final remains one top-level Assistant card')
-  assert.ok(!finals[0]!.id.startsWith(`${expandedRoots[0]!.id}.`) && !finals[0]!.id.startsWith(`${expandedRoots[1]!.id}.`),
-    'the final is not absorbed by either occurrence')
+  assert.ok(!finals[0]!.id.startsWith(`${expandedRoots[0]!.id}.`), 'the final is not absorbed by the root')
 })
 
 test('Focus image demand follows the materialized root and Work members', () => {

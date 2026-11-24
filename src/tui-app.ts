@@ -359,7 +359,7 @@ import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
 import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
 import type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
-import { projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
+import { focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
@@ -4741,13 +4741,20 @@ export class TuiApp {
     readonly ancestry: TranscriptRevealAncestry
   } | undefined
   /** `focusRootHidesSearchTarget()` memo: the collapsed Focus visibility of one
-   * search target for the current window/activity epoch. */
+   * search target for one committed transcript publication. The epoch moves on
+   * every `setTranscript()` commit, so an in-place row mutation or a late
+   * continuation that reflows a command can never keep a stale verdict. */
   private collapsedFocusHiddenMemo: {
+    readonly publication: number
     readonly messages: readonly TranscriptMessage[]
     readonly activities: ReadonlyMap<number, TurnActivity>
     readonly target: TranscriptMessage
     readonly hidden: boolean
   } | undefined
+  /** Increments on every committed transcript publication. Presentation memos
+   * that read the whole window are keyed by it (the array identity alone is not
+   * enough: a fold may mutate original row objects in place). */
+  private transcriptPublicationEpoch = 0
   /** The CompactWorkComponent cache, keyed by the span owner. */
   private readonly workComponents = new Map<TranscriptMessage, {
     component: CompactWorkComponent
@@ -4768,14 +4775,15 @@ export class TuiApp {
   }>()
   /** The folder's per-turn activities (same fold state as `messages`). */
   private turnActivities: ReadonlyMap<number, TurnActivity> = new Map()
-  /** The FocusActivityComponent cache, keyed by the Thought block's run
-   * OWNER (the run's first `TranscriptMessage`) — NOT by turn: one turn can
-   * materialize several Thought runs (a turn-less window entry splits it),
-   * each with its own hidden rows/Action winner/component. Rebuilds on the
-   * activity object/revision, the expansion state, the theme revision, the
-   * icon style, the bounded Action + ActionStats signatures, or the live
-   * Preparing summary (plan §39 + §34.9; addendum v2 §39 — synthetic Action
-   * changes must repaint even when `TurnActivity.tool` did not move).
+  /** The FocusActivityComponent cache, keyed by the ONE logical Turn root's
+   * OWNER (the first eligible `TranscriptMessage` of its primary region) — NOT
+   * by the numeric turn: the same turn number from another display subject must
+   * never reuse this component, while a late continuation that reflows a
+   * command keeps the same owner/component. Rebuilds on the activity
+   * object/revision, the expansion state, the theme revision, the icon style,
+   * the bounded Action + ActionStats signatures, or the live Preparing summary
+   * (plan §39 + §34.9; addendum v2 §39 — synthetic Action changes must repaint
+   * even when `TurnActivity.tool` did not move).
    * render() still re-reads Date.now() per frame, so the running duration
    * refreshes on the WorkingIndicator's repaint heartbeat. */
   private readonly focusActivityComponents = new Map<TranscriptMessage, {
@@ -10134,6 +10142,7 @@ export class TuiApp {
   ): void {
     this.searchPresentationDiagnostics.transcriptSets += 1
     this.transcriptPresentationDiagnostics.setCalls += 1
+    this.transcriptPublicationEpoch += 1
     // Delivered files (PR1): a projection commit follows every display-subject
     // selection (session swap, viewer enter/exit, cold rehydrate, session
     // commit). A live browser whose captured catalog no longer describes the
@@ -10982,12 +10991,16 @@ export class TuiApp {
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
    * needs the Focus-root reveal). Computed from the real `projectFocus`
    * collapsed output — never from "the row has a turn" — and memoized per
-   * window/activity/target. An UNQUALIFIED mid-turn notice is already visible
-   * as a post-Thought row, so it never needs the root reveal; a proven Working
-   * `tool-jobs` Notice is hidden with the Work/Thought and does. */
+   * committed publication/activity/target. An UNQUALIFIED mid-turn notice, a
+   * bridged command and a fail-open (disjoint) region row are already visible,
+   * so they never need the root reveal; a proven Working `tool-jobs` Notice is
+   * hidden with the Work/Thought and does. */
   private focusRootHidesSearchTarget(message: TranscriptMessage): boolean {
+    // Fast fail before projecting: a turn-less row cannot be hidden by a root.
+    if (focusProjectionTurnOf(message) === undefined) return false
     const memo = this.collapsedFocusHiddenMemo
-    if (memo !== undefined && memo.messages === this.messages && memo.activities === this.turnActivities
+    if (memo !== undefined && memo.publication === this.transcriptPublicationEpoch
+      && memo.messages === this.messages && memo.activities === this.turnActivities
       && memo.target === message) return memo.hidden
     const blocks = projectFocus(
       this.messages,
@@ -10997,6 +11010,7 @@ export class TuiApp {
     )
     const visible = blocks.some(block => block.kind === 'message' && block.message === message)
     this.collapsedFocusHiddenMemo = {
+      publication: this.transcriptPublicationEpoch,
       messages: this.messages,
       activities: this.turnActivities,
       target: message,
@@ -12716,6 +12730,13 @@ export class TuiApp {
     for (const turn of turns) {
       const previews = this.streamingToolPreviewsForTurn(turn)
       if (previews.length === 0) continue
+      // Focus attaches a live call only to its still-open logical Turn root. A
+      // completed (or never-opened) Turn has NO valid owner: its stale preview
+      // fails open as one standalone row instead of updating a historical root.
+      if (focusExpandedTurns !== undefined && this.turnActivities.get(turn)?.completed !== false) {
+        pending.push(...previews)
+        continue
+      }
       const owner = this.workPreparingOwner(turn, spans)
       if (owner.kind === 'pending-run') {
         // The previous run was closed by a Conversation / Context / Attention
@@ -13092,15 +13113,20 @@ export class TuiApp {
     width: number,
   ): Component {
     if (block.kind === 'activity') {
+      // One logical current Turn owns ONE collapsed Action slot; a settled
+      // (or foreign/historical) root never receives a live Preparing summary.
+      const livePreparing = isFocusDisplayPreset(this.displayState.preset)
+        && !block.activity.completed
+        && !projectionExpanded.has(block.activity.turn)
+        ? compactPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
+        : undefined
       return this.focusActivityComponentFor(
         block.owner,
         block.activity,
         projectionExpanded.has(block.activity.turn),
         this.compactActionPresentationFor(block.action),
         block.actionStats,
-        isFocusDisplayPreset(this.displayState.preset) && !projectionExpanded.has(block.activity.turn)
-          ? compactPreparingSummary(this.streamingToolPreviewsForTurn(block.activity.turn))
-          : undefined,
+        livePreparing,
       )
     }
     if (block.kind === 'work') {

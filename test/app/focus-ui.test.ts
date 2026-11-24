@@ -251,19 +251,34 @@ test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the
   app.stop()
 })
 
-test('Focus expanded places Preparing rows after the process tail and before the final assistant', async () => {
+test('a stale Preparing snapshot after turn/end never updates the settled Focus root', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, [...runningTurn(0), ...settleEvents(0)])
   app.setFocusMode(true)
+  // A stale snapshot that reaches the app AFTER the turn settled: production
+  // clears it on `turn/end`, so this is projection-only evidence that must not
+  // resurrect live state on a historical root.
   show(app, folder, [
     { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash', argumentBytes: 0 },
     { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit', argumentBytes: 0 },
   ])
   app.setFullscreen(true)
   await vt.waitForRender()
-  const headerRow = findFocusHeaderRow(vt.getViewport(), false)
-  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+  const collapsed = vt.getViewport()
+  const collapsedJoined = collapsed.join('\n')
+  assert.ok(hasFocusHeader(collapsedJoined, false), `collapsed Thought missing:\n${collapsedJoined}`)
+  assert.ok(!/Action:\s+Preparing/.test(collapsedJoined),
+    `the settled Action slot never paints a stale live call:\n${collapsedJoined}`)
+  // The stale snapshot is ONE fail-open standalone evidence row per preview —
+  // never an aggregated Activity card and never a second summary.
+  assert.equal((collapsedJoined.match(/Preparing Edit/g) ?? []).length, 1,
+    `the edit preview renders exactly once:\n${collapsedJoined}`)
+  assert.equal((collapsedJoined.match(/Preparing Bash/g) ?? []).length, 1,
+    `the bash preview renders exactly once:\n${collapsedJoined}`)
+  assert.ok(!collapsedJoined.includes('Preparing Edit +1'), `no aggregated pending Activity summary:\n${collapsedJoined}`)
+  const headerRow = findFocusHeaderRow(collapsed, false)
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${collapsedJoined}`)
   click(vt, 3, headerRow + 1)
   await vt.waitForRender()
   app.expandAllWorkSpansForTest()
@@ -275,13 +290,10 @@ test('Focus expanded places Preparing rows after the process tail and before the
   const finalRow = findRow(view, 'The transcript folds events incrementally.')
   assert.ok(hasFocusHeader(joined, true), `expanded Thought missing:\n${joined}`)
   assert.ok(processRow >= 0 && preparingRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
-  assert.ok(processRow < preparingRow && preparingRow < finalRow,
-    `the fail-open Preparing rows must sit at the process tail before the final:\n${joined}`)
-  // The ownerless pending run renders one FULL row per live preview (edit at
-  // index 0, bash at index 1) — never an aggregated `+N` Activity card.
+  assert.ok(preparingRow > finalRow,
+    `a stale fail-open row stays after the settled final, never inside the root history:\n${joined}`)
   assert.equal((joined.match(/Preparing Edit/g) ?? []).length, 1, `the edit preview renders once:\n${joined}`)
   assert.equal((joined.match(/Preparing Bash/g) ?? []).length, 1, `the bash preview renders once:\n${joined}`)
-  assert.ok(!joined.includes('+1'), `no aggregated pending Activity summary:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })

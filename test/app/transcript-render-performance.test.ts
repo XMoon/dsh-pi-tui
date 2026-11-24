@@ -5,6 +5,8 @@ import { TuiApp } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity } from '../../src/transcript.ts'
 import { MessageId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
 import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
@@ -433,81 +435,111 @@ test('fullscreen content refresh updates geometry without remounting unchanged b
   }
 })
 
-test('two Thought runs of one turn keep independent Focus component identities', async () => {
+test('one logical Focus root survives no-op, bridged and Action refreshes', async () => {
   const { app, terminal } = startApp()
   app.setFocusMode(true)
   const activity = {
     turn: 1, completed: false, assistantMessages: 0, toolCalls: 1, tools: new Map([['read', 1]]), revision: 1,
   } as TurnActivity
+  const userRow: TranscriptMessage = { kind: 'user', turn: 1, text: 'go' }
   const readRow: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' }
+  const commandRow: TranscriptMessage = {
+    kind: 'command', commandId: CommandId('cmd-1'), seq: SessionSeq(4), time: T0,
+    name: 'model', args: null, outcome: { kind: 'success', text: 'switched' },
+  }
   const thinkingRow: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'run B reasoning', running: true }
   const retryRow: TranscriptMessage = { kind: 'system', turn: 1, text: 'llm retry 1 in 2s — x', origin: 'llm-retry' }
-  const summaryRow: TranscriptMessage = { kind: 'summary', text: '… older' }
-  const messages: TranscriptMessage[] = [readRow, summaryRow, thinkingRow, retryRow]
   const activities = new Map<number, TurnActivity>([[1, activity]])
-  app.setTranscript(messages, activities)
-  await terminal.waitForRender()
-  const mounted = mountedComponents(app)
-  assert.equal(mounted.length, 3, 'two Thought runs of the SAME turn + the window summary')
 
-  // (1) A refresh with NO content change must reuse BOTH Thought components.
-  // A turn-keyed cache would thrash them: each lookup would find the other
-  // run's entry (same TurnActivity object, different Action) and rebuild.
+  // (0) A TRAILING command is not bridged yet: it stays a standalone tail row
+  // after the one summary.
+  const trailing: TranscriptMessage[] = [userRow, readRow, commandRow]
+  app.setTranscript(trailing, activities)
+  await terminal.waitForRender()
+  const tailMounted = mountedComponents(app)
+  assert.equal(tailMounted.length, 3, 'one root plus its visible prompt and trailing control row')
+  const rootComponent = tailMounted[1]
+
+  // (1) A refresh with NO content change reuses every component identity.
   app.resetTranscriptPresentationDiagnosticsForTest()
-  app.setTranscript(messages, activities)
+  app.setTranscript(trailing, activities)
   await terminal.waitForRender()
   let diag = diagnostics(app)
   assert.equal(diag.structuralCommits, 0)
-  assert.equal(diag.mountReplacements, 0, 'a no-op refresh must not thrash the two same-turn Thought components')
-  assert.deepEqual(mountedComponents(app), mounted, 'both Thought component identities are stable')
+  assert.equal(diag.mountReplacements, 0, 'a no-op refresh never thrashes the logical root')
+  assert.deepEqual(mountedComponents(app), tailMounted, 'every component identity is stable')
 
-  // (2) Change ONLY the second run's Action evidence: the first run keeps its
-  // component identity, exactly one block is replaced, no structural fallback.
-  const changedRetry: TranscriptMessage = { kind: 'system', turn: 1, text: 'llm retry 2 in 4s — y', origin: 'llm-retry' }
+  // (2) Same-turn continuation evidences the bridge: the command reflows ahead
+  // of the ONE summary and the root component (same owner object) is reused.
   app.resetTranscriptPresentationDiagnosticsForTest()
-  app.setTranscript([readRow, summaryRow, thinkingRow, changedRetry], activities)
+  const bridged: TranscriptMessage[] = [userRow, readRow, commandRow, thinkingRow]
+  app.setTranscript(bridged, activities)
+  await terminal.waitForRender()
+  const bridgedMounted = mountedComponents(app)
+  assert.equal(bridgedMounted.length, 3, 'the command is now a visible bridge row before the root')
+  assert.strictEqual(bridgedMounted[2], rootComponent,
+    'the logical root keeps its component when a continuation reflows the command')
+  diag = diagnostics(app)
+  assert.equal(diag.structuralCommits, 1, 'the reflow is a structural position change, not a root rebuild')
+
+  // (3) A NEW hidden Action candidate repaints ONLY the one root component.
+  app.resetTranscriptPresentationDiagnosticsForTest()
+  const withRetry: TranscriptMessage[] = [userRow, readRow, commandRow, thinkingRow, retryRow]
+  app.setTranscript(withRetry, activities)
   await terminal.waitForRender()
   diag = diagnostics(app)
-  assert.equal(diag.structuralCommits, 0)
-  assert.equal(diag.mountReplacements, 1, 'exactly the affected Thought occurrence is replaced')
-  const after = mountedComponents(app)
-  assert.strictEqual(after[0], mounted[0], 'the untouched run keeps its component')
-  assert.notStrictEqual(after[2], mounted[2], 'the changed run is the one replaced')
+  assert.equal(diag.structuralCommits, 0, 'a hidden Action change stays on the content path')
+  assert.equal(diag.mountReplacements, 1, 'exactly the affected logical root is replaced')
+  const afterRetry = mountedComponents(app)
+  assert.notStrictEqual(afterRetry[2], rootComponent, 'the changed root is rebuilt')
+  assert.strictEqual(afterRetry[0], bridgedMounted[0], 'the untouched prompt keeps its component')
+  assert.strictEqual(afterRetry[1], bridgedMounted[1], 'the untouched command keeps its component')
+  const rebuiltRoot = afterRetry[2]
 
-  // (3) The same no-op refresh under an ACTIVE search target: any component
-  // identity thrash is forced into a STRUCTURAL rebuild by the refresh path,
-  // so a stable identity is the only thing keeping it on the content path.
-  app.setTranscript(messages, activities)
-  await terminal.waitForRender()
+  // (4) A visible search target never churns the root; a HIDDEN target opens
+  // it legitimately, still as the ONE logical root.
   app.setTranscriptSearchTarget({
-    query: 'older',
+    query: 'go',
     match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message: summaryRow,
+    message: userRow,
   })
   await terminal.waitForRender()
   app.resetTranscriptPresentationDiagnosticsForTest()
-  app.setTranscript(messages, activities)
+  app.setTranscript(withRetry, activities)
   await terminal.waitForRender()
   diag = diagnostics(app)
   assert.equal(diag.structuralCommits, 0, 'an active search target must not force a structural fallback')
-  assert.equal(diag.mountReplacements, 0, 'the Thought component identities stay stable while searching')
+  assert.equal(diag.mountReplacements, 0, 'a visible search target never churns an unchanged root')
+  assert.strictEqual(mountedComponents(app)[2], rebuiltRoot, 'the root identity stays stable while searching')
+  app.setTranscriptSearchTarget({
+    query: 'retry',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: retryRow,
+  })
+  await terminal.waitForRender()
+  app.resetTranscriptPresentationDiagnosticsForTest()
+  app.setTranscript(withRetry, activities)
+  await terminal.waitForRender()
+  diag = diagnostics(app)
+  assert.equal(diag.structuralCommits, 0, 'the temporary reveal never falls back to a structural rebuild')
+  const revealedRoots = mountedComponents(app)
+    .filter(component => (component as { constructor?: { name?: string } }).constructor?.name === 'FocusActivityComponent')
+  assert.equal(revealedRoots.length, 1, 'the hidden-target reveal opens the one logical root')
   app.setTranscriptSearchTarget(undefined)
 
-  // (4) The cache is keyed by the run OWNER and pruned when a run leaves the
-  // window: the keys are the run rows themselves (never the turn number), and
-  // the dropped run keeps no stale component to resurrect.
+  // (5) The cache is keyed by the root OWNER and pruned when that owner leaves
+  // the window: the dropped root keeps no stale component to resurrect, and the
+  // displaced region mints its own logical root.
   const cache = (app as unknown as { focusActivityComponents: Map<unknown, unknown> }).focusActivityComponents
-  // Map insertion order is not projection order once a run is re-inserted
-  // after an eviction, so compare the key SET.
-  assert.deepEqual(new Set(cache.keys()), new Set([readRow, thinkingRow]), 'the cache keys are the run owners, not the turn')
+  assert.deepEqual([...cache.keys()], [userRow], 'the cache key is the root owner, never the turn')
   app.setTranscript([thinkingRow, retryRow], activities)
   await terminal.waitForRender()
-  assert.deepEqual([...cache.keys()], [thinkingRow], 'the run that left the window is evicted')
-  app.setTranscript(messages, activities)
+  assert.deepEqual([...cache.keys()], [thinkingRow], 'the root that left the window is evicted')
+  assert.notStrictEqual(mountedComponents(app)[0], rebuiltRoot,
+    'an evicted root never resurrects its stale component (it is rebuilt, not reused)')
+  app.setTranscript(withRetry, activities)
   await terminal.waitForRender()
-  assert.deepEqual(new Set(cache.keys()), new Set([readRow, thinkingRow]), 'the returning run gets its own entry again')
-  assert.notStrictEqual(mountedComponents(app)[0], mounted[0],
-    'an evicted run never resurrects its stale component (it is rebuilt, not reused)')
+  assert.deepEqual([...cache.keys()], [userRow], 'the returning region gets its own entry again')
 })
 
 // ── steady-render display projection (no per-frame rescan) ─────────────────
