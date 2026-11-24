@@ -176,8 +176,14 @@ export async function runAcpCommandInvocation(context) {
     const catalog = await waitFor(() => {
       const rows = updatesFor(updates, sessionId)
         .filter(update => update?.sessionUpdate === 'available_commands_update')
-      return rows.length === 0 ? undefined : rows.at(-1)
-    }, 'CMD-04 the initial available_commands_update')
+      const latest = rows.at(-1)
+      // The official filesystem provider may announce its initial project
+      // Skill after the first complete command-only catalog. Wait for the
+      // complete replacement that contains the real project Skill.
+      return latest !== undefined && catalogNames({ update: latest }).includes(SKILL_NAME)
+        ? latest
+        : undefined
+    }, 'CMD-04 the complete catalog with the real project Skill', 60_000)
     const initialNames = catalogNames({ update: catalog })
     assert(initialNames.includes('feedback'), `CMD-04: the real /feedback command must be advertised (${JSON.stringify(initialNames)})`)
     assert(initialNames.includes('compact'), `CMD-04: the real /compact command must be advertised (${JSON.stringify(initialNames)})`)
