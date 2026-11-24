@@ -53,6 +53,7 @@ import { alive, saveFile, restoreFile, waitForSurfaceStatus } from '../../lib/sp
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent, writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
+import { readKernelProcess, readProcessStarttime, sameKernelProcess } from '../../src/runtime/native-process/identity.ts'
 import { installedArtifactBuildId, managedHostGateReason, unitBelongsToRun } from './managed-host-m6-2b.mjs'
 import { waitForComposerMode, waitForComposerText } from './shell-tui-driving.mjs'
 
@@ -941,11 +942,27 @@ function trackRunOwnedHost(context, record) {
   context.trackDetachedPid(record.hostPid, record.schema === 2 ? record.hostKernelIdentity : record.hostStarttime)
 }
 
+/**
+ * Whether one captured Host generation is gone. PID reuse is `different`, not
+ * the captured process; an unreadable identity is `unknown`, never gone.
+ */
+function hostProcessGone(record) {
+  const expected = record.schema === 2 ? record.hostKernelIdentity : undefined
+  if (expected !== undefined) {
+    const classification = sameKernelProcess(expected, readKernelProcess(record.hostPid))
+    return classification === 'gone' || classification === 'different'
+  }
+  if (typeof record.hostStarttime === 'string' && record.hostStarttime !== '') {
+    return readProcessStarttime(record.hostPid) !== record.hostStarttime
+  }
+  return !alive(record.hostPid)
+}
+
 /** Stop the public Host and prove every Host THIS CASE started has exited. */
 async function stopRunOwnedHosts(context, installation, ownedHosts, label) {
   const stopped = assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, label)
   await waitForValue(
-    () => (ownedHosts.every(host => !alive(host.hostPid)) ? true : undefined),
+    () => (ownedHosts.every(host => hostProcessGone(host)) ? true : undefined),
     `${label}: every run-owned Host exited`,
     60_000,
   )
@@ -1285,7 +1302,7 @@ export async function runHostDefaultEnvironment(context) {
     if (startAttempted) {
       try {
         for (const record of publishedRecords(dshHome)) {
-          if (typeof record.hostPid !== 'number' || !alive(record.hostPid)) continue
+          if (typeof record.hostPid !== 'number' || hostProcessGone(record)) continue
           if (ownedHosts.some(host => host.hostPid === record.hostPid)) continue
           recordHostIdentity(context, record)
           trackRunOwnedHost(context, record)
@@ -1294,7 +1311,7 @@ export async function runHostDefaultEnvironment(context) {
         await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 public stop')
         // A failed start can publish its record after the first stop: capture
         // and stop that generation too before any definition mutation.
-        const lateHosts = publishedRecords(dshHome).filter(record => typeof record.hostPid === 'number' && alive(record.hostPid))
+        const lateHosts = publishedRecords(dshHome).filter(record => typeof record.hostPid === 'number' && !hostProcessGone(record))
         if (lateHosts.length > 0) {
           for (const record of lateHosts) {
             recordHostIdentity(context, record)
@@ -1303,7 +1320,7 @@ export async function runHostDefaultEnvironment(context) {
           }
           await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 late public stop')
         }
-        assert(publishedRecords(dshHome).every(record => typeof record.hostPid !== 'number' || !alive(record.hostPid)),
+        assert(publishedRecords(dshHome).every(record => typeof record.hostPid !== 'number' || hostProcessGone(record)),
           'a published Host record remained alive after the public stop')
         assertManagerStopped(service)
         hostStopProven = true
