@@ -1,22 +1,26 @@
 /**
  * The safety boundary of the selectable Host-default-environment case: a
- * pre-existing/foreign fixed drop-in is refused without a byte change, and a
- * definition this run installed is restored/uninstalled only after a positive
- * Host-stop proof.
+ * pre-existing/foreign fixed drop-in is refused without a byte change, an
+ * unknown kernel observation never counts as gone, and a definition this run
+ * installed is stopped/restored/uninstalled only through the exact file it
+ * recorded.
  *
- * This tests the TWO extracted decisions the real selected lane consumes; it
- * does not drive a manager, Host or tool sequence.
+ * This tests the extracted decisions the real selected lane consumes; it does
+ * not drive a manager, Host or tool sequence.
  *
  * @module @xmoon76/dsh-pi-tui/test/tooling/host-default-environment-ownership
  */
 
 import assert from 'node:assert/strict'
-import { lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
   assertRunAdmissionFiles,
+  classifyHostExit,
+  fileIdentity,
   finishOwnedDefinition,
+  stopAdmittedDefinition,
 } from '../../scripts/smoke/split-process/host-default-environment.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -64,7 +68,54 @@ test('admission accepts an empty drop-in directory', t => {
   }))
 })
 
-test('an owned definition is never restored or uninstalled without a positive stop proof', () => {
+test('captured Host exit never treats an unknown read as gone', () => {
+  const linux = { platform: 'linux', pid: 42, startTicks: '100' }
+  const schema2 = { schema: 2, hostPid: 42, hostKernelIdentity: linux }
+  assert.equal(classifyHostExit(schema2, { kind: 'gone' }), true)
+  assert.equal(classifyHostExit(schema2, { kind: 'unknown', code: 'NATIVE_UNAVAILABLE' }), false)
+  assert.equal(classifyHostExit(schema2, { kind: 'alive', identity: linux }), false)
+  assert.equal(classifyHostExit(schema2, { kind: 'alive', identity: { ...linux, startTicks: '101' } }), true)
+
+  const schema1 = { schema: 1, hostPid: 42, hostStarttime: '100' }
+  assert.equal(classifyHostExit(schema1, { kind: 'alive', identity: linux }), false)
+  assert.equal(classifyHostExit(schema1, { kind: 'alive', identity: { ...linux, startTicks: '101' } }), true)
+  assert.equal(classifyHostExit(schema1, { kind: 'unknown', code: 'NATIVE_UNAVAILABLE' }), false)
+  assert.equal(classifyHostExit({ schema: 2, hostPid: 42 }, { kind: 'alive', identity: linux }), false)
+  assert.equal(classifyHostExit({ schema: 1, hostPid: 42 }, { kind: 'alive', identity: linux }), false)
+})
+
+test('public stop is admitted only through an absent or unchanged run-owned definition', async t => {
+  const root = testLifecycle(t).tempDir('dsh-pr1-stop-admission-')
+  const unitPath = join(root, 'profile.service')
+  const service = { kind: 'systemd', unitPath }
+  let stops = 0
+  const stop = () => {
+    stops += 1
+    return 'stopped'
+  }
+
+  writeFileSync(unitPath, 'foreign bytes')
+  await assert.rejects(
+    stopAdmittedDefinition(service, { original: undefined }, stop),
+    /without proven run ownership/u,
+  )
+  assert.equal(stops, 0)
+
+  writeFileSync(unitPath, 'original bytes')
+  const ownership = { original: { bytes: Buffer.from('original bytes') }, current: fileIdentity(unitPath) }
+  assert.equal(await stopAdmittedDefinition(service, ownership, stop), 'stopped')
+  assert.equal(stops, 1)
+
+  writeFileSync(unitPath, 'changed bytes')
+  await assert.rejects(stopAdmittedDefinition(service, ownership, stop), /identity changed/u)
+  assert.equal(stops, 1)
+
+  unlinkSync(unitPath)
+  assert.equal(await stopAdmittedDefinition(service, ownership, stop), 'stopped')
+  assert.equal(stops, 2)
+})
+
+test('an unproven stop never restores or uninstalls an owned definition', () => {
   const calls = []
   const ownership = { original: { bytes: Buffer.from('original') }, current: {}, dropIn: undefined }
   const actions = {
@@ -77,8 +128,6 @@ test('an owned definition is never restored or uninstalled without a positive st
     action: 'preserved',
     reason: 'the owned service definition was preserved because the Host stop was not proven',
   })
-  assert.deepEqual(calls, [], 'an unproven stop must not mutate the definition')
-  assert.deepEqual(finishOwnedDefinition(false, { original: undefined }, actions), { action: 'not-applicable' })
   assert.deepEqual(calls, [])
 })
 
@@ -92,15 +141,4 @@ test('a confirmed stop restores, uninstalls and verifies absence in order', () =
     assertAbsent: () => calls.push('absent'),
   }), { action: 'removed' })
   assert.deepEqual(calls, ['assert', 'restore', 'uninstall', 'absent'])
-})
-
-test('a changed definition identity stops the finish before any mutation', () => {
-  const calls = []
-  assert.throws(() => finishOwnedDefinition(true, { original: { bytes: Buffer.from('original') } }, {
-    assertCurrentIdentity: () => { throw new Error('identity changed') },
-    restore: () => calls.push('restore'),
-    uninstall: () => calls.push('uninstall'),
-    assertAbsent: () => calls.push('absent'),
-  }), /identity changed/u)
-  assert.deepEqual(calls, [])
 })

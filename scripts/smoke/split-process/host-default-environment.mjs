@@ -53,7 +53,7 @@ import { alive, saveFile, restoreFile, waitForSurfaceStatus } from '../../lib/sp
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent, writeC1WorkFixture } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
-import { readKernelProcess, readProcessStarttime, sameKernelProcess } from '../../../src/runtime/native-process/identity.ts'
+import { readKernelProcess, sameKernelProcess } from '../../../src/runtime/native-process/identity.ts'
 import { installedArtifactBuildId, managedHostGateReason, unitBelongsToRun } from './managed-host-m6-2b.mjs'
 import { waitForComposerMode, waitForComposerText } from './shell-tui-driving.mjs'
 
@@ -391,7 +391,7 @@ function assertPlistValid(path) {
 }
 
 /** The exact file identity this run recorded: (dev, ino, content hash, mode, uid). */
-function fileIdentity(path) {
+export function fileIdentity(path) {
   const info = lstatSync(path)
   return {
     dev: String(info.dev),
@@ -943,19 +943,25 @@ function trackRunOwnedHost(context, record) {
 }
 
 /**
- * Whether one captured Host generation is gone. PID reuse is `different`, not
- * the captured process; an unreadable identity is `unknown`, never gone.
+ * The actual exit decision for one captured generation and one kernel
+ * observation. An unreadable identity or missing captured identity is never
+ * permission to declare the process gone.
  */
-function hostProcessGone(record) {
-  const expected = record.schema === 2 ? record.hostKernelIdentity : undefined
-  if (expected !== undefined) {
-    const classification = sameKernelProcess(expected, readKernelProcess(record.hostPid))
+export function classifyHostExit(record, observed) {
+  if (observed.kind === 'gone') return true
+  if (observed.kind === 'unknown') return false
+  if (record.schema === 2) {
+    if (record.hostKernelIdentity === undefined) return false
+    const classification = sameKernelProcess(record.hostKernelIdentity, observed)
     return classification === 'gone' || classification === 'different'
   }
-  if (typeof record.hostStarttime === 'string' && record.hostStarttime !== '') {
-    return readProcessStarttime(record.hostPid) !== record.hostStarttime
-  }
-  return !alive(record.hostPid)
+  return typeof record.hostStarttime === 'string' && record.hostStarttime !== ''
+    && observed.identity.platform === 'linux'
+    && observed.identity.startTicks !== record.hostStarttime
+}
+
+function hostProcessGone(record) {
+  return classifyHostExit(record, readKernelProcess(record.hostPid))
 }
 
 /** Stop the public Host and prove every Host THIS CASE started has exited. */
@@ -968,6 +974,21 @@ async function stopRunOwnedHosts(context, installation, ownedHosts, label) {
   )
   for (const host of ownedHosts) context.untrackDetachedPid?.(host.hostPid)
   return stopped
+}
+
+/**
+ * Stop only when the definition target is absent or still the exact file this
+ * run recorded. An unrecorded or changed definition is preserved and the stop
+ * is never issued through that uncertain target.
+ */
+export async function stopAdmittedDefinition(service, ownership, stop) {
+  if (lstatOrUndefined(definitionPathOf(service)) !== undefined) {
+    if (ownership.original === undefined) {
+      throw new SplitSmokeAssertionError(`${CASE_ID}: a service definition exists without proven run ownership; preserving it and refusing to stop through an unproven target`)
+    }
+    assertRunOwnedFile(definitionPathOf(service), ownership.current, 'owned service definition before public stop')
+  }
+  return await stop()
 }
 
 /** A positive stopped/absent manager verdict for one still-installed definition. */
@@ -1308,7 +1329,7 @@ export async function runHostDefaultEnvironment(context) {
           trackRunOwnedHost(context, record)
           ownedHosts.push(record)
         }
-        await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 public stop')
+        await stopAdmittedDefinition(service, ownership, () => stopRunOwnedHosts(context, installation, ownedHosts, 'P7 public stop'))
         // A failed start can publish its record after the first stop: capture
         // and stop that generation too before any definition mutation.
         const lateHosts = publishedRecords(dshHome).filter(record => typeof record.hostPid === 'number' && !hostProcessGone(record))
@@ -1318,7 +1339,7 @@ export async function runHostDefaultEnvironment(context) {
             trackRunOwnedHost(context, record)
             ownedHosts.push(record)
           }
-          await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 late public stop')
+          await stopAdmittedDefinition(service, ownership, () => stopRunOwnedHosts(context, installation, ownedHosts, 'P7 late public stop'))
         }
         assert(publishedRecords(dshHome).every(record => typeof record.hostPid !== 'number' || hostProcessGone(record)),
           'a published Host record remained alive after the public stop')
@@ -1330,7 +1351,7 @@ export async function runHostDefaultEnvironment(context) {
     } else {
       hostStopProven = true
     }
-    if (ownership.original === undefined && definitionPresent(service)) {
+    if (ownership.original === undefined && definitionPresent(service) && hostStopProven) {
       cleanupErrors.push('a service definition appeared during this run without a proven run ownership; it was preserved')
     }
     if (ownership.original !== undefined) {
