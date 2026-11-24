@@ -20,7 +20,10 @@ import {
   readProcessStarttime,
   sameKernelProcess,
   type KernelObservation,
+  type KernelProcessIdentity,
 } from '../../src/runtime/native-process/identity.ts'
+// @ts-expect-error -- the repository's plain-JavaScript upgrade contract has no declaration file
+import { classifyKernelLiveness } from './split-upgrade-native-contract.mjs'
 // @ts-expect-error -- the repository's plain-JavaScript smoke helper has no declaration file
 import { connectCookie as exchangeLaunchCookie, fetchStatus as fetchRawStatus } from '../../scripts/lib/split-smoke-processes.mjs'
 
@@ -129,6 +132,67 @@ export function assertPublishedHostMatchesKernel(record: PublishedHostRecord, la
     return
   }
   throw new Error(`${label}: unsupported published Host identity schema`)
+}
+
+/** The exact kernel identity a published Host record owns, schema-aware. */
+export function publishedKernelIdentity(record: PublishedHostRecord): KernelProcessIdentity {
+  if (record.schema === 2) {
+    if (record.hostKernelIdentity === undefined) throw new Error('the published Darwin identity has no kernel identity')
+    return record.hostKernelIdentity as KernelProcessIdentity
+  }
+  if (record.schema === 1) {
+    if (typeof record.hostStarttime !== 'string' || record.hostStarttime === '') {
+      throw new Error('the published Linux identity has no kernel start time')
+    }
+    return {
+      platform: 'linux',
+      pid: record.hostPid,
+      startTicks: record.hostStarttime,
+      ppid: 0,
+      pgid: 0,
+      sid: 0,
+      state: '',
+    }
+  }
+  throw new Error('unsupported published Host identity schema')
+}
+
+/** The published process is still the SAME live kernel process (never a PID). */
+export function assertPublishedHostIdentityLive(record: PublishedHostRecord, label: string): void {
+  const expected = publishedKernelIdentity(record)
+  const observation = readKernelProcess(record.hostPid)
+  if (observation.kind !== 'alive'
+    || classifyKernelLiveness(observation).state !== 'alive'
+    || sameKernelProcess(expected, observation) !== 'same') {
+    throw new Error(`${label}: the published Host is not the same live kernel process`)
+  }
+}
+
+/** The published process identity is terminal (gone or a provably different PID). */
+export function assertPublishedHostIdentityTerminal(record: PublishedHostRecord, label: string): void {
+  const expected = publishedKernelIdentity(record)
+  const observation = readKernelProcess(record.hostPid)
+  if (observation.kind === 'unknown') {
+    throw new Error(`${label}: the published Host kernel identity is unverifiable`)
+  }
+  if (observation.kind === 'alive'
+    && sameKernelProcess(expected, observation) === 'same'
+    && classifyKernelLiveness(observation).state === 'alive') {
+    throw new Error(`${label}: the published Host identity is still live`)
+  }
+}
+
+/** The real identity witness is still the same live, non-terminated process. */
+export function assertWitnessIdentityLive(
+  witness: { pid: number; kernelIdentity: Record<string, any> },
+  label: string,
+): void {
+  const observation = readKernelProcess(witness.pid)
+  if (observation.kind !== 'alive'
+    || classifyKernelLiveness(observation).state !== 'alive'
+    || sameKernelProcess(witness.kernelIdentity as KernelProcessIdentity, observation) !== 'same') {
+    throw new Error(`${label}: the identity witness is not the same live kernel process`)
+  }
 }
 
 /** The authenticated Client echo must name the SAME Host record, schema-aware. */

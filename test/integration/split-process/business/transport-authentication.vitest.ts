@@ -16,6 +16,7 @@ import {
   assertClientHostMatchesPublished,
   assertNoSecret,
   assertPublishedHostMatchesKernel,
+  assertWitnessIdentityLive,
   closeMuxSocket,
   exchangeCookie,
   muxAttempt,
@@ -36,15 +37,6 @@ import {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
 }
 
 async function waitFor(
@@ -651,7 +643,7 @@ test('refuses unsafe or forged Host discovery facts without killing or replacing
       expect(status.localHost.hostPid).toBe(hostPid)
       expect(status.localHost.instanceId).toBe(hostInstanceId)
       expect(status.services.piTuiHostReady).toBe(true)
-      expect(pidAlive(witness.pid)).toBe(true)
+      assertWitnessIdentityLive(witness, 'the live dummy witness')
     }
     const runRefusal = async (
       refusal: DiscoveryRefusal,

@@ -10,6 +10,8 @@ import { expect, test } from 'vitest'
 
 import {
   assertClientHostMatchesPublished,
+  assertPublishedHostIdentityLive,
+  assertPublishedHostIdentityTerminal,
   assertPublishedHostMatchesKernel,
   exchangeCookie,
   rawHttpRequest,
@@ -26,15 +28,6 @@ import {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
 }
 
 function scopeScratchSet(dshHome: string, scopeId: string): string[] {
@@ -343,7 +336,7 @@ test('recovers a stale Host through authenticated discovery and rejects its reti
 
     const clientExit = await scene.finishEntry(client!)
     expect(clientExit.exit).toEqual({ code: 0, signal: null })
-    expect(pidAlive(discovered.hostPid)).toBe(true)
+    assertPublishedHostIdentityLive(discovered as never, 'the discovered Host before Client exit')
 
     const [attached] = await scene.startQualificationClients({ mode: 'attach' })
     const attachedReady = await scene.waitEntryRecord(attached!, { m4a0: 'ready' })
@@ -352,13 +345,13 @@ test('recovers a stale Host through authenticated discovery and rejects its reti
     expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(spawnedScratch)
     const attachedExit = await scene.finishEntry(attached!)
     expect(attachedExit.exit).toEqual({ code: 0, signal: null })
-    expect(pidAlive(discovered.hostPid)).toBe(true)
+    assertPublishedHostIdentityLive(discovered as never, 'the discovered Host before Client exit')
 
     const reclaimed = await scene.reclaimDiscoveredHost(client!)
     expect(reclaimed.pid).toBe(discovered.hostPid)
     expect(reclaimed.reclaimed).toBe(true)
     expect(reclaimed.registryRemoved).toBe(true)
-    expect(pidAlive(discovered.hostPid)).toBe(false)
+    assertPublishedHostIdentityTerminal(discovered as never, 'the reclaimed discovered Host')
     // Only the stale scratch remains; the reclaimed Host removed its own.
     expect(scopeScratchSet(scene.installation.dshHome, scene.scope.scopeId)).toEqual(oldScratch)
     await scene.assertEntrySeatsFree()
