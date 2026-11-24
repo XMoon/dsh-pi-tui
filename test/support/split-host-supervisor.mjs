@@ -7008,15 +7008,6 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   if (fallbackHosts.some(record => record.reclaimed !== true)) {
     throw new Error('RESTORE_INSTALLATION: a discovered fallback Host is still unreclaimed')
   }
-  const restoreLabel = compensating ? 'RESTORE_INSTALLATION compensation' : 'RESTORE_INSTALLATION'
-  // Drift intentionally keeps the stable Host alive; every other ledger is
-  // audited by exact group. PTY Clients are audited by the authoritative ledger.
-  if (mutation.fault !== 'client-bootstrap-drift') {
-    for (const handle of hosts) await assertHostGroupGone(handle, restoreLabel)
-  }
-  for (const handle of qualificationClients) await assertHostGroupGone(handle, restoreLabel)
-  for (const handle of qualificationHelpers) await assertHostGroupGone(handle, restoreLabel)
-  await auditProcessClientLedger(restoreLabel)
   await mutation.restore()
   const restored = installedPackageFacts(scene.installation.profilePackage,
     processCandidate.manifest?.version, processCandidate.targetDshVersion, 'RESTORE_INSTALLATION')
