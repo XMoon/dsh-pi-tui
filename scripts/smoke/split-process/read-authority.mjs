@@ -629,14 +629,17 @@ export async function runReadAuthority(context) {
         // The incremental observation over the cold rows publishes the same
         // continued fact (real state/projections via the production adapter).
         const activityNonce = signalProbe(cold.client, { op: 'activity', windowMs: 4_000 })
-        const activitySnap = await waitProbe(cold.client, activityNonce,
-          record => record.phase === 'activity-snapshot'
-            && (record.facts ?? []).some(entry => entry.sessionId === sessionX
-              && Array.isArray(entry.continuedQuestionCallIds)
-              && entry.continuedQuestionCallIds.includes(callId)),
-          'UA cold incremental observation fact', 60_000)
+        // The probe's `activity-snapshot` records carry only the revisions; the
+        // FACTS live in the `activity-result.snapshots` array (one snapshot per
+        // recorded revision). Wait for the result, then inspect the snapshots.
         const activityResult = await waitProbe(cold.client, activityNonce,
           record => record.phase === 'activity-result', 'UA cold activity result', 60_000)
+        const activitySnap = (activityResult.snapshots ?? []).find(record =>
+          (record.facts ?? []).some(entry => entry.sessionId === sessionX
+            && Array.isArray(entry.continuedQuestionCallIds)
+            && entry.continuedQuestionCallIds.includes(callId)))
+        assert(activitySnap !== undefined,
+          `UA cold incremental observation never published the continued fact: ${JSON.stringify(activityResult.counters)}`)
         trace('ua-05c', {
           oldHostPid: hostBefore.hostPid,
           newHostPid: coldHost.ready.pid,

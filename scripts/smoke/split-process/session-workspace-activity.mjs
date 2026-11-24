@@ -89,9 +89,24 @@ export async function runSessionWorkspaceActivity(context) {
   trace('ud-workspace-needs', { sessionX, sessionY, folder: folderLine(selectedLines)?.trim(), frame: selectedLines })
 
   // ── Real carrier drop while the Workspace stays OPEN ──────────────────────
-  const generationBeforeDrop = lastSurfaceStatus(clientA)?.generationId
-  assert(typeof generationBeforeDrop === 'number', 'U-D Client A had no connected generation before the carrier drop')
-  clientA.signalBusiness('SIGUSR1')
+  // Sample the REAL viewport continuously from BEFORE the drop: the revocation
+  // interval is transient and a post-reconnect poll can miss it entirely.
+  const sampledFrames = []
+  const samplingDeadlineRef = { value: Date.now() + 180_000 }
+  const sampler = (async () => {
+    while (Date.now() < samplingDeadlineRef.value) {
+      try {
+        sampledFrames.push(await clientA.viewport())
+      } catch {
+        return
+      }
+      await sleep(20)
+    }
+  })()
+  try {
+    const generationBeforeDrop = lastSurfaceStatus(clientA)?.generationId
+    assert(typeof generationBeforeDrop === 'number', 'U-D Client A had no connected generation before the carrier drop')
+    clientA.signalBusiness('SIGUSR1')
   await waitForSurfaceStatus(clientA,
     record => record.transport === 'connected'
       && typeof record.generationId === 'number'
@@ -103,33 +118,25 @@ export async function runSessionWorkspaceActivity(context) {
   // OFFICIAL FOLDER PROOF is withdrawn (flat fallback). A folder line must be
   // absent here — the old predicate (header + Needs substring) also held in
   // this flat state, which is exactly the false positive being fixed.
-  const fallbackDeadline = Date.now() + 60_000
-  let fallbackLines = await clientA.viewport()
-  while (!(revoked(fallbackLines)
-    && folderLine(fallbackLines) === undefined
-    && fallbackLines.some(line => line.includes('Sessions ·'))) && Date.now() < fallbackDeadline) {
-    await sleep(50)
-    fallbackLines = await clientA.viewport()
-  }
-  assert(revoked(fallbackLines),
-    `U-D no real membership revocation was observed after the carrier drop:\n${fallbackLines.join('\n')}`)
-  assert(folderLine(fallbackLines) === undefined,
-    `U-D the flat fallback still painted an official folder proof:\n${fallbackLines.join('\n')}`)
+  const fallbackIndex = sampledFrames.findIndex(lines => revoked(lines)
+    && folderLine(lines) === undefined
+    && lines.some(line => line.includes('Sessions ·')))
+  assert(fallbackIndex >= 0,
+    `U-D no real membership revocation was sampled after the carrier drop: ${sampledFrames.length} frames`)
+  const fallbackLines = sampledFrames[fallbackIndex]
   trace('ud-workspace-flat-fallback', { sessionX, sessionY, frame: fallbackLines })
 
   // The fresh official membership must be a POSITIVE folder paint with the same
   // X and Y, no revocation notice, X still selected and Y still committed.
-  const recoveredDeadline = Date.now() + 120_000
-  let recoveredLines = await clientA.viewport()
-  while (!(folderLine(recoveredLines) !== undefined
-    && xLine(recoveredLines)?.includes('Needs attention')
-    && yLine(recoveredLines) !== undefined
-    && !revoked(recoveredLines)
-    && recoveredLines.find(line => line.startsWith('> '))?.includes(shortSessionId(sessionX)))
-    && Date.now() < recoveredDeadline) {
-    await sleep(100)
-    recoveredLines = await clientA.viewport()
-  }
+  const recoveredIndex = sampledFrames.findIndex((lines, index) => index > fallbackIndex
+    && folderLine(lines) !== undefined
+    && xLine(lines)?.includes('Needs attention')
+    && yLine(lines) !== undefined
+    && !revoked(lines)
+    && lines.find(line => line.startsWith('> '))?.includes(shortSessionId(sessionX)))
+  assert(recoveredIndex > fallbackIndex,
+    `U-D no positive recovered folder was sampled after the flat fallback: ${sampledFrames.length} frames`)
+  const recoveredLines = sampledFrames[recoveredIndex]
   assert(folderLine(recoveredLines) !== undefined,
     `U-D the panel never re-proved the official folder after the drop:\n${recoveredLines.join('\n')}`)
   assert(xLine(recoveredLines)?.includes('Needs attention'),
@@ -149,6 +156,12 @@ export async function runSessionWorkspaceActivity(context) {
     folder: folderLine(recoveredLines)?.trim(),
     frame: recoveredLines,
   })
+  } finally {
+    // The sampler is bounded by its own deadline; wait for it to observe the
+    // stop flag by shortening the deadline on the next tick.
+    samplingDeadlineRef.value = Date.now()
+    await sampler
+  }
 
   // ── Space Peek: read-only, no answer affordance, no Host write ────────────
   const eventsBeforePeek = (hostSessionEvents(dshHome, sessionX) ?? []).length
