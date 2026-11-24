@@ -82,12 +82,19 @@ test('tarball smoke allows only the fixed Linuxbrew runtime directories', (t) =>
   assert.match(result.stdout, /ok\s+no workspace absolute paths in packaged files/)
 })
 
-test('tarball smoke still flags another path below /home/linuxbrew', (t) => {
+test('tarball smoke still flags descendants of each Linuxbrew runtime path', (t) => {
   const life = testLifecycle(t)
-  const { tarball } = leakTarball(life, "['/home/linuxbrew/.linuxbrew/lib', '/home/linuxbrew/private/file']")
-  const result = runSmoke(tarball)
-  assert.notEqual(result.status, 0, result.stdout)
-  assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
+  for (const leaked of [
+    '/home/linuxbrew/.linuxbrew/bin/private/source.ts',
+    '/home/linuxbrew/.linuxbrew/sbin/private/source.ts',
+    '/home/linuxbrew/.linuxbrew/lib/private.ts',
+    '/home/linuxbrew/private/file',
+  ]) {
+    const { tarball } = leakTarball(life, `const leaked = '${leaked}'`)
+    const result = runSmoke(tarball)
+    assert.notEqual(result.status, 0, `${leaked}\n${result.stdout}`)
+    assert.match(result.stdout, /FAIL no workspace absolute paths in packaged files/)
+  }
 })
 
 test('tarball smoke allows escaped slash sequences in regex literals', (t) => {

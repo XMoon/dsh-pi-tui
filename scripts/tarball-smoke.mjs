@@ -527,7 +527,7 @@ function main() {
       // The ONLY non-workspace Unix home path this product may embed is the
       // fixed Linuxbrew runtime directory pair. Every other /home/<segment>
       // shape remains a generic leak, including a deeper /home/linuxbrew path.
-      /\/home\/(?!linuxbrew\/\.linuxbrew\/(?:bin|sbin)(?:$|[^A-Za-z0-9._-]))[^/"']+/,
+      /\/home\/(?!linuxbrew\/\.linuxbrew\/(?:bin|sbin)(?:$|["'`]))[^/"']+/,
       /\/Users\/[^/"']+/,
       /\/home\/runner\/work\//,
       /[A-Za-z]:\\[^\\/\r\n"'<>|?*]+\\[^\\/\r\n"'<>|?*]+/,
