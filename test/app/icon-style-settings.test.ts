@@ -425,21 +425,53 @@ test('the 200-column scalar journey runs pointer-only from the rail to a settled
     t.invoke()
     await t.vt.waitForRender()
     await openIconStyleChoiceByPointer(t.vt)
-    const cancelSymbolRow = viewRows(t.vt).findIndex(line => /^(?:> | {2})symbols/u.test(line.slice(104)))
-    assert.ok(cancelSymbolRow >= 0, `the symbol candidate paints in the reopened choice:\n${viewRows(t.vt).join('\n')}`)
-    const cancelSymbolColumn = viewRows(t.vt)[cancelSymbolRow]!.indexOf('symbols')
-    pressCell(t.vt, cancelSymbolRow, cancelSymbolColumn + 1)
+    // The reopened choice starts on the persisted current option (`symbols`).
+    // Press a DIFFERENT, actually painted noncurrent option so an accidentally
+    // admitted release would move the selected candidate and be observable.
+    const detailColumn = (): number => {
+      const header = viewRows(t.vt).find(line => line.includes('Details'))
+      assert.ok(header !== undefined, 'the choice frame paints the Details pane')
+      const label = header.indexOf('Details')
+      return header[label - 1] === '[' ? label - 1 : label
+    }
+    const choiceRow = (label: string): number => {
+      const start = detailColumn()
+      return viewRows(t.vt).findIndex(line => new RegExp(`^(?:> | {2})${label}(?: |$)`).test(line.slice(start)))
+    }
+    const candidateSelected = (label: string): boolean => {
+      const start = detailColumn()
+      return viewRows(t.vt).some(line => new RegExp(`^> ${label}(?: |$)`).test(line.slice(start)))
+    }
+    const cancelSymbolRow = choiceRow('symbols')
+    const cancelMinimalRow = choiceRow('minimal')
+    assert.ok(cancelSymbolRow >= 0, `the current symbol candidate paints:\n${viewRows(t.vt).join('\n')}`)
+    assert.ok(cancelMinimalRow >= 0, `the noncurrent minimal candidate paints:\n${viewRows(t.vt).join('\n')}`)
+    assert.equal(candidateSelected('symbols'), true, 'the reopened choice starts on the persisted symbol candidate')
+    assert.equal(candidateSelected('minimal'), false, 'the different candidate is not selected at press time')
+    const minimalColumn = viewRows(t.vt)[cancelMinimalRow]!.indexOf('minimal')
+    pressCell(t.vt, cancelMinimalRow, minimalColumn + 1)
     t.vt.resize(160, 40)
-    releaseCell(t.vt, cancelSymbolRow, cancelSymbolColumn + 1)
+    releaseCell(t.vt, cancelMinimalRow, minimalColumn + 1)
     await t.vt.waitForRender()
     assert.equal(t.settings.writes.length, 1, 'the straddling candidate release never writes')
     assert.match(viewRows(t.vt).join('\n'), /Choose value/u, 'the refused release leaves the choice open')
+    assert.equal(candidateSelected('symbols'), true, 'the straddling release did not move the selected candidate')
+    assert.equal(candidateSelected('minimal'), false, 'the different candidate stayed unselected')
     // A second release with NO fresh press is inert even after the repaint.
-    const repainted = viewRows(t.vt).findIndex(line => line.includes('symbols'))
-    releaseCell(t.vt, repainted, columnOn(viewRows(t.vt)[repainted]!, 'symbols') + 1)
+    const repaintedMinimal = choiceRow('minimal')
+    assert.ok(repaintedMinimal >= 0)
+    releaseCell(t.vt, repaintedMinimal, viewRows(t.vt)[repaintedMinimal]!.indexOf('minimal') + 1)
     await t.vt.waitForRender()
     assert.equal(t.settings.writes.length, 1, 'a release without a fresh press never writes')
-    // A fresh pointer gesture on the painted Cancel abandons the choice.
+    assert.equal(candidateSelected('symbols'), true, 'the unpaired release kept the original candidate')
+    // A FRESH gesture on a different cell of the same painted option row can
+    // select the intended candidate before Cancel, still with no write.
+    const freshMinimalRow = choiceRow('minimal')
+    await clickSettingsCell(t.vt, freshMinimalRow, detailColumn() + 50)
+    assert.equal(candidateSelected('minimal'), true, 'the fresh pointer selects the intended candidate')
+    assert.equal(candidateSelected('symbols'), false, 'the previous candidate is no longer selected')
+    assert.equal(t.settings.writes.length, 1, 'selecting a candidate never writes')
+    // The fresh pointer gesture on the painted Cancel abandons the choice.
     await clickDetailButton(t.vt, 'Cancel')
     await t.vt.waitForRender()
     assert.equal(t.settings.writes.length, 1, 'Cancel writes nothing')

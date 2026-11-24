@@ -2236,15 +2236,6 @@ test('a held card press cannot open Details across a resize, and a short frame k
   await held.waitForFrame()
   assert.equal(held.panel.currentView(), 'list', 'the unpainted-width release never opens Details')
   assert.equal(held.panel.focused, true, 'the content keeps the keyboard')
-  // Reverse: back to 120, wait for the real frame, then release again with no
-  // fresh press: still refused, and no stale Host operation starts.
-  held.vt.resize(120, 24)
-  await held.waitForFrame()
-  release(held, heldRow, columnOf(held, heldRow, '@vendor/foo') + 2)
-  await held.waitForFrame()
-  assert.equal(held.panel.currentView(), 'list', 'a release without a fresh press is inert')
-  assert.deepEqual(held.installCalls, [])
-  assert.deepEqual(held.removeBundle, [])
   // A FRESH gesture on the repainted frame (a cell the stale press never used)
   // still opens Details: the selected card is already current, so the one click
   // runs the existing select-then-open semantics.
@@ -2252,6 +2243,33 @@ test('a held card press cannot open Details across a resize, and a short frame k
   await clickCell(held, freshRow, columnOf(held, freshRow, '@vendor/foo') + 20)
   assert.equal(held.panel.currentView(), 'details', 'the repainted frame accepts a fresh gesture')
   held.app.dispose()
+
+  // Reverse: a REAL held press at 200 on the selected card, a resize to 120
+  // WITH the repaint, then release at the newly painted card cell. The held
+  // press must be refused: List identity, no open and no Host operation.
+  const reverse = await open({ columns: 200, rows: 24 })
+  await contentFocus(reverse)
+  await selectCard(reverse, 'bundle:@vendor/foo')
+  const reverseRow200 = rowOf(reverse, '@vendor/foo')
+  press(reverse, reverseRow200, columnOf(reverse, reverseRow200, '@vendor/foo') + 2)
+  reverse.vt.resize(120, 24)
+  await reverse.waitForFrame()
+  const reverseRow120 = rowOf(reverse, '@vendor/foo')
+  release(reverse, reverseRow120, columnOf(reverse, reverseRow120, '@vendor/foo') + 2)
+  await reverse.waitForFrame()
+  assert.equal(reverse.panel.currentView(), 'list', 'the held 200 press released on the 120 frame never opens Details')
+  assert.equal(reverse.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the List keeps the same selected card identity')
+  assert.equal(reverse.panel.focused, true, 'the content keeps the keyboard')
+  assert.deepEqual(reverse.installCalls, [], 'the refused held release starts no install')
+  assert.deepEqual(reverse.updateCalls, [], 'the refused held release starts no update')
+  assert.deepEqual(reverse.removeBundle, [], 'the refused held release removes nothing')
+  // A fresh gesture on the 120 frame (a cell the held press never used) opens
+  // Details for the same card.
+  const reverseFreshRow = rowOf(reverse, '@vendor/foo')
+  await clickCell(reverse, reverseFreshRow, columnOf(reverse, reverseFreshRow, '@vendor/foo') + 20)
+  assert.equal(reverse.panel.currentView(), 'details', 'the 120 repaint accepts a fresh gesture')
+  assert.equal(reverse.panel.selectedCardValue(), 'bundle:@vendor/foo', 'the fresh gesture opens the same card')
+  reverse.app.dispose()
 
   // The six-real-business-row floor is a CHILD fact, not a terminal-width guess:
   // at 120x10 and 200x10 the child paints ONE business column and the root's
