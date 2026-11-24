@@ -684,11 +684,13 @@ class ProcessScene implements SplitProcessScene {
       && typeof ownSeat === 'string' && ownSeat !== ''
       && otherSeat !== ownSeat, 'the two parallel Scenes share the Host seat')
     assert(other.host?.pid !== host.ready?.localHost?.hostPid, 'the two parallel Scenes share a Host process')
-    assert(other.host?.birth !== own.host?.birth, 'the two parallel Scenes share a Host kernel birth')
     assert(other.worker?.pid !== own.worker?.pid, 'the two parallel Scenes share a Worker PID')
-    assert(other.worker?.birth !== own.worker?.birth, 'the two parallel Scenes share a Worker kernel birth')
     assert(typeof other.worker?.ppid === 'number' && typeof own.worker?.ppid === 'number',
       'a parallel Scene Worker has no real PPID')
+    // The serialized birth is the start timestamp; on Linux two distinct
+    // processes started in the same clock tick carry the same string. The
+    // live check below binds each birth to its own PID, so PID inequality plus
+    // per-PID liveness is the process-identity separation.
     assert(other.candidate?.sha256 === this.candidate.candidateSha256, 'the two parallel Scenes used different candidates')
     const otherClients = other.processClients ?? []
     assert(otherClients.length > 0, 'the other parallel Scene reported no Client')
@@ -704,8 +706,8 @@ class ProcessScene implements SplitProcessScene {
         for (const ownEntry of own.processClients ?? []) {
           assert(business.pid !== ownEntry.shellPid, 'the two parallel Scenes share a Client shell/business PID')
           for (const ownBusiness of ownEntry.businessIdentities ?? []) {
-            assert(business.pid !== ownBusiness.pid && business.birth !== ownBusiness.birth,
-              'the two parallel Scenes share a business Client identity')
+            assert(business.pid !== ownBusiness.pid,
+              'the two parallel Scenes share a business Client process')
           }
         }
       }

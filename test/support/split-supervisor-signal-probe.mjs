@@ -568,17 +568,17 @@ function assertProcessSiblingDistinct(sibling, target) {
     sibling.scope?.hostSeat?.path ?? sibling.scope?.hostSeat?.name,
     target.scope?.hostSeat?.path ?? target.scope?.hostSeat?.name)
   requireDistinctSiblingFact('Worker PID', sibling.worker?.pid, target.worker?.pid)
-  requireDistinctSiblingFact('Worker birth', sibling.worker?.birth, target.worker?.birth)
   requireDistinctSiblingFact('Worker PPID', sibling.worker?.ppid, target.worker?.ppid)
   requireDistinctSiblingFact('Host PID', (sibling.hosts ?? [])[0]?.pid, (target.hosts ?? [])[0]?.pid)
-  requireDistinctSiblingFact('Host birth', (sibling.hosts ?? [])[0]?.birth, (target.hosts ?? [])[0]?.birth)
+  // The serialized birth is the start timestamp; on Linux two distinct
+  // processes started in the same clock tick carry the same string. The live
+  // identity checks below bind each birth to its own PID.
   const siblingClient = (sibling.processClients ?? [])[0]
   const targetClient = (target.processClients ?? [])[0]
   requireDistinctSiblingFact('Client identity', siblingClient?.clientId, targetClient?.clientId)
   requireDistinctSiblingFact('native session', siblingClient?.sessionId, targetClient?.sessionId)
   requireDistinctSiblingFact('Client scratch', siblingClient?.scratch, targetClient?.scratch)
   requireDistinctSiblingFact('Client shell PID', siblingClient?.shellPid, targetClient?.shellPid)
-  requireDistinctSiblingFact('Client shell birth', siblingClient?.shellBirth, targetClient?.shellBirth)
   const siblingBusiness = (siblingClient?.businessIdentities ?? []).map(value => `${String(value.pid)}:${String(value.birth)}`)
   if (siblingBusiness.length === 0) fail('the sibling process Scene has no live business Client identity')
   const targetBusiness = (target.processClients ?? []).flatMap(entry =>
