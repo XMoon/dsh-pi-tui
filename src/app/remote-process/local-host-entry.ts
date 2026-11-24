@@ -87,6 +87,13 @@ import {
 } from './local-acp-listener.ts'
 import type { AcpQuestionSpec } from './local-acp-question-form.ts'
 import {
+  AcpHostCommandError,
+  EMPTY_COMMAND_CATALOG,
+  type AcpCommandCatalogRead,
+  type AcpCommandCatalogRow,
+  type AcpNativeSkillCatalog,
+} from './local-acp-commands.ts'
+import {
   AcpSessionViewRegistry,
   ACP_IMAGE_MEDIA_TYPES,
   type AcpImageLimits,
@@ -306,6 +313,8 @@ ${WEB_FIXED_OVERRIDES_YAML}
 `
 
 interface OfficialDshModules {
+  /** The official strict leading-slash parser used by ACP command routing. */
+  readonly parseCommand: (line: string) => { readonly name: string; readonly rawInput: string } | undefined
   readonly runProfile: (options: {
     environment: unknown
     profile: string
@@ -328,7 +337,9 @@ async function loadOfficialDsh(anchor: string): Promise<OfficialDshModules> {
   const profileBoot = await importResolved('@deepseek-ai/dsh/profile-boot')
   const appBoot = await importResolved('@deepseek-ai/dsh-app-boot')
   const homePaths = await importResolved('@deepseek-ai/dsh-home-paths')
+  const commands = await importResolved('@deepseek-ai/dsh-commands')
   return {
+    parseCommand: commands.parseCommand as OfficialDshModules['parseCommand'],
     runProfile: profileBoot.runProfile as OfficialDshModules['runProfile'],
     loadLayeredEnv: appBoot.loadLayeredEnv as OfficialDshModules['loadLayeredEnv'],
     resolveDshHome: homePaths.resolveDshHome as OfficialDshModules['resolveDshHome'],
@@ -722,6 +733,165 @@ interface AgentStatusSeamLike {
   readonly status: 'idle' | 'running'
 }
 
+/** The exact official command descriptor/definition facts this adapter uses. */
+interface CommandDescriptorLike {
+  readonly name: string
+  readonly description: string
+  readonly definitionId?: unknown
+  readonly input?: { readonly hint?: string }
+}
+
+interface CommandExecutionLike {
+  readonly result?: { readonly kind?: unknown; readonly text?: unknown }
+}
+
+interface CommandRuntimeLike {
+  list(agent: object): readonly CommandDescriptorLike[]
+  find(agent: object, name: string): CommandDescriptorLike | undefined
+  execute(
+    agent: object,
+    line: string,
+    attachments: readonly unknown[],
+    signal: AbortSignal,
+  ): Promise<CommandExecutionLike | undefined>
+}
+
+interface AgentPresetInspectionLike {
+  readonly modules: readonly { readonly moduleName: string }[]
+}
+
+interface AgentPresetRegistryLike {
+  inspectCompositions(ctx?: object): readonly AgentPresetInspectionLike[]
+  serviceFor(agent: { readonly ctx: object }, name: 'compaction' | 'skills'): unknown
+}
+
+interface WorkingDirectoryLike {
+  get(session: object): string
+}
+
+interface SkillSummaryLike {
+  readonly name?: unknown
+  readonly description?: unknown
+  readonly invocation?: { readonly userInvocable?: unknown }
+}
+
+interface SkillRegistryLike {
+  snapshot(options: {
+    readonly cwd: string
+    readonly scope: object
+    readonly signal?: AbortSignal
+  }): Promise<{ readonly skills: readonly SkillSummaryLike[]; readonly complete: boolean }>
+}
+
+interface CompactionEngineLike {
+  compactNow(agent: object, signal: AbortSignal): Promise<unknown>
+}
+
+/** The official command definition identities this Host may advertise. */
+const FEEDBACK_DEFINITION_ID = '@deepseek-ai/dsh-command-feedback'
+const COMPACT_DEFINITION_ID = '@deepseek-ai/dsh-command-compact'
+
+/** The audited official compaction modules of one isolated preset group. */
+const AUDITED_COMPACTION_MODULES: ReadonlySet<string> = new Set([
+  '@deepseek-ai/dsh-compaction-basic',
+  '@deepseek-ai/dsh-command-compact',
+  '@deepseek-ai/dsh-compaction-tool-result-pruner',
+])
+
+/** One live Agent exposes its exact Cordis context to the preset registry. */
+interface HostAgentLike extends LiveAgentViewIdentity {
+  readonly ctx: object
+}
+
+/** Fail closed unless the exact Agent/Session objects are still the live pair. */
+function assertExactHostIdentity(
+  agents: AgentRegistryLike,
+  sessions: SessionRegistryLike,
+  agent: LiveAgentViewIdentity,
+  session: object,
+): void {
+  if (agents.get(agent.id) !== agent || sessions.get(agent.id) !== session || agent.session !== session) {
+    throw new AcpHostCommandError('stale', 'the exact Host Agent/Session identity is no longer current')
+  }
+}
+
+/** Whether this Agent exposes the exact Cordis context required for preset reads. */
+function hasContext(agent: LiveAgentViewIdentity): agent is HostAgentLike {
+  return typeof (agent as { readonly ctx?: unknown }).ctx === 'object' && (agent as { readonly ctx?: unknown }).ctx !== null
+}
+
+/** The active modules of the exact retained preset revision. */
+function retainedModules(agent: LiveAgentViewIdentity, presets: AgentPresetRegistryLike): readonly string[] | undefined {
+  if (!hasContext(agent)) return undefined
+  let inspections: readonly AgentPresetInspectionLike[]
+  try {
+    inspections = presets.inspectCompositions(agent.ctx)
+  } catch {
+    return undefined
+  }
+  if (inspections.length !== 1) return undefined
+  return inspections[0]?.modules.map(module => module.moduleName)
+}
+
+/** Whether the exact retained revision mounts the native human Skill loader. */
+function hasNativeSkillLoader(agent: LiveAgentViewIdentity, presets: AgentPresetRegistryLike): boolean {
+  return retainedModules(agent, presets)?.includes('@deepseek-ai/dsh-tool-skill') === true
+}
+
+/** Resolve the exact Skill registry (scoped first, then the global service). */
+function readSkillRegistry(
+  agent: LiveAgentViewIdentity,
+  presets: AgentPresetRegistryLike,
+  global: SkillRegistryLike | undefined,
+): SkillRegistryLike | undefined {
+  if (!hasContext(agent)) return undefined
+  let scoped: unknown
+  try {
+    scoped = presets.serviceFor(agent, 'skills')
+  } catch {
+    scoped = undefined
+  }
+  const registry = (scoped as SkillRegistryLike | undefined) ?? global
+  return registry !== undefined && typeof registry.snapshot === 'function' ? registry : undefined
+}
+
+/**
+ * The ONE audited compaction composition gate: exactly one retained revision,
+ * the official basic engine + command definition modules, no other compaction
+ * engine module, and the exact scoped service object.
+ */
+function auditedCompactionEngine(
+  agent: LiveAgentViewIdentity,
+  presets: AgentPresetRegistryLike | undefined,
+): CompactionEngineLike | undefined {
+  if (presets === undefined || !hasContext(agent)) return undefined
+  const modules = retainedModules(agent, presets)
+  if (modules === undefined
+    || !modules.includes('@deepseek-ai/dsh-compaction-basic')
+    || !modules.includes('@deepseek-ai/dsh-command-compact')
+    || !modules.filter(name => name.includes('compaction')).every(name => AUDITED_COMPACTION_MODULES.has(name))) {
+    return undefined
+  }
+  let service: unknown
+  try {
+    service = presets.serviceFor(agent, 'compaction')
+  } catch {
+    return undefined
+  }
+  const engine = service as CompactionEngineLike | undefined
+  return engine !== undefined && typeof engine.compactNow === 'function' ? engine : undefined
+}
+
+/** Project one official command definition onto the detached wire row. */
+function commandRow(definition: CommandDescriptorLike): AcpCommandCatalogRow {
+  return {
+    kind: 'command',
+    name: definition.name,
+    description: definition.description,
+    ...definition.input?.hint === undefined ? {} : { inputHint: definition.input.hint },
+  }
+}
+
 /**
  * Bind the narrow {@link HostAcpSessionAccess} from the ONE already-settled Host
  * Context. The official Workspace/Session/Agent/Session services stay the sole
@@ -736,7 +906,10 @@ interface AgentStatusSeamLike {
  * @param context - the settled Host context.
  * @returns the narrow Session access the listener borrows from.
  */
-export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis').Context): HostAcpSessionAccess {
+export function createHostAcpSessionAccess(
+  context: import('@deepseek-ai/cordis').Context,
+  parseCommand?: (line: string) => { readonly name: string; readonly rawInput: string } | undefined,
+): HostAcpSessionAccess {
   const workspaceController = context.reflect.get('workspaceController') as WorkspaceControllerLike | undefined
   const sessionController = context.reflect.get('sessionController') as SessionControllerLike | undefined
   const agents = context.reflect.get('agents') as AgentRegistryLike | undefined
@@ -750,6 +923,13 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
   // ACP-owned question (the View fails it closed instead).
   const userQuestions = context.reflect.get('userQuestions') as UserQuestionServiceLike | undefined
   const sessionProjections = context.reflect.get('sessionProjections') as SessionProjectionServiceLike | undefined
+  // Command/Skill/compaction capabilities are optional at the Host access
+  // boundary: an absent service is a truthful capability absence, never a
+  // fabricated empty catalog or a root-engine fallback.
+  const commands = context.reflect.get('commands') as CommandRuntimeLike | undefined
+  const agentPresets = context.reflect.get('agentPresets') as AgentPresetRegistryLike | undefined
+  const workingDirectory = context.reflect.get('workingDirectory') as WorkingDirectoryLike | undefined
+  const skills = context.reflect.get('skills') as SkillRegistryLike | undefined
   // The official canonical-history/title read plane is REQUIRED for a truthful
   // load/list advertisement: without it the listener advertises neither.
   const sessionQuery = context.reflect.get('sessionQuery') as SessionQueryReadLike | undefined
@@ -1026,6 +1206,135 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       }
     },
     /**
+     * Read the effective official command registry. Only the audited
+     * `feedback` identity and the audited retained compact composition are
+     * advertised; other effective Host names remain visible for precedence and
+     * explicit unsupported routing.
+     */
+    readCommandCatalog(agent, session): AcpCommandCatalogRead {
+      assertExactHostIdentity(agents, sessions, agent, session)
+      if (commands === undefined) return EMPTY_COMMAND_CATALOG
+      let effective: readonly CommandDescriptorLike[]
+      let feedback: CommandDescriptorLike | undefined
+      let compact: CommandDescriptorLike | undefined
+      try {
+        effective = commands.list(agent as never)
+        feedback = commands.find(agent as never, 'feedback')
+        compact = commands.find(agent as never, 'compact')
+      } catch {
+        throw new AcpHostCommandError('unavailable', 'the official command registry could not be read')
+      }
+      const feedbackState = feedback === undefined
+        ? 'missing' as const
+        : String(feedback.definitionId) === FEEDBACK_DEFINITION_ID
+          ? 'available' as const
+          : 'shadowed' as const
+      let compactState: AcpCommandCatalogRead['compact']
+      if (compact === undefined) compactState = 'missing'
+      else if (String(compact.definitionId) !== COMPACT_DEFINITION_ID) compactState = 'shadowed'
+      else compactState = auditedCompactionEngine(agent, agentPresets) === undefined ? 'unavailable' : 'available'
+      const rows: AcpCommandCatalogRow[] = []
+      if (feedbackState === 'available' && feedback !== undefined) rows.push(commandRow(feedback))
+      if (compactState === 'available' && compact !== undefined) rows.push(commandRow(compact))
+      return {
+        effectiveNames: effective.map(descriptor => descriptor.name),
+        feedback: feedbackState,
+        compact: compactState,
+        rows,
+      }
+    },
+
+    /**
+     * Read the native Skill catalog from the exact retained loader composition
+     * and the official committed working directory. No list() fallback, no
+     * header cwd and no same-name tool heuristic is accepted.
+     */
+    async readNativeSkills(agent, session, signal): Promise<AcpNativeSkillCatalog> {
+      assertExactHostIdentity(agents, sessions, agent, session)
+      signal.throwIfAborted()
+      if (agentPresets === undefined || !hasContext(agent) || !hasNativeSkillLoader(agent, agentPresets)) {
+        return { kind: 'absent' }
+      }
+      if (workingDirectory === undefined) return { kind: 'absent' }
+      const registry = readSkillRegistry(agent, agentPresets, skills)
+      if (registry === undefined) return { kind: 'absent' }
+      const cwd = workingDirectory.get(session)
+      if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/')) {
+        throw new AcpHostCommandError('unavailable', 'the exact Session has no effective working directory')
+      }
+      let observed: Awaited<ReturnType<SkillRegistryLike['snapshot']>>
+      try {
+        observed = await registry.snapshot({ cwd, scope: agent as never, signal })
+      } catch (error) {
+        if (signal.aborted) throw error
+        throw new AcpHostCommandError('unavailable', 'the native Skill catalog could not be read')
+      }
+      signal.throwIfAborted()
+      assertExactHostIdentity(agents, sessions, agent, session)
+      if (workingDirectory.get(session) !== cwd || !hasNativeSkillLoader(agent, agentPresets)) {
+        throw new AcpHostCommandError('stale', 'the native Skill scope changed during the catalog read')
+      }
+      if (observed.complete !== true) {
+        throw new AcpHostCommandError('unavailable', 'the native Skill catalog is incomplete')
+      }
+      const rows = observed.skills
+        .filter(skill => skill.invocation?.userInvocable === true)
+        .map(skill => {
+          if (typeof skill.name !== 'string' || skill.name.length === 0 || typeof skill.description !== 'string') return undefined
+          return { kind: 'skill' as const, name: skill.name, description: skill.description }
+        })
+        .filter((row): row is { readonly kind: 'skill'; readonly name: string; readonly description: string } => row !== undefined)
+        .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+      return { kind: 'available', cwd, skills: rows }
+    },
+
+    /** Execute the ONE approved standalone command through the official runtime. */
+    executeStandaloneCommand(agent, session, line, signal): Promise<unknown> {
+      assertExactHostIdentity(agents, sessions, agent, session)
+      if (commands === undefined) throw new AcpHostCommandError('unavailable', 'the official command runtime is unavailable')
+      let definition: CommandDescriptorLike | undefined
+      try {
+        definition = commands.find(agent as never, 'feedback')
+      } catch {
+        throw new AcpHostCommandError('unavailable', 'the official command registry could not be read')
+      }
+      if (definition === undefined) throw new AcpHostCommandError('unavailable', 'the approved command is no longer registered')
+      if (String(definition.definitionId) !== FEEDBACK_DEFINITION_ID) {
+        throw new AcpHostCommandError('unsupported', 'the effective command is not the approved definition')
+      }
+      return commands.execute(agent as never, line, [], signal)
+    },
+
+    /** Enter the exact retained official manual-compaction engine. */
+    parseCommand: line => parseCommand?.(line),
+    executeManualCompact(agent, session, signal): Promise<unknown> {
+      assertExactHostIdentity(agents, sessions, agent, session)
+      if (commands === undefined) throw new AcpHostCommandError('unavailable', 'the official command runtime is unavailable')
+      let definition: CommandDescriptorLike | undefined
+      let engine: CompactionEngineLike | undefined
+      try {
+        definition = commands.find(agent as never, 'compact')
+        engine = auditedCompactionEngine(agent, agentPresets)
+      } catch {
+        throw new AcpHostCommandError('unavailable', 'the official compaction composition could not be read')
+      }
+      if (definition === undefined) throw new AcpHostCommandError('unavailable', 'the approved compact command is no longer registered')
+      if (String(definition.definitionId) !== COMPACT_DEFINITION_ID) {
+        throw new AcpHostCommandError('unsupported', 'the effective compact command is not the approved definition')
+      }
+      if (engine === undefined) throw new AcpHostCommandError('unavailable', 'the exact retained compaction engine is unavailable')
+      try {
+        return engine.compactNow(agent as never, signal)
+      } catch (error) {
+        // `compactNow` performs its official synchronous admission (busy,
+        // disposed signal) before returning its Promise. Preserve that real
+        // rejection as the operation settlement instead of turning it into an
+        // unrelated dispatch failure.
+        return Promise.reject(error)
+      }
+    },
+
+    /**
      * Subscribe the View owner to the exact Host facts a prompt flight is
      * correlated against. The Host Context, registries and Agent/Session objects
      * stay on this side: only the observed identity payloads are forwarded, and
@@ -1049,6 +1358,20 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         }),
         context.on('session/event', (session, event) => {
           listener.onSessionEvent(session, event)
+        }),
+        // Effective command/Skill registry invalidations are unfiltered by
+        // contract: each attached claim re-reads its own exact scope.
+        context.on('commands/change', () => {
+          listener.onCommandCatalogInvalidated()
+        }),
+        context.on('skills/change', () => {
+          listener.onSkillCatalogInvalidated()
+        }),
+        // A preset tool/loader recomposition can change the retained Skill
+        // registry without a `skills/change`; it is an invalidation only, never
+        // a tool-list authority.
+        context.on('tools/change', () => {
+          listener.onSkillCatalogInvalidated()
         }),
         // The transient provisional output of one emitting Agent. It is the
         // SAME official frame the Direct TUI consumes; here it is correlated to
@@ -1973,7 +2296,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // The official Workspace/Session/Agent registries stay the sole authority;
       // only their callable methods are forwarded. A failure to read them is a
       // Host composition failure (the readiness audit already required them).
-      const sessionAccess = createHostAcpSessionAccess(handle.ctx)
+      const sessionAccess = createHostAcpSessionAccess(handle.ctx, dsh.parseCommand)
       acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host'), sessionAccess })
       scratchOwner.acpController = acpController
       // Register the entry-owned controller as the root Host `piTuiAcpOwner`

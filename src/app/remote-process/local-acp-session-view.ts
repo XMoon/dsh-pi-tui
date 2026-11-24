@@ -118,6 +118,24 @@ import {
   type AcpSessionHistory,
   type AcpSessionReadRow,
 } from './local-acp-projections.ts'
+import {
+  ACP_COMPACT_CANCEL_REASON,
+  AcpHostCommandError,
+  catalogUpdate,
+  classifyCompactOutcome,
+  classifyStandaloneOutcome,
+  isAcpCompactAbort,
+  readLeadingCommand,
+  routeLeadingCommand,
+  sameCatalogRows,
+  type AcpCatalogRow,
+  type AcpCommandCatalogRead,
+  type AcpCommandFailureCode,
+  type AcpCommandOutcome,
+  type AcpCommandSettlement,
+  type AcpCompactObservedFacts,
+  type AcpNativeSkillCatalog,
+} from './local-acp-commands.ts'
 
 /** The exact live identity a borrowed Session View is allowed to believe. */
 export interface LiveAgentViewIdentity {
@@ -300,6 +318,42 @@ export interface HostAcpSessionAccess {
     answer: AcpQuestionAnswer,
     stillCurrent: () => boolean,
   ): AcpContinuedAnswerOutcome
+  /**
+   * Read the exact live effective command registry. This is a detached
+   * metadata read: the returned rows are never an execution capability, and a
+   * refusal must be distinguished from a real empty registry.
+   */
+  readCommandCatalog(agent: LiveAgentViewIdentity, session: object): AcpCommandCatalogRead
+  /**
+   * Read the exact native human-Skill catalog from the Agent's retained
+   * composition and effective committed cwd. `absent` is a proven capability
+   * absence; a failed/incomplete read rejects and is never published as empty.
+   */
+  readNativeSkills(agent: LiveAgentViewIdentity, session: object, signal: AbortSignal): Promise<AcpNativeSkillCatalog>
+  /**
+   * Execute the ONE approved standalone command through the official command
+   * runtime. The method entry is synchronous: every exact-identity and
+   * definition check happens before the official call, and the returned
+   * Promise is the original handler settlement.
+   */
+  executeStandaloneCommand(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    line: string,
+    signal: AbortSignal,
+  ): Promise<unknown>
+  /**
+   * Enter the exact retained official manual-compaction engine in the same
+   * synchronous stack. No command wrapper, sourceCommandId or second
+   * maintenance lock is introduced.
+   */
+  executeManualCompact(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    signal: AbortSignal,
+  ): Promise<unknown>
+  /** The official DSH leading-slash parser bound by the Host composition. */
+  parseCommand(line: string): { readonly name: string; readonly rawInput: string } | undefined
 }
 
 /** One transient per-connection config-options notification callback. */
@@ -440,6 +494,7 @@ export type LocalAcpSessionErrorCode =
   | LocalAcpQuestionErrorCode
   | LocalAcpLoadErrorCode
   | LocalAcpListErrorCode
+  | AcpCommandFailureCode
   | AcpModelErrorCode
 
 /**
@@ -566,6 +621,10 @@ export interface AcpPromptFactListener {
   onInboxClaimed(agent: LiveAgentViewIdentity, message: AcpUserMessageLike, turn: number): void
   /** One committed durable Session event. */
   onSessionEvent(session: object, event: AcpSessionEventLike): void
+  /** The official effective command registry was invalidated (unfiltered). */
+  onCommandCatalogInvalidated(): void
+  /** The official Skill registry/loader composition was invalidated. */
+  onSkillCatalogInvalidated(): void
   /** One official inbox discard notice for a removed message. */
   onInboxDiscarded(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void
   /** One Agent interval failure carrying the owning turn. */
@@ -823,6 +882,23 @@ interface ViewClaim {
   /** At most ONE unsettled ACP prompt flight, correlated by real Host facts only. */
   inflight?: InflightPrompt
   /**
+   * At most ONE standalone/compact command operation. It is a sibling of the
+   * prompt flight, never a second prompt and never a durable command store.
+   */
+  commandOperation?: AcpOwnedCommand
+  /**
+   * The per-claim catalog invalidation epoch. A read captures this value and
+   * must still match it before its result is delivered; an invalidation never
+   * cancels command execution or the read-only Session projection.
+   */
+  catalogEpoch?: number
+  /** One catalog read owner is running for this claim. */
+  catalogReadRunning?: boolean
+  /** A coalesced follow-up read is required after the running one settles. */
+  catalogDirty?: boolean
+  /** The rows this connection ACTUALLY received (display intent only). */
+  lastDeliveredCatalog?: readonly AcpCatalogRow[]
+  /**
    * PO-3B: serializes an in-flight `session/close` settlement. A repeated
    * close on the same View awaits the SAME real settlement instead of running
    * a second cancellation.
@@ -1027,6 +1103,44 @@ type CommittedOutputEntry =
   | { readonly kind: 'tool-image'; readonly ref: AcpStoredImageRef }
 
 /**
+ * One transient command operation. The Host execution Promise is the only
+ * execution terminal; the compaction start/summary/end facts are observations
+ * of the SAME operation's exact Session events, not a second completion owner.
+ */
+interface AcpOwnedCommand {
+  readonly claim: ViewClaim
+  readonly agent: LiveAgentViewIdentity
+  readonly session: object
+  readonly kind: 'standalone' | 'compact'
+  /** The ONE stable opaque ACP message id of this command's result text. */
+  readonly messageId: string
+  /**
+   * The compact-only cancellation controller. It never aborts a standalone
+   * command after dispatch (the approved feedback handler is noninterruptible)
+   * and is always replaced/captured per operation.
+   */
+  readonly controller: AbortController
+  readonly executionSignal: AbortSignal
+  state: 'dispatching' | 'executing' | 'host-settled' | 'delivery-settled'
+  cancelRequested: boolean
+  deliveryClosed: boolean
+  hostSettled: boolean
+  /** Resolves on the original official Promise settlement. */
+  readonly hostSettledPromise: PromiseWithResolvers<void>
+  /** Resolves after this exact op released its claim slot. */
+  readonly completion: PromiseWithResolvers<void>
+  settlement?: AcpCommandSettlement
+  compactionId?: string
+  startSeq?: number
+  summarySeq?: number
+  endSeq?: number
+  endError?: string
+  checkpointSeen: boolean
+  factConflict: boolean
+  requestAbortDisposer?: () => void
+}
+
+/**
  * One unsettled prompt flight. Each field is a DIFFERENT authoritative fact:
  * `requestId` is View-minted, `messageId` comes from the official
  * `agent/inbox/inserted`, `turn` from the official `agent/inbox/claimed`, and
@@ -1096,6 +1210,12 @@ interface InflightPrompt {
   readonly settleAdmission: () => void
   /** PO-3B: output delivery is closed; queued-but-unsent updates are dropped. */
   deliveryClosed: boolean
+  /**
+   * The ONE cancellable native-Skill preflight read of this flight. It is set
+   * synchronously before the first await and cleared after the read settles;
+   * Close/EOF/Off/dispose/cancel abort exactly this read, never a Host write.
+   */
+  skillPreflightAbort?: AbortController
   /**
    * PO-4C: the ONLY abort channel of this flight's own output work. It is
    * passed to the official image read and to nothing else — never to the
@@ -1302,6 +1422,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   hasUnsettledHostWork(): boolean {
     for (const claim of this.claims.values()) {
       if (claim.inflight !== undefined && !claim.inflight.settledDone) return true
+      if (claim.commandOperation !== undefined) return true
       if (claim.retiringTurn !== undefined) return true
       if (claim.unclaimedHostObligation !== undefined) return true
       if (claim.mcpMountPending === true || claim.mcpLease !== undefined) return true
@@ -1449,7 +1570,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     signal: AbortSignal,
   ): Promise<SessionConfigOption[]> {
     const claim = this.attachedClaim(state, request.sessionId)
-    if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined
+    if (claim.inflight !== undefined || claim.commandOperation !== undefined
+      || claim.unclaimedHostObligation !== undefined
+      || claim.closing !== undefined
       || claim.mcpMountPending === true || claim.mcpRetireRequested === true) {
       throw new LocalAcpViewError(
         'LOCAL_ACP_MODEL_VIEW_BUSY',
@@ -1461,7 +1584,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const session = claim.exactSession as object
     const stillCurrent = (): AcpModelCurrentness => {
       if (!this.isStillAttached(state, claim, agent, session)) return 'stale'
-      if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined
+      if (claim.inflight !== undefined || claim.commandOperation !== undefined
+        || claim.unclaimedHostObligation !== undefined || claim.closing !== undefined
         || claim.mcpMountPending === true || claim.mcpRetireRequested === true) return 'view-busy'
       return 'current'
     }
@@ -1579,6 +1703,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
     }
     this.commitAttached(state, op, claim, access, agent, channels)
+    this.scheduleCatalogRefresh(claim, access)
     return { sessionId }
   }
 
@@ -1636,6 +1761,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // from the projection of the EXACT attached Session: `null` (no write yet)
     // sends nothing and an empty list is a real clear.
     this.offerCurrentPlan(claim, access)
+    this.scheduleCatalogRefresh(claim, access)
     return {}
   }
 
@@ -1788,6 +1914,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (claim.requestElicitation !== undefined && access.hasQuestionService()) {
         this.offerContinuedQuestions(claim, claim.requestElicitation)
       }
+      this.scheduleCatalogRefresh(claim, access)
       return {}
     } catch (error) {
       // The cancellation class must be read BEFORE the release marks the replay
@@ -2156,6 +2283,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private stopProjectionOutput(claim: ViewClaim): void {
     claim.notifyProjection = undefined
+    claim.inflight?.skillPreflightAbort?.abort()
     claim.projectionStalled = true
     if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
     const replay = claim.replay
@@ -2202,6 +2330,111 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return undefined
     }
     return true
+  }
+
+  /**
+   * Mark one exact claim's catalog stale. The epoch is committed synchronously
+   * before any read can settle; the dirty bit coalesces bursts into one
+   * follow-up read and never reaches command execution.
+   */
+  private invalidateCatalog(claim: ViewClaim): void {
+    claim.catalogEpoch = (claim.catalogEpoch ?? 0) + 1
+    claim.catalogDirty = true
+    if (this.access !== undefined) this.scheduleCatalogRefresh(claim, this.access)
+  }
+
+  /** One global command-registry invalidation; it carries no scope by contract. */
+  onCommandCatalogInvalidated(): void {
+    for (const claim of this.claims.values()) this.invalidateCatalog(claim)
+  }
+
+  /** One global Skill/loader invalidation; every attached claim re-reads its own scope. */
+  onSkillCatalogInvalidated(): void {
+    for (const claim of this.claims.values()) this.invalidateCatalog(claim)
+  }
+
+  /**
+   * Start (or coalesce) the ONE catalog read owner of this claim. A read never
+   * crosses an attach/replay barrier, never cancels command execution and is
+   * abandoned by the claim's existing `readAbort` lifetime.
+   */
+  private scheduleCatalogRefresh(claim: ViewClaim, access: HostAcpSessionAccess): void {
+    if (claim.notifyProjection === undefined || claim.projectionStalled === true) return
+    // The load replay owns the ordered output until its canonical history and
+    // live window drained. An invalidation during it stays dirty; `loadSession`
+    // schedules the first read after the barrier closes.
+    if (claim.replay !== undefined) return
+    if (claim.catalogReadRunning === true) return
+    if (claim.catalogDirty !== true && claim.lastDeliveredCatalog !== undefined) return
+    claim.catalogDirty = true
+    claim.catalogReadRunning = true
+    runDetached('local acp: command catalog', async () => {
+      try {
+        while (claim.catalogDirty === true && this.catalogRefreshCurrent(claim)) {
+          claim.catalogDirty = false
+          const epoch = claim.catalogEpoch ?? 0
+          const agent = claim.exactAgent
+          const session = claim.exactSession
+          if (agent === undefined || session === undefined) return
+          let commands: AcpCommandCatalogRead
+          try {
+            commands = access.readCommandCatalog(agent, session)
+          } catch {
+            this.diag.warn('local-acp.catalog.failed', { key: 'commands' })
+            return
+          }
+          let skills: AcpNativeSkillCatalog
+          try {
+            skills = await access.readNativeSkills(agent, session, claim.readAbort.signal)
+          } catch (error) {
+            if (claim.readAbort.signal.aborted) return
+            this.diag.warn('local-acp.catalog.failed', { key: 'skills' })
+            return
+          }
+          if (!this.catalogRefreshCurrent(claim)
+            || claim.exactAgent !== agent || claim.exactSession !== session) return
+          if (claim.catalogEpoch !== epoch) continue
+          const hostNames = new Set(commands.effectiveNames)
+          const rows: AcpCatalogRow[] = skills.kind === 'available'
+            ? [...commands.rows, ...skills.skills.filter(skill => !hostNames.has(skill.name))]
+            : [...commands.rows]
+          const previous = claim.lastDeliveredCatalog
+          if (previous !== undefined && sameCatalogRows(previous, rows)) continue
+          let delivered = false
+          const update = catalogUpdate(rows)
+          try {
+            await this.enqueueProjectionTask(claim, async () => {
+              // A stale read never reaches the client. The dirty bit was already
+              // set by the invalidation, so the loop re-reads the current target.
+              if (!this.catalogRefreshCurrent(claim) || claim.catalogEpoch !== epoch) return
+              await this.sendProjection(claim, update)
+              delivered = true
+            })
+          } catch {
+            this.diag.warn('local-acp.catalog.failed', { key: 'delivery' })
+            return
+          }
+          // Record only what the client ACTUALLY received. A skipped/stalled
+          // task is not a delivery and must not suppress a later real update.
+          if (delivered) claim.lastDeliveredCatalog = rows
+        }
+      } finally {
+        claim.catalogReadRunning = false
+        if (claim.catalogDirty === true && this.catalogRefreshCurrent(claim)) {
+          this.scheduleCatalogRefresh(claim, access)
+        }
+      }
+    }, { diag: this.diag })
+  }
+
+  /** Whether this exact claim may still read and deliver a catalog update. */
+  private catalogRefreshCurrent(claim: ViewClaim): boolean {
+    return this.claims.get(claim.sessionId) === claim
+      && claim.notifyProjection !== undefined
+      && claim.projectionStalled !== true
+      && claim.detachedWithFence !== true
+      && claim.replay === undefined
+      && claim.connectionIdentity.phase === 'attached'
   }
 
   /** Record one live projection failure without failing a Host request. */
@@ -2522,7 +2755,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // A still-attached View keeps its Session claim; only a detached View
       // releases after the MCP responsibility is gone.
       if (claim.connectionIdentity.phase === 'attached' && !claim.detachedWithFence) return
-      if (claim.inflight !== undefined || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
+      if (claim.inflight !== undefined || claim.commandOperation !== undefined
+        || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
         claim.detachedWithFence = true
         this.notifyWorkSettled()
         return
@@ -2565,6 +2799,25 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // settlement proof and must not lock the retry (v1.1 §5.B.3).
     const inFlightAttempt = claim.closing
     if (inFlightAttempt !== undefined) return await inFlightAttempt
+    if (claim.commandOperation !== undefined) {
+      // Commit the singleflight attempt BEFORE any cancellation callback can
+      // re-enter close. The command's exact execution terminal is then awaited
+      // without a second close attempt overwriting the slot.
+      const deferred = Promise.withResolvers<Record<string, never>>()
+      claim.closing = deferred.promise
+      runDetached('local acp: command close', async () => {
+        try {
+          deferred.resolve(await this.closeClaim(state, sessionId, claim, access))
+        } catch (error) {
+          deferred.reject(error)
+        }
+      }, { diag: this.diag })
+      try {
+        return await deferred.promise
+      } finally {
+        if (claim.closing === deferred.promise) claim.closing = undefined
+      }
+    }
     const attempt = this.closeClaim(state, sessionId, claim, access)
     claim.closing = attempt
     try {
@@ -2587,6 +2840,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim: ViewClaim,
     access: HostAcpSessionAccess,
   ): Promise<Record<string, never>> {
+    const command = claim.commandOperation
+    if (command !== undefined) {
+      // Close delivery first, record the exact cancellation intent, and wait
+      // for the ORIGINAL official execution Promise. A business error is a real
+      // terminal and does not prevent a safe detach; an unproven terminal keeps
+      // the claim fenced instead of fabricating success.
+      command.deliveryClosed = true
+      this.stopProjectionOutput(claim)
+      this.requestCommandCancel(claim, command)
+      await command.completion.promise
+    }
     // An unclaimed obligation may still execute. Try ONE exact removal on the
     // current facts; anything short of a real removal is unconfirmed.
     const obligation = claim.unclaimedHostObligation
@@ -2673,6 +2937,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private releaseDetachedIfSettled(claim: ViewClaim): void {
     if (!claim.detachedWithFence) return
     if (claim.inflight !== undefined) return
+    if (claim.commandOperation !== undefined) return
     if (claim.retiringTurn !== undefined) return
     if (claim.unclaimedHostObligation !== undefined) return
     if (claim.mcpMountPending === true || claim.mcpLease !== undefined) return
@@ -2693,7 +2958,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // detaches, but the claim survives so a LATE approval of that exact
     // ACP-owned turn can never be delegated to the TUI and a late insertion is
     // still observed. A claim with no such fact is released now.
-    if (claim.retiringTurn !== undefined || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
+    if (claim.retiringTurn !== undefined || claim.commandOperation !== undefined
+      || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
     } else if (this.claims.get(sessionId) === claim) {
       this.claims.delete(sessionId)
@@ -2716,6 +2982,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   cancelSession(state: ConnectionViewState, access: HostAcpSessionAccess, sessionId: string): void {
     const claim = this.claims.get(sessionId)
     if (claim === undefined || claim.connectionIdentity !== state || claim.detachedWithFence) return
+    const command = claim.commandOperation
+    if (command !== undefined) {
+      this.requestCommandCancel(claim, command)
+      return
+    }
     const flight = claim.inflight
     if (flight === undefined || flight.settledDone) return
     // Commit the intent FIRST so a late insertion/claim still observes it.
@@ -2796,6 +3067,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private addressCancelIntent(claim: ViewClaim, flight: InflightPrompt, access: HostAcpSessionAccess): void {
     if (flight.settledDone || flight.cancelKind !== undefined) return
+    if (flight.skillPreflightAbort !== undefined) {
+      // The advertised-Skill revalidation is the only live Host read of this
+      // flight. Cancelling it is a definite pre-dispatch action; no message or
+      // turn exists yet.
+      flight.skillPreflightAbort.abort()
+      return
+    }
     const session = claim.exactSession
     const agent = claim.exactAgent
     const sessionId = claim.sessionId
@@ -2887,6 +3165,277 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * ordered notification drain. No status, text, timestamp or ACK is treated as
    * a completed turn.
    */
+  /**
+   * Route one raw wire prompt from the CURRENT effective registry and the LAST
+   * DELIVERED catalog. A Host read failure on a leading candidate fails closed;
+   * ordinary prose never reaches the command registry.
+   */
+  private classifyCommandRoute(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    prompt: readonly unknown[],
+  ): { readonly route: ReturnType<typeof routeLeadingCommand>; readonly epoch: number } {
+    const leading = readLeadingCommand(prompt, line => access.parseCommand(line))
+    const epoch = claim.catalogEpoch ?? 0
+    if (leading === undefined) return { route: { kind: 'prose' }, epoch }
+    let catalog: AcpCommandCatalogRead
+    try {
+      catalog = access.readCommandCatalog(
+        claim.exactAgent as LiveAgentViewIdentity,
+        claim.exactSession as object,
+      )
+    } catch {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_COMMAND_UNAVAILABLE',
+        'the Host command registry could not be read; the command was not dispatched',
+        JSONRPC_INVALID_PARAMS,
+      )
+    }
+    const deliveredSkills = new Set(
+      (claim.lastDeliveredCatalog ?? [])
+        .filter(row => row.kind === 'skill')
+        .map(row => row.name),
+    )
+    return { route: routeLeadingCommand(leading, catalog, deliveredSkills, prompt.length), epoch }
+  }
+
+  /**
+   * Admit one approved command as a transient operation. The slot and the
+   * operation-specific execution signal are committed synchronously BEFORE the
+   * official call, so the exact Session facts it publishes are attributable.
+   */
+  private async dispatchCommand(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    route: { readonly kind: 'standalone'; readonly line: string } | { readonly kind: 'compact' },
+    requestSignal: AbortSignal,
+    sendUpdate: (update: SessionUpdate) => Promise<void>,
+  ): Promise<AcpPromptResult> {
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    if (requestSignal.aborted) {
+      throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP command request was aborted before dispatch', JSONRPC_INVALID_PARAMS)
+    }
+    const controller = new AbortController()
+    const op: AcpOwnedCommand = {
+      claim,
+      agent,
+      session,
+      kind: route.kind,
+      messageId: randomUUID(),
+      controller,
+      executionSignal: controller.signal,
+      state: 'dispatching',
+      cancelRequested: false,
+      deliveryClosed: false,
+      hostSettled: false,
+      hostSettledPromise: Promise.withResolvers<void>(),
+      completion: Promise.withResolvers<void>(),
+      checkpointSeen: false,
+      factConflict: false,
+    }
+    claim.commandOperation = op
+    const onAbort = (): void => {
+      op.deliveryClosed = true
+      this.requestCommandCancel(claim, op)
+    }
+    requestSignal.addEventListener('abort', onAbort, { once: true })
+    op.requestAbortDisposer = () => requestSignal.removeEventListener('abort', onAbort)
+    let official: Promise<unknown>
+    try {
+      if (op.cancelRequested) throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP command request was cancelled before dispatch', JSONRPC_INVALID_PARAMS)
+      official = route.kind === 'compact'
+        ? access.executeManualCompact(agent, session, op.executionSignal)
+        : access.executeStandaloneCommand(agent, session, route.line, op.executionSignal)
+    } catch (error) {
+      this.settleCommandSlot(claim, op)
+      throw this.mapHostCommandError(error)
+    }
+    op.state = 'executing'
+    try {
+      const settlement: AcpCommandSettlement = await official.then(
+        value => ({ kind: 'resolved' as const, value }),
+        error => ({ kind: 'rejected' as const, error }),
+      )
+      op.settlement = settlement
+      op.hostSettled = true
+      op.state = 'host-settled'
+      op.hostSettledPromise.resolve()
+      const facts: AcpCompactObservedFacts = {
+        ...op.compactionId === undefined ? {} : { compactionId: op.compactionId },
+        ...op.startSeq === undefined ? {} : { startSeq: op.startSeq },
+        ...op.summarySeq === undefined ? {} : { summarySeq: op.summarySeq },
+        ...op.endSeq === undefined ? {} : { endSeq: op.endSeq },
+        ...op.endError === undefined ? {} : { endError: op.endError },
+        checkpointSeen: op.checkpointSeen,
+        conflict: op.factConflict,
+      }
+      const outcome = route.kind === 'compact'
+        ? classifyCompactOutcome(settlement, facts, isAcpCompactAbort(op.controller.signal))
+        : classifyStandaloneOutcome(settlement)
+      if (!op.deliveryClosed && !requestSignal.aborted) {
+        await this.deliverCommandOutcome(claim, op, outcome, sendUpdate)
+      }
+      op.state = 'delivery-settled'
+      if (outcome.kind === 'failure') throw this.commandOutcomeError(outcome)
+      return { stopReason: outcome.kind === 'cancelled' ? 'cancelled' : 'end_turn' }
+    } finally {
+      this.settleCommandSlot(claim, op)
+    }
+  }
+
+  /** Release one exact command slot and its waiters, never a newer operation. */
+  private settleCommandSlot(claim: ViewClaim, op: AcpOwnedCommand): void {
+    op.requestAbortDisposer?.()
+    op.requestAbortDisposer = undefined
+    if (claim.commandOperation === op) claim.commandOperation = undefined
+    op.completion.resolve()
+    this.notifyWorkSettled()
+  }
+
+  /**
+   * Deliver the command's own standard result AFTER every compaction update
+   * already queued by the official synchronous publication. The bounded tail is
+   * the existing ordered sink; the result task is the actual delivery receipt.
+   */
+  private async deliverCommandOutcome(
+    claim: ViewClaim,
+    op: AcpOwnedCommand,
+    outcome: AcpCommandOutcome,
+    sendUpdate: (update: SessionUpdate) => Promise<void>,
+  ): Promise<void> {
+    if (outcome.kind === 'failure' || outcome.kind === 'cancelled') return
+    const text = outcome.text
+    if (text === undefined || text.length === 0) return
+    let delivered = false
+    try {
+      await this.enqueueProjectionTask(claim, async () => {
+        if (op.deliveryClosed || claim.commandOperation !== op || !this.projectionCurrent(claim)) return
+        await sendUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          messageId: op.messageId,
+          content: { type: 'text', text },
+        })
+        delivered = true
+      })
+    } catch {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_COMMAND_OUTPUT_FAILED',
+        'the command result could not be delivered on the ACP connection',
+        JSONRPC_INTERNAL_ERROR,
+      )
+    }
+    if (!delivered) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_COMMAND_OUTPUT_FAILED',
+        'the command result could not be delivered on the ACP connection',
+        JSONRPC_INTERNAL_ERROR,
+      )
+    }
+  }
+
+  /** Map one pre-dispatch Host access failure onto its stable ACP classification. */
+  private mapHostCommandError(error: unknown): LocalAcpViewError {
+    if (error instanceof AcpHostCommandError) {
+      switch (error.code) {
+        case 'stale':
+          return new LocalAcpViewError('LOCAL_ACP_COMMAND_STALE', 'the exact Host command identity changed before dispatch', JSONRPC_INVALID_PARAMS)
+        case 'unsupported':
+          return new LocalAcpViewError('LOCAL_ACP_COMMAND_UNSUPPORTED', 'this Host command is not supported by the ACP command contract', JSONRPC_INVALID_PARAMS)
+        case 'unavailable':
+          return new LocalAcpViewError('LOCAL_ACP_COMMAND_UNAVAILABLE', 'the approved Host service is unavailable', JSONRPC_INVALID_PARAMS)
+      }
+    }
+    this.diag.warn('local-acp.command.dispatch-failed', {
+      kind: error instanceof Error ? error.name : typeof error,
+      ...typeof (error as { readonly code?: unknown } | null)?.code === 'string'
+        ? { code: (error as { readonly code: string }).code }
+        : {},
+    })
+    return new LocalAcpViewError('LOCAL_ACP_COMMAND_INDETERMINATE', 'the command could not be dispatched', JSONRPC_INTERNAL_ERROR)
+  }
+
+  /** Map one classified command failure onto the existing View error boundary. */
+  private commandOutcomeError(outcome: Extract<AcpCommandOutcome, { readonly kind: 'failure' }>): LocalAcpViewError {
+    const rpcCode = outcome.code === 'LOCAL_ACP_COMMAND_BUSY'
+      || outcome.code === 'LOCAL_ACP_COMMAND_UNSUPPORTED'
+      || outcome.code === 'LOCAL_ACP_COMMAND_INVALID_INPUT'
+      || outcome.code === 'LOCAL_ACP_COMMAND_STALE'
+      || outcome.code === 'LOCAL_ACP_COMMAND_UNAVAILABLE'
+      ? JSONRPC_INVALID_PARAMS
+      : JSONRPC_INTERNAL_ERROR
+    return new LocalAcpViewError(outcome.code, outcome.text ?? outcome.message, rpcCode)
+  }
+
+  /**
+   * The ONE ACP cancellation seat for a command operation. The intent is
+   * synchronous; the actual compact abort decision is deferred exactly one
+   * microtask and re-checks the CURRENT slot and this operation's own commit
+   * fact. A standalone command is never aborted after dispatch.
+   */
+  private requestCommandCancel(claim: ViewClaim, op: AcpOwnedCommand): void {
+    if (op.hostSettled || op.cancelRequested) return
+    op.cancelRequested = true
+    if (op.state === 'dispatching') return
+    if (op.kind === 'standalone') return
+    queueMicrotask(() => {
+      if (this.claims.get(claim.sessionId) !== claim || claim.commandOperation !== op || op.hostSettled) return
+      if (op.summarySeq !== undefined) return
+      op.controller.abort(ACP_COMPACT_CANCEL_REASON)
+    })
+  }
+
+  /**
+   * Revalidate one ALREADY DELIVERED Skill intention against the exact live
+   * registry, loader composition and effective cwd. The read is bounded by its
+   * own preflight controller plus the claim's read lifetime; it is not a Host
+   * write and creates no second operation registry.
+   */
+  private async preflightAdvertisedSkill(
+    claim: ViewClaim,
+    flight: InflightPrompt,
+    access: HostAcpSessionAccess,
+    name: string,
+    epoch: number,
+  ): Promise<'ok' | 'cancelled'> {
+    const controller = new AbortController()
+    flight.skillPreflightAbort = controller
+    const signal = AbortSignal.any([controller.signal, claim.readAbort.signal])
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    try {
+      const catalog = await access.readNativeSkills(agent, session, signal)
+      if (controller.signal.aborted || flight.cancelRequested || flight.deliveryClosed) return 'cancelled'
+      if (claim.readAbort.signal.aborted) {
+        throw new LocalAcpViewError('LOCAL_ACP_COMMAND_UNAVAILABLE', 'the ACP view stopped its read before the Skill settled', JSONRPC_INVALID_PARAMS)
+      }
+      if (this.claims.get(claim.sessionId) !== claim || claim.exactAgent !== agent || claim.exactSession !== session
+        || (claim.catalogEpoch ?? 0) !== epoch || claim.replay !== undefined) {
+        throw new LocalAcpViewError('LOCAL_ACP_COMMAND_STALE', 'the advertised Skill changed before dispatch', JSONRPC_INVALID_PARAMS)
+      }
+      if (catalog.kind !== 'available' || !catalog.skills.some(skill => skill.name === name)) {
+        throw new LocalAcpViewError('LOCAL_ACP_COMMAND_STALE', 'the advertised Skill is no longer available on this exact Agent', JSONRPC_INVALID_PARAMS)
+      }
+      // Host command precedence is re-read synchronously after the await: a
+      // command registered under the same name wins over the Skill intention.
+      let commands: AcpCommandCatalogRead
+      try {
+        commands = access.readCommandCatalog(agent, session)
+      } catch {
+        throw new LocalAcpViewError('LOCAL_ACP_COMMAND_UNAVAILABLE', 'the Host command registry could not be re-read', JSONRPC_INVALID_PARAMS)
+      }
+      if (commands.effectiveNames.includes(name)) {
+        throw new LocalAcpViewError('LOCAL_ACP_COMMAND_STALE', 'a Host command now shadows the advertised Skill', JSONRPC_INVALID_PARAMS)
+      }
+      return 'ok'
+    } catch (error) {
+      if (controller.signal.aborted || flight.cancelRequested) return 'cancelled'
+      throw error
+    } finally {
+      if (flight.skillPreflightAbort === controller) flight.skillPreflightAbort = undefined
+    }
+  }
+
   async promptSession(
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
@@ -2920,15 +3469,26 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         JSONRPC_INVALID_PARAMS,
       )
     }
-    if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) {
-      // A previous accepted Prompt still owes a Host terminal fact: the View
-      // must not stack a second Host responsibility on top of it (v1.1 §5.D).
+    if (claim.inflight !== undefined || claim.commandOperation !== undefined
+      || claim.unclaimedHostObligation !== undefined || claim.closing !== undefined) {
+      // A previous accepted Prompt/command still owes a Host terminal fact: the
+      // View must not stack a second Host responsibility on top of it.
       throw promptError('LOCAL_ACP_PROMPT_IN_FLIGHT', 'a prompt is already in flight for this session view', JSONRPC_INVALID_PARAMS)
     }
     const content = validatePromptContent(request.prompt, imageEnabled)
     if (requestSignal.aborted) {
       throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP prompt request was aborted before admission', JSONRPC_INVALID_PARAMS)
     }
+    const routed = this.classifyCommandRoute(claim, access, request.prompt)
+    if (routed.route.kind === 'error') {
+      throw new LocalAcpViewError(routed.route.code, routed.route.message, JSONRPC_INVALID_PARAMS)
+    }
+    if (routed.route.kind === 'standalone' || routed.route.kind === 'compact') {
+      return await this.dispatchCommand(claim, access, routed.route, requestSignal, sendUpdate)
+    }
+    const skillPreflight = routed.route.kind === 'skill'
+      ? { name: routed.route.name, epoch: routed.epoch }
+      : undefined
     // A View is only a BORROWER: it keeps no claim on the Agent's lifetime, so
     // the exact identity verified at attach time must STILL be current before a
     // prompt is dispatched. Otherwise the official Controller would cold-resume
@@ -3013,6 +3573,49 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     requestSignal.addEventListener('abort', onAbort, { once: true })
     flight.detachAbort = () => requestSignal.removeEventListener('abort', onAbort)
     claim.inflight = flight
+
+    if (skillPreflight !== undefined) {
+      let preflight: 'ok' | 'cancelled'
+      try {
+        preflight = await this.preflightAdvertisedSkill(claim, flight, access, skillPreflight.name, skillPreflight.epoch)
+      } catch (error) {
+        flight.settleAdmission()
+        this.failPrompt(claim, flight, error instanceof LocalAcpViewError
+          ? error
+          : error instanceof AcpHostCommandError
+            ? this.mapHostCommandError(error)
+            : new LocalAcpViewError(
+              'LOCAL_ACP_COMMAND_UNAVAILABLE',
+              'the advertised Skill could not be revalidated before dispatch',
+              JSONRPC_INVALID_PARAMS,
+            ))
+        return await flight.settled.promise
+      }
+      if (preflight === 'cancelled') {
+        // No Host insertion exists: settle the admission first so the generic
+        // failure path cannot plant an unclaimed-Host obligation.
+        flight.settleAdmission()
+        this.completePrompt(claim, flight, { stopReason: 'cancelled' })
+        return await flight.settled.promise
+      }
+      // The preflight await may have outlived the provenance read at admission.
+      const currentBeforeDispatch = access.currentTurn(request.sessionId, claim.exactAgent, claim.exactSession)
+      if (currentBeforeDispatch.kind === 'stale') {
+        flight.settleAdmission()
+        this.failPrompt(claim, flight, promptError(
+          'LOCAL_ACP_PROMPT_STALE_AGENT',
+          'the borrowed turn identity changed during the Skill preflight',
+          JSONRPC_INVALID_PARAMS,
+        ))
+        return await flight.settled.promise
+      }
+      flight.turnProvenance = currentBeforeDispatch.openTurn === null
+        ? undefined
+        : {
+          turn: currentBeforeDispatch.openTurn,
+          origin: claim.retiringTurn?.turn === currentBeforeDispatch.openTurn ? claim.retiringTurn.origin : 'tui',
+        }
+    }
 
     try {
       await access.prompt({
@@ -3189,12 +3792,79 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * Record the exact compact facts of THIS operation before any projection
+   * callback runs. The start is captured only inside the synchronous dispatch
+   * window; every later fact must carry the SAME operation's compactionId.
+   */
+  private observeCommandSessionEvent(claim: ViewClaim, event: AcpSessionEventLike): void {
+    const op = claim.commandOperation
+    if (op === undefined || op.kind !== 'compact') return
+    const data = event.data as {
+      readonly compactionId?: unknown
+      readonly sourceCommandId?: unknown
+      readonly turn?: unknown
+      readonly error?: unknown
+      readonly source?: { readonly kind?: unknown; readonly compactionId?: unknown }
+    } | undefined
+    if (event.type === 'compaction/start') {
+      if (typeof data?.compactionId !== 'string' || data.turn !== null || data.sourceCommandId !== undefined) return
+      if (op.compactionId === undefined) {
+        // Only the synchronous dispatch window may establish the identity.
+        if (op.state !== 'dispatching') return
+        op.compactionId = data.compactionId
+        op.startSeq = event.seq
+        return
+      }
+      if (data.compactionId !== op.compactionId) op.factConflict = true
+      return
+    }
+    if (op.compactionId === undefined) return
+    if (event.type === 'compaction/summary') {
+      if (typeof data?.compactionId !== 'string' || data.compactionId !== op.compactionId
+        || op.startSeq === undefined || event.seq <= op.startSeq) {
+        op.factConflict = true
+        return
+      }
+      if (op.summarySeq === undefined) op.summarySeq = event.seq
+      else if (op.summarySeq !== event.seq) op.factConflict = true
+      return
+    }
+    if (event.type === 'compaction/end') {
+      if (typeof data?.compactionId !== 'string' || data.compactionId !== op.compactionId
+        || op.startSeq === undefined || event.seq <= (op.summarySeq ?? op.startSeq)) {
+        op.factConflict = true
+        return
+      }
+      if (op.endSeq === undefined) {
+        op.endSeq = event.seq
+        op.endError = typeof data.error === 'string' ? data.error : undefined
+      } else if (op.endSeq !== event.seq) {
+        op.factConflict = true
+      }
+      return
+    }
+    if (event.type === 'user/message'
+      && data?.source?.kind === 'compact-checkpoint'
+      && data.source.compactionId === op.compactionId) {
+      op.checkpointSeen = true
+    }
+  }
+
+  /**
    * One committed Session event. Only the exact Session object and the owned
    * turn are projected; every other event is inert for this View.
    */
   onSessionEvent(session: object, event: AcpSessionEventLike): void {
     for (const claim of this.claims.values()) {
       if (claim.exactSession !== session) continue
+      // The command facts are recorded FIRST: a compaction start/summary/end
+      // can be published synchronously inside the official call before the
+      // read-only projection task is queued, and every later classification
+      // must see them even when the projection sink is absent or stalled.
+      this.observeCommandSessionEvent(claim, event)
+      if (event.type === 'working-directory/change' || event.type === 'agent-preset/selected') {
+        this.invalidateCatalog(claim)
+      }
       // A committed model/selection record is the ONLY config-update trigger.
       // It re-reads the Host authority asynchronously; the per-claim chain and
       // the post-read identity checks keep a late result from replacing a
@@ -3867,6 +4537,32 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // reverse Form of this claim and its read-only projection end here.
       this.stopProjectionOutput(claim)
       this.releaseQuestionForms(claim)
+      const command = claim.commandOperation
+      if (command !== undefined) {
+        // The disposed Agent's own cancellation is an INDEPENDENT Host signal;
+        // the ACP compact controller is only an additional scoped intent. The
+        // original operation Promise remains the terminal, so the exact lease
+        // is not retired before it settles and no replacement Agent is used.
+        command.deliveryClosed = true
+        this.requestCommandCancel(claim, command)
+        claim.detachedWithFence = true
+        if (claim.connectionIdentity.phase !== 'closed') claim.connectionIdentity.phase = 'idle'
+        runDetached('local acp: disposed command terminal', async () => {
+          await command.completion.promise
+          if (this.claims.get(claim.sessionId) !== claim) return
+          if (claim.mcpLease !== undefined && this.access !== undefined) this.requestMcpRetire(claim, this.access)
+          if (claim.commandOperation !== undefined || claim.inflight !== undefined
+            || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+            || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
+            claim.detachedWithFence = true
+            this.notifyWorkSettled()
+            return
+          }
+          this.claims.delete(claim.sessionId)
+          this.notifyWorkSettled()
+        }, { diag: this.diag })
+        continue
+      }
       const flight = claim.inflight
       if (flight !== undefined && !flight.settledDone) {
         // Disposal ends this flight's Host work for good: the disposed Agent
@@ -4065,6 +4761,32 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         claim.detachedWithFence = true
         continue
       }
+      const command = claim.commandOperation
+      if (command !== undefined) {
+        // A command owns the shared Session lease until its ORIGINAL execution
+        // Promise settles. EOF/Off must not retire scoped MCP or release the
+        // claim first; the observer stays installed and the exact operation is
+        // still cancellable after delivery closed.
+        command.deliveryClosed = true
+        this.requestCommandCancel(claim, command)
+        runDetached('local acp: command disconnect', async () => {
+          await command.completion.promise
+          if (this.claims.get(sessionId) !== claim) return
+          if (claim.mcpLease !== undefined && bound !== undefined) {
+            this.requestMcpRetire(claim, bound)
+          }
+          if (claim.commandOperation !== undefined || claim.inflight !== undefined
+            || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+            || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
+            claim.detachedWithFence = true
+            this.notifyWorkSettled()
+            return
+          }
+          this.claims.delete(sessionId)
+          this.notifyWorkSettled()
+        }, { diag: this.diag })
+        continue
+      }
       if (claim.mcpLease !== undefined && bound !== undefined) this.requestMcpRetire(claim, bound)
       const flight = claim.inflight
       if (flight !== undefined) {
@@ -4145,7 +4867,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * retired-turn fence that must survive until its own facts end it.
    */
   private releaseClaimIfUnfenced(sessionId: string, claim: ViewClaim): void {
-    if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+    if (claim.retiringTurn !== undefined || claim.commandOperation !== undefined
+      || claim.unclaimedHostObligation !== undefined
       || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
       // The fence/obligation survives for its own facts; the claim dies with it.
       claim.detachedWithFence = true
@@ -4159,7 +4882,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Release one disconnect claim after its flight settled. */
   private releaseClaimAfterDisconnect(sessionId: string, claim: ViewClaim): void {
-    if (claim.mcpLease !== undefined || claim.mcpMountPending === true) {
+    if (claim.commandOperation !== undefined
+      || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
       claim.detachedWithFence = true
       this.notifyWorkSettled()
       return
@@ -4293,6 +5017,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim.requestElicitation = channels?.requestElicitation
     claim.notifyProjection = channels?.notifyProjection
     claim.capabilities = channels?.capabilities
+    // Every new View starts with a fresh complete catalog. The first read is
+    // scheduled after the attach/load barrier, never from a previous claim.
+    claim.catalogEpoch = 0
+    claim.catalogDirty = claim.notifyProjection !== undefined
   }
 
   /**
@@ -4302,7 +5030,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * a stale operation's late release must not delete the newer claim.
    */
   private releaseReservation(state: ConnectionViewState, claim: ViewClaim): void {
-    if (claim.mcpMountPending === true || claim.mcpLease !== undefined) {
+    if (claim.commandOperation !== undefined
+      || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
       this.notifyWorkSettled()
       return

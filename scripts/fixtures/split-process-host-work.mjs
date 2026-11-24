@@ -67,6 +67,9 @@ const SCENARIOS = new Set([
   // (official `todo_write`, one real `subagent` child, provider usage, then a
   // step-pressure compaction) are the durable facts an ACP client consumes.
   'acp-projection',
+  // G-ACP2-PR3A commands: one plain, large assistant answer per prompt with no
+  // tool/subagent side effects, so an explicit `/compact` is deterministic.
+  'acp-command',
   // G-ACP2 transient streaming: the ONLY scripted provider whose deltas and
   // durable block agree. Its first delta is held so a case can prove the ACP
   // chunk precedes the durable append, and one prompt selects a deliberately
@@ -1561,6 +1564,22 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `po4c answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `po4c answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'acp-command') {
+      if (options.purpose === 'compaction') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'acp command compaction summary' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'acp command compaction summary' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const answer = `acp command answer ${token} ${'acp command long context '.repeat(6_000)}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
