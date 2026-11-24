@@ -56,6 +56,16 @@ async function waitForPattern(client, pattern, label, timeoutMs = 90_000) {
   throw new SplitSmokeAssertionError(`${label}: wanted ${String(pattern)}; frame=${JSON.stringify(await client.viewport())}`)
 }
 
+async function waitForNoPattern(client, pattern, label, timeoutMs = 30_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const frame = await frameOf(client)
+    if (!pattern.test(frame)) return frame
+    await sleep(120)
+  }
+  throw new SplitSmokeAssertionError(`${label}: still matched ${String(pattern)}; frame=${JSON.stringify(await client.viewport())}`)
+}
+
 async function selectFrame(client, predicate, label, limit = 24) {
   for (let step = 0; step < limit; step += 1) {
     const frame = await frameOf(client)
