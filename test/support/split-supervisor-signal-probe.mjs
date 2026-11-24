@@ -383,6 +383,43 @@ function identityLiveness(kernel, pid, birth) {
   return kernel.serialize(observation.identity) === birth ? 'live' : 'foreign'
 }
 
+/**
+ * Capture the REAL kernel identity of the probe-owned Vitest main right after
+ * spawn. Every destructive signal re-reads this identity and the current
+ * parent table before it acts, so PID reuse or a re-parented process is a
+ * controlled failure, never a signal to an unintended process.
+ */
+function captureProbeMainIdentity(kernel, spawned, label) {
+  if (!Number.isInteger(spawned.pid) || spawned.pid <= 0) {
+    fail(`${label}: the spawn returned no PID`)
+  }
+  if (spawned.exitCode !== null || spawned.signalCode !== null) {
+    fail(`${label} already exited before its identity was captured`)
+  }
+  let observation
+  try {
+    observation = kernel.read(spawned.pid)
+  } catch (error) {
+    fail(`${label} kernel identity cannot be read: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (observation.kind !== 'alive') fail(`${label} is not a live kernel process at capture`)
+  return { pid: spawned.pid, birth: kernel.serialize(observation.identity) }
+}
+
+function assertProbeMainIdentity(kernel, captured, expectedPid, label) {
+  if (captured === undefined) fail(`${label}: the probe did not capture the spawn identity`)
+  if (captured.pid !== expectedPid) fail(`${label}: the captured PID is not the probe-owned Vitest main`)
+  if (identityLiveness(kernel, captured.pid, captured.birth) !== 'live') {
+    fail(`${label} is not the live kernel process captured at spawn`)
+  }
+  const rows = processTable()
+  const row = rows.get(captured.pid)
+  if (row === undefined || row.ppid !== process.pid) {
+    fail(`${label} is no longer a direct child of this probe`)
+  }
+  return rows
+}
+
 function processTable() {
   let listing
   try {
@@ -421,6 +458,14 @@ function installerProcessRunning(receipt) {
 
 function checkProcessReceiptResources(receipt, kernel) {
   const problems = []
+  if (!Number.isInteger(receipt.worker?.ppid) || receipt.worker.ppid <= 0) {
+    problems.push('the receipt Worker has no real PPID')
+  }
+  if (!Number.isInteger(receipt.supervisor?.ppid) || receipt.supervisor.ppid <= 0) {
+    problems.push('the receipt Supervisor has no real PPID')
+  } else if (receipt.worker?.pid !== undefined && receipt.supervisor.ppid !== receipt.worker.pid) {
+    problems.push('the receipt Supervisor PPID is not the Scene Worker')
+  }
   if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
@@ -568,6 +613,8 @@ if (sentinel.pid === undefined) fail('could not start the external sentinel proc
 
 let child
 let vitestPid
+/** The probe-owned Vitest main identity captured immediately after spawn. */
+let probeMainIdentity
 let siblingChild
 let siblingRunId
 let siblingStopFile
@@ -674,6 +721,7 @@ let siblingReceipt
 try {
   let deadline
   const kernel = processMode ? await loadKernelHelpers() : undefined
+  if (processMode) probeMainIdentity = captureProbeMainIdentity(kernel, child, 'probe-owned Vitest main')
   if (upgradeMode && siblingChild !== undefined) {
     siblingReceipt = await waitUntil(() => {
       const current = latestUpgradeReceipt(tmpBase, siblingRunId)
@@ -705,8 +753,20 @@ try {
       if (point.detail?.workerPid !== ready.worker?.pid) {
         fail('process-main-signal: the reported checkpoint does not name the receipt Worker')
       }
+      if (ready.worker?.ppid !== vitestPid) {
+        fail('process-main-signal: the receipt Worker is not a child of the probe-owned Vitest main')
+      }
+      if (identityLiveness(kernel, ready.worker?.pid, ready.worker?.birth) !== 'live') {
+        fail('process-main-signal: the receipt Worker is not the live kernel process it registered')
+      }
       // The signal goes to the REAL Vitest main this probe spawned, never to the
-      // Worker that the receipt names.
+      // Worker that the receipt names. The spawn identity and the current
+      // parent edge are re-read immediately before the signal.
+      const mainRows = assertProbeMainIdentity(kernel, probeMainIdentity, vitestPid, 'probe-owned Vitest main')
+      const workerRow = mainRows.get(ready.worker?.pid)
+      if (workerRow === undefined || workerRow.ppid !== vitestPid) {
+        fail('process-main-signal: the receipt Worker is no longer a child of the probe-owned Vitest main')
+      }
       if (child.kill(signal) === false) fail('could not signal the Vitest main process')
       deadline = Date.now() + 240_000
     } else {
@@ -782,10 +842,16 @@ try {
         receipt = current
       }
       killedWorkerPid = workerKillTarget(receipt, at, vitestPid)
-      // Tight, immediately-preceding identity check: the Worker birth, PPID and
-      // the probe-owned Vitest main must still be the registered identities.
+      // Tight, immediately-preceding identity check: the Worker birth, the
+      // probe-owned Vitest main and the current Worker -> main parent edge must
+      // all still be the registered identities and the live process tree.
+      const rows = assertProbeMainIdentity(kernel, probeMainIdentity, vitestPid, 'probe-owned Vitest main')
       if (identityLiveness(kernel, killedWorkerPid, receipt.worker?.birth) !== 'live') {
         fail(`worker PID ${String(killedWorkerPid)} is not the live kernel process the receipt registered`)
+      }
+      const workerRow = rows.get(killedWorkerPid)
+      if (workerRow === undefined || workerRow.ppid !== vitestPid) {
+        fail(`worker PID ${String(killedWorkerPid)} is no longer a child of the probe-owned Vitest main`)
       }
       if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
@@ -1215,6 +1281,7 @@ try {
     scopeId: processMode ? receipt.scope?.scopeId : undefined,
     seat: processMode ? receipt.scope?.hostSeat : undefined,
     workerBirth: processMode ? receipt.worker?.birth : undefined,
+    supervisorPpid: processMode ? receipt.supervisor?.ppid : undefined,
     supervisorBirth: processMode ? receipt.supervisor?.birth : undefined,
     install: processMode ? receipt.install : undefined,
     sibling: processMode && siblingChild !== undefined ? { runId: siblingRunId, pid: siblingChild.pid } : undefined,

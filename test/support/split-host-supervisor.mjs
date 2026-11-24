@@ -355,6 +355,7 @@ function initReceipt(tmpBase, worker, extra = {}) {
     runId: RUN_ID,
     supervisor: {
       pid: process.pid,
+      ppid: process.ppid,
       pgrp: getPgrp() ?? process.pid,
       birth: workerKernelBirth(process.pid),
       startedAt: SUPERVISOR_STARTED_AT,
@@ -1001,8 +1002,86 @@ function syncFallbackHostsReceipt() {
   writeReceipt({ fallbackHosts })
 }
 
+/**
+ * The authoritative ownership proof of ONE discovery-fallback Host in a
+ * process Scene, taken immediately before a signal: uid, the live kernel
+ * identity, the detached group/session it leads, the installed Host entry
+ * under this Scene root, the registered Client scratch, this Scene's DSH home
+ * and the product scope registry naming that exact live process.
+ *
+ * Any mismatch or unreadable fact is unknown ownership: the caller fails
+ * closed (NOT_QUIESCED), never falls back to a bare PID signal.
+ */
+function assertProcessFallbackOwnership(pid, scratch, registered, reason) {
+  if (processScope === undefined || scene?.kind !== 'process') {
+    throw new Error(`${reason}: the process Scene scope is not recorded`)
+  }
+  const snapshot = nativeProcessSnapshot(pid)
+  if (snapshot === null) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} has no readable kernel identity`)
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && snapshot.uid !== uid) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} is not owned by this user`)
+  }
+  const hostEntry = realpathSync(scene.installFacts.entries.host)
+  if (!snapshot.command.includes('local-host.mjs')
+    || !snapshot.command.includes(scene.workDir)
+    || !snapshot.command.includes(hostEntry)) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} does not run this Scene's installed Host entry`)
+  }
+  if (processEnvironmentValue(pid, 'SPLIT_PROCESS_SCRATCH') !== scratch) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} does not carry the registered Client scratch`)
+  }
+  if (processEnvironmentValue(pid, 'DSH_HOME') !== scene.installation.dshHome) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} does not carry this Scene's DSH home`)
+  }
+  const observation = readKernelProcess(pid)
+  if (observation.kind !== 'alive') {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} has no live kernel identity`)
+  }
+  const identity = observation.identity
+  // The detached Host is the leader of its OWN process group AND session; only
+  // such a group can be signalled as one owned unit.
+  if (identity.pgid !== pid || identity.sid !== pid) {
+    throw new Error(`${reason}: fallback Host PID ${String(pid)} is not the detached group/session leader this Scene created`)
+  }
+  if (registered !== undefined) {
+    if (registered.birth !== snapshot.birth) {
+      throw new Error(`${reason}: fallback Host PID ${String(pid)} is not the kernel process this Scene registered`)
+    }
+    if (registered.scratch !== scratch) {
+      throw new Error(`${reason}: fallback Host PID ${String(pid)} does not match its registered scratch`)
+    }
+  }
+  let registry
+  try {
+    registry = JSON.parse(readFileSync(join(processScope.dir, 'instance.json'), 'utf8'))
+  } catch (error) {
+    throw new Error(`${reason}: the product scope registry for fallback Host PID ${String(pid)} cannot be read (${boundedError(error)})`)
+  }
+  if (registry?.scopeId !== processScope.scopeId || registry?.hostPid !== pid) {
+    throw new Error(`${reason}: the product scope registry does not name fallback Host PID ${String(pid)} in this scope`)
+  }
+  if (registered !== undefined && registry.instanceId !== registered.instanceId) {
+    throw new Error(`${reason}: the product scope registry names another Host instance than the one this Scene registered`)
+  }
+  if (registry.schema === 1) {
+    if (registry.hostStarttime !== readHostStarttime(pid)) {
+      throw new Error(`${reason}: the registry Host starttime is not the live kernel birth`)
+    }
+  } else if (registry.schema === 2) {
+    if (sameKernelProcess(registry.hostKernelIdentity, observation) !== 'same') {
+      throw new Error(`${reason}: the registry Host kernel identity is not the live kernel identity`)
+    }
+  } else {
+    throw new Error(`${reason}: the product scope registry carries an unsupported Host identity schema`)
+  }
+  return { identity, birth: snapshot.birth, registry }
+}
+
 /** Reclaim ONE detached discovery-fallback Host by its real kernel identities. */
-async function reclaimFallbackHost(pid, origin, scratch, reason) {
+async function reclaimFallbackHost(pid, origin, scratch, reason, processOwner) {
   const command = processCommandLine(pid)
   if (command === undefined || !command.includes('local-host.mjs')) {
     throw new Error(`${reason}: the fallback Host candidate ${String(pid)} is no longer a Host entry process`)
@@ -1025,27 +1104,46 @@ async function reclaimFallbackHost(pid, origin, scratch, reason) {
     reclaimed: false,
     exitObserved: undefined,
   }
-  // A detached Host candidate is its own process-group leader.
-  try {
-    process.kill(-pid, 'SIGTERM')
-  } catch {
-    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+  const strict = processOwner === true
+    ? assertProcessFallbackOwnership(pid, scratch,
+      fallbackHosts.find(entry => entry.pid === pid && entry.starttime === starttime && entry.reclaimed !== true), reason)
+    : undefined
+  // A detached Host candidate is its own process-group leader. In a process
+  // Scene the strict proof above already rejected any other shape; there is no
+  // bare-PID fallback because a group-signal failure is not an ownership proof.
+  const signalGroup = signal => {
+    try {
+      process.kill(-pid, signal)
+    } catch (error) {
+      if (strict !== undefined) {
+        if (error?.code !== 'ESRCH') {
+          throw new Error(`${reason}: the owned fallback Host group ${String(pid)} could not be signalled (${String(error?.code ?? 'unknown')})`)
+        }
+        return false
+      }
+      try { process.kill(pid, signal) } catch { /* already gone */ }
+    }
+    return true
   }
+  signalGroup('SIGTERM')
   await waitForGroupGone(pid, TERM_GRACE_MS)
   if (processGroupAlive(pid)) {
-    try {
-      process.kill(-pid, 'SIGKILL')
-    } catch {
-      try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
-    }
+    signalGroup('SIGKILL')
     await waitForGroupGone(pid, KILL_GRACE_MS)
   }
   if (processGroupAlive(pid) || pidAlive(pid)) {
     throw new Error(`${reason}: the fallback Host ${String(pid)} is still alive after TERM/KILL`)
   }
-  const currentStarttime = readHostStarttime(pid)
-  if (currentStarttime !== undefined && currentStarttime !== starttime) {
-    throw new Error(`${reason}: the fallback Host PID ${String(pid)} was reused by another process during reclaim`)
+  if (strict !== undefined) {
+    const state = processIdentityState(strict.identity)
+    if (state !== 'gone' && state !== 'reused') {
+      throw new Error(`${reason}: the reclaimed fallback Host PID ${String(pid)} is still ${state}`)
+    }
+  } else {
+    const currentStarttime = readHostStarttime(pid)
+    if (currentStarttime !== undefined && currentStarttime !== starttime) {
+      throw new Error(`${reason}: the fallback Host PID ${String(pid)} was reused by another process during reclaim`)
+    }
   }
   record.reclaimed = true
   record.exitObserved = 'group-gone'
@@ -1082,7 +1180,7 @@ async function reclaimClientFallbackHosts(reason) {
       if (matched === undefined) {
         throw new Error(`${reason}: local Host process ${String(pid)} under the Scene root is not attributable to any registered Client`)
       }
-      reclaimed.push(await reclaimFallbackHost(pid, matched.origin, matched.scratch, reason))
+      reclaimed.push(await reclaimFallbackHost(pid, matched.origin, matched.scratch, reason, scene.kind === 'process'))
     }
   }
   await pass()
@@ -3139,8 +3237,8 @@ async function handleStartHost(message) {
     const hostScratch = join(scene.workDir, `host-scratch-${generationLabel}`)
     mkdirSync(hostScratch, { recursive: true, mode: 0o700 })
     // The curated install environment already carries the offline LLM patch;
-    // this Scene passes no workload scenario, no C1 variables and no arbitrary
-    // extra environment.
+    // this Scene passes no workload scenario, no workload variables and no
+    // arbitrary extra environment.
     env = {
       ...scene.installation.base.env,
       DSH_PI_TUI_ENTRY_RECORDS: '1',

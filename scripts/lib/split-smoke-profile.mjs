@@ -153,7 +153,25 @@ export function inspectImmutableSplitCandidate(explicitPath) {
       `the candidate tarball cannot be read (${String(error?.code ?? error?.name ?? 'unknown')})`)
   }
   const candidateSha256 = createHash('sha256').update(bytes).digest('hex')
-  const statAfter = identityOf(lstatSync(real))
+  // Independent post-read identity: canonical path, regular-file shape, single
+  // owner link and the stat identity captured before the read must all still
+  // describe the same immutable file.
+  let afterReal
+  try {
+    afterReal = realpathSync(real)
+  } catch (error) {
+    refuse('INPUT_CANDIDATE_CHANGED',
+      `the candidate path cannot be canonicalized after its bytes were read (${String(error?.code ?? error?.name ?? 'unknown')})`)
+  }
+  if (afterReal !== real) {
+    refuse('INPUT_CANDIDATE_CHANGED', 'the candidate path was replaced while its bytes were being read')
+  }
+  const after = lstatSync(real)
+  if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1
+    || (typeof process.getuid === 'function' && after.uid !== before.uid)) {
+    refuse('INPUT_CANDIDATE_CHANGED', 'the candidate file shape changed while its bytes were being read')
+  }
+  const statAfter = identityOf(after)
   if (statAfter.dev !== statBefore.dev || statAfter.ino !== statBefore.ino
     || statAfter.size !== statBefore.size || statAfter.mode !== statBefore.mode
     || statAfter.nlink !== statBefore.nlink) {

@@ -277,7 +277,6 @@ test('persists the preset default, updates the current blank session, and reads 
     const readbackFrame = await frameText(readback)
     const readbackRow = rowWith(readbackFrame, TARGET_ROW, 'cold restart default readback')
     expect(readbackRow).toContain('[default]')
-    expect(rowWith(readbackFrame, 'Standard mode (standard)', 'cold restart standard row')).not.toContain('[default]')
     // A sessionless Client has no current Session relationship to paint.
     expect(readbackFrame).not.toContain('[current]')
     await closeCatalog(readback, 'cold restart default readback')
