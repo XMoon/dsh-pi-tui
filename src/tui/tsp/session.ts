@@ -3173,9 +3173,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // belong to BOTH ancestors, so the walk covers `span.parts` (not only direct
     // message parts) and the top-level cluster blocks.
     const structure = projectTranscriptStructure(lastMessages)
+    // In Focus, a canonical Work emitted raw by a fail-open region has no
+    // materialized header: it must not mint a temporary Work grant. Derive the
+    // materialized owners from the SAME expanded projection the mapper uses.
+    const focusMaterializedWorkOwners = options.displayState?.preset === 'focus'
+      && lastTurnActivities !== undefined
+      ? new Set<TranscriptMessage>()
+      : undefined
+    if (focusMaterializedWorkOwners !== undefined && lastTurnActivities !== undefined) {
+      for (const block of projectFocus(lastMessages, lastTurnActivities, new Set(lastTurnActivities.keys()), true)) {
+        if (block.kind === 'work') focusMaterializedWorkOwners.add(block.span.owner)
+      }
+    }
     for (const block of structure) {
       if (block.kind === 'work') {
         if (!workSpanContains(block.span, message)) continue
+        if (focusMaterializedWorkOwners !== undefined
+          && !focusMaterializedWorkOwners.has(block.span.owner)) continue
         workOwners.add(block.span.owner)
         continue
       }

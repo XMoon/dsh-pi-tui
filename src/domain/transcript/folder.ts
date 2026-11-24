@@ -193,6 +193,17 @@ export function assistantLatestStepOf(activity: TurnActivity): number | undefine
 
 /** Whether an Assistant crossed an admitted human-steer boundary and is
  * therefore a persistent conversation answer rather than Focus process. */
+/** Whether the exact Assistant row's step has authoritative continuation
+ * evidence in the Fold: a real tool/call or step boundary after its
+ * settlement, or a later output that confirmed its streaming candidate. The
+ * Focus projection holds a latest-step settled Assistant back as the pending
+ * final ONLY when this fact is absent; presentation row kind/order never
+ * answers that question. */
+export function assistantStepIntermediateOf(activity: TurnActivity, message: TranscriptMessage): boolean {
+  const step = assistantStepOf(message)
+  return step !== undefined && (activity as MutableTurnActivity).intermediateAssistantSteps.has(step)
+}
+
 export function assistantCommittedBeforeSteer(
   activity: TurnActivity,
   message: TranscriptMessage,
@@ -1083,6 +1094,7 @@ export class TranscriptFolder {
         tools: new Map(),
         thinkingTail: '',
         confirmedSteps: new Set(),
+        intermediateAssistantSteps: new Set(),
         settledSteps: new Set(),
         firstVisibleAssistantTimes: new Map(),
         committedAnswerSteps: new Set(),
@@ -1434,6 +1446,9 @@ export class TranscriptFolder {
       : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
     activity.messageConfirmedStep = candidate.step
     activity.confirmedSteps.add(candidate.step)
+    // The candidate is now authoritatively intermediate: a real later
+    // tool/call, step boundary or later output proved the turn continues.
+    activity.intermediateAssistantSteps.add(candidate.step)
     activity.messageCandidate = undefined
   }
 
@@ -5018,6 +5033,16 @@ export class TranscriptFolder {
           }
         }
         this.usage.onStepStart(event.data.turn, event.data.step)
+        // A real NEW step after the latest settled Assistant proves that
+        // Assistant intermediate. This is step provenance, not a display-row
+        // guess; same-step retry/attempt fixes do not mark it.
+        const latestSettled = activity.lastAssistantStep
+        if (latestSettled !== undefined && event.data.step > latestSettled
+          && activity.settledSteps.has(latestSettled)
+          && !activity.intermediateAssistantSteps.has(latestSettled)) {
+          activity.intermediateAssistantSteps.add(latestSettled)
+          activity.revision += 1
+        }
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -5359,6 +5384,13 @@ export class TranscriptFolder {
         // last assistant step — the final-answer dedup depends on it
         // (review finding).
         activity.lastAssistantStep = Math.max(priorLast, event.data.step)
+        if (priorLast !== undefined && event.data.step > priorLast
+          && activity.settledSteps.has(priorLast)
+          && !activity.intermediateAssistantSteps.has(priorLast)) {
+          // A newer step's authoritative output proves the previous step
+          // intermediate; the latest step keeps its own decision.
+          activity.intermediateAssistantSteps.add(priorLast)
+        }
         if (staleForFocus) {
           // A stale durable settlement cannot reclaim candidate or final
           // ownership. It may still update the confirmed slot when that exact
@@ -5521,7 +5553,24 @@ export class TranscriptFolder {
               status: 'running',
             }
           }
-          this.confirmMessageCandidate(activity)
+          // A real tool/call proves the candidate intermediate ONLY when it is
+          // not a late event for an older step. Same-step text-then-call and a
+          // later-step call are valid continuation; an older-step late call is
+          // not. The settled-candidate case marks the step directly; the
+          // streaming case is confirmed by the existing candidate authority.
+          const candidate = activity.messageCandidate
+          if (candidate !== undefined) {
+            if (event.data.step >= candidate.step) {
+              this.confirmMessageCandidate(activity)
+            }
+          } else {
+            const latest = activity.lastAssistantStep
+            if (latest !== undefined && event.data.step >= latest
+              && activity.settledSteps.has(latest)
+              && !activity.intermediateAssistantSteps.has(latest)) {
+              activity.intermediateAssistantSteps.add(latest)
+            }
+          }
           this.syncMessage(activity)
           activity.revision += 1
         }

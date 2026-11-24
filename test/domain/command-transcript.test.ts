@@ -21,8 +21,9 @@ import test from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
-import { assistantLatestStepOf } from '../../src/domain/transcript/folder.ts'
+import { assistantLatestStepOf, assistantStepIntermediateOf } from '../../src/domain/transcript/folder.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
 import { classifyTranscriptMessage } from '../../src/domain/transcript/semantics.ts'
 
@@ -403,6 +404,95 @@ function toolResultAt(callId: string, text: string, seq: number, turn = 0, step 
     },
   }, seq)
 }
+
+test('the Fold marks a settled Assistant intermediate only from real execution events', () => {
+  const build = (): { folder: TranscriptFolder; assistant: TranscriptMessage } => {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      event('turn/start', { turn: 1 }, 0),
+      userMessage('fact prompt', 1, 1),
+      event('step/start', { turn: 1, step: 1 }, 2),
+      assistantMessage('FACT_ASSISTANT', 3, 1, 1),
+      event('step/end', { turn: 1, step: 1 }, 4),
+    ])
+    const assistant = folder.messages().find(message => message.kind === 'assistant' && message.text === 'FACT_ASSISTANT')
+    assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+    return { folder, assistant }
+  }
+  const marked = (apply: (folder: TranscriptFolder) => void): boolean => {
+    const { folder, assistant } = build()
+    apply(folder)
+    const activity = folder.turnActivities().get(1)
+    assert.ok(activity !== undefined)
+    return assistantStepIntermediateOf(activity, assistant)
+  }
+  assert.equal(marked(() => {}), false, 'a settled Assistant alone is not intermediate')
+  assert.equal(marked(folder => folder.apply([
+    event('tool/call', { turn: 1, step: 1, callId: ToolCallId('fact-call'), name: 'read', arguments: '{}' }, 5),
+  ])), true, 'a real same-step tool/call after text is valid continuation')
+  assert.equal(marked(folder => folder.apply([
+    event('step/start', { turn: 1, step: 2 }, 5),
+  ])), true, 'a real later step boundary is valid continuation')
+  assert.equal(marked(folder => folder.apply([
+    event('command/run', { commandId: CommandId('fact-cmd'), name: 'model', source: { kind: 'user' } }, 5),
+    event('command/done', { commandId: CommandId('fact-cmd'), kind: 'success' }, 6),
+  ])), false, 'an independent control event never confirms a step')
+  assert.equal(marked(folder => folder.apply([
+    event('llm/retry', {
+      retryId: 'fact-retry' as RetryId, turn: 1, step: 2, provider: 'p', mode: 'normal',
+      policyKey: 'test', retry: 1, maxRetries: 2, delayMs: 1_000, failure: { code: 'X', message: 'x' },
+    }, 5),
+  ])), false, 'a retry diagnostic never confirms a step')
+  assert.equal(marked(folder => folder.apply([
+    event('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('fact-orphan'), role: 'tool', toolCallId: ToolCallId('fact-orphan-call'),
+        content: [{ type: 'text', text: 'orphan' }], source: { kind: 'tool', callId: ToolCallId('fact-orphan-call') },
+      },
+    }, 5),
+  ])), false, 'a result-only orphan never confirms a step')
+  assert.equal(marked(folder => folder.apply([
+    // A late OLDER-step assistant (step 0) must not confirm the settled step 1.
+    assistantMessage('OLDER_FACT_ASSISTANT', 5, 1, 0),
+  ])), false, 'a late older-step Assistant never confirms the latest step')
+})
+
+test('a late older-step reasoning row never releases the latest pending final', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 1 }, 0),
+    userMessage('reasoning prompt', 1, 1),
+    event('step/start', { turn: 1, step: 2 }, 2),
+    assistantMessage('REASONING_PENDING_LATEST', 3, 1, 2),
+    event('step/end', { turn: 1, step: 2 }, 4),
+    event('command/run', { commandId: CommandId('reason-cmd'), name: 'model', source: { kind: 'user' } }, 5),
+    event('command/done', { commandId: CommandId('reason-cmd'), kind: 'success', text: 'switched' }, 6),
+    // A late older-step message with reasoning: the Fold restores a Thinking
+    // row, but no real execution event confirms the latest step.
+    event('assistant/message', {
+      turn: 1, step: 1,
+      stream: [],
+      message: {
+        id: MessageId('reason-older'), role: 'assistant',
+        content: [{ type: 'reasoning', text: 'older reasoning' }, { type: 'text', text: 'OLDER_REASONING_TEXT' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 7),
+  ])
+  const messages = folder.messages()
+  assert.ok(messages.some(message => message.kind === 'thinking' && message.text === 'older reasoning'),
+    'fixture: the Fold restored the older-step Thinking row')
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set([1]), true)
+  const flatRows = blocks.flatMap(block => block.kind === 'work'
+    ? [...block.span.members] : block.kind === 'message' ? [block.message] : [])
+  assert.equal(flatRows.filter(message => message.kind === 'assistant'
+    && message.text === 'REASONING_PENDING_LATEST').length, 0,
+  'the latest pending final stays held back before turn/end')
+  assert.equal(flatRows.filter(message => message.kind === 'thinking'
+    && message.text === 'older reasoning').length, 1,
+  'the older-step Thinking evidence remains retained')
+})
 
 test('a late older-step assistant never releases the real latest pending final', () => {
   const build = (fence: 'command' | 'replay'): TranscriptFolder => {

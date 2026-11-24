@@ -49,6 +49,10 @@ export interface TranscriptRevealAncestryInputs {
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
   readonly workIsContainer: boolean
   readonly clusterIsContainer: boolean
+  /** Optional per-publication materialized Work owners. When present, a Work
+   * span mints a reveal node only if THIS projection actually materialized its
+   * header; a canonical span emitted raw by a fail-open region never does. */
+  readonly workOwnersMaterialized?: ReadonlySet<TranscriptMessage>
 }
 
 /**
@@ -63,7 +67,10 @@ export function transcriptRevealAncestryFor(
   const ancestry: { work?: TranscriptWorkSpan; cluster?: ContextCluster } = {}
   if (inputs.workIsContainer) {
     const span = inputs.workByMember.get(message)
-    if (span !== undefined) ancestry.work = span
+    if (span !== undefined
+      && (inputs.workOwnersMaterialized === undefined || inputs.workOwnersMaterialized.has(span.owner))) {
+      ancestry.work = span
+    }
   }
   if (inputs.clusterIsContainer) {
     const cluster = inputs.clusterByMember.get(message)

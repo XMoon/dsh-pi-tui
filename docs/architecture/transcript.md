@@ -204,6 +204,23 @@ projectTranscriptStructure()
   command retains NO semantic Focus ancestry: when expanded it is physically
   nested below the root for placement only (`focusPresentationOwner`) and
   carries no `containerPath`, and a search hit on it never needs a root reveal.
+- **Pending final and live-call placement are Fold facts, not row shapes.**
+  Before `turn/end`, the structural latest-step settled Assistant is held back
+  as the pending final unless the Folder recorded authoritative continuation
+  for that exact step (a real `tool/call` or a new step after its settlement,
+  or a later output that confirmed its streaming candidate). A late older-step
+  Assistant/Thinking, an orphan/result-only diagnostic, a retry diagnostic or
+  an independent control row never confirms it; display kind and physical order
+  are never the authority. After `turn/end` the qualified final classifier owns
+  the final, including the max-tokens truncation flag. The live Preparing call
+  is placed from the canonical RAW tail plus that exact held-back-final
+  identity: a materialized trailing Work owns it, a primary region that reaches
+  the raw tail admits it as the root's child, and an independent boundary or a
+  later fail-open region renders it exactly once standalone with no Focus
+  ancestry (a preview with no projected root also fails open standalone).
+  Search reveal ancestry is derived only from containers the actual projection
+  materialized: a canonical Work emitted raw by a fail-open region mints no Work
+  grant and is never promoted into a manual disclosure.
 
 Compact, Full and expanded Focus all materialize this structure:
 

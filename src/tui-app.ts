@@ -359,7 +359,7 @@ import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
 import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
 import type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
-import { focusLiveTailPlacement, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
+import { focusHeldBackFinalByTurn, focusLiveTailPlacement, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
@@ -12218,6 +12218,17 @@ export class TuiApp {
     return this.searchRevealGranted ? this.searchTarget?.message : undefined
   }
 
+  /** The Work owners the ACTUAL expanded Focus projection materialized as
+   * containers. A fail-open region emits its canonical members raw, so its span
+   * is absent here and must never mint a search reveal/promotion. */
+  private focusMaterializedWorkOwners(): ReadonlySet<TranscriptMessage> {
+    const owners = new Set<TranscriptMessage>()
+    for (const block of projectFocus(this.messages, this.turnActivities, new Set(this.turnActivities.keys()), true)) {
+      if (block.kind === 'work') owners.add(block.span.owner)
+    }
+    return owners
+  }
+
   /**
    * The STABLE ancestry (canonical Work span / Context cluster) that could hide
    * one transcript row on the current preset/surface. The current open/hidden
@@ -12235,12 +12246,20 @@ export class TuiApp {
     // owner that would unexpectedly reopen the cluster on a surface change. The
     // SEMANTIC clustering is untouched. The canonical lookup itself lives in
     // `tui/transcript/reveal.ts`.
+    const workIsContainer = this.transcriptDisclosureActionAvailable()
+      && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed'))
+    // In Focus, a canonical Work span emitted raw by a fail-open region has no
+    // header to reveal or promote: grant only spans the ACTUAL expanded
+    // projection materialized. Other presets keep the surface capability.
+    const materializedWorkOwners = workIsContainer && isFocusDisplayPreset(this.displayState.preset)
+      ? this.focusMaterializedWorkOwners()
+      : undefined
     return transcriptRevealAncestryFor(message, {
       workByMember: this.canonicalStructureIndex().workByMember,
       clusterByMember: this.canonicalStructureIndex().clusterByMember,
-      workIsContainer: this.transcriptDisclosureActionAvailable()
-        && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed')),
+      workIsContainer,
       clusterIsContainer: !this.contextClusterDefaultExpanded(),
+      ...(materializedWorkOwners === undefined ? {} : { workOwnersMaterialized: materializedWorkOwners }),
     })
   }
 
@@ -12478,6 +12497,7 @@ export class TuiApp {
   private focusPreparingInsertionIndex(
     blocks: readonly TranscriptRenderBlock[],
     turn: number,
+    heldBackFinal: TranscriptMessage | undefined,
   ): number | undefined {
     let activityIndex = -1
     let lastTurnIndex = -1
@@ -12516,7 +12536,9 @@ export class TuiApp {
       }
       if (!('turn' in block.message) || block.message.turn !== turn) continue
       lastTurnIndex = index
-      lastTurnIsHeldBackFinal = block.message.kind === 'assistant' && block.containerPath === undefined
+      // Final identity, never "an assistant without containerPath": a raw
+      // fail-open/intermediate Assistant is NOT the held-back final.
+      lastTurnIsHeldBackFinal = heldBackFinal !== undefined && block.message === heldBackFinal
     }
     if (activityIndex === -1) return undefined
     // The held-back final assistant is the LAST row projectFocus emits for the
@@ -12731,6 +12753,9 @@ export class TuiApp {
     const liveTailPlacement = focusExpandedTurns === undefined
       ? undefined
       : focusLiveTailPlacement(this.messages, this.turnActivities)
+    const heldBackFinalByTurn = focusExpandedTurns === undefined
+      ? undefined
+      : focusHeldBackFinalByTurn(this.messages, this.turnActivities)
     const liveTailRootTurn = liveTailPlacement === undefined || !('turn' in liveTailPlacement.rootOwner)
       ? undefined
       : liveTailPlacement.rootOwner.turn
@@ -12752,7 +12777,7 @@ export class TuiApp {
         if (focusExpandedTurns === undefined) {
           pending.push(...previews)
         } else if (focusExpandedTurns.has(turn)) {
-          const insertion = this.focusPreparingInsertionIndex(blocks, turn)
+          const insertion = this.focusPreparingInsertionIndex(blocks, turn, heldBackFinalByTurn?.get(turn))
           if (insertion !== undefined) {
             // §3.3: Focus ancestry only while this Turn's PRIMARY projected
             // region actually reaches the raw tail. A turn-less boundary, a
@@ -12768,7 +12793,15 @@ export class TuiApp {
               previews,
               ...(containerPath === undefined ? {} : { containerPath }),
             })
+          } else {
+            // Explicit §3.3 no-root fail-open: an expanded preview with no
+            // projected Activity root renders once standalone, never dropped.
+            pending.push(...previews)
           }
+        } else if (!blocks.some(block => block.kind === 'activity' && block.activity.turn === turn)) {
+          // A collapsed preview with no projected root cannot own the header
+          // Action slot: fail open standalone instead of silently dropping it.
+          pending.push(...previews)
         }
         continue
       }
@@ -12776,7 +12809,7 @@ export class TuiApp {
       const span = owner.span
       const workIndex = blocks.findIndex(block => block.kind === 'work' && block.span.owner === span.owner)
       if (workIndex < 0) {
-        if (focusExpandedTurns === undefined) pending.push(...previews)
+        pending.push(...previews)
         continue
       }
       const workBlock = blocks[workIndex]

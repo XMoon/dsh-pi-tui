@@ -613,6 +613,59 @@ test('Focus renders a live Preparing only in the latest window selected from the
   }
 })
 
+test('a Focus live Preparing after a replay fence follows the later visible assistant', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 0 }, 0),
+    ev('tool/call', { turn: 0, step: 0, callId: ToolCallId('pp-a'), name: 'read', arguments: '{}' }, 1),
+    ev('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pp-ar'), role: 'tool', toolCallId: ToolCallId('pp-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('pp-a') } },
+    }, 2),
+    ev('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pp-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    ev('turn/start', { turn: 1 }, 5),
+    ev('user/message', {
+      id: MessageId('pp-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 6),
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('pp-b1'), name: 'read', arguments: '{}' }, 7),
+    ev('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('pp-b1r'), role: 'tool', toolCallId: ToolCallId('pp-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('pp-b1') } },
+    }, 8),
+    ev('step/end', { turn: 1, step: 0 }, 9),
+    ev('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('pp-late'), role: 'tool', toolCallId: ToolCallId('pp-late-c'), content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('pp-late-c') } },
+    }, 10),
+    ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('pp-later'), role: 'assistant', content: [{ type: 'text', text: 'LATER_REGION_ASSISTANT' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 11),
+    ev('step/start', { turn: 1, step: 2 }, 12),
+  ])
+  const preview: StreamingToolPreview = { callId: 'pp-live', turn: 1, step: 2, index: 0, name: 'bash', argumentBytes: 12 }
+  const nodes = flatten(folder.messages(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: [preview],
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  })
+  const assistantNode = nodes.find(node => textOf(node).includes('LATER_REGION_ASSISTANT'))
+  const preparing = nodes.filter(node => node.kind === 'row' && node.id.includes('preparing-pp-live'))
+  assert.equal(preparing.length, 1, 'exactly one live Preparing row')
+  assert.equal(preparing[0]?.parent, 'main',
+    'the later fail-open region keeps the live Preparing standalone, never under the earlier root')
+  assert.ok(assistantNode !== undefined && nodes.indexOf(preparing[0]!) > nodes.indexOf(assistantNode),
+    'the live row follows the later visible assistant')
+  assert.equal(nodesOf(nodes, 'section').filter(node => node.parent === 'main').length, 2,
+    'one root per logical Turn; no third root')
+})
+
 test('the TSP Focus sink never releases the latest pending final for a late older-step row', () => {
   const folder = apply([
     ev('turn/start', { turn: 1 }, 0),

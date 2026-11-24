@@ -397,6 +397,82 @@ test('runner Focus search: command detail needs no root reveal, hidden Process d
   assert.ok(app.focusExpandedTurnsForTest().has(0), 'a manual grant is never revoked by a search dismissal')
 })
 
+test('runner Focus search: a fail-open Work member never promotes a phantom Work', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('sr-a'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('sr-ar'), role: 'tool', toolCallId: ToolCallId('sr-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('sr-a') } },
+    }, 2),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('sr-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    event('turn/start', { turn: 1 }, 5),
+    event('user/message', {
+      id: MessageId('sr-u'), role: 'user', content: [{ type: 'text', text: 'search the fence' }], source: { kind: 'user' },
+    }, 6),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('sr-b1'), name: 'read', arguments: '{}' }, 7),
+    event('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('sr-b1r'), role: 'tool', toolCallId: ToolCallId('sr-b1'), content: [{ type: 'text', text: 'B1_HIDDEN_MARKER' }], source: { kind: 'tool', callId: ToolCallId('sr-b1') } },
+    }, 8),
+    event('step/end', { turn: 1, step: 0 }, 9),
+    // A late orphan result for the settled Turn 0: the replay hard fence.
+    event('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('sr-late'), role: 'tool', toolCallId: ToolCallId('sr-late-c'), content: [{ type: 'text', text: 'LATE_A_MARKER' }], source: { kind: 'tool', callId: ToolCallId('sr-late-c') } },
+    }, 10),
+    event('tool/call', { turn: 1, step: 1, callId: ToolCallId('sr-b2'), name: 'bash', arguments: '{}' }, 11),
+    event('tool/result', {
+      turn: 1, step: 1,
+      message: { id: MessageId('sr-b2r'), role: 'tool', toolCallId: ToolCallId('sr-b2'), content: [{ type: 'text', text: 'B2_VISIBLE_MARKER' }], source: { kind: 'tool', callId: ToolCallId('sr-b2') } },
+    }, 12),
+    event('step/end', { turn: 1, step: 1 }, 13),
+    event('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('sr-final'), role: 'assistant', content: [{ type: 'text', text: 'the fence final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 14),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 15),
+  ]
+  const fixture = await mountSearchRunner(t, 2, [], 'unused', events)
+  const { app } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  const search = async (query: string): Promise<TranscriptMessage | undefined> => {
+    app.closeTranscriptSearch()
+    app.startTranscriptSearch('full')
+    await fixture.settleRender()
+    typeQuery(fixture, query)
+    await fixture.settleRender()
+    return app.transcriptSearchPresentationForTest()?.message
+  }
+
+  // B2 is raw fail-open evidence: finding it needs no root/Work grant, and an
+  // ordinary dismiss must not promote a phantom Work span.
+  const b2 = await search('B2_VISIBLE_MARKER')
+  assert.ok(b2 !== undefined && b2.kind === 'tool', 'the fail-open B2 row is the target')
+  assert.ok(mountedSearchSelection(app, b2) !== undefined, 'the visible B2 row is materialized')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a visible fail-open row never opens the root')
+  assert.equal(app.expandedWorkOwnersForTest().has(b2), false,
+    'no phantom Work owner is promoted for the fail-open span')
+
+  // B1 is hidden inside the real primary Work: its reveal opens the root and
+  // promotes the ACTUAL Work owner.
+  const b1 = await search('B1_HIDDEN_MARKER')
+  assert.ok(b1 !== undefined && b1.kind === 'tool', 'the hidden B1 row is the target')
+  assert.ok(mountedSearchSelection(app, b1) !== undefined, 'the hidden B1 row is materialized after reveal')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.ok(app.expandedWorkOwnersForTest().has(b1), 'the real hidden Work is promoted on dismiss')
+})
+
 test('runner search: a same-window query re-windows zero times and rebuilds at most once', async (t) => {
   const fixture = await mountSearchRunner(t, 30, [25, 29])
   const { app, projections } = fixture

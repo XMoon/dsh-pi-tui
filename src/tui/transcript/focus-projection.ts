@@ -31,13 +31,12 @@
 import {
   assistantCommittedBeforeSteer,
   assistantLatestStepOf,
-  assistantStepOf,
+  assistantStepIntermediateOf,
   assistantStepSettledOf,
 } from '../../domain/transcript/folder.ts'
 import { assistantForStep, eligibleFinalAssistant, type EligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import {
-  classifyTranscriptMessage,
   isPostTurnReplayEvidence,
   isSurfacedContext,
   isSurfacedInteractionTool,
@@ -175,6 +174,52 @@ export function focusProjectionTurnOf(message: TranscriptMessage): number | unde
   if (message.kind === 'command') return undefined
   if (message.kind === 'compaction' && message.sourceCommand !== undefined) return undefined
   return 'turn' in message ? message.turn : undefined
+}
+
+/**
+ * The settled latest-step Assistant that is still the PENDING final of an open
+ * Turn, or undefined when it has authoritative continuation evidence (the Fold's
+ * step/continuation fact), is committed, has display blocks, or is not settled.
+ */
+function focusPendingFinal(
+  rows: readonly TranscriptMessage[],
+  activity: TurnActivity | undefined,
+): TranscriptMessage | undefined {
+  if (activity === undefined || activity.completed) return undefined
+  const latestStep = assistantLatestStepOf(activity)
+  if (latestStep === undefined) return undefined
+  const latestAssistant = assistantForStep(rows, latestStep)
+  if (latestAssistant === undefined
+    || !assistantStepSettledOf(activity, latestAssistant)
+    || latestAssistant.displayBlocks !== undefined
+    || assistantCommittedBeforeSteer(activity, latestAssistant)
+    || assistantStepIntermediateOf(activity, latestAssistant)) return undefined
+  return latestAssistant
+}
+
+/**
+ * The row a turn's expanded Focus holds back / emits as its final, per turn:
+ * the qualified final once `turn/end` authoritatively qualifies it, otherwise
+ * the still-pending latest-step Assistant. One rows pass; consumers use it to
+ * recognize the final by IDENTITY instead of `assistant without containerPath`.
+ */
+export function focusHeldBackFinalByTurn(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+): ReadonlyMap<number, TranscriptMessage> {
+  const out = new Map<number, TranscriptMessage>()
+  for (const [turn, rows] of focusRowsByTurn(messages)) {
+    const activity = activities.get(turn)
+    if (activity === undefined) continue
+    const final = eligibleFinalAssistant(activity, rows)
+    if (final !== undefined) {
+      out.set(turn, final.message)
+      continue
+    }
+    const pending = focusPendingFinal(rows, activity)
+    if (pending !== undefined) out.set(turn, pending)
+  }
+  return out
 }
 
 /**
@@ -349,40 +394,8 @@ export function projectFocus(
   for (const [turn, rows] of rowsByTurn) {
     const final = eligibleFinalAssistant(activities.get(turn), rows)
     if (final !== undefined) finalByTurn.set(turn, final)
-    // Before `turn/end`, a settled Assistant that still owns the structural
-    // latest step is not yet known to be the official final. Decide that ONCE
-    // over EVERY eligible row of the Turn (excluding control/replay/foreign
-    // evidence, which never prove a later Process step), then apply the
-    // decision wherever the row is emitted: the primary region AND a later
-    // fail-open region. A command/fused control row after the Assistant is not
-    // a later Process step; a real Tool/ordinary Process row confirms it as
-    // intermediate.
-    const activity = activities.get(turn)
-    if (activity === undefined || activity.completed) continue
-    // Select the structural LATEST-STEP row first: a late older-step settlement
-    // can be appended after it, and physical last position is not step identity.
-    const latestStep = assistantLatestStepOf(activity)
-    if (latestStep === undefined) continue
-    const latestAssistant = assistantForStep(rows, latestStep)
-    if (latestAssistant === undefined
-      || !assistantStepSettledOf(activity, latestAssistant)
-      || latestAssistant.displayBlocks !== undefined
-      || assistantCommittedBeforeSteer(activity, latestAssistant)) continue
-    const latestIndex = rows.indexOf(latestAssistant)
-    // A stale older-step Assistant settlement is transcript evidence, never a
-    // later Process continuation; only genuine Process evidence (tool/thinking/
-    // system rows, control/replay/foreign rows already excluded) releases the
-    // candidate.
-    const laterProcess = rows.slice(latestIndex + 1).some(member =>
-      // Only genuine continuation evidence releases the candidate. A
-      // newly-materialized orphan/result-only Tool diagnostic (explicit
-      // zero-call provenance) or an attention diagnostic never confirms a
-      // later model step; the Fold's own semantic classifier owns that line.
-      member.kind !== 'user' && member.kind !== 'assistant'
-      && !isSurfacedContext(member) && !isFocusBridgeControlRow(member)
-      && classifyTranscriptMessage(member).class !== 'attention'
-      && !(member.kind === 'tool' && member.callCount === 0))
-    if (!laterProcess) pendingByTurn.set(turn, latestAssistant)
+    const pending = focusPendingFinal(rows, activities.get(turn))
+    if (pending !== undefined) pendingByTurn.set(turn, pending)
   }
   const out: FocusProjectedBlock[] = []
   const rootedTurns = new Set<number>()
@@ -683,29 +696,44 @@ export function focusLiveTailPlacement(
   // The caller may already hold the all-expanded projection (TSP does): reuse
   // the SAME derived blocks instead of re-projecting the window.
   const expanded = expandedBlocks ?? projectFocus(messages, activities, new Set(activities.keys()), true)
-  const last = expanded.at(-1)
-  if (last === undefined) return undefined
   const openActivityOf = (turn: number): Extract<FocusProjectedBlock, { kind: 'activity' }> | undefined => {
     const block = expanded.find(candidate => candidate.kind === 'activity' && candidate.activity.turn === turn)
     return block?.kind === 'activity' && !block.activity.completed ? block : undefined
   }
-  if (last.kind === 'activity') {
-    return last.activity.completed ? undefined : { rootOwner: last.owner }
-  }
-  if (last.kind === 'work') {
-    const activity = openActivityOf(last.span.turn)
-    return activity === undefined ? undefined : { rootOwner: activity.owner, workOwner: last.span.owner }
-  }
-  if (last.kind !== 'message') return undefined
-  const message = last.message
-  if (!('turn' in message)) return undefined
-  const activity = openActivityOf(message.turn)
+  // Use the CANONICAL RAW tail, not the last painted block: a pending final is
+  // hidden from the expanded view but is still a real raw conversation row.
+  const trailing = projectTranscriptStructure(messages).at(-1)
+  if (trailing === undefined) return undefined
+  const tailWork = trailing.kind === 'work' ? trailing.span : undefined
+  const tailMessage = trailing.kind === 'work'
+    ? undefined
+    : trailing.kind === 'message' ? trailing.message
+      : trailing.kind === 'context-cluster' ? trailing.cluster.members.at(-1) : undefined
+  const tailTurn = tailWork !== undefined
+    ? tailWork.turn
+    : tailMessage !== undefined && 'turn' in tailMessage ? tailMessage.turn : undefined
+  if (tailTurn === undefined) return undefined
+  const activity = openActivityOf(tailTurn)
   if (activity === undefined) return undefined
-  // Only a row emitted by the primary region carries the root's placement
-  // mark: a persistent input/context row (focusPresentationOwner) or a normal
-  // process row (focus-root containerPath). A raw later-region row has neither.
-  const regionRow = last.focusPresentationOwner !== undefined
-    || last.containerPath?.some(node => node.kind === 'focus-root' && node.turn === message.turn) === true
+  if (tailWork !== undefined) {
+    // The EXACT canonical Work owns the call only when that Work was actually
+    // materialized by the primary region; a later-region Work is raw evidence.
+    const materialized = expanded.some(block => block.kind === 'work' && block.span.owner === tailWork.owner)
+    return materialized ? { rootOwner: activity.owner, workOwner: tailWork.owner } : undefined
+  }
+  if (tailMessage === undefined) return undefined
+  const heldBack = focusHeldBackFinalByTurn(messages, activities).get(tailTurn)
+  const emitted = expanded.find((block): block is Extract<FocusProjectedBlock, { kind: 'message' }> =>
+    block.kind === 'message' && block.message === tailMessage)
+  const activityIndex = expanded.findIndex(block => block.kind === 'activity' && block.activity.turn === tailTurn)
+  // A region FOUNDATION row (leading prompt/surfaced context) is emitted before
+  // the Thought without a marker and is still part of the region; a raw
+  // later-region row appears after the Thought with no marker.
+  const foundationRow = emitted !== undefined && activityIndex >= 0 && expanded.indexOf(emitted) < activityIndex
+  const regionRow = tailMessage === heldBack
+    || foundationRow
+    || (emitted !== undefined && (emitted.focusPresentationOwner !== undefined
+      || emitted.containerPath?.some(node => node.kind === 'focus-root' && node.turn === tailTurn) === true))
   return regionRow ? { rootOwner: activity.owner } : undefined
 }
 

@@ -4143,6 +4143,85 @@ test('a late older-step settlement never releases the latest pending final in th
   app.stop()
 })
 
+test('an expanded Focus live run with no projected root fails open standalone', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [eventAt('turn/start', { turn: 1 }, T0, 0)])
+  show(app, folder, [
+    { callId: 'no-root-live', turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('Preparing Bash'),
+    `a preview with no projected root renders once standalone instead of being dropped:\n${joined}`)
+  app.stop()
+})
+
+test('a live Focus run after a replay fence inserts after the later visible assistant', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pp-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pp-ar'), role: 'tool', toolCallId: ToolCallId('pp-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('pp-a') } },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pp-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('pp-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('pp-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('pp-b1r'), role: 'tool', toolCallId: ToolCallId('pp-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('pp-b1') } },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    // A late orphan result for the settled Turn A: a replay hard fence.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('pp-late'), role: 'tool', toolCallId: ToolCallId('pp-late-c'), content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('pp-late-c') } },
+    }, T0 + 10, 10),
+    // B settles an intermediate Assistant in the disjoint region, then a real
+    // next step starts: the Assistant is now visible fail-open WITHOUT a path.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('pp-later'), role: 'assistant', content: [{ type: 'text', text: 'LATER_REGION_ASSISTANT' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+    eventAt('step/start', { turn: 1, step: 2 }, T0 + 12, 12),
+  ])
+  show(app, folder, [
+    { callId: 'pp-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  assert.ok(view.join('\n').includes('LATER_REGION_ASSISTANT'),
+    `the later-region intermediate assistant is visible fail-open:\n${view.join('\n')}`)
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const assistantIndex = blocks.findIndex(block => block.kind === 'message' && block.message?.text === 'LATER_REGION_ASSISTANT')
+  const previewIndex = blocks.findIndex(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.ok(assistantIndex >= 0 && previewIndex > assistantIndex,
+    `the live call is inserted AFTER the later raw assistant:\n${JSON.stringify({ assistantIndex, previewIndex })}`)
+  assert.equal(blocks[previewIndex]?.containerPath, undefined, 'the live call keeps no Focus ancestry after the fence')
+  assert.equal(blocks.filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1).length, 1,
+    'exactly one live preview row')
+  app.stop()
+})
+
 test('a result-only orphan diagnostic never releases the pending final in the real TuiApp sink', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()
