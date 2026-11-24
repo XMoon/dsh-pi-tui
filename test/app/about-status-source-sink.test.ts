@@ -41,6 +41,11 @@ interface SinkHarness {
   readonly waitForFrame: (predicate: (frame: string) => boolean, label: string) => Promise<void>
   readonly statsCalls: () => number
   readonly contextCalls: () => number
+  /** One raw SGR press/release on 0-based terminal cells (no wait). */
+  readonly press: (row: number, col: number) => void
+  readonly release: (row: number, col: number) => void
+  /** The live terminal resize (the next paint is awaited by the caller). */
+  readonly resize: (columns: number, rows: number) => void
   readonly fireStatusInvalidation: () => void
   readonly switchSession: (id: string | undefined) => void
   readonly dispose: () => void
@@ -48,6 +53,8 @@ interface SinkHarness {
 
 interface ProofOptions {
   readonly session: string | undefined
+  /** The live frame width (defaults to the 100-column direct layout). */
+  readonly columns?: number
   readonly stats: {
     readonly turns: number
     readonly llmMs: number
@@ -64,7 +71,7 @@ interface ProofOptions {
  * fires only when the projection changed).
  */
 function setupProof(options: ProofOptions): SinkHarness {
-  const columns = 100
+  const columns = options.columns ?? 100
   const rows = 40
   const vt = new VirtualTerminal(columns, rows)
   const copied: string[] = []
@@ -339,6 +346,15 @@ function setupProof(options: ProofOptions): SinkHarness {
     },
     statsCalls: () => statsCalls,
     contextCalls: () => contextCalls,
+    press: (row, col) => {
+      vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+    },
+    release: (row, col) => {
+      vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+    },
+    resize: (nextColumns, nextRows) => {
+      vt.resize(nextColumns, nextRows)
+    },
     fireStatusInvalidation: () => fireInvalidation(),
     switchSession: (id) => {
       scopeObject = id === undefined ? undefined : { sessionId: id, generation: (scopeObject?.generation ?? 0) + 1 }
@@ -476,8 +492,9 @@ test('NEGATIVE: the About `r` forces the context exactly once and never twice pe
   }
 })
 
-test('NEGATIVE→POSITIVE: the action row paints Refresh AND Copy All as two independently clickable targets', async () => {
+test('NEGATIVE→POSITIVE: the 200-column action row paints Refresh AND Copy All as independently clickable targets', async () => {
   const h = setupProof({
+    columns: 200,
     session: 'sess-click',
     stats: { turns: 2, llmMs: 500, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheHitPct: 0 } },
     contextValue: 3_000,
@@ -485,15 +502,21 @@ test('NEGATIVE→POSITIVE: the action row paints Refresh AND Copy All as two ind
   try {
     h.invoke()
     await h.waitForFrame(frame => /Turns/.test(frame), 'the live About frame')
+    // The widened direct projection: the 30-cell rail on the left and the real
+    // content column from x=32 (the 2-cell gutter is owner-less).
+    const frame = h.view().split('\n')
+    const paneHeader = frame.find(line => line.includes('Categories (10)'))
+    assert.ok(paneHeader !== undefined, `the direct pane header paints:\n${h.view()}`)
+    const aboutCol = visibleWidth(paneHeader.slice(0, paneHeader.indexOf('About')))
+    assert.equal(aboutCol, 32, 'the About content column starts after the 30-cell rail + gutter')
     // Locate the action row and BOTH painted buttons.
-    const rows = h.view().split('\n')
-    const actionRowIndex = rows.findIndex(line => line.includes('Copy All ['))
+    const actionRowIndex = frame.findIndex(line => line.includes('Copy All ['))
     assert.ok(actionRowIndex !== -1, `the action row paints on a live session:\n${h.view()}`)
-    const actionRow = rows[actionRowIndex]!
+    const actionRow = frame[actionRowIndex]!
     const refreshCol = actionRow.indexOf('Refresh context [')
     const copyAllCol = actionRow.indexOf('Copy All [')
-    assert.ok(refreshCol !== -1 && copyAllCol !== -1 && copyAllCol > refreshCol,
-      `both buttons paint side by side: ${JSON.stringify(actionRow)}`)
+    assert.ok(refreshCol >= 32 && copyAllCol >= 32 && copyAllCol > refreshCol,
+      `both content buttons paint side by side inside the content column: ${JSON.stringify(actionRow)}`)
     const contextBefore = h.contextCalls()
     // Click 1: Copy All — the clipboard gets the report, no refresh.
     await h.click(actionRowIndex, copyAllCol + 2)
@@ -504,11 +527,56 @@ test('NEGATIVE→POSITIVE: the action row paints Refresh AND Copy All as two ind
     await h.click(actionRowIndex, refreshCol + 2)
     assert.equal(h.copied.length, 1, 'the Refresh click never copied')
     assert.equal(h.contextCalls(), contextBefore + 1, 'the Refresh click forced exactly once')
-    // A genuinely BLANK cell (far right of the action row, past both
-    // buttons) is inert: no copy, no refresh.
-    await h.click(actionRowIndex, copyAllCol + 40)
-    assert.equal(h.copied.length, 1, 'a blank-cell click never copies')
-    assert.equal(h.contextCalls(), contextBefore + 1, 'a blank-cell click never refreshes')
+    // A genuinely BLANK cell (far right, past both buttons), the widened
+    // rail cells at the old content origin and BOTH 2-cell gutters are inert.
+    for (const [row, col] of [
+      [actionRowIndex, copyAllCol + 40],
+      [actionRowIndex, 25],
+      [actionRowIndex, 30],
+      [actionRowIndex, 31],
+    ] as const) {
+      await h.click(row, col)
+    }
+    assert.equal(h.copied.length, 1, 'no blank/old-origin/gutter cell copies')
+    assert.equal(h.contextCalls(), contextBefore + 1, 'no blank/old-origin/gutter cell refreshes')
+    // A press whose frame moves under a resize cannot refresh: the release must
+    // be refused, and a FRESH gesture on the repainted 200-column row acts.
+    h.press(actionRowIndex, refreshCol + 2)
+    h.resize(160, 40)
+    h.release(actionRowIndex, refreshCol + 2)
+    await h.waitForFrame(frame => /Refresh context \[/.test(frame), 'the 160-column repaint')
+    assert.equal(h.contextCalls(), contextBefore + 1, 'the straddling release never refreshed')
+    assert.equal(h.copied.length, 1, 'the straddling release never copied')
+    h.resize(200, 40)
+    await h.waitForFrame(frame => /Refresh context \[/.test(frame), 'the restored 200-column frame')
+    const freshRow = h.view().split('\n').findIndex(line => line.includes('Copy All ['))
+    assert.ok(freshRow >= 0)
+    const freshRowLine = h.view().split('\n')[freshRow]!
+    const freshRefresh = freshRowLine.indexOf('Refresh context [')
+    // A different word than the straddled press avoids the fork's word-selection
+    // double-click path; the whole painted affordance is the target.
+    await h.click(freshRow, freshRefresh + 10)
+    assert.equal(h.contextCalls(), contextBefore + 2, 'the fresh click on the repainted row refreshes once')
+    // The content focus paints a real Back; clicking it returns to the rail,
+    // and the rail's Close exits the SAME lease. The physical bar starts at x=0.
+    await h.pressKey('\r')
+    await h.waitForFrame(frame => /Back \[Esc\]/.test(frame), 'the About content bar')
+    const frameWithBack = h.view().split('\n')
+    const backRow = frameWithBack.length - 1
+    const backLine = frameWithBack[backRow]!
+    assert.equal(visibleWidth(backLine), 200, 'the ONE physical bar fills the live width from x=0')
+    const backIndex = backLine.indexOf('Back [Esc]')
+    assert.ok(backIndex >= 0, `the content bar paints its Back affordance:\n${backLine}`)
+    await h.click(backRow, backIndex + 2)
+    await h.waitForFrame(frame => /Settings · Categories/.test(frame) && /Close \[Esc\]/.test(frame), 'the rail after Back')
+    const closeFrame = h.view().split('\n')
+    const closeRow = closeFrame.length - 1
+    const closeLine = closeFrame[closeRow]!
+    assert.equal(visibleWidth(closeLine), 200, 'the rail bar also fills the live width from x=0')
+    const closeIndex = closeLine.indexOf('Close [Esc]')
+    assert.ok(closeIndex >= 0, `the rail bar paints its Close affordance:\n${closeLine}`)
+    await h.click(closeRow, closeIndex + 2)
+    assert.doesNotMatch(h.view(), /Settings ·/u, 'the painted Close exits the ONE Settings lease')
   } finally {
     h.dispose()
   }

@@ -691,6 +691,21 @@ async function openWebPage(h: Harness): Promise<string> {
   return settleWebPage(h)
 }
 
+/**
+ * The painted DETAIL-column text of the current Settings frame, located from
+ * its pane header and joined so a fact wrapped inside the real pane width reads
+ * as one phrase. The column origin follows the live wide/medium allocation; it
+ * is never a hard-coded x=68/24.
+ */
+function detailPaneText(vt: VirtualTerminal): string {
+  const rows = vt.getViewport().map(stripTerminalSequences)
+  const header = rows.find(candidate => candidate.includes('Details'))
+  assert.ok(header !== undefined, `the detail pane header must be painted:\n${rows.join('\n')}`)
+  const label = header.indexOf('Details')
+  const start = header[label - 1] === '[' ? label - 1 : label
+  return rows.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ').trim()
+}
+
 /** Leave the Settings surface through its real Esc ladder (the page may own a
  *  Detail/List level; the workspace itself needs the last Esc). */
 async function closeWorkspace(h: Harness): Promise<void> {
@@ -714,7 +729,7 @@ test('the workspace row reports the configured providers and opens the Web page 
   assert.match(rowView, /Search: DeepSeek server-side search · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
   assert.match(rowView, /Configure Web…/u, 'the row Detail paints the ONE page entry')
   assert.match(compactRow(), /billed separately/u)
-  assert.match(compactRow(), /not an Optional.*?Bundle/u)
+  assert.match(detailPaneText(h.vt), /not an Optional.*?Bundle/u)
   assert.match(compactRow(), /Share Original Question is on by/u,
     'the launcher explains the default share behaviour')
   assert.match(compactRow(), /default: it sends up to 128 characters/u,

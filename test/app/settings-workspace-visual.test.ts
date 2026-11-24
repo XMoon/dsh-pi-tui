@@ -1589,6 +1589,21 @@ const rowsPaneText = (h: Harness, row: number): string => {
   return plain[row]!.slice(start, end)
 }
 
+/**
+ * The painted DETAIL-column text of the current frame, located from its pane
+ * header and joined so a fact wrapped inside the real pane width reads as one
+ * phrase. The column origin follows the CURRENT wide/medium allocation; it is
+ * never a hard-coded x=68/24.
+ */
+const detailPaneText = (h: Harness): string => {
+  const plain = h.rowsPlain()
+  const header = plain.find(candidate => candidate.includes('Details'))
+  assert.ok(header !== undefined, `the detail pane header must be painted:\n${h.view()}`)
+  const label = header.indexOf('Details')
+  const start = header[label - 1] === '[' ? label - 1 : label
+  return plain.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ').trim()
+}
+
 /** One native SGR left-button gesture (1-based terminal cells). */
 const press = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`) }
 const release = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`) }
@@ -2171,7 +2186,7 @@ test('a copy settled after the workspace closed never notifies the restored surf
 
 test('Agent paints the single Subagent entry among its availability-gated rows and no legacy launcher', async () => {
   const h = setup({
-    columns: 140,
+    columns: 200,
     rows: 44,
     doc: { theme: 'dark' },
     agent: {
@@ -2801,9 +2816,8 @@ test('Session log upload paints its upload risk and offers On/Off/Reset; Reset m
   await h.open('Host')
   await key(h, '\r')
   await highlightRow(h, 'Session log upload')
-  const detail = h.view()
-  assert.match(detail, /Send session log data with requests to the official DeepSeek API/u)
-  assert.match(detail, /Session data can include conversation content/u)
+  assert.match(h.view(), /Send session log data with requests to the official DeepSeek API/u)
+  assert.match(detailPaneText(h), /Session data can include conversation content/u)
 
   await key(h, '\r') // L1 -> the scalar candidate choice
   assert.match(h.view(), /Risk: May send chat content to DeepSeek API/u,
@@ -2978,14 +2992,14 @@ test('the default permission and shell policy rows offer no candidate on a non-r
     assert.match(h.view(), /Default permission/u, `${readiness}: the default-permission row stays painted`)
     await openRowInAgent(h, 'Default permission')
     await key(h, '\r')
-    assert.match(h.view(), /No candidate is available for this setting right now\./u,
+    assert.match(detailPaneText(h), /No candidate is available for this setting right now\./u,
       `${readiness}: the permission default offers no confirmable candidate`)
     assert.match(h.view(), /Last-known value|Unavailable — no authoritative config document/u,
       `${readiness}: the row states the real freshness`)
     await key(h, '\x1b')
     await openRowInAgent(h, 'User shell sandbox policy')
     await key(h, '\r')
-    assert.match(h.view(), /No candidate is available for this setting right now\./u,
+    assert.match(detailPaneText(h), /No candidate is available for this setting right now\./u,
       `${readiness}: the shell policy offers no confirmable candidate`)
     h.dispose()
   }
@@ -3267,8 +3281,8 @@ test('the wide geometry is exact and a 300-char value never squeezes the Action 
   await h.open()
   const paneRow = rowOf(h, 'Categories (10)')
   assert.equal(cellIndexOf(h, paneRow, '[Categories (10)]'), 0, 'the categories level starts at cell 0 and owns focus at L0')
-  assert.equal(cellIndexOf(h, paneRow, 'Rows (4)'), 22 + 2, 'the row column starts after the 22-cell column and a 2-cell gap')
-  assert.equal(cellIndexOf(h, paneRow, 'Details'), 22 + 2 + 42 + 2, 'the detail column starts after the 42-cell row column and a 2-cell gap')
+  assert.equal(cellIndexOf(h, paneRow, 'Rows (4)'), 30 + 2, 'the row column starts after the 30-cell wide rail and a 2-cell gap')
+  assert.equal(cellIndexOf(h, paneRow, 'Details'), 30 + 2 + 70 + 2, 'the detail column starts after the 70-cell wide row column and a 2-cell gap')
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
   }
@@ -4578,7 +4592,7 @@ test('a stored theme whose source is gone is listed as unavailable and can never
   release(h, row, cellIndexOf(h, row, 'Confirm'))
   await settle(h)
   assert.equal(h.replacements(), 0, 'an unavailable source is never written')
-  assert.match(h.view(), /Not saved · the selected source is no longer available/)
+  assert.match(detailPaneText(h), /Not saved · the selected source is no longer available/)
   h.dispose()
 })
 
@@ -8173,7 +8187,7 @@ test('a refused write is attributed from a fresh read: base, expected and unread
     'the apply-first runtime fact stays live through the unreadable rejection')
   assert.match(unreadable.view(), /Outcome unknown/u,
     'a rejection whose readback is unavailable cannot be attributed to this commit')
-  assert.match(unreadable.view(), /post-write describe failed/u, 'the real failure reason is stated')
+  assert.match(detailPaneText(unreadable), /post-write describe failed/u, 'the real failure reason is stated')
   assert.match(unreadable.view(), /could not be re-read/u, 'the unavailable readback is named')
   assert.ok(!unreadable.view().includes('Status  Verified'), 'an unattributable write is never Verified')
   assert.doesNotMatch(unreadable.view(), /Status\s+Not saved/u,
@@ -8862,7 +8876,7 @@ test('Submit while busy never presents a missing or invalid stored value as the 
     if (stored === undefined) delete (values as { busyEnter?: string }).busyEnter
     else (values as { busyEnter?: string }).busyEnter = stored
     const h = setup({
-      columns: 140,
+      columns: 160,
       rows: 40,
       tuiSettings: { get: () => values, replace: (next: TuiSettingsDoc) => { Object.assign(values, next) } },
     })

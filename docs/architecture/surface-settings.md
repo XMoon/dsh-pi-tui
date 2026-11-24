@@ -105,6 +105,21 @@ specialist-page contract below).
   override keeps the USER config alive; the Detail shows that literal USER
   state rather than claiming the field vanished.
 
+- The wide frame (`W ≥ 108`) distributes its live INTEGER cell grant across
+  `Categories | Rows | Details` in bounded steps:
+  `Categories = 22 + min(8, floor(max(0, W−120)/10))`,
+  `Rows = 42 + min(28, floor(7·max(0, W−120)/20))`, and `Details` takes the
+  remainder after both 2-cell `COLUMN_GAP` gutters. The allocation is a pure
+  function of the width: no theme, focus, content, Host state, preference or
+  cached measurement participates, so data can never move a column. The two
+  gutters are blank and own no target, scroll or copy. The medium 76–107
+  adjacent pair, the `<76` single column, the medium 22/40 widths, the
+  height/chrome budget and the focus ladder are unchanged. The SAME `Categories`
+  width rule positions the wide direct-pages rail (About/Models/Account) and the
+  Plugins `W ≥ 120` rail; the Plugins child keeps its own local split and
+  six-real-body-row admission (see [surface-plugins.md](./surface-plugins.md)),
+  which is never the Standard `Rows` width.
+
 - Every category shares ONE root row plan: header, optional metadata, at most
   one top rule, optional app notice, optional pane header, body, and the single
   physical last-row Action Bar. The app notice is the ONE root-level notice;
@@ -673,8 +688,9 @@ specialist-page contract below).
   plugin content focus paints `List | Details` under the SAME six-row floor, so a
   shorter frame keeps one business column; below 76 columns it is one column, and
   the page is not
-  mounted while the rail is focused there. `install`/`confirm`/`diagnostics`
-  always take the full width (no rail) so risk text is never squeezed. `Tab`
+  mounted while the rail is focused there. `install`/`update`/`confirm`/
+  `diagnostics` always take the full width (no rail) so risk text is never
+  squeezed. `Tab`
   and `Enter`/`Right` only hand the keyboard to the plugin List (no action);
   `Tab` inside the List keeps its filter cycle, `Shift+Tab` from the untouched
   List root returns to the rail, and `Esc` from the List root returns to the

@@ -961,6 +961,18 @@ function layoutForWidth(width: number): SettingsLayout {
 }
 
 /**
+ * The elastic Categories rail width of a WIDE frame: the frame's real integer
+ * cell grant buys at most 8 extra cells, one per completed 10-column step past
+ * the 120-column wide base. This is RAIL WIDTH ONLY — a pure projection of the
+ * live width. It never classifies a frame, reads focus/Host/current content or
+ * decides whether a child may split: medium/narrow/full-width layouts express
+ * their own real allocation through their existing branches.
+ */
+function wideCategoryWidth(width: number): number {
+  return WIDE_CATEGORY_WIDTH + Math.min(8, Math.floor(Math.max(0, width - 120) / 10))
+}
+
+/**
  * The ONE per-frame row allocation, in the frozen §4.4 priority order: the
  * Action Bar and the Header are granted first, then the BODY keeps at least one
  * real row (from three terminal rows on), then the optional notice (rows>=6,
@@ -1997,7 +2009,7 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     const narrow = plan.layout === 'narrow'
-    const categoryWidth = narrow ? 0 : plan.layout === 'wide' ? WIDE_CATEGORY_WIDTH : MEDIUM_CATEGORY_WIDTH
+    const categoryWidth = narrow ? 0 : plan.layout === 'wide' ? wideCategoryWidth(plan.width) : MEDIUM_CATEGORY_WIDTH
     const contentX = narrow ? 0 : categoryWidth + COLUMN_GAP
     const contentWidth = Math.max(1, plan.width - contentX)
     const geometry = chromeGeometry(plan)
@@ -2836,11 +2848,17 @@ export class SettingsWorkspacePanel implements Component {
    *  addressable, and no second "visible window" state is stored. */
   private visiblePaneLayout(plan: SettingsChromePlan): readonly PaneLayout[] {
     if (plan.layout === 'wide') {
-      const rowsX = WIDE_CATEGORY_WIDTH + COLUMN_GAP
-      const detailX = rowsX + WIDE_ROWS_WIDTH + COLUMN_GAP
+      // The elastic wide allocation: Categories takes one bounded extra cell
+      // per 10 columns past 120 (max +8); Rows takes one bounded extra cell per
+      // 20/7 columns (max +28); the rest belongs to Details. The two 2-cell
+      // gutters are not owned by any pane.
+      const categoryWidth = wideCategoryWidth(plan.width)
+      const rowsWidth = WIDE_ROWS_WIDTH + Math.min(28, Math.floor(7 * Math.max(0, plan.width - 120) / 20))
+      const rowsX = categoryWidth + COLUMN_GAP
+      const detailX = rowsX + rowsWidth + COLUMN_GAP
       return [
-        { page: 'categories', x: 0, width: WIDE_CATEGORY_WIDTH },
-        { page: 'rows', x: rowsX, width: WIDE_ROWS_WIDTH },
+        { page: 'categories', x: 0, width: categoryWidth },
+        { page: 'rows', x: rowsX, width: rowsWidth },
         { page: 'detail', x: detailX, width: Math.max(1, plan.width - detailX) },
       ]
     }
@@ -4335,7 +4353,7 @@ export class SettingsWorkspacePanel implements Component {
     view: PluginWorkspaceView,
     focus: SettingsWorkspaceFocus,
   ): {
-    readonly showCategories: boolean
+    readonly railWidth: number
     readonly contentX: number
     readonly contentWidth: number
     readonly allowDual: boolean
@@ -4344,24 +4362,27 @@ export class SettingsWorkspacePanel implements Component {
     // A business page (install/update/confirm/diagnostics) owns the FULL width:
     // its risk text and actions are never squeezed beside the Categories rail.
     if (view === 'install' || view === 'update' || view === 'confirm' || view === 'diagnostics') {
-      return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
+      return { railWidth: 0, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
     }
     if (width >= 120) {
-      // `Categories(22) · List · Details preview`: the rail always stays.
-      const contentX = WIDE_CATEGORY_WIDTH + COLUMN_GAP
-      return { showCategories: true, contentX, contentWidth: Math.max(1, width - contentX), allowDual: true }
+      // `Categories · List · Details preview`: the rail always stays and uses
+      // the SAME elastic Categories sizing rule as the Standard projection.
+      const railWidth = wideCategoryWidth(width)
+      const contentX = railWidth + COLUMN_GAP
+      return { railWidth, contentX, contentWidth: Math.max(1, width - contentX), allowDual: true }
     }
     if (width >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS) {
       // 76..119: the adjacent pair moves with the owning focus.
       if (focus === 'categories') {
-        const contentX = MEDIUM_CATEGORY_WIDTH + COLUMN_GAP
-        return { showCategories: true, contentX, contentWidth: Math.max(1, width - contentX), allowDual: false }
+        const railWidth = MEDIUM_CATEGORY_WIDTH
+        const contentX = railWidth + COLUMN_GAP
+        return { railWidth, contentX, contentWidth: Math.max(1, width - contentX), allowDual: false }
       }
-      return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: true }
+      return { railWidth: 0, contentX: 0, contentWidth: Math.max(1, width), allowDual: true }
     }
     // Narrow: ONE column. The root paints the Categories list alone until the
     // content takes the keyboard, so the page is never mounted there.
-    return { showCategories: false, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
+    return { railWidth: 0, contentX: 0, contentWidth: Math.max(1, width), allowDual: false }
   }
 
   /** The local viewport the plugin page is granted for THIS frame. */
@@ -4593,11 +4614,20 @@ export class SettingsWorkspacePanel implements Component {
       const navigation = this.focus === 'categories' ? this.renderNavigationActionBar(plan.width) : undefined
       const fallback = navigation ?? this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
       lines.push(fit(fallback.line, plan.width))
-      this.paintedTargets = fallback.span === undefined
+      const fallbackTargets: HitTarget[] = fallback.span === undefined
         ? []
         : [this.barEscapeTarget(lines.length - 1, navigation === undefined
           ? fallback.span
           : { startCol: fallback.span.startCol, endCol: fallback.span.endCol })]
+      // The rail's OWN forward hint is the pointer analogue of Enter/Right on
+      // every projection, including this unavailable-composition fallback: only
+      // the span the frame really painted is published, and activating it
+      // replays the existing Enter ladder (never a second focus transfer).
+      const fallbackOpen = navigation?.openSpan
+      if (fallbackOpen !== undefined) {
+        fallbackTargets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: fallbackOpen.startCol, endCol: fallbackOpen.endCol })
+      }
+      this.paintedTargets = fallbackTargets
       this.paintedPanes = {}
       this.paintedContentBox = undefined
       this.paintedRevision = this.revision
@@ -4613,18 +4643,18 @@ export class SettingsWorkspacePanel implements Component {
     const contentTop = geometry.contentTop
     const contentRows = geometry.contentRows
     if (plan.paneHeaderRows === 1) lines.push(this.renderPluginPaneHeader(plan, projection, layout, view))
-    const visible = projection.showCategories ? this.visibleCategories(contentRows) : []
+    const visible = projection.railWidth > 0 ? this.visibleCategories(contentRows) : []
     for (let index = 0; index < contentRows; index += 1) {
       const content = fit(child[index] ?? '', projection.contentWidth)
-      if (!projection.showCategories) {
+      if (projection.railWidth === 0) {
         lines.push(content)
         continue
       }
       const id = visible[index]
-      const rail = fit(id === undefined ? '' : this.categoryLine(id), WIDE_CATEGORY_WIDTH)
+      const rail = fit(id === undefined ? '' : this.categoryLine(id), projection.railWidth)
       lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${content}`)
       if (id !== undefined) {
-        targets.push({ kind: 'category', id, row: contentTop + index, startCol: 0, endCol: WIDE_CATEGORY_WIDTH })
+        targets.push({ kind: 'category', id, row: contentTop + index, startCol: 0, endCol: projection.railWidth })
       }
     }
     // The page's semantic bar is its LOCAL last row; while the rail owns the
@@ -4637,13 +4667,20 @@ export class SettingsWorkspacePanel implements Component {
       // already in panel columns (never shifted by the content-column origin).
       targets.push(this.barEscapeTarget(lines.length - 1, barSpan))
     }
+    // The rail's painted forward hint is the pointer analogue of Enter/Right on
+    // THIS direct page too: the root replays its existing Enter ladder, never a
+    // second focus owner. A hint the frame dropped or truncated publishes none.
+    const openSpan = navigation?.openSpan
+    if (openSpan !== undefined) {
+      targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: openSpan.startCol, endCol: openSpan.endCol })
+    }
     this.paintedContentBox = { x: projection.contentX, top: contentTop, width: projection.contentWidth, rows: contentRows }
     const categories = this.currentCategoryOrder()
-    this.paintedPanes = projection.showCategories
+    this.paintedPanes = projection.railWidth > 0
       ? {
           categories: {
             x: 0,
-            width: WIDE_CATEGORY_WIDTH,
+            width: projection.railWidth,
             contentTop,
             contentRows: Math.min(categories.length, contentRows),
             maxOffset: Math.max(0, categories.length - contentRows),
@@ -4675,13 +4712,13 @@ export class SettingsWorkspacePanel implements Component {
 
   private renderPluginPaneHeader(
     plan: SettingsChromePlan,
-    projection: { readonly showCategories: boolean; readonly contentWidth: number },
+    projection: { readonly railWidth: number; readonly contentWidth: number },
     layout: { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number },
     view: PluginWorkspaceView,
   ): string {
     const parts: string[] = []
-    if (projection.showCategories) {
-      parts.push(fit(this.paneHeader(`Categories (${this.currentCategoryOrder().length})`, this.focus === 'categories'), WIDE_CATEGORY_WIDTH))
+    if (projection.railWidth > 0) {
+      parts.push(fit(this.paneHeader(`Categories (${this.currentCategoryOrder().length})`, this.focus === 'categories'), projection.railWidth))
       parts.push(' '.repeat(COLUMN_GAP))
     }
     if (layout.dual) {

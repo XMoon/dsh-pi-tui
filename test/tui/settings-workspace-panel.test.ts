@@ -858,6 +858,19 @@ function setup(options: {
 const plain = (harness: Harness, width = harness.columns()): string =>
   harness.panel.render(width).map(stripTerminalSequences).join('\n')
 
+/** Slice one painted row by CELL columns (never JS character indices). */
+function sliceCells(line: string, startColumn: number, cells: number): string {
+  let column = 0
+  let out = ''
+  for (const glyph of line) {
+    const width = visibleWidth(glyph)
+    if (column >= startColumn && column < startColumn + cells) out += glyph
+    column += width
+    if (column >= startColumn + cells) break
+  }
+  return out
+}
+
 const header = (harness: Harness): string => plain(harness).split('\n')[0] ?? ''
 
 /** The painted DETAIL column of the 120-column projection (pane x = 68):
@@ -2296,6 +2309,173 @@ test('a width cycle keeps the selected category/row/focus and refuses old coordi
   assert.match(header(h), /Settings · Conversation · Rows/u, 'the stale release activated nothing')
   assert.equal(h.commits(), 0)
   assert.equal(h.closes(), 0)
+})
+
+/**
+ * The frozen wide allocation: Categories takes one bounded extra cell per
+ * 10 columns past 120 (max +8), Rows one per 20/7 columns (max +28), Detail the
+ * remainder. These are independent literals from the accepted plan, not a copy
+ * of the production helpers.
+ */
+const WIDE_ALLOCATION = [
+  // width, categories, rows, rowsX, detailX, detailWidth
+  [108, 22, 42, 24, 68, 40],
+  [120, 22, 42, 24, 68, 52],
+  [123, 22, 43, 24, 69, 54],
+  [129, 22, 45, 24, 71, 58],
+  [130, 23, 45, 25, 72, 58],
+  [140, 24, 49, 26, 77, 63],
+  [160, 26, 56, 28, 86, 74],
+  [180, 28, 63, 30, 95, 85],
+  [199, 29, 69, 31, 102, 97],
+  [200, 30, 70, 32, 104, 96],
+  [201, 30, 70, 32, 104, 97],
+  [240, 30, 70, 32, 104, 136],
+] as const
+
+test('the wide frame distributes Categories/Rows/Detail over the frozen integer steps', () => {
+  for (const [width, categories, rowsWidth, rowsX, detailX, detailWidth] of WIDE_ALLOCATION) {
+    const h = setup({ columns: width, rows: 40 })
+    walkTo(h, 'appearance')
+    const frame = plain(h, width).split('\n')
+    const headerRow = frame.findIndex(line => line.includes('Categories (10)'))
+    assert.ok(headerRow >= 0, `${width}: the shared pane header paints`)
+    const paneHeader = frame[headerRow]!
+    assert.ok(paneHeader.startsWith('[Categories (10)]'), `${width}: the focused rail starts at x=0\n${paneHeader}`)
+    assert.equal(paneHeader.indexOf('Rows (4)'), rowsX, `${width}: the Rows pane starts at x=${rowsX}\n${paneHeader}`)
+    assert.equal(paneHeader.indexOf('Details'), detailX, `${width}: the Detail pane starts at x=${detailX}\n${paneHeader}`)
+    assert.equal(width - detailX, detailWidth, `${width}: the Detail owns the remaining ${detailWidth} cells`)
+    // Every painted body row is exactly the live width; each 2-cell gutter is
+    // blank and belongs to neither pane.
+    const body = frame.slice(headerRow + 1, -1)
+    assert.ok(body.length > 0, `${width}: the body paints`)
+    for (const line of body) {
+      assert.equal(visibleWidth(line), width, `${width}: every body row is fitted to the live width`)
+      assert.equal(line.slice(categories, categories + 2).trim(), '', `${width}: the rail/Rows gutter owns no cell`)
+      assert.equal(line.slice(detailX - 2, detailX).trim(), '', `${width}: the Rows/Detail gutter owns no cell`)
+      assert.equal(visibleWidth(line.slice(rowsX, rowsX + rowsWidth)), rowsWidth, `${width}: the Rows pane keeps its cells`)
+    }
+  }
+})
+
+test('a wide Rows summary uses its extra cells while CJK stays inside the pane', () => {
+  const summary = 'symbols · wide summary 宽屏摘要更完整'
+  const snapshot = (): SettingsWorkspaceSnapshot => ({
+    ...SNAPSHOT,
+    rows: SNAPSHOT.rows.map(row => row.id === 'icon-style'
+      ? { ...row, label: '图标样式 Icon style', summary }
+      : row),
+  })
+  const rowAt = (width: number): string => {
+    const h = setup({ columns: width, rows: 40, snapshot })
+    walkTo(h, 'appearance')
+    h.panel.handleInput('\t') // the Rows pane takes the keyboard
+    const frame = plain(h, width).split('\n')
+    const line = frame.find(candidate => candidate.includes('图标样式'))
+    assert.ok(line !== undefined, `${width}: the CJK row paints:\n${frame.join('\n')}`)
+    return line
+  }
+  const mediumRow = rowAt(120)
+  const mediumCell = sliceCells(mediumRow, 24, 42)
+  const wideRow = rowAt(200)
+  const wideCell = sliceCells(wideRow, 32, 70)
+  assert.equal(visibleWidth(mediumCell), 42, 'the medium Rows pane owns exactly 42 cells')
+  assert.equal(visibleWidth(wideCell), 70, 'the wide Rows pane owns exactly 70 cells')
+  assert.ok(mediumCell.endsWith('…'), `the 42-cell row truncates the summary:\n${mediumCell}`)
+  assert.ok(!wideCell.endsWith('…'), `the 70-cell row shows the whole summary:\n${wideCell}`)
+  assert.match(wideCell, /宽屏摘要更完整/u, 'the widened Rows pane reveals the real CJK summary tail')
+  assert.equal(visibleWidth(wideRow), 200, 'the CJK row never spills past the frame')
+})
+
+test('the wide resize staircase keeps the selected row/focus and the Detail minus-one step', () => {
+  const h = setup({ columns: 120, rows: 40 })
+  plain(h)
+  walkTo(h, 'conversation')
+  h.panel.handleInput('\r') // rail -> rows
+  h.panel.handleInput('\u001b[B') // the second Conversation row
+  assert.match(header(h), /Settings · Conversation · Rows/u)
+  for (const [width, rowsX, detailX, detailWidth] of [
+    [199, 31, 102, 97],
+    [200, 32, 104, 96],
+    [201, 32, 104, 97],
+  ] as const) {
+    h.resize(width, 40)
+    const frame = plain(h).split('\n')
+    assert.match(header(h), /Settings · Conversation · Rows/u, `${width}: the selected category/level survive the resize`)
+    const paneHeader = frame.find(line => line.includes('Categories (10)'))
+    assert.ok(paneHeader !== undefined, `${width}: the shared pane header paints`)
+    assert.equal(paneHeader.indexOf('[Rows (7)]'), rowsX, `${width}: the focused Rows pane moved to x=${rowsX}`)
+    assert.equal(paneHeader.indexOf('Details'), detailX, `${width}: the Detail pane moved to x=${detailX}`)
+    assert.equal(width - detailX, detailWidth, `${width}: the Detail width follows the frozen formula`)
+    // The selection stays on the SAME row through the staircase.
+    const selected = frame.filter(line => line.slice(rowsX).startsWith('> '))
+    assert.equal(selected.length, 1, `${width}: exactly one Rows cursor paints`)
+  }
+  // The widened gutters remain owner-less: a press+release in either 2-cell
+  // gutter changes neither the level nor the selection and writes nothing.
+  h.resize(200, 40)
+  const gutterFrame = plain(h).split('\n')
+  const selectedRow = gutterFrame.findIndex(line => line.slice(32).startsWith('> '))
+  assert.ok(selectedRow >= 0, 'the selected Rows row paints')
+  for (const x of [30, 31, 102, 103] as const) {
+    h.panel.onCellPress(x, selectedRow)
+    h.panel.onCellClick(x, selectedRow)
+  }
+  assert.match(header(h), /Settings · Conversation · Rows/u, 'a gutter gesture never takes a pane owner')
+  assert.equal(h.commits(), 0, 'a gutter gesture never writes')
+  assert.equal(h.closes(), 0, 'a gutter gesture never closes the lease')
+})
+
+test('the direct wide page hands its content the elastic grant and mounts lazily once', () => {
+  const h = setup({ columns: 44, rows: 24 })
+  plain(h, 44) // the narrow first frame is the About content
+  h.panel.handleInput('\u001b') // Esc returns the keyboard to the rail
+  plain(h, 44) // the narrow rail frame leaves the direct column
+  walkTo(h, 'models') // the narrow rail only selects: no page is mounted
+  plain(h, 44) // the rail frame paints Models selected but still mounts nothing
+  assert.equal(h.built.length, 0, 'a narrow rail selection mounts no direct page')
+  h.resize(200, 40)
+  const wide = plain(h).split('\n')
+  assert.equal(h.built.length, 1, 'the first visible wide content column mounts the page exactly once')
+  assert.equal(h.built[0]?.id, 'models:list')
+  const paneHeader = wide.find(line => line.includes('Categories (10)'))
+  assert.ok(paneHeader !== undefined, 'the direct wide pane header paints')
+  assert.equal(paneHeader.indexOf('Models'), 32, 'the direct content column starts after the 30-cell rail + gutter')
+  const pageRow = wide.find(line => line.includes('models:list page'))
+  assert.ok(pageRow !== undefined, 'the real page paints its body')
+  assert.equal(visibleWidth(pageRow), 200, 'the direct row keeps the live width')
+  assert.equal(pageRow.indexOf('models:list page'), 32, 'the page body starts at the widened content x=32')
+  assert.equal(visibleWidth(pageRow.slice(32)), 168, 'the page body wins the remaining 168 cells')
+  const selectedRail = wide.find(line => line.slice(0, 30).trimEnd() === '> Models')
+  assert.ok(selectedRail !== undefined, 'the selected rail row owns the widened 30-cell column')
+  assert.equal(selectedRail.slice(30, 32), '  ', 'the rail/content gutter stays blank')
+  // A later resize only reprojects the SAME page instance: no rebuild/read.
+  h.resize(240, 40)
+  plain(h)
+  h.resize(200, 40)
+  plain(h)
+  assert.equal(h.built.length, 1, 'later resizes never rebuild or re-mount the page')
+})
+
+test('the unavailable plugin composition still publishes the painted rail forward target', () => {
+  const h = setup({ columns: 200, rows: 40 })
+  walkTo(h, 'plugins')
+  const frame = plain(h).split('\n')
+  assert.match(frame.join('\n'), /The Plugin Manager is unavailable in this composition\./u,
+    'the unavailable composition paints its honest fallback')
+  assert.equal(h.pluginPages.length, 0, 'no plugin page is fabricated')
+  const barRow = frame.length - 1
+  const hint = frame[barRow]!.indexOf('Enter/Right focus')
+  assert.ok(hint >= 0, `the rail bar paints its real forward hint:\n${frame[barRow]}`)
+  // The painted hint is a real bar-open target on the fallback projection too.
+  h.panel.onCellPress(hint + 2, barRow)
+  h.panel.onCellClick(hint + 2, barRow)
+  const after = plain(h).split('\n')
+  assert.match(header(h), /Settings · Plugins/u, 'the focus transfer keeps the same category')
+  assert.match(after.at(-1)!, /Back \[Esc\]/u, 'the content fallback names its real Esc')
+  assert.match(after.join('\n'), /The Plugin Manager is unavailable in this composition\./u,
+    'the honest unavailable content stays painted')
+  assert.equal(h.pluginPages.length, 0, 'the pointer route never fabricates a page')
 })
 
 test('losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
