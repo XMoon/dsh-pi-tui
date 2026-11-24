@@ -613,6 +613,83 @@ test('Focus renders a live Preparing only in the latest window selected from the
   }
 })
 
+test('a Focus live Preparing never re-adopts an earlier Work across a replay fence', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 0 }, 0),
+    ev('tool/call', { turn: 0, step: 0, callId: ToolCallId('fence-a'), name: 'read', arguments: '{}' }, 1),
+    ev('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('fence-ar'), role: 'tool', toolCallId: ToolCallId('fence-a'),
+        content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('fence-a') },
+      },
+    }, 2),
+    ev('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('fence-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    ev('turn/start', { turn: 1 }, 5),
+    ev('user/message', {
+      id: MessageId('fence-bu'), role: 'user',
+      content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 6),
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('fence-b1'), name: 'read', arguments: '{}' }, 7),
+    ev('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('fence-b1r'), role: 'tool', toolCallId: ToolCallId('fence-b1'),
+        content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b1') },
+      },
+    }, 8),
+    ev('step/end', { turn: 1, step: 0 }, 9),
+    ev('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('fence-late'), role: 'tool', toolCallId: ToolCallId('fence-late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('fence-late-c') },
+      },
+    }, 10),
+    ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('fence-b2'), name: 'bash', arguments: '{}' }, 11),
+    ev('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('fence-b2r'), role: 'tool', toolCallId: ToolCallId('fence-b2'),
+        content: [{ type: 'text', text: 'B2 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b2') },
+      },
+    }, 12),
+    ev('step/end', { turn: 1, step: 1 }, 13),
+    // A non-Work same-turn row after the replay fence: the canonical tail is a
+    // Context row the root's primary region never contained.
+    ev('user/message', {
+      id: MessageId('fence-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'late B context' }],
+      source: { kind: 'agent-instructions' }, turn: 1,
+    }, 14),
+  ])
+  const preview: StreamingToolPreview = { callId: 'fence-live', turn: 1, step: 2, index: 0, name: 'bash', argumentBytes: 12 }
+  const nodes = flatten(folder.messages(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: [preview],
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  })
+  const roots = nodesOf(nodes, 'section').filter(node => node.parent === 'main')
+  assert.equal(roots.length, 2, 'one root per logical Turn; the later region mints no third root')
+  const preparing = nodes.filter(node => node.kind === 'row' && node.id.includes('preparing-fence-live'))
+  assert.equal(preparing.length, 1, 'the live run renders exactly once')
+  assert.equal(preparing[0]?.parent, 'main',
+    'the later fail-open region forces the expanded live run standalone, never a child of the earlier root')
+  assert.equal(roots.some(root => preparing[0]!.id.startsWith(`${root.id}.`)), false,
+    'the live run is not a descendant of any earlier root')
+  for (const root of roots) {
+    assert.ok(!descendantText(nodes, root.id).includes('Preparing'),
+      `no earlier root/Work slot paints the live run (${root.id})`)
+  }
+})
+
 test('an ownerless Focus Preparing stays on its real root without inventing Work', () => {
   const folder = apply([
     ev('turn/start', { turn: 1 }, 0),

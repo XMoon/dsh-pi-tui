@@ -50,7 +50,7 @@ import { resolveWorkLifetimes, type WorkLifetime } from '../transcript/activity-
 import { compactActionBody, compactActionPresentation, compactPreparingSummary, latestReasoningLine } from '../components/transcript/compact-process-preview.ts'
 import { focusStatusLabel } from '../components/transcript/focus-activity.ts'
 import { compactActionStatParts, formatCompactDuration, type CompactActionSource, type CompactActionStats } from '../transcript/process-summary.ts'
-import { focusLiveTailAttachTurn, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { focusLiveTailPlacement, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import { summarizeWorkSpan } from '../transcript/work-summary.ts'
@@ -2413,6 +2413,21 @@ function focusDuration(activity: TurnActivity, options: TranscriptPresetViewOpti
   return duration === '0s' ? undefined : duration
 }
 
+/** The bounded one-line collapsed Action body the Focus root head paints (and
+ * the root stamp must follow): the SAME derivation for the head and the stamp,
+ * never a content hash. */
+function focusRootActionBody(
+  action: CompactActionSource | undefined,
+  options: TranscriptPresetViewOptions,
+): string | undefined {
+  if (action === undefined) return undefined
+  const body = compactActionBody(compactActionPresentation(action, {
+    ...(options.toolPresenter === undefined ? {} : { presenter: options.toolPresenter }),
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+  }))
+  return body === undefined ? undefined : sanitizedPhysicalLine(body)
+}
+
 function focusRootHead(slot: FocusSlot, options: TranscriptPresetViewOptions): Node {
   const phase = options.focusPhase ?? 'working'
   const duration = focusDuration(slot.activity, options)
@@ -2443,10 +2458,7 @@ function focusRootHead(slot: FocusSlot, options: TranscriptPresetViewOptions): N
       index: preview.index,
       ...(preview.name === undefined ? {} : { name: preview.name }),
     })))
-    const action = slot.action === undefined ? undefined : compactActionBody(compactActionPresentation(slot.action, {
-      ...(options.toolPresenter === undefined ? {} : { presenter: options.toolPresenter }),
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    }))
+    const action = focusRootActionBody(slot.action, options)
     if (preparing !== undefined || action !== undefined) {
       head.push(ui.text({
         key: 'action',
@@ -2674,6 +2686,13 @@ function focusRootDescriptor(
   ]
   for (const preview of slot.preparing) stamp.push(...preparingStampOf(preview, options.cwd))
   for (const child of slot.children) stamp.push(...child.stamp)
+  // The collapsed Focus root head paints the Action aggregate and the latest
+  // hidden Action body on its OWN, even when no child is materialized: the root
+  // stamp must follow those exact bounded strings (a source/status change with
+  // an unchanged activity revision must still repaint the native root).
+  for (const part of compactActionStatParts(slot.actionStats)) stamp.push(sanitizedPhysicalLine(part))
+  const actionBody = focusRootActionBody(slot.action, options)
+  if (actionBody !== undefined) stamp.push(actionBody)
   // R13: the collapsed Focus root head paints its own Action through
   // `options.cwd`, and children need not be expanded for it to show — the
   // root stamp covers that root on its own.
@@ -2732,7 +2751,10 @@ function focusPreparingPlacement(
   // the raw tail is the same canonical region policy either way.
   const expandedBlocks = projectFocus(messages, activities, new Set(activities.keys()), true)
   const trailing = projectTranscriptStructure(messages).at(-1)
-  const attachTurn = focusLiveTailAttachTurn(messages, activities)
+  const placement = focusLiveTailPlacement(messages, activities)
+  const placementTurn = placement === undefined || !('turn' in placement.rootOwner)
+    ? undefined
+    : placement.rootOwner.turn
   const rootOfTurn = (turn: number): TranscriptMessage | undefined => {
     const projected = expandedBlocks.find(block => block.kind === 'activity' && block.activity.turn === turn)
     return projected?.kind === 'activity' ? projected.owner : undefined
@@ -2754,23 +2776,20 @@ function focusPreparingPlacement(
   let workOwner: TranscriptMessage | undefined
   let attachedRootOwner: TranscriptMessage | undefined
   if (trailing?.kind === 'work') {
-    // The exact trailing canonical Work owns the preview. Its owning root is the
-    // ONE summary of that Turn, admitted only while the Turn is still open (a
-    // completed / foreign preview never attaches to a historical root).
-    if (attachTurn !== undefined) {
-      const projected = expandedBlocks.find(block => block.kind === 'work' && block.span.owner === trailing.span.owner)
-      if (projected?.kind === 'work') {
-        turn = attachTurn
-        attachedRootOwner = rootOfTurn(attachTurn)
-        workOwner = attachedRootOwner === undefined ? undefined : trailing.span.owner
-      }
+    // The EXACT projected trailing canonical Work owns the preview. A canonical
+    // Work in a later fail-open region was not materialized under the root and
+    // therefore never re-adopts a live call.
+    if (placement?.workOwner !== undefined && placement.workOwner === trailing.span.owner) {
+      turn = placementTurn
+      attachedRootOwner = placement.rootOwner
+      workOwner = placement.workOwner
     }
-  } else if (attachTurn !== undefined) {
-    // A root reaches the raw tail only when the trailing row belongs to that
-    // same open Turn; a turn-less command / hard boundary after the region
-    // takes the standalone route below instead of a fabricated Focus path.
-    turn = attachTurn
-    attachedRootOwner = rootOfTurn(attachTurn)
+  } else if (placement !== undefined) {
+    // The projected PRIMARY region must actually reach the raw tail; a
+    // turn-less/replay/hard boundary or a later fail-open region of the same
+    // Turn takes the standalone route below.
+    turn = placementTurn
+    attachedRootOwner = placement.rootOwner
   }
   if (turn === undefined) {
     // The raw tail is an independent turn-less boundary. The still-open logical

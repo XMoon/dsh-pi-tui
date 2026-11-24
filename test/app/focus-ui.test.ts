@@ -4100,6 +4100,114 @@ test('expanded Focus inserts the live Preparing call after every nested Work par
   assert.ok(preparingRow > toolRow, `the live call follows every durable Work part:\n${joined}`)
 })
 
+test('a live Focus run never re-adopts an earlier Work across a replay fence', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('fence-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('fence-ar'), role: 'tool', toolCallId: ToolCallId('fence-a'),
+        content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('fence-a') },
+      },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('fence-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('fence-bu'), role: 'user',
+      content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('fence-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('fence-b1r'), role: 'tool', toolCallId: ToolCallId('fence-b1'),
+        content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b1') },
+      },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    // A late orphan result for the settled Turn A: a replay hard fence between
+    // the root's primary region and the later same-turn Work B2.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('fence-late'), role: 'tool', toolCallId: ToolCallId('fence-late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('fence-late-c') },
+      },
+    }, T0 + 10, 10),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('fence-b2'), name: 'bash', arguments: '{}' }, T0 + 11, 11),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('fence-b2r'), role: 'tool', toolCallId: ToolCallId('fence-b2'),
+        content: [{ type: 'text', text: 'B2 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b2') },
+      },
+    }, T0 + 12, 12),
+    eventAt('step/end', { turn: 1, step: 1 }, T0 + 13, 13),
+  ])
+  show(app, folder, [
+    { callId: 'fence-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly turn?: number; readonly result?: string }
+      readonly preparingSummary?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const works = blocks.filter(block => block.kind === 'work')
+  assert.equal(works.some(block => block.preparingSummary?.text?.includes('Preparing') === true), false,
+    'the earlier Work never re-adopts a live call across the replay fence')
+  const previewBlocks = blocks.filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.equal(previewBlocks.length, 1, 'the live run is inserted exactly once')
+  assert.equal(previewBlocks[0]?.containerPath, undefined,
+    'the later fail-open region gives the live run no Focus ancestry')
+  const previewIndex = blocks.findIndex(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  const b2Index = blocks.findIndex(block => block.kind === 'message' && block.message?.result === 'B2 result')
+  assert.ok(b2Index >= 0 && previewIndex > b2Index,
+    'the live run renders after the raw later-region evidence, never inside the earlier region')
+
+  // The same holds when the later fail-open region ends in a NON-Work same-turn
+  // row (a surfaced Context row): the numeric turn alone never admits the call.
+  applyMixed(folder, [
+    eventAt('user/message', {
+      id: MessageId('fence-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'late B context' }], source: { kind: 'agent-instructions' }, turn: 1,
+    }, T0 + 14, 14),
+  ])
+  show(app, folder, [
+    { callId: 'fence-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  await vt.waitForRender()
+  const nonWorkBlocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly turn?: number }
+      readonly preparingSummary?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const nonWorkPreview = nonWorkBlocks.filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.equal(nonWorkPreview.length, 1, 'the live run is still inserted once')
+  assert.equal(nonWorkPreview[0]?.containerPath, undefined,
+    'a non-Work fail-open same-turn tail also keeps the live run standalone')
+  assert.equal(nonWorkBlocks.filter(block => block.kind === 'work')
+    .some(block => block.preparingSummary?.text?.includes('Preparing') === true), false,
+  'no earlier Work re-adopts the call across the replay fence')
+  app.stop()
+})
+
 test('an expanded Focus live run after an unbridged trailing command stays standalone', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()

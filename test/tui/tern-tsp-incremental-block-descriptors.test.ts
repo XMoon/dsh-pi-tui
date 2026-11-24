@@ -964,3 +964,40 @@ test('a PTC Context image load state changes only that Context block stamp', () 
   assert.equal(imageBlob(loadingNode), PENDING_IMAGE_BLOB_ID,
     'the loading state keeps the pending placeholder, never the ready blob')
 })
+
+test('a same-revision Focus Action/stat change invalidates the root stamp', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'stamp-user', 'go'),
+    toolCall(2, 'stamp-a', 'read', {}, 0),
+    toolResult(3, 'stamp-a', 'A', 0),
+    ev('step/end', { turn: 1, step: 0 }, 4),
+  ])
+  const liveActivity = folder.turnActivities().get(1)
+  assert.ok(liveActivity !== undefined)
+  // Snapshot the activity (the Folder mutates its live object in place): pin
+  // the SAME revision/tokens while the source rows change.
+  const activity = structuredClone(liveActivity)
+  // the root head's Action aggregate/winner is derived from the hidden rows, so
+  // its stamp must follow them without a full content hash or revision bump.
+  const options = {
+    preset: 'focus' as const,
+    turnActivities: new Map([[1, activity]]),
+    window: LATEST_WINDOW,
+  }
+  const rootOf = (messages: readonly TranscriptMessage[]): (typeof descriptors)[number] => {
+    const descriptors = describeTranscriptMainBlocksForPreset(messages, new TranscriptNodeKeys(), options)
+    const root = descriptors.find(descriptor => descriptor.key.includes('focus-'))
+    assert.ok(root !== undefined)
+    return root
+  }
+  const before = rootOf(folder.messages())
+  folder.apply([
+    toolCall(5, 'stamp-b', 'bash', {}, 1),
+    toolResult(6, 'stamp-b', 'B', 1),
+  ])
+  const after = rootOf(folder.messages())
+  assert.equal(after.key, before.key, 'the root identity is unchanged')
+  assert.notDeepEqual(after.stamp, before.stamp,
+    'a same-revision Action/stat change invalidates the retained root stamp')
+})

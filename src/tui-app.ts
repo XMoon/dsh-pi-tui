@@ -359,7 +359,7 @@ import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
 import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
 import type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
-import { focusLiveTailAttachTurn, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
+import { focusLiveTailPlacement, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
@@ -12726,11 +12726,14 @@ export class TuiApp {
       if (block.kind === 'work') spans.push(block.span)
     }
     const turns = [...new Set(this.streamingToolPreviews.map(preview => preview.turn))].sort((a, b) => a - b)
-    // ONE raw-tail admission per pass: it does not depend on the preview turn,
-    // and every preview group must not rescan the window.
-    const liveTailAttachTurn = focusExpandedTurns === undefined
+    // ONE projected raw-tail placement per pass: it does not depend on the
+    // preview turn, and every preview group must not rescan the window.
+    const liveTailPlacement = focusExpandedTurns === undefined
       ? undefined
-      : focusLiveTailAttachTurn(this.messages, this.turnActivities)
+      : focusLiveTailPlacement(this.messages, this.turnActivities)
+    const liveTailRootTurn = liveTailPlacement === undefined || !('turn' in liveTailPlacement.rootOwner)
+      ? undefined
+      : liveTailPlacement.rootOwner.turn
     const pending: StreamingToolPreview[] = []
     for (const turn of turns) {
       const previews = this.streamingToolPreviewsForTurn(turn)
@@ -12742,7 +12745,7 @@ export class TuiApp {
         pending.push(...previews)
         continue
       }
-      const owner = this.workPreparingOwner(turn, spans)
+      const owner = this.workPreparingOwner(turn, spans, focusExpandedTurns !== undefined, liveTailPlacement)
       if (owner.kind === 'pending-run') {
         // The previous run was closed by a Conversation / Context / Attention
         // boundary (or none exists yet): the call is a NEW Process run.
@@ -12751,11 +12754,12 @@ export class TuiApp {
         } else if (focusExpandedTurns.has(turn)) {
           const insertion = this.focusPreparingInsertionIndex(blocks, turn)
           if (insertion !== undefined) {
-            // §3.3: Focus ancestry only while the canonical RAW tail still
-            // belongs to this open Turn. An independent trailing boundary (a
-            // turn-less command/summary, a fused compaction control, a foreign
-            // or completed Turn) keeps the live run standalone AFTER it.
-            const containerPath = liveTailAttachTurn === turn
+            // §3.3: Focus ancestry only while this Turn's PRIMARY projected
+            // region actually reaches the raw tail. A turn-less boundary, a
+            // replay fence or a later fail-open region of the same Turn keeps
+            // the live run standalone AFTER it; an exact trailing Work is
+            // handled by the Work branch above, never re-adopted here.
+            const containerPath = liveTailRootTurn === turn && liveTailPlacement?.workOwner === undefined
               ? [{ kind: 'focus-root' as const, turn }]
               : undefined
             blocks.splice(insertion, 0, {
@@ -12818,7 +12822,24 @@ export class TuiApp {
    * Otherwise the call starts a NEW run (`pending-run`) and must never be drawn
    * back across the closed boundary.
    */
-  private workPreparingOwner(turn: number, spans: readonly TranscriptWorkSpan[]): WorkPreparingOwner {
+  private workPreparingOwner(
+    turn: number,
+    spans: readonly TranscriptWorkSpan[],
+    focusMode: boolean,
+    focusPlacement?: { readonly rootOwner: TranscriptMessage; readonly workOwner?: TranscriptMessage },
+  ): WorkPreparingOwner {
+    if (focusMode) {
+      // Focus: the ACTUAL projected region tail decides. A later fail-open
+      // region of the same Turn may end in a canonical Work the projection did
+      // not materialize; that Work must never re-adopt the live call.
+      if (focusPlacement === undefined) return { kind: 'pending-run' }
+      const rootTurn = 'turn' in focusPlacement.rootOwner ? focusPlacement.rootOwner.turn : undefined
+      if (rootTurn !== turn) return { kind: 'pending-run' }
+      if (focusPlacement.workOwner === undefined) return { kind: 'pending-run' }
+      const span = spans.find(candidate => candidate.owner === focusPlacement.workOwner && candidate.turn === turn)
+      return span === undefined ? { kind: 'pending-run' } : { kind: 'trailing-run', span }
+    }
+    // Compact keeps its existing canonical-tail ownership rule.
     let trailing: TranscriptWorkSpan | undefined
     for (const span of spans) {
       if (span.turn === turn) trailing = span
