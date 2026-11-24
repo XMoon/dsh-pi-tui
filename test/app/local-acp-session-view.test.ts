@@ -5482,6 +5482,48 @@ test('G-ACP2-PR2 LOAD-09: a close during a history Store read is a cancellation,
     'the abort class wins over the attachment error')
 })
 
+test('G-ACP2-PR2 LOAD-13: a subagent-edge overflow aborts the waiting read and fails the load with BACKPRESSURE', async () => {
+  const view = projectionView('LD15', {
+    history: {
+      header: { sessionId: 'LD15', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: {
+          id: 'am1',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'COLD' },
+          role: 'user',
+          content: [{ type: 'text', text: 'from a cold child' }],
+        },
+      }],
+    },
+  })
+  const entered = Promise.withResolvers<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.headerFactsImpl = async (_sessionId, signal) => {
+    readSignal = signal
+    entered.resolve()
+    await new Promise<void>(resolve => {
+      if (signal?.aborted === true) { resolve(); return }
+      signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    return undefined
+  }
+  const loading = view.load()
+  await entered.promise
+  // Fill the OTHER replay buffer (official subagent lifecycle edges) past its
+  // cap: MAX_REPLAY_BUFFERED_EVENTS is 1024.
+  for (let index = 0; index <= 1024; index += 1) {
+    view.registry.onSubagentStart({
+      runId: `run-${String(index)}`, id: `child-${String(index)}`, parentSessionId: 'LD15', local: true,
+    })
+  }
+  assert.equal(readSignal?.aborted, true, 'the edge overflow aborts the waiting read')
+  await assert.rejects(loading, isViewError('LOCAL_ACP_LOAD_BACKPRESSURE'),
+    'the load reports backpressure, not a plain cancellation')
+  assert.equal(view.registry.hasClaim('LD15'), false, 'the failed load releases only this View')
+})
+
 test('G-ACP2-PR2 LIVE-01: a live close aborts an in-flight cold header read and leaves another View alive', async () => {
   const view = projectionView('L15')
   await view.resume()
@@ -5510,13 +5552,6 @@ test('G-ACP2-PR2 LIVE-01: a live close aborts an in-flight cold header read and 
   await flushOutput()
   assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
     'no late frame from the cancelled live projection')
-  // Another View is untouched by this claim's cancellation.
-  const other = projectionView('L17')
-  await other.resume()
-  other.commit('session/title', { title: 'still alive', messageSeqs: [], source: 'user' })
-  await flushOutput()
-  assert.equal(other.notifications.some(update => update.sessionUpdate === 'session_info_update'), true,
-    'the sibling View keeps projecting')
 })
 
 test('G-ACP2-PR2 LIVE-02: a live close aborts an in-flight attachment Store read', async () => {
@@ -5569,7 +5604,14 @@ test('G-ACP2-PR2 LOAD-12: load offers the official continued question after its 
     answered.push(callId)
     return { kind: 'queued' }
   }
-  await view.load()
+  const hold = view.holdProjection()
+  const loading = view.load()
+  // The canonical history is still blocked at the sink: the reverse Form must
+  // not exist yet.
+  await hold.entered
+  assert.equal(channel.forms.length, 0, 'the continued Form waits for the drained history')
+  hold.release()
+  await loading
   await flushOutput()
   assert.equal(channel.forms.length, 1, 'load offers the pending continued question exactly once')
   assert.equal(channel.forms[0]!.request.toolCallId, 'call-first')

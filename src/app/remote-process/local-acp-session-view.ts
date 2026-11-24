@@ -2017,12 +2017,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     replay: ViewReplay | undefined,
     message: AcpHistoryAgentMessage,
   ): Promise<void> {
-    const lineage = await this.sessionMessageLineage(claim, access, replay, message.senderSessionId)
+    const lineage = await this.sessionMessageLineage(claim, access, message.senderSessionId)
     if (lineage === 'unproven') {
       this.diag.warn('local-acp.projection.session-message-unverified', { key: 'session_message' })
       return
     }
-    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, replay, message.senderSessionId)) return
+    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return
     const blocks: AcpWireContentBlock[] = []
     for (const part of message.content) {
       if (part.type === 'text') {
@@ -2060,7 +2060,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private async sessionMessageLineage(
     claim: ViewClaim,
     access: HostAcpSessionAccess,
-    replay: ViewReplay | undefined,
     senderSessionId: string,
   ): Promise<'child' | 'parent' | 'unproven'> {
     if (senderSessionId === claim.sessionId) return 'unproven'
@@ -2086,7 +2085,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private async announceChildAssociation(
     claim: ViewClaim,
     access: HostAcpSessionAccess,
-    replay: ViewReplay | undefined,
     childId: string,
   ): Promise<boolean> {
     const announced = claim.announcedChildren ??= new Set()
@@ -2321,6 +2319,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // canonical snapshot it must follow.
         if (replay.subagents.length >= MAX_REPLAY_BUFFERED_EVENTS) {
           replay.overflowed = true
+          // The SAME terminal abort as the Session-event buffer: this replay can
+          // never succeed, so any read it still waits on must stop now instead
+          // of after the drain notices the overflow.
+          if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
+          replay.abort.abort()
           return
         }
         replay.subagents.push({ edge, info })
@@ -4885,7 +4888,6 @@ const NO_PROJECTION_CAPABILITIES: AcpNegotiatedCapabilities = {
 }
 
 /** A signal nothing aborts, used by read-only projections outside a replay barrier. */
-const UNABORTED_SIGNAL = new AbortController().signal
 
 /** The bounded load replay window could not hold every live event. */
 function loadBackpressure(): LocalAcpViewError {
