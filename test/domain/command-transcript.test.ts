@@ -22,6 +22,7 @@ import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
+import { assistantLatestStepOf } from '../../src/domain/transcript/folder.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
 import { classifyTranscriptMessage } from '../../src/domain/transcript/semantics.ts'
 
@@ -402,6 +403,77 @@ function toolResultAt(callId: string, text: string, seq: number, turn = 0, step 
     },
   }, seq)
 }
+
+test('a late older-step assistant never releases the real latest pending final', () => {
+  const build = (fence: 'command' | 'replay'): TranscriptFolder => {
+    const folder = new TranscriptFolder()
+    let seq = 0
+    const events: SessionEvent[] = []
+    if (fence === 'replay') {
+      // A settled earlier Turn supplies the replay provenance target.
+      events.push(
+        event('turn/start', { turn: 0 }, seq++),
+        toolCall('read', 'older-a', seq++, 0, 0),
+        toolResultAt('older-a', 'A result', seq++, 0, 0),
+        assistantMessage('A final', seq++, 0, 1),
+        event('turn/end', { turn: 0, reason: { kind: 'completed' } }, seq++),
+      )
+    }
+    events.push(
+      event('turn/start', { turn: 1 }, seq++),
+      userMessage('older-step prompt', seq++, 1),
+      event('step/start', { turn: 1, step: 2 }, seq++),
+      assistantMessage('LATEST_STEP_PENDING', seq++, 1, 2),
+      event('step/end', { turn: 1, step: 2 }, seq++),
+    )
+    if (fence === 'command') {
+      events.push(
+        event('command/run', { commandId: CommandId('older-cmd'), name: 'model', source: { kind: 'user' } }, seq++),
+        event('command/done', { commandId: CommandId('older-cmd'), kind: 'success', text: 'switched' }, seq++),
+      )
+    } else {
+      // A late orphan result for the settled earlier Turn: a replay hard fence.
+      events.push(event('tool/result', {
+        turn: 0, step: 9,
+        message: {
+          id: MessageId('older-late'), role: 'tool', toolCallId: ToolCallId('older-late-c'),
+          content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('older-late-c') },
+        },
+      }, seq++))
+    }
+    // A newly materialized durable message for the OLDER step, with no previous
+    // chunk/entry and no later structural step: the physical tail is not the
+    // structural latest step.
+    events.push(assistantMessage('OLDER_STEP_EVIDENCE', seq++, 1, 1))
+    folder.apply(events)
+    return folder
+  }
+  for (const fence of ['command', 'replay'] as const) {
+    const folder = build(fence)
+    const activity = folder.turnActivities().get(1)
+    assert.ok(activity !== undefined)
+    assert.equal(assistantLatestStepOf(activity), 2, `fixture (${fence}): the structural latest step stays 2`)
+    const before = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+    assert.equal(before.filter(block => block.kind === 'message' && block.message.kind === 'assistant'
+      && block.message.text === 'LATEST_STEP_PENDING').length, 0,
+    `the real latest-step assistant stays held back before turn/end (${fence})`)
+    const olderBefore = before.filter(block => block.kind === 'message' && block.message.kind === 'assistant'
+      && block.message.text === 'OLDER_STEP_EVIDENCE')
+    assert.equal(olderBefore.length, 1, `the late older-step evidence is retained exactly once (${fence})`)
+    assert.equal(before.filter(block => block.kind === 'activity' && block.activity.turn === 1).length, 1,
+      `one summary for the Turn only (${fence})`)
+
+    const endSeq = 40
+    folder.apply([event('turn/end', { turn: 1, reason: { kind: 'completed' } }, endSeq)])
+    const after = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+    assert.equal(after.filter(block => block.kind === 'message' && block.message.kind === 'assistant'
+      && block.message.text === 'LATEST_STEP_PENDING').length, 1,
+    `exactly one qualified final appears after turn/end (${fence})`)
+    assert.equal(after.filter(block => block.kind === 'message' && block.message.kind === 'assistant'
+      && block.message.text === 'OLDER_STEP_EVIDENCE').length, 1,
+    `the older-step evidence stays retained after turn/end (${fence})`)
+  }
+})
 
 test('a bridged control run never promotes a settled assistant to Process before turn/end', () => {
   const folder = new TranscriptFolder()

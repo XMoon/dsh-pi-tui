@@ -613,6 +613,46 @@ test('Focus renders a live Preparing only in the latest window selected from the
   }
 })
 
+test('the TSP Focus sink never releases the latest pending final for a late older-step row', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'older-step-user', 'older-step prompt'),
+    ev('step/start', { turn: 1, step: 2 }, 2),
+    ev('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('older-step-latest'), role: 'assistant', content: [{ type: 'text', text: 'LATEST_STEP_PENDING' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('step/end', { turn: 1, step: 2 }, 4),
+    ev('command/run', { commandId: CommandId('older-step-cmd'), name: 'model', source: { kind: 'user' } }, 5),
+    ev('command/done', { commandId: CommandId('older-step-cmd'), kind: 'success', text: 'switched' }, 6),
+    ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('older-step-evidence'), role: 'assistant', content: [{ type: 'text', text: 'OLDER_STEP_EVIDENCE' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 7),
+  ])
+  const options = {
+    preset: 'focus' as const,
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  }
+  const before = flatten(folder.messages(), options)
+  assert.equal(nodesOf(before, 'section').filter(node => node.parent === 'main').length, 1,
+    'the late older-step row mints no second root')
+  assert.equal(before.filter(node => textOf(node).includes('LATEST_STEP_PENDING')).length, 0,
+    'the structural latest-step pending final is not painted before turn/end')
+  assert.equal(before.filter(node => textOf(node).includes('OLDER_STEP_EVIDENCE')).length, 1,
+    'the older-step evidence is retained in the expanded native tree')
+
+  folder.apply([ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 8)])
+  const after = flatten(folder.messages(), options)
+  assert.equal(after.filter(node => textOf(node).includes('LATEST_STEP_PENDING')).length, 1,
+    'exactly one qualified final is painted after turn/end')
+  assert.equal(after.filter(node => textOf(node).includes('OLDER_STEP_EVIDENCE')).length, 1,
+    'the older-step evidence stays retained after the final')
+})
+
 test('a Focus live Preparing never re-adopts an earlier Work across a replay fence', () => {
   const folder = apply([
     ev('turn/start', { turn: 0 }, 0),

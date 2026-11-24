@@ -34,7 +34,7 @@ import {
   assistantStepOf,
   assistantStepSettledOf,
 } from '../../domain/transcript/folder.ts'
-import { eligibleFinalAssistant, type EligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
+import { assistantForStep, eligibleFinalAssistant, type EligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import {
   isPostTurnReplayEvidence,
@@ -164,10 +164,11 @@ export type FocusProjectedBlock =
  * collapsed Focus reorder would otherwise lift it above the turn's held-back
  * final and invert the real chronology (`assistant final` → `Context
  * compacted`). Treating turn-less rows as BOUNDARIES makes the projection
- * agree with the fold: `process A -> Thought A`, `command -> standalone`,
- * `process B -> Thought B`. Both runs may still belong to one model turn (the
- * run-owner component cache supports that), and the semantic disclosure
- * identity stays the turn number.
+ * agree with the fold: the Turn keeps its ONE summary, the command stays a
+ * standalone control row (bridged only while eligible same-Turn evidence
+ * continues), and any later disjoint region fails open in raw order instead of
+ * minting a second Thought. All of those rows may belong to one model turn; the
+ * semantic disclosure identity stays the turn number.
  */
 export function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
   if (message.kind === 'command') return undefined
@@ -357,22 +358,23 @@ export function projectFocus(
     // intermediate.
     const activity = activities.get(turn)
     if (activity === undefined || activity.completed) continue
-    let latestIndex = -1
-    for (let rowIndex = rows.length - 1; rowIndex >= 0; rowIndex -= 1) {
-      if (rows[rowIndex]?.kind === 'assistant') {
-        latestIndex = rowIndex
-        break
-      }
-    }
-    if (latestIndex < 0) continue
-    const latestAssistant = rows[latestIndex]!
-    if (latestAssistant.kind !== 'assistant') continue
-    if (assistantStepOf(latestAssistant) !== assistantLatestStepOf(activity)
+    // Select the structural LATEST-STEP row first: a late older-step settlement
+    // can be appended after it, and physical last position is not step identity.
+    const latestStep = assistantLatestStepOf(activity)
+    if (latestStep === undefined) continue
+    const latestAssistant = assistantForStep(rows, latestStep)
+    if (latestAssistant === undefined
       || !assistantStepSettledOf(activity, latestAssistant)
       || latestAssistant.displayBlocks !== undefined
       || assistantCommittedBeforeSteer(activity, latestAssistant)) continue
+    const latestIndex = rows.indexOf(latestAssistant)
+    // A stale older-step Assistant settlement is transcript evidence, never a
+    // later Process continuation; only genuine Process evidence (tool/thinking/
+    // system rows, control/replay/foreign rows already excluded) releases the
+    // candidate.
     const laterProcess = rows.slice(latestIndex + 1).some(member =>
-      member.kind !== 'user' && !isSurfacedContext(member) && !isFocusBridgeControlRow(member))
+      member.kind !== 'user' && member.kind !== 'assistant'
+      && !isSurfacedContext(member) && !isFocusBridgeControlRow(member))
     if (!laterProcess) pendingByTurn.set(turn, latestAssistant)
   }
   const out: FocusProjectedBlock[] = []
@@ -669,8 +671,11 @@ export function focusExpandedTailStructure(region: readonly TranscriptMessage[],
 export function focusLiveTailPlacement(
   messages: readonly TranscriptMessage[],
   activities: ReadonlyMap<number, TurnActivity>,
+  expandedBlocks?: readonly FocusProjectedBlock[],
 ): { readonly rootOwner: TranscriptMessage; readonly workOwner?: TranscriptMessage } | undefined {
-  const expanded = projectFocus(messages, activities, new Set(activities.keys()), true)
+  // The caller may already hold the all-expanded projection (TSP does): reuse
+  // the SAME derived blocks instead of re-projecting the window.
+  const expanded = expandedBlocks ?? projectFocus(messages, activities, new Set(activities.keys()), true)
   const last = expanded.at(-1)
   if (last === undefined) return undefined
   const openActivityOf = (turn: number): Extract<FocusProjectedBlock, { kind: 'activity' }> | undefined => {

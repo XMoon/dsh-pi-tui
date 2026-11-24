@@ -31,7 +31,13 @@ export interface EligibleFinalAssistant {
 /** Find the Assistant entry that owns the structural latest step. A late
  * durable message can append after newer process evidence, so physical array
  * order is not a reliable final-answer identity. */
-function assistantForStep(
+/**
+ * The structural Assistant row owning one exact step (the LAST physical row for
+ * that step). Physical position alone is not step identity: a late older-step
+ * settlement can be appended after the latest-step row, so callers that need
+ * the turn's latest candidate must select by step first.
+ */
+export function assistantForStep(
   group: readonly TranscriptMessage[],
   step: number,
 ): Extract<TranscriptMessage, { kind: 'assistant' }> | undefined {

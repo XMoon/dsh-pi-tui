@@ -4100,6 +4100,49 @@ test('expanded Focus inserts the live Preparing call after every nested Work par
   assert.ok(preparingRow > toolRow, `the live call follows every durable Work part:\n${joined}`)
 })
 
+test('a late older-step settlement never releases the latest pending final in the real TuiApp sink', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('older-step-u'), role: 'user',
+      content: [{ type: 'text', text: 'older-step prompt' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('step/start', { turn: 1, step: 2 }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('older-step-latest'), role: 'assistant', content: [{ type: 'text', text: 'LATEST_STEP_PENDING' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('step/end', { turn: 1, step: 2 }, T0 + 4, 4),
+    eventAt('command/run', { commandId: 'older-step-cmd', name: 'model', source: { kind: 'user' } }, T0 + 5, 5),
+    eventAt('command/done', { commandId: 'older-step-cmd', kind: 'success', text: 'switched' }, T0 + 6, 6),
+    // A late durable settlement for the OLDER step, appended after the command:
+    // the physical tail is not the structural latest step.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('older-step-evidence'), role: 'assistant', content: [{ type: 'text', text: 'OLDER_STEP_EVIDENCE' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 7, 7),
+  ])
+  show(app, folder)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('OLDER_STEP_EVIDENCE'), `the older-step evidence stays visible in the expanded sink:\n${joined}`)
+  assert.equal(joined.includes('LATEST_STEP_PENDING'), false,
+    'the real latest-step pending final is not painted before turn/end')
+
+  applyMixed(folder, [eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 8, 8)])
+  show(app, folder)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal((joined.match(/LATEST_STEP_PENDING/g) ?? []).length, 1,
+    `exactly one qualified final is painted after turn/end:\n${joined}`)
+  assert.equal((joined.match(/OLDER_STEP_EVIDENCE/g) ?? []).length, 1,
+    'the older-step evidence remains retained after the final')
+  app.stop()
+})
+
 test('a live Focus run never re-adopts an earlier Work across a replay fence', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()
