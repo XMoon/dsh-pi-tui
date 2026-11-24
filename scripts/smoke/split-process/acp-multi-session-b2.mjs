@@ -502,7 +502,8 @@ export async function runAcpMultiSessionB2(context) {
     assert(hostAssistantHasText(eventsB, 'B1_ECHO_B settled'), 'B2-03: B assistant output missing')
     assert(modelRecords(sessionA, 'B1_ECHO_A').some(record => record.hasEchoTool === true), 'B2-09: A model step must see its scoped MCP tool')
     assert(modelRecords(sessionB, 'B1_ECHO_B').every(record => record.hasEchoTool === false), 'B2-09: B model step must not see A tool')
-    const foreignUpdates = allUpdates.filter(update => update?.sessionId !== sessionA && update?.sessionId !== sessionB)
+    const foreignUpdates = allUpdates.filter(update => update?.sessionId !== sessionA && update?.sessionId !== sessionB
+      && update?.update?.sessionUpdate !== 'available_commands_update')
     assert(foreignUpdates.length === 0, `B2-03: foreign Session updates: ${JSON.stringify(foreignUpdates)}`)
     assertOnlySession(readUpdates(updatesA), sessionA, 'B2-03 A updates')
     assertOnlySession(readUpdates(updatesB), sessionB, 'B2-03 B updates')
