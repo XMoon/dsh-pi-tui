@@ -807,6 +807,10 @@ export class TspSessionBrowser {
       if (this.panel !== undefined) this.panel.revision++
       this.targets.clear()
       this.readerBodyId = undefined
+      // PR2: a hidden page never keeps the selected-Session exact read alive.
+      // The state is committed above before the owner is told to clear.
+      const panel = this.panel
+      if (panel !== undefined && !panel.disposed) panel.request.onInspectorSelection?.(undefined)
     }
   }
 
@@ -1241,6 +1245,21 @@ export class TspSessionBrowser {
       }
       visit(root)
     }
+    // PR2: the native Presenter reports its OWN typed Session selection after
+    // the real targets are committed. A Details Reader, the inline directory
+    // editor, a folder or a Show-more row reports no Session target.
+    this.reportInspectorSelection(panel)
     return node
+  }
+
+  /** The ONE selected-Session report of a committed native layer. It uses the
+   *  SAME typed selection the Resume/Details actions use; a browse cursor
+   *  anchored on a Folder is never guessed into a Session. */
+  private reportInspectorSelection(panel: SessionBrowserPanel): void {
+    if (panel.disposed || this.panel !== panel) return
+    const selected = panel.page === 'browse' && !panel.directoryEntry
+      ? selectedSessionRow(panel)
+      : undefined
+    panel.request.onInspectorSelection?.(selected?.id)
   }
 }

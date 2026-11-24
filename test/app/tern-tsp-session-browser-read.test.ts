@@ -12,7 +12,13 @@ import type {
   SessionBrowserResumeIntent,
 } from '../../src/app/command/session-browser-presentation.ts'
 import type { SessionProjectionSummary, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
-import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
+import type {
+  SessionInspectorData,
+  SessionInspectorReadResult,
+  SessionInspectorSource,
+  SessionWorkspaceFactsPort,
+} from '../../src/runtime/session-workspace-facts-port.ts'
+import { inertActivityObservation } from '../support/session-workspace-facts-fake.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 
@@ -89,6 +95,7 @@ function ownerFor(
   options: {
     readonly isCurrent?: () => boolean
     readonly onResumeIntent?: (intent: SessionBrowserResumeIntent, scope: SessionScope, settle: (outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void) => void
+    readonly sessionWorkspaceFacts?: SessionWorkspaceFactsPort
   } = {},
 ) {
   const diag = DIAG()
@@ -99,6 +106,7 @@ function ownerFor(
     diag,
     sessionId: () => 'session-current',
     ...(options.onResumeIntent === undefined ? {} : { onResumeIntent: options.onResumeIntent }),
+    ...(options.sessionWorkspaceFacts === undefined ? {} : { sessionWorkspaceFacts: options.sessionWorkspaceFacts }),
   })
   return { owner, diag }
 }
@@ -868,4 +876,336 @@ test('R17 an explicit refresh owns exactly ONE projection chain and an older cha
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.ok(!presentation.latest()?.rows.some(entry => entry.title?.startsWith('STALE ') === true),
     'a retired chain never writes its stale projection into the accepted roster')
+})
+
+// ── Session Workspace PR2: the ONE owner-side selected Inspector lifecycle ───
+
+const INS_A = 'session-a'
+const INS_B = 'session-b'
+const INS_C = 'session-c'
+const INS_DEBOUNCE_MS = 150
+
+const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+interface DeferredRead {
+  readonly promise: Promise<SessionInspectorReadResult>
+  readonly resolve: (result: SessionInspectorReadResult) => void
+}
+
+interface ProbeInspectorSource extends SessionInspectorSource {
+  readonly sessionId: string
+  readonly reads: number
+  readonly active: number
+  readonly disposed: number
+}
+
+interface ProbeSourceState {
+  readonly probe: ProbeInspectorSource
+  readonly invalidate: (reason: 'changed' | 'source-replaced') => void
+  resolveNext(result: SessionInspectorReadResult): void
+}
+
+/** A caller-controlled Inspector source probe. A read stays pending until the
+ *  case resolves it, which is what lets the owner's abort/fence semantics be
+ *  observed without weakening them. */
+class InspectorProbe {
+  readonly states: ProbeSourceState[] = []
+  maxActive = 0
+  private active = 0
+
+  open(sessionId: string, onInvalidated: (reason: 'changed' | 'source-replaced') => void): SessionInspectorSource {
+    const pending: DeferredRead[] = []
+    let reads = 0
+    let disposed = 0
+    const state: ProbeSourceState = {
+      probe: {
+        sessionId,
+        get reads() { return reads },
+        get active() { return pending.length },
+        get disposed() { return disposed },
+        read: (signal: AbortSignal) => {
+          if (disposed > 0) return Promise.reject(new Error('the disposed probe source was read'))
+          if (signal.aborted) return Promise.reject(new Error('the probe source was read with an aborted signal'))
+          reads += 1
+          this.active += 1
+          this.maxActive = Math.max(this.maxActive, this.active)
+          let resolve!: (result: SessionInspectorReadResult) => void
+          const promise = new Promise<SessionInspectorReadResult>((done) => { resolve = done })
+          pending.push({ promise, resolve })
+          return promise.finally(() => { this.active -= 1 })
+        },
+        dispose: () => { disposed += 1 },
+      },
+      invalidate: (reason) => {
+        if (disposed > 0) return
+        onInvalidated(reason)
+      },
+      resolveNext: (result) => {
+        const entry = pending.shift()
+        assert.ok(entry !== undefined, `the ${sessionId} source has no pending read to resolve`)
+        entry.resolve(result)
+      },
+    }
+    this.states.push(state)
+    return state.probe
+  }
+
+  sourcesOf(sessionId: string): ProbeInspectorSource[] {
+    return this.states.filter(state => state.probe.sessionId === sessionId).map(state => state.probe)
+  }
+}
+
+function inspectorFactsOf(probe: InspectorProbe): SessionWorkspaceFactsPort {
+  return {
+    readActivity: async () => [],
+    observeActivity: () => inertActivityObservation(),
+    followWorkspaces: () => ({
+      isCurrent: () => true,
+      dispose: () => {},
+      [Symbol.asyncIterator]: async function* (): AsyncGenerator<never> {
+        await new Promise<void>(() => {})
+      },
+    }),
+    openInspector: (sessionId, onInvalidated) => probe.open(sessionId, onInvalidated),
+  }
+}
+
+function inspectorData(sessionId: string, turns: number, asOfSeq = turns): SessionInspectorData {
+  return {
+    sessionId,
+    asOfSeq,
+    stats: {
+      turns,
+      steps: turns,
+      llmMs: 10,
+      toolMs: 0,
+    },
+  }
+}
+
+async function inspectorOwner(
+  t: { after(fn: () => unknown): void },
+  probe: InspectorProbe,
+  options: {
+    readonly presentation?: PresentationProbe
+    readonly rows?: readonly SessionSummary[]
+    readonly facts?: SessionWorkspaceFactsPort
+  } = {},
+): Promise<{
+  readonly presentation: PresentationProbe
+  readonly owner: ReturnType<typeof createSessionBrowserReadOwner>
+  readonly request: SessionBrowserPanelRequest
+  setRows(rows: readonly SessionSummary[]): void
+}> {
+  const presentation = options.presentation ?? new PresentationProbe()
+  let rows: SessionSummary[] = [...(options.rows ?? [row(INS_A), row(INS_B), row(INS_C)])]
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => rows }), {
+    ...(options.facts === undefined
+      ? { sessionWorkspaceFacts: inspectorFactsOf(probe) }
+      : { sessionWorkspaceFacts: options.facts }),
+  })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open()
+  await waitUntil('the Inspector owner roster', () =>
+    presentation.latest()?.rows.some(entry => entry.id === INS_A) === true)
+  return {
+    presentation,
+    owner,
+    request: presentation.requests[0]!,
+    setRows: (next) => { rows = [...next] },
+  }
+}
+
+test('INS-O1 a settled selection is ONE read after the debounce; rapid moves coalesce and same-id repaint is inert', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  await delay(INS_DEBOUNCE_MS + 50)
+  assert.equal(probe.states.length, 0, 'no selection means zero Inspector sources and zero reads')
+
+  h.request.onInspectorSelection!(INS_A)
+  h.request.onInspectorSelection!(INS_B)
+  await delay(50)
+  h.request.onInspectorSelection!(INS_C)
+  await waitUntil('the final selected read', () => probe.sourcesOf(INS_C)[0]?.reads === 1)
+  assert.equal(probe.sourcesOf(INS_A)[0]?.reads ?? 0, 0, 'the superseded A never reads')
+  assert.equal(probe.sourcesOf(INS_B)[0]?.reads ?? 0, 0, 'the superseded B never reads')
+  assert.equal(probe.sourcesOf(INS_A)[0]?.disposed, 1, 'each superseded source is released once')
+  assert.equal(probe.sourcesOf(INS_B)[0]?.disposed, 1)
+  await waitUntil('the loading Inspector cut', () => h.presentation.latest()?.inspector?.state === 'loading')
+
+  probe.states.find(state => state.probe.sessionId === INS_C)!.resolveNext({
+    kind: 'ready',
+    data: inspectorData(INS_C, 1),
+  })
+  await waitUntil('the exact selected Inspector cut', () =>
+    h.presentation.latest()?.inspector?.state === 'ready'
+    && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 1)
+  const reads = probe.sourcesOf(INS_C)[0]!.reads
+  h.request.onInspectorSelection!(INS_C)
+  await delay(INS_DEBOUNCE_MS + 50)
+  assert.equal(probe.sourcesOf(INS_C)[0]!.reads, reads, 'a same-id repaint never starts a second read')
+  assert.equal(probe.sourcesOf(INS_C).length, 1, 'a same-id repaint never recreates the source')
+
+  h.request.onInspectorSelection!(undefined)
+  await waitUntil('the cleared Inspector state', () => h.presentation.latest()?.inspector === undefined)
+  assert.equal(probe.sourcesOf(INS_C)[0]!.disposed, 1, 'clearing the selection releases the source')
+})
+
+test('INS-O2 A→B→A keeps ONE physical flight; only the latest A read commits', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  h.request.onInspectorSelection!(INS_A)
+  await waitUntil('the first A read', () => probe.sourcesOf(INS_A)[0]?.reads === 1)
+
+  h.request.onInspectorSelection!(INS_B)
+  await delay(20)
+  h.request.onInspectorSelection!(INS_A)
+  await delay(INS_DEBOUNCE_MS + 70)
+  assert.equal(probe.sourcesOf(INS_A).length, 2, 'A→B→A opens a fresh A source')
+  assert.equal(probe.sourcesOf(INS_B)[0]!.reads, 0, 'the B intent never becomes a read while A is unsettled')
+  assert.equal(probe.sourcesOf(INS_A)[1]!.reads, 0, 'the new A read waits for the unsettled physical slot')
+  assert.equal(probe.maxActive, 1, 'at most ONE physical Inspector read is ever in flight')
+
+  // The OLD A promise settles after its source/epoch is gone: it must not paint.
+  probe.states.find(state => state.probe.sessionId === INS_A)!.resolveNext({
+    kind: 'ready',
+    data: inspectorData(INS_A, 99),
+  })
+  await waitUntil('the latest A read after the old settle', () => probe.sourcesOf(INS_A)[1]!.reads === 1)
+  const latest = probe.states.filter(state => state.probe.sessionId === INS_A).at(-1)!
+  latest.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 2) })
+  await waitUntil('the latest A cut', () =>
+    h.presentation.latest()?.inspector?.state === 'ready'
+    && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 2)
+  assert.equal(probe.maxActive, 1, 'the trailing read reused the ONE physical slot')
+})
+
+test('INS-O3 same-source changes coalesce ONE trailing read and a source replacement revokes the old cut', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  h.request.onInspectorSelection!(INS_A)
+  await waitUntil('the first exact read', () => probe.sourcesOf(INS_A)[0]?.reads === 1)
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
+  await waitUntil('the first exact cut', () => h.presentation.latest()?.inspector?.state === 'ready')
+
+  const source = probe.states[0]!
+  source.invalidate('changed')
+  source.invalidate('changed')
+  await waitUntil('the refreshing cut', () =>
+    (h.presentation.latest()?.inspector as { refreshing?: boolean } | undefined)?.refreshing === true)
+  await waitUntil('the ONE trailing read', () => source.probe.reads === 2)
+  await delay(INS_DEBOUNCE_MS + 50)
+  assert.equal(source.probe.reads, 2, 'two relevant changes coalesce into exactly one trailing read')
+  source.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 2) })
+  await waitUntil('the fresh trailing cut', () =>
+    h.presentation.latest()?.inspector?.state === 'ready'
+    && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 2
+    && (h.presentation.latest()?.inspector as { refreshing?: boolean }).refreshing === false)
+
+  source.invalidate('source-replaced')
+  await waitUntil('the revoked exact cut', () => h.presentation.latest()?.inspector?.state === 'loading')
+  await waitUntil('the replacement read', () => source.probe.reads === 3)
+  source.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 3) })
+  await waitUntil('the re-proved cut', () =>
+    h.presentation.latest()?.inspector?.state === 'ready'
+    && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 3)
+  assert.equal(probe.states.length, 1, 'a source replacement reuses the ONE selected source')
+})
+
+test('INS-O4 a metadata-only roster revision keeps the cut; a removed target clears it and invalidates a late read', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  h.request.onInspectorSelection!(INS_A)
+  await waitUntil('the ready Inspector cut', () => probe.states[0]?.probe.reads === 1)
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
+  await waitUntil('the published exact cut', () => h.presentation.latest()?.inspector?.state === 'ready')
+  const accepted = h.presentation.latest()!.inspector
+
+  h.setRows([row(INS_A, { title: 'renamed' }), row(INS_B), row(INS_C)])
+  h.owner.refresh()
+  await waitUntil('the metadata roster revision', () => h.presentation.latest()?.rows[0]?.title === 'renamed')
+  assert.deepEqual(h.presentation.latest()!.inspector, accepted,
+    'an ordinary metadata roster revision never invalidates the selected exact cut')
+  assert.equal(probe.states[0]!.probe.reads, 1, 'an ordinary metadata roster revision never re-reads')
+
+  probe.states[0]!.invalidate('changed')
+  await waitUntil('a pending trailing read', () => probe.states[0]!.probe.reads === 2)
+  h.setRows([row(INS_B), row(INS_C)])
+  h.owner.refresh()
+  await waitUntil('the removed target cleared', () => h.presentation.latest()?.inspector === undefined)
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 9) })
+  await delay(50)
+  assert.equal(h.presentation.latest()?.inspector, undefined,
+    'a late read of a removed target never repaints an exact Inspector cut')
+  assert.equal(probe.states[0]!.probe.disposed, 1, 'the removed target source is released')
+})
+
+test('INS-O5 retire/dispose clears the timer/source and ignores the late settlement', async (t) => {
+  const probe = new InspectorProbe()
+  const h = await inspectorOwner(t, probe)
+  h.request.onInspectorSelection!(INS_A)
+  await waitUntil('the pending exact read', () => probe.states[0]?.probe.reads === 1)
+  const snapshots = h.presentation.snapshots.length
+  h.owner.dispose()
+  assert.equal(probe.states[0]!.probe.disposed, 1, 'dispose releases the selected source')
+  probe.states[0]!.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 1) })
+  await delay(INS_DEBOUNCE_MS + 50)
+  assert.equal(h.presentation.snapshots.length, snapshots, 'a late read after retire publishes nothing')
+  assert.equal(probe.states[0]!.probe.reads, 1, 'retire starts no replacement read')
+})
+
+test('INS-O6 an omitted Inspector capability is a truthful unavailable state with zero reads', async (t) => {
+  const presentation = new PresentationProbe()
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => [row(INS_A)] }))
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open()
+  await waitUntil('the roster without a facts port', () => presentation.latest()?.rows.length === 1)
+  presentation.requests[0]!.onInspectorSelection!(INS_A)
+  await waitUntil('the unavailable Inspector state', () =>
+    presentation.latest()?.inspector?.state === 'unavailable')
+  assert.equal(presentation.latest()?.inspector?.sessionId, INS_A)
+})
+
+test('INS-O7 a synchronous open-time selection is ignored until the handle and first-ready roster exist', async (t) => {
+  class SyncReportingProbe extends PresentationProbe {
+    override open(request: SessionBrowserPanelRequest): SessionBrowserPanelHandle {
+      const handle = super.open(request)
+      // A real renderer may paint during open; the read owner must not admit a
+      // read before its handle is installed and its first roster accepted.
+      request.onInspectorSelection?.(INS_A)
+      return handle
+    }
+  }
+  const probe = new InspectorProbe()
+  const presentation = new SyncReportingProbe()
+  const h = await inspectorOwner(t, probe, { presentation })
+  assert.equal(probe.states.length, 0, 'the open-time report starts no source/read')
+  h.request.onInspectorSelection!(INS_A)
+  await waitUntil('the post-open selection source', () => probe.sourcesOf(INS_A).length === 1)
+})
+
+test('INS-O8 a typed direct resume that closes the panel starts no Inspector read', async (t) => {
+  class SyncReportingProbe extends PresentationProbe {
+    override open(request: SessionBrowserPanelRequest): SessionBrowserPanelHandle {
+      const handle = super.open(request)
+      request.onInspectorSelection?.(INS_A)
+      return handle
+    }
+  }
+  const probe = new InspectorProbe()
+  const presentation = new SyncReportingProbe()
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => [row(INS_A)] }), {
+    sessionWorkspaceFacts: inspectorFactsOf(probe),
+    onResumeIntent: () => {},
+  })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open({
+    directMatch: {
+      query: INS_A,
+      find: rows => rows.find(entry => entry.id === INS_A),
+    },
+  })
+  await waitUntil('the direct-match close', () => presentation.closed[0] === true)
+  await delay(INS_DEBOUNCE_MS + 50)
+  assert.equal(probe.states.length, 0, 'a typed direct resume that retires the panel never starts a read')
 })

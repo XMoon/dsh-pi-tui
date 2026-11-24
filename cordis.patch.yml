@@ -46,6 +46,19 @@
       inject: [tuiStartup, sessionProjections]
       disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
 
+    # The OFFICIAL whole-log `sessionStats` projection unit
+    # (`@deepseek-ai/dsh-session-stats`): registered EXACTLY ONCE per Host graph
+    # through the same `sessionProjections` seam the bundle's own performance
+    # unit uses. The id keeps its historical `split-host-` name; this one bundle
+    # row is the SINGLE declaration for Direct and the Split Host. The Host-only
+    # overlay only retunes its `inject` (see HOST_ONLY_PATCH), never re-declares
+    # the package. `tuiStartup` is Direct's command-line admission; the daemon
+    # supervisor mounts no Host unit.
+    - id: split-host-session-stats
+      name: '@deepseek-ai/dsh-session-stats'
+      inject: [tuiStartup, sessionProjections]
+      disabled: !!js "ctx.get('tuiDaemonStartup') !== undefined"
+
     # Workspace file service (the OFFICIAL `@deepseek-ai/dsh-api-workspace-files`):
     # the ONE Host owner of the `workspaceFiles` Remote namespace the delivered-
     # files preview reads through — bounded `stat`/`read` under the Session's

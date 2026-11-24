@@ -18,9 +18,11 @@ import {
   directRunningOf,
   type DirectFactsAgentLike,
   type DirectFactsContextLike,
+  type DirectInspectorReads,
 } from '../../../src/runtime/direct/session-workspace-facts-direct.ts'
 import type { WorkspaceFactEntityLike } from '../../../src/runtime/direct/session-lifecycle-direct.ts'
 import type { SessionSummary } from '../../../src/runtime/session-reader-port.ts'
+import { SupersededReadError } from '../../../src/runtime/read-error.ts'
 
 const row = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummary =>
   ({ id, updatedAt: 1, live: false, ...overrides })
@@ -260,4 +262,305 @@ test('UA-11 a disposed Direct observation removes its official listeners exactly
   h.agents.a = { status: 'running' }
   h.emitAgent('agent/status', 'a')
   assert.equal(observation.getSnapshot().facts[0]?.running, false, 'a disposed observation never repaints')
+})
+
+// ── L2: the per-selection Direct Inspector source ───────────────────────────
+
+const INSPECTOR_SESSION = 'session-inspector-direct'
+
+interface InspectorSnapshot {
+  readonly asOfSeq: number
+  readonly values?: Readonly<Record<string, unknown>>
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+interface InspectorHarness {
+  readonly facts: DirectSessionWorkspaceFacts
+  readonly calls: { readonly snapshot: number; readonly stat: number; readonly observe: number }
+  readonly observeStarted: () => Promise<void>
+  readonly disposedObservations: () => number
+  attach(): void
+  emitProjection(sessionId: string, key: string): void
+  emitSession(event: 'session/created' | 'session/disposed', sessionId: string): void
+  offCount(): number
+  source(onInvalidated: (reason: 'changed' | 'source-replaced') => void): ReturnType<DirectSessionWorkspaceFacts['openInspector']>
+}
+
+function inspectorHarness(options: {
+  readonly attached?: boolean
+  readonly snapshot?: InspectorSnapshot | Error
+  readonly stat?: { readonly formatStatus?: 'current' | 'migration-required' } | undefined | Error
+  readonly observation?: {
+    readonly header: { readonly id: string }
+    readonly projections?: InspectorSnapshot
+  } | Error
+  readonly observationGate?: Promise<void>
+  readonly withProjections?: boolean
+  readonly withPersistence?: boolean
+  readonly withQuery?: boolean
+} = {}): InspectorHarness {
+  let attached = options.attached === true
+  // The official Session store returns the SAME attached Session object for
+  // every lookup; the source's identity fence depends on that contract.
+  const attachedSession = { id: INSPECTOR_SESSION }
+  let offCount = 0
+  let disposedObservations = 0
+  const calls = { snapshot: 0, stat: 0, observe: 0 }
+  const sessionListeners = new Map<string, Array<(session: { readonly id: string }) => void>>()
+  const projectionListeners: Array<(sessionId: string, key: string) => void> = []
+  let observeStartedResolve!: () => void
+  const observeStarted = new Promise<void>((resolve) => { observeStartedResolve = resolve })
+  const reads: DirectInspectorReads = {
+    liveSession: () => attached ? attachedSession : undefined,
+    ...(options.withProjections === false ? {} : {
+      snapshot: (): InspectorSnapshot => {
+        calls.snapshot += 1
+        if (options.snapshot instanceof Error) throw options.snapshot
+        return options.snapshot ?? { asOfSeq: -1, values: {} }
+      },
+      onProjectionChanged: (listener): (() => void) => {
+        projectionListeners.push(listener)
+        return () => { offCount += 1 }
+      },
+    }),
+    ...(options.withPersistence === false ? {} : {
+      stat: async (): Promise<{ readonly formatStatus?: 'current' | 'migration-required' } | undefined> => {
+        calls.stat += 1
+        if (options.stat instanceof Error) throw options.stat
+        return options.stat
+      },
+    }),
+    ...(options.withQuery === false ? {} : {
+      observe: async (): Promise<{
+        readonly header: { readonly id: string }
+        readonly projections?: InspectorSnapshot
+        [Symbol.dispose](): void
+      }> => {
+        calls.observe += 1
+        observeStartedResolve()
+        if (options.observationGate !== undefined) await options.observationGate
+        if (options.observation instanceof Error) throw options.observation
+        if (options.observation === undefined) throw new Error('no observation configured')
+        return {
+          header: options.observation.header,
+          ...(options.observation.projections === undefined ? {} : { projections: options.observation.projections }),
+          [Symbol.dispose]: () => { disposedObservations += 1 },
+        }
+      },
+    }),
+  }
+  const ctx = {
+    get: (): undefined => undefined,
+    on: (name: string, listener: (payload: never) => unknown): (() => void) => {
+      if (name === 'session/created' || name === 'session/disposed') {
+        const registered = sessionListeners.get(name) ?? []
+        registered.push(listener as unknown as (session: { readonly id: string }) => void)
+        sessionListeners.set(name, registered)
+        return () => { offCount += 1 }
+      }
+      throw new Error(`the Inspector fixture received an unexpected Host event "${name}"`)
+    },
+  } as unknown as DirectFactsContextLike
+  const facts = new DirectSessionWorkspaceFacts(ctx, () => undefined, reads)
+  return {
+    facts,
+    calls,
+    observeStarted: () => observeStarted,
+    disposedObservations: () => disposedObservations,
+    attach: () => { attached = true },
+    emitProjection: (sessionId, key) => {
+      for (const listener of [...projectionListeners]) listener(sessionId, key)
+    },
+    emitSession: (event, sessionId) => {
+      for (const listener of [...sessionListeners.get(event) ?? []]) listener({ id: sessionId })
+    },
+    offCount: () => offCount,
+    source: (onInvalidated) => facts.openInspector(INSPECTOR_SESSION, reason => onInvalidated(reason)),
+  }
+}
+
+const legalStats = {
+  turns: 2,
+  steps: 3,
+  llmMs: 30,
+  toolMs: 7,
+  ttftMs: 6,
+  ttftSteps: 2,
+  decodeMs: 15,
+  decodeTokens: 120,
+}
+
+test('INSP-D1 an attached Session reads ONE exact official projection cut and calls no persistence/query read', async () => {
+  const h = inspectorHarness({
+    attached: true,
+    snapshot: {
+      asOfSeq: 7,
+      values: {
+        sessionStats: legalStats,
+        workingDirectory: '/host/project',
+      },
+    },
+  })
+  const result = await h.source(() => { throw new Error('an exact attached cut never invalidates itself') })
+    .read(new AbortController().signal)
+  assert.equal(result.kind, 'ready')
+  if (result.kind === 'ready') {
+    assert.equal(result.data.sessionId, INSPECTOR_SESSION)
+    assert.equal(result.data.asOfSeq, 7)
+    assert.equal(result.data.stats?.turns, 2)
+    assert.equal(result.data.effectiveCwd, '/host/project')
+  }
+  assert.equal(h.calls.snapshot, 1, 'one exact attached snapshot cut')
+  assert.equal(h.calls.stat, 0, 'an attached Session never stats/opens persistence')
+  assert.equal(h.calls.observe, 0, 'an attached Session never opens a cold observation')
+  assert.equal(h.disposedObservations(), 0)
+})
+
+test('INSP-D2 a cold Session stats first, observes exactly once and disposes the lease exactly once', async () => {
+  const h = inspectorHarness({
+    stat: { formatStatus: 'current' },
+    observation: {
+      header: { id: INSPECTOR_SESSION },
+      projections: {
+        asOfSeq: 9,
+        values: {
+          tokenUsage: {
+            uncachedInputTokens: 1,
+            outputTokens: 2,
+            cacheReadTokens: 3,
+            cacheWriteTokens: 4,
+          },
+        },
+      },
+    },
+  })
+  const result = await h.source(() => {}).read(new AbortController().signal)
+  assert.equal(result.kind, 'ready')
+  if (result.kind === 'ready') {
+    assert.equal(result.data.asOfSeq, 9)
+    assert.equal(result.data.usage?.totalTokens, 10)
+  }
+  assert.equal(h.calls.stat, 1)
+  assert.equal(h.calls.observe, 1)
+  assert.equal(h.disposedObservations(), 1, 'the caller-owned observation lease is released exactly once')
+})
+
+test('INSP-D3 migration-required and not-found refuse WITHOUT opening a cold observation', async () => {
+  const migration = inspectorHarness({
+    stat: { formatStatus: 'migration-required' },
+    observation: { header: { id: INSPECTOR_SESSION } },
+  })
+  assert.deepEqual(
+    await migration.source(() => {}).read(new AbortController().signal),
+    { kind: 'migration-required', message: 'Session migration is required' },
+  )
+  assert.equal(migration.calls.observe, 0, 'a required migration is refused before observeSession')
+  assert.equal(migration.calls.stat, 1)
+
+  const absent = inspectorHarness({ stat: undefined })
+  assert.equal((await absent.source(() => {}).read(new AbortController().signal)).kind, 'unavailable')
+  assert.equal(absent.calls.observe, 0, 'a not-found cold Session opens no observation')
+})
+
+test('INSP-D4 a missing capability is a truthful unavailable, never a fallback read', async () => {
+  const noProjections = inspectorHarness({ attached: true, withProjections: false })
+  assert.equal((await noProjections.source(() => {}).read(new AbortController().signal)).kind, 'unavailable')
+  assert.equal(noProjections.calls.snapshot, 0)
+
+  const noPersistence = inspectorHarness({ withPersistence: false })
+  assert.equal((await noPersistence.source(() => {}).read(new AbortController().signal)).kind, 'unavailable')
+  assert.equal(noPersistence.calls.stat, 0)
+
+  const noQuery = inspectorHarness({ stat: { formatStatus: 'current' }, withQuery: false })
+  assert.equal((await noQuery.source(() => {}).read(new AbortController().signal)).kind, 'unavailable')
+  assert.equal(noQuery.calls.observe, 0)
+})
+
+test('INSP-D5 a cold result whose Session attached meanwhile is superseded and its lease disposed', async () => {
+  const gate = deferred()
+  const h = inspectorHarness({
+    stat: { formatStatus: 'current' },
+    observation: { header: { id: INSPECTOR_SESSION } },
+    observationGate: gate.promise,
+  })
+  const pending = h.source(() => {}).read(new AbortController().signal)
+  await h.observeStarted()
+  h.attach()
+  gate.resolve()
+  await assert.rejects(pending, (error: unknown) => error instanceof SupersededReadError)
+  assert.equal(h.disposedObservations(), 1, 'the superseded cold lease is still released')
+})
+
+test('INSP-D6 a caller abort during the cold observation disposes the lease and rejects as cancellation', async () => {
+  const gate = deferred()
+  const h = inspectorHarness({
+    stat: { formatStatus: 'current' },
+    observation: { header: { id: INSPECTOR_SESSION } },
+    observationGate: gate.promise,
+  })
+  const controller = new AbortController()
+  const pending = h.source(() => {}).read(controller.signal)
+  await h.observeStarted()
+  controller.abort()
+  gate.resolve()
+  await assert.rejects(pending, (error: unknown) => (error as Error).name === 'AbortError')
+  assert.equal(h.disposedObservations(), 1, 'the aborted cold lease is released exactly once')
+})
+
+test('INSP-D7 a broken persistence/observation read propagates and never fabricates data', async () => {
+  const statFailure = inspectorHarness({ stat: new Error('stat exploded') })
+  await assert.rejects(statFailure.source(() => {}).read(new AbortController().signal), /stat exploded/u)
+  assert.equal(statFailure.calls.observe, 0, 'a failed stat never reaches observeSession')
+
+  const observationFailure = inspectorHarness({
+    stat: { formatStatus: 'current' },
+    observation: new Error('observation exploded'),
+  })
+  await assert.rejects(observationFailure.source(() => {}).read(new AbortController().signal), /observation exploded/u)
+  assert.equal(observationFailure.disposedObservations(), 0, 'a failed observation has no lease to release')
+})
+
+test('INSP-D8 only the selected Session relevant keys invalidate; identity/lifecycle dispose releases every watch', () => {
+  const reasons: Array<'changed' | 'source-replaced'> = []
+  const h = inspectorHarness({ attached: true, withPersistence: false, withQuery: false })
+  const source = h.source(reason => { reasons.push(reason) })
+  h.emitProjection(INSPECTOR_SESSION, 'sessionStats')
+  assert.deepEqual(reasons, ['changed'], 'a relevant key of the selected Session is a real change')
+  h.emitProjection(INSPECTOR_SESSION, 'title')
+  assert.deepEqual(reasons, ['changed', 'changed'])
+  h.emitProjection(INSPECTOR_SESSION, 'userQuestions')
+  assert.equal(reasons.length, 2, 'a non-Inspector key never invalidates')
+  h.emitProjection('session-someone-else', 'sessionStats')
+  assert.equal(reasons.length, 2, 'another Session never invalidates')
+  h.emitSession('session/created', 'session-someone-else')
+  assert.equal(reasons.length, 2, 'another Session lifecycle never invalidates')
+  h.emitSession('session/created', INSPECTOR_SESSION)
+  assert.deepEqual(reasons, ['changed', 'changed', 'source-replaced'],
+    'the selected attached identity changing is a source replacement')
+  source.dispose()
+  assert.equal(h.offCount(), 3, 'two session lifecycle watches + one projection feed are released')
+  h.emitProjection(INSPECTOR_SESSION, 'sessionStats')
+  h.emitSession('session/disposed', INSPECTOR_SESSION)
+  assert.equal(reasons.length, 3, 'a disposed source never publishes a later callback')
+})
+
+test('INSP-D9 a malformed attached cut is unavailable, never a partial ready DTO', async () => {
+  const badCut = inspectorHarness({
+    attached: true,
+    snapshot: { asOfSeq: 1.5, values: { sessionStats: legalStats } },
+  })
+  assert.equal((await badCut.source(() => {}).read(new AbortController().signal)).kind, 'unavailable',
+    'a non-integer cut is not an exact Inspector answer')
+
+  const badValues = inspectorHarness({
+    attached: true,
+    snapshot: { asOfSeq: 1, values: [] as unknown as Readonly<Record<string, unknown>> },
+  })
+  assert.equal((await badValues.source(() => {}).read(new AbortController().signal)).kind, 'unavailable',
+    'a non-record projection value set is not an exact Inspector answer')
 })

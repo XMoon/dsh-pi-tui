@@ -25,6 +25,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { boot, loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
 import type { ScheduleCatalogEntry, ScheduleService } from '@deepseek-ai/dsh-schedule'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
@@ -52,6 +54,10 @@ const HEADLESS_HOST_PATCHES = [
   { id: 'workspace-files', inject: [] },
   { id: 'webserver', inject: [] },
   { id: 'workspace-controller', inject: [] },
+  // The bundle's ONE official session-stats row is retuned exactly like the
+  // real Host-only overlay: withdraw the Direct `tuiStartup` admission gate so
+  // the long-lived Host keeps the whole-log unit after the TUI is gone.
+  { id: 'split-host-session-stats', inject: ['sessionProjections'] },
   { id: 'pi-tui-schedule', inject: ['sessionController'] },
   { id: 'pi-tui-direct-connection', inject: ['credentials', 'webServer'] },
   { id: 'pi-tui-direct-file-upload', inject: ['agents', 'attachments', 'commands', 'connection'] },
@@ -234,6 +240,7 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal(count('pi-tui-direct-file-upload'), 1, 'exactly one Direct FileUploads row')
   assert.equal(count('pi-tui-direct-connection'), 1, 'exactly one Direct Connection row')
   assert.equal(count('split-host-session-controller'), 0, 'a Direct Host mounts no split Session controller')
+  assert.equal(count('split-host-session-stats'), 1, 'the bundle owns exactly ONE official session-stats row')
 
   const schedule = host.ctx.get('schedule') as unknown as ScheduleService
   const controller = host.ctx.get('sessionController') as unknown as SessionController
@@ -311,6 +318,47 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal(changes.length, settled, 'the unsubscribed listener never hears another commit')
   const afterDelete = await schedule.view({ id: existing.id })
   assert.equal('code' in afterDelete, true, 'the deleted task is really gone')
+})
+
+test('L5: the real profile mounts the ONE official session-stats row and folds a real closed step', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('session-stats-loader')
+  const host = await bootHost(root)
+  life.defer(() => host.dispose())
+
+  const session = host.ctx.sessions.create(SessionId('loader-stats-proof'), { meta: { cwd: host.workRoot } })
+  session.append('turn/start', { turn: 0 })
+  session.append('step/start', { turn: 0, step: 0 })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  session.append('assistant/message', {
+    turn: 0,
+    step: 0,
+    message: {
+      id: MessageId('stats-proof'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [{ type: 'chunk', time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
+    usage: { inputTokens: 3, outputTokens: 7 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 0, step: 0 })
+  session.append('turn/end', { turn: 0, reason: { kind: 'completed' } })
+
+  const registry = host.ctx.get('sessionProjections') as {
+    snapshot(session: unknown, keys?: readonly string[]): {
+      readonly asOfSeq: number
+      readonly values: Readonly<Record<string, unknown>>
+    }
+  }
+  const snapshot = registry.snapshot(session, ['sessionStats'])
+  const stats = snapshot.values.sessionStats as
+    | { readonly turns: number; readonly steps: number; readonly decodeTokens: number }
+    | undefined
+  assert.ok(stats !== undefined, 'the real Loader row must register the whole-log sessionStats unit')
+  assert.equal(stats.turns, 1)
+  assert.equal(stats.steps, 1)
+  assert.equal(stats.decodeTokens, 7)
 })
 
 /** A bounded observation of one authoritative fact: the assertion fails with

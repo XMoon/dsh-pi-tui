@@ -445,6 +445,11 @@ const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['session/event', 'src/app/host/features/history-search.ts'],
   ['session/created', 'src/app/host/features/history-search.ts'],
   ['session/disposed', 'src/app/host/features/history-search.ts'],
+  // Session Workspace PR2: the Direct Inspector source observes the selected
+  // Session's REAL attached lifecycle identity to revoke a stale exact cut; it
+  // subscribes to no other Host event plane.
+  ['session/created', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  ['session/disposed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */

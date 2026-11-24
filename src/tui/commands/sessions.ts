@@ -295,6 +295,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             source: 'enter',
           })
         },
+        // PR2: the renderer's committed-frame typed selection crosses the SAME
+        // per-open lease; the shared read owner owns the debounce/read/fences.
+        ...(request.onInspectorSelection === undefined ? {} : {
+          onInspectorSelection: (sessionId: string | undefined) => {
+            if (!state.disposed) request.onInspectorSelection?.(sessionId)
+          },
+        }),
         readMarkdown: async (sessionId, signal) => {
           if (state.disposed || active !== state) {
             throw new Error('the Session Workspace was released')

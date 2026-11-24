@@ -22,13 +22,19 @@ import {
 import type {
   ActivityObservation,
   ActivityObservationSnapshot,
+  InspectorInvalidation,
   SessionActivityFact,
+  SessionInspectorReadResult,
+  SessionInspectorSource,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
   WorkspaceFactsFrame,
   WorkspaceFactsHandle,
   WorkspaceFollowMode,
 } from '../session-workspace-facts-port.ts'
+import { detachSessionInspector, INSPECTOR_PROJECTION_KEYS } from '../session-inspector-projection.ts'
+import { safeErrorMessage } from '../process/errors.ts'
+import { SupersededReadError } from '../read-error.ts'
 
 /** The minimal Host context surface this adapter needs (structural — never a
  *  package dependency; the services resolve from the running installation). */
@@ -45,6 +51,44 @@ export interface DirectFactsAgentLike {
 /** The read-only registry subset: `list()` is the ONE Workspace authority. */
 export interface DirectWorkspaceRegistryFactsLike {
   list(): readonly WorkspaceFactEntityLike[]
+}
+
+/** One caller-owned exact cold observation lease (the official `observeSession`
+ *  contract narrowed to the projection read this adapter performs). */
+export interface DirectSessionObservationLike {
+  readonly header: { readonly id: unknown }
+  readonly projections?: {
+    readonly asOfSeq: number
+    readonly values?: Readonly<Record<string, unknown>>
+  }
+  [Symbol.dispose](): void
+}
+
+/** One exact Inspector projection cut (the official registry/observation view). */
+export interface DirectInspectorProjectionCut {
+  readonly asOfSeq: number
+  readonly values?: Readonly<Record<string, unknown>>
+}
+
+/**
+ * The narrow injected Host-read capabilities the Direct Inspector uses.
+ *
+ * The facts adapter MUST NOT add new Host-service coupling of its own: these
+ * capabilities are implemented by the EXISTING Direct read owners
+ * (`DirectSessionReader` for the attached projection cut and change feed,
+ * `DirectSessionMarkdown` for the official cold `stat`/`observeSession` path)
+ * and injected by the Direct composition. An omitted capability is a truthful
+ * `unavailable` Inspector state.
+ */
+export interface DirectInspectorReads {
+  readonly liveSession?: (sessionId: string) => { readonly id: unknown } | undefined
+  readonly snapshot?: (session: unknown, keys: readonly string[]) => DirectInspectorProjectionCut | undefined
+  readonly onProjectionChanged?: (listener: (sessionId: string, key: string) => void) => () => void
+  readonly stat?: (
+    sessionId: string,
+    signal: AbortSignal,
+  ) => Promise<{ readonly formatStatus?: 'current' | 'migration-required' } | undefined>
+  readonly observe?: (sessionId: string, signal: AbortSignal) => Promise<DirectSessionObservationLike | undefined>
 }
 
 const WORKSPACE_DOMAIN = 'workspace'
@@ -301,17 +345,144 @@ class DirectWorkspaceFactsHandle implements WorkspaceFactsHandle {
   }
 }
 
+/**
+ * One per-selection Direct Inspector source.
+ *
+ * It subscribes to the official sources at construction only: the selected
+ * Session's authorized projection-key changes and the two real attached
+ * lifecycle events (`session/created` / `session/disposed`). Event callbacks
+ * are dirty/identity invalidation only — this source never re-reads a
+ * projection from a callback. `read` performs ONE exact cut: the attached
+ * Session's official `sessionProjections.snapshot` when live, or the official
+ * `sessionPersistence.stat` + non-activating `sessionQuery.observeSession`
+ * when cold. It never retains, resumes, migrates or materializes a Session.
+ */
+class DirectInspectorSource implements SessionInspectorSource {
+  private readonly ctx: DirectFactsContextLike
+  private readonly reads: DirectInspectorReads
+  private readonly sessionId: string
+  private readonly onInvalidated: (reason: InspectorInvalidation) => void
+  private readonly offs: Array<() => void> = []
+  private disposed = false
+
+  constructor(
+    ctx: DirectFactsContextLike,
+    reads: DirectInspectorReads,
+    sessionId: string,
+    onInvalidated: (reason: InspectorInvalidation) => void,
+  ) {
+    this.ctx = ctx
+    this.reads = reads
+    this.sessionId = sessionId
+    this.onInvalidated = onInvalidated
+    const invalidateIdentity = (session: { readonly id: unknown }): void => {
+      if (this.disposed || String(session.id) !== this.sessionId) return
+      this.onInvalidated('source-replaced')
+    }
+    this.offs.push(ctx.on('session/created', invalidateIdentity, { global: true }))
+    this.offs.push(ctx.on('session/disposed', invalidateIdentity, { global: true }))
+    if (reads.onProjectionChanged !== undefined) {
+      this.offs.push(reads.onProjectionChanged((sessionId, key) => {
+        if (this.disposed || sessionId !== this.sessionId) return
+        if (!(INSPECTOR_PROJECTION_KEYS as readonly string[]).includes(key)) return
+        this.onInvalidated('changed')
+      }))
+    }
+  }
+
+  private unavailable(message = 'Session statistics are unavailable'): SessionInspectorReadResult {
+    return { kind: 'unavailable', message }
+  }
+
+  private detachedOf(projections: DirectInspectorProjectionCut): SessionInspectorReadResult {
+    if (!Number.isSafeInteger(projections.asOfSeq) || projections.asOfSeq < -1) return this.unavailable()
+    const values = projections.values
+    if (typeof values !== 'object' || values === null || Array.isArray(values)) return this.unavailable()
+    return { kind: 'ready', data: detachSessionInspector(this.sessionId, projections.asOfSeq, values) }
+  }
+
+  async read(signal: AbortSignal): Promise<SessionInspectorReadResult> {
+    signal.throwIfAborted()
+    if (this.disposed) throw new SupersededReadError('the Session Inspector source was disposed')
+    const liveSession = this.reads.liveSession
+    const attached = liveSession?.(this.sessionId)
+    if (attached !== undefined) {
+      const snapshot = this.reads.snapshot
+      if (snapshot === undefined) return this.unavailable()
+      let cut: DirectInspectorProjectionCut | undefined
+      try {
+        cut = snapshot(attached, INSPECTOR_PROJECTION_KEYS)
+      } catch (error) {
+        return { kind: 'error', message: safeErrorMessage(error) }
+      }
+      signal.throwIfAborted()
+      if (cut === undefined) return this.unavailable()
+      // An attached identity that changed while the cut was read cannot be
+      // presented as this source's exact data: the lifecycle invalidation owns
+      // the next legal read.
+      if (liveSession?.(this.sessionId) !== attached) {
+        throw new SupersededReadError('the attached Session identity changed during the Inspector read')
+      }
+      return this.detachedOf(cut)
+    }
+    const stat = this.reads.stat
+    if (stat === undefined) return this.unavailable()
+    const stored = await stat(this.sessionId, signal)
+    signal.throwIfAborted()
+    // The Session attached while `stat` was in flight: ANY cold answer taken
+    // from that stat is no longer this source's current identity.
+    if (liveSession?.(this.sessionId) !== undefined) {
+      throw new SupersededReadError('the Session attached during the Inspector cold read')
+    }
+    if (stored === undefined) return this.unavailable('Session is no longer available')
+    // A required migration is refused BEFORE any observation is opened: a cold
+    // projection read must never materialize or migrate the stored Session.
+    if (stored.formatStatus === 'migration-required') {
+      return { kind: 'migration-required', message: 'Session migration is required' }
+    }
+    const observe = this.reads.observe
+    if (observe === undefined) return this.unavailable()
+    const observation = await observe(this.sessionId, signal)
+    if (observation === undefined) return this.unavailable()
+    try {
+      if (String(observation.header.id) !== this.sessionId) {
+        return { kind: 'error', message: 'The observed Session identity did not match the requested Session' }
+      }
+      signal.throwIfAborted()
+      if (this.disposed) throw new SupersededReadError('the Session Inspector source was disposed')
+      if (liveSession?.(this.sessionId) !== undefined) {
+        throw new SupersededReadError('the Session attached during the Inspector cold read')
+      }
+      if (observation.projections === undefined) return this.unavailable()
+      return this.detachedOf(observation.projections)
+    } finally {
+      observation[Symbol.dispose]()
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    // Commit disposed BEFORE releasing subscriptions: a synchronous listener
+    // fired by the release can never publish into this source.
+    this.disposed = true
+    for (const off of this.offs.splice(0)) off()
+  }
+}
+
 /** The Direct read-authority adapter over the live Host services. */
 export class DirectSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
   private readonly ctx: DirectFactsContextLike
   private readonly agentFor: (sessionId: string) => DirectFactsAgentLike | undefined
+  private readonly inspectorReads: DirectInspectorReads | undefined
 
   constructor(
     ctx: DirectFactsContextLike,
     agentFor: (sessionId: string) => DirectFactsAgentLike | undefined,
+    inspectorReads?: DirectInspectorReads,
   ) {
     this.ctx = ctx
     this.agentFor = agentFor
+    this.inspectorReads = inspectorReads
   }
 
   async readActivity(
@@ -358,5 +529,12 @@ export class DirectSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
     // the generation in either mode; there is no carrier to recover.
     void mode
     return new DirectWorkspaceFactsHandle(this.ctx, signal)
+  }
+
+  openInspector(sessionId: string, onInvalidated: (reason: InspectorInvalidation) => void): SessionInspectorSource {
+    // An omitted capability (a fixture/composition without the injected Direct
+    // read owners) is a truthful unavailable source, never a second ctx read.
+    const reads = this.inspectorReads ?? {}
+    return new DirectInspectorSource(this.ctx, reads, sessionId, onInvalidated)
   }
 }

@@ -484,6 +484,53 @@ export class DirectSessionReader implements SessionReader {
     }
   }
 
+  /** Session Workspace PR2: the exact live Session identity for the selected
+   *  Inspector target. It returns the SAME official Session object the store
+   *  holds; a cold Session answers `undefined` (never an activation). */
+  inspectorLiveSession(sessionId: string): { readonly id: unknown } | undefined {
+    return this.liveSession(sessionId)
+  }
+
+  /** Session Workspace PR2: ONE exact official projection cut for the selected
+   *  Inspector keys. A missing registry/shape answers `undefined`; the caller
+   *  maps that to a truthful `unavailable`, never a partial DTO. */
+  inspectorSnapshot(
+    session: unknown,
+    keys: readonly string[],
+  ): { readonly asOfSeq: number; readonly values?: Readonly<Record<string, unknown>> } | undefined {
+    const projections = this.sessionProjections() as {
+      snapshot(
+        session: unknown,
+        keys?: readonly string[],
+      ): { readonly asOfSeq?: unknown; readonly values?: unknown }
+    } | undefined
+    if (projections?.snapshot === undefined) return undefined
+    const cut = projections.snapshot(session, keys)
+    if (typeof cut !== 'object' || cut === null || typeof cut.asOfSeq !== 'number') return undefined
+    const values = cut.values
+    return {
+      asOfSeq: cut.asOfSeq,
+      ...(typeof values === 'object' && values !== null && !Array.isArray(values)
+        ? { values: values as Readonly<Record<string, unknown>> }
+        : {}),
+    }
+  }
+
+  /** Session Workspace PR2: the official projection change feed filtered to the
+   *  selected Inspector keys. The returned disposer is caller-owned. */
+  inspectorOnChanged(listener: (sessionId: string, key: string) => void): (() => void) | undefined {
+    const projections = this.ctx.get('sessionProjections') as {
+      onChanged?(
+        listener: (session: unknown, key: string, value: unknown, seq: number) => void,
+      ): () => void
+    } | undefined
+    if (projections?.onChanged === undefined) return undefined
+    return projections.onChanged((session, key) => {
+      const id = (session as { readonly id?: unknown }).id
+      listener(String(id), key)
+    })
+  }
+
   private sessionProjections(): {
     snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
   } | undefined {

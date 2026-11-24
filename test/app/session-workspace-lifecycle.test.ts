@@ -186,11 +186,22 @@ interface ControlledActivityObservation {
   fail(message: string): void
 }
 
+interface ControlledInspectorSource {
+  readonly sessionId: string
+  readonly reads: number
+  readonly disposed: number
+  readonly pending: () => number
+  resolveNext(result: import('../../src/runtime/session-workspace-facts-port.ts').SessionInspectorReadResult): void
+}
+
 interface FactsSource {
   readonly port: SessionWorkspaceFactsPort
   readonly handles: ControlledFactsHandle[]
   /** Every per-open Activity observation the workspace opened, in order. */
   readonly observations: ControlledActivityObservation[]
+  /** Every per-selection Inspector source the real PiTUI panel opened, in order
+   *  (only when the harness opts into the Inspector seam). */
+  readonly inspectorSources: ControlledInspectorSource[]
   readonly followCalls: number
   /** Every EXACT whole-roster sample the Browser requested: always 0. */
   readonly readActivityCalls: { count: number }
@@ -207,9 +218,10 @@ interface FactsSource {
   requireGeneration(): void
 }
 
-function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource {
+function factsSource(initial: readonly SessionActivityFact[] = [], withInspector = false): FactsSource {
   const handles: ControlledFactsHandle[] = []
   const observations: ControlledActivityObservation[] = []
+  const inspectorSources: ControlledInspectorSource[] = []
   let generationLive = true
   let currentGeneration: object = {}
   const state = {
@@ -297,11 +309,39 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
       handles.push(handle)
       return handle
     },
+    ...(withInspector ? {
+      openInspector: (sessionId: string, _onInvalidated: (reason: 'changed' | 'source-replaced') => void) => {
+        let reads = 0
+        let disposed = 0
+        const pendingResolvers: Array<(result: import('../../src/runtime/session-workspace-facts-port.ts').SessionInspectorReadResult) => void> = []
+        inspectorSources.push({
+          sessionId,
+          get reads() { return reads },
+          get disposed() { return disposed },
+          pending: () => pendingResolvers.length,
+          resolveNext: (result) => {
+            const resolve = pendingResolvers.shift()
+            assert.ok(resolve !== undefined, `the ${sessionId} Inspector source has no pending read`)
+            resolve(result)
+          },
+        })
+        return {
+          read: (signal: AbortSignal) => {
+            if (disposed > 0) return Promise.reject(new Error('the disposed Inspector source was read'))
+            if (signal.aborted) return Promise.reject(new Error('the Inspector source was read with an aborted signal'))
+            reads += 1
+            return new Promise((resolve) => { pendingResolvers.push(resolve) })
+          },
+          dispose: () => { disposed += 1 },
+        }
+      },
+    } : {}),
   }
   return {
     port,
     handles,
     observations,
+    inspectorSources,
     get followCalls() { return state.followCalls },
     readActivityCalls: state.readActivityCalls,
     setFacts: (facts) => { state.facts = facts },
@@ -401,6 +441,9 @@ function harness(options: {
   readonly hostDirectoryBrowse?: TuiCommandRunner['hostDirectoryBrowse']
   /** PR2: the controlled official Markdown read seam the Reader consumes. */
   readonly readMarkdown?: (sessionId: string, signal: AbortSignal) => Promise<SessionMarkdownReadResult>
+  /** PR2: opt this harness into the controlled Inspector source seam so the
+   *  REAL PiTUI panel selection report reaches the read owner. */
+  readonly inspector?: boolean
   /** The physical frame size this mount paints (default 100x30). */
   readonly frameColumns?: number
   readonly frameRows?: number
@@ -437,7 +480,7 @@ function harness(options: {
   )
   app.start()
   started.add(app)
-  const facts = factsSource(options.initialFacts ?? [])
+  const facts = factsSource(options.initialFacts ?? [], options.inspector === true)
   const eligibilityListeners = new Set<() => void>()
   const notices: Array<{ text: string; kind: string }> = []
   const originalNotify = app.notify.bind(app)
@@ -3248,4 +3291,68 @@ test('R16 a preset-only official push updates the accepted preset and a known-ab
   h.pushRoster([row(CURRENT, 3_000, { presetKnown: true })])
   await waitUntil(() => snapshots.at(-1)?.rows[0]?.preset === undefined, 'a known-absent preset clears the accepted value')
   h.close()
+})
+
+// ── Session Workspace PR2: real PiTUI presenter → Inspector read owner ──────
+
+function inspectorCut(sessionId: string, turns: number): import('../../src/runtime/session-workspace-facts-port.ts').SessionInspectorReadResult {
+  return {
+    kind: 'ready',
+    data: {
+      sessionId,
+      asOfSeq: turns,
+      stats: {
+        turns,
+        steps: turns,
+        llmMs: 10,
+        toolMs: 0,
+      },
+    },
+  }
+}
+
+test('PR2: the REAL PiTUI panel reports its painted typed selection into the ONE Inspector owner', async () => {
+  const h = harness({ currentSessionId: CURRENT, inspector: true })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('Current session'), 'the roster titles paint')
+
+  await waitUntil(() => h.facts.inspectorSources.length === 1,
+    'the initial painted Session reaches the Inspector owner')
+  const first = h.facts.inspectorSources[0]!
+  assert.equal(first.sessionId, CURRENT, 'the current Session is the panel\'s initial typed selection')
+  await waitUntil(() => first.reads === 1, 'ONE settled selection performs exactly ONE exact read')
+  first.resolveNext(inspectorCut(CURRENT, 1))
+  await h.vt.waitForRender()
+
+  // Two rapid painted moves: only the FINAL selection may reach an exact read.
+  h.vt.sendInput('\x1b[B')
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.facts.inspectorSources.at(-1)?.sessionId === THIRD,
+    'the final painted target reaches the owner')
+  const finalSource = h.facts.inspectorSources.at(-1)!
+  assert.equal(first.disposed, 1, 'the superseded initial source is released')
+  for (const superseded of h.facts.inspectorSources.slice(1, -1)) {
+    assert.equal(superseded.reads, 0, 'a superseded rapid target never reads')
+    assert.equal(superseded.disposed, 1, 'a superseded rapid target source is released')
+  }
+  await waitUntil(() => finalSource.reads === 1, 'only the latest target reads after the debounce')
+  finalSource.resolveNext(inspectorCut(THIRD, 2))
+  await h.vt.waitForRender()
+
+  // An unrelated accepted publication repaints the SAME id: no second read.
+  const reads = finalSource.reads
+  h.notifyEligibility()
+  await h.vt.waitForRender()
+  // Bounded negative window: a same-id repaint must not start a second read.
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  assert.equal(finalSource.reads, reads, 'a same-id repaint never starts a second Inspector read')
+
+  h.vt.sendInput('\x1b')
+  await waitUntil(() => finalSource.disposed === 1, 'closing the workspace releases the selected source')
+  // Bounded negative window: closing starts no replacement read.
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  assert.equal(finalSource.reads, reads, 'closing the workspace starts no replacement read')
+  assert.equal(h.facts.readActivityCalls.count, 0, 'the Browser never takes a whole-roster Activity sample')
 })

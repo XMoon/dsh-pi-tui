@@ -39,13 +39,17 @@
  */
 
 import { isRemoteCancellation, remoteFailureCode } from './write-failure.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import { SupersededReadError } from '../read-error.ts'
 import type { SessionSummary } from '../session-reader-port.ts'
 import type {
   ActivityObservation,
   ActivityObservationSnapshot,
   FactState,
+  InspectorInvalidation,
   SessionActivityFact,
+  SessionInspectorReadResult,
+  SessionInspectorSource,
   SessionPendingKind,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
@@ -54,6 +58,7 @@ import type {
   WorkspaceFollowMode,
   WorkspaceInvalidatedReason,
 } from '../session-workspace-facts-port.ts'
+import { detachSessionInspector, INSPECTOR_PROJECTION_KEYS } from '../session-inspector-projection.ts'
 import type {
   RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,
@@ -1962,6 +1967,181 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   }
 }
 
+/** The minimal per-selected-target invalidation witness of one Remote Inspector
+ *  source. It is ONLY a change witness: it is never used to construct DTO data. */
+interface RemoteInspectorWitness {
+  readonly generation: RemoteConnectionGeneration | undefined
+  readonly binding: unknown
+  readonly authorized: boolean
+  readonly running: boolean | undefined
+  readonly values: readonly (readonly [string, unknown])[]
+}
+
+function sameInspectorValues(
+  left: readonly (readonly [string, unknown])[],
+  right: readonly (readonly [string, unknown])[],
+): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index]![0] !== right[index]![0] || !Object.is(left[index]![1], right[index]![1])) return false
+  }
+  return true
+}
+
+/**
+ * One per-selection Remote Inspector source.
+ *
+ * Construction installs the official list and Connection-generation
+ * subscriptions BEFORE reading the current witness; the witness is only a
+ * minimal reference/bit set for the SELECTED id (relevant projection value
+ * references, the official list-row running bit, the borrowed binding identity
+ * and the Connection generation). A real selected-relevant change is
+ * `changed`; an identity/authorization replacement is `source-replaced`; every
+ * unrelated row or same-value notification is inert. `read` performs ONE
+ * passive exact `session.projections` unary at the captured identity and never
+ * retains, refreshes or re-enumerates the corpus.
+ */
+class RemoteInspectorSource implements SessionInspectorSource {
+  private readonly source: RemoteSessionWorkspaceFactsSource
+  private readonly sessions: RemoteSessionsReadSource
+  private readonly sessionId: string
+  private readonly onInvalidated: (reason: InspectorInvalidation) => void
+  private readonly offs: Array<() => void> = []
+  private witness: RemoteInspectorWitness | undefined
+  private disposed = false
+
+  constructor(
+    source: RemoteSessionWorkspaceFactsSource,
+    sessionId: string,
+    onInvalidated: (reason: InspectorInvalidation) => void,
+  ) {
+    this.source = source
+    this.sessions = source.sessions
+    this.sessionId = sessionId
+    this.onInvalidated = onInvalidated
+    const onSourcePublication = (): void => { this.invalidateIfChanged() }
+    // Subscribe FIRST, then take the actual current identity: an arrival in
+    // between is folded into the baseline and never lost.
+    this.offs.push(this.sessions.list.subscribe(onSourcePublication))
+    this.offs.push(source.connection.generation.subscribe(onSourcePublication))
+    this.witness = this.captureWitness()
+  }
+
+  private captureWitness(): RemoteInspectorWitness {
+    const listed = this.sessions.list.getSnapshot()
+    const authorized = listed.phase === 'ready' && listed.ids.includes(this.sessionId)
+    const rawValues = listed.projectionsBySession[this.sessionId]?.values as
+      | Readonly<Record<string, unknown>>
+      | undefined
+    return {
+      generation: this.source.connection.generation.getSnapshot(),
+      binding: this.sessions.binding(this.sessionId),
+      authorized,
+      running: authorized ? listed.byId[this.sessionId]?.running : undefined,
+      values: INSPECTOR_PROJECTION_KEYS.map(key => [key, rawValues?.[key]] as const),
+    }
+  }
+
+  /** Commit the new witness BEFORE the listener runs; a first publication while
+   *  the baseline was not captured yet simply adopts the current identity. */
+  private invalidateIfChanged(): void {
+    if (this.disposed) return
+    const next = this.captureWitness()
+    const previous = this.witness
+    this.witness = next
+    if (previous === undefined) return
+    if (!Object.is(previous.generation, next.generation)
+      || !Object.is(previous.binding, next.binding)
+      || previous.authorized !== next.authorized) {
+      this.onInvalidated('source-replaced')
+      return
+    }
+    if (!Object.is(previous.running, next.running)
+      || !sameInspectorValues(previous.values, next.values)) {
+      this.onInvalidated('changed')
+    }
+  }
+
+  private unavailable(message = 'Session statistics are unavailable'): SessionInspectorReadResult {
+    return { kind: 'unavailable', message }
+  }
+
+  private failureOf(error: unknown): SessionInspectorReadResult {
+    const failure = classifyReadFailure(error)
+    if (failure === 'denied') return { kind: 'denied', message: 'Session statistics are not permitted' }
+    if (failure === 'unavailable') return this.unavailable()
+    return { kind: 'error', message: safeErrorMessage(error) }
+  }
+
+  private detachedOf(value: unknown): SessionInspectorReadResult {
+    if (value === null) return this.unavailable()
+    if (!isRecord(value)) return this.unavailable()
+    if (value.kind === 'migration-required') {
+      return { kind: 'migration-required', message: 'Session migration is required' }
+    }
+    if (value.kind !== 'sequenced') return this.unavailable()
+    const asOfSeq = value.asOfSeq
+    if (typeof asOfSeq !== 'number' || !Number.isSafeInteger(asOfSeq) || asOfSeq < -1) return this.unavailable()
+    const values = value.values
+    if (!isRecord(values)) return this.unavailable()
+    return { kind: 'ready', data: detachSessionInspector(this.sessionId, asOfSeq, values) }
+  }
+
+  private assertCurrent(
+    generation: RemoteConnectionGeneration,
+    binding: unknown,
+  ): void {
+    const current = this.source.connection.generation.getSnapshot()
+    if (current === undefined || !Object.is(current, generation)) {
+      throw new SupersededReadError('the Connection generation was replaced during the Session projections read')
+    }
+    const listed = this.sessions.list.getSnapshot()
+    if (listed.phase !== 'ready' || !listed.ids.includes(this.sessionId)) {
+      throw new SupersededReadError('the Session left the authorized roster during the Session projections read')
+    }
+    if (!Object.is(this.sessions.binding(this.sessionId), binding)) {
+      throw new SupersededReadError('the Session binding was replaced during the Session projections read')
+    }
+  }
+
+  async read(signal: AbortSignal): Promise<SessionInspectorReadResult> {
+    signal.throwIfAborted()
+    if (this.disposed) throw new SupersededReadError('the Session Inspector source was disposed')
+    const generation = this.source.connection.generation.getSnapshot()
+    // Without a current Connection generation no exact Remote read may leave.
+    if (generation === undefined) return this.unavailable()
+    const listed = this.sessions.list.getSnapshot()
+    if (listed.phase !== 'ready' || !listed.ids.includes(this.sessionId)) return this.unavailable()
+    const row = listed.byId[this.sessionId]
+    if (row?.origin === 'subagent') return this.unavailable()
+    // Borrow the current binding identity: a binding-less cold target is legal.
+    const binding = this.sessions.binding(this.sessionId)
+    let result: Awaited<ReturnType<RemoteSessionFactsRemotes['session']['projections']>>
+    try {
+      // ONE official passive read; the receiver stays the generated namespace.
+      result = await this.source.remote.session.projections({ sessionId: this.sessionId }, signal)
+    } catch (error) {
+      if (signal.aborted || isRemoteCancellation(error)) {
+        throw new SupersededReadError('the Session projections read was cancelled')
+      }
+      return this.failureOf(error)
+    }
+    signal.throwIfAborted()
+    if (this.disposed) throw new SupersededReadError('the Session Inspector source was disposed')
+    this.assertCurrent(generation, binding)
+    if (!result.ok) return this.failureOf(result.error)
+    return this.detachedOf(result.value)
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    // Commit disposed BEFORE releasing subscriptions: a synchronous listener
+    // fired by the release can never publish into this source.
+    this.disposed = true
+    for (const off of this.offs.splice(0)) off()
+  }
+}
+
 /** The Remote read-authority adapter over the ONE shared Client runtime. */
 export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
   private readonly source: RemoteSessionWorkspaceFactsSource
@@ -2134,5 +2314,9 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
 
   connectionGeneration(): RemoteConnectionGeneration | undefined {
     return this.generation.getSnapshot()
+  }
+
+  openInspector(sessionId: string, onInvalidated: (reason: InspectorInvalidation) => void): SessionInspectorSource {
+    return new RemoteInspectorSource(this.source, sessionId, onInvalidated)
   }
 }

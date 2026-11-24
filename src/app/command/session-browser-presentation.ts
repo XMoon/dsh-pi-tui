@@ -1,6 +1,6 @@
 /** Internal read-only Session Browser contract shared by the app read owner and TSP presenter. */
 import type { SessionSummary } from '../../runtime/session-reader-port.ts'
-import type { SessionActivityFact, SessionWorkspaceFact } from '../../runtime/session-workspace-facts-port.ts'
+import type { SessionActivityFact, SessionInspectorData, SessionWorkspaceFact } from '../../runtime/session-workspace-facts-port.ts'
 import type { HostDirectoryBrowsePort } from '../../runtime/host-directory-browse-port.ts'
 
 export interface SessionBrowserWorkspaceMetadata {
@@ -49,6 +49,15 @@ export interface SessionBrowserWorkspaceSnapshot {
   readonly activityError?: string
 }
 
+/** The ONE selected-Session Inspector state of an open renderer. PR2 delivers
+ *  the data/state only (no paint); a consumer must match `sessionId` against
+ *  the CURRENT typed selection before presenting it, and an old exact cut is
+ *  `refreshing` rather than a current-live claim. */
+export type SessionInspectorSnapshot =
+  | { readonly sessionId: string; readonly state: 'loading' }
+  | { readonly sessionId: string; readonly state: 'ready'; readonly data: SessionInspectorData; readonly refreshing: boolean }
+  | { readonly sessionId: string; readonly state: 'unavailable' | 'denied' | 'migration-required' | 'error'; readonly message: string }
+
 /** Detached state produced only by SessionReader.list/projectionBatch/search. */
 export interface SessionBrowserReadSnapshot {
   readonly listState: SessionBrowserListState
@@ -63,6 +72,9 @@ export interface SessionBrowserReadSnapshot {
    *  batch, a search update or a repaint never does. The PiTUI Session
    *  Workspace keys its ONE Activity sample on this value. */
   readonly listRevision: number
+  /** The ONE selected-Session Inspector cut, absent when no Session target is
+   *  selected (never a stats map for the whole roster). */
+  readonly inspector?: SessionInspectorSnapshot
   readonly workspace?: SessionBrowserWorkspaceSnapshot
   readonly listError?: string
   readonly projectionError?: string
@@ -116,6 +128,11 @@ export interface SessionBrowserPanelRequest {
    *  completion; an absent callback is not wrapped into a fake reader. The
    *  TSP native presentation never receives it. */
   readonly onListDirectory?: HostDirectoryBrowsePort['list']
+  /** Session Workspace PR2: the renderer's ONE real typed selection report,
+   *  emitted from a committed frame's painted rows only. `undefined` clears.
+   *  Optional solely for presenters/fixtures without the seam; both production
+   *  renderers forward it. */
+  readonly onInspectorSelection?: (sessionId: string | undefined) => void
   readonly onClose: () => void
 }
 

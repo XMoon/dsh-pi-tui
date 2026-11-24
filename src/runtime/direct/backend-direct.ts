@@ -172,9 +172,16 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
   // verdict can never be mixed with another generation's roster.
   const mcpServers = new DirectMcpServerPort(deps.ctx)
   const cuaAccess = new DirectCuaAccessPort(deps.ctx)
+  // Session Workspace PR2: the selected-Session Inspector reads are supplied by
+  // the EXISTING Direct read owners (the session reader owns the exact attached
+  // projection cut/change feed; the Markdown owner owns the official cold
+  // stat/observeSession primitives). The facts adapter stays free of new Host
+  // service coupling.
+  const sessionReader = new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections)
+  const sessionMarkdown = new DirectSessionMarkdown(deps.ctx)
   return createDirectBackend(
     new DirectSubagentPort(deps.ctx),
-    new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections),
+    sessionReader,
     new DirectPendingInputReader(deps.queueAgentFor),
     new DirectSessionWriter(deps.ctx, deps.agentFor, deps.queueAgentFor),
     new DirectSessionLifecycle(deps.ctx, deps.compose, deps.ownerPool),
@@ -186,7 +193,7 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     // S5-PR3: the official Markdown read is a separate semantic capability
     // from the ZIP archive; the Host Session Query snapshot and the official
     // formatter are resolved/consumed in-process, never in the Client.
-    new DirectSessionMarkdown(deps.ctx),
+    sessionMarkdown,
     new DirectHostCommandPort(deps.ctx, deps.agentFor),
     new DirectPluginManagerPort(deps.ctx),
     new DirectJobObservationPort(deps.ctx, deps.diag),
@@ -223,8 +230,15 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
     new DirectUnavailableAcpAccess(),
     // M5-U-A: the ONE read-authority port. Direct reads the live Agent status
     // and the official Workspace registry it already owns; it never fabricates
-    // a cross-Session pending fact.
-    new DirectSessionWorkspaceFacts(deps.ctx, deps.agentFor),
+    // a cross-Session pending fact. PR2 injects the exact Inspector reads from
+    // the two existing Direct read owners above.
+    new DirectSessionWorkspaceFacts(deps.ctx, deps.agentFor, {
+      liveSession: sessionId => sessionReader.inspectorLiveSession(sessionId),
+      snapshot: (session, keys) => sessionReader.inspectorSnapshot(session, keys),
+      onProjectionChanged: listener => sessionReader.inspectorOnChanged(listener) ?? (() => {}),
+      stat: (sessionId, signal) => sessionMarkdown.inspectorStat(sessionId, signal),
+      observe: (sessionId, signal) => sessionMarkdown.inspectorObservation(sessionId, signal),
+    }),
     // S5-PR4: the official Host Schedule domain, resolved per operation from
     // the SAME Host Context. Never a Client task store and never a
     // `runner.ctx.schedule` shortcut around this port.

@@ -2174,6 +2174,10 @@ export interface SessionWorkspaceOpenOptions {
   readonly subject: SessionBrowserSubject
   readonly onQueryChange: (raw: string) => void
   readonly onResume: (sessionId: string) => void
+  /** Session Workspace PR2: the renderer's committed-frame typed selection
+   *  report. The shared read owner owns the debounced exact read; this lease
+   *  only forwards it while THIS record owns the physical screen. */
+  readonly onInspectorSelection?: (sessionId: string | undefined) => void
   /** Session Workspace PR2: ONE explicit full Session-id Markdown read for the
    *  local Reader. The command bridge composes the open, reader and runner
    *  cancellation signals; this lease only forwards it while THIS record owns
@@ -28705,6 +28709,11 @@ export class TuiApp {
       onResume: (sessionId) => {
         if (this.workspaceLease === record) options.onResume(sessionId)
       },
+      ...(options.onInspectorSelection === undefined ? {} : {
+        onInspectorSelection: (sessionId: string | undefined) => {
+          if (this.workspaceLease === record) options.onInspectorSelection?.(sessionId)
+        },
+      }),
       readMarkdown: (sessionId, signal) => {
         if (this.disposed || record === undefined || this.workspaceLease !== record) {
           return Promise.reject(new Error('the Session Workspace lease is no longer current'))

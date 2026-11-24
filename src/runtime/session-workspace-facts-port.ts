@@ -32,6 +32,9 @@
  */
 
 import type { SessionSummary } from './session-reader-port.ts'
+import type { SessionInspectorData } from './session-inspector-projection.ts'
+
+export type { SessionInspectorData } from './session-inspector-projection.ts'
 
 /** The official Host pending-forwarded-event kind (`SessionPendingInput`). */
 export type SessionPendingKind = 'question' | 'approval' | 'other'
@@ -170,6 +173,36 @@ export interface ActivityObservation {
   dispose(): void
 }
 
+/** Why one Inspector source's exact data is no longer assumed current.
+ *
+ *  - `changed`: the SAME selected Session identity's relevant official projection
+ *    (or list-row activity) really changed. The last exact cut may stay visible
+ *    as `refreshing`; it is never claimed as the newest fact.
+ *  - `source-replaced`: the Connection generation, binding identity, Direct
+ *    attached identity/lifecycle or the Session's authorization changed. The
+ *    existing exact data is revoked; a later legal read re-proves it. */
+export type InspectorInvalidation = 'changed' | 'source-replaced'
+
+/** The terminal answer of one exact Session Inspector read. `ready` carries the
+ *  detached DTO; every other kind is a truthful missing/refused/failed answer
+ *  with a safe message. A changed Session identity/authorization is NOT one of
+ *  these: it rejects with the existing superseded/cancellation semantics. */
+export type SessionInspectorReadResult =
+  | { readonly kind: 'ready'; readonly data: SessionInspectorData }
+  | { readonly kind: 'unavailable' | 'denied' | 'migration-required' | 'error'; readonly message: string }
+
+/** One caller-owned exact Inspector source for ONE selected Session id.
+ *
+ *  Construction only subscribes to the official change sources; it never
+ *  performs a read, retains a Session or opens history. `read` is an explicit
+ *  passive exact projection read at the captured source identity, and
+ *  `dispose` releases every subscription exactly once and makes later
+ *  callbacks inert. */
+export interface SessionInspectorSource {
+  read(signal: AbortSignal): Promise<SessionInspectorReadResult>
+  dispose(): void
+}
+
 /** The UI-neutral read-authority port. */
 export interface SessionWorkspaceFactsPort {
   /** Read the current facts of already-authorized main Session rows.
@@ -206,4 +239,10 @@ export interface SessionWorkspaceFactsPort {
    *  adopted generation with the current one. Omitted by backends with no
    *  reconnecting transport (Direct). */
   connectionGeneration?(): unknown
+  /** Open ONE exact Inspector source for ONE selected, already-authorized main
+   *  Session id. The source only subscribes here; the caller owns its lifetime
+   *  and starts the explicit read after its own selection debounce. Both
+   *  production adapters implement this; an omitted capability is a truthful
+   *  `unavailable` Inspector state for a fixture/presenter without it. */
+  openInspector?(sessionId: string, onInvalidated: (reason: InspectorInvalidation) => void): SessionInspectorSource
 }
