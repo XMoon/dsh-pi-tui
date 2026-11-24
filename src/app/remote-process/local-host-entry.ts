@@ -34,6 +34,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlChannel } from './entry-control.ts'
+import { initializeHostEnvironment } from './host-environment.ts'
 import { HostActivityObserver } from './host-activity.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../host/features/web-roster.ts'
 import {
@@ -2273,7 +2274,38 @@ function optionsFromEnvironment(): LocalHostEntryOptions {
 
 if (import.meta.main) {
   try {
-    await runLocalHostEntry(optionsFromEnvironment())
+    const options = optionsFromEnvironment()
+    // The Host inherits the OS manager's environment, not an interactive
+    // shell's. Append the common tool directories that already exist before
+    // the official profile boot snapshots this process environment; the mode
+    // value and the inherited PATH are the only inputs. A non-Linux/macOS
+    // process keeps its existing unsupported-platform path untouched.
+    const platform = process.platform
+    if (platform === 'linux' || platform === 'darwin') {
+      const environment = initializeHostEnvironment(platform)
+      writeEntryRecord({
+        m4a0: 'host-environment',
+        processRole: 'host',
+        pid: process.pid,
+        mode: environment.mode,
+        addedPathCount: environment.addedPathCount,
+        skippedInvalidCount: environment.skippedInvalidCount,
+        skippedInaccessibleCount: environment.skippedInaccessibleCount,
+      })
+      if (environment.skippedInvalidCount > 0 || environment.skippedInaccessibleCount > 0) {
+        createEntryDiag('host').warn(
+          `host environment: skipped PATH candidates (invalid=${String(environment.skippedInvalidCount)}, inaccessible=${String(environment.skippedInaccessibleCount)})`,
+          {
+            skippedInvalidCount: environment.skippedInvalidCount,
+            skippedInaccessibleCount: environment.skippedInaccessibleCount,
+          },
+        )
+      }
+      if (environment.homeAvailable === false) {
+        createEntryDiag('host').warn('host environment: no usable home directory; only absolute path candidates were considered')
+      }
+    }
+    await runLocalHostEntry(options)
   } catch (error) {
     writeEntryRecord({
       m4a0: 'failure',

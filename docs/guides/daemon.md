@@ -135,6 +135,60 @@ without touching the Host, and only the explicit `Stop daemon Host and exit`
 runs the authenticated `daemon stop` after the terminal is restored. The stop
 interrupts every connected Client, Session and Job of that Profile's Host.
 
+## Host tool discovery (PATH)
+
+A Host started by systemd, launchd or the detached launcher does not run an
+interactive login shell. Before the official profile boot it appends the common
+user and platform tool directories that already exist to its inherited PATH, so
+Agent shells, background Jobs and child processes can find installed tools
+without repeating `mise exec` or editing `.zshrc`. The inherited PATH keeps its
+order: a tool directory already configured in the service PATH stays first, and
+a same-name system tool may win. The durable contract is owned by the
+[daemon architecture contract](../architecture/host-daemon.md#host-startup-environment);
+the no-bootstrap escape hatch is `DSH_PI_TUI_HOST_PATH_MODE=inherit` in the
+**actual Host environment**.
+
+An existing managed Host already keeps its old process environment. After
+upgrading, check that no important work is running and restart it; reinstalling
+the service is not required:
+
+~~~sh
+dsh --profile pi-tui daemon status
+dsh --profile pi-tui daemon restart
+~~~
+
+For a Linux systemd user unit, put the opt-out in a user drop-in below
+`[Service]`, reload the manager and restart explicitly:
+
+~~~ini
+# ~/.config/systemd/user/dsh-pi-tui@<...>.service.d/50-host-environment.conf
+[Service]
+Environment=DSH_PI_TUI_HOST_PATH_MODE=inherit
+~~~
+
+~~~sh
+systemctl --user daemon-reload
+dsh --profile pi-tui daemon restart
+~~~
+
+For a macOS LaunchAgent, add `DSH_PI_TUI_HOST_PATH_MODE` with the value
+`inherit` to that plist's `EnvironmentVariables` dictionary and restart with
+the management command. A variable passed only to the `dsh daemon start` CLI
+does not reach a Host started by systemd or launchd. For a detached cold start,
+pass the variable in the calling shell; it does not change an already running
+Host:
+
+~~~sh
+DSH_PI_TUI_HOST_PATH_MODE=inherit dsh --profile pi-tui daemon start
+~~~
+
+Inspect the Host's own environment from a connected Client (`!` or the Agent
+Bash tool) with `command -v <tool>` or `printf '%s\n' "$PATH"`; do not publish
+the complete environment. A tool that is installed later under a directory
+that already existed is found without a restart; a newly created candidate
+directory is adopted on the next Host cold start. To force one same-name tool
+ahead of others, order it explicitly in the service PATH.
+
 ## Adopt an installed update (Linux / macOS)
 
 Package updates belong to the official plugin command. The daemon never
