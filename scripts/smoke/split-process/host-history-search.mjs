@@ -21,9 +21,14 @@
  */
 
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
+
+import { Context } from '@deepseek-ai/cordis'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostStatus } from '../../lib/split-smoke-processes.mjs'
@@ -154,6 +159,150 @@ async function readFullText(client, requestPath, item, label, chunkLimit = 5) {
 }
 
 /**
+ * Create ONE cold official current-format Session with the INSTALLED package-root
+ * write handle (never a raw parser/writer). The writer process exits before any
+ * Host starts, so the Session never becomes live in this smoke.
+ */
+async function seedOfficialColdSession(dshHome, { id, cwd, texts }) {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(JsonlSessionPersistence, { root: join(dshHome, 'sessions') })
+    const persistence = ctx.reflect.get('sessionPersistence')
+    const header = {
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId(id),
+      createdAt: Date.now(),
+      cwd,
+      isSeeded: false,
+    }
+    const handle = await persistence.create(header)
+    try {
+      const accepted = texts.map((text, seq) => ({
+        type: 'user/message',
+        seq,
+        time: Date.now() + seq,
+        surfaceOp: 'append',
+        data: {
+          id: `seed-${id}-${String(seq)}`,
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user', rpcId: `seed-rpc-${id}-${String(seq)}` },
+        },
+      }))
+      if (accepted.length > 0) await handle.append(accepted)
+      await handle.flush()
+    } finally {
+      await handle.close()
+    }
+  } finally {
+    await ctx.fiber.dispose()
+  }
+}
+
+/** Append ONE official accepted event to a cold Session with the installed write handle. */
+async function appendOfficialColdEvent(dshHome, sessionId, { text, seq }) {
+  const ctx = new Context()
+  try {
+    await ctx.plugin(JsonlSessionPersistence, { root: join(dshHome, 'sessions') })
+    const persistence = ctx.reflect.get('sessionPersistence')
+    const handle = await persistence.open(SessionId(sessionId), 'write')
+    try {
+      await handle.append([{
+        type: 'user/message',
+        seq,
+        time: Date.now(),
+        surfaceOp: 'append',
+        data: {
+          id: `append-${sessionId}-${String(seq)}`,
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user', rpcId: `append-rpc-${sessionId}-${String(seq)}` },
+        },
+      }])
+      await handle.flush()
+    } finally {
+      await handle.close()
+    }
+  } finally {
+    await ctx.fiber.dispose()
+  }
+}
+
+/** Write a legacy v1 file set and capture its full observable identity. */
+function writeLegacyV1Sentinel(profileDir) {
+  const historyDir = join(profileDir, '.dsh-pi-tui', 'history-search')
+  mkdirSync(join(profileDir, '.dsh-pi-tui'), { recursive: true, mode: 0o700 })
+  mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+  chmodSync(join(profileDir, '.dsh-pi-tui'), 0o700)
+  chmodSync(historyDir, 0o700)
+  const dbPath = join(historyDir, 'v1.sqlite')
+  const snapshot = new Map()
+  for (const [suffix, contents] of [['', 'legacy-v1-main'], ['-wal', 'legacy-v1-wal'], ['-shm', 'legacy-v1-shm']]) {
+    const file = `${dbPath}${suffix}`
+    writeFileSync(file, contents, { mode: 0o600 })
+    const stat = lstatSync(file)
+    snapshot.set(suffix, {
+      bytes: readFileSync(file),
+      ino: stat.ino,
+      mode: stat.mode,
+      mtimeMs: stat.mtimeMs,
+    })
+  }
+  return { dbPath, snapshot }
+}
+
+/** Verify the legacy v1 file set is byte/mode/inode identical and never renamed. */
+function assertLegacyV1Untouched(sentinel) {
+  for (const [suffix, before] of sentinel.snapshot) {
+    const file = `${sentinel.dbPath}${suffix}`
+    const after = lstatSync(file)
+    assert(readFileSync(file).equals(before.bytes), `the legacy v1${suffix} bytes changed`)
+    assert(after.ino === before.ino, `the legacy v1${suffix} inode was replaced`)
+    assert(after.mode === before.mode, `the legacy v1${suffix} mode changed`)
+    assert(after.mtimeMs === before.mtimeMs, `the legacy v1${suffix} was rewritten`)
+  }
+}
+
+/** The last bootstrap diagnostics record of one Host debug log. */
+function bootstrapCounters(logPath) {
+  if (!existsSync(logPath)) return undefined
+  const lines = readFileSync(logPath, 'utf8').split('\n')
+  const line = [...lines].reverse().find(candidate => candidate.includes('history-search.bootstrap.end'))
+  if (line === undefined) return undefined
+  const fields = {}
+  for (const part of line.split(' ')) {
+    const match = /^([A-Za-z][A-Za-z]+)=(.+)$/u.exec(part)
+    if (match !== null) fields[match[1]] = match[2]
+  }
+  return fields
+}
+
+/** Wait until a Host's bootstrap diagnostics record exists. */
+async function waitForBootstrapCounters(logPath, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const counters = bootstrapCounters(logPath)
+    if (counters !== undefined) return counters
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label}: no history-search.bootstrap.end record in ${logPath}`)
+}
+
+/** Read the derived v2 database (Host exited, no writer) without touching sources. */
+function inspectDerivedHistory(profileDir) {
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const userVersion = db.prepare('PRAGMA user_version').get().user_version
+    const sessions = db.prepare('SELECT COUNT(*) AS count FROM history_sessions').get().count
+    const proofs = db.prepare('SELECT COUNT(*) AS count FROM history_source_proofs').get().count
+    return { dbPath, userVersion, sessions, proofs }
+  } finally {
+    db.close()
+  }
+}
+
+/**
  * One test-only Host plugin installed only into THIS smoke's isolated profile.
  * It uses official Host services (workingDirectory/sessionController) to
  * exercise event-time cwd changes and real queue edit/remove while a Turn is
@@ -251,8 +400,30 @@ export async function runHostHistorySearch(context) {
   let firstEvent
   let firstMessage
 
+  const sentinelId = 'hsp-cold-sentinel'
+  const emptySentinelId = 'hsp-cold-empty'
+  const sentinelTexts = ['hsp-sentinel-alpha', 'hsp-sentinel-beta']
+  const logA = join(workDir, 'history-search-host-a.log')
+  const logB = join(workDir, 'history-search-host-b.log')
+  const logC = join(workDir, 'history-search-host-c.log')
+  const logD = join(workDir, 'history-search-host-d.log')
+  let legacySentinel
+  let thirdHost
+  let fourthHost
+
   try {
-    const firstHost = await scene.startC1Host('skills-standing', 'history host 1')
+    // Cold official sentinels + a legacy v1 file set exist BEFORE the first
+    // Host: neither is ever resumed, so their durable proof lifecycle is the
+    // only thing the restarts exercise.
+    const sentinelCwd = realpathSync(workDir)
+    await seedOfficialColdSession(dshHome, { id: sentinelId, cwd: sentinelCwd, texts: sentinelTexts })
+    await seedOfficialColdSession(dshHome, { id: emptySentinelId, cwd: sentinelCwd, texts: [] })
+    legacySentinel = writeLegacyV1Sentinel(context.installation.profileDir)
+
+    const firstHost = await scene.startC1Host('skills-standing', 'history host 1', {
+      DSH_PI_TUI_LOG: logA,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
+    })
     host = firstHost.host
     const hostPid = firstHost.ready.pid
     assert(Number.isInteger(hostPid), 'host history search: the Host did not publish a real PID')
@@ -417,7 +588,10 @@ export async function runHostHistorySearch(context) {
     await scene.stopC1Host(host)
     host = undefined
 
-    const restarted = await scene.startC1Host('skills-standing', 'history host 2')
+    const restarted = await scene.startC1Host('skills-standing', 'history host 2', {
+      DSH_PI_TUI_LOG: logB,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
+    })
     host = restarted.host
     assert(restarted.ready.pid !== hostPid,
       `W03: the restarted Host reused the first Host PID ${String(restarted.ready.pid)}`)
@@ -446,12 +620,105 @@ export async function runHostHistorySearch(context) {
     const restartText = await readFullText(clientB, requestPath, restartAnswer.items[0], 'W03 restart exact text')
     assert(restartText === unique, 'W03: restart changed the recoverable original text')
 
-    // ── W02c: real working-directory/change H1→H2 on the same Host. ───────
-    await scene.exitC1Client(clientB, 'history cwd client B exit')
+    // ── W04: a third real Host reuses the committed cold proofs. ───────────
+    await scene.exitC1Client(clientB, 'history client B exit')
     clientB = undefined
     await scene.stopC1Host(host)
     host = undefined
     await scene.awaitSceneSeatFree()
+    const countersB = await waitForBootstrapCounters(logB, 'W03 restarted host')
+    assert(Number(countersB.sourceProofHit) >= 2,
+      `W04: the restarted Host reused no cold sentinel proof: ${JSON.stringify(countersB)}`)
+    thirdHost = await scene.startC1Host('skills-standing', 'history host 3', {
+      DSH_PI_TUI_LOG: logC,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
+    })
+    host = thirdHost.host
+    assert(thirdHost.ready.pid !== restarted.ready.pid,
+      `W04: the third Host reused the second Host PID ${String(thirdHost.ready.pid)}`)
+    assert(thirdHost.ready.localHost?.instanceId !== restarted.ready.localHost?.instanceId,
+      'W04: the third Host reused the second Host instance identity')
+    const clientCResult = await scene.startC1Client('history client C', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    clientB = clientCResult.client
+    const sentinelAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId: sentinelId, query: 'hsp-sentinel-', limit: 25,
+    }, 'host history search W04 sentinel'), 'W04 sentinel')
+    assert(sentinelAnswer.items.length === 2,
+      `W04: the reused cold sentinel projection returned ${JSON.stringify(sentinelAnswer.items)}`)
+    assert(JSON.stringify(sentinelAnswer.items.map(item => item.preview).sort()) === JSON.stringify([...sentinelTexts].sort()),
+      'W04: the reused cold sentinel changed its accepted previews')
+    const emptyAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId: emptySentinelId, query: '', limit: 25,
+    }, 'host history search W04 empty sentinel'), 'W04 empty sentinel')
+    assert(emptyAnswer.items.length === 0, 'W04: a header-only cold sentinel produced a phantom occurrence')
+    const targetAgain = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 25,
+    }, 'host history search W04 target'), 'W04 target')
+    assert(targetAgain.items.length === 2 && JSON.stringify(targetAgain.items.map(item => item.messageId).sort())
+      === JSON.stringify(beforeIds), 'W04: the reused proof changed the target occurrence identities')
+    const countersC = await waitForBootstrapCounters(logC, 'W04 host')
+    assert(Number(countersC.sourceProofHit) >= 3,
+      `W04: the all-cold restart reused no proof: ${JSON.stringify(countersC)}`)
+    for (const field of ['directPersistenceOpenCalls', 'directPersistenceReadCalls', 'directPersistenceStatCalls', 'replayAttempted']) {
+      assert(Number(countersC[field]) === 0,
+        `W04: a stable eligible cold corpus performed ${field}=${String(countersC[field])}`)
+    }
+    await scene.exitC1Client(clientB, 'history client C exit')
+    clientB = undefined
+    await scene.stopC1Host(host)
+    host = undefined
+    await scene.awaitSceneSeatFree()
+
+    // ── W05: one offline official append is the ONLY rebuilt source. ───────
+    const appendedText = 'hsp-sentinel-appended'
+    await appendOfficialColdEvent(dshHome, sentinelId, { text: appendedText, seq: sentinelTexts.length })
+    fourthHost = await scene.startC1Host('skills-standing', 'history host 4', {
+      DSH_PI_TUI_LOG: logD,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
+    })
+    host = fourthHost.host
+    assert(fourthHost.ready.pid !== thirdHost.ready.pid && fourthHost.ready.pid !== restarted.ready.pid,
+      'W05: the fourth Host reused a previous PID')
+    assert(fourthHost.ready.localHost?.instanceId !== thirdHost.ready.localHost?.instanceId,
+      'W05: the fourth Host reused the third instance identity')
+    const clientDResult = await scene.startC1Client('history client D', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    clientB = clientDResult.client
+    const appendedAnswer = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId: sentinelId, query: 'hsp-sentinel-', limit: 25,
+    }, 'host history search W05 appended'), 'W05 appended')
+    assert(appendedAnswer.items.length === 3,
+      `W05: the changed cold sentinel returned ${JSON.stringify(appendedAnswer.items)}`)
+    assert(JSON.stringify(appendedAnswer.items.map(item => item.preview).sort())
+      === JSON.stringify([...sentinelTexts, appendedText].sort()),
+    'W05: the rebuilt sentinel lost an accepted occurrence')
+    const stableTarget = assertReady(await searchSettled(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 25,
+    }, 'host history search W05 stable target'), 'W05 stable target')
+    assert(stableTarget.items.length === 2, 'W05: an unrelated stable source was not reused')
+    const countersD = await waitForBootstrapCounters(logD, 'W05 host')
+    assert(Number(countersD.sourceProofHit) >= 2,
+      `W05: unchanged cold sources were not reused: ${JSON.stringify(countersD)}`)
+    assert(Number(countersD.sourceProofMinted) === 1,
+      `W05: the one changed source minted ${String(countersD.sourceProofMinted)} proofs`)
+    assert(Number(countersD.directPersistenceOpenCalls) === 1,
+      `W05: only the changed source may open: ${JSON.stringify(countersD)}`)
+    assert(Number(countersD.directPersistenceStatCalls) === 1,
+      `W05: only the changed source may stat: ${JSON.stringify(countersD)}`)
+    assert(Number(countersD.directPersistenceReadCalls) >= 1,
+      'W05: the changed source was not read')
+    assert(Number(countersD.sourceProofMiss) >= 1,
+      'W05: the changed revision did not miss its durable proof')
+    await scene.exitC1Client(clientB, 'history client D exit')
+    clientB = undefined
+    await scene.stopC1Host(host)
+    host = undefined
+    await scene.awaitSceneSeatFree()
+
+    // ── W02c: real working-directory/change H1→H2 on the same Host. ───────
     const cwdProof = join(workDir, 'host-history-search-cwd-proof.jsonl')
     writeFileSync(cwdProof, '', { mode: 0o600 })
     // The Host Workspace resolution realpaths a proposed directory (macOS
@@ -570,28 +837,44 @@ export async function runHostHistorySearch(context) {
     await scene.awaitSceneSeatFree()
     host = undefined
 
-    // W03: the derived SQLite index is a private, profile-local file.
+    // W06: the active derived store is v2, private and profile-local; the
+    // legacy v1 file set stayed byte/mode/inode identical.
     const historyDir = join(context.installation.profileDir, '.dsh-pi-tui', 'history-search')
-    const dbPath = join(historyDir, 'v1.sqlite')
+    const dbPath = join(historyDir, 'v2.sqlite')
     const dbStat = statSync(dbPath)
     const dirStat = statSync(historyDir)
     assert((dbStat.mode & 0o777) === 0o600,
-      `W03: the derived index file mode is ${(dbStat.mode & 0o777).toString(8)}, expected 600`)
+      `W06: the derived index file mode is ${(dbStat.mode & 0o777).toString(8)}, expected 600`)
     assert((dirStat.mode & 0o077) === 0,
-      `W03: the derived index directory mode ${(dirStat.mode & 0o777).toString(8)} is not private`)
-    trace('host-history-search/pr1', {
+      `W06: the derived index directory mode ${(dirStat.mode & 0o777).toString(8)} is not private`)
+    assertLegacyV1Untouched(legacySentinel)
+    const derived = inspectDerivedHistory(context.installation.profileDir)
+    assert(derived.userVersion === 2, `W06: v2 user_version is ${String(derived.userVersion)}`)
+    assert(derived.sessions >= 3, `W06: v2 holds ${String(derived.sessions)} sessions`)
+    assert(derived.proofs >= 3, `W06: v2 holds ${String(derived.proofs)} durable proofs`)
+    trace('host-history-search/pr3a', {
       status: 'PASS',
       hostPid,
+      secondHostPid: restarted.ready.pid,
+      thirdHostPid: thirdHost.ready.pid,
+      fourthHostPid: fourthHost.ready.pid,
       clientAPid: clientAResult.ready.pid,
       clientBPid: clientBResult.ready.pid,
       sessionId,
+      sentinelId,
+      emptySentinelId,
       firstMessageId: firstMessage.id,
       firstEventSeq: firstEvent.seq,
       firstEventType: firstEvent.type,
       firstEventTime: firstEvent.time,
       cwd: header.cwd,
       occurrences: 2,
+      sentinelColdTexts: sentinelTexts.length + 1,
       restarted: true,
+      thirdHostAllColdHits: Number(countersC.sourceProofHit),
+      thirdHostOpenCalls: Number(countersC.directPersistenceOpenCalls),
+      fourthHostHits: Number(countersD.sourceProofHit),
+      fourthHostOpens: Number(countersD.directPersistenceOpenCalls),
       cwdChange: true,
       forkChild: true,
       queueEditRemove: true,
@@ -600,6 +883,11 @@ export async function runHostHistorySearch(context) {
       staleCursor: true,
       exactTextChunks: true,
       dbPath,
+      v2UserVersion: derived.userVersion,
+      v2Proofs: derived.proofs,
+      legacyV1Untouched: true,
+      hostLogs: [logA, logB, logC, logD],
+      quiesced: true,
     })
     return { status: 'PASS' }
   } finally {

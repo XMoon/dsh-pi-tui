@@ -52,15 +52,22 @@ import {
   type HistorySearchUnavailableReason,
 } from '../../../runtime/remote/pi-tui-history-search-contract.ts'
 import {
+  HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
   HistorySearchIndex,
   HistorySearchIndexUnavailableError,
   contentSha256,
+  historyCheckpointHash,
   sessionEventHash,
   sessionHeaderHash,
   type HistoryOccurrenceInput,
   type HistorySearchAfter,
   type HistorySessionCheckpointRow,
+  type HistorySourceProofBasis,
 } from './history-search-index.ts'
+import {
+  sourceProofBasis,
+  type HistoryRevisionAuthority,
+} from './history-search-revision-authority.ts'
 
 /** The maximum number of buffered live events before a dirty re-read. */
 export const HISTORY_SEARCH_MAX_PENDING_EVENTS = 4096
@@ -111,6 +118,10 @@ export interface HistorySearchPersistenceSnapshotLike {
   readonly eventCount?: number
   /** Opaque change token comparable only within one persistence instance. */
   readonly revision?: unknown
+  /** Header-only format classification; absent without versioned artifact metadata. */
+  readonly formatStatus?: 'current' | 'migration-required'
+  /** Backend-resolved materialized artifact location, when the backend has one. */
+  readonly location?: { readonly kind: string; readonly path: string }
 }
 
 /** A structural official read handle. */
@@ -186,6 +197,15 @@ export type PiTuiHistorySearchHostDeps = {
   sessionQuery(): HistorySearchQueryLike | undefined
   /** The existing Host `sessions` registry; the live half of the official corpus. */
   sessions(): HistorySearchSessionsLike | undefined
+  /**
+   * Optional pass-scoped qualification of the ACTUAL official persistence
+   * runtime. A Host fixture without it keeps the ordinary official replay path
+   * and never reuses or mints a durable source proof.
+   */
+  revisionAuthority?(
+    persistence: HistorySearchPersistenceLike,
+    signal: AbortSignal,
+  ): Promise<HistoryRevisionAuthority | undefined>
 }
 
 type IndexState =
@@ -210,6 +230,45 @@ interface OfficialSession {
   readonly liveObject?: HistorySearchLiveSessionLike
   readonly eventCount?: number
   readonly revision?: unknown
+  /** Detached source-classification facts of the persisted snapshot. */
+  readonly formatStatus?: 'current' | 'migration-required'
+  readonly location?: { readonly kind: string; readonly path: string }
+}
+
+/**
+ * One process-local identity of the official services a proven round and its
+ * durable proofs were captured against. It is NOT a second coverage state
+ * machine: it only answers whether the exact source binding still holds.
+ */
+interface CoveragePersistenceBasis {
+  readonly persistence: object | undefined
+  readonly persistenceIdentity: symbol | undefined
+  readonly sessions: object | undefined
+}
+
+/** One cold durable-proof reuse attempt's settled class. */
+type SourceProofReuseOutcome = 'hit' | 'miss' | 'stale' | 'failed'
+
+/** The five fixed reasons a cold unproven proof attempt misses. */
+type SourceProofMissClass =
+  | 'ineligible'
+  | 'no-proof'
+  | 'binding-mismatch'
+  | 'checkpoint-mismatch'
+  | 'obligation-or-fault'
+
+/** ONE round-local completeness/ownership record (see the owning field). */
+interface HistoryCoverageRound {
+  /** The actual official service binding sampled when this round began. */
+  readonly basis: CoveragePersistenceBasis
+  /** A proof authority consumed by this round; invalidated before publish. */
+  proofAuthority?: HistoryRevisionAuthority
+  readonly expected: Set<string> | undefined
+  readonly settled: Set<string>
+  deletionsSettled: boolean
+  invalidating: boolean
+  /** The full official-ID traversal of THIS round has finished. */
+  traversed: boolean
 }
 
 /**
@@ -273,10 +332,39 @@ interface HistorySearchPhaseCounters {
   directPersistenceStatCalls: number
   /** Direct official persistence `open` calls actually started in this scope. */
   directPersistenceOpenCalls: number
+  /** Direct official handle `read` calls actually started in this scope. */
+  directPersistenceReadCalls: number
+  /** Direct official handle `close` calls actually started in this scope. */
+  directPersistenceCloseCalls: number
   /** Direct official `sessionQuery.observeSession` calls actually started in this scope. */
   directSessionObserveCalls: number
   /** Entries into `proveDurablePrefix` (a possible official `open`) in this scope. */
   prefixProofAttempted: number
+  /** Actual pass-scoped revision-authority captures that qualified. */
+  revisionAuthorityQualified: number
+  /** Actual pass-scoped revision-authority captures that did not qualify. */
+  revisionAuthorityUnavailable: number
+  /** Aggregate time of the actual authority captures (one per pass/point). */
+  revisionAuthorityElapsedMsTotal: number
+  /** Cold unproven proof attempts settled as a real witness hit. */
+  sourceProofHit: number
+  /** Cold unproven proof attempts that did not hit (the five classes below). */
+  sourceProofMiss: number
+  sourceProofMissIneligible: number
+  sourceProofMissNoProof: number
+  sourceProofMissBindingMismatch: number
+  sourceProofMissCheckpointMismatch: number
+  sourceProofMissObligationOrFault: number
+  /** A hit candidate refused by the writer fence (never counted as a hit). */
+  sourceProofStale: number
+  /** A hit/mint write failed (never counted as a hit or a mint). */
+  sourceProofFailed: number
+  /** Proofs committed by a verified complete cold replay. */
+  sourceProofMinted: number
+  /** Proofs actually revoked by committed index mutations, measured at log time. */
+  sourceProofRevoked: number
+  /** Index revocation count captured when the phase scope began. */
+  sourceProofRevokedBase: number
 }
 
 /** O(1) disposal-verification counters; no Session id, content or path is retained. */
@@ -482,14 +570,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    * round finishes only when every expected ID and deletion settled and no
    * accepted-payload/repair obligation remains.
    */
-  private coverageRound: {
-    readonly expected: Set<string> | undefined
-    readonly settled: Set<string>
-    deletionsSettled: boolean
-    invalidating: boolean
-    /** The full official-ID traversal of THIS round has finished. */
-    traversed: boolean
-  } | undefined
+  private coverageRound: HistoryCoverageRound | undefined
+  /**
+   * The process-local official service binding of the FIRST successful
+   * bootstrap. A later replacement retires durable-proof reuse for this Host
+   * lifetime; it never discards accepted obligations.
+   */
+  private coveragePersistenceBasis: CoveragePersistenceBasis | undefined
+  /** False once the official source binding changed in this Host lifetime. */
+  private priorProofReuseAllowed = true
   /** A pass or repair failed to read the official source; a later full pass clears it. */
   private sourceFaulted = false
   private pendingEventCount = 0
@@ -537,6 +626,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private readonly pointCounters: HistorySearchPhaseCounters = this.emptyPhaseCounters()
   /** Ended point repair tasks (success, failure or cancel); diagnostics only. */
   private pointRepairsCompleted = 0
+  /** Index revocation count at the point scope's start; diagnostics only. */
+  private indexProofRevocationsBase = 0
 
   constructor(ctx: Context, deps: PiTuiHistorySearchHostDeps) {
     super(ctx, PI_TUI_HISTORY_SEARCH_NAMESPACE)
@@ -572,6 +663,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const runSignal = this.liveSignal(signal, invocation)
     runSignal.throwIfAborted()
     if (this.disposed) return { kind: 'unavailable', reason: 'index-unavailable' }
+    // The authenticated Owner read observes the live source binding BEFORE it
+    // waits for accepted short writes: a replaced official service must
+    // downgrade the visible state, never publish the previous epoch as ready.
+    this.observeCoverageBasis()
     await this.awaitWrites(runSignal)
     runSignal.throwIfAborted()
     this.assertSameLiveInvocation(invocation)
@@ -654,6 +749,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const runSignal = this.liveSignal(signal, invocation)
     runSignal.throwIfAborted()
     if (this.disposed) return { kind: 'unavailable', reason: 'index-unavailable' }
+    // The authenticated Owner read observes the live source binding BEFORE it
+    // waits for accepted short writes: a replaced official service must
+    // downgrade the visible state, never publish the previous epoch as ready.
+    this.observeCoverageBasis()
     await this.awaitWrites(runSignal)
     runSignal.throwIfAborted()
     this.assertSameLiveInvocation(invocation)
@@ -700,12 +799,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.droppedAccepted.clear()
       const index = this.index
       this.index = undefined
+      const finalRevocations = index === undefined
+        ? 0
+        : Math.max(0, index.sourceProofRevocations - this.indexProofRevocationsBase)
       index?.close()
       // Every point flight has joined above; the periodic 1/128 cadence does not
       // necessarily land on the last ended task, so emit the final aggregate
       // once unless that exact count was already the emitted one.
       if (this.pointRepairsCompleted > 0 && this.pointRepairsCompleted !== 1 && this.pointRepairsCompleted % 128 !== 0) {
-        this.logPointRepairs()
+        this.logPointRepairs(finalRevocations)
       }
       this.diag.dispose()
     })()
@@ -809,6 +911,225 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (this.index.checkpointOf(sessionId) === undefined) return
       this.index.markSession({ sessionId, dirty: true })
     })
+  }
+
+  // ── official source binding / durable proof authority ───────────────────
+
+  /** The current raw official service binding the pass/query actually observes. */
+  private currentCoverageBasis(): CoveragePersistenceBasis {
+    const persistence = this.deps.sessionPersistence()
+    const sessions = this.deps.sessions()
+    return {
+      persistence: persistence === undefined ? undefined : serviceIdentity(persistence),
+      persistenceIdentity: persistence === undefined ? undefined : persistence.identity,
+      sessions: sessions === undefined ? undefined : serviceIdentity(sessions),
+    }
+  }
+
+  private sameCoverageBasis(left: CoveragePersistenceBasis, right: CoveragePersistenceBasis): boolean {
+    return left.persistence === right.persistence
+      && left.persistenceIdentity === right.persistenceIdentity
+      && left.sessions === right.sessions
+  }
+
+  /**
+   * Retire every proof consumed from the replaced source binding. Accepted
+   * obligations, repair intents, deletion cuts and sticky faults are NOT
+   * discarded: only the coverage proof and the reuse permission are.
+   */
+  private invalidateCoverageBinding(): void {
+    this.priorProofReuseAllowed = false
+    this.verifiedRevisions.clear()
+    this.coverage = 'unproven'
+    this.coverageRound = undefined
+    this.markReconcileNeeded('reconciling')
+    this.refreshCompleteness()
+  }
+
+  /**
+   * Compare the current official service binding with the first bootstrap
+   * capture. A changed (including temporarily missing) binding retires proof
+   * reuse for this Host lifetime and forces honest incomplete coverage.
+   */
+  private observeCoverageBasis(): void {
+    const current = this.currentCoverageBasis()
+    const known = this.coveragePersistenceBasis
+    if (known === undefined) {
+      if (current.persistence !== undefined && current.sessions !== undefined) {
+        this.coveragePersistenceBasis = current
+      }
+      return
+    }
+    if (this.sameCoverageBasis(known, current)) return
+    // Save the new actual binding (an absent service is recorded as absent) so
+    // a later recovery is another observable change, never a silent re-open.
+    this.coveragePersistenceBasis = current
+    this.invalidateCoverageBinding()
+  }
+
+  /** Whether this exact round may still publish a completion. */
+  private roundSourceCurrent(round: HistoryCoverageRound): boolean {
+    if (this.coverageRound !== round) return false
+    if (!this.sameCoverageBasis(round.basis, this.currentCoverageBasis())) return false
+    if (round.proofAuthority !== undefined && !round.proofAuthority.isCurrent()) return false
+    return true
+  }
+
+  /** Capture the ONE pass-scoped revision authority; never per Session. */
+  private async captureRevisionAuthority(
+    persistence: HistorySearchPersistenceLike,
+    counters: HistorySearchPhaseCounters,
+  ): Promise<HistoryRevisionAuthority | undefined> {
+    const capture = this.deps.revisionAuthority
+    if (capture === undefined) return undefined
+    const startedAt = performance.now()
+    const authority = await capture(persistence, this.lifecycle.signal)
+    counters.revisionAuthorityElapsedMsTotal += elapsedMilliseconds(startedAt)
+    if (authority === undefined) counters.revisionAuthorityUnavailable += 1
+    else counters.revisionAuthorityQualified += 1
+    this.lifecycle.signal.throwIfAborted()
+    return authority
+  }
+
+  private recordSourceProofMiss(
+    counters: HistorySearchPhaseCounters,
+    reason: SourceProofMissClass,
+  ): 'miss' {
+    counters.sourceProofMiss += 1
+    if (reason === 'ineligible') counters.sourceProofMissIneligible += 1
+    else if (reason === 'no-proof') counters.sourceProofMissNoProof += 1
+    else if (reason === 'binding-mismatch') counters.sourceProofMissBindingMismatch += 1
+    else if (reason === 'checkpoint-mismatch') counters.sourceProofMissCheckpointMismatch += 1
+    else counters.sourceProofMissObligationOrFault += 1
+    return 'miss'
+  }
+
+  /**
+   * The ONE durable-proof reuse admission for a cold, unproven Session. Every
+   * eligibility fact is a positive observation; anything unknown is a miss and
+   * the caller performs the ordinary official replay. A hit performs NO index
+   * mutation and settles only the per-ID round evidence.
+   */
+  private async tryReuseSourceProof(
+    sessionId: string,
+    record: OfficialSession,
+    persistence: HistorySearchPersistenceLike,
+    sessions: HistorySearchSessionsLike,
+    authority: HistoryRevisionAuthority,
+    counters: HistorySearchPhaseCounters,
+  ): Promise<SourceProofReuseOutcome> {
+    if (!this.priorProofReuseAllowed || this.coverage === 'proven') {
+      return this.recordSourceProofMiss(counters, 'ineligible')
+    }
+    if (!authority.isCurrent()) return this.recordSourceProofMiss(counters, 'ineligible')
+    if (record.live || sessions.get(sessionId) !== undefined) {
+      return this.recordSourceProofMiss(counters, 'ineligible')
+    }
+    if (this.indexFaulted) return this.recordSourceProofMiss(counters, 'obligation-or-fault')
+    if (
+      this.pending.has(sessionId)
+      || this.heldPending.has(sessionId)
+      || this.droppedAccepted.has(sessionId)
+      || this.reconcilePending.has(sessionId)
+      || this.disposalRequests.has(sessionId)
+      || this.rebuildRequests.has(sessionId)
+    ) {
+      return this.recordSourceProofMiss(counters, 'obligation-or-fault')
+    }
+    const basis = sourceProofBasis(authority, record)
+    if (basis === undefined) return this.recordSourceProofMiss(counters, 'ineligible')
+    const checkpoint = this.index?.checkpointOf(sessionId)
+    if (checkpoint === undefined) return this.recordSourceProofMiss(counters, 'no-proof')
+    if (checkpoint.dirty || checkpoint.sourceState !== 'persisted' || checkpoint.uncertainSources > 0) {
+      return this.recordSourceProofMiss(counters, 'checkpoint-mismatch')
+    }
+    if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
+      return this.recordSourceProofMiss(counters, 'checkpoint-mismatch')
+    }
+    if (record.eventCount !== undefined && record.eventCount !== checkpoint.nextSeq) {
+      return this.recordSourceProofMiss(counters, 'checkpoint-mismatch')
+    }
+    const checkpointHash = historyCheckpointHash(checkpoint)
+    const proof = this.index?.sourceProofOf(sessionId)
+    if (proof === undefined) return this.recordSourceProofMiss(counters, 'no-proof')
+    if (proof.contractVersion !== HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION) {
+      return this.recordSourceProofMiss(counters, 'binding-mismatch')
+    }
+    if (
+      proof.scopeKey !== basis.scopeKey
+      || proof.sourcePath !== basis.sourcePath
+      || proof.sourceRevision !== basis.sourceRevision
+    ) {
+      return this.recordSourceProofMiss(counters, 'binding-mismatch')
+    }
+    if (proof.checkpointHash !== checkpointHash) {
+      return this.recordSourceProofMiss(counters, 'checkpoint-mismatch')
+    }
+
+    const witness = this.createWitness(sessionId, persistence, sessions, checkpoint, record.liveObject, true)
+    const round = this.coverageRound
+    let refused = false
+    try {
+      // The short commit re-reads every fact a same-stack live event or writer
+      // turn may have changed since the admission read. A refusal keeps the
+      // original round barrier and hands the official replay to the coalesced
+      // repair owner; it never erases an accepted obligation.
+      const receipt = await this.commitWitness(witness, () => {
+        if (!this.priorProofReuseAllowed || !authority.isCurrent()) {
+          refused = true
+          return
+        }
+        if (this.indexFaulted) {
+          refused = true
+          return
+        }
+        if (
+          this.pending.has(sessionId)
+          || this.heldPending.has(sessionId)
+          || this.droppedAccepted.has(sessionId)
+          || this.reconcilePending.has(sessionId)
+          || this.disposalRequests.has(sessionId)
+          || this.rebuildRequests.has(sessionId)
+        ) {
+          refused = true
+          return
+        }
+        if (sessions.get(sessionId) !== undefined) {
+          refused = true
+          return
+        }
+        const current = this.requireIndex().sourceProofOf(sessionId)
+        if (
+          current === undefined
+          || current.contractVersion !== HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION
+          || current.scopeKey !== basis.scopeKey
+          || current.sourcePath !== basis.sourcePath
+          || current.sourceRevision !== basis.sourceRevision
+          || current.checkpointHash !== checkpointHash
+        ) {
+          refused = true
+          return
+        }
+        this.rememberVerifiedRevision(sessionId, record, persistence)
+        this.settleRoundSession(sessionId, round)
+      })
+      if (receipt === 'failed') {
+        counters.sourceProofFailed += 1
+        return 'failed'
+      }
+      if (refused || receipt === 'stale') {
+        counters.sourceProofStale += 1
+        this.scheduleSessionRepair(sessionId, 'rebuild')
+        return 'stale'
+      }
+      counters.sourceProofHit += 1
+      if (round !== undefined && this.coverageRound === round) {
+        round.proofAuthority = authority
+      }
+      return 'hit'
+    } finally {
+      this.releaseWitness(witness)
+    }
   }
 
   // ── live observation ─────────────────────────────────────────────────────
@@ -1073,7 +1394,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       live: false,
       ...(snapshot.eventCount === undefined ? {} : { eventCount: snapshot.eventCount }),
       ...(snapshot.revision === undefined ? {} : { revision: snapshot.revision }),
+      ...(snapshot.formatStatus === undefined ? {} : { formatStatus: snapshot.formatStatus }),
+      ...(snapshot.location === undefined ? {} : { location: { kind: snapshot.location.kind, path: snapshot.location.path } }),
     }
+    // ONE authority capture for this independent cold point replay, AFTER the
+    // short-source guard. A point repair has NO durable hit path; it may only
+    // mint from an actual complete cold replay.
+    const authority = await this.captureRevisionAuthority(persistence, counters)
     return this.replayOfficialSession(
       sessionId,
       record,
@@ -1081,7 +1408,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       sessions,
       query,
       counters,
-      { rebuild: true },
+      { rebuild: true, ...(authority === undefined ? {} : { authority }) },
     )
   }
 
@@ -1342,6 +1669,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    * It never decides that a source is empty on its own, never performs official
    * I/O, never captures a second witness and must only be invoked from a
    * `commitWitness` callback of `replayOfficialSession`/`rebuildLiveSession`.
+   *
+   * When `mint` is present this helper first persists the durable source proof
+   * of that complete cold replay and only then settles the held/dropped/memo
+   * obligations. A proof write failure aborts the whole terminal (the writer
+   * receipt fails), so no obligation is settled without its proof transaction.
    */
   private settleAuthoritativeReplay(
     witness: HistoryCandidateWitness,
@@ -1352,6 +1684,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       | { readonly sourceState: 'live' }
       | { readonly sourceState: 'persisted'; readonly record: OfficialSession }
     ),
+    mint?: {
+      readonly authority: HistoryRevisionAuthority
+      readonly basis: HistorySourceProofBasis
+      readonly counters: HistorySearchPhaseCounters
+    },
   ): void {
     const sessionId = witness.sessionId
     if (witness.expected === undefined) {
@@ -1372,6 +1709,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         events: [],
       }, witness)
     }
+    if (mint !== undefined && this.canMintSourceProof(witness, source, mint)) {
+      const checkpoint = this.requireIndex().checkpointOf(sessionId)
+      if (checkpoint === undefined) {
+        throw new Error('history search: the terminal checkpoint disappeared before its source proof')
+      }
+      this.requireIndex().commitSourceProof(checkpoint, mint.basis)
+      mint.counters.sourceProofMinted += 1
+    }
     this.settleHeldBatch(sessionId)
     this.settleDroppedCoverage(sessionId)
     if (source.sourceState === 'persisted') {
@@ -1379,6 +1724,46 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     this.reconcilePending.delete(sessionId)
     this.settleRoundSession(sessionId)
+  }
+
+  /**
+   * The FINAL proof-mint fence inside the terminal writer callback. Every
+   * condition is a synchronous re-observation of the accepted replay; held or
+   * dropped accepted obligations deliberately skip the mint without refusing
+   * the ordinary terminal.
+   */
+  private canMintSourceProof(
+    witness: HistoryCandidateWitness,
+    source: {
+      readonly header: HistorySearchSessionHeaderLike
+      readonly inheritedEventCount: number
+    } & (
+      | { readonly sourceState: 'live' }
+      | { readonly sourceState: 'persisted'; readonly record: OfficialSession }
+    ),
+    mint: {
+      readonly authority: HistoryRevisionAuthority
+      readonly basis: HistorySourceProofBasis
+    },
+  ): boolean {
+    if (source.sourceState !== 'persisted') return false
+    if (!mint.authority.isCurrent()) return false
+    if (this.indexFaulted || this.disposed || this.lifecycle.signal.aborted) return false
+    const sessionId = witness.sessionId
+    if (witness.liveObject !== undefined || witness.sessions.get(sessionId) !== undefined) return false
+    if (this.pending.has(sessionId) || this.heldPending.has(sessionId) || this.droppedAccepted.has(sessionId)) return false
+    const checkpoint = this.index?.checkpointOf(sessionId)
+    if (checkpoint === undefined) return false
+    if (checkpoint.dirty || checkpoint.sourceState !== 'persisted' || checkpoint.uncertainSources !== 0) return false
+    if (checkpoint.inheritedCut < 0 || checkpoint.nextSeq < checkpoint.inheritedCut) return false
+    if (checkpoint.nextSeq === 0 ? checkpoint.lastEventHash !== null : checkpoint.lastEventHash === null) return false
+    if (checkpoint.headerHash !== sessionHeaderHash(source.header)) return false
+    if (checkpoint.headerHash !== sessionHeaderHash(source.record.header)) return false
+    if (checkpoint.inheritedCut !== source.inheritedEventCount) return false
+    if (source.record.live) return false
+    if (String(source.record.header.id) !== sessionId || String(source.header.id) !== sessionId) return false
+    if (source.record.eventCount !== undefined && source.record.eventCount !== checkpoint.nextSeq) return false
+    return true
   }
 
   /** Re-add the ordered remainder without losing the exact byte/event counters. */
@@ -1544,8 +1929,25 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       replayElapsedMsMax: 0,
       directPersistenceStatCalls: 0,
       directPersistenceOpenCalls: 0,
+      directPersistenceReadCalls: 0,
+      directPersistenceCloseCalls: 0,
       directSessionObserveCalls: 0,
       prefixProofAttempted: 0,
+      revisionAuthorityQualified: 0,
+      revisionAuthorityUnavailable: 0,
+      revisionAuthorityElapsedMsTotal: 0,
+      sourceProofHit: 0,
+      sourceProofMiss: 0,
+      sourceProofMissIneligible: 0,
+      sourceProofMissNoProof: 0,
+      sourceProofMissBindingMismatch: 0,
+      sourceProofMissCheckpointMismatch: 0,
+      sourceProofMissObligationOrFault: 0,
+      sourceProofStale: 0,
+      sourceProofFailed: 0,
+      sourceProofMinted: 0,
+      sourceProofRevoked: 0,
+      sourceProofRevokedBase: 0,
     }
   }
 
@@ -1565,6 +1967,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         outcome = 'unavailable'
         return
       }
+      // The FIRST successful bootstrap captures the actual official service
+      // binding; every later pass compares against it.
+      this.observeCoverageBasis()
       let index: HistorySearchIndex
       try {
         index = HistorySearchIndex.open({ profileDir: profile.dir, signal: this.lifecycle.signal })
@@ -1577,6 +1982,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return
       }
       this.index = index
+      this.indexProofRevocationsBase = index.sourceProofRevocations
+      counters.sourceProofRevokedBase = index.sourceProofRevocations
       coverageComplete = await this.coldStart(persistence, sessions, query, counters)
       if (coverageComplete) this.sourceFaulted = false
     } catch (error) {
@@ -1613,18 +2020,30 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // Session created later in this round is not a deletion candidate even if
     // the old roster and the live registry both omit it.
     const deletionCut = this.deletionCut()
+    this.observeCoverageBasis()
+    const basis = this.currentCoverageBasis()
     const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'cold_start')
-    this.beginCoverageRound(official)
+    this.beginCoverageRound(official, basis)
     this.markRoundInvalidating()
+    // ONE pass-scoped authority capture after the official roster sampling and
+    // before any per-ID work; a miss never blocks the ordinary replay path.
+    const authority = await this.captureRevisionAuthority(persistence, counters)
     const deletion = await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut)
     if (deletion === 'failed') return false
-    if (this.coverageRound !== undefined) this.coverageRound.deletionsSettled = deletion === 'complete'
+    const deletionRound = this.coverageRound
+    if (deletionRound === undefined || !this.roundSourceCurrent(deletionRound)) {
+      this.invalidateCoverageBinding()
+      return false
+    }
+    deletionRound.deletionsSettled = deletion === 'complete'
     for (const [sessionId, record] of official) {
       counters.sessionsVisited += 1
       signal.throwIfAborted()
       // A checkpoint read from disk belongs to a PREVIOUS process. Its revision
       // is not comparable here and a tail hash alone cannot prove the prefix,
-      // so cold start always rebuilds from the official source.
+      // so cold start always rebuilds from the official source — UNLESS this
+      // pass carries a qualified authority and the exact durable proof of a
+      // complete previous cold replay still matches this cold record.
       // The pending live batch is a SHORT commit. Drain it INSIDE the full
       // per-ID ownership: a requiredHandoff repair starts on release and must
       // observe the post-drain checkpoint, not race the coldStart's ordinary
@@ -1632,7 +2051,29 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // is an ordinary accepted-work obligation owned by the point repair.
       let drained: WriteReceipt = 'committed'
       const outcome = await this.withFullSessionOwnership(sessionId, async () => {
-        const replayOutcome = await this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+        let replayOutcome: ReplayOutcome
+        if (authority !== undefined) {
+          const reuse = await this.tryReuseSourceProof(
+            sessionId, record, persistence, sessions, authority, counters,
+          )
+          if (reuse === 'hit') {
+            replayOutcome = 'complete'
+          } else if (reuse === 'miss') {
+            replayOutcome = await this.replayOfficialSession(
+              sessionId, record, persistence, sessions, query, counters,
+              { rebuild: true, requiredHandoff: true, authority },
+            )
+          } else {
+            // stale/failed settle exactly like the ordinary round: the id is
+            // not proven and its coalesced official repair owns the retry.
+            replayOutcome = reuse
+          }
+        } else {
+          replayOutcome = await this.replayOfficialSession(
+            sessionId, record, persistence, sessions, query, counters,
+            { rebuild: true, requiredHandoff: true },
+          )
+        }
         drained = await this.enqueueWrite(() => {
           this.drainPendingSession(sessionId)
         })
@@ -1642,7 +2083,22 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (outcome === 'complete') this.settleRoundSession(sessionId)
       await yieldEventLoop()
     }
-    if (this.coverageRound !== undefined) this.coverageRound.traversed = true
+    // A round may only publish traversal/completion while the EXACT source
+    // binding it sampled and every consumed proof authority are still current.
+    const traversedRound = this.coverageRound
+    if (traversedRound === undefined || !this.roundSourceCurrent(traversedRound)) {
+      this.invalidateCoverageBinding()
+      return false
+    }
+    // A Session replaced during the pass may not have been re-read: re-validate
+    // the EXACT enumerated live identity for every record before this pass is
+    // allowed to settle.
+    for (const sessionId of this.staleOfficialIdentities(official, sessions)) {
+      this.markRoundInvalidating()
+      this.reconcilePending.add(sessionId)
+      this.markReconcileNeeded('reconciling')
+    }
+    traversedRound.traversed = true
     // Sessions born during the warmup window were buffered by the listener
     // before they could appear in the persisted enumeration.
     for (const sessionId of [...this.pending.keys()]) {
@@ -1701,6 +2157,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           live: false,
           ...(snapshot.eventCount === undefined ? {} : { eventCount: snapshot.eventCount }),
           ...(snapshot.revision === undefined ? {} : { revision: snapshot.revision }),
+          ...(snapshot.formatStatus === undefined ? {} : { formatStatus: snapshot.formatStatus }),
+          ...(snapshot.location === undefined ? {} : { location: { kind: snapshot.location.kind, path: snapshot.location.path } }),
         })
       }
       // The live registry is SYNCHRONOUS: it never triggers a second listing.
@@ -1717,9 +2175,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           live: true,
           liveObject: session,
           // The persisted snapshot's durable facts survive the live precedence:
-          // an unchanged-revision check must never lose its only official token.
+          // an unchanged-revision check must never lose its only official token,
+          // and a live record is explicitly NOT source-proof eligible.
           ...(existing?.eventCount === undefined ? {} : { eventCount: existing.eventCount }),
           ...(existing?.revision === undefined ? {} : { revision: existing.revision }),
+          ...(existing?.formatStatus === undefined ? {} : { formatStatus: existing.formatStatus }),
+          ...(existing?.location === undefined ? {} : { location: existing.location }),
         })
       }
       signal.throwIfAborted()
@@ -1751,7 +2212,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
     counters: HistorySearchPhaseCounters,
-    options: { readonly rebuild: boolean; readonly requiredHandoff?: boolean },
+    options: {
+      readonly rebuild: boolean
+      readonly requiredHandoff?: boolean
+      readonly authority?: HistoryRevisionAuthority
+    },
   ): Promise<ReplayOutcome> {
     counters.replayAttempted += 1
     const startedAt = performance.now()
@@ -1799,6 +2264,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // metadata of an empty source; the roster record never substitutes them.
       let terminalHeader: HistorySearchSessionHeaderLike
       let terminalInheritedCount: number
+      /** The one proof candidate of THIS replay; absent means no mint attempt. */
+      let mintCandidate: {
+        readonly authority: HistoryRevisionAuthority
+        readonly basis: HistorySourceProofBasis
+        readonly counters: HistorySearchPhaseCounters
+      } | undefined
       if (record.live) {
         counters.directSessionObserveCalls += 1
         const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
@@ -1813,17 +2284,53 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       } else {
         counters.directPersistenceOpenCalls += 1
         const handle = await persistence.open(sessionId, 'read', { signal })
+        let preBasis: HistorySourceProofBasis | undefined
         try {
           terminalHeader = handle.header
           terminalInheritedCount = Number(handle.inheritedEventCount)
-          outcome = await this.replayHandle(sessionId, handle, witness, record.eventCount)
+          // Only a candidate that ACTUALLY starts from no checkpoint and reaches
+          // seq 0 may mint. `options.rebuild` is not itself evidence: an internal
+          // tail/cut reset inside replayHandle keeps the conservative no-mint
+          // contract.
+          if (witness.expected === undefined && options.authority !== undefined && options.authority.isCurrent()) {
+            preBasis = sourceProofBasis(options.authority, record)
+          }
+          outcome = await this.replayHandle(sessionId, handle, witness, record.eventCount, counters)
         } finally {
+          counters.directPersistenceCloseCalls += 1
           await handle.close()
         }
-        // The same-instance revision must still name the SAME source after the
-        // read; a missing/changed token keeps this round incomplete.
         if (outcome === 'complete') {
-          outcome = await this.proveCurrentSource(sessionId, record, persistence, counters)
+          // The same-instance revision must still name the SAME source after the
+          // handle was closed; a missing/changed token keeps this round
+          // incomplete and never reaches a proof.
+          const current = await this.proveCurrentSource(sessionId, record, persistence, counters)
+          if (current.outcome === 'stale') {
+            outcome = 'stale'
+          } else if (
+            preBasis !== undefined
+            && options.authority !== undefined
+            && options.authority.isCurrent()
+          ) {
+            const projectedNextSeq = witness.expected?.nextSeq ?? 0
+            const postBasis = sourceProofBasis(options.authority, current.snapshot)
+            const terminalHeaderHash = sessionHeaderHash(terminalHeader)
+            const recordHeaderHash = sessionHeaderHash(record.header)
+            const snapshotHeaderHash = sessionHeaderHash(current.snapshot.header)
+            if (
+              postBasis !== undefined
+              && postBasis.scopeKey === preBasis.scopeKey
+              && postBasis.sourcePath === preBasis.sourcePath
+              && postBasis.sourceRevision === preBasis.sourceRevision
+              && snapshotHeaderHash === recordHeaderHash
+              && snapshotHeaderHash === terminalHeaderHash
+              && String(current.snapshot.header.id) === sessionId
+              && String(record.header.id) === sessionId
+              && (current.snapshot.eventCount === undefined || current.snapshot.eventCount === projectedNextSeq)
+            ) {
+              mintCandidate = { authority: options.authority, basis: preBasis, counters }
+            }
+          }
         }
       }
       if (outcome === 'complete') {
@@ -1836,7 +2343,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           ? { header: terminalHeader, inheritedEventCount: terminalInheritedCount, sourceState: 'live' as const }
           : { header: terminalHeader, inheritedEventCount: terminalInheritedCount, sourceState: 'persisted' as const, record }
         const terminal = await this.commitWitness(witness, () => {
-          this.settleAuthoritativeReplay(witness, replayFacts)
+          this.settleAuthoritativeReplay(witness, replayFacts, mintCandidate)
         })
         if (terminal === 'committed') {
           counters.replayCompleted += 1
@@ -1867,20 +2374,26 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     })
   }
 
-  /** Same-instance revision re-check after a cold read (`stat` on the same instance). */
+  /**
+   * Same-instance revision re-check after a cold read (`stat` on the same
+   * instance), returning the actual post-read snapshot a proof may compare.
+   */
   private async proveCurrentSource(
     sessionId: string,
     record: OfficialSession,
     persistence: HistorySearchPersistenceLike,
     counters: HistorySearchPhaseCounters,
-  ): Promise<ReplayOutcome> {
-    if (record.revision === undefined) return 'stale'
+  ): Promise<
+    | { readonly outcome: 'complete'; readonly snapshot: HistorySearchPersistenceSnapshotLike }
+    | { readonly outcome: 'stale' }
+  > {
+    if (record.revision === undefined) return { outcome: 'stale' }
     counters.directPersistenceStatCalls += 1
     const snapshot = await persistence.stat(sessionId, { signal: this.lifecycle.signal })
     this.lifecycle.signal.throwIfAborted()
-    if (snapshot === undefined || snapshot.revision === undefined) return 'stale'
-    if (snapshot.revision !== record.revision) return 'stale'
-    return 'complete'
+    if (snapshot === undefined || snapshot.revision === undefined) return { outcome: 'stale' }
+    if (snapshot.revision !== record.revision) return { outcome: 'stale' }
+    return { outcome: 'complete', snapshot }
   }
 
   /** A read slice must be the exact contiguous official sequence (source breach otherwise). */
@@ -1902,6 +2415,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     handle: HistorySearchReadHandleLike,
     witness: HistoryCandidateWitness,
     expectedEventCount: number | undefined,
+    counters: HistorySearchPhaseCounters,
   ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
     const headerHash = sessionHeaderHash(handle.header)
@@ -1920,6 +2434,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     if (nextSeq > 0) {
       signal.throwIfAborted()
+      counters.directPersistenceReadCalls += 1
       const tail = await handle.read(nextSeq - 1, 1, { signal })
       const tailEvent = tail.events[0]
       if (tailEvent === undefined || tailEvent.seq !== nextSeq - 1 || sessionEventHash(tailEvent) !== lastEventHash) {
@@ -1932,6 +2447,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     for (;;) {
       signal.throwIfAborted()
+      counters.directPersistenceReadCalls += 1
       const slice = await handle.read(nextSeq, HISTORY_SEARCH_READ_BATCH, { signal })
       const events = eventsOf(slice.events, sessionId)
       if (events.length === 0) break
@@ -2186,15 +2702,25 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return
       }
       const signal = this.lifecycle.signal
+      counters.sourceProofRevokedBase = this.index.sourceProofRevocations
+      this.observeCoverageBasis()
+      const basis = this.currentCoverageBasis()
       const deletionCut = this.deletionCut()
       const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'periodic_verify')
-      this.beginCoverageRound(official)
+      this.beginCoverageRound(official, basis)
+      const authority = await this.captureRevisionAuthority(persistence, counters)
       const deletion = await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut)
       if (deletion === 'failed') {
         outcome = 'incomplete'
         return
       }
-      if (this.coverageRound !== undefined) this.coverageRound.deletionsSettled = deletion === 'complete'
+      const deletionRound = this.coverageRound
+      if (deletionRound === undefined || !this.roundSourceCurrent(deletionRound)) {
+        this.invalidateCoverageBinding()
+        outcome = 'incomplete'
+        return
+      }
+      deletionRound.deletionsSettled = deletion === 'complete'
       for (const [sessionId, record] of official) {
         counters.sessionsVisited += 1
         signal.throwIfAborted()
@@ -2202,7 +2728,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // repair is awaited, then this round claims the id in the single-flight
         // map. A repair requested during the claim is coalesced to the release.
         const result = await this.withFullSessionOwnership(sessionId, () =>
-          this.reconcileOfficialSession(sessionId, record, persistence, sessions, query, counters))
+          this.reconcileOfficialSession(sessionId, record, persistence, sessions, query, counters, authority))
         if (result === 'failed') {
           outcome = 'incomplete'
           return
@@ -2210,7 +2736,15 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (result === 'complete') this.settleRoundSession(sessionId)
         else this.markRoundInvalidating()
       }
-      if (this.coverageRound !== undefined) this.coverageRound.traversed = true
+      // The round may only record traversal/completion while the source
+      // binding and every proof authority it consumed are still current.
+      const traversedRound = this.coverageRound
+      if (traversedRound === undefined || !this.roundSourceCurrent(traversedRound)) {
+        this.invalidateCoverageBinding()
+        outcome = 'incomplete'
+        return
+      }
+      traversedRound.traversed = true
       // Accepted live events that arrived during the pass merge in order BEFORE
       // the completeness decision. Each writer turn commits at most one bounded
       // chunk, so this wait never hides an unbounded live burst behind one task.
@@ -2264,6 +2798,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
     counters: HistorySearchPhaseCounters,
+    authority: HistoryRevisionAuthority | undefined,
   ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
     let checkpoint = this.index?.checkpointOf(sessionId)
@@ -2288,7 +2823,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (proof === 'rollback') {
         // Header/cut/tail explicitly replaced: the official source is the
         // authoritative rollback and a rebuild is safe.
-        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+        return this.replayOfficialSession(
+          sessionId, record, persistence, sessions, query, counters,
+          { rebuild: true, requiredHandoff: true, ...(authority === undefined ? {} : { authority }) },
+        )
       }
       // The claimed prefix is present: settle the provisional marker, then
       // apply the normal revision rules below.
@@ -2311,24 +2849,43 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // that finds no new tail events would never call writeBatch(), leaving
       // dirty set forever. Reconcile from official events instead.
       this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+      return this.replayOfficialSession(
+        sessionId, record, persistence, sessions, query, counters,
+        { rebuild: true, requiredHandoff: true, ...(authority === undefined ? {} : { authority }) },
+      )
     }
     // Only the normal no-read eligibility changes for an unproven epoch. The
     // disposed-live dirty/short-durable-source guard ABOVE has priority and must
     // retain accepted provisional rows; it is never bypassed by this replay. A
     // clean prior-process checkpoint plus a matching live object is not proof of
     // this Host's observed source. DSH seed events do not republish on
-    // session/event, so an unproven clean ID needs a current-incarnation replay.
+    // session/event, so an unproven clean ID needs a current-incarnation replay —
+    // unless its qualified durable source proof still matches this exact cold
+    // record, in which case the proof IS that current-incarnation evidence.
     if (this.coverage !== 'proven') {
+      if (authority !== undefined) {
+        const reuse = await this.tryReuseSourceProof(
+          sessionId, record, persistence, sessions, authority, counters,
+        )
+        if (reuse === 'hit') return 'complete'
+        if (reuse === 'failed' || reuse === 'stale') {
+          this.markRoundInvalidating()
+          return reuse
+        }
+      }
       this.markRoundInvalidating()
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, {
         rebuild: true,
         requiredHandoff: true,
+        ...(authority === undefined ? {} : { authority }),
       })
     }
     if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
       this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+      return this.replayOfficialSession(
+        sessionId, record, persistence, sessions, query, counters,
+        { rebuild: true, requiredHandoff: true, ...(authority === undefined ? {} : { authority }) },
+      )
     }
     const droppedCoverage = this.droppedAccepted.get(sessionId)
     if (droppedCoverage !== undefined && checkpoint.nextSeq <= droppedCoverage) {
@@ -2339,7 +2896,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // watermark stays until the committed checkpoint passes it.
       this.markRoundInvalidating()
       if (record.live) return this.rebuildLiveSession(sessionId, persistence, sessions, query, counters)
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+      return this.replayOfficialSession(
+        sessionId, record, persistence, sessions, query, counters,
+        { rebuild: true, requiredHandoff: true, ...(authority === undefined ? {} : { authority }) },
+      )
     }
     if (!record.live && record.eventCount !== undefined && record.eventCount < checkpoint.nextSeq) {
       // A durable tail shrink is a rollback: rebuild from the official log. A
@@ -2347,7 +2907,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // events (append is not the durability barrier), so it is never read as a
       // shrink here.
       this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+      return this.replayOfficialSession(
+        sessionId, record, persistence, sessions, query, counters,
+        { rebuild: true, requiredHandoff: true, ...(authority === undefined ? {} : { authority }) },
+      )
     }
     if (!record.live) {
       const unchanged = this.revisionUnchanged(sessionId, record, persistence)
@@ -2357,7 +2920,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // prefix survived a middle-of-log repair, even when the tail event hash
         // still matches. Rebuild from official events instead of trusting it.
         this.markRoundInvalidating()
-        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: !unchanged, requiredHandoff: true })
+        return this.replayOfficialSession(
+          sessionId, record, persistence, sessions, query, counters,
+          {
+            rebuild: !unchanged,
+            requiredHandoff: true,
+            ...(authority === undefined ? {} : { authority }),
+          },
+        )
       }
     }
     if (checkpoint.sourceState === 'live' && !record.live && record.eventCount !== undefined && record.eventCount >= checkpoint.nextSeq) {
@@ -2553,6 +3123,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return 'rollback'
       }
       if (checkpoint.nextSeq === 0) return 'proven'
+      counters.directPersistenceReadCalls += 1
       const tail = await handle.read(checkpoint.nextSeq - 1, 1, { signal })
       const event = tail.events[0]
       if (event === undefined) return 'insufficient'
@@ -2564,6 +3135,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (this.disposed || this.lifecycle.signal.aborted) throw error
       return 'unreadable'
     } finally {
+      counters.directPersistenceCloseCalls += 1
       await handle.close()
     }
   }
@@ -2703,6 +3275,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     startedAt: number,
     counters: HistorySearchPhaseCounters,
   ): void {
+    const revoked = this.index?.sourceProofRevocations
+    const sourceProofRevoked = revoked === undefined
+      ? counters.sourceProofRevoked
+      : Math.max(0, revoked - counters.sourceProofRevokedBase)
     this.logDiagnostic(message, {
       outcome,
       elapsedMs: elapsedMilliseconds(startedAt),
@@ -2713,8 +3289,24 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       replayElapsedMsMax: roundMilliseconds(counters.replayElapsedMsMax),
       directPersistenceStatCalls: counters.directPersistenceStatCalls,
       directPersistenceOpenCalls: counters.directPersistenceOpenCalls,
+      directPersistenceReadCalls: counters.directPersistenceReadCalls,
+      directPersistenceCloseCalls: counters.directPersistenceCloseCalls,
       directSessionObserveCalls: counters.directSessionObserveCalls,
       prefixProofAttempted: counters.prefixProofAttempted,
+      revisionAuthorityQualified: counters.revisionAuthorityQualified,
+      revisionAuthorityUnavailable: counters.revisionAuthorityUnavailable,
+      revisionAuthorityElapsedMsTotal: roundMilliseconds(counters.revisionAuthorityElapsedMsTotal),
+      sourceProofHit: counters.sourceProofHit,
+      sourceProofMiss: counters.sourceProofMiss,
+      sourceProofMissIneligible: counters.sourceProofMissIneligible,
+      sourceProofMissNoProof: counters.sourceProofMissNoProof,
+      sourceProofMissBindingMismatch: counters.sourceProofMissBindingMismatch,
+      sourceProofMissCheckpointMismatch: counters.sourceProofMissCheckpointMismatch,
+      sourceProofMissObligationOrFault: counters.sourceProofMissObligationOrFault,
+      sourceProofStale: counters.sourceProofStale,
+      sourceProofFailed: counters.sourceProofFailed,
+      sourceProofMinted: counters.sourceProofMinted,
+      sourceProofRevoked,
     })
   }
 
@@ -2730,18 +3322,38 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   }
 
   /** The service-lifetime point-repair aggregate; numbers only, never an id. */
-  private logPointRepairs(): void {
+  private logPointRepairs(revocationsDelta?: number): void {
     const counters = this.pointCounters
+    const revoked = this.index?.sourceProofRevocations
+    const sourceProofRevoked = revocationsDelta ?? (
+      revoked === undefined ? 0 : Math.max(0, revoked - this.indexProofRevocationsBase)
+    )
     this.logDiagnostic('history-search.point-repairs', {
       completed: this.pointRepairsCompleted,
       directPersistenceStatCalls: counters.directPersistenceStatCalls,
       directPersistenceOpenCalls: counters.directPersistenceOpenCalls,
+      directPersistenceReadCalls: counters.directPersistenceReadCalls,
+      directPersistenceCloseCalls: counters.directPersistenceCloseCalls,
       directSessionObserveCalls: counters.directSessionObserveCalls,
       prefixProofAttempted: counters.prefixProofAttempted,
       replayAttempted: counters.replayAttempted,
       replayCompleted: counters.replayCompleted,
       replayElapsedMsTotal: roundMilliseconds(counters.replayElapsedMsTotal),
       replayElapsedMsMax: roundMilliseconds(counters.replayElapsedMsMax),
+      revisionAuthorityQualified: counters.revisionAuthorityQualified,
+      revisionAuthorityUnavailable: counters.revisionAuthorityUnavailable,
+      revisionAuthorityElapsedMsTotal: roundMilliseconds(counters.revisionAuthorityElapsedMsTotal),
+      sourceProofHit: counters.sourceProofHit,
+      sourceProofMiss: counters.sourceProofMiss,
+      sourceProofMissIneligible: counters.sourceProofMissIneligible,
+      sourceProofMissNoProof: counters.sourceProofMissNoProof,
+      sourceProofMissBindingMismatch: counters.sourceProofMissBindingMismatch,
+      sourceProofMissCheckpointMismatch: counters.sourceProofMissCheckpointMismatch,
+      sourceProofMissObligationOrFault: counters.sourceProofMissObligationOrFault,
+      sourceProofStale: counters.sourceProofStale,
+      sourceProofFailed: counters.sourceProofFailed,
+      sourceProofMinted: counters.sourceProofMinted,
+      sourceProofRevoked,
     })
   }
 
@@ -2761,11 +3373,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     })
   }
 
-  private beginCoverageRound(official: ReadonlyMap<string, OfficialSession>): void {
+  private beginCoverageRound(official: ReadonlyMap<string, OfficialSession>, basis: CoveragePersistenceBasis): void {
     const previous = this.coverageRound
     this.coverageRound = {
+      basis,
       expected: this.coverage === 'proven' ? undefined : new Set(official.keys()),
-      settled: new Set(),
+      settled: new Set<string>(),
       deletionsSettled: false,
       // An unresolved destructive obligation survives a new round; only a
       // complete same-round proof may release it.
@@ -2785,15 +3398,23 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.markReconcileNeeded('reconciling')
   }
 
-  private settleRoundSession(sessionId: string): void {
-    if (this.coverageRound?.expected?.has(sessionId) === true) {
-      this.coverageRound.settled.add(sessionId)
+  private settleRoundSession(sessionId: string, round: HistoryCoverageRound | undefined = this.coverageRound): void {
+    if (round?.expected?.has(sessionId) === true) {
+      round.settled.add(sessionId)
     }
   }
 
   private finishCoverageRound(): void {
     const round = this.coverageRound
     if (round === undefined) return
+    // A source-binding change observed at completion time retires this round
+    // (and any consumed proof authority) instead of publishing a stale ready.
+    this.observeCoverageBasis()
+    if (this.coverageRound !== round) return
+    if (!this.roundSourceCurrent(round)) {
+      this.invalidateCoverageBinding()
+      return
+    }
     if (!round.traversed) return
     if (!round.deletionsSettled) return
     if (round.expected !== undefined && round.expected.size !== round.settled.size) return

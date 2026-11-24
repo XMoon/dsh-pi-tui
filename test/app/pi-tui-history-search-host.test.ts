@@ -21,6 +21,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { Context, symbols } from '@deepseek-ai/cordis'
@@ -39,11 +40,21 @@ import {
   type HistorySearchRequest,
   type HistorySearchResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
-import { sessionHeaderHash } from '../../src/app/host/features/history-search-index.ts'
+import {
+  HistorySearchIndex,
+  historyCheckpointHash,
+  sessionEventHash,
+  sessionHeaderHash,
+} from '../../src/app/host/features/history-search-index.ts'
+import {
+  sourceProofBasis,
+  type HistoryRevisionAuthority,
+} from '../../src/app/host/features/history-search-revision-authority.ts'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
 import {
   HISTORY_SEARCH_MAX_PENDING_EVENTS,
   PiTuiHistorySearchHostService,
+  normalizeHistoryCwd,
   type HistorySearchLiveSessionLike,
   type HistorySearchPersistenceLike,
   type HistorySearchProfileContextLike,
@@ -714,6 +725,7 @@ function historyDebugProbeScript(historyModuleUrl: string): string {
   return `
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { PiTuiHistorySearchHostService } from ${JSON.stringify(historyModuleUrl)}
@@ -825,12 +837,12 @@ test('explicit debug diagnostics reach the standard file sink without Session co
   assert.match(log, /history-search\.inventory\.end phase=cold_start outcome=ok elapsedMs=\d+(?:\.\d)? persistedRows=1 mergedRows=1 liveSessionsObserved=0 directPersistenceListCalls=1 queryListSessionsCalls=0/u)
   // The full cold phase owns exactly its own official calls: ONE open + ONE
   // final currentness stat for the single cold source, no observation.
-  assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)? directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directSessionObserveCalls=0 prefixProofAttempted=0/u)
+  assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)? directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directPersistenceReadCalls=1 directPersistenceCloseCalls=1 directSessionObserveCalls=0 prefixProofAttempted=0 revisionAuthorityQualified=0 revisionAuthorityUnavailable=0 revisionAuthorityElapsedMsTotal=0 sourceProofHit=0 sourceProofMiss=0 sourceProofMissIneligible=0 sourceProofMissNoProof=0 sourceProofMissBindingMismatch=0 sourceProofMissCheckpointMismatch=0 sourceProofMissObligationOrFault=0 sourceProofStale=0 sourceProofFailed=0 sourceProofMinted=0 sourceProofRevoked=0/u)
   // An unchanged stable epoch: the periodic pass makes no direct official call.
-  assert.match(log, /history-search\.verify\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0 directPersistenceStatCalls=0 directPersistenceOpenCalls=0 directSessionObserveCalls=0 prefixProofAttempted=0/u)
+  assert.match(log, /history-search\.verify\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0 directPersistenceStatCalls=0 directPersistenceOpenCalls=0 directPersistenceReadCalls=0 directPersistenceCloseCalls=0 directSessionObserveCalls=0 prefixProofAttempted=0 revisionAuthorityQualified=0 revisionAuthorityUnavailable=0 revisionAuthorityElapsedMsTotal=0 sourceProofHit=0 sourceProofMiss=0 sourceProofMissIneligible=0 sourceProofMissNoProof=0 sourceProofMissBindingMismatch=0 sourceProofMissCheckpointMismatch=0 sourceProofMissObligationOrFault=0 sourceProofStale=0 sourceProofFailed=0 sourceProofMinted=0 sourceProofRevoked=0/u)
   // The point scope is separate from every full phase and is reported on its
   // first completion: one stat + one prefix open, no replay.
-  assert.match(log, /history-search\.point-repairs completed=1 directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directSessionObserveCalls=0 prefixProofAttempted=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0/u)
+  assert.match(log, /history-search\.point-repairs completed=1 directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directPersistenceReadCalls=1 directPersistenceCloseCalls=1 directSessionObserveCalls=0 prefixProofAttempted=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0 revisionAuthorityQualified=0 revisionAuthorityUnavailable=0 revisionAuthorityElapsedMsTotal=0 sourceProofHit=0 sourceProofMiss=0 sourceProofMissIneligible=0 sourceProofMissNoProof=0 sourceProofMissBindingMismatch=0 sourceProofMissCheckpointMismatch=0 sourceProofMissObligationOrFault=0 sourceProofStale=0 sourceProofFailed=0 sourceProofMinted=0 sourceProofRevoked=0/u)
   assert.equal(log.match(/history-search\.point-repairs/gu)?.length, 1, 'one ended point task must emit exactly one bounded aggregate')
   assert.match(log, /history-search\.writer phase=cold_start writerCommitted=\d+ writerFailed=0/u)
   assert.match(log, /history-search\.disposals seen=1 statCalls=1 statNotFound=0 proofProven=1 proofInsufficient=0 proofRollback=0 proofUnreadable=0 statElapsedMsTotal=\d+(?:\.\d)? verifyElapsedMsTotal=\d+(?:\.\d)?/u)
@@ -859,6 +871,8 @@ interface MutableOfficialSource {
   persistedHeader?: SessionHeader
   events: { type: string; seq: number; time: number; data: unknown }[]
   revision: number
+  /** Opaque durable revision token for the durable-proof cases. */
+  revisionToken?: unknown
   /** Advertised durable count when it deliberately disagrees with `events`. */
   eventCount?: number
   /** rc.5 JSONL shape: `list()` provides no eventCount at all. */
@@ -867,6 +881,9 @@ interface MutableOfficialSource {
   durableEventCount?: number
   /** The official sessionQuery reports this Session as live. */
   live?: boolean
+  /** Official source classification used by the durable-proof tests. */
+  formatStatus?: 'current' | 'migration-required'
+  location?: { readonly kind: string; readonly path: string }
 }
 
 function mutableSource(headerCwd: string, id = 'mutable-session'): MutableOfficialSource {
@@ -904,6 +921,8 @@ function mutableDeps(
     statIds: () => readonly string[]
     openCalls: () => number
     observeCalls: () => number
+    readCalls: () => number
+    closeCalls: () => number
   }
 } {
   const sources = [source, ...extras]
@@ -912,12 +931,16 @@ function mutableDeps(
   const snapshotOf = (candidate: MutableOfficialSource) => ({
     header: candidate.persistedHeader ?? candidate.header,
     ...(candidate.omitEventCount === true ? {} : { eventCount: candidate.eventCount ?? candidate.events.length }),
-    revision: candidate.revision,
+    revision: candidate.revisionToken ?? candidate.revision,
+    ...(candidate.formatStatus === undefined ? {} : { formatStatus: candidate.formatStatus }),
+    ...(candidate.location === undefined ? {} : { location: candidate.location }),
   })
   let listCalls = 0
   let statCalls = 0
   let openCalls = 0
   let observeCalls = 0
+  let readCalls = 0
+  let closeCalls = 0
   const statIds: string[] = []
   const persistence: HistorySearchPersistenceLike = {
     identity: Symbol('mutable-persistence'),
@@ -940,10 +963,11 @@ function mutableDeps(
         header: candidate.persistedHeader ?? candidate.header,
         inheritedEventCount: 0,
         async read(offset = 0, length = Number.MAX_SAFE_INTEGER) {
+          readCalls += 1
           const durable = candidate.durableEventCount ?? candidate.events.length
           return { events: candidate.events.slice(offset, Math.min(offset + length, durable)) }
         },
-        async close() {},
+        async close() { closeCalls += 1 },
       }
     },
   }
@@ -974,6 +998,8 @@ function mutableDeps(
       statIds: () => [...statIds],
       openCalls: () => openCalls,
       observeCalls: () => observeCalls,
+      readCalls: () => readCalls,
+      closeCalls: () => closeCalls,
     },
   }
 }
@@ -1012,6 +1038,7 @@ interface DirectHistoryDeps {
   sessionPersistence: () => HistorySearchPersistenceLike | undefined
   sessionQuery: () => HistorySearchQueryLike | undefined
   sessions: () => HistorySearchSessionsLike | undefined
+  revisionAuthority?: (persistence: HistorySearchPersistenceLike, signal: AbortSignal) => Promise<HistoryRevisionAuthority | undefined>
 }
 
 function directService(ctx: Context, deps: DirectHistoryDeps, profileDir: string): PiTuiHistorySearchHostService {
@@ -1416,7 +1443,7 @@ test('an unsafe sidecar keeps the index closed until a later write proves it saf
   const deliver = (event: unknown) => (service as unknown as {
     observeLiveEvent(session: unknown, event: unknown): void
   }).observeLiveEvent(liveSessionOf(source), event)
-  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v1.sqlite')
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
   const walPath = `${dbPath}-wal`
   try {
     await waitDirectReady(service)
@@ -2040,31 +2067,27 @@ test('a periodic full pass makes one persisted listing and no second query listi
     const ctx = wire.host.ctx
     const rawPersistence = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
     let listCalls = 0
-    const counting: HistorySearchPersistenceLike = {
-      identity: rawPersistence.identity,
-      list: (options) => {
-        listCalls += 1
-        return rawPersistence.list(options)
-      },
-      stat: (id, options) => rawPersistence.stat(id, options),
-      open: (id, access, options) => rawPersistence.open(id, access, options),
-    }
     const internals = wire.service() as unknown as {
-      deps: { sessionPersistence(): HistorySearchPersistenceLike | undefined }
       verifySources(): Promise<void>
     }
-    const originalPersistence = internals.deps.sessionPersistence
+    // Patch the ACTUAL service instance in place: replacing the deps closure
+    // would be a different raw service object and therefore a real binding
+    // replacement (which correctly invalidates coverage).
+    const originalList = rawPersistence.list
     const originalQueryList = ctx.sessionQuery.listSessions
     let queryListCalls = 0
+    rawPersistence.list = function patchedList(options) {
+      listCalls += 1
+      return originalList.call(rawPersistence, options)
+    }
     ctx.sessionQuery.listSessions = function (...args: never[]) {
       queryListCalls += 1
       return originalQueryList.apply(this, args as unknown as [AbortSignal?])
     }
-    internals.deps.sessionPersistence = () => counting
     try {
       await internals.verifySources()
     } finally {
-      internals.deps.sessionPersistence = originalPersistence
+      rawPersistence.list = originalList
       ctx.sessionQuery.listSessions = originalQueryList
     }
     assert.equal(listCalls, 1, 'one full pass must make exactly one persisted listing')
@@ -2100,25 +2123,20 @@ test('an Owner search and exact readText complete while the periodic persisted l
     const listEntered = new Promise<void>(resolve => { enteredList = resolve })
     let releaseList!: () => void
     const listGate = new Promise<void>(resolve => { releaseList = resolve })
-    const blocked: HistorySearchPersistenceLike = {
-      identity: rawPersistence.identity,
-      list: async (options) => {
-        enteredList()
-        await listGate
-        return rawPersistence.list(options)
-      },
-      stat: (id, options) => rawPersistence.stat(id, options),
-      open: (id, access, options) => rawPersistence.open(id, access, options),
-    }
     const internals = wire.service() as unknown as {
-      deps: { sessionPersistence(): HistorySearchPersistenceLike | undefined }
       verifySources(): Promise<void>
       pointCounters: PointCountersLike
       sessionRepairFlights: Map<string, { promise: Promise<void> }>
       scheduleSessionRepair(sessionId: string, kind: 'rebuild' | 'disposal'): void
     }
-    const originalPersistence = internals.deps.sessionPersistence
-    internals.deps.sessionPersistence = () => blocked
+    // Patch the ACTUAL list method so the block cannot be mistaken for a
+    // replaced service binding (which would legitimately invalidate coverage).
+    const originalList = rawPersistence.list
+    rawPersistence.list = async function blockedList(options) {
+      enteredList()
+      await listGate
+      return originalList.call(rawPersistence, options)
+    }
     let pointAfterConcurrentRepair: ReturnType<typeof pointCountersOf> | undefined
     const pass = internals.verifySources()
     await listEntered
@@ -2166,7 +2184,7 @@ test('an Owner search and exact readText complete while the periodic persisted l
       }, 'the concurrent point repair must own exactly its own live observation and replay')
       pointAfterConcurrentRepair = pointAfter
     } finally {
-      internals.deps.sessionPersistence = originalPersistence
+      rawPersistence.list = originalList
       releaseList()
       await pass
     }
@@ -2630,6 +2648,8 @@ test('a same-ID live replacement right after enumeration cannot inherit a stale 
     deps: { sessions(): HistorySearchSessionsLike | undefined }
     index: { checkpointOf(id: string): { dirty: boolean; sourceState: string } | undefined }
     verifySources(): Promise<void>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    writeTail: Promise<void>
   }
   const checkpoint = () => internals.index.checkpointOf('mutable-session')
   try {
@@ -2657,8 +2677,15 @@ test('a same-ID live replacement right after enumeration cannot inherit a stale 
 
     const stale = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
     assert.equal(stale.kind, 'incomplete', JSON.stringify(stale))
-    assert.equal(checkpoint()?.sourceState, 'persisted', 'the fence must not fabricate a live/persisted transition')
-    assert.equal(checkpoint()?.dirty, false, 'the fence must not rewrite content it did not read')
+    // The invalidated pass hands the ID to its coalesced official replay; wait
+    // for that owner to settle before observing the rewritten checkpoint.
+    while (internals.sessionRepairFlights.size > 0) {
+      await Promise.allSettled([...internals.sessionRepairFlights.values()].map(entry => entry.promise))
+    }
+    await internals.writeTail
+    const settled = checkpoint()
+    assert.ok(settled !== undefined, 'the repaired Session must keep its derived checkpoint')
+    assert.equal(settled.dirty, false, 'the repair must not leave a dirty checkpoint')
 
     // The next official pass sees the same live object; the verified rows stay
     // searchable and the index returns to ready only through that real check.
@@ -4672,6 +4699,7 @@ test('the round finish requires the full traversal proof even with no outstandin
   const service = directService(ctx, deps, profileDir)
   const internals = service as unknown as {
     coverageRound?: {
+      basis: unknown
       expected: Set<string> | undefined
       settled: Set<string>
       deletionsSettled: boolean
@@ -4683,6 +4711,7 @@ test('the round finish requires the full traversal proof even with no outstandin
   try {
     await waitDirectReady(service)
     internals.coverageRound = {
+      basis: (service as unknown as { currentCoverageBasis(): unknown }).currentCoverageBasis(),
       expected: undefined,
       settled: new Set(),
       deletionsSettled: true,
@@ -4858,7 +4887,7 @@ test('a real Session born and retired during a held roster scan survives the old
   }
   const ctx = wire.host.ctx
   const rawPersistence = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
-  const originalPersistence = internals.deps.sessionPersistence
+  const originalList = rawPersistence.list
   let releaseList: () => void = () => {}
   try {
     await wire.host.harness.create(SessionId('history-r12-roster-a'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
@@ -4870,17 +4899,13 @@ test('a real Session born and retired during a held roster scan survives the old
     let listEntered!: () => void
     const listReached = new Promise<void>(resolve => { listEntered = resolve })
     const listGate = new Promise<void>(resolve => { releaseList = resolve })
-    const blocked: HistorySearchPersistenceLike = {
-      identity: rawPersistence.identity,
-      list: async () => {
-        listEntered()
-        await listGate
-        return oldRoster
-      },
-      stat: (id, options) => rawPersistence.stat(id, options),
-      open: (id, access, options) => rawPersistence.open(id, access, options),
+    // Block the ACTUAL list method: a replaced deps closure would be a real
+    // service-binding replacement and correctly invalidate coverage.
+    rawPersistence.list = async function blockedList() {
+      listEntered()
+      await listGate
+      return oldRoster
     }
-    internals.deps.sessionPersistence = () => blocked
     const pass = internals.verifySources()
     await listReached
 
@@ -4916,7 +4941,7 @@ test('a real Session born and retired during a held roster scan survives the old
 
     // Restore the current official source: its roster now names B's durable log,
     // so the next full pass reconciles B and the authenticated Owner search answers.
-    internals.deps.sessionPersistence = originalPersistence
+    rawPersistence.list = originalList
     await internals.verifySources()
     const hit = await waitForSettled(wire, { scope: 'all', query: 'hsp-r12-roster-b', limit: 25 }, 'retired B occurrence')
     assert.equal(hit.kind, 'ready', JSON.stringify(hit))
@@ -4928,7 +4953,7 @@ test('a real Session born and retired during a held roster scan survives the old
     if (a.kind !== 'ready') throw new Error('expected ready')
     assert.equal(a.items.length, 1)
   } finally {
-    internals.deps.sessionPersistence = originalPersistence
+    rawPersistence.list = originalList
     releaseList()
     await wire.dispose()
   }
@@ -5550,5 +5575,563 @@ test('a materialized empty cold Session and a real empty live Session settle a c
     await runtime?.dispose()
     await m3?.dispose()
     await host.dispose()
+  }
+})
+
+// ── durable cold source proof recovery ────────────────────────────────────
+
+/**
+ * One structural pass authority equivalent to a qualified Q capture. The H
+ * policy tests use it as a TEST STAND-IN for the real runtime classification;
+ * the L3 authority suite exercises the real provider facts.
+ */
+function proofAuthority(root: string, scopeKey = 'a'.repeat(64)): {
+  readonly authority: HistoryRevisionAuthority
+  setCurrent(value: boolean): void
+} {
+  let current = true
+  const authority: HistoryRevisionAuthority = {
+    service: {},
+    identity: Symbol('test-proof-authority'),
+    scopeKey,
+    root,
+    codec: 'zstd',
+    isCurrent: () => current,
+  }
+  return {
+    authority,
+    setCurrent: value => {
+      current = value
+    },
+  }
+}
+
+function proofSnapshot(source: MutableOfficialSource): {
+  formatStatus: 'current' | 'migration-required' | undefined
+  location: { readonly kind: string; readonly path: string } | undefined
+  revision: unknown
+} {
+  return { formatStatus: source.formatStatus, location: source.location, revision: source.revisionToken ?? source.revision }
+}
+
+/** A cold current official source with a stable absolute artifact path. */
+function proofSource(root: string, overrides: Partial<MutableOfficialSource> = {}): MutableOfficialSource {
+  const source = mutableSource('/repo/proof', 'proof-session')
+  return {
+    ...source,
+    revisionToken: 'rev-1',
+    formatStatus: 'current',
+    location: { kind: 'jsonl', path: join(root, 'sessions', 'proof-session.jsonl.zstd') },
+    ...overrides,
+  }
+}
+
+/**
+ * Seed the derived checkpoint (and, unless disabled, its exact durable proof)
+ * a complete previous cold replay would have left behind.
+ */
+function seedColdProof(
+  profileDir: string,
+  source: MutableOfficialSource,
+  authority: HistoryRevisionAuthority,
+  options: { readonly nextSeq?: number; readonly mint?: boolean; readonly basisAuthority?: HistoryRevisionAuthority } = {},
+): void {
+  const sessionId = String(source.header.id)
+  const index = HistorySearchIndex.open({ profileDir })
+  try {
+    const nextSeq = options.nextSeq ?? source.events.length
+    const headerCwd = normalizeHistoryCwd(source.header.cwd)
+    index.commitBatch({
+      sessionId,
+      headerHash: sessionHeaderHash(source.header),
+      inheritedCut: 0,
+      baseNextSeq: 0,
+      nextSeq,
+      headerCwd,
+      effectiveCwd: headerCwd,
+      lastEventHash: nextSeq === 0 ? null : sessionEventHash(source.events[nextSeq - 1]!),
+      sourceState: 'persisted',
+      uncertainSourcesDelta: 0,
+      occurrences: [],
+    })
+    if (options.mint === false) return
+    const checkpoint = index.checkpointOf(sessionId)
+    assert.ok(checkpoint !== undefined)
+    const basis = sourceProofBasis(options.basisAuthority ?? authority, proofSnapshot(source))
+    assert.ok(basis !== undefined, 'the seeded source must be proof-eligible')
+    index.commitSourceProof(checkpoint, basis)
+  } finally {
+    index.close()
+  }
+}
+
+function rewriteProofContractVersion(profileDir: string, version: number): void {
+  const db = new DatabaseSync(join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite'))
+  try {
+    db.prepare('UPDATE history_source_proofs SET contract_version = ?').run(version)
+  } finally {
+    db.close()
+  }
+}
+
+async function verifyFullPass(service: PiTuiHistorySearchHostService): Promise<void> {
+  await (service as unknown as { verifySources(): Promise<void> }).verifySources()
+}
+
+function indexOfService(service: PiTuiHistorySearchHostService): HistorySearchIndex {
+  const index = (service as unknown as { index: HistorySearchIndex | undefined }).index
+  assert.ok(index !== undefined)
+  return index
+}
+
+test('an exact qualified cold proof is reused with zero official reads, and every ineligible fact replays', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-hit-root-')
+  const profileDir = life.tempDir('dsh-history-proof-hit-profile-')
+  const source = proofSource(root)
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, source, probe.authority)
+
+  const { deps, calls } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, { ...deps, revisionAuthority: async () => probe.authority, sessionPersistence: () => deps.sessionPersistence() }, profileDir)
+  try {
+    await waitDirectReady(service)
+    assert.equal(calls.openCalls(), 0, 'a proof hit must not open the official source')
+    assert.equal(calls.statCalls(), 0, 'a proof hit must not stat the official source')
+    assert.equal(calls.readCalls(), 0, 'a proof hit must not read the official source')
+    // A stable proven epoch keeps its same-instance no-read fast path.
+    await verifyFullPass(service)
+    assert.equal(calls.openCalls(), 0)
+    assert.equal(calls.statCalls(), 0)
+    assert.equal(calls.readCalls(), 0)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+
+  const negatives: Array<{
+    readonly label: string
+    readonly seed?: (profileDir: string, source: MutableOfficialSource, authority: HistoryRevisionAuthority) => void
+    readonly mutate?: (source: MutableOfficialSource, probe: ReturnType<typeof proofAuthority>) => void
+  }> = [
+    { label: 'a missing proof', seed: (dir, candidate, authority) => seedColdProof(dir, candidate, authority, { mint: false }) },
+    { label: 'a moved checkpoint count', seed: (dir, candidate, authority) => seedColdProof(dir, candidate, authority, { nextSeq: 2 }) },
+    { label: 'a changed revision', mutate: candidate => { candidate.revisionToken = 'rev-2' } },
+    { label: 'a changed header', mutate: candidate => { candidate.header = testHeader(String(candidate.header.id), '/repo/other') } },
+    { label: 'a path outside the root', mutate: candidate => { candidate.location = { kind: 'jsonl', path: '/elsewhere/proof-session.jsonl.zstd' } } },
+    { label: 'a wrong codec suffix', mutate: candidate => { candidate.location = { kind: 'jsonl', path: join(root, 'sessions', 'proof-session.jsonl') } } },
+    {
+      label: 'a different install scope',
+      seed: (dir, candidate, authority) => {
+        const other = proofAuthority(authority.root, 'b'.repeat(64))
+        seedColdProof(dir, candidate, other.authority)
+      },
+    },
+    {
+      label: 'a stale pass authority',
+      mutate: (_candidate, currentProbe) => { currentProbe.setCurrent(false) },
+    },
+    {
+      label: 'an older proof contract',
+      seed: (dir, candidate, authority) => {
+        seedColdProof(dir, candidate, authority)
+        rewriteProofContractVersion(dir, 2)
+      },
+    },
+    { label: 'a live registration', mutate: candidate => { candidate.live = true } },
+  ]
+  for (const negative of negatives) {
+    const caseRoot = life.tempDir('dsh-history-proof-miss-root-')
+    const caseProfile = life.tempDir('dsh-history-proof-miss-profile-')
+    const caseSource = proofSource(caseRoot)
+    const caseProbe = proofAuthority(caseRoot)
+    ;(negative.seed ?? ((dir, candidate, authority) => seedColdProof(dir, candidate, authority)))(
+      caseProfile,
+      caseSource,
+      caseProbe.authority,
+    )
+    negative.mutate?.(caseSource, caseProbe)
+    const caseDeps = mutableDeps(caseSource)
+    const caseCtx = new Context()
+    let caseService: PiTuiHistorySearchHostService | undefined
+    caseService = directService(caseCtx, {
+      ...caseDeps.deps,
+      revisionAuthority: async () => caseProbe.authority,
+    }, caseProfile)
+    try {
+      await waitDirectReady(caseService, 15_000)
+      assert.ok(
+        caseDeps.calls.openCalls() + caseDeps.calls.observeCalls() > 0,
+        `${negative.label} must fall back to an official read, not a silent proof hit`,
+      )
+    } finally {
+      await caseService.dispose()
+      await caseCtx.fiber.dispose()
+    }
+  }
+})
+
+test('an early hit cannot publish ready while a later Session official read is still latched', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-latch-root-')
+  const profileDir = life.tempDir('dsh-history-proof-latch-profile-')
+  const hitSource = proofSource(root)
+  const replaySource = proofSource(root, { header: testHeader('late-session', '/repo/late') })
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, hitSource, probe.authority)
+  const { deps, calls } = mutableDeps(hitSource, [replaySource])
+  const basePersistence = deps.sessionPersistence()!
+  let latched = false
+  let release = (): void => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const gated: HistorySearchPersistenceLike = {
+    identity: basePersistence.identity,
+    list: options => basePersistence.list(options),
+    stat: (id, options) => basePersistence.stat(id, options),
+    open: async (id, access, options) => {
+      if (String(id) === 'late-session') {
+        latched = true
+        await gate
+      }
+      return basePersistence.open(id, access, options)
+    },
+  }
+  const ctx = new Context()
+  const service = directService(ctx, { ...deps, sessionPersistence: () => gated, revisionAuthority: async () => probe.authority }, profileDir)
+  try {
+    const deadline = Date.now() + 15_000
+    while (!latched && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(latched, true, 'the later Session read must be latched')
+    const early = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+    assert.equal(early.kind, 'loading', `an early hit must not publish ready: ${JSON.stringify(early)}`)
+    assert.equal(calls.openCalls(), 0, 'the latched read must be the only open and it has not started')
+    release()
+    await waitDirectReady(service)
+    assert.equal(calls.openCalls(), 1)
+    const late = await service.search({ scope: 'session', sessionId: 'late-session', query: 'mutable', limit: 10 }, new AbortController().signal)
+    assert.equal(late.kind, 'ready')
+    assert.ok(late.kind === 'ready' && late.items.length >= 2)
+  } finally {
+    release()
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a complete qualified cold replay mints the durable proof and a restarted service reuses it', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-mint-root-')
+  const profileDir = life.tempDir('dsh-history-proof-mint-profile-')
+  const source = proofSource(root)
+  const probe = proofAuthority(root)
+  const { deps, calls } = mutableDeps(source)
+  const ctx = new Context()
+  let service = directService(ctx, { ...deps, revisionAuthority: async () => probe.authority }, profileDir)
+  try {
+    await waitDirectReady(service)
+    const index = indexOfService(service)
+    const checkpoint = index.checkpointOf('proof-session')
+    assert.ok(checkpoint !== undefined)
+    const proof = index.sourceProofOf('proof-session')
+    assert.ok(proof !== undefined, 'a complete qualified cold replay must mint its proof')
+    assert.equal(proof.checkpointHash, historyCheckpointHash(checkpoint))
+    assert.equal(proof.sourceRevision, 'rev-1')
+    assert.equal(proof.contractVersion, 1)
+    assert.ok(calls.openCalls() > 0 && calls.readCalls() > 0)
+    const openBefore = calls.openCalls()
+    const statBefore = calls.statCalls()
+    const readBefore = calls.readCalls()
+    await service.dispose()
+    // A second service in the SAME process (the test's structural stand-in for
+    // a Host restart) must reuse the committed proof with zero official reads.
+    const restartedCtx = new Context()
+    try {
+      service = directService(restartedCtx, { ...deps, revisionAuthority: async () => probe.authority }, profileDir)
+      await waitDirectReady(service)
+    assert.equal(calls.openCalls(), openBefore, 'the recovery pass must not open a proven cold source')
+    assert.equal(calls.statCalls(), statBefore, 'the recovery pass must not stat a proven cold source')
+    assert.equal(calls.readCalls(), readBefore, 'the recovery pass must not read a proven cold source')
+    const answer = await service.search(
+      { scope: 'session', sessionId: 'proof-session', query: 'mutable', limit: 10 },
+      new AbortController().signal,
+    )
+    assert.equal(answer.kind, 'ready')
+      assert.ok(answer.kind === 'ready' && answer.items.length >= 2, 'the reused projection must answer the exact accepted rows')
+    } finally {
+      await service.dispose()
+      await restartedCtx.fiber.dispose()
+    }
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an empty header-only cold source mints a seq0 proof that a restarted service reuses', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-empty-root-')
+  const profileDir = life.tempDir('dsh-history-proof-empty-profile-')
+  const source = proofSource(root, { events: [] })
+  const probe = proofAuthority(root)
+  const { deps, calls } = mutableDeps(source)
+  const ctx = new Context()
+  let service = directService(ctx, { ...deps, revisionAuthority: async () => probe.authority }, profileDir)
+  try {
+    await waitDirectReady(service)
+    const checkpoint = indexOfService(service).checkpointOf('proof-session')
+    assert.ok(checkpoint !== undefined)
+    assert.equal(checkpoint.nextSeq, 0)
+    assert.equal(checkpoint.lastEventHash, null)
+    assert.ok(indexOfService(service).sourceProofOf('proof-session') !== undefined)
+    const openBefore = calls.openCalls()
+    const statBefore = calls.statCalls()
+    await service.dispose()
+    const restartedCtx = new Context()
+    try {
+      service = directService(restartedCtx, { ...deps, revisionAuthority: async () => probe.authority }, profileDir)
+      await waitDirectReady(service)
+      assert.equal(calls.openCalls(), openBefore)
+      assert.equal(calls.statCalls(), statBefore)
+    } finally {
+      await service.dispose()
+      await restartedCtx.fiber.dispose()
+    }
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an ordinary incremental replay revokes the old proof and never mints, while failed final proofs mint nothing', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-increment-root-')
+  const profileDir = life.tempDir('dsh-history-proof-increment-profile-')
+  const source = proofSource(root)
+  const probe = proofAuthority(root)
+  const { deps, calls } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, { ...deps, revisionAuthority: async () => probe.authority }, profileDir)
+  try {
+    await waitDirectReady(service)
+    assert.ok(indexOfService(service).sourceProofOf('proof-session') !== undefined)
+    // An ordinary append with an unchanged opaque revision is the ordinary
+    // incremental path, not a full cold replay: it must never mint.
+    source.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 1003,
+      data: {
+        target: 'next-turn',
+        start: 2,
+        inserted: [{ id: 'msg-3', role: 'user', content: [{ type: 'text', text: 'mutable third' }], source: { kind: 'user', rpcId: 'rpc-3' } }],
+      },
+    })
+    const openBefore = calls.openCalls()
+    await verifyFullPass(service)
+    assert.equal(calls.openCalls(), openBefore + 1, 'the ordinary incremental path reads the official tail')
+    assert.equal(indexOfService(service).sourceProofOf('proof-session'), undefined,
+      'an incremental replay must revoke the old proof and must not mint a new one')
+    await waitDirectReady(service)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+
+  // A final currentness mismatch, a read failure and a close failure each keep
+  // the index incomplete and mint no proof.
+  const failures: Array<{ readonly label: string; readonly wrap: (base: HistorySearchPersistenceLike) => HistorySearchPersistenceLike }> = [
+    {
+      label: 'a changed final revision',
+      wrap: base => {
+        let statCalls = 0
+        return {
+          identity: base.identity,
+          list: options => base.list(options),
+          open: (id, access, options) => base.open(id, access, options),
+          stat: async (id, options) => {
+            statCalls += 1
+            const snapshot = await base.stat(id, options)
+            return statCalls === 1 && snapshot !== undefined ? { ...snapshot, revision: 'changed' } : snapshot
+          },
+        }
+      },
+    },
+    {
+      label: 'an official read failure',
+      wrap: base => ({
+        identity: base.identity,
+        list: options => base.list(options),
+        stat: (id, options) => base.stat(id, options),
+        open: async (id, access, options) => {
+          const handle = await base.open(id, access, options)
+          return {
+            header: handle.header,
+            inheritedEventCount: handle.inheritedEventCount,
+            read: async () => { throw new Error('official read failure') },
+            close: () => handle.close(),
+          }
+        },
+      }),
+    },
+    {
+      label: 'an official close failure',
+      wrap: base => ({
+        identity: base.identity,
+        list: options => base.list(options),
+        stat: (id, options) => base.stat(id, options),
+        open: async (id, access, options) => {
+          const handle = await base.open(id, access, options)
+          return {
+            header: handle.header,
+            inheritedEventCount: handle.inheritedEventCount,
+            read: (offset, length, readOptions) => handle.read(offset, length, readOptions),
+            close: async () => { throw new Error('official close failure') },
+          }
+        },
+      }),
+    },
+  ]
+  for (const failure of failures) {
+    const caseRoot = life.tempDir('dsh-history-proof-failure-root-')
+    const caseProfile = life.tempDir('dsh-history-proof-failure-profile-')
+    const caseSource = proofSource(caseRoot)
+    const caseProbe = proofAuthority(caseRoot)
+    const caseDeps = mutableDeps(caseSource)
+    const persistence = failure.wrap(caseDeps.deps.sessionPersistence()!)
+    const caseCtx = new Context()
+    const caseService = directService(caseCtx, {
+      ...caseDeps.deps,
+      sessionPersistence: () => persistence,
+      revisionAuthority: async () => caseProbe.authority,
+    }, caseProfile)
+    try {
+      const deadline = Date.now() + 15_000
+      for (;;) {
+        const answer = await caseService.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+        if (answer.kind === 'incomplete') break
+        if (answer.kind === 'unavailable') break
+        if (Date.now() > deadline) throw new Error(`${failure.label}: unexpected settled state ${JSON.stringify(answer)}`)
+        assert.equal(answer.kind, 'loading')
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      const index = indexOfService(caseService)
+      assert.equal(index.sourceProofOf('proof-session'), undefined, `${failure.label} must mint no proof`)
+    } finally {
+      await caseService.dispose()
+      await caseCtx.fiber.dispose()
+    }
+  }
+})
+
+test('a replaced official persistence binding downgrades ready and the next full pass rebuilds', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-replace-root-')
+  const profileDir = life.tempDir('dsh-history-proof-replace-profile-')
+  const source = proofSource(root)
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, source, probe.authority)
+  const { deps, calls } = mutableDeps(source)
+  const first = deps.sessionPersistence()!
+  const second: HistorySearchPersistenceLike = {
+    identity: Symbol('replaced-persistence'),
+    list: options => first.list(options),
+    stat: (id, options) => first.stat(id, options),
+    open: (id, access, options) => first.open(id, access, options),
+  }
+  let current = first
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    sessionPersistence: () => current,
+    revisionAuthority: async () => probe.authority,
+  }, profileDir)
+  try {
+    await waitDirectReady(service)
+    current = second
+    const downgraded = await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)
+    assert.equal(downgraded.kind, 'incomplete', `a replaced binding must not keep publishing ready: ${JSON.stringify(downgraded)}`)
+    const openBefore = calls.openCalls()
+    await verifyFullPass(service)
+    assert.ok(calls.openCalls() > openBefore, 'the next full pass must rebuild from the replacement binding')
+    await waitDirectReady(service)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a live replacement during hit admission refuses the hit and hands the ID to the live repair owner', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-proof-live-root-')
+  const profileDir = life.tempDir('dsh-history-proof-live-profile-')
+  const source = proofSource(root)
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, source, probe.authority)
+  const { deps, calls } = mutableDeps(source)
+  const baseSessions = deps.sessions()!
+  const liveObject = { id: source.header.id, header: source.header }
+  let armed = false
+  let getCalls = 0
+  const sessions: HistorySearchSessionsLike = {
+    list: () => baseSessions.list(),
+    get: () => {
+      if (!armed) return undefined
+      getCalls += 1
+      // The first read is the admission's exact-absence observation; the
+      // writer callback then observes the SAME id live and must refuse.
+      return getCalls > 1 ? liveObject : undefined
+    },
+  }
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    sessions: () => sessions,
+    revisionAuthority: async () => probe.authority,
+  }, profileDir)
+  try {
+    await waitDirectReady(service)
+    const internals = service as unknown as {
+      coverage: string
+      tryReuseSourceProof(
+        sessionId: string,
+        record: unknown,
+        persistence: HistorySearchPersistenceLike,
+        sessions: HistorySearchSessionsLike,
+        authority: HistoryRevisionAuthority,
+        counters: object,
+      ): Promise<string>
+      emptyPhaseCounters(): object
+      sessionRepairFlights: Map<string, unknown>
+    }
+    // The ready epoch has no unproven admission; drive the SAME production
+    // admission once against a cold, unproven state.
+    internals.coverage = 'unproven'
+    armed = true
+    getCalls = 0
+    const counters = internals.emptyPhaseCounters() as { sourceProofHit: number; sourceProofStale: number }
+    const outcome = await internals.tryReuseSourceProof(
+      'proof-session',
+      { header: source.header, live: false, ...proofSnapshot(source) },
+      deps.sessionPersistence()!,
+      sessions,
+      probe.authority,
+      counters,
+    )
+    assert.equal(outcome, 'stale')
+    assert.equal(counters.sourceProofHit, 0, 'a refused admission must never count as a hit')
+    assert.equal(counters.sourceProofStale, 1)
+    assert.equal(internals.sessionRepairFlights.size, 1, 'the refused hit must hand the ID to a repair owner')
+    const deadline = Date.now() + 15_000
+    while (internals.sessionRepairFlights.size > 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(calls.observeCalls() > 0, 'the coalesced repair must own the live observation')
+    assert.equal(calls.openCalls(), 0, 'the refused hit must not open a persisted handle')
+    const row = indexOfService(service).occurrence('proof-session', 'msg-1')
+    assert.equal(row?.content, 'mutable first', 'the live repair must project the accepted occurrences')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
   }
 })

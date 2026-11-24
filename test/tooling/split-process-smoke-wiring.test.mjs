@@ -557,8 +557,9 @@ test('every registry entry declares a conservative platform list and the audited
     'acp.protocol-projection',
     // The Host accepted-input history search case drives only the shared Split
     // harness (tmux PTY, authenticated Host, real official Session admission,
-    // two real Client PIDs and a clean Host restart); it uses no
-    // platform-specific process/seat primitive beyond that shared seam.
+    // real Client PIDs, qualified cold-proof recovery across several real Host
+    // processes and one offline official append); it uses no platform-specific
+    // process/seat primitive beyond that shared seam.
     'surface.host-history-search-pr1',
     // UX PR3: the sessionless `/preset` case drives only the shared Split
     // harness (tmux PTY, authenticated Host, real roster read, explicit

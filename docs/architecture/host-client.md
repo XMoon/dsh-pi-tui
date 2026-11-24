@@ -1759,7 +1759,10 @@ or the current Ctrl+R/↑↓ contract owned by
 | Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing directory stays `null` (never the Client cwd) |
 | Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
 | Official corpus roster | ONE `sessionPersistence.list` snapshot merged with the Host `sessions` live registry; a same-id live/persisted Header must pass the official `assertSessionHeadersCompatible` check, and the live Header is the visible one |
-| Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v1.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
+| Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v2.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
+| Durable cold source proof | ONE row per Session in the same `v2.sqlite` records the exact official source path, opaque revision, install/config scope digest and checkpoint digest of one COMPLETE cold replay. Any checkpoint-changing batch, marker rewrite, reset or delete revokes it in the SAME transaction; a failed or partial write leaves no proof |
+| Restart recovery | Only a qualified runtime/backend may compare a committed persisted proof across Host restarts; unqualified sources replay through official handles. The upstream revision API itself remains instance-scoped. A qualified hit performs no official `open`/`read`/`stat`/replay, releases no accepted obligation and settles only the per-ID round evidence; a stale or refused hit keeps the ordinary round barrier and hands the official replay to the existing repair owner |
+| Source binding | Proof eligibility is bound to the exact pass-scoped official persistence binding (raw service, official Symbol, Loader provider entry/activation, effective root/codec and installed release identity) plus the selected snapshot classification. A replaced service binding, an invalidated runtime authority or changed snapshot metadata retires prior-proof reuse and unproven coverage; the next full pass replays officially |
 | Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round |
 | Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
 | Destructive round | before the first known destructive publication of a full round (deletion, rebuild or marker rewrite), the round establishes an `incomplete` barrier and holds it through every required deletion, accepted-payload/repair settlement and per-ID terminal commit. Read-only discovery preserves the prior `ready` epoch; the round-local deletion cut and its cut-bound witness fence derived deletion |
@@ -1787,7 +1790,13 @@ and terminal settlement has settled; a point completion observed while the
 traversal is still pending cannot release the global barrier. While coverage is
 unproven, each authoritative ID requires a current-incarnation authoritative
 replay: a clean prior-process checkpoint plus a matching live identity is not a
-proof of this Host's observed source. A completed final ordinary pending drain
+proof of this Host's observed source. The ONE scoped exception is a qualified
+cold durable proof: it is the current-incarnation evidence of a complete cold
+replay performed by the same qualified official backend, and it is only
+compared while the exact source binding, snapshot metadata, projected
+checkpoint and runtime authority all still match. A proof never makes a
+different source generation, an unqualified backend, a live record, a dirty or
+uncertain checkpoint, or an outstanding accepted/repair obligation eligible. A completed final ordinary pending drain
 is also a terminal owner and can settle the traversed round without waiting for
 the periodic timer. While coverage is unproven, the forced current-incarnation
 replay is ordered AFTER the disposed-live dirty/short-durable-source guard;
@@ -1811,6 +1820,24 @@ one Host service incarnation and index revision: any newer observed event makes
 it `stale` instead of silently re-ranking the caller's page. The Host refuses a
 non-Owner, an ended peer or an aborted invocation before any official read or
 index query.
+
+Restore invalidation is an explicit operator procedure, not a runtime
+feature. Before restoring a backup, rolling back/cloning a filesystem snapshot
+or replacing the offline source, stop the owning Host with the existing daemon
+control (`dsh --profile <profile> daemon stop`), confirm the Host exited and the
+kernel seat is free, and prevent the supervisor or a Client from restarting it;
+stop any other writer of the same source. After the restore, resolve the ACTUAL
+canonical Profile directory (never `DSH_HOME` or a Session root), then move the
+existing `.dsh-pi-tui/history-search/v2.sqlite`, `v2.sqlite-wal` and
+`v2.sqlite-shm` as ONE set into a new owner-only backup directory inside that
+private `history-search` directory (`umask 077`, a private `mktemp -d`,
+skip absent files, never a wildcard delete). A symlink, foreign owner or
+unexpected file stops the procedure for manual inspection. Leave `v1.sqlite`,
+other artifacts and the original Sessions untouched, restart the Host, and let
+the index rebuild from the official source; history search reports loading or
+incomplete until that rebuild proves full coverage. Do not copy the backed-up
+`v2` set back over the restored source. Automatic rollback detection is not
+promised.
 
 ## Currentness, operation ownership and request ids
 

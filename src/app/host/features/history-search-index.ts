@@ -6,13 +6,18 @@
  * from the official log at any time:
  *
  * ```text
- * $PROFILE_DIR/.dsh-pi-tui/history-search/v1.sqlite
+ * $PROFILE_DIR/.dsh-pi-tui/history-search/v2.sqlite
  * ```
  *
+ * Besides the projected rows it stores ONE source-proof row per Session: the
+ * exact durable source revision and checkpoint digest a complete cold replay
+ * observed. The proof is metadata only — it never substitutes for an official
+ * read and is revoked atomically by every mutation that changes a checkpoint.
+ *
  * It owns nothing else: path/schema/permission validation, atomic per-Session
- * checkpoint + occurrence commits, the three keyset search scopes and the
- * exact-text read. The Host service above it owns reconciliation, authorization
- * and the wire.
+ * checkpoint + occurrence commits, source-proof durability, the three keyset
+ * search scopes and the exact-text read. The Host service above it owns
+ * reconciliation, authorization, qualification and the wire.
  *
  * @module @xmoon76/dsh-pi-tui/app/host/features/history-search-index
  */
@@ -27,13 +32,19 @@ import { historySearchPreview } from '../../../runtime/remote/pi-tui-history-sea
 export const HISTORY_SEARCH_SQLITE_APPLICATION_ID = 0x50495448
 
 /**
- * Fixed schema version of the derived index. The pre-release product v1
- * already owns the bounded preview / exact UTF-16 length columns; there is no
- * second generation to read or migrate.
+ * Fixed schema version of the derived index. v2 adds the durable
+ * `history_source_proofs` relation; the pre-release v1 file is never opened,
+ * migrated or deleted.
  */
-export const HISTORY_SEARCH_SQLITE_USER_VERSION = 1
+export const HISTORY_SEARCH_SQLITE_USER_VERSION = 2
 
-const DATABASE_FILE = 'v1.sqlite'
+/**
+ * Semantic contract of one durable source proof. Bump only when the projection
+ * or the proof semantics change: proofs from an older contract are not reused.
+ */
+export const HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION = 1
+
+const DATABASE_FILE = 'v2.sqlite'
 const PRIVATE_DIRECTORY = '.dsh-pi-tui'
 const HISTORY_DIRECTORY = 'history-search'
 
@@ -74,9 +85,17 @@ CREATE INDEX history_order_session ON history_occurrences(
 CREATE INDEX history_order_directory ON history_occurrences(
   effective_cwd, accepted_ms DESC, session_id ASC, first_seq DESC, message_id ASC
 );
+CREATE TABLE history_source_proofs (
+  session_id TEXT PRIMARY KEY REFERENCES history_sessions(session_id) ON DELETE CASCADE,
+  contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+  scope_key TEXT NOT NULL CHECK(length(scope_key) = 64),
+  source_path TEXT NOT NULL CHECK(length(source_path) > 0),
+  source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+  checkpoint_hash TEXT NOT NULL CHECK(length(checkpoint_hash) = 64)
+);
 `
 
-const EXPECTED_TABLES = ['history_occurrences', 'history_sessions'] as const
+const EXPECTED_TABLES = ['history_occurrences', 'history_sessions', 'history_source_proofs'] as const
 const EXPECTED_INDEXES = ['history_order_all', 'history_order_directory', 'history_order_session'] as const
 
 const SESSION_COLUMNS = [
@@ -86,6 +105,9 @@ const SESSION_COLUMNS = [
 const OCCURRENCE_COLUMNS = [
   'row_id', 'session_id', 'message_id', 'first_seq', 'accepted_ms', 'effective_cwd',
   'content', 'normalized_content', 'preview', 'content_length', 'content_sha256', 'has_non_text',
+] as const
+const PROOF_COLUMNS = [
+  'session_id', 'contract_version', 'scope_key', 'source_path', 'source_revision', 'checkpoint_hash',
 ] as const
 
 /** The index path cannot be opened or is not safe to use; the Host stays up. */
@@ -108,6 +130,23 @@ export interface HistorySessionCheckpointRow {
   readonly sourceState: 'persisted' | 'live'
   readonly uncertainSources: number
   readonly dirty: boolean
+}
+
+/**
+ * The durable source facts a complete cold replay observed for one Session.
+ * They are opaque strings: the revision is compared for exact equality only.
+ */
+export interface HistorySourceProofBasis {
+  readonly scopeKey: string
+  readonly sourcePath: string
+  readonly sourceRevision: string
+}
+
+/** One stored durable source proof. */
+export interface HistorySourceProofRow extends HistorySourceProofBasis {
+  readonly sessionId: string
+  readonly contractVersion: number
+  readonly checkpointHash: string
 }
 
 /** One accepted occurrence to commit. */
@@ -218,6 +257,26 @@ export function sessionHeaderHash(header: unknown): string {
 }
 
 /**
+ * Hash every projected checkpoint fact a durable source proof covers. The
+ * digest is the exact terminal state of one complete replay: a later batch,
+ * marker or reset that changes ANY field cannot match it.
+ */
+export function historyCheckpointHash(row: HistorySessionCheckpointRow): string {
+  return createHash('sha256').update(stableJson([
+    row.sessionId,
+    row.headerCwd,
+    row.inheritedCut,
+    row.nextSeq,
+    row.effectiveCwd,
+    row.lastEventHash,
+    row.headerHash,
+    row.sourceState,
+    row.uncertainSources,
+    row.dirty,
+  ]), 'utf8').digest('hex')
+}
+
+/**
  * `lstat` one path, treating only a real ENOENT as absence. `existsSync`
  * follows symlinks, so a DANGLING symlink would look absent and could be
  * followed by a later create; every private-file decision uses this probe.
@@ -303,6 +362,15 @@ interface RawSessionRow {
   readonly source_state: 'persisted' | 'live'
   readonly uncertain_sources: number
   readonly dirty: number
+}
+
+interface RawSourceProofRow {
+  readonly session_id: string
+  readonly contract_version: number
+  readonly scope_key: string
+  readonly source_path: string
+  readonly source_revision: string
+  readonly checkpoint_hash: string
 }
 
 interface RawOccurrenceRow {
@@ -412,10 +480,11 @@ function inspectSchema(db: DatabaseSync): SchemaState {
   }
   if (tableColumns(db, 'history_sessions').join(',') !== SESSION_COLUMNS.join(',')) return 'corrupt'
   if (tableColumns(db, 'history_occurrences').join(',') !== OCCURRENCE_COLUMNS.join(',')) return 'corrupt'
+  if (tableColumns(db, 'history_source_proofs').join(',') !== PROOF_COLUMNS.join(',')) return 'corrupt'
   return 'ok'
 }
 
-/** Quarantine one own-v1 file set under private names; never deletes data. */
+/** Quarantine one own-v2 file set under private names; never deletes data. */
 function quarantineDatabaseFile(dbPath: string): void {
   const stamp = String(Date.now())
   for (const suffix of ['', '-wal', '-shm']) {
@@ -446,6 +515,8 @@ export class HistorySearchIndex {
   private closed = false
   /** Content generation owned by the ONE index mutation boundary. */
   private contentRevision = 0
+  /** Revoked durable proofs; diagnostics only, derived from committed writes. */
+  private proofRevocationCount = 0
 
   private constructor(path: string, db: DatabaseSync) {
     this.path = path
@@ -462,11 +533,55 @@ export class HistorySearchIndex {
     return this.contentRevision
   }
 
+  /** Monotonic count of source proofs actually revoked by committed writes. */
+  get sourceProofRevocations(): number {
+    return this.proofRevocationCount
+  }
+
+  /**
+   * The files a proof-only transaction depends on: the main database and its
+   * materialized WAL/SHM sidecars must all be private, owned regular files.
+   */
+  private assertProofFileSet(): void {
+    assertPrivateDatabaseFile(this.path)
+    assertPrivateSidecars(this.path)
+    for (const suffix of ['-wal', '-shm'] as const) {
+      if (lstatIfExists(`${this.path}${suffix}`) === undefined) {
+        throw new Error(`history search index: the ${suffix} sidecar is not materialized`)
+      }
+    }
+  }
+
+  /** Perform one proof-only transaction with a final in-transaction file check. */
+  private commitSourceProofRow(sessionId: string, basis: HistorySourceProofBasis, checkpointHash: string): void {
+    this.db.prepare(
+      `INSERT INTO history_source_proofs (
+        session_id, contract_version, scope_key, source_path, source_revision, checkpoint_hash
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        contract_version = excluded.contract_version,
+        scope_key = excluded.scope_key,
+        source_path = excluded.source_path,
+        source_revision = excluded.source_revision,
+        checkpoint_hash = excluded.checkpoint_hash`,
+    ).run(
+      sessionId,
+      HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
+      basis.scopeKey,
+      basis.sourcePath,
+      basis.sourceRevision,
+      checkpointHash,
+    )
+    // No fallible validation is allowed after COMMIT: the last one runs here,
+    // while a failure still rolls the whole proof insert back.
+    this.assertProofFileSet()
+  }
+
   /**
    * Open (or initialize) the profile-local derived index.
    *
    * A foreign database, a non-private path or an unowned directory refuses the
-   * index (the Host stays Ready and reports `unavailable`). A known v1 file
+   * index (the Host stays Ready and reports `unavailable`). A known v2 file
    * that fails schema validation or SQLite integrity is quarantined and
    * rebuilt from an empty schema; the original bytes are preserved.
    */
@@ -650,12 +765,73 @@ export class HistorySearchIndex {
     return row === undefined ? undefined : checkpointOfRaw(row)
   }
 
+  /**
+   * ONE point read of the committed durable source proof. It is never
+   * materialized as part of a corpus listing and never carries occurrence
+   * content.
+   */
+  sourceProofOf(sessionId: string): HistorySourceProofRow | undefined {
+    this.assertOpen()
+    const row = this.db.prepare('SELECT * FROM history_source_proofs WHERE session_id = ?')
+      .get(sessionId) as unknown as RawSourceProofRow | undefined
+    if (row === undefined) return undefined
+    return {
+      sessionId: row.session_id,
+      contractVersion: row.contract_version,
+      scopeKey: row.scope_key,
+      sourcePath: row.source_path,
+      sourceRevision: row.source_revision,
+      checkpointHash: row.checkpoint_hash,
+    }
+  }
+
+  /**
+   * Persist the durable source proof of ONE complete cold replay. The stored
+   * checkpoint must still hash to exactly the caller's expected terminal
+   * checkpoint and must itself be a clean, persisted, fully counted row; the
+   * proof-only transaction additionally proves the private file set at its
+   * start and immediately before COMMIT.
+   *
+   * This function is a durability primitive, not a replay authority: the Host
+   * service may only call it from the terminal of a verified complete replay.
+   */
+  commitSourceProof(expected: HistorySessionCheckpointRow, basis: HistorySourceProofBasis): void {
+    this.assertOpen()
+    this.assertProofFileSet()
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM history_sessions WHERE session_id = ?')
+        .get(expected.sessionId) as unknown as RawSessionRow | undefined
+      if (row === undefined) {
+        throw new Error('history search index: no checkpoint exists for the source proof')
+      }
+      const actual = checkpointOfRaw(row)
+      const checkpointHash = historyCheckpointHash(actual)
+      if (checkpointHash !== historyCheckpointHash(expected)) {
+        throw new Error('history search index: the checkpoint changed before its source proof was committed')
+      }
+      if (actual.sourceState !== 'persisted' || actual.dirty || actual.uncertainSources !== 0) {
+        throw new Error('history search index: only a clean persisted checkpoint may carry a source proof')
+      }
+      if (actual.inheritedCut < 0 || actual.nextSeq < actual.inheritedCut) {
+        throw new Error('history search index: the source proof checkpoint has an invalid sequence range')
+      }
+      if (actual.nextSeq === 0 ? actual.lastEventHash !== null : actual.lastEventHash === null) {
+        throw new Error('history search index: the source proof checkpoint has an inconsistent tail hash')
+      }
+      this.commitSourceProofRow(expected.sessionId, basis, checkpointHash)
+    })
+  }
+
   deleteSession(sessionId: string): void {
     let removedOccurrences = 0
+    let removedProof = false
     this.transaction(() => {
+      removedProof = this.db.prepare('SELECT 1 FROM history_source_proofs WHERE session_id = ?').get(sessionId) !== undefined
       removedOccurrences += Number(this.db.prepare('DELETE FROM history_occurrences WHERE session_id = ?').run(sessionId).changes)
+      // The foreign-key cascade removes the proof with its Session row.
       this.db.prepare('DELETE FROM history_sessions WHERE session_id = ?').run(sessionId)
     })
+    if (removedProof) this.proofRevocationCount += 1
     if (removedOccurrences > 0) this.contentRevision += 1
   }
 
@@ -677,6 +853,7 @@ export class HistorySearchIndex {
       throw new Error('history search index: nextSeq must be a non-negative safe integer >= baseNextSeq')
     }
     let insertedOccurrences = 0
+    let revokedProofs = 0
     // Fail the batch BEFORE it commits when a sidecar is already unsafe. The
     // post-commit re-check below remains a second window; a Host that observes
     // either failure keeps the index closed until a later write proves safety.
@@ -688,6 +865,11 @@ export class HistorySearchIndex {
       if (persistedNext !== input.baseNextSeq) {
         throw new Error('history search index: the persisted Session checkpoint moved underneath this batch')
       }
+      // ANY batch that rewrites the checkpoint (including zero events and a
+      // marker-only terminal row) revokes the proof in the SAME transaction:
+      // rollback restores the old proof together with the old rows.
+      revokedProofs += Number(this.db.prepare('DELETE FROM history_source_proofs WHERE session_id = ?')
+        .run(input.sessionId).changes)
       if (existing === undefined) {
         this.db.prepare(
           `INSERT INTO history_sessions (
@@ -746,6 +928,7 @@ export class HistorySearchIndex {
       }
     })
     if (insertedOccurrences > 0) this.contentRevision += 1
+    if (revokedProofs > 0) this.proofRevocationCount += revokedProofs
     // SQLite materializes -wal/-shm on the first write. They inherit the main
     // file's mode, but the policy is proven here, not assumed: an unsafe sidecar
     // fails the batch (and therefore the authoritative answer) closed.
@@ -759,7 +942,15 @@ export class HistorySearchIndex {
     readonly sourceState?: 'persisted' | 'live'
     readonly uncertainSources?: number
   }): void {
+    const mutates = input.dirty !== undefined || input.sourceState !== undefined || input.uncertainSources !== undefined
+    let revokedProofs = 0
     this.transaction(() => {
+      if (mutates) {
+        // A marker rewrite is a checkpoint change: the old durable proof can
+        // no longer describe this row and is revoked in the same transaction.
+        revokedProofs += Number(this.db.prepare('DELETE FROM history_source_proofs WHERE session_id = ?')
+          .run(input.sessionId).changes)
+      }
       if (input.dirty !== undefined) {
         this.db.prepare('UPDATE history_sessions SET dirty = ? WHERE session_id = ?')
           .run(input.dirty ? 1 : 0, input.sessionId)
@@ -773,6 +964,7 @@ export class HistorySearchIndex {
           .run(input.uncertainSources, input.sessionId)
       }
     })
+    if (revokedProofs > 0) this.proofRevocationCount += revokedProofs
   }
 
   search(request: HistoryIndexSearchRequest): HistoryIndexSearchPage {
