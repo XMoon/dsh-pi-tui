@@ -496,6 +496,9 @@ export async function runReadAuthority(context) {
           && Array.isArray(fact.continuedQuestionCallIds)
           && !fact.continuedQuestionCallIds.includes(callId)
       }, 'UA queued reply suppresses the continued candidate', 20_000)
+      const suppressedFact = factOf(suppressed, sessionX, 'UA queued suppression fact')
+      assert(suppressedFact.attention !== 'question' && suppressedFact.attention !== 'plan-review',
+        `UA a queued reply still reported attention ${JSON.stringify(suppressedFact.attention)}`)
       // Release the held turn: the queued reply is claimed as a durable
       // `user-question-reply` message exactly once.
       writeFileSync(holdBarrier, 'release\n', { mode: 0o600 })
