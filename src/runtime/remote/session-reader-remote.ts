@@ -16,6 +16,8 @@ import {
   type SessionContentSearchPage,
   type SessionProjectionSummary,
   type SessionReader,
+  type SessionReaderListSnapshot,
+  type SessionReaderObservableList,
   type SessionSummary,
 } from '../session-reader-port.ts'
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
@@ -33,15 +35,35 @@ export interface RemoteConnectionGenerationSource {
   subscribe(listener: () => void): () => void
 }
 
-/** The detached projection values retained on an official Client list row. */
+/** The detached projection values retained on an official Client list row.
+ *  `userQuestions`/`inbox` are the official summary-facing pending hints: they
+ *  are a SCHEDULING clue only (merged cached/sequenced values carry no per-key
+ *  provenance here) and are never read as an exact answerable fact. */
 export interface RemoteProjectionValues {
   readonly title?: unknown
   readonly agentPreset?: unknown
+  readonly userQuestions?: unknown
+  readonly inbox?: unknown
+}
+
+/** One listed Session's retained projection snapshot: the full shared store
+ *  view plus its explicit-load lifecycle. Used for the SAME scheduling hints as
+ *  the summary values, never as an exact read. */
+export interface RemoteSessionProjectionSnapshot {
+  readonly values: RemoteProjectionValues
+  readonly state: 'idle' | 'loading' | 'ready' | 'migration-required' | 'error'
 }
 
 /** The official Client Session list row subset consumed by this adapter. */
 export interface RemoteSessionListRow {
   readonly id: string
+  /** The official durable Host title, when the Client row carries one. */
+  readonly title?: string
+  /** The Client-composed display label (durable title, else cwd basename,
+   *  else the Session id). It is a DISPLAY fallback, never the durable title:
+   *  mapping it as a title would fabricate a Host title for an unnamed Session
+   *  and would make the roster semantics depend on a cwd basename. */
+  readonly displayTitle?: string
   readonly cwd?: string
   readonly parentId?: string
   readonly origin?: 'subagent'
@@ -60,6 +82,9 @@ export interface RemoteSessionListState {
   readonly ids: readonly string[]
   readonly byId: Readonly<Record<string, RemoteSessionListRow>>
   readonly phase: 'pending' | 'ready'
+  /** The shared projection store's per-Session values (including Sessions this
+   *  Client has not retained) and their explicit-load state. */
+  readonly projectionsBySession: Readonly<Record<string, RemoteSessionProjectionSnapshot>>
 }
 
 /** Observable list snapshot face from the official Session Controller client. */
@@ -190,10 +215,103 @@ export const CURRENT_STATUS_PROJECTION_KEYS: readonly string[] = [...STATUS_PROJ
 export class RemoteSessionReader implements SessionReader {
   private readonly sessions: RemoteSessionsReadSource
   private readonly generation: RemoteConnectionGenerationSource
+  private readonly listeners = new Set<() => void>()
+  private unsubscribeList: (() => void) | undefined
+  private unsubscribeGeneration: (() => void) | undefined
+  /** The observable list face's own publication counter (see
+   *  {@link SessionReaderListSnapshot}). It advances once per official list
+   *  notification while the face has a subscriber. */
+  private publication = 0
 
   constructor(sessions: RemoteSessionsReadSource, generation: RemoteConnectionGenerationSource) {
     this.sessions = sessions
     this.generation = generation
+  }
+
+  /** The ONE official row mapping shared by the explicit `list()` pull and the
+   *  observable snapshot: `ids` is the ordered membership/identity authority and
+   *  `byId[id]` only detaches that id's metadata. */
+  private rowsOf(snapshot: RemoteSessionListState): SessionSummary[] {
+    return snapshot.ids.map(id => {
+      const row = snapshot.byId[id]
+      return {
+        // `ids` is the official ordered membership/identity authority; the
+        // keyed row only supplies detached metadata for this id. The durable
+        // `title` (when the Host projected one) is the only title authority;
+        // the composed `displayTitle` fallback is deliberately not mapped.
+        id,
+        updatedAt: row.updatedAt,
+        ...(row.title === undefined ? {} : { title: row.title }),
+        // The official list row carries the shared projection values, so a
+        // preset-only change (another Client selects a preset on a blank
+        // Session) reaches the accepted roster without any extra read.
+        ...(typeof row.projectionValues?.agentPreset === 'string' && row.projectionValues.agentPreset !== ''
+          ? { preset: row.projectionValues.agentPreset }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(row.projectionValues ?? {}, 'agentPreset')
+          ? { presetKnown: true }
+          : {}),
+        cwd: row.cwd,
+        ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
+        ...(row.origin === undefined ? {} : { origin: row.origin }),
+        // The official Client row's `formatStatus` is passed through VERBATIM:
+        // no header parsing, no `cwd`-missing inference, no client-side decoder.
+        ...(row.formatStatus === undefined ? {} : { formatStatus: row.formatStatus }),
+        // The Client row's `running` bit is not the Direct reader's attached
+        // Session-store bit. Keep Remote rows conservatively detached and let
+        // shadow parity mark the field non-comparable.
+        live: false,
+      }
+    })
+  }
+
+  /** The synchronous observable snapshot: the SAME row mapping `list()` uses,
+   *  with the official list arrival phase as availability. A missing
+   *  Connection generation is `unavailable`, never an empty roster. */
+  private snapshot(): SessionReaderListSnapshot {
+    if (this.generation.getSnapshot() === undefined) {
+      return { generation: this.publication, availability: 'unavailable', rows: [] }
+    }
+    const listed = this.sessions.list.getSnapshot()
+    if (listed.phase !== 'ready') {
+      return { generation: this.publication, availability: 'loading', rows: [] }
+    }
+    return { generation: this.publication, availability: 'ready', rows: this.rowsOf(listed) }
+  }
+
+  /** The push-driven roster face over the official observable list. The
+   *  underlying subscription exists only while this face has a subscriber, and
+   *  it NEVER triggers an official list refresh: the Client Session Controller
+   *  owns list arrival. */
+  readonly observableList: SessionReaderObservableList = {
+    getSnapshot: () => this.snapshot(),
+    subscribe: (listener: () => void): (() => void) => {
+      this.listeners.add(listener)
+      if (this.unsubscribeList === undefined) {
+        const notify = (): void => {
+          this.publication += 1
+          // Snapshot the listener set: a listener may unsubscribe synchronously.
+          for (const registered of [...this.listeners]) registered()
+        }
+        // The official roster view is not the only source of its availability:
+        // a Connection change (loss/replacement) must notify even when the list
+        // store publishes nothing.
+        this.unsubscribeList = this.sessions.list.subscribe(notify)
+        this.unsubscribeGeneration = this.generation.subscribe(notify)
+      }
+      let active = true
+      return (): void => {
+        if (!active) return
+        active = false
+        this.listeners.delete(listener)
+        if (this.listeners.size === 0) {
+          this.unsubscribeList?.()
+          this.unsubscribeList = undefined
+          this.unsubscribeGeneration?.()
+          this.unsubscribeGeneration = undefined
+        }
+      }
+    },
   }
 
   async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
@@ -209,27 +327,8 @@ export class RemoteSessionReader implements SessionReader {
     signal?.throwIfAborted()
     if (!Object.is(capturedGeneration, this.generation.getSnapshot())) return undefined
 
-    const snapshot = this.sessions.list.getSnapshot()
-    if (snapshot.phase !== 'ready') return undefined
-    return snapshot.ids.map(id => {
-      const row = snapshot.byId[id]
-      return {
-        // `ids` is the official ordered membership/identity authority; the
-        // keyed row only supplies detached metadata for this id.
-        id,
-        updatedAt: row.updatedAt,
-        cwd: row.cwd,
-        ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
-        ...(row.origin === undefined ? {} : { origin: row.origin }),
-        // The official Client row's `formatStatus` is passed through VERBATIM:
-        // no header parsing, no `cwd`-missing inference, no client-side decoder.
-        ...(row.formatStatus === undefined ? {} : { formatStatus: row.formatStatus }),
-        // The Client row's `running` bit is not the Direct reader's attached
-        // Session-store bit. Keep Remote rows conservatively detached and let
-        // shadow parity mark the field non-comparable.
-        live: false,
-      }
-    })
+    const snapshot = this.snapshot()
+    return snapshot.availability === 'ready' ? [...snapshot.rows] : undefined
   }
 
   /** Official Client Session-summary blank bit — the Remote mapping of the

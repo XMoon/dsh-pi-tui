@@ -48,6 +48,7 @@ import { mergeCause } from '../remote/dispose-cause.ts'
 import type { RemoteBackendFetch } from '../remote/runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
 import type { HostDirectoryBrowseOutcome } from '../../runtime/host-directory-browse-port.ts'
+import type { WorkspaceFactsFrame } from '../../runtime/session-workspace-facts-port.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { CliSessionLaunchIntent } from '../../startup.ts'
@@ -1284,6 +1285,7 @@ async function startSurfaceLocalClient(
             readonly path?: unknown
             readonly abort?: unknown
             readonly namespace?: unknown
+            readonly mode?: unknown
           }
           nonce = request.nonce
           const backend = currentRevision?.application?.selected.backend
@@ -1352,37 +1354,207 @@ async function startSurfaceLocalClient(
             return
           }
           if (request.op === 'workspaces') {
-            const handle = backend.sessionWorkspaceFacts.followWorkspaces()
+            // The explicit one-shot probe keeps the historical default; a
+            // requested `recovering` mode consumes the official reconnecting
+            // stream lifecycle (physical carrier replacement + fresh baseline)
+            // and mirrors the Browser owner's ONE-legal-rebind rule after a
+            // terminal failure: the failed handle's generation is gone, so a
+            // generation change that already landed since it opened (or the
+            // NEXT one) may establish ONE new logical handle.
+            const mode = request.mode === 'recovering' ? 'recovering' as const : 'single-generation' as const
             const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 30_000
             const maxFrames = typeof request.maxFrames === 'number' ? request.maxFrames : Number.POSITIVE_INFINITY
-            const deadline = setTimeout(() => { handle.dispose() }, windowMs)
-            emit({ phase: 'workspaces-open', windowMs, maxFrames })
-            try {
-              let frames = 0
-              for await (const frame of handle) {
-                frames += 1
-                switch (frame.type) {
-                  case 'baseline':
-                  case 'replace':
-                    emit({ phase: 'workspaces-frame', type: frame.type, items: frame.items })
-                    break
-                  case 'upsert':
-                    emit({ phase: 'workspaces-frame', type: frame.type, workspace: frame.workspace })
-                    break
-                  case 'remove':
-                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceId: frame.workspaceId })
-                    break
-                  case 'order':
-                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceIds: frame.workspaceIds })
-                    break
-                }
-                if (frames >= maxFrames) break
+            const deadlineAt = Date.now() + windowMs
+            const generation = domains.connection.generation
+            let handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, mode)
+            const expiry = setTimeout(() => { handle.dispose() }, windowMs)
+            let frames = 0
+            let frameSeq = 0
+            let failed: string | undefined
+            // The LOGICAL handle sequence: a replacement constructed below is
+            // the only increment, so evidence can distinguish one-handle
+            // carrier recovery from a new logical handle.
+            let logicalHandle = 1
+            /** The first generation DIFFERENT from the failed handle's opening
+             *  one; a change already present resolves immediately. */
+            const waitForNewGeneration = async (baseline: unknown): Promise<boolean> => {
+              const current = generation.getSnapshot()
+              if (current !== undefined && !Object.is(current, baseline)) return true
+              return await new Promise<boolean>((resolve) => {
+                let off: (() => void) | undefined
+                const timer = setTimeout(() => { off?.(); resolve(false) }, Math.max(0, deadlineAt - Date.now()))
+                off = generation.subscribe(() => {
+                  const next = generation.getSnapshot()
+                  if (next === undefined || Object.is(next, baseline)) return
+                  clearTimeout(timer)
+                  off?.()
+                  resolve(true)
+                })
+              })
+            }
+            const emitFrame = (frame: WorkspaceFactsFrame): void => {
+              frames += 1
+              frameSeq += 1
+              switch (frame.type) {
+                case 'invalidated':
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, reason: frame.reason })
+                  break
+                case 'baseline':
+                case 'replace':
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, items: frame.items })
+                  break
+                case 'upsert':
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, workspace: frame.workspace })
+                  break
+                case 'remove':
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, workspaceId: frame.workspaceId })
+                  break
+                case 'order':
+                  emit({ phase: 'workspaces-frame', handle: logicalHandle, seq: frameSeq, type: frame.type, workspaceIds: frame.workspaceIds })
+                  break
               }
-              emit({ phase: 'workspaces-ended' })
+            }
+            emit({ phase: 'workspaces-open', handle: logicalHandle, mode, windowMs, maxFrames })
+            try {
+              consume: for (;;) {
+                try {
+                  for await (const frame of handle) {
+                    emitFrame(frame)
+                    if (frames >= maxFrames || Date.now() >= deadlineAt) break consume
+                  }
+                  break
+                } catch (error) {
+                  if (mode !== 'recovering') {
+                    failed = error instanceof Error ? error.message : String(error)
+                    break
+                  }
+                  // The failure belongs to the Connection that owned the real
+                  // physical attempt: only a defined live generation DIFFERENT
+                  // from it is a legal replacement trigger. Emit the actual
+                  // terminal provenance BEFORE any replacement decision.
+                  const attempted = handle.attemptedGeneration?.()
+                  const liveAtFailure = generation.getSnapshot()
+                  const startedWaiting = Date.now()
+                  const replacedInTime = await waitForNewGeneration(attempted)
+                  emit({
+                    phase: 'workspaces-terminal',
+                    handle: logicalHandle,
+                    errorClass: error instanceof Error ? (error.constructor?.name ?? 'Error') : typeof error,
+                    errorName: error instanceof Error ? error.name : undefined,
+                    errorCode: typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : undefined,
+                    message: String(error instanceof Error ? error.message : error).slice(0, 240),
+                    attemptKnown: attempted !== undefined,
+                    liveDefined: liveAtFailure !== undefined,
+                    attemptIsLive: attempted !== undefined && liveAtFailure !== undefined && Object.is(attempted, liveAtFailure),
+                    waitedMs: Date.now() - startedWaiting,
+                    replacedInTime,
+                    frames,
+                    deadlineReached: Date.now() >= deadlineAt,
+                  })
+                  if (!replacedInTime) {
+                    failed = error instanceof Error ? error.message : String(error)
+                    break
+                  }
+                  if (frames >= maxFrames || Date.now() >= deadlineAt) break
+                  // The failed logical handle is settled BEFORE the ONE legal
+                  // replacement is constructed (no duplicate physical streams).
+                  handle.dispose()
+                  logicalHandle += 1
+                  emit({ phase: 'workspaces-handle', handle: logicalHandle })
+                  handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, 'recovering')
+                }
+              }
             } finally {
-              clearTimeout(deadline)
+              clearTimeout(expiry)
               handle.dispose()
             }
+            if (failed === undefined) emit({ phase: 'workspaces-ended' })
+            else emit({ phase: 'workspaces-failed', error: failed })
+            return
+          }
+          if (request.op === 'activity') {
+            // Session Workspace PR1 qualification: drive the PRODUCTION
+            // incremental Activity observation over the REAL generated Client
+            // faces and count the ACTUAL unary requests it issues (peak
+            // in-flight and totals per endpoint). This is a test-only probe —
+            // the production adapter owns the same scheduling internally.
+            const rows = await backend.sessionReader.list(undefined)
+            if (rows === undefined) throw new Error('activity probe: the Host Session list is unavailable')
+            const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 5_000
+            const target = domains.remote.session as unknown as {
+              state: (...args: never[]) => unknown
+              projections: (...args: never[]) => unknown
+            }
+            // The generated namespace installs each method as a GETTER
+            // (`configurable: true`), so a plain assignment throws. The probe
+            // swaps the descriptors and restores the ORIGINAL descriptors.
+            const stateDescriptor = Object.getOwnPropertyDescriptor(target, 'state')
+            const projectionsDescriptor = Object.getOwnPropertyDescriptor(target, 'projections')
+            const originalState = target.state
+            const originalProjections = target.projections
+            const counters = { state: 0, projections: 0, inFlight: 0, peak: 0 }
+            const counted = (name: 'state' | 'projections', original: (...args: never[]) => unknown) =>
+              async (...args: never[]): Promise<unknown> => {
+                counters[name] += 1
+                counters.inFlight += 1
+                counters.peak = Math.max(counters.peak, counters.inFlight)
+                try {
+                  return await original.apply(target, args)
+                } finally {
+                  counters.inFlight -= 1
+                }
+              }
+            const observation = backend.sessionWorkspaceFacts.observeActivity(new AbortController().signal)
+            const snapshots: unknown[] = []
+            const record = (): void => {
+              const snapshot = observation.getSnapshot()
+              snapshots.push({
+                rosterRevision: snapshot.rosterRevision,
+                revision: snapshot.revision,
+                facts: snapshot.facts.map(fact => ({
+                  sessionId: fact.sessionId,
+                  running: fact.running,
+                  pendingKinds: fact.pendingKinds,
+                  continuedQuestionCallIds: fact.continuedQuestionCallIds,
+                  attention: fact.attention,
+                  attentionSourceState: fact.attentionSourceState,
+                })),
+                ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+                counters: { ...counters },
+              })
+              emit({ phase: 'activity-snapshot', revision: snapshot.revision, rosterRevision: snapshot.rosterRevision })
+            }
+            const unsubscribe = observation.subscribe(record)
+            Object.defineProperty(target, 'state', {
+              configurable: true,
+              enumerable: true,
+              value: counted('state', originalState),
+            })
+            Object.defineProperty(target, 'projections', {
+              configurable: true,
+              enumerable: true,
+              value: counted('projections', originalProjections),
+            })
+            try {
+              // The qualification probe composes no root interaction delivery,
+              // so it proves the CURRENT-session priority input only.
+              const probeStatus = status()
+              observation.setPriorityIds(new Set())
+              observation.setRoster(rows, 1, probeStatus.openSessionId ?? undefined)
+              await new Promise<void>(resolve => setTimeout(resolve, windowMs))
+              record()
+            } finally {
+              unsubscribe()
+              observation.dispose()
+              if (stateDescriptor !== undefined) Object.defineProperty(target, 'state', stateDescriptor)
+              if (projectionsDescriptor !== undefined) Object.defineProperty(target, 'projections', projectionsDescriptor)
+            }
+            emit({
+              phase: 'activity-result',
+              rows: rows.length,
+              counters: { ...counters },
+              snapshots,
+            })
             return
           }
           if (request.op === 'directory-browse') {

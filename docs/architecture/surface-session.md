@@ -252,16 +252,20 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   committed create consumes the captured intent, a stale intent fails before any
   Host `create`, and a failed preflight marks the Welcome status rejected
   without replacing the confirmed target.
-- **Activity is sampled, never inferred.** One accepted roster revision produces
-  one sample from `SessionWorkspaceFactsPort.readActivity` over the read owner's
-  roster. Activity generation and eligibility updates are separate from
-  Workspace membership revision, and stale roster results are inert. `running`,
-  `pending` and `attentionSourceState` retain provenance. Unknown, unavailable
-  and denied facts remain complete Activity facts; compact rows hide them rather
-  than printing them once per Session. A Working row paints `Working`, while
-  only confirmed answerability paints `Needs attention`. A newer roster revision
-  waiting for its Activity sample paints NO transient placeholder row: the list
-  keeps its existing rows and physical height. A real
+- **Activity is observed incrementally, never inferred.** Each open owns ONE
+  per-open `SessionWorkspaceFactsPort.observeActivity` handle over the read
+  owner's roster: it publishes the official running projection with the roster
+  and commits each measured row as it lands, so a slow or cold row never blocks
+  the first Working/Needs paint and the Session list never waits for a
+  whole-roster sample. Activity revision and eligibility updates are separate
+  from the Workspace membership revision AND from the roster revision, and a
+  fact measured on a superseded roster is inert. `running`, `pending` and
+  `attentionSourceState` retain provenance. Unknown, unavailable and denied
+  facts remain complete Activity facts; compact rows hide them rather than
+  printing them once per Session. A Working row paints `Working`, while only
+  confirmed answerability paints `Needs attention`. A row that was already
+  measured keeps its truthful unknown state instead of a transient placeholder
+  row: the list keeps its existing rows and physical height. A real
   `Activity unavailable: ...` failure remains a status line.
 - **Answerability is a gate, not a classification.** Only a pending candidate
   this Client can really answer may enter `Needs attention`: a live forwarded
@@ -277,10 +281,14 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   revoked answerability immediately leaves `Needs attention` and its count,
   because a classification is a fact and not a deferred animation.
 - **Workspace baseline is the membership authority.** Browse folders use official
-  `workspaceId`/`sessionIds` in follow order. A missing, denied, failed or ended
-  follow invalidates membership and keeps the roster usable as a flat fallback;
-  cwd never proves membership. Ambiguous and unassigned rows are explicit only
-  after a valid baseline. There is no `w` key that changes a scope selector.
+  `workspaceId`/`sessionIds` in follow order, and every generation starts with a
+  validated baseline. The Browser consumes the official RECONNECTING follow: a
+  lost carrier invalidates membership immediately (flat fallback) and the same
+  panel restores it from the next fresh baseline without closing or reopening
+  the surface; a terminal failure is stated truthfully and is never retried on
+  the same Connection generation. cwd never proves membership. Ambiguous and
+  unassigned rows are explicit only after a valid baseline. There is no `w` key
+  that changes a scope selector.
 - **Attention stays inside its Workspace.** Needs/Working are row priorities inside each official Workspace folder, never a cross-folder section or a reason to filter out sibling folders. Browse scope is not narrowed, so the header paints no outside-attention count.
 - **Search stays global.** The panel never re-filters the Host's bounded search
   page by the browse scope; only a real editor text change reaches the read
@@ -412,13 +420,13 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   background Transcript; a real navigation hit retires an old press while an
   inert wheel leaves a legal press intact.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
-  read owner, one Activity sample generation and one fullscreen lease. The close
-  path aborts list/search/Activity, disposes the follow once, stops the screen
-  once and restores the return surface once; a late result from any of the three
-  sources can never paint into a newer open. An Activity update never moves the
-  cursor to another Session: the selection is preserved by Session id and the
-  scroll anchor by the visible row id, so the user keeps browsing the same row
-  while the groups and statuses repaint truthfully.
+  read owner, one incremental Activity observation and one fullscreen lease. The
+  close path aborts list/search, disposes the observation and the follow once,
+  stops the screen once and restores the return surface once; a late result from
+  any source can never paint into a newer open. An Activity update never moves
+  the cursor to another Session: the selection is preserved by Session id and
+  the scroll anchor by the visible row id, so the user keeps browsing the same
+  row while the groups and statuses repaint truthfully.
 
 Authority: `TuiApp.openSessionWorkspace` + `SessionWorkspacePanel`,
 `projectPiTuiWorkspaceTree` (the ONE PiTUI action-row adapter over the shared

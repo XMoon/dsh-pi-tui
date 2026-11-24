@@ -183,6 +183,46 @@ export async function runReadAuthority(context) {
       assert((read.rows ?? []).every(row => row.origin !== 'subagent' && row.origin === undefined),
         'UA the two-Client scene unexpectedly listed a subagent child')
       assertNoHostWrite(sessionX, writesBefore, 'UA read of X')
+
+      // ── PR1: the ONE per-open INCREMENTAL Activity observation over the SAME
+      //    real generated Client wire. It must publish the official running
+      //    projection with the roster, discover X's real pending question
+      //    without a Gateway state sample per row, promote it to an exact pair,
+      //    and NEVER take an all-roster sample.
+      // A short window keeps the real timed question answerable for the rest of
+      // this scene while still draining a 2-row corpus many times over.
+      const activityNonce = signalProbe(clientA, { op: 'activity', windowMs: 3_000 })
+      const activity = await waitProbe(clientA, activityNonce,
+        record => record.phase === 'activity-result', 'UA activity observation result', 60_000)
+      const counters = activity.counters ?? {}
+      assert(typeof counters.state === 'number' && counters.state >= 1,
+        `UA the observation never sampled the current Session: ${JSON.stringify(counters)}`)
+      assert(typeof counters.projections === 'number' && counters.projections >= 1,
+        `UA the observation never discovered an ordinary row: ${JSON.stringify(counters)}`)
+      assert(counters.peak <= 4,
+        `UA the observation exceeded the fixed actual unary capacity: ${JSON.stringify(counters)}`)
+      assert(counters.state <= 4,
+        `UA the observation sampled the whole roster instead of the current/candidate rows: ${JSON.stringify(counters)}`)
+      assert(counters.projections <= activity.rows + 1,
+        `UA the observation issued more projections than roster rows: ${JSON.stringify(counters)}`)
+      const activitySnapshots = Array.isArray(activity.snapshots) ? activity.snapshots : []
+      assert(activitySnapshots.length >= 1, 'UA the observation published no snapshot')
+      const rosterSnapshot = activitySnapshots[activitySnapshots.length - 1]
+      assert((rosterSnapshot.facts ?? []).length >= 2,
+        `UA the observation did not publish one fact per authorized row: ${JSON.stringify(rosterSnapshot.facts)}`)
+      const xFacts = activitySnapshots
+        .map(snapshot => (snapshot.facts ?? []).find(fact => fact.sessionId === sessionX))
+        .filter(fact => fact !== undefined)
+      assert(xFacts.some(fact => fact.attention === 'question' && fact.attentionSourceState === 'known'),
+        `UA the incremental observation never discovered X's real pending question: ${JSON.stringify(xFacts)}`)
+      const xQuestionFact = xFacts.find(fact => fact.attention === 'question')
+      assert(xQuestionFact.running === true,
+        `UA the observation's running fact for X was ${JSON.stringify(xQuestionFact.running)}`)
+      assert(typeof rosterSnapshot.rosterRevision === 'number'
+        && typeof rosterSnapshot.revision === 'number',
+      'UA the observation snapshot carries no separate roster/activity revisions')
+      assertNoHostWrite(sessionX, writesBefore, 'UA incremental activity observation of X')
+
       // Re-read AFTER the sample: no retained reference and no second owner.
       const readAgain = await readFacts(clientA, 'UA A read after the first sample')
       assert((rowOf(readAgain, sessionX, 'UA X row (second read)').retainedBy?.tuiMainView ?? 0) === 0,
@@ -521,6 +561,103 @@ export async function runReadAuthority(context) {
       })
     }
 
+    // ── UA-05c: a persisted `continued` Question survives a REAL Host restart.
+    //    Same isolated DSH_HOME/profile, clean Host stop, new Host boot and a
+    //    new Client: the COLD session must be listed and its unanswered timed
+    //    call must be read exactly (attention + callId) without retain or
+    //    migration, and the incremental observation must publish the same fact.
+    {
+      const coldHold = join(workDir, 'ua-cold-question.release')
+      const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX } =
+        await startDualSurfaceScene('question', 'ua-cold', {
+          C1_TIMED_QUESTION: '1',
+          SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.timedPatchPath,
+          C1_HOLD_AFTER_TIMED: coldHold,
+        })
+      const triggerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+      await submitPrompt(clientB, 'm5c-question-trigger', 'UA cold question trigger')
+      const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+        'UA cold question tool/call', 120_000)
+      const callId = call.data.callId
+      assert(typeof callId === 'string' && callId !== '', 'UA cold question carries no callId')
+      await waitForC1WorkEvent(workRoot,
+        event => event.kind === 'after-timed-held' && event.sessionId === sessionX,
+        'UA cold question held after continued', 120_000)
+      // The durable continued call is NEVER answered here.
+      await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+        event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+        'UA cold timed question result', 120_000)
+      writeFileSync(coldHold, 'release\n', { mode: 0o600 })
+      await sleep(1_000)
+      for (const [side, client] of [['B', clientB], ['A', clientA]]) {
+        client.signalBusiness('SIGTERM')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 0 && exit.signal === null,
+          `UA cold Client ${side} exit was ${JSON.stringify(exit)}`)
+        await client.dispose()
+      }
+      await stopC1Host(host)
+      assert(host.exited === true && host.exitResult?.code === 0 && host.exitResult?.signal === null,
+        `UA cold Host did not shut down normally: ${JSON.stringify(host.exitResult)}`)
+      // A NEW Host on the SAME isolated profile/DSH_HOME, then a NEW Client.
+      const coldHost = await tools.startC1Host('question', 'ua-cold-restart')
+      assert(coldHost.ready.pid !== hostBefore.hostPid, 'UA cold restart reused the old Host PID')
+      const cold = await tools.startC1Client('UA cold A', {
+        SPLIT_PROCESS_CLIENT_READ_AUTHORITY_PROOF: requestPath,
+      })
+      try {
+        const read = await readFactsUntil(cold.client, record => {
+          const fact = (record.facts ?? []).find(entry => entry.sessionId === sessionX)
+          return fact !== undefined
+            && Array.isArray(fact.continuedQuestionCallIds)
+            && fact.continuedQuestionCallIds.includes(callId)
+        }, 'UA cold exact read of the persisted continued session', 120_000)
+        const row = rowOf(read, sessionX, 'UA cold persisted X row')
+        const fact = factOf(read, sessionX, 'UA cold persisted X fact')
+        assert(fact.attention === 'question' && fact.attentionSourceState === 'known',
+          `UA cold continued attention was ${JSON.stringify({ attention: fact.attention, source: fact.attentionSourceState })}`)
+        assert(Array.isArray(fact.pendingKinds) && !fact.pendingKinds.includes('question'),
+          `UA the cold timed-out question still reports a Gateway pending: ${JSON.stringify(fact.pendingKinds)}`)
+        assert((row.retainedBy?.tuiMainView ?? 0) === 0,
+          `UA the cold read retained the session: ${JSON.stringify(row.retainedBy)}`)
+        // No migration/activation: the session keeps its identity and the Host
+        // event log is still the SAME durable file (the call is unchanged).
+        const coldCalls = (hostSessionEvents(dshHome, sessionX) ?? [])
+          .filter(event => event.type === 'tool/call' && event.data?.callId === callId)
+        assert(coldCalls.length === 1, 'UA the cold session was migrated or re-triggered')
+        // The incremental observation over the cold rows publishes the same
+        // continued fact (real state/projections via the production adapter).
+        const activityNonce = signalProbe(cold.client, { op: 'activity', windowMs: 4_000 })
+        // The probe's `activity-snapshot` records carry only the revisions; the
+        // FACTS live in the `activity-result.snapshots` array (one snapshot per
+        // recorded revision). Wait for the result, then inspect the snapshots.
+        const activityResult = await waitProbe(cold.client, activityNonce,
+          record => record.phase === 'activity-result', 'UA cold activity result', 60_000)
+        const activitySnap = (activityResult.snapshots ?? []).find(record =>
+          (record.facts ?? []).some(entry => entry.sessionId === sessionX
+            && Array.isArray(entry.continuedQuestionCallIds)
+            && entry.continuedQuestionCallIds.includes(callId)))
+        assert(activitySnap !== undefined,
+          `UA cold incremental observation never published the continued fact: ${JSON.stringify(activityResult.counters)}`)
+        trace('ua-05c', {
+          oldHostPid: hostBefore.hostPid,
+          newHostPid: coldHost.ready.pid,
+          sessionX,
+          continuedCallId: callId,
+          attention: fact.attention,
+          retainedBy: row.retainedBy ?? {},
+          coldActivityCounters: activityResult.counters,
+          coldSnapshotRevision: activitySnap.revision,
+        })
+      } finally {
+        cold.client.signalBusiness('SIGTERM')
+        await cold.client.waitForExit(60_000).catch(() => {})
+        await cold.client.dispose()
+        await stopC1Host(coldHost.host)
+      }
+    }
+
     // ── UA-07/09/10: the official Workspace follow baseline + a REAL Session
     //    create increment, then a real mux rollover and a fresh-generation read.
     {
@@ -603,6 +740,24 @@ export async function runReadAuthority(context) {
         'UA workspaces stream ended', 150_000)
       assert((hostSessionEvents(dshHome, sessionY) ?? []).length >= createIndex,
         'UA the Host Session log lost events during the Workspace observation')
+      // ── PR1: the Browser's RECOVERING Workspace follow over the SAME
+      //    official reconnecting Gateway stream. A REAL mux rollover must
+      //    invalidate the current membership and deliver a FRESH baseline in
+      //    the SAME logical handle.
+      const recoveringNonce = signalProbe(clientA,
+        { op: 'workspaces', mode: 'recovering', windowMs: 120_000, maxFrames: 64 })
+      await waitProbe(clientA, recoveringNonce, record => record.phase === 'workspaces-open',
+        'UA recovering Workspace stream opened', 30_000)
+      const recoveringBaseline = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'baseline',
+        'UA recovering Workspace baseline', 30_000)
+      assert(Array.isArray(recoveringBaseline.items) && recoveringBaseline.items.length >= 1,
+        'UA the recovering Workspace baseline was empty')
+      const recoveringMember = recoveringBaseline.items.find(item =>
+        Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
+      assert(recoveringMember !== undefined,
+        `UA the recovering baseline lost the current Workspace membership: ${JSON.stringify(recoveringBaseline.items)}`)
+
       // A REAL mux rollover: the next read runs on the NEW generation.
       const beforeReconnect = lastSurfaceStatus(clientA)
       assert(beforeReconnect?.transport === 'connected' && typeof beforeReconnect.generationId === 'number',
@@ -614,6 +769,57 @@ export async function runReadAuthority(context) {
           && record.generationId !== beforeReconnect.generationId,
         'UA Client A reconnected on a new generation',
         120_000)
+      // The recovering observation invalidated the old generation's membership
+      // and consumed a FRESH baseline from the new one. The installed transport
+      // may deliver that baseline through the ONE legal replacement logical
+      // handle (the qualification probe's `handle` sequence increments once),
+      // never a duplicate stream and never a retry of the failed generation.
+      const invalidated = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'invalidated',
+        'UA recovering membership invalidated on the real carrier loss', 120_000)
+      const freshBaseline = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'baseline'
+          && typeof record.seq === 'number' && typeof invalidated.seq === 'number'
+          && record.seq > invalidated.seq,
+        'UA recovering fresh baseline after the real reconnect', 120_000).catch(async (error) => {
+        // A terminal failure is the other truthful outcome; surface its reason
+        // instead of the bare timeout.
+        const failed = await waitProbe(clientA, recoveringNonce,
+          record => record.phase === 'workspaces-failed', 'UA recovering terminal failure record', 2_000)
+          .catch(() => undefined)
+        throw new SplitSmokeAssertionError(
+          `${error instanceof Error ? error.message : String(error)}; terminal failure record: ${failed === undefined ? 'none' : JSON.stringify(failed)}`)
+      })
+      const freshMember = (freshBaseline.items ?? []).find(item =>
+        Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
+      assert(freshMember !== undefined,
+        `UA the fresh recovering baseline lost the current Workspace membership: ${JSON.stringify(freshBaseline.items)}`)
+      // Logical-handle provenance must discriminate the two accepted branches.
+      // A terminal escape needs its REAL provenance (a different defined live
+      // Connection, a real error class and the failed handle settled); the
+      // retryable carrier branch must recover on the SAME logical handle.
+      assert(typeof invalidated.handle === 'number' && typeof freshBaseline.handle === 'number',
+        `UA the recovering frames carry no logical-handle identity: ${JSON.stringify({ invalidated, freshBaseline })}`)
+      const terminal = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-terminal',
+        'UA recovering terminal provenance record', 3_000).catch(() => undefined)
+      if (terminal !== undefined) {
+        assert(terminal.handle === invalidated.handle,
+          `UA the terminal record names a different logical handle: ${JSON.stringify(terminal)}`)
+        assert(terminal.attemptKnown === true && terminal.liveDefined === true
+          && terminal.attemptIsLive === false && terminal.replacedInTime === true,
+          `UA a replacement was authorized without a different defined live Connection: ${JSON.stringify(terminal)}`)
+        assert(typeof terminal.errorName === 'string' && terminal.errorName.length > 0,
+          `UA the terminal record carries no actual error class: ${JSON.stringify(terminal)}`)
+        assert(freshBaseline.handle === invalidated.handle + 1,
+          `UA the terminal branch did not open exactly ONE replacement handle: ${invalidated.handle} -> ${freshBaseline.handle}`)
+      } else {
+        assert(freshBaseline.handle === invalidated.handle,
+          `UA the retryable carrier branch changed the logical handle without a terminal record: ${invalidated.handle} -> ${freshBaseline.handle}`)
+      }
+      await waitProbe(clientA, recoveringNonce, record => record.phase === 'workspaces-ended',
+        'UA recovering Workspace stream ended', 150_000)
+
       const afterReconnect = await readFacts(clientA, 'UA A read after the real reconnect')
       assert(afterReconnect.phase === 'facts', `UA the post-reconnect read failed: ${JSON.stringify(afterReconnect)}`)
       assert(afterReconnect.generationId === reconnected.generationId,

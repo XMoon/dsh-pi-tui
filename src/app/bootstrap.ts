@@ -1526,7 +1526,11 @@ export function applyRunnerWithRuntime(
           // Opening the official stream can itself fail closed (for example a
           // replaced Remote Connection generation): that is an unavailable
           // membership, never a crash and never an empty Workspace.
-          facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal)
+          // The startup `-c` pairing is a ONE-SHOT decision: it must never adopt
+        // a replacement generation's membership, so it requests the explicit
+        // single-generation contract even though the Browser defaults to the
+        // recovering one.
+        facts = backend.sessionWorkspaceFacts.followWorkspaces(lifecycleController.signal, 'single-generation')
           const first = await facts[Symbol.asyncIterator]().next()
           if (first.done !== true && first.value.type === 'baseline') baseline = first.value.items
         } catch (error) {

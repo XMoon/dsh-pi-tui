@@ -28,34 +28,49 @@ const row = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummar
 interface DirectHarness {
   readonly ctx: DirectFactsContextLike
   readonly facts: DirectSessionWorkspaceFacts
+  readonly agents: Record<string, DirectFactsAgentLike>
   setWorkspaceRows(rows: readonly WorkspaceFactEntityLike[]): void
   emitDomainChange(domain: string): void
+  /** Fire one official Agent lifecycle event (agent/status|created|disposed). */
+  emitAgent(event: 'agent/status' | 'agent/created' | 'agent/disposed', id: string): void
   readonly offCount: () => number
 }
 
 function directHarness(options: {
   registry?: boolean
-  agents?: Readonly<Record<string, DirectFactsAgentLike>>
+  agents?: Record<string, DirectFactsAgentLike>
   workspaces?: readonly WorkspaceFactEntityLike[]
 }): DirectHarness {
   let rows = options.workspaces ?? []
+  const agents = options.agents ?? {}
   let offCount = 0
   const listeners: Array<(change: { readonly domain: string }) => void> = []
+  const agentListeners = new Map<string, Array<(payload: { readonly agent: { readonly id: string } }) => void>>()
   const registry = {
     list: () => rows,
   }
   const ctx = {
     get: (name: string) => (name === 'workspaceRegistry' && options.registry !== false ? registry : undefined),
-    on: (name: string, listener: (change: { readonly domain: string }) => void) => {
-      if (name === 'domain/changed') listeners.push(listener)
+    on: (name: string, listener: (payload: never) => unknown) => {
+      if (name === 'domain/changed') {
+        listeners.push(listener as unknown as (change: { readonly domain: string }) => void)
+      } else {
+        const registered = agentListeners.get(name) ?? []
+        registered.push(listener as unknown as (payload: { readonly agent: { readonly id: string } }) => void)
+        agentListeners.set(name, registered)
+      }
       return () => { offCount += 1; return true }
     },
   } as unknown as DirectFactsContextLike
   return {
     ctx,
-    facts: new DirectSessionWorkspaceFacts(ctx, id => options.agents?.[id]),
+    agents,
+    facts: new DirectSessionWorkspaceFacts(ctx, id => agents[id]),
     setWorkspaceRows: next => { rows = next },
     emitDomainChange: domain => { for (const listener of listeners) listener({ domain }) },
+    emitAgent: (event, id) => {
+      for (const listener of agentListeners.get(event) ?? []) listener({ agent: { id } })
+    },
     offCount: () => offCount,
   }
 }
@@ -181,4 +196,68 @@ test('UA-10 the caller abort ends the Direct Workspace generation and releases t
   controller.abort()
   assert.deepEqual(await pending, { done: true, value: undefined })
   assert.equal(h.offCount(), 1)
+})
+
+// ── L2: the per-open incremental Direct observation ─────────────────────────
+
+test('UA-11 Direct publishes the exact live Agent running state for every main row, synchronously', () => {
+  const h = directHarness({
+    agents: { running: { status: 'running' }, idle: { status: 'idle' }, broken: { status: 'compacting' } },
+  })
+  const controller = new AbortController()
+  const observation = h.facts.observeActivity(controller.signal)
+  observation.setRoster([
+    row('running'),
+    row('idle'),
+    row('broken'),
+    row('child', { origin: 'subagent' }),
+    row('unknown'),
+  ], 1, 'running')
+  const snapshot = observation.getSnapshot()
+  assert.equal(snapshot.rosterRevision, 1)
+  assert.deepEqual(snapshot.facts.map(fact => fact.sessionId), ['running', 'idle', 'broken', 'unknown'],
+    'one fact per authorized main row, in roster order; a subagent child never enters')
+  assert.deepEqual(snapshot.facts.map(fact => fact.running), [true, false, undefined, undefined],
+    'the live Agent status is the ONLY running source; an unknown status is never idle')
+  assert.ok(snapshot.facts.every(fact => fact.attention === 'unknown' && fact.attentionSourceState === 'unknown'),
+    'Direct owns no cross-Session Gateway pending truth')
+  observation.dispose()
+  controller.abort()
+})
+
+test('UA-11 an official Agent lifecycle event invalidates ONLY the exact changed row', () => {
+  const h = directHarness({ agents: { a: { status: 'idle' }, b: { status: 'idle' } } })
+  const controller = new AbortController()
+  const observation = h.facts.observeActivity(controller.signal)
+  observation.setRoster([row('a'), row('b')], 1, undefined)
+  const first = observation.getSnapshot()
+  assert.deepEqual(first.facts.map(fact => fact.running), [false, false])
+  // The live Agent flips to running and the official Host event names it.
+  h.agents.a = { status: 'running' }
+  h.emitAgent('agent/status', 'a')
+  const next = observation.getSnapshot()
+  assert.equal(next.revision, first.revision + 1)
+  assert.deepEqual(next.facts.map(fact => fact.running), [true, false], 'only the named row changed')
+  // An event for an id outside this observation's roster is inert.
+  h.agents.ghost = { status: 'running' }
+  const before = observation.getSnapshot().revision
+  h.emitAgent('agent/status', 'ghost')
+  assert.equal(observation.getSnapshot().revision, before, 'a row outside the roster publishes nothing')
+  observation.dispose()
+  controller.abort()
+})
+
+test('UA-11 a disposed Direct observation removes its official listeners exactly once', () => {
+  const h = directHarness({ agents: { a: { status: 'idle' } } })
+  const controller = new AbortController()
+  const observation = h.facts.observeActivity(controller.signal)
+  observation.setRoster([row('a')], 1, undefined)
+  const offs = h.offCount()
+  observation.dispose()
+  observation.dispose()
+  assert.equal(h.offCount(), offs + 3, 'each official listener is removed exactly once on the first dispose')
+  controller.abort()
+  h.agents.a = { status: 'running' }
+  h.emitAgent('agent/status', 'a')
+  assert.equal(observation.getSnapshot().facts[0]?.running, false, 'a disposed observation never repaints')
 })

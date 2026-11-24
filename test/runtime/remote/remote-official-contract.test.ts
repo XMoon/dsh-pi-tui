@@ -79,7 +79,11 @@ import { RemoteSkillCatalog } from '../../../src/runtime/remote/skill-remote.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf } from '../../../src/app/remote/m3a-semantics.ts'
 import { RemoteHostFilePort } from '../../../src/runtime/remote/host-file-remote.ts'
 import { RemoteInteractionPort } from '../../../src/runtime/remote/interaction-remote.ts'
-import { RemoteSessionWorkspaceFacts } from '../../../src/runtime/remote/session-workspace-facts-remote.ts'
+import {
+  RemoteSessionWorkspaceFacts,
+  type RemoteSessionStatusEventsLike,
+  type RemoteWorkspaceStreamSource,
+} from '../../../src/runtime/remote/session-workspace-facts-remote.ts'
 import {
   RemoteHostDirectoryBrowsePort,
   type RemoteDirectoryPickerNamespace,
@@ -275,16 +279,39 @@ function officialContextFactFaces(): { breakdown: ContextBreakdownProjection; us
  *  adapter's one-source face with NO cast — the passive `session.state` /
  *  `session.projections` methods and `workspace.follow` are the published
  *  contract, not a test-only shape. */
+/** The real generated forwarded-event seat, narrowed to the ONE event the
+ *  activity observation consumes. The generated `$on` is one generic method
+ *  bound to its own service state (the P11 same-Host wire smoke caught the
+ *  unbound failure), so the production runtime binds it once. */
+function officialSessionStatusEvents(remote: ClientRemote): RemoteSessionStatusEventsLike {
+  return remote.$on.bind(remote) as unknown as RemoteSessionStatusEventsLike
+}
+
 function officialSessionWorkspaceFacts(
-  sessions: ISessions,
-  remote: ClientRemote,
+  runtime: import('../../support/m3-inprocess/client-runtime.ts').RemoteClientRuntime,
   generation: ConnectionGenerationState,
 ): RemoteSessionWorkspaceFacts {
   return new RemoteSessionWorkspaceFacts({
-    sessions,
-    remote: { session: remote.session, workspace: remote.workspace },
+    sessions: runtime.sessions,
+    remote: { session: runtime.remote.session, workspace: runtime.remote.workspace },
     connection: { generation },
+    events: {
+      onSessionStatus: listener => officialSessionStatusEvents(runtime.remote)('api-session/status', listener),
+    },
+    // The mounted Client domain's own reconnecting stream source (the captured
+    // `ClientRemote.$stream` receiver and the Gateway module's OWN carrier-error
+    // constructor), not a test-only stand-in.
+    workspaceStream: runtime.workspaceStream,
+    initialGeneration: runtime.initialGeneration,
   })
+}
+
+/** The mounted domain's reconnecting stream source is the SAME narrow source
+ *  shape the per-open `recovering` Workspace follow consumes. */
+function officialWorkspaceStreamSource(
+  runtime: import('../../support/m3-inprocess/client-runtime.ts').RemoteClientRuntime,
+): RemoteWorkspaceStreamSource {
+  return runtime.workspaceStream
 }
 
 /** M5-U-A: the official projection PAYLOAD the Attention classification reads
@@ -380,6 +407,8 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     piTuiHostFilePort,
     officialRemoteInteractionPort,
     officialSessionWorkspaceFacts,
+    officialWorkspaceStreamSource,
+    officialSessionStatusEvents,
     officialQuestionProjectionPayload,
     officialHostDirectoryBrowseNamespace,
     officialHostDirectoryBrowsePort,

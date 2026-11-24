@@ -25,6 +25,8 @@ import {
   type MountedRemoteClientDomains,
 } from '../../../src/app/remote/client-runtime.ts'
 import { mergeCause } from '../../../src/app/remote/dispose-cause.ts'
+import type { RemoteWorkspaceStreamSource } from '../../../src/runtime/remote/session-workspace-facts-remote.ts'
+import type { RemoteConnectionGeneration } from '../../../src/runtime/remote/session-reader-remote.ts'
 import type { InProcessHostCarrier } from './host-runtime.ts'
 
 /** The composed official Client runtime. Not exported from the package root. */
@@ -34,6 +36,11 @@ export interface RemoteClientRuntime {
   readonly sessions: ISessions
   readonly jobs: IJobs
   readonly remote: ClientRemote
+  /** The production mounted-domain reconnecting Workspace stream source and
+   *  the Client-domain initial Connection identity: the SAME fields the split
+   *  Client hands the application assembly. */
+  readonly workspaceStream: RemoteWorkspaceStreamSource
+  readonly initialGeneration: RemoteConnectionGeneration | undefined
   dispose(): Promise<void>
 }
 
@@ -151,6 +158,8 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     sessions: mounted.sessions,
     jobs: mounted.jobs,
     remote: mounted.remote,
+    workspaceStream: mounted.workspaceStream,
+    initialGeneration: mounted.initialGeneration,
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true

@@ -12,6 +12,7 @@ import type {
   SessionBrowserResumeIntent,
 } from '../../src/app/command/session-browser-presentation.ts'
 import type { SessionProjectionSummary, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
+import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
 
@@ -771,4 +772,100 @@ test('a failed resume attempt re-enables the panel and each intent settles indep
     'the older attempt must not settle the newer pending intent')
   settles[1]!({ kind: 'switched', sessionId: 'session-other' })
   await waitUntil('the retry settles pending', () => presentation.latest()?.resumePending === false, 3_000)
+})
+
+test('an explicit refresh re-opens the ONE Activity observation so unfinished discovery is retried', async (t) => {
+  const observations: Array<{ disposed: number }> = []
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    observeActivity: () => {
+      const record = { disposed: 0 }
+      observations.push(record)
+      return {
+        setRoster() {},
+        setPriorityIds() {},
+        getSnapshot: () => ({ rosterRevision: 0, revision: 0, facts: [] }),
+        subscribe: () => () => {},
+        dispose: () => { record.disposed += 1 },
+      }
+    },
+    followWorkspaces: () => ({
+      dispose() {},
+      isCurrent: () => true,
+      async *[Symbol.asyncIterator]() { /* no frames in this read-only case */ },
+    }),
+  }
+  const presentation = new PresentationProbe()
+  const owner = createSessionBrowserReadOwner({
+    reader: reader(),
+    presentation,
+    captureSubject: () => captured(),
+    diag: DIAG(),
+    sessionWorkspaceFacts: facts,
+  })
+  t.after(() => { owner.dispose() })
+  owner.open()
+  assert.equal(observations.length, 1, 'opening starts exactly ONE observation')
+  owner.refresh()
+  assert.equal(observations[0]!.disposed, 1, 'the explicit refresh disposes the unfinished observation')
+  assert.equal(observations.length, 2, 'the refresh re-opens exactly ONE observation so failed discovery retries')
+})
+
+test('R17 an explicit refresh owns exactly ONE projection chain and an older chain cannot overwrite it', async (t) => {
+  const presentation = new PresentationProbe()
+  const listed = Array.from({ length: 45 }, (_, index) => row(`session-row-${String(index).padStart(2, '0')}`, { updatedAt: 1_000 - index }))
+  let listRows = listed
+  const calls: string[][] = []
+  const held: Array<() => void> = []
+  let holdNext = false
+  const read = reader({
+    list: async () => listRows,
+    projectionBatch: async (batch) => {
+      calls.push(batch.map(item => item.id))
+      const stale = holdNext
+      if (holdNext) {
+        holdNext = false
+        await new Promise<void>((resolve) => { held.push(resolve) })
+      }
+      return new Map(batch.map(item => [item.id, {
+        title: stale ? `STALE ${item.id}` : `Fresh ${item.id}`,
+      }]))
+    },
+  })
+  const { owner, diag } = ownerFor(presentation, read)
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open()
+  await waitUntil('the initial one-chain enrichment settles', () => calls.length === 2
+    && presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
+  calls.length = 0
+  // An UNCHANGED explicit refresh still re-reads metadata, with exactly ONE
+  // chain (a second simultaneous chain would double these calls).
+  owner.refresh()
+  await waitUntil('the unchanged refresh chain settles', () => calls.length === 2
+    && presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 2, 'an unchanged refresh runs exactly ONE projection chain')
+  calls.length = 0
+  // A changed refresh also runs exactly ONE chain (never one beside it).
+  listRows = [...listed, row('session-new', { updatedAt: 2_000 })]
+  owner.refresh()
+  await waitUntil('the changed refresh chain settles', () => calls.length === 2
+    && presentation.latest()?.rows.some(entry => entry.id === 'session-new' && entry.title === 'Fresh session-new') === true)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 2, 'a changed refresh runs exactly ONE projection chain')
+  calls.length = 0
+  // A held older chain is retired: its late result can never overwrite the
+  // newer accepted enrichment, and exactly one new chain starts.
+  holdNext = true
+  owner.refresh()
+  await waitUntil('the held refresh chain starts', () => calls.length === 1)
+  owner.refresh()
+  // The newer chain must DISPATCH its own batch (not merely inherit the title
+  // the previous refresh already proved).
+  await waitUntil('the newer refresh chain dispatches', () => calls.length >= 2)
+  await waitUntil('the newer refresh chain settles', () => presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
+  held.splice(0).forEach(release => { release() })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(!presentation.latest()?.rows.some(entry => entry.title?.startsWith('STALE ') === true),
+    'a retired chain never writes its stale projection into the accepted roster')
 })

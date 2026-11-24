@@ -14,6 +14,7 @@
 
 ### 改进
 
+- **Session 列表状态加载更快、更稳**：PiTui/TSP 的 `/sessions` 不再周期性全量刷新并等待所有 Session 的状态读取完成，而是订阅官方 Session 列表的推送更新，只读取真正需要确认的 Session；首屏列表和 `Working` 状态立即出现，慢的冷 Session 不再拖住其他行。Daemon/Remote 下断线重连后，列表状态与 Workspace 归属会自动恢复，无需退出页面；真实失败仍如实提示。Direct 模式行为不变。
 - **Settings 行的真实动作可直接点击**：设置页 Rows 底栏现在按当前行显示真实的 `Open` / `Choose` / `Details` 前进动作，已完整绘出的提示可直接点击，并与键盘 Enter 走同一条路径；不可用或未装配的专业页面不会被误标为 `Open`。点击行本身仍只选中，不改变原有窄屏行为。
 
 - **Agent 并行工具调用改为在 Detail 内直接编辑**：`/settings → Agent` 的原 `Agent loop` 行更名为 `Parallel tool calls`（内部 id 与官方命名空间不变），行内直接显示当前有效值。选中行不会打开任何页面，`Enter` / 右方向键或正文的 `Change` 才进入同一 Detail 内的数字输入，**一次确认**即提交一次官方写入；`Details [?]` 或不输入直接按 `?` 可展开 effective/inherited/修订号与官方 unset 的高级信息。空值或非法值留在输入框并给出真实错误、零写入；与当前值相同的输入显示 `No changes` 而不是伪造成功；依赖宿主回读的 `Verified` / `Not saved` / `Unverified` / `Outcome unconfirmed` 与父级面板导航的脏草稿确认都会如实展示。Shell 执行的两字段页保持原有 Apply→Save 流程不变。

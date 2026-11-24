@@ -53,7 +53,13 @@ import { RemotePluginManagerPort } from '../../runtime/remote/plugin-manager-rem
 import { RemoteDeliveredFileReadPort } from '../../runtime/remote/deliverables-remote.ts'
 import type { RemoteWorkspaceFilesNamespace } from '../../runtime/remote/deliverables-remote.ts'
 import type { SessionWorkspaceFactsPort } from '../../runtime/session-workspace-facts-port.ts'
-import { RemoteSessionWorkspaceFacts, type RemoteSessionFactsRemotes } from '../../runtime/remote/session-workspace-facts-remote.ts'
+import {
+  RemoteSessionWorkspaceFacts,
+  type RemoteSessionFactsRemotes,
+  type RemoteSessionStatusEventsLike,
+  type RemoteWorkspaceStreamSource,
+} from '../../runtime/remote/session-workspace-facts-remote.ts'
+import type { RemoteConnectionGeneration } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemoteWebAccessNamespace } from '../../runtime/remote/web-access-remote.ts'
 import type { RemoteAcpAccessNamespace } from '../../runtime/remote/acp-access-remote.ts'
 import type { PiTuiHostUserShellNamespace } from '../../runtime/remote/pi-tui-host-user-shell-contract.ts'
@@ -258,6 +264,16 @@ export interface RemoteM3ARuntimeSource {
   readonly jobs: RemoteJobObservationSource
   /** The ONE shared Connection generation source. */
   readonly connection: { readonly generation: RemoteConnectionGenerationSource }
+  /** The official reconnecting Workspace stream source: the SAME
+   *  `ClientRemote.$stream` receiver and the SAME installation's
+   *  `RemoteStreamCarrierError` constructor (see
+   *  `RemoteWorkspaceStreamSource`). Only the per-open Browser Workspace
+   *  follow consumes it; the `-c` one-shot path stays single-generation. */
+  readonly workspaceStream: RemoteWorkspaceStreamSource
+  /** The Client-domain-scoped FIRST established Connection generation.
+   *  `undefined` means the composition never proved an initial generation, so
+   *  a `phase=ready` list can never be claimed as a fresh `running` baseline. */
+  readonly initialGeneration: RemoteConnectionGeneration | undefined
 }
 
 /**
@@ -286,6 +302,10 @@ export function createRemoteM3ASemantics(
   const forwardedEvents = remote.$on.bind(remote) as unknown as
     RemoteInteractionRuntimeSource['remote']['$on']
       & RemotePluginManagerSource['$on']
+  // The forwarded Agent status event is the RECOVERY path's currentness proof:
+  // the same method-bound `$on` seat, never a second transport and never a
+  // duplicate durable status registry (the Session Manager remains the store).
+  const sessionStatusEvents = remote.$on.bind(remote) as unknown as RemoteSessionStatusEventsLike
   const modelCatalog = new RemoteModelCatalog(remote.session, sessions, generation, remote.llm, remote.piTuiDefaultModel)
   const interaction = new RemoteInteractionPort({
     sessions,
@@ -296,6 +316,19 @@ export function createRemoteM3ASemantics(
     ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
   })
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
+  const sessionWorkspaceFacts = new RemoteSessionWorkspaceFacts({
+    sessions,
+    remote: { session: remote.session, workspace: remote.workspace },
+    connection: { generation },
+    // The ONE forwarded status seat (recovery currentness only).
+    events: {
+      onSessionStatus: listener => sessionStatusEvents('api-session/status', listener),
+    },
+    // The official reconnecting Gateway lifecycle: the SAME `$stream`
+    // receiver and the captured same-installation carrier-error class.
+    workspaceStream: runtime.workspaceStream,
+    initialGeneration: runtime.initialGeneration,
+  })
   let disposed = false
   return {
     sessionReader: new RemoteSessionReader(sessions, generation),
@@ -328,12 +361,9 @@ export function createRemoteM3ASemantics(
     deliveredFileRead: new RemoteDeliveredFileReadPort(remote.workspaceFiles, generation),
     // M5-U-A: passive `session.state`/`session.projections` reads over the SAME
     // generated namespace and the official `workspace.follow` stream. No second
-    // Client/Remote, no retain, no writer.
-    sessionWorkspaceFacts: new RemoteSessionWorkspaceFacts({
-      sessions,
-      remote: { session: remote.session, workspace: remote.workspace },
-      connection: { generation },
-    }),
+    // Client/Remote, no retain, no writer. Its adapter-lifetime discovery
+    // receipts own Client-store subscriptions, released with this adapter.
+    sessionWorkspaceFacts,
     // S5-PR4: the official generated `schedule` namespace over the SAME
     // Client Remote and the SAME Connection generation; a missing namespace is
     // a truthful unavailable, never a Direct fallback.
@@ -358,6 +388,7 @@ export function createRemoteM3ASemantics(
       modelCatalog.disposeCache()
       presetCatalog.disposeCache()
       interaction.dispose()
+      sessionWorkspaceFacts.dispose()
     },
   }
 }

@@ -33,7 +33,7 @@ function state(
   byId: Readonly<Record<string, RemoteSessionListRow>>,
   phase: RemoteSessionListState['phase'] = 'ready',
 ): RemoteSessionListState {
-  return { ids, byId, phase }
+  return { ids, byId, phase, projectionsBySession: {} }
 }
 
 function binding(values: RemoteProjectionValues & Readonly<Record<string, unknown>>): RemoteSessionBinding {
@@ -663,4 +663,29 @@ test('the live status projection list is EXACTLY what the status reads (no stati
   // consumer establishes the subscription it needs.
   assert.equal(CURRENT_STATUS_PROJECTION_KEYS.includes('turnOutline'), false)
   assert.equal(CURRENT_STATUS_PROJECTION_KEYS.includes('sessionStats'), false)
+})
+
+test('the durable title is mapped from the real rc.5 row shape and the display fallback is never a title', async () => {
+  // The installed `projectList()` composes `displayTitle` from (durable title |
+  // cwd basename | session id) and only adds `title` when the projection store
+  // holds a durable title. Mapping the fallback as a title would fabricate one.
+  const generations = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state(
+      ['titled', 'untitled'],
+      {
+        titled: listRow('titled', 10, { title: 'Renamed session', displayTitle: 'Renamed session' }),
+        untitled: listRow('untitled', 20, { displayTitle: 'project-basename' }),
+      },
+    ),
+  })
+  const reader = new RemoteSessionReader(source, generations.source)
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows, [
+    { id: 'titled', updatedAt: 10, title: 'Renamed session', cwd: undefined, live: false },
+    { id: 'untitled', updatedAt: 20, cwd: undefined, live: false },
+  ], 'only the durable title is mapped; the composed display fallback is not a title')
+  // The observable (push) snapshot uses the SAME mapping.
+  const snapshot = reader.observableList?.getSnapshot()
+  assert.deepEqual(snapshot?.rows, rows)
 })

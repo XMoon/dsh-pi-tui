@@ -27,6 +27,10 @@ import {
 import type { RemoteWorkspaceNamespaceLike } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteSessionsReadSource } from '../../../src/runtime/remote/session-reader-remote.ts'
 import type { SessionSummary } from '../../../src/runtime/session-reader-port.ts'
+import {
+  silentSessionStatusEvents,
+  unconfiguredWorkspaceStream,
+} from '../../support/remote-session-workspace-source.ts'
 
 const row = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummary =>
   ({ id, updatedAt: 1, live: false, ...overrides })
@@ -68,6 +72,7 @@ function remoteFacts(options: {
           updatedAt: item.updatedAt,
         }])),
         phase: 'ready',
+        projectionsBySession: {},
       }),
       subscribe: () => () => {},
     },
@@ -91,6 +96,9 @@ function remoteFacts(options: {
       workspace: options.workspace ?? { create: async () => ({ ok: false, error: {} }), follow: () => { throw new Error('no stream') } },
     },
     connection: { generation },
+    events: silentSessionStatusEvents(),
+    workspaceStream: unconfiguredWorkspaceStream(),
+    initialGeneration: generationIdentity,
   }
   return new RemoteSessionWorkspaceFacts(source)
 }

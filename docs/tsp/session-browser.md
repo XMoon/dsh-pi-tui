@@ -48,8 +48,11 @@ production default; TSP keeps the experimental opt-in described in
   `Next`, and receives the same eight-row watermark without ever becoming
   `Current`.
 - A missing or failed Workspace baseline keeps the listed roster usable as a
-  flat fallback and states the single unavailable membership annotation.
-  Ambiguous membership is not guessed into the current Workspace.
+  flat fallback and states the single unavailable membership annotation; the
+  same panel restores membership from the next fresh official baseline after a
+  carrier loss (see the shared Session activity/Workspace contract in
+  [host-client.md](../architecture/host-client.md)). Ambiguous membership is
+  not guessed into the current Workspace.
 - Workspace folder expansion is per Browser open. Search remains global and
   ignores folder expansion; clearing the query restores the same typed
   selection and expansion state.
@@ -156,11 +159,13 @@ production default; TSP keeps the experimental opt-in described in
 - `/sessions [query]` and bare `/resume` open the same Browser. `/search <query>`
   opens its global Cards view with the initial query; empty `/search` is rejected
   before listing. None of these commands creates a Session.
-- `/resume <id-or-prefix>` uses the single official `SessionReader.list()` read
-  for that open and the pure `findSessionMatch()` over `panel.rows` (listed
-  main-session rows only): a full exact ID wins over the listed order; without
-  one, only a UNIQUE non-empty `session-`/`session_`/short-id prefix starts the
-  switch, still without a second list. An ambiguous prefix, an empty prefix
+- `/resume <id-or-prefix>` matches against the ONE official roster of that open
+  (the reader's pull result, or the push-driven official snapshot when the
+  reader exposes it — never a second list) and the pure `findSessionMatch()`
+  over `panel.rows` (listed main-session rows only): a full exact ID wins over
+  the listed order; without one, only a UNIQUE non-empty
+  `session-`/`session_`/short-id prefix starts the switch, still without a
+  second list. An ambiguous prefix, an empty prefix
   (bare `session-`/`session_`), and a miss — including a subagent-only target —
   never switch: the same original text seeds the ONE global Browser search for
   the user to choose from. A manual Browser query entered while the list loads

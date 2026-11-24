@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { inertActivityObservation } from '../support/session-workspace-facts-fake.ts'
 import test from 'node:test'
 import { CAPABILITIES, DIRECT_IMPLEMENTED_CAPABILITIES } from '../../src/runtime/capability.ts'
 import { createDirectBackend } from '../../src/runtime/backend.ts'
@@ -298,6 +299,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   }
   const sessionWorkspaceFacts: import('../../src/runtime/session-workspace-facts-port.ts').SessionWorkspaceFactsPort = {
     readActivity: async () => [],
+    observeActivity: () => inertActivityObservation(),
     followWorkspaces: () => {
       throw new Error('the fixture never follows Workspaces')
     },
