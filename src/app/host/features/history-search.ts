@@ -2529,6 +2529,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     if (this.reconcilePending.size > 0) {
       this.state = { kind: 'incomplete', reason: 'reconciling' }
+      // A startup/pass handoff may have left ordinary accepted events whose
+      // repair was refused during loading. Schedule the bounded drain now;
+      // never wait for another event or the 30 s timer.
+      if (this.hasUnheldPending()) this.enqueueDrain()
       return
     }
     if (this.pending.size > 0) {

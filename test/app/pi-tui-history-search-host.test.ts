@@ -3473,3 +3473,62 @@ test('a normal live drain uses the index status predicate, not a checkpoint scan
     await ctx.fiber.dispose()
   }
 })
+
+test('a startup accepted event is handed to the bounded drain without waiting for a timer', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r802-')
+  const a = mutableSource('/repo/r802-a', 'r802-a')
+  const b = mutableSource('/repo/r802-b', 'r802-b')
+  a.live = true
+  b.live = false
+  b.present = false
+  const { deps } = mutableDeps(a, [b])
+  const persistence = deps.sessionPersistence()
+  const realList = persistence.list
+  let listEntered!: () => void
+  const listReached = new Promise<void>(resolve => { listEntered = resolve })
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  const ctx = new Context()
+  let service: PiTuiHistorySearchHostService | undefined
+  try {
+    const oldRoster = await realList.call(persistence)
+    persistence.list = async () => {
+      listEntered()
+      await listGate
+      return oldRoster
+    }
+    service = directService(ctx, deps, profileDir)
+    await listReached
+    // B is born and its accepted event arrives while the initial roster is held.
+    b.live = true
+    b.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 19_000,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'r802-b-startup',
+          role: 'user',
+          content: [{ type: 'text', text: 'r802 startup accepted event' }],
+          source: { kind: 'user', rpcId: 'rpc-r802-b' },
+        }],
+      },
+    })
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(b), b.events[3])
+    releaseList()
+    await waitDirectReady(service, 10_000)
+    const hit = await service.search({ scope: 'all', query: 'r802 startup accepted event', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    releaseList()
+    persistence.list = realList
+    if (service !== undefined) await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
