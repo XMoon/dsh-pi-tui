@@ -7,7 +7,7 @@ import { rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
 const IS_GUI = process.env.TERN_FOCUS_GUI === '1'
 const SCENARIO = process.env.TERN_FOCUS_CASE ?? 'svg'
-if (SCENARIO !== 'svg' && SCENARIO !== 'image' && SCENARIO !== 'question') throw new Error(`unknown Focus Tern case ${SCENARIO}`)
+if (SCENARIO !== 'svg' && SCENARIO !== 'image' && SCENARIO !== 'question' && SCENARIO !== 'command') throw new Error(`unknown Focus Tern case ${SCENARIO}`)
 export function focusEvidenceTier(isGui) {
   return `${isGui ? 'REAL_TERN_GUI' : 'REAL_TERN_HEADLESS'} + CONTROL_INJECTED_INPUT + official Direct application`
 }
@@ -70,6 +70,10 @@ const subtreeText = (nodes, id) => {
   return out.join(' ')
 }
 const eventRows = h => records(h).filter(row => row.kind === 'client.toggle')
+/** The final Assistant materializes either as a native card or as the role
+ *  container the client assigns to a plain assistant row. */
+const isAssistantRow = node => node.k === 'card'
+  || String(node.p?.role ?? '').startsWith('dsh.transcript.assistant')
 const mainRegion = snapshot => snapshot.nodes.find(node => String(node.class ?? '').split(/\s+/u).includes('sf-main'))
 const mainNodes = snapshot => {
   const main = mainRegion(snapshot)
@@ -131,8 +135,10 @@ export default async function (h) {
   const dshSessionPin = packageJson.devDependencies?.['@deepseek-ai/dsh-session']
   const sdkIntegrity = lock.match(/'@stencil-hq\/tern@0\.2\.0':\s*\n\s*resolution: \{integrity: ([^}]+)\}/u)?.[1]
   const extra = { tern: ternVersion, sdk: '0.2.0', dsh: dshPin }
-  h.check('the worktree uses the plan-pinned DSH npm runtime',
-    dshPin === '0.2.2-rc.1' && dshSessionPin === dshPin && dshMode === 'npm',
+  // The lane follows the checkout's own frozen DSH pin instead of hardcoding
+  // one release: a version bump must not turn this qualification lane red.
+  h.check('the worktree uses its tracked DSH npm runtime',
+    typeof dshPin === 'string' && dshPin !== '' && dshSessionPin === dshPin && dshMode === 'npm',
     JSON.stringify({ dshPin, dshSessionPin, dshMode }))
   h.check('the lockfile carries the pinned Tern SDK integrity', sdkIntegrity !== undefined, String(sdkIntegrity))
   h.measure('the Tern client binary identity for this run', JSON.stringify({ version: ternVersion, sha256: ternSha256 }))
@@ -162,7 +168,11 @@ export default async function (h) {
     finish(h, extra)
     return
   }
-  h.check('the Direct subject records its own running fixture', records(h).some(row => row.kind === 'fixture.ready'))
+  if (!await waitFor(h, 'the Direct subject records its own running fixture',
+    () => records(h).some(row => row.kind === 'fixture.ready'))) {
+    finish(h, extra)
+    return
+  }
   const hello = wire(h).find(row => row.dir === 'in' && row.verb === 'r' && row.body?.r === 'hello')
   const promptInfo = JSON.parse(readFileSync(join(h.root, 'prompts.json'), 'utf8'))
   const manifest = {
@@ -319,6 +329,177 @@ export default async function (h) {
         && roots.length === 1
         && liveNodes(h).get(roots[0])?.p.collapsed === true
         && !h.texts(h.snapshot()).includes(promptInfo.assistantMarker)
+    })) {
+      finish(h, extra)
+      return
+    }
+  } else if (SCENARIO === 'command') {
+    // Phase 1 — the command is durable while the SAME Turn has no continuation
+    // yet: it stays a standalone row and the Turn keeps its ONE summary.
+    if (!await waitFor(h, 'the real mid-Turn command lands before the second Work begins', () => {
+      const rows = records(h)
+      const roots = rootIds(liveNodes(h))
+      return rows.some(row => row.kind === 'command.injected')
+        && rows.some(row => row.kind === 'subject.model-step.held' && row.stepIndex === 1)
+        && rows.some(row => row.kind === 'display.commit' && row.messageKinds.includes('command') && !row.finalPresent)
+        && roots.length === 1
+        && liveNodes(h).get(roots[0])?.p.collapsed === true
+        && !h.texts(h.snapshot()).includes(promptInfo.assistantMarker)
+    })) {
+      finish(h, extra)
+      return
+    }
+    const topLevelIndex = (snapshot, predicate) => mainNodes(snapshot).findIndex(predicate)
+    const headWithText = (snapshot, text) => mainNodes(snapshot).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head') && h.descendantsText(node).includes(text))
+    const trailingSnap = h.snapshot()
+    const trailingRootIndex = topLevelIndex(trailingSnap, node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('Working'))
+    const trailingCommandIndex = topLevelIndex(trailingSnap, node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).includes('/model switch'))
+    h.check('the unbridged mid-Turn command stays the ONE standalone control row',
+      trailingCommandIndex >= 0, JSON.stringify(mainNodes(trailingSnap).map(node => ({ class: node.class, text: h.descendantsText(node) }))))
+    h.check('the unbridged command still sits after the ONE summary in collapsed chronology',
+      trailingRootIndex >= 0 && trailingCommandIndex > trailingRootIndex,
+      JSON.stringify({ trailingRootIndex, trailingCommandIndex }))
+    h.check('one logical Turn summary exists while the command is unbridged', rootIds(liveNodes(h)).length === 1)
+    h.capture('focus-command-trailing-1280x800-dark',
+      'the same Turn has the command at its raw tail before any continuation is evidenced')
+
+    // Phase 2 — a real same-Turn continuation (the second Tool call) lands: the
+    // command is bridged and reflows ahead of the one collapsed summary.
+    writeFileSync(join(h.root, 'release-tool-step.json'), `${JSON.stringify({ release: true })}\n`)
+    if (!await waitFor(h, 'the second registered Tool executes after the command', () => {
+      const rows = records(h)
+      const roots = rootIds(liveNodes(h))
+      return rows.some(row => row.kind === 'subject.tool-b.completed')
+        && rows.some(row => row.kind === 'display.commit'
+          && row.messageKinds.filter(kind => kind === 'tool').length === 2
+          && row.messageKinds.includes('command') && !row.finalPresent)
+        && liveNodes(h).get(roots[0])?.p.collapsed === true
+        && !h.texts(h.snapshot()).includes(promptInfo.assistantMarker)
+    })) {
+      finish(h, extra)
+      return
+    }
+    const topLevelIndexIn = (snapshot, text) => topLevelIndex(snapshot, node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head') && h.descendantsText(node).includes(text))
+    // The native frame follows the display commit; wait for the reflowed order
+    // before capturing. A baseline checkout never satisfies it and still keeps
+    // the pre-fix frame as the before witness.
+    const reflowed = await waitFor(h, 'the bridged command reflows ahead of the summary in the painted frame',
+      () => {
+        const snapshot = h.snapshot()
+        const rootIndex = topLevelIndexIn(snapshot, 'Working')
+        const commandIndex = topLevelIndexIn(snapshot, '/model switch')
+        return rootIndex >= 0 && commandIndex >= 0 && commandIndex < rootIndex
+      }, 120)
+    const bridgedSnap = h.snapshot()
+    const bridgedRootIndex = topLevelIndexIn(bridgedSnap, 'Working')
+    const bridgedCommandIndex = topLevelIndexIn(bridgedSnap, '/model switch')
+    // Capture BEFORE the cardinality assertion: this frame is the before/after
+    // witness a baseline checkout can also produce (two summaries there).
+    h.capture('focus-command-bridged-collapsed-1280x800-dark',
+      'the continuation bridged the command ahead of the collapsed summary')
+    const bridgedRootIds = rootIds(liveNodes(h))
+    h.check('the bridged command reflows ahead of the ONE summary',
+      reflowed && bridgedCommandIndex >= 0 && bridgedRootIndex >= 0 && bridgedCommandIndex < bridgedRootIndex,
+      JSON.stringify({ reflowed, bridgedRootIndex, bridgedCommandIndex }))
+    h.check('the bridged command never mints a second Focus summary', bridgedRootIds.length === 1,
+      JSON.stringify(bridgedRootIds))
+    if (bridgedRootIds.length !== 1) {
+      finish(h, extra)
+      return
+    }
+
+    // Phase 3 — opening the one root keeps the command physically between the
+    // two canonical Work runs and independent of their disclosure.
+    const rootIdForCommand = rootIds(liveNodes(h))[0]
+    const collapsedSnap = h.snapshot()
+    const collapsedHead = headWithText(collapsedSnap, 'Working')
+    const beforeOpen = eventRows(h).length
+    h.check('the one Focus root opens through its real header with the bridged command',
+      collapsedHead !== undefined && await h.click(collapsedSnap.chains, collapsedHead))
+    if (!await waitFor(h, 'the client-generated open event for the command Turn', () => eventRows(h).length > beforeOpen)) {
+      finish(h, extra)
+      return
+    }
+    if (!await waitFor(h, 'the expanded Turn materializes its command and two Works', () => {
+      const live = liveNodes(h)
+      const parents = new Map()
+      for (const entry of wire(h)) {
+        if (entry.dir !== 'out' || entry.verb !== 'f') continue
+        for (const op of entry.body?.ops ?? []) {
+          if (op[0] === 'add' && typeof op[2] === 'string') parents.set(String(op[1]), op[2])
+        }
+      }
+      const commandIds = [...live.entries()].filter(([id, node]) => (node.k === 'section' || node.k === 'card')
+        && parents.get(id) === rootIdForCommand
+        && subtreeText(live, id).includes('/model switch')).map(([id]) => id)
+      const works = workIds(live, rootIdForCommand)
+      return commandIds.length === 1 && works.length >= 2
+        && parents.get(commandIds[0]) === rootIdForCommand
+        && works.every(work => commandIds[0] !== work && !commandIds[0].startsWith(`${work}.`))
+    })) {
+      finish(h, extra)
+      return
+    }
+    const expandedNodes = liveNodes(h)
+    const expandedParents = new Map()
+    for (const entry of wire(h)) {
+      if (entry.dir !== 'out' || entry.verb !== 'f') continue
+      for (const op of entry.body?.ops ?? []) {
+        if (op[0] === 'add' && typeof op[2] === 'string') expandedParents.set(String(op[1]), op[2])
+      }
+    }
+    const expandedCommand = [...expandedNodes.entries()].filter(([id, node]) => (node.k === 'section' || node.k === 'card')
+      && expandedParents.get(id) === rootIdForCommand
+      && subtreeText(expandedNodes, id).includes('/model switch'))
+    const worksAfterOpen = workIds(expandedNodes, rootIdForCommand)
+    h.check('the bridged command never hides the two canonical Work runs', worksAfterOpen.length === 2,
+      JSON.stringify(worksAfterOpen))
+    const commandId = expandedCommand[0]?.[0]
+    h.check('the command is a top-level Root child, never wrapped by a Work container',
+      commandId !== undefined && !worksAfterOpen.some(work => commandId.startsWith(`${work}.`)))
+    const frameAddOrder = []
+    for (const entry of wire(h)) {
+      if (entry.dir !== 'out' || entry.verb !== 'f') continue
+      for (const op of entry.body?.ops ?? []) {
+        if (op[0] === 'add' && typeof op[2] === 'string' && op[2] === rootIdForCommand) frameAddOrder.push(String(op[1]))
+      }
+    }
+    const commandOrder = commandId === undefined ? -1 : frameAddOrder.indexOf(commandId)
+    const workOrders = worksAfterOpen.map(work => frameAddOrder.indexOf(work)).sort((left, right) => left - right)
+    h.check('the command keeps its exact A -> command -> B position in the open Turn',
+      commandOrder >= 0 && workOrders.length === 2 && commandOrder > workOrders[0] && commandOrder < workOrders[1],
+      JSON.stringify({ frameAddOrder, commandOrder, workOrders }))
+    h.capture('focus-command-expanded-1280x800-dark',
+      'the same Turn opened: Work A, the independent command row, then Work B')
+
+    const closeSnap = h.snapshot()
+    const closeHead = headWithText(closeSnap, 'Working')
+    const beforeCloseCommand = eventRows(h).length
+    h.check('the opened command Turn closes through the same header',
+      closeHead !== undefined && await h.click(closeSnap.chains, closeHead))
+    if (!await waitFor(h, 'the client-generated close event for the command Turn',
+      () => eventRows(h).length > beforeCloseCommand && eventRows(h).at(-1)?.collapsed === true)) {
+      finish(h, extra)
+      return
+    }
+    if (!await waitFor(h, 'the closed command Turn returns one visible standalone control row', () => {
+      const live = liveNodes(h)
+      const roots = rootIds(live)
+      const parents = new Map()
+      for (const entry of wire(h)) {
+        if (entry.dir !== 'out' || entry.verb !== 'f') continue
+        for (const op of entry.body?.ops ?? []) {
+          if (op[0] === 'add' && typeof op[2] === 'string') parents.set(String(op[1]), op[2])
+        }
+      }
+      return roots.length === 1
+        && [...live.entries()].some(([id, node]) => (node.k === 'section' || node.k === 'card')
+          && parents.get(id) === 'main'
+          && subtreeText(live, id).includes('/model switch'))
     })) {
       finish(h, extra)
       return
@@ -505,7 +686,7 @@ export default async function (h) {
     openRootEvent?.id === rootId && openRootEvent?.collapsed === false, JSON.stringify(openRootEvent))
   let live = liveNodes(h)
   const nestedWorks = workIds(live, rootId)
-  const expectedWorkCount = SCENARIO === 'question' ? 0 : SCENARIO === 'svg' ? 2 : 1
+  const expectedWorkCount = SCENARIO === 'question' ? 0 : SCENARIO === 'svg' || SCENARIO === 'command' ? 2 : 1
   h.check('the Focus root materializes the exact canonical Work occurrence count', nestedWorks.length === expectedWorkCount,
     JSON.stringify({ scenario: SCENARIO, nestedWorks }))
   h.check('each newly materialized Work is independently collapsed', nestedWorks.every(id => live.get(id)?.p.collapsed === true))
@@ -546,7 +727,9 @@ export default async function (h) {
   if (nestedWorks.length > 0) {
     const workId = SCENARIO === 'svg'
       ? nestedWorks.find(id => subtreeText(live, id).includes('dsh_pi_tui_svg'))
-      : nestedWorks[0]
+      : SCENARIO === 'command'
+        ? nestedWorks.find(id => subtreeText(live, id).includes('focus_command_a'))
+        : nestedWorks[0]
     h.check('the SVG scenario identifies Work B from its real Tool-derived Activity head',
       workId !== undefined,
       JSON.stringify(nestedWorks.map(id => ({ id, text: subtreeText(live, id) }))))
@@ -562,7 +745,10 @@ export default async function (h) {
     const workHead = SCENARIO === 'svg'
       ? mainNodes(workSnap).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
         && h.descendantsText(node).startsWith('Activity') && h.descendantsText(node).includes('dsh_pi_tui_svg'))
-      : visibleSectionHead(workSnap, h, 'Activity')
+      : SCENARIO === 'command'
+        ? mainNodes(workSnap).find(node => String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+          && h.descendantsText(node).startsWith('Activity') && h.descendantsText(node).includes('focus_command_a'))
+        : visibleSectionHead(workSnap, h, 'Activity')
     h.check('the targeted nested Work head exists in the real client tree', workHead !== undefined,
       JSON.stringify({
         workId,
@@ -590,8 +776,12 @@ export default async function (h) {
             nestedWorks.filter(id => id !== workId).every(id => live.get(id)?.p.collapsed === true),
             JSON.stringify(nestedWorks.map(id => ({ id, collapsed: live.get(id)?.p.collapsed }))))
         }
+        const childToolsAppeared = await waitFor(h, 'the opened Work materializes its own Tool row',
+          () => [...liveNodes(h).entries()].some(([id, node]) => id.startsWith(`${workId}.`) && node.k === 'tool'))
+        live = liveNodes(h)
         const childTools = [...live.entries()].filter(([id, node]) => id.startsWith(`${workId}.`) && node.k === 'tool')
-        h.check('opening this Work materializes its own registered Tool', childTools.length === 1)
+        h.check('opening this Work materializes its own registered Tool', childToolsAppeared && childTools.length === 1,
+          JSON.stringify(childTools.map(([id]) => id)))
         if (SCENARIO === 'svg' && childTools.length === 1) {
           const svgTool = childTools[0]
           h.check('the SVG Tool has an independent native disclosure', svgTool[1].p.collapsible === true && svgTool[1].p.collapsed === true,
@@ -730,7 +920,7 @@ export default async function (h) {
   }
   if (!await waitFor(h, 'the official Direct final row is present in the SDK Main tree', () => {
     const nodes = liveNodes(h)
-    return [...nodes.entries()].some(([id, node]) => node.k === 'card'
+    return [...nodes.entries()].some(([id, node]) => isAssistantRow(node)
       && !id.startsWith(`${rootId}.`)
       && subtreeText(nodes, id).includes(promptInfo.assistantMarker))
   }, 400)) {
@@ -738,7 +928,7 @@ export default async function (h) {
     return
   }
   live = liveNodes(h)
-  const finalCards = [...live.entries()].filter(([id, node]) => node.k === 'card'
+  const finalCards = [...live.entries()].filter(([id, node]) => isAssistantRow(node)
     && !id.startsWith(`${rootId}.`)
     && subtreeText(live, id).includes(promptInfo.assistantMarker))
   h.check('official turn/end publishes one final Assistant outside the Focus root', finalCards.length === 1, JSON.stringify(finalCards.map(([id]) => id)))

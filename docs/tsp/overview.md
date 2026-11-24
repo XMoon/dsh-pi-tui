@@ -449,9 +449,11 @@ enough. `PROJECTION_ONLY` is not navigable state.
 
 - TSP is experimental and opt-in; PiTui remains the product renderer.
 - TSP now consumes the shared canonical transcript structure for native Full
-  and Compact presentation. Focus still does not have a PiTui-equivalent TSP
-  presentation, and some native disclosure interactions remain limited; Full
-  and Compact support does not establish full PiTui feature parity.
+  and Compact presentation, and native Focus consumes the same one-summary
+  projection contract owned by
+  [transcript.md](../architecture/transcript.md). Some native disclosure
+  interactions remain limited; Full, Compact and Focus support does not
+  establish full PiTui feature parity.
 - Physical GUI, IME, the desktop font stack, wheel/trackpad, the real OS
   window theme/chrome and Remote TSP qualification are outside the automated
   contract; only a specific real-pane run may claim them. The client's own

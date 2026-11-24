@@ -4418,3 +4418,101 @@ test('a settled !! card keeps its accepted transcript position and never joins W
   }
   app.stop()
 })
+
+test('one incremental live Turn publishes exactly one Focus summary across command, context and Preparing', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  const publish = async (previews?: readonly StreamingToolPreview[]): Promise<string> => {
+    show(app, folder, previews)
+    await vt.waitForRender()
+    return vt.getViewport().join('\n')
+  }
+  const expectOneSummary = (joined: string, phase: string): void => {
+    assert.equal(countFocusHeaders(joined), 1, `${phase}: exactly one Focus summary\n${joined}`)
+  }
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('inc-u1'), role: 'user',
+      content: [{ type: 'text', text: 'check the transcript' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'locating the transcript path…' } }, T0 + 2, 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'usage', usage: { inputTokens: 12_000, outputTokens: 3_000 } } }, T0 + 3, 3),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('inc-c1'), name: 'read',
+      arguments: JSON.stringify({ path: 'src/transcript.ts' }),
+    }, T0 + 4, 4),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: '529', message: 'overloaded' } }, T0 + 5, 5),
+  ])
+  let joined = await publish()
+  expectOneSummary(joined, 'running')
+  let header = vt.getViewport()[findFocusHeaderRow(vt.getViewport(), false)] ?? ''
+  assert.ok(header.includes('Working'), `the running header is missing:\n${header}`)
+  assert.ok(header.includes('15k tok'), `the authoritative token usage renders once:\n${header}`)
+  assert.ok(header.includes('2 actions'), `read + retry are the real actions:\n${header}`)
+  assert.ok(joined.includes('Action:  Retry 1 in 2s'),
+    `the latest hidden retry owns the Action slot:\n${joined}`)
+
+  // A mid-turn command lifecycle: the same logical Turn keeps ONE summary and
+  // the command card stays visible exactly once.
+  applyMixed(folder, [
+    eventAt('command/run', { commandId: 'inc-cmd', name: 'model', source: { kind: 'user' } }, T0 + 6, 6),
+    eventAt('command/done', { commandId: 'inc-cmd', kind: 'success', text: 'switched' }, T0 + 7, 7),
+  ])
+  joined = await publish()
+  expectOneSummary(joined, 'after the mid-turn command')
+  assert.equal((joined.match(/\/model/g) ?? []).length, 1, `the command renders exactly once:\n${joined}`)
+
+  // Context-only continuation of the SAME Turn.
+  applyMixed(folder, [
+    eventAt('user/message', {
+      id: MessageId('inc-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'docs/AGENTS.md' }], source: { kind: 'agent-instructions' },
+    }, T0 + 8, 8),
+  ])
+  joined = await publish()
+  expectOneSummary(joined, 'after the context injection')
+  assert.equal((joined.match(/Context injection/g) ?? []).length, 1,
+    `the context row surfaces exactly once:\n${joined}`)
+
+  // More live evidence: another retry plus one streaming tool call.
+  applyMixed(folder, [
+    eventAt('llm/retry', { turn: 1, step: 2, retry: 2, delayMs: 4_000, failure: { code: '529', message: 'overloaded again' } }, T0 + 9, 9),
+  ])
+  const preview: StreamingToolPreview = { callId: 'inc-live', turn: 1, step: 3, index: 0, name: 'bash', argumentBytes: 3 }
+  joined = await publish([preview])
+  expectOneSummary(joined, 'with live Preparing')
+  assert.ok(joined.includes('Preparing Bash'), `the one live preview owns the header Action slot:\n${joined}`)
+  assert.equal((joined.match(/Preparing/g) ?? []).length, 1, `exactly one bounded preview row:\n${joined}`)
+
+  // Settle: one terminal summary, the final answer once, no ghost row.
+  applyMixed(folder, [
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('inc-r1'), role: 'tool',
+        toolCallId: ToolCallId('inc-c1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('inc-c1') },
+      },
+    }, T0 + 10, 10),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('inc-a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'The transcript folds events incrementally.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 11, 11),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 12, 12),
+  ])
+  joined = await publish()
+  expectOneSummary(joined, 'settled')
+  header = vt.getViewport()[findFocusHeaderRow(vt.getViewport(), false)] ?? ''
+  assert.ok(header.includes('Turn complete'), `the settled header is missing:\n${header}`)
+  assert.equal((joined.match(/The transcript folds events incrementally\./g) ?? []).length, 1,
+    `the qualified final renders exactly once:\n${joined}`)
+  assert.equal((joined.match(/Preparing/g) ?? []).length, 0, `the live preview retires on settlement:\n${joined}`)
+  assert.equal((joined.match(/\/model/g) ?? []).length, 1, `the command stays exactly once:\n${joined}`)
+  app.stop()
+})

@@ -5022,6 +5022,64 @@ test('late-replay provenance (B): a late read never merges with the legal read',
     'the exported mirror applies the same grouping boundary')
 })
 
+test('late-replay provenance (C): a late orphan result after a newer Turn stays standalone evidence', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+    eventAt('turn/start', { turn: 1 }, 1005, 5),
+    eventAt('user/message', {
+      id: MessageId('u-b'), role: 'user',
+      content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 1006, 6),
+    // A NEW orphan result for the already-settled turn A materializes while B
+    // runs: durable transcript evidence, never a second A summary/stats input.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('late-r'), role: 'tool', toolCallId: ToolCallId('late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('late-c') },
+      },
+    }, 6001, 7),
+  ])
+  const messages = folder.messages()
+  const late = messages.find(message => message.kind === 'tool' && message.result === 'late evidence')
+  assert.ok(late !== undefined && late.kind === 'tool', 'fixture: the late card materialized')
+  assert.equal(isPostTurnReplayEvidence(late), true, 'a newly materialized post-turn row is replay evidence')
+  assert.equal(isTranscriptWorkMember(late), false, 'replay evidence never joins a Work span')
+
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const activities = blocks.filter((block): block is Extract<FocusProjectedBlock, { kind: 'activity' }> => block.kind === 'activity')
+  assert.deepEqual(activities.map(block => block.activity.turn), [0, 1],
+    'one summary per logical Turn, never an extra root for the late row')
+  assert.equal(activities[0]?.actionStats.total, 1, 'the late result adds no Action to the settled Turn')
+  assert.equal(activities[1]?.actionStats.total, 0, 'the newer Turn stays clean')
+  const lateIndex = blocks.findIndex(block => block.kind === 'message' && block.message === late)
+  const promptIndex = blocks.findIndex(block => block.kind === 'message'
+    && block.message.kind === 'user' && block.message.text === 'B prompt')
+  assert.ok(lateIndex > promptIndex, 'the late card stays visible at its raw position after B')
+  assert.equal(blocks.filter(block => block.kind === 'message' && block.message === late).length, 1,
+    'the late card renders exactly once')
+  const expanded = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  assert.equal(expanded.filter(block => block.kind === 'activity' && block.activity.turn === 0).length, 1,
+    'expanding the settled Turn never mints a second A root for replay evidence')
+  assert.ok(expanded.some(block => block.kind === 'message' && block.message === late),
+    'the late card stays visible when the settled Thought opens')
+  assert.deepEqual(workSpanToolNames(folder), ['read'], 'no synthesized Work/Action aggregation includes the replay row')
+})
+
 test('a hostile action subtype name stays on ONE Focus header row', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))

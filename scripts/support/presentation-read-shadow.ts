@@ -317,7 +317,15 @@ function normalizeContainerPath(path: TranscriptContainerPath | undefined): unkn
 
 function normalizeFocusBlock(block: FocusProjectedBlock): unknown {
   if (block.kind === 'activity') {
-    return { kind: 'activity', activity: normalizeActivity(block.activity) }
+    return {
+      kind: 'activity',
+      activity: normalizeActivity(block.activity),
+      // The shared projection's whole-Turn Action aggregate and bounded
+      // collapsed preview ARE part of the visible Focus summary, so the parity
+      // oracle compares them instead of trusting the row activity alone.
+      actionStats: normalizeValue(block.actionStats),
+      ...(block.action === undefined ? {} : { action: normalizeValue(block.action) }),
+    }
   }
   if (block.kind === 'work') {
     return {

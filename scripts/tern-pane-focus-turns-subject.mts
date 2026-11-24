@@ -16,16 +16,18 @@ const releaseToolStepPath = join(paneRoot, 'release-tool-step.json')
 const releaseToolArgumentsPath = join(paneRoot, 'release-tool-arguments.json')
 const turnEndReleasePath = join(paneRoot, 'release-turn-end.json')
 const scenarioPath = join(paneRoot, 'focus-scenario.json')
-const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8')) as { readonly name: 'svg' | 'image' | 'question' }
+const scenario = JSON.parse(readFileSync(scenarioPath, 'utf8')) as { readonly name: 'svg' | 'image' | 'question' | 'command' }
 const scenarioName = scenario.name
-if (scenarioName !== 'svg' && scenarioName !== 'image' && scenarioName !== 'question') {
+if (scenarioName !== 'svg' && scenarioName !== 'image' && scenarioName !== 'question' && scenarioName !== 'command') {
   throw new Error(`unknown Focus Tern case ${scenarioName}`)
 }
 const prompt = scenarioName === 'svg'
   ? 'FOCUS-TURNS-01 Start the first operation, then inspect the standalone SVG result.'
   : scenarioName === 'image'
     ? 'FOCUS-RASTER-01 Render and inspect the registered durable image result.'
-    : 'FOCUS-WAIT-01 Ask for a decision, then report one concise result.'
+    : scenarioName === 'command'
+      ? 'FOCUS-COMMAND-01 Run the first operation, switch model mid-turn, then inspect the second result.'
+      : 'FOCUS-WAIT-01 Ask for a decision, then report one concise result.'
 const finalMarker = `${scenarioName.toUpperCase()}-DIRECT-FINAL`
 mkdirSync(workRoot, { recursive: true })
 process.env.DSH_HOME = workRoot
@@ -275,7 +277,53 @@ try {
             `Detail ${index + 1}: the final response follows the accepted steer and the SVG inspection.\n\n`),
           finalMarker,
         ]
-      : [`${scenarioName.toUpperCase()}-`, 'DIRECT-', 'FINAL'],
+      : scenarioName === 'command'
+        ? ['The first operation completed. ', ...Array.from({ length: 6 }, (_, index) =>
+            `Detail ${index + 1}: the command split the same Turn and the single summary survived.\n\n`), finalMarker]
+        : [`${scenarioName.toUpperCase()}-`, 'DIRECT-', 'FINAL'],
+    ...(scenarioName === 'command' ? {
+      scriptedToolCalls: [
+        {
+          text: 'Running the first operation before the mid-turn command.',
+          toolCall: {
+            callId: 'focus-command-a',
+            name: 'focus_command_a',
+            arguments: '{}',
+          },
+        },
+        {
+          text: 'The first result is ready; inspecting the second operation.',
+          toolCall: {
+            callId: 'focus-command-b',
+            name: 'focus_command_b',
+            arguments: '{}',
+          },
+        },
+      ],
+    } : {}),
+    ...(scenarioName === 'command' ? {
+      holdScriptedToolStep: async (stepIndex, signal) => {
+        if (stepIndex !== 1) return
+        note({ kind: 'subject.model-step.held', stepIndex })
+        signal?.throwIfAborted()
+        if (signal === undefined) {
+          await heldToolStep
+          return
+        }
+        let onAbort!: () => void
+        const aborted = new Promise<never>((_, reject) => {
+          onAbort = () => reject(signal.reason ?? new Error('the scripted model step was aborted'))
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
+        })
+        try {
+          await Promise.race([heldToolStep, aborted])
+          signal.throwIfAborted()
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
+      },
+    } : {}),
     ...(scenarioName === 'svg' ? {
       scriptedToolCalls: [
         {
@@ -388,6 +436,57 @@ try {
       },
     }))
     note({ kind: 'fixture.tool-a-registered', tool: 'focus_qualification_a', authority: 'official Tools registry and real Agent execution' })
+  }
+  if (scenarioName === 'command') {
+    for (const suffix of ['a', 'b']) {
+      fixture.ctx.tools.register(defineTool({
+        name: `focus_command_${suffix}`,
+        description: `The ${suffix} canonical Work operation of the mid-turn command qualification.`,
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } },
+          render: () => [{ type: 'text', text: `Command qualification operation ${suffix} completed.` }],
+        },
+        async execute() {
+          note({ kind: `subject.tool-${suffix}.started` })
+          note({ kind: `subject.tool-${suffix}.completed` })
+          return { ok: true }
+        },
+      }))
+    }
+    note({
+      kind: 'fixture.command-tools-registered',
+      tools: ['focus_command_a', 'focus_command_b'],
+      authority: 'official Tools registry and real Agent execution',
+    })
+    const sessionPrototype = Session.prototype as unknown as {
+      append(this: { readonly id: unknown }, type: string, data: unknown, ...options: unknown[]): unknown
+    }
+    const originalAppend = sessionPrototype.append
+    let commandInjected = false
+    sessionPrototype.append = function patched(this: { readonly id: unknown }, type, data, ...options) {
+      const result = originalAppend.call(this, type, data, ...options)
+      const toolCallId = (data as { readonly message?: { readonly toolCallId?: unknown } } | undefined)?.message?.toolCallId
+      if (!commandInjected && type === 'tool/result' && String(toolCallId) === 'focus-command-a') {
+        commandInjected = true
+        // The real official command lifecycle, appended inside the open model
+        // Turn. DSH opens no model turn for it: the card is session-level.
+        originalAppend.call(this, 'command/run', {
+          commandId: 'focus-command-mid-turn',
+          name: 'model',
+          args: 'switch',
+          source: { kind: 'user' },
+        })
+        originalAppend.call(this, 'command/done', {
+          commandId: 'focus-command-mid-turn',
+          kind: 'success',
+          text: 'model switched mid-turn',
+        })
+        note({ kind: 'command.injected', commandId: 'focus-command-mid-turn', after: toolCallId })
+      }
+      return result
+    }
+    restoreSessionAppend = () => { sessionPrototype.append = originalAppend }
   }
   if (scenarioName === 'question') {
     const sessionPrototype = Session.prototype as unknown as {
