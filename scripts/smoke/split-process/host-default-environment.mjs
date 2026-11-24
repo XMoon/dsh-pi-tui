@@ -45,7 +45,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { userInfo } from 'node:os'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import xterm from '@xterm/headless'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 
@@ -444,21 +444,63 @@ function assertLaunchdDefinitionOwned(service) {
   `${CASE_ID}: the installed plist is not this run's definition; preserving it`)
 }
 
-/**
- * Create or verify the ONE run-owned systemd drop-in directory. A pre-existing
- * directory is admitted only when it is empty; this run removes only the exact
- * file it created and the directory only when this run created it and it is
- * empty.
- */
-function ensureOwnedDropInDirectory(service, ownership) {
-  if (existsSync(service.dropInDir)) {
-    const entries = readdirSync(service.dropInDir)
-    assert(entries.length === 0 || (entries.length === 1 && entries[0] === basename(service.dropInPath)),
-      `${CASE_ID}: the profile drop-in directory already contains foreign files; preserving it`)
-    return
+/** lstat without treating every error as absence. */
+function lstatOrUndefined(path) {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
   }
+}
+
+/** The fixed test drop-in must not exist at all, including as a dangling link. */
+function assertFixedDropInAbsent(service) {
+  assert(service.kind === 'systemd', `${CASE_ID}: a LaunchAgent has no systemd drop-in`)
+  assert(lstatOrUndefined(service.dropInPath) === undefined,
+    `${CASE_ID}: refusing to run beside a pre-existing test drop-in (${service.dropInPath})`)
+}
+
+/** A pre-existing drop-in directory is admitted only when it is empty. */
+function assertDropInDirectoryAdmitted(service) {
+  assert(service.kind === 'systemd', `${CASE_ID}: a LaunchAgent has no systemd drop-in directory`)
+  const info = lstatOrUndefined(service.dropInDir)
+  if (info === undefined) return
+  assert(info.isDirectory() && !info.isSymbolicLink(),
+    `${CASE_ID}: the profile drop-in path is not a real directory; preserving it`)
+  assert(readdirSync(service.dropInDir).length === 0,
+    `${CASE_ID}: the profile drop-in directory already contains foreign files; preserving it`)
+}
+
+/** Create the ONE run-owned drop-in directory only when it is absent. */
+function prepareDropInDirectory(service, ownership) {
+  if (existsSync(service.dropInDir)) return
   mkdirSync(service.dropInDir, { mode: 0o755 })
   ownership.dropInDirCreated = true
+}
+
+/** The run-owned file admission every scenario start must pass before mutations. */
+export function assertRunAdmissionFiles(service) {
+  if (service.kind !== 'systemd') return
+  assertFixedDropInAbsent(service)
+  assertDropInDirectoryAdmitted(service)
+}
+
+/**
+ * The ONE definition-finish decision: a definition this run installed may be
+ * restored/uninstalled only after a positive Host-stop proof. Any uncertain
+ * stop preserves it and reports the concrete reason.
+ */
+export function finishOwnedDefinition(hostStopProven, ownership, actions) {
+  if (ownership.original === undefined) return { action: 'not-applicable' }
+  if (!hostStopProven) {
+    return { action: 'preserved', reason: 'the owned service definition was preserved because the Host stop was not proven' }
+  }
+  actions.assertCurrentIdentity()
+  actions.restore()
+  actions.uninstall()
+  actions.assertAbsent()
+  return { action: 'removed' }
 }
 
 /**
@@ -469,12 +511,20 @@ function ensureOwnedDropInDirectory(service, ownership) {
 function writeServiceEnvironment(installation, service, ownership, environment) {
   if (service.kind === 'systemd') {
     assertSystemdDefinitionOwned(installation, service)
-    ensureOwnedDropInDirectory(service, ownership)
-    if (ownership.dropIn !== undefined) {
+    assertRunOwnedFile(service.unitPath, ownership.current, 'installed systemd unit')
+    const content = renderSystemdDropIn(environment)
+    if (ownership.dropIn === undefined) {
+      // Exclusive first creation: a leftover/dangling target is refused rather
+      // than truncated or followed, and the file is recorded only after success.
+      assertFixedDropInAbsent(service)
+      prepareDropInDirectory(service, ownership)
+      writeFileSync(service.dropInPath, content, { mode: 0o600, flag: 'wx' })
+      ownership.dropIn = fileIdentity(service.dropInPath)
+    } else {
       assertRunOwnedFile(service.dropInPath, ownership.dropIn, 'systemd test drop-in')
+      writeFileSync(service.dropInPath, content, { mode: 0o600 })
+      ownership.dropIn = fileIdentity(service.dropInPath)
     }
-    writeFileSync(service.dropInPath, renderSystemdDropIn(environment), { mode: 0o600 })
-    ownership.dropIn = fileIdentity(service.dropInPath)
     const reload = systemctl(['--user', 'daemon-reload'])
     assert(reload.status === 0, `${CASE_ID}: systemctl --user daemon-reload failed: ${reload.stderr.slice(-500)}`)
     return
@@ -895,12 +945,32 @@ function trackRunOwnedHost(context, record) {
 async function stopRunOwnedHosts(context, installation, ownedHosts, label) {
   const stopped = assertStatus(runDaemon(installation, ['stop']), { host: 'stopped' }, label)
   await waitForValue(
-    () => (ownedHosts.every(host => !alive(host.pid)) ? true : undefined),
+    () => (ownedHosts.every(host => !alive(host.hostPid)) ? true : undefined),
     `${label}: every run-owned Host exited`,
     60_000,
   )
-  for (const host of ownedHosts) context.untrackDetachedPid?.(host.pid)
+  for (const host of ownedHosts) context.untrackDetachedPid?.(host.hostPid)
   return stopped
+}
+
+/** A positive stopped/absent manager verdict for one still-installed definition. */
+function assertManagerStopped(service) {
+  if (!definitionPresent(service)) return
+  if (service.kind === 'systemd') {
+    const props = managerFacts(service)
+    if (props.LoadState === 'not-found') return
+    assert(props.ActiveState !== 'active' && props.ActiveState !== 'activating' && props.ActiveState !== 'reloading'
+      && props.pid === 0,
+    `${CASE_ID}: the systemd user unit is not proven stopped (ActiveState=${String(props.ActiveState)}, MainPID=${String(props.pid)})`)
+    return
+  }
+  const print = runLaunchctl(['print', `gui/${String(service.uid)}/${service.label}`])
+  if (print.status === 113) return
+  assert(print.status === 0, `${CASE_ID}: launchctl print could not prove the LaunchAgent absent (exited ${String(print.status)})`)
+  const state = /^\tstate = (.+)$/mu.exec(print.stdout ?? '')?.[1]
+  const pid = Number(/^\tpid = (\d+)$/mu.exec(print.stdout ?? '')?.[1] ?? '0')
+  assert(state !== 'running' && pid === 0,
+    `${CASE_ID}: the LaunchAgent is not proven stopped (state=${String(state)}, pid=${String(pid)})`)
 }
 
 /** The ONE Session containing the exact authored prompt; any ambiguity fails. */
@@ -936,11 +1006,13 @@ export async function runHostDefaultEnvironment(context) {
   mountHostWorkFixture(installation, workDir)
 
   // Run-owned admission BEFORE any cleanup authority exists: a pre-existing
-  // definition or Host record is never this invocation's resource.
-  assert(!definitionPresent(service),
+  // definition (including a dangling link) or any profile scope is never this
+  // invocation's resource.
+  assert(lstatOrUndefined(definitionPathOf(service)) === undefined,
     `${CASE_ID}: refusing to run beside a pre-existing service definition (${definitionPathOf(service)})`)
-  assert(publishedRecords(dshHome).length === 0,
-    `${CASE_ID}: refusing to run beside a pre-existing published Host record`)
+  assert(scopeDirectories(dshHome).length === 0,
+    `${CASE_ID}: refusing to run beside a pre-existing published Host scope`)
+  assertRunAdmissionFiles(service)
 
   const clients = []
   const rawEnvironment = { PATH: `${probes.explicitBin}:/usr/bin:/bin`, HOME: hostHome }
@@ -955,6 +1027,7 @@ export async function runHostDefaultEnvironment(context) {
   const managedEnvironment = {
     ...detachedEnvironment,
     XDG_DATA_HOME: join(hostHome, '.local', 'share'),
+    MISE_SHIMS_DIR: join(hostHome, '.local', 'share', 'mise', 'shims'),
     MISE_DATA_DIR: join(hostHome, '.local', 'share', 'mise'),
     ASDF_DATA_DIR: join(hostHome, '.asdf'),
     CARGO_HOME: join(hostHome, '.cargo'),
@@ -965,22 +1038,19 @@ export async function runHostDefaultEnvironment(context) {
   }
   const ownership = { original: undefined, current: undefined, dropIn: undefined, dropInDirCreated: false }
   const ownedHosts = []
-  let detachedStarted = false
-  let detachedStopped = false
-  let managedStarted = false
-  let managedStopped = false
+  let startAttempted = false
   let directTui
   let failure
   let evidence
   try {
     // ── P1: the detached Host augments the inherited PATH ──────────────────
     runRawShellPrecheck({ env: rawEnvironment, nonce, label: 'P1 before the detached Host' })
+    startAttempted = true
     const detached = assertStatus(
       runDaemon(installation, ['start'], detachedEnvironment),
       { host: 'ready', manager: 'process', unit: 'none' },
       'P1 detached daemon start',
     )
-    detachedStarted = true
     const detachedRecord = await captureHostIdentity(context, 'P1 detached', detached.instance)
     ownedHosts.push(detachedRecord)
     assert(detachedRecord.instanceId.slice(0, 8) === detached.instance, 'P1: the authenticated instance does not match the status instance')
@@ -1034,7 +1104,6 @@ export async function runHostDefaultEnvironment(context) {
 
     // ── P3: the real manager runs the augmented Host ───────────────────────
     await stopRunOwnedHosts(context, installation, ownedHosts, 'P3 stop the detached Host')
-    detachedStopped = true
     const installedResult = runDaemon(installation, ['install'])
     assert(installedResult.status === 0, `P3 daemon install failed: ${installedResult.stderr.slice(-800)}`)
     assert(definitionPresent(service), 'P3 daemon install did not create the owned service definition')
@@ -1065,13 +1134,13 @@ export async function runHostDefaultEnvironment(context) {
     ownership.current = fileIdentity(definitionPathOf(service))
     writeServiceEnvironment(installation, service, ownership, managedEnvironment)
     runRawShellPrecheck({ env: managedEnvironment, nonce, label: 'P3 before the managed Host' })
+    startAttempted = true
     const managed = runDaemon(installation, ['start'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' })
     const managedStatus = assertStatus(managed, {
       host: 'ready',
       manager: service.kind === 'systemd' ? 'systemd' : 'launchd',
       unit: service.kind === 'systemd' ? service.unit : service.label,
     }, 'P3 managed daemon start')
-    managedStarted = true
     const managedRecord = await captureHostIdentity(context, 'P3 managed', managedStatus.instance)
     ownedHosts.push(managedRecord)
     assert(managedRecord.instanceId.slice(0, 8) === managedStatus.instance, 'P3: the authenticated instance does not match status')
@@ -1116,6 +1185,7 @@ export async function runHostDefaultEnvironment(context) {
     assert(subprocessEvent.stderr === '', 'P4: the official ctx.subprocess spawn wrote an unexpected stderr')
 
     // ── P5: warm reuse, restart and unchanged service bytes ────────────────
+    startAttempted = true
     const warm = assertStatus(runDaemon(installation, ['start']), { host: 'ready' }, 'P5 warm start')
     assert(warm.instance === managedStatus.instance && warm.pid === managedStatus.pid, 'P5: a warm start replaced the Host')
     const warmClient = createManagedClient(context, {
@@ -1130,6 +1200,7 @@ export async function runHostDefaultEnvironment(context) {
     const beforeRestartDropIn = service.kind === 'systemd'
       ? { sha256: sha256File(service.dropInPath), mode: statSync(service.dropInPath).mode & 0o777 }
       : undefined
+    startAttempted = true
     const restarted = assertStatus(runDaemon(installation, ['restart'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' }), { host: 'ready' }, 'P5 restart')
     assert(restarted.instance !== managedStatus.instance, 'P5: restart did not create a new Host instance')
     const restartedRecord = await captureHostIdentity(context, 'P5 restarted', restarted.instance)
@@ -1155,13 +1226,11 @@ export async function runHostDefaultEnvironment(context) {
 
     // ── P6: inherit cold start leaves the explicit PATH exactly as given ────
     await stopRunOwnedHosts(context, installation, ownedHosts, 'P6 stop the managed Host')
-    managedStopped = true
     const inheritEnvironment = { ...managedEnvironment, DSH_PI_TUI_HOST_PATH_MODE: 'inherit' }
     writeServiceEnvironment(installation, service, ownership, inheritEnvironment)
     runRawShellPrecheck({ env: rawEnvironment, nonce, label: 'P6 before the inherit Host' })
+    startAttempted = true
     const inherited = assertStatus(runDaemon(installation, ['start'], { HOME: clientHomeA, PATH: '/usr/bin:/bin' }), { host: 'ready', manager: service.kind === 'systemd' ? 'systemd' : 'launchd' }, 'P6 inherit cold start')
-    managedStarted = true
-    managedStopped = false
     const inheritedRecord = await captureHostIdentity(context, 'P6 inherit', inherited.instance)
     ownedHosts.push(inheritedRecord)
     assert(inheritedRecord.instanceId.slice(0, 8) === inherited.instance, 'P6: the inherited authenticated instance does not match status')
@@ -1204,37 +1273,63 @@ export async function runHostDefaultEnvironment(context) {
   } finally {
     // ── P7: public stop/uninstall, definition restore and scoped quiescence ─
     const cleanupErrors = []
-    let hostStopUnconfirmed = false
+    let hostStopProven = false
     for (const client of clients) {
       try { await client.dispose() } catch (error) { cleanupErrors.push(`Client dispose: ${error instanceof Error ? error.message : String(error)}`) }
     }
     if (directTui !== undefined) {
       try { await directTui.dispose() } catch (error) { cleanupErrors.push(`Direct dispose: ${error instanceof Error ? error.message : String(error)}`) }
     }
-    if ((detachedStarted && !detachedStopped) || (managedStarted && !managedStopped)) {
+    // A failed start is still a start attempt: a missing registry record is
+    // never proof that the manager job or its Host is absent.
+    if (startAttempted) {
       try {
+        for (const record of publishedRecords(dshHome)) {
+          if (typeof record.hostPid !== 'number' || !alive(record.hostPid)) continue
+          if (ownedHosts.some(host => host.hostPid === record.hostPid)) continue
+          recordHostIdentity(context, record)
+          trackRunOwnedHost(context, record)
+          ownedHosts.push(record)
+        }
         await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 public stop')
+        // A failed start can publish its record after the first stop: capture
+        // and stop that generation too before any definition mutation.
+        const lateHosts = publishedRecords(dshHome).filter(record => typeof record.hostPid === 'number' && alive(record.hostPid))
+        if (lateHosts.length > 0) {
+          for (const record of lateHosts) {
+            recordHostIdentity(context, record)
+            trackRunOwnedHost(context, record)
+            ownedHosts.push(record)
+          }
+          await stopRunOwnedHosts(context, installation, ownedHosts, 'P7 late public stop')
+        }
+        assert(publishedRecords(dshHome).every(record => typeof record.hostPid !== 'number' || !alive(record.hostPid)),
+          'a published Host record remained alive after the public stop')
+        assertManagerStopped(service)
+        hostStopProven = true
       } catch (error) {
-        hostStopUnconfirmed = true
-        cleanupErrors.push(`public stop did not prove every run-owned Host gone: ${error instanceof Error ? error.message : String(error)}`)
+        cleanupErrors.push(`public stop/manager proof failed: ${error instanceof Error ? error.message : String(error)}`)
       }
+    } else {
+      hostStopProven = true
     }
     if (ownership.original === undefined && definitionPresent(service)) {
       cleanupErrors.push('a service definition appeared during this run without a proven run ownership; it was preserved')
     }
     if (ownership.original !== undefined) {
-      if (hostStopUnconfirmed) {
-        cleanupErrors.push('the owned service definition was preserved because the Host stop was not confirmed')
-      } else {
-        try {
-          assertRunOwnedFile(definitionPathOf(service), ownership.current, 'owned service definition before uninstall')
-          restoreOwnedDefinition(installation, service, ownership)
-          const uninstalled = runDaemon(installation, ['uninstall'])
-          if (uninstalled.status !== 0) throw new Error(`daemon uninstall exited ${String(uninstalled.status)}: ${uninstalled.stderr.slice(-400)}`)
-          assert(!definitionPresent(service), 'the owned service definition survived public uninstall')
-        } catch (error) {
-          cleanupErrors.push(`service cleanup: ${error instanceof Error ? error.message : String(error)}`)
-        }
+      try {
+        const outcome = finishOwnedDefinition(hostStopProven, ownership, {
+          assertCurrentIdentity: () => assertRunOwnedFile(definitionPathOf(service), ownership.current, 'owned service definition before uninstall'),
+          restore: () => restoreOwnedDefinition(installation, service, ownership),
+          uninstall: () => {
+            const uninstalled = runDaemon(installation, ['uninstall'])
+            if (uninstalled.status !== 0) throw new Error(`daemon uninstall exited ${String(uninstalled.status)}: ${uninstalled.stderr.slice(-400)}`)
+          },
+          assertAbsent: () => assert(!definitionPresent(service), 'the owned service definition survived public uninstall'),
+        })
+        if (outcome.action === 'preserved') cleanupErrors.push(outcome.reason)
+      } catch (error) {
+        cleanupErrors.push(`service cleanup: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     if (cleanupErrors.length > 0) {
