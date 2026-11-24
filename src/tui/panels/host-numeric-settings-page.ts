@@ -920,11 +920,13 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     let inputAdmissible = true
     let advancedFacts: readonly number[] = []
     let advancedAction: ContentLine | undefined
+    let acceptLine: number | undefined
     if (this.question !== undefined) {
       const question = this.questionLines(width, snapshot)
       content = question.lines
       mustSee = question.mustSee
       risk = question.risk
+      acceptLine = question.acceptLine
     } else if (this.numberInput !== undefined) {
       const built = this.inputLines(width, snapshot)
       content = built.lines
@@ -986,17 +988,28 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     if (resetReady && offset < maxOffset && offset + bodyRows >= content.length - 1) offset = maxOffset
     offset = Math.min(Math.max(0, offset), maxOffset)
     this.formOffset = offset
+    // An ordinary question's necessary copy is judged against the FINAL
+    // physical viewport. The same answer controls the accept row's visible
+    // word, its hit target and the bar action: a copy scrolled out of view
+    // leaves only an inert blank row (scroll geometry preserved), not a blue
+    // word whose handler refuses.
+    const questionFrameComplete = this.question !== undefined && this.question.kind !== 'reset'
+      && mustSee.every(lineIndex => lineIndex >= offset && lineIndex < offset + bodyRows)
     const visible = new Set<number>()
     let acceptPainted = false
     for (let index = 0; index < bodyRows; index += 1) {
       const line = content[offset + index]
-      lines.push(fit(line?.text ?? '', width))
+      const suppressed = this.question !== undefined && this.question.kind !== 'reset'
+        && !questionFrameComplete && acceptLine !== undefined && offset + index === acceptLine
+      lines.push(fit(suppressed ? '' : line?.text ?? '', width))
       visible.add(offset + index)
-      for (const target of line?.targets ?? []) {
-        targets.push({ ...target, row: index })
-        if (target.action.kind === 'accept') acceptPainted = true
-        const action = bodyActionOf(target.action.kind)
-        if (action !== undefined) this.paintedActions.add(action)
+      if (!suppressed) {
+        for (const target of line?.targets ?? []) {
+          targets.push({ ...target, row: index })
+          if (target.action.kind === 'accept') acceptPainted = true
+          const action = bodyActionOf(target.action.kind)
+          if (action !== undefined) this.paintedActions.add(action)
+        }
       }
     }
     // A confirmation's necessary facts are admitted only after they were really
@@ -1026,7 +1039,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     const questionRead = this.question === undefined ? false
       : this.question.kind === 'reset'
         ? this.resetRiskRead(width, risk)
-        : mustSee.every(lineIndex => visible.has(lineIndex))
+        : questionFrameComplete
     const complete = questionRead || (this.question === undefined && frameComplete)
     if (this.question !== undefined && questionRead) this.paintedQuestion = this.questionIdentity()
     // A question's ONE accept target is admitted only once its necessary copy
@@ -1473,7 +1486,13 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private questionLines(
     width: number,
     snapshot: HostNumericSettingsSnapshot<T>,
-  ): { lines: ContentLine[]; mustSee: readonly number[]; risk: readonly { readonly line: number; readonly statement: number }[] } {
+  ): {
+    lines: ContentLine[]
+    mustSee: readonly number[]
+    risk: readonly { readonly line: number; readonly statement: number }[]
+    /** The ONE action row of the grouped question, when its full word fits. */
+    acceptLine?: number
+  } {
     const question = this.question!
     if (question.kind === 'reset') {
       const lines: ContentLine[] = []
@@ -1548,12 +1567,16 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       ? 'Refresh…'
       : question.kind === 'discard' ? 'Discard…' : this.ambiguous(snapshot) ? 'Leave anyway…' : 'Discard and leave…'
     // The necessary copy + accept must fit together; the requested/last-known
-    // detail is scrollable and never blocks the fallback's publication.
-    if (lines.length + 1 <= bodyRows) {
+    // detail is scrollable and never blocks the fallback's publication. The
+    // accept word itself must fit WHOLE: a truncated action word is never
+    // painted. Its row is reserved and later gated by the FINAL viewport.
+    let acceptLine: number | undefined
+    if (visibleWidth(acceptWord) <= width && lines.length + 1 <= bodyRows) {
+      acceptLine = lines.length
       lines.push(this.acceptAction(acceptWord, width))
     }
     lines.push(...detail)
-    return { lines, mustSee, risk: [] }
+    return { lines, mustSee, risk: [], ...(acceptLine === undefined ? {} : { acceptLine }) }
   }
 
   private renderTenantBar(

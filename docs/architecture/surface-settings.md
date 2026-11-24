@@ -771,11 +771,12 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   readback prove. `Last-known · read-only` is never called Ready, a superseded
   capture refuses the edit until an explicit Refresh, and a Refresh discards a
   draft only after its own confirmation.
-- **Parent navigation stays guarded, not hidden.** While the raw Input, the
-  Advanced disclosure, a confirmation or a pending/unknown write holds the keys
-  the tenant refuses every parent category/row/pane/Tab/Back path; a definite
-  dirty draft and an ambiguous outcome open the page's OWN leave question
-  (`Discard and leave [D]` / `Leave anyway [D]`, plus `Keep [Esc]`). The
+- **Parent navigation stays guarded, not hidden.** A pending write refuses
+  every parent category/row/pane/Tab/Back path; the raw Input, the Advanced
+  disclosure and an active page question own their local keys. A definite dirty
+  draft and a settled ambiguous outcome open the page's OWN leave question
+  (`Discard and leave [D]` / `Leave anyway [D]`, plus `Keep [Esc]`), and the
+  unknown acknowledgement never undoes a possibly applied Host write. The
   captured continuation re-proves the SAME mounted page instance and the SAME
   source category/row before it applies the captured destination, and a
   destination that vanished in the meantime is refused instead of applied. For
@@ -834,9 +835,10 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   `Keep` retains the group/field/draft, and `Discard and leave` clears the local
   patch before re-proving the captured destination. A plain local `Discard` is
   a body action too (`Discard…`) and stays; `Refresh` asks before it discards
-  the draft and re-reads. The raw Input, the Advanced disclosure and a
-  pending/unknown write refuse every parent route outright. Unknown outcomes
-  offer only `Leave anyway` (never compacted to a `Discard` label) plus `Keep`
+  the draft and re-reads. A pending write refuses every parent route outright;
+  the raw Input, the Advanced disclosure and an active question own their local
+  keys, while a settled unknown outcome keeps the guarded leave gate. Unknown
+  outcomes offer only `Leave anyway` (never compacted to a `Discard` label) plus `Keep`
   and the requested intents with BOTH last-confirmed caps; leaving does not undo
   a possibly applied Host write. A stale/refused capture's leave copy states
   that Save is unavailable until an explicit Refresh instead of advertising it.
@@ -848,8 +850,9 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   and its shortcut key stays inert until a repaint admits it. The bar and the
   body use ONE admission contract: a displayed action always means what its
   handler does. A question publishes its accept only while its necessary copy
-  is complete in that frame (optional requested detail stays scrollable); a
-  browse Save disappears with its dirty facts; the local Discard keeps a real
+  is complete in that frame (optional requested detail stays scrollable);
+  otherwise the action row is an inert blank, not an actionable-looking word.
+  A browse Save disappears with its dirty facts; the local Discard keeps a real
   body affordance; the ambiguous outcome never compacts its acknowledgement to
   the definite `Discard` wording.
 - **Authority and status.** Effective/inherited/revision/generation and the
