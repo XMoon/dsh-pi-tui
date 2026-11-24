@@ -110,8 +110,7 @@ export async function runSessionWorkspaceActivity(context) {
     'U-D Host question settled', 120_000)
   assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
     `U-D the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
-  assert(!(await viewportText(clientB)).includes('[1] Proceed'),
-    'U-D the loser Client B kept an answerable modal after the first settlement')
+  await clientB.waitForScreenGone('[1] Proceed', 'U-D the loser Client B withdrew the answerable modal', 30_000)
   trace('ud-workspace-answered', { sessionX, sessionY })
   await tools.scene.dispose()
 }

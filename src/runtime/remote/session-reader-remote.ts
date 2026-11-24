@@ -59,6 +59,11 @@ export interface RemoteSessionListRow {
   readonly id: string
   /** The official durable Host title, when the Client row carries one. */
   readonly title?: string
+  /** The Client-composed display label (durable title, else cwd basename,
+   *  else the Session id). It is a DISPLAY fallback, never the durable title:
+   *  mapping it as a title would fabricate a Host title for an unnamed Session
+   *  and would make the roster semantics depend on a cwd basename. */
+  readonly displayTitle?: string
   readonly cwd?: string
   readonly parentId?: string
   readonly origin?: 'subagent'
@@ -230,7 +235,9 @@ export class RemoteSessionReader implements SessionReader {
       const row = snapshot.byId[id]
       return {
         // `ids` is the official ordered membership/identity authority; the
-        // keyed row only supplies detached metadata for this id.
+        // keyed row only supplies detached metadata for this id. The durable
+        // `title` (when the Host projected one) is the only title authority;
+        // the composed `displayTitle` fallback is deliberately not mapped.
         id,
         updatedAt: row.updatedAt,
         ...(row.title === undefined ? {} : { title: row.title }),
