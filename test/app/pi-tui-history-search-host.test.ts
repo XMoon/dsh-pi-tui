@@ -3319,3 +3319,107 @@ test('a cold dirty repair completes from the rc.5 no-eventCount source shape', a
     await ctx.fiber.dispose()
   }
 })
+
+test('an old roster cannot delete a Session created and retired during its scan', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r7-roster-cut-')
+  const a = mutableSource('/repo/r7-a', 'r7-a')
+  const b = mutableSource('/repo/r7-b', 'r7-b')
+  a.live = true
+  b.live = false
+  b.present = false
+  const { deps } = mutableDeps(a, [b])
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const persistence = deps.sessionPersistence()
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number; checkpointOf(id: string): { nextSeq: number; sourceState: string; dirty: boolean } | undefined }
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+    observeDisposedSession(session: unknown): void
+  }
+  const inbox = (sessionId: string, seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 17_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `${sessionId}-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-${sessionId}-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (source: MutableOfficialSource, event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  const realList = persistence.list
+  let listEntered!: () => void
+  const listReached = new Promise<void>(resolve => { listEntered = resolve })
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  try {
+    await waitDirectReady(service)
+    // Capture the OLD roster before B exists, then hold the pass at its list.
+    const oldRoster = await realList.call(persistence)
+    persistence.list = async () => {
+      listEntered()
+      await listGate
+      return oldRoster
+    }
+    const pass = internals.verifySources()
+    await listReached
+
+    // B is created, indexed by a real live point repair, then normally retired
+    // and durable-proofed while the old roster is still held.
+    b.present = true
+    b.live = true
+    const accepted = inbox('r7-b', 3, 'r7-b accepted after the roster cut')
+    b.events.push(accepted)
+    deliver(b, accepted)
+    const createdStarted = Date.now()
+    while (internals.index.checkpointOf('r7-b')?.nextSeq !== 4 && Date.now() - createdStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r7-b')?.nextSeq, 4)
+    await settleRepairs()
+    b.live = false
+    internals.observeDisposedSession({ id: 'r7-b' })
+    const retiredStarted = Date.now()
+    while (
+      (internals.index.checkpointOf('r7-b')?.sourceState !== 'persisted' || internals.index.checkpointOf('r7-b')?.dirty === true)
+      && Date.now() - retiredStarted < 5_000
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await settleRepairs()
+
+    // Release the pre-B roster. B is absent from it and from the live registry,
+    // but was created after the round-local cut and must not be deleted.
+    releaseList()
+    await pass
+    await waitDirectReady(service)
+    assert.equal(internals.index.checkpointOf('r7-b')?.nextSeq, 4)
+    const hit = await service.search({ scope: 'all', query: 'r7-b accepted after the roster cut', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+    assert.equal(internals.index.occurrenceCount(), 5, 'A keeps 2 and B keeps its 3 accepted messages')
+  } finally {
+    releaseList()
+    persistence.list = realList
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})

@@ -1477,8 +1477,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     counters: HistorySearchPhaseCounters,
   ): Promise<void> {
     const signal = this.lifecycle.signal
+    // Capture the deletion cut BEFORE the persisted roster is sampled. A
+    // Session created later in this round is not a deletion candidate even if
+    // the old roster and the live registry both omit it.
+    const deletionCut = this.deletionCut()
     const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'cold_start')
-    await this.reconcileRemovedSessions(official, persistence, sessions)
+    await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut)
     for (const [sessionId, record] of official) {
       counters.sessionsVisited += 1
       signal.throwIfAborted()
@@ -1983,8 +1987,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return
       }
       const signal = this.lifecycle.signal
+      const deletionCut = this.deletionCut()
       const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'periodic_verify')
-      if (await this.reconcileRemovedSessions(official, persistence, sessions) === 'failed') {
+      if (await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut) === 'failed') {
         outcome = 'incomplete'
         return
       }
@@ -2171,14 +2176,25 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    * short write each: a new live object, a buffered accepted event, a new
    * maintenance candidate or a moved checkpoint refuses the deletion.
    */
+  /** Snapshot the deletion candidates before the persisted roster is sampled. */
+  private deletionCut(): Map<string, HistorySessionCheckpointRow> {
+    const cut = new Map<string, HistorySessionCheckpointRow>()
+    for (const checkpoint of this.index?.listSessions() ?? []) cut.set(checkpoint.sessionId, checkpoint)
+    return cut
+  }
+
   private async reconcileRemovedSessions(
     official: ReadonlyMap<string, OfficialSession>,
     persistence: HistorySearchPersistenceLike,
     sessions: HistorySearchSessionsLike,
+    deletionCut: ReadonlyMap<string, HistorySessionCheckpointRow>,
   ): Promise<ReplayOutcome> {
     if (this.index === undefined) return 'complete'
     let allApplied = true
-    for (const checkpoint of this.index.listSessions()) {
+    // Delete only round-local candidates: the witness below is bound to the
+    // checkpoint captured BEFORE the roster read, so a Session created or
+    // changed during the scan can never pass this deletion fence.
+    for (const checkpoint of deletionCut.values()) {
       const sessionId = checkpoint.sessionId
       if (official.has(sessionId)) continue
       const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)
