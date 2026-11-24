@@ -367,10 +367,14 @@ export async function runAcpMultiSessionB2(context) {
       permissionRequests.push(params)
       return { outcome: { outcome: 'selected', optionId: params.sessionId === sessionA ? 'allow-once' : 'reject-once' } }
     })
-    assert(acpMain.initialized.agentCapabilities?.loadSession === false, 'B2-01: loadSession must stay false')
+    // G-ACP2-PR2: a Host with the official Controller/Query read seams
+    // advertises the canonical history and roster methods; resume/close stay.
+    assert(acpMain.initialized.agentCapabilities?.loadSession === true,
+      'B2-01: a read-seam-ready Host must advertise session/load')
     assert(acpMain.initialized.agentCapabilities?.sessionCapabilities?.resume !== undefined
-      && acpMain.initialized.agentCapabilities?.sessionCapabilities?.close !== undefined,
-    'B2-01: resume/close capabilities must be advertised')
+      && acpMain.initialized.agentCapabilities?.sessionCapabilities?.close !== undefined
+      && acpMain.initialized.agentCapabilities?.sessionCapabilities?.list !== undefined,
+    'B2-01: resume/close/list capabilities must be advertised')
     assert(acpMain.initialized.agentCapabilities?.mcpCapabilities?.http === false
       && acpMain.initialized.agentCapabilities?.mcpCapabilities?.sse === false,
     'B2-01: http/sse MCP capabilities must stay false')

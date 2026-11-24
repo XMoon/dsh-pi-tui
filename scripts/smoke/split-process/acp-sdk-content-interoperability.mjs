@@ -17,9 +17,13 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { installedSdkVersion, pinnedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
-const SDK_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.resolve('@agentclientprotocol/sdk')), 'utf8')).version
+// The ONE SDK version fact: this repository's exact pin and the version the
+// process really resolved (see scripts/lib/split-smoke-sdk.mjs).
+const PINNED_SDK = pinnedSdkVersion()
+const SDK_VERSION = installedSdkVersion()
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 
 function requireFact(condition, label) {
@@ -91,6 +95,15 @@ async function openSdkClient(scopeDir) {
       accountedUpdates = atSettlement
       return window
     },
+    /**
+     * The same settled window, limited to OBSERVED flight output: the
+     * supplemental read-only projections of the shared Session are not part of
+     * the prompt's attempt.
+     */
+    flightWindow(from, atSettlement, sessionId) {
+      return this.finishWindow(from, atSettlement, sessionId)
+        .filter(params => !READ_ONLY_PROJECTION_KINDS.has(params.update.sessionUpdate))
+    },
     async dispose() {
       connection.close()
       socket.destroy()
@@ -131,6 +144,17 @@ export function throwSceneFailure(kind, failure, cleanupErrors) {
     throw primary
   }
 }
+
+/**
+ * G-ACP2-PR2 read-only projections of the SHARED Session ride the same
+ * connection but are never part of a prompt's flight output. A flight window
+ * filters them out EXPLICITLY; a "closed View receives nothing" window stays
+ * raw so a projection after close would still fail.
+ */
+const READ_ONLY_PROJECTION_KINDS = new Set([
+  'plan', 'plan_update', 'plan_removed', 'session_info_update', 'usage_update',
+  'compaction_update', 'subagent_update', 'session_message', 'notice',
+])
 
 /** The committed user message, not an inbox splice alone, proves dispatch. */
 async function prompt(session, promptBlocks, matches, label, errorCode) {
@@ -189,7 +213,7 @@ async function prompt(session, promptBlocks, matches, label, errorCode) {
   requireFact(authored.length === 1 && authored[0].data.id === admitted.id, `${label}: no foreign authored user claimed by this turn`)
   requireFact(interval.filter(event => event.type === 'turn/start').length === 1, `${label}: no different turn in the owned interval`)
   const turnEvents = interval.filter(event => event.data?.turn === turn)
-  const updates = sdk.finishWindow(from, atSettlement, sessionId)
+  const updates = sdk.flightWindow(from, atSettlement, sessionId)
   context.trace('acp-sdk/prompt', {
     label, sessionId, hostPid: session.identity.hostPid, hostInstanceId: session.identity.instanceId,
     requestId: admitted.source.rpcId, userMessageId: admitted.id, turn,
@@ -283,7 +307,10 @@ async function runScene(context, kind, env, operation) {
     assert.equal(capabilities.promptCapabilities.image, input)
     assert.equal(capabilities.promptCapabilities.audio, false)
     assert.equal(capabilities.promptCapabilities.embeddedContext, false)
-    requireFact(capabilities.loadSession !== true, 'session/load remains unadvertised')
+    // G-ACP2-PR2: a Host with the official Controller/Query read seams
+    // advertises the canonical history and roster methods.
+    requireFact(capabilities.loadSession === true && capabilities.sessionCapabilities?.list !== undefined,
+      'session/load and session/list are advertised when their read seams are bound')
     const resumed = await sdk.request(acp.methods.agent.session.resume, { sessionId, cwd: workspace })
     // Current contract: the attached View answers the connection-owned model
     // options; no business payload of the Session may ride along.
@@ -512,7 +539,8 @@ async function outputScene(context) {
 }
 
 export async function runAcpSdkContentInteroperability(context) {
-  requireFact(SDK_VERSION === '1.4.0' && acp.PROTOCOL_VERSION === 1, 'installed pinned official SDK and ACP v1')
+  requireFact(SDK_VERSION === PINNED_SDK && acp.PROTOCOL_VERSION === 1,
+    `installed pinned official SDK and ACP v1 (resolved ${String(SDK_VERSION)}, pinned ${String(PINNED_SDK)})`)
   const input = await inputScene(context)
   // inputScene returns only AFTER SDK/TUI/Host teardown and kernel seat release.
   // Rewriting the existing fixture in this same profile is safe only then.

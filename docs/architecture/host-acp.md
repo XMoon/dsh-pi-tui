@@ -200,19 +200,23 @@ profile's independent `autoStart` preference enables it (see below).
   `initialize.protocolVersion` — including a client that requests a higher
   version — with `protocolVersion: 1`; the client decides whether v1 is
   acceptable or disconnects. A second `initialize` on the same connection is
-  rejected. A request to a registered Session handler before the handshake
-  completes is JSON-RPC `-32600 Invalid Request` (the stable
-  `LOCAL_ACP_SESSION_NOT_READY` / `LOCAL_ACP_VIEW_NOT_INITIALIZED` data code is
-  retained for diagnosis); after the handshake, unsupported Session operations
-  keep their existing `LOCAL_ACP_SESSION_NOT_READY` business classification.
+  rejected. A request to any registered Session handler before the handshake
+  completes is JSON-RPC `-32600 Invalid Request`, refused by the pinned ACP SDK's
+  own connection-initialization gate BEFORE this product's handler runs, so that
+  pre-handshake path carries no `LOCAL_ACP_*` diagnostic data and has no Host
+  side effect; after the handshake, unsupported Session operations keep their
+  existing `LOCAL_ACP_SESSION_NOT_READY` business classification.
   The response names `agentInfo.name` `dsh-pi-tui` and `agentInfo.version` the
   installed `@xmoon76/dsh-pi-tui` bundle version — never the DSH engine version.
-  `authMethods` stays empty and `loadSession` is always `false`. When the Host
-  installs the shared Session View it advertises exactly
-  `sessionCapabilities: { resume: {}, close: {} }`; it does not advertise
-  `session/list`, `load`, `delete`, `fork`, `additionalDirectories` or
-  `options`. It also does not expose client `fs`/`terminal` capabilities or
-  issue those reverse requests. MCP capability is explicit:
+  `authMethods` stays empty. When the Host installs the shared Session View it
+  advertises `sessionCapabilities: { resume: {}, close: {} }`, and it adds
+  `loadSession: true` plus `sessionCapabilities.list: {}` ONLY when the official
+  Session Controller authorization, Session Query canonical-history/title and
+  Session-projection read seams are all bound (see
+  [Official session facts on the stable v1 wire](#official-session-facts-on-the-stable-v1-wire)).
+  It never advertises `delete`, `fork`, `additionalDirectories`, `systemPrompt` or
+  `options`, and it does not expose client `fs`/`terminal` capabilities or issue
+  those reverse requests. MCP capability is explicit:
   `mcpCapabilities: { http: false, sse: false }`; standard stdio MCP servers are
   `session/new`/`session/resume` inputs, not an HTTP/SSE capability. It does NOT
   advertise the optional `sessionCapabilities.options` capability: the standard
@@ -529,8 +533,12 @@ profile's independent `autoStart` preference enables it (see below).
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - `session/list`, MCP prompts and ACP file/artifact transfer are NOT provided
-    by this View and fail closed with their stable `LOCAL_ACP_*` code.
+  - MCP prompts and ACP file/artifact transfer are NOT provided by this View and
+    fail closed with their stable `LOCAL_ACP_*` code. `session/list` is served by
+    the local ACP front door when the official authorized roster read seam is
+    bound (see “Official session facts on the stable v1 wire” below); without
+    that seam it is not advertised and fails closed with
+    `LOCAL_ACP_LIST_UNAVAILABLE`.
   - **Scoped cancellation (PO-3B).** `session/cancel` addresses ONLY this
     connection's own unsettled prompt flight, decided from authoritative Host
     facts — never an Agent-global cancel, a status/timing guess or an
@@ -713,3 +721,159 @@ profile's independent `autoStart` preference enables it (see below).
   and to the macOS public and private names; a SIGKILL leaves those inodes for
   the next seat winner's safe reclaim. Cleanup unlinks only this process's own
   saved inode.
+
+## Official session facts on the stable v1 wire
+
+The pinned `@agentclientprotocol/sdk@2.9.1` package root is the stable v1
+schema (`protocolVersion: 1`); `/experimental/v2` is a different protocol and is
+never imported. On top of that wire this Host projects OFFICIAL DSH facts. The
+authorities are the existing Host services and nothing else:
+
+- Session existence, visibility and access: the official
+  `sessionController.list` result, which the Controller itself filters through
+  its `remoteAccess.allows({kind:'session', id})` authorization. The ACP layer
+  never re-implements an ACL and never reads raw persistence.
+- Titles: the official `sessionQuery.readTitleSnapshots` fold of EXACTLY the
+  authorized ids above.
+- History: the official `sessionQuery.readSession`, which returns the complete
+  replay-validated canonical event log. No raw session file, bounded surface
+  window, ZIP export or cold synthesized interrupted-turn closer is ever used.
+- Current plan: the durable whole-list `todo/write` event and the official
+  `todos` projection of the exact attached Session.
+- Current context occupancy: the official `contextPressure` projection
+  (`projectedTokens ?? pressureTokens` paired with the newest known route
+  `contextWindow`). The cumulative lifetime token buckets are never presented as
+  occupancy, and no cost is invented.
+- Compaction: the durable `compaction/start|summary|end` lifecycle keyed by its
+  own `compactionId`.
+- Subagent children: the durable child `Session.header` (`origin:'subagent'`
+  AND the exact `parentSession`) cross-checked with the official
+  `subagent/start|end` run identity. An ordinary fork's `parentSession` never
+  counts.
+- Agent messages: the durable `user/message` whose official
+  `source.kind:'agent-message'` carries the real `senderSessionId`. The runtime's
+  `subagent-settled` account is never presented as child-authored words.
+- Notices: this Host has NO official user-notice producer, so no `notice` is
+  ever sent even when the client advertises the capability
+  (`UNADVERTISED_BY_DESIGN`); nothing is synthesized from logs or UI activity.
+
+These read-only facts never become a second Session, Agent or Writer authority.
+A read-only projection is produced ONLY for the exact attached Session of the
+connection that owns it, and the client capabilities that gate the supplemental
+frames are frozen for the whole connection at `initialize` — a later attach can
+never widen them.
+
+### `session/list`
+
+`session/list` answers from the authorized roster and NEVER creates a View,
+resumes an Agent or touches a Session writer. A connection that was not
+initialized is refused before the handler runs.
+
+- Visibility: only ROOT Sessions (`header.origin !== 'subagent'`) with a
+  standard absolute cwd are rows. A row that cannot prove an absolute cwd is
+  omitted rather than represented by a fabricated entry.
+- Filtering: an omitted or null `cwd` lists every authorized root; a supplied
+  `cwd` must be a standard absolute path with no NUL and selects exactly the
+  rows of that directory.
+- Ordering: `(updatedAt DESC, sessionId UTF8 ASC)` — never locale-dependent.
+- Pagination: a fixed page of **50** rows. `nextCursor` is the canonical
+  Base64URL encoding of the compact JSON array
+  `[updatedAt, sessionId, cwdOrEmpty]`, bound to the request's own cwd filter,
+  at most 768 characters, and accepted only when it re-encodes to the exact
+  supplied bytes. A malformed, non-canonical, filter-mismatched or oversized
+  cursor is JSON-RPC `-32602`. Pagination continues on the CURRENT roster
+  snapshot: it is a keyset continuation, never a transaction and never a second
+  cursor store.
+- `updatedAt` is ISO 8601 from the official activity milliseconds; `title` comes
+  only from the official durable fold, and an unprovable title is simply absent.
+
+### `session/load` versus `session/resume`
+
+`session/load` reuses the SAME official attach as `session/resume` (one cold
+`resolveAgent` resume at most, the same one-View-per-Session rule, the same
+workspace/MCP policy). The ONLY difference is history: `load` replays the
+complete canonical log, `resume` replays NOTHING.
+
+The replay is fenced and ordered:
+
+1. The claim is reserved and the official Agent/Session identity is verified
+   exactly as for resume.
+2. At the attach critical point — BEFORE the View can emit anything — the
+   replay barrier opens and live durable events of that Session are buffered
+   under a bounded window.
+3. The complete canonical history is read, validated and converted BEFORE any
+   notification is sent: `seq` must be strictly increasing, and a committed
+   block with no standard ACP v1 projection fails the whole load closed.
+4. The history is handed to the claim's single ordered output tail; every image
+   is re-read and verified by the official Attachment Store inside that tail.
+5. Buffered live events are joined by their official `seq`: the window is
+   sorted ascending, a repeated seq is projected exactly once, `seq <= cut` is a
+   duplicate of the snapshot and is dropped, and `seq > cut` follows the history.
+6. The barrier closes atomically with that join, and the `session/load`
+   response is sent ONLY after the ordered tail fully drained. A notification
+   failure is a request error, never a swallowed success.
+
+Failure and lifecycle rules: a new prompt on a still-replaying View is
+`LOCAL_ACP_VIEW_BUSY`; an unrepresentable block is
+`LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT`; a broken seq order is
+`LOCAL_ACP_LOAD_INVALID_HISTORY`; an unreadable committed image is
+`LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED`; an over-budget live window is
+`LOCAL_ACP_LOAD_BACKPRESSURE`. Every one of them releases ONLY that View — the
+Host Session, Agent, Writer and TUI are untouched — and no partial history is
+ever reported as a complete load. Close, physical disconnect, runtime Off and
+Agent disposal invalidate the replay generation first, so a late read never
+sends a closed View's history. A View loaded this way keeps its exact seq fence
+and never becomes a second history authority.
+
+### Read-only projections
+
+Every projection below is a transient, per-claim, bounded and cancellable
+ordered tail — the same bounded transport the prompt output uses. It is
+independent of any prompt flight: a TUI/Goal turn's plan, title, occupancy,
+compaction and agent messages are projected too, while its assistant output
+never becomes an answer to an ACP `session/prompt`.
+
+- **Plan.** The durable `todo/write` whole-list replacement (and, on `resume`,
+  the current official `todos` projection once) becomes the stable legacy
+  `sessionUpdate: 'plan'` for a client without `clientCapabilities.plan`, and
+  the negotiated `plan_update` (one stable `planId` per Session) for a client
+  that declared it. An empty list is a formal clear. The official `todos` fold
+  resets to `null` at every `turn/start` (it keeps the finished checklist on
+  `turn/end`), so a View that already announced a plan removes it on that
+  reset: `plan_removed` for the negotiated client, the complete empty legacy
+  `plan` otherwise. `null`/absent still sends nothing when no plan was ever
+  announced — the official `null` means "no active plan", never "unavailable".
+  DSH records no priority, so every entry carries the fixed presentation
+  default `medium`; that is a display adaptation, never a claimed DSH
+  priority.
+- **Session info.** A durable `session/title` becomes a field-level
+  `session_info_update` carrying that event's own durable time; an unchanged
+  title is not re-sent and a local `Date.now()` activity is never fabricated.
+- **Usage.** After a committed `assistant/message` that carries the provider's
+  own usage, the current official context pressure and route capacity become
+  `usage_update {used,size}`. Missing or invalid values produce NO update —
+  never a fabricated 0, never 100%, never the lifetime billed sum and never a
+  cost.
+- **Compaction.** Only a client that declared `session.compaction` receives
+  `compaction_update`: `start` → `in_progress`, `summary` → complete summary
+  content replacement, `end` → `completed`, or `failed` with the official error.
+  Each durable `compactionId` contributes at most one start, one summary and one
+  end, in that order: a duplicated or out-of-order callback is dropped instead
+  of re-projecting a lifecycle this View already delivered. No
+  `compaction_summary_chunk` is produced (the Host has no streaming summary
+  producer) and a cancelled compaction has no official state to report.
+- **Subagent child.** Only a client that declared `subagents` receives a
+  `subagent_update` on the child's immediate parent Session, and only after the
+  child header proves `origin:'subagent'` plus the exact durable creator. The
+  official `runId` joins the lifecycle: the `end` edge announces the SAME
+  verified child as its `start`, and an `end` whose start this View never
+  announced sends nothing (a lone idle snapshot is not an observed
+  association). The first announcement precedes any child traffic; child
+  `capabilities` are always omitted (no child mutation is offered).
+- **Agent message.** Only a client that declared `subagents` receives a
+  `session_message` for a durable `agent-message` user message — in the live
+  stream AND when that same durable message is replayed by `session/load` — with
+  the real `senderSessionId`, the exact recipient Session and the message's own
+  content. Other `user/message` source kinds are Host context, a continued
+  question reply or the runtime's settlement account, and none of them becomes
+  user or agent content.

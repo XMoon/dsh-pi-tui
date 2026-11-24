@@ -374,7 +374,9 @@ export async function runAcpPo3aTurnEvents(context) {
     assert(initB?.result?.protocolVersion === 1, 'B: initialize must answer protocolVersion 1')
     assert(initB?.result?.agentInfo?.version === installedVersion,
       `B: agentInfo.version must be the installed bundle version ${installedVersion}`)
-    assert(initB?.result?.agentCapabilities?.loadSession === false, 'B: loadSession must stay false')
+    // G-ACP2-PR2: canonical history/roster reads are advertised when bound.
+    assert(initB?.result?.agentCapabilities?.loadSession === true, 'B: a read-seam-ready Host advertises session/load')
+    assert(initB?.result?.agentCapabilities?.sessionCapabilities?.list !== undefined, 'B: and session/list')
     assert(initB?.result?.agentCapabilities?.promptCapabilities?.image === false,
       'B: inline image prompts must stay unadvertised')
     assert(initB?.result?.agentCapabilities?.sessionCapabilities?.resume !== undefined,
@@ -419,7 +421,23 @@ export async function runAcpPo3aTurnEvents(context) {
     assert((hostSessionEvents(dshHome, sessionA) ?? []).every(event =>
       !(event.type === 'user/message' && userMessageText(event) === turnBPrompt)),
     'C: the accepted ACP message must NOT have been claimed while the TUI turn runs')
-    assert(await conn1.silent(1_500), 'C: an accepted ACP prompt must not answer before its turn settles')
+    // The absence under test is the RESPONSE, not every frame: this connection
+    // now also receives the shared Session's legitimate read-only projections
+    // (its durable title/plan), so the window drains frames and requires that
+    // none is the answer to this request.
+    const earlyC = []
+    const earlyCDeadline = Date.now() + 1_500
+    for (;;) {
+      const remaining = earlyCDeadline - Date.now()
+      if (remaining <= 0) break
+      try {
+        earlyC.push(await conn1.next(remaining))
+      } catch {
+        break
+      }
+    }
+    assert(earlyC.every(frame => frame?.id !== 3),
+      `C: an accepted ACP prompt must not answer before its turn settles (got ${JSON.stringify(earlyC.find(frame => frame?.id === 3))})`)
 
     releaseHeldTurn()
     const bNotifications = []

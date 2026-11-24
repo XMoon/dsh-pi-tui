@@ -20,6 +20,7 @@ import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
+import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 const CASE_ID = 'acp.native-question-form'
@@ -313,7 +314,63 @@ export async function runAcpNativeQuestionForm(context) {
     assert(eventsOf(sessionC).slice(startC).every(event => event.data?.source?.kind !== 'user-question-reply'),
       'NAQ F: no reply is written for a declined question')
 
-    // ── G) No Host replacement and no leaked reverse requests.
+    // ── G) LOAD: a Session taken over by `session/load` on a NEW connection
+    //      must get its still-answerable official continued question back.
+    trace('naq/step-load-continued-start')
+    const first = await openSdkClient(endpoint, () => {})
+    clients.push(first)
+    await first.request(acp.methods.agent.initialize, {
+      protocolVersion: 1,
+      clientCapabilities: { elicitation: { form: {} } },
+    })
+    const sessionD = (await first.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })).sessionId
+    const promptD = 'acp-question-timed'
+    const startD = eventsOf(sessionD).length
+    const resultD = first.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionD, prompt: [{ type: 'text', text: promptD }],
+    }).then(value => ({ value }), error => ({ error }))
+    const formD = await waitForFact(() => first.forms.find(form => form.params?.sessionId === sessionD),
+      'NAQ G the timed form of the load candidate')
+    const outcomeD = await resultD
+    if (outcomeD.error !== undefined) fail(`NAQ G: the timed prompt rejected (${String(outcomeD.error?.message ?? outcomeD.error)})`)
+    assert(outcomeD.value?.stopReason === 'end_turn', 'NAQ G: the timed turn of the load candidate ends')
+    const turnD = turnOfUserText(eventsOf(sessionD), promptD)
+    const callD = toolEventsOf(eventsOf(sessionD), turnD, 'tool/call')
+      .find(event => event.data?.name === 'ask_user_question')?.data?.callId
+    assert(typeof callD === 'string' && callD !== '', 'NAQ G: the load candidate owns a real question call')
+    assertStandardForm(formD, { sessionId: sessionD, callId: callD, label: 'NAQ G' })
+    // Leave the continued question UNANSWERED, release this View, then take the
+    // Session over from a FRESH connection with `session/load`.
+    await first.request(acp.methods.agent.session.close, { sessionId: sessionD })
+    await first.close()
+    const loaderUpdates = []
+    const loader = await openSdkClient(endpoint, params => { loaderUpdates.push(params) })
+    clients.push(loader)
+    await loader.request(acp.methods.agent.initialize, {
+      protocolVersion: 1,
+      clientCapabilities: { elicitation: { form: {} } },
+    })
+    const loading = loader.request(acp.methods.agent.session.load, { sessionId: sessionD, cwd: hostCwd, mcpServers: [] })
+    const formG = await waitForFact(() => loader.forms.find(form => form.params?.sessionId === sessionD),
+      'NAQ G the continued form offered by session/load')
+    const loaded = await loading
+    assert(loaded !== undefined, 'NAQ G: session/load answers')
+    assertStandardForm(formG, { sessionId: sessionD, callId: callD, label: 'NAQ G' })
+    assert(loaderUpdates.some(params => params?.sessionId === sessionD
+      && params?.update?.sessionUpdate === 'user_message_chunk'),
+    'NAQ G: the canonical history reaches the loaded connection')
+    formG.resolve({ action: 'accept', content: { q0: 'Cancel' } })
+    const replyD = await waitForFact(() => eventsOf(sessionD).slice(startD)
+      .find(event => event.type === 'user/message'
+        && event.data?.source?.kind === 'user-question-reply'
+        && event.data?.source?.callId === callD), 'NAQ G the official continued reply after load')
+    const repliesD = eventsOf(sessionD).slice(startD)
+      .filter(event => event.type === 'user/message' && event.data?.source?.kind === 'user-question-reply')
+    assert(repliesD.length === 1, 'NAQ G: exactly one continued reply is steered after load')
+    assert(replyD.data.source.outcome === 'answered', 'NAQ G: the reply records the answered outcome')
+    trace('naq/step-load-continued-done')
+
+    // ── H) No Host replacement and no leaked reverse requests.
     const identityAfter = await scene.hostIdentityFacts(host)
     assert(identityAfter.hostPid === hostIdentity.hostPid && identityAfter.instanceId === hostIdentity.instanceId,
       'NAQ G: the qualification never replaces the Host process or instance')
@@ -326,11 +383,11 @@ export async function runAcpNativeQuestionForm(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       candidateSha256: context.candidateSha256,
       dshVersion: context.targetDshVersion,
-      acpSdkVersion: '1.4.0',
+      acpSdkVersion: installedSdkVersion(),
       hostPid: hostIdentity.hostPid,
       hostInstanceId: hostIdentity.instanceId,
       scopeId,
-      sessions: [sessionA, sessionB, sessionC],
+      sessions: [sessionA, sessionB, sessionC, sessionD],
       blocking: { callId: callA, answers: toolResultObject(resultEventA) },
       timed: { callId: callB, pending: pendingB, replies: repliesB.length },
       declined: { callId: callC, isError: resultEventC.data.message.isError },
@@ -339,6 +396,7 @@ export async function runAcpNativeQuestionForm(context) {
       acpProtocolVersion: init.protocolVersion,
       nativeQuestionToolResult: true,
       continuedReplySteered: true,
+      loadContinued: { callId: callD, replies: repliesD.length },
       declineFailsClosed: true,
       l6EvidenceRecorded: true,
     }

@@ -33,6 +33,7 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 function assert(condition, message) {
@@ -191,6 +192,19 @@ function imageRefOf(block) {
   return block.attachment
 }
 
+/**
+ * G-ACP2-PR2 read-only projections of the SHARED Session ride the same
+ * connection but are never part of a prompt's flight output. A flight
+ * assertion filters them out explicitly; a "nothing at all arrives" assertion
+ * does not use this filter.
+ */
+const READ_ONLY_PROJECTION_KINDS = new Set([
+  'plan', 'plan_update', 'plan_removed', 'session_info_update', 'usage_update',
+  'compaction_update', 'subagent_update', 'session_message', 'notice',
+])
+const flightOnly = updates => updates.filter(entry =>
+  !READ_ONLY_PROJECTION_KINDS.has(entry?.message?.params?.update?.sessionUpdate))
+
 export async function runAcpPo4cContentOutput(context) {
   const { dshHome, workDir, trace } = context
   const scene = createC1Scene(context, { imageProbe: true })
@@ -288,7 +302,10 @@ export async function runAcpPo4cContentOutput(context) {
     await waitForHostSessionEventAfter(dshHome, sessionId, start,
       event => event.type === 'turn/end' && event.data?.turn === turn, `${label} real turn/end`)
     const turnEvents = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.data?.turn === turn)
-    return { start, id, turn, requestId, messageId: durable.data.id, settled, turnEvents }
+    return {
+      start, id, turn, requestId, messageId: durable.data.id, turnEvents,
+      settled: { ...settled, updates: flightOnly(settled.updates ?? []) },
+    }
   }
 
   /**
@@ -559,7 +576,9 @@ export async function runAcpPo4cContentOutput(context) {
     for (;;) {
       const entry = await acp.next(message => message?.id === fenceId || message?.method === 'session/update')
       if (entry.message?.id === fenceId) break
-      strayTui.push(entry)
+      // Only the TUI turn's OWN output would be a violation; the shared
+      // Session's read-only projections are legitimate on this connection.
+      if (!READ_ONLY_PROJECTION_KINDS.has(entry.message?.params?.update?.sessionUpdate)) strayTui.push(entry)
     }
     assert(strayTui.length === 0,
       `PO-4C: a foreign TUI turn never projects onto the ACP View (got ${String(strayTui.length)} stray update(s))`)
@@ -682,7 +701,12 @@ export async function runAcpPo4cContentOutput(context) {
     const capacityResponses = capacity.entries.filter(entry => entry.message?.id === capacityPromptId)
     assert(capacityResponses.length === 0,
       `PO-4C: an over-budget frame never fabricates a StopReason (got ${String(capacityResponses.length)})`)
-    assert(capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'),
+    // The capacity connection owns its own new Session, whose first prompt also
+    // projects that Session's durable title; what must NEVER appear is RESULT
+    // content or an image from the over-budget frame.
+    const capacityDeliveredNoResultContent = capacityUpdates.every(update => update?.sessionUpdate === 'tool_call'
+      || READ_ONLY_PROJECTION_KINDS.has(update?.sessionUpdate))
+    assert(capacityDeliveredNoResultContent,
       `PO-4C: an over-budget frame delivers no result content (got ${JSON.stringify(capacityUpdates.map(update => update?.sessionUpdate))})`)
     assert(!JSON.stringify(capacity.entries).includes('"type":"image"'),
       'PO-4C: an over-budget frame never delivers any image content')
@@ -713,7 +737,7 @@ export async function runAcpPo4cContentOutput(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       candidateSha256: context.candidateSha256,
       dshVersion: context.targetDshVersion,
-      acpSdkVersion: '1.4.0',
+      acpSdkVersion: installedSdkVersion(),
       hostPid: hostIdentity.hostPid,
       hostInstanceId: hostIdentity.instanceId,
       scopeId: ready.localHost.scopeId,
@@ -765,7 +789,7 @@ export async function runAcpPo4cContentOutput(context) {
         overBudgetCode: overflowRecord.code,
         overBudgetImageCount: 2,
         overBudgetStoredBytes: [mixedRef.bytes, toolRef.bytes],
-        noContentOrStopReason: capacityUpdates.every(update => update?.sessionUpdate === 'tool_call')
+        noContentOrStopReason: capacityDeliveredNoResultContent
           && capacityResponses.length === 0,
         siblingAfterOverflow: true,
         tuiAlive: tuiAfterOverflow === sessionId,

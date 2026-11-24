@@ -384,7 +384,9 @@ export async function runAcpScopedMcpB1(context) {
       `Q02: initialize must advertise http/sse false: ${JSON.stringify(initNew.agentCapabilities)}`)
     assert(initNew.agentCapabilities?.sessionCapabilities?.resume !== undefined
       && initNew.agentCapabilities?.sessionCapabilities?.close !== undefined, 'Q02: resume/close capabilities must be advertised')
-    assert(initNew.agentCapabilities?.loadSession === false, 'Q02: loadSession must stay false')
+    // G-ACP2-PR2: canonical history/roster reads are advertised when bound.
+    assert(initNew.agentCapabilities?.loadSession === true, 'Q02: a read-seam-ready Host advertises session/load')
+    assert(initNew.agentCapabilities?.sessionCapabilities?.list !== undefined, 'Q02: and session/list')
 
     // ── B1-01: standard session/new starts a real Host Session whose exact
     //     Agent mounts the stdio server and runs a real model tool call.

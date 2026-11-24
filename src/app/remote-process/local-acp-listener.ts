@@ -50,10 +50,16 @@ import {
   type AcpConfigOptionsNotifier,
   type AcpElicitationRequester,
   type AcpImageLimits,
+  type AcpProjectionNotifier,
   type AcpViewChannels,
   type ConnectionViewState,
   type HostAcpSessionAccess,
 } from './local-acp-session-view.ts'
+import {
+  readSessionListRequest,
+  selectSessionPage,
+  type AcpNegotiatedCapabilities,
+} from './local-acp-projections.ts'
 
 /** The ACP agent identity this front door advertises (never a copied brand). */
 const AGENT_NAME = 'dsh-pi-tui'
@@ -343,6 +349,12 @@ interface ConnectionState {
    * or narrows it, because output images are committed content, not prompts.
    */
   maxOutputFrameBytes: number
+  /**
+   * The client capabilities THIS connection declared at `initialize`, frozen
+   * once for its whole life. A read-only projection is produced only when the
+   * matching capability was declared; no later attach can widen or narrow it.
+   */
+  capabilities: AcpNegotiatedCapabilities
   /**
    * The bounded per-connection Session View roster; present only when Session
    * View is installed. Each slot is routing/teardown state only — the one
@@ -750,6 +762,15 @@ function buildAgentApp(
       // ONCE for this connection. Supplying `{}` advertises it; an absent or
       // null value does not, and no question Form is ever sent to such a client.
       state.elicitationForm = params.clientCapabilities?.elicitation?.form != null
+      // The optional read-only projection capabilities are frozen HERE for the
+      // whole connection: a later attach can never widen what this client said
+      // it understands, and no notice is ever sent without a real producer.
+      state.capabilities = {
+        plan: params.clientCapabilities?.plan != null,
+        compaction: params.clientCapabilities?.session?.compaction != null,
+        subagents: params.clientCapabilities?.subagents != null,
+        notices: params.clientCapabilities?.session?.notices != null,
+      }
       if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
         const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
@@ -759,17 +780,23 @@ function buildAgentApp(
         }
       }
       initializeComplete = true
+      // History/roster reads are advertised ONLY when the official Session
+      // Controller/Query read seams are all bound: a Host that cannot read the
+      // canonical log never claims `loadSession` and never claims `list`.
+      const sessionReadReady = context.sessionAccess?.supportsSessionRead() === true
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: AGENT_NAME, title: AGENT_NAME, version: context.bundleVersion },
         agentCapabilities: {
-          loadSession: false,
+          loadSession: sessionReadReady,
           promptCapabilities: { image: state.imageEnabled, audio: false, embeddedContext: false },
           mcpCapabilities: { http: false, sse: false },
           // Advertise the shared-Session capability ONLY when this Host really
-          // installed the connection-scoped View. `session/list`/`loadSession`
-          // stay unavailable, and image follows the Host capability above.
-          sessionCapabilities: context.sessionAccess !== undefined ? { resume: {}, close: {} } : {},
+          // installed the connection-scoped View; `list` joins it only when the
+          // authorized roster and canonical history read seams are ready.
+          sessionCapabilities: context.sessionAccess !== undefined
+            ? { resume: {}, close: {}, ...(sessionReadReady ? { list: {} } : {}) }
+            : {},
         },
         authMethods: [],
       }
@@ -819,6 +846,11 @@ function buildAgentApp(
       error instanceof LocalAcpViewError
         ? new RequestError(error.rpcCode, error.message, { ...error.data, code: error.code })
         : error
+    const listInvalidRequest = (): LocalAcpViewError => new LocalAcpViewError(
+      'LOCAL_ACP_LIST_INVALID_REQUEST',
+      'the session/list request cwd or cursor is not representable',
+      JSONRPC_INVALID_PARAMS,
+    )
     const notOwned = (): LocalAcpViewError => new LocalAcpViewError(
       'LOCAL_ACP_VIEW_NOT_OWNED',
       'this ACP connection holds no view for that session',
@@ -886,9 +918,21 @@ function buildAgentApp(
           ? { action: response.action, content: response.content }
           : { action: response.action }
       }
+    /**
+     * The ONE read-only projection sink of an attached View. It is built from
+     * the SAME SDK client context as the attach request (exactly like the
+     * config-options notifier), so it stays usable after that request settles
+     * while this connection lives and never reaches another connection.
+     */
+    const projectionNotifierFor = (client: AgentContext): AcpProjectionNotifier =>
+      async (sessionId, update) => {
+        await client.notify(methods.client.session.update, { sessionId, update })
+      }
     /** The per-connection transient channels an attached View may use. */
     const viewChannelsFor = (client: AgentContext): AcpViewChannels => ({
       notifyConfigOptions: configNotifierFor(client),
+      notifyProjection: projectionNotifierFor(client),
+      capabilities: state.capabilities,
       ...state.elicitationForm ? { requestElicitation: requestElicitationFor(client) } : {},
     })
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {
@@ -929,6 +973,87 @@ function buildAgentApp(
         throw asRequestError(error)
       } finally {
         if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        endRequest('control')
+      }
+    })
+    // `session/load` is `session/resume` PLUS the complete canonical history:
+    // the same official attach (one cold resume at most, same slot/MCP policy)
+    // and the View-owned replay barrier that answers only after the ordered
+    // drain. It is registered only when the Host read seams are all ready.
+    const sessionReadReady = access.supportsSessionRead()
+    app.onRequest(methods.agent.session.load, async ({ params, client, signal }) => {
+      beginRequest('control')
+      let view: ConnectionViewState | undefined
+      try {
+        requireInitialized()
+        if (!sessionReadReady) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_LOAD_UNAVAILABLE',
+            'this Host cannot replay canonical Session history',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+        if (routeOwnedView(slots, views, params.sessionId) !== undefined) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_VIEW_BUSY',
+            'this ACP connection already holds a view for that session',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+        view = createSessionViewSlot(slots, views)
+        const result = await views.loadSession(view, access, params, viewChannelsFor(client), signal)
+        const configOptions = await readConfigOptionsOrLog(params.sessionId, view)
+        return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        endRequest('control')
+      }
+    })
+    // `session/list` reads ONLY the authorized official roster: it never
+    // creates a claim, resumes an Agent or touches a Session writer.
+    app.onRequest(methods.agent.session.list, async ({ params, signal }) => {
+      beginRequest('control')
+      try {
+        requireInitialized()
+        if (!sessionReadReady) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_LIST_UNAVAILABLE',
+            'this Host has no authorized Session roster',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+        let request: { readonly cwd?: string; readonly cursor?: string }
+        try {
+          request = readSessionListRequest(params)
+        } catch {
+          throw listInvalidRequest()
+        }
+        signal.throwIfAborted()
+        const rows = await access.readSessionList(signal)
+        signal.throwIfAborted()
+        let page: ReturnType<typeof selectSessionPage>
+        try {
+          page = selectSessionPage(rows, request)
+        } catch {
+          throw listInvalidRequest()
+        }
+        return {
+          sessions: page.sessions.map(row => ({
+            sessionId: row.sessionId,
+            cwd: row.cwd,
+            ...(row.title === undefined ? {} : { title: row.title }),
+            updatedAt: row.updatedAt,
+          })),
+          ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        }
+      } catch (error) {
+        // A roster read failure is never a fabricated empty page; a caller
+        // abort keeps its own transport classification.
+        signal.throwIfAborted()
+        throw asRequestError(error)
+      } finally {
         endRequest('control')
       }
     })
@@ -1003,9 +1128,9 @@ function buildAgentApp(
     app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.load, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
   }
-  // `session/list` remains genuinely unimplemented regardless of the View.
-  app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
 
   if (access !== undefined && views !== undefined && slots !== undefined) {
     // A `session/cancel` notification carries no response. PO-3B scopes it to
@@ -1039,6 +1164,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     closed: false,
     imageEnabled: false,
     elicitationForm: false,
+    capabilities: { plan: false, compaction: false, subagents: false, notices: false },
     inputBounds: TEXT_ONLY_BOUNDS,
     maxOutputFrameBytes: deriveImageOutputBounds(context.sessionAccess?.imageLimits()) ?? MAX_OUTPUT_FRAME_BYTES,
     ...(viewRoster === undefined ? {} : { views: viewRoster }),

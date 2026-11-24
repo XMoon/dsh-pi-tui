@@ -45,6 +45,12 @@ import {
 import { AcpAssistantStream } from '../../src/app/remote-process/local-acp-live-stream.ts'
 import { AcpModelError, type AcpModelCurrentness, type AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { AcpScopedMcpError, type AcpScopedMcpCurrentness, type AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
+import type {
+  AcpHistoryHeader,
+  AcpNegotiatedCapabilities,
+  AcpSessionHistory,
+  AcpSessionReadRow,
+} from '../../src/app/remote-process/local-acp-projections.ts'
 import { createHostAcpSessionAccess } from '../../src/app/remote-process/local-host-entry.ts'
 
 const QUIET_DIAG: Diag = {
@@ -282,6 +288,44 @@ class FakeAccess implements HostAcpSessionAccess {
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
     return () => {}
+  }
+
+  /** Whether this fake Host bound the official Controller/Query read seams. */
+  sessionReadReady = false
+  supportsSessionRead(): boolean {
+    return this.sessionReadReady
+  }
+  readonly sessionListCalls: number[] = []
+  sessionListRows: readonly AcpSessionReadRow[] = []
+  readSessionListImpl: (signal?: AbortSignal) => Promise<readonly AcpSessionReadRow[]> =
+    async () => this.sessionListRows
+  async readSessionList(signal?: AbortSignal): Promise<readonly AcpSessionReadRow[]> {
+    this.sessionListCalls.push(1)
+    return await this.readSessionListImpl(signal)
+  }
+  readonly historyCalls: string[] = []
+  sessionHistory: AcpSessionHistory = { header: { sessionId: '' }, events: [] }
+  readSessionHistoryImpl: (sessionId: string, signal?: AbortSignal) => Promise<AcpSessionHistory> =
+    async () => this.sessionHistory
+  async readSessionHistory(sessionId: string, signal?: AbortSignal): Promise<AcpSessionHistory> {
+    this.historyCalls.push(sessionId)
+    return await this.readSessionHistoryImpl(sessionId, signal)
+  }
+  headerFacts: AcpHistoryHeader | undefined
+  /** Every signal the View handed to a header read (the cold-read cancel seam). */
+  headerFactsSignals: (AbortSignal | undefined)[] = []
+  headerFactsImpl: (sessionId: string, signal?: AbortSignal) => Promise<AcpHistoryHeader | undefined> = async () => this.headerFacts
+  async sessionHeaderFacts(sessionId: string, signal?: AbortSignal): Promise<AcpHistoryHeader | undefined> {
+    this.headerFactsSignals.push(signal)
+    return await this.headerFactsImpl(sessionId, signal)
+  }
+  pressureValue: unknown
+  contextPressure(): unknown {
+    return this.pressureValue
+  }
+  todosValue: unknown
+  sessionTodos(): unknown {
+    return this.todosValue
   }
 
   /** Question capability of this fake Host (off unless a test enables it). */
@@ -937,7 +981,7 @@ function promptView(sessionId = 'P1', options: { readonly mcp?: boolean; readonl
   start: (text?: string, signal?: AbortSignal, prompt?: readonly unknown[], imageEnabled?: boolean) => Promise<{ stopReason: string }>
   insert: (rpcId: string, messageId: string, text?: string) => void
   claim: (messageId: string, turn: number, rpcId?: string) => void
-  commit: (type: string, data: Record<string, unknown>) => void
+  commit: (type: string, data: Record<string, unknown>, time?: number) => void
   /** The committed sequence of the LAST `commit()` (the durable join key). */
   lastSeq: () => number
   /** One official transient assistant-stream frame of the attached Agent. */
@@ -1707,6 +1751,8 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
     onAssistantStream: agent => { seen.push(`stream:${agent.id}`) },
     onQuestionRequest: (_request, next) => next(),
     onQuestionProjection: (session, key) => { seen.push(`projection:${String((session as unknown as { id: string }).id)}:${key}`) },
+    onSubagentStart: info => { seen.push(`subagent-start:${info.id}:${info.parentSessionId}`) },
+    onSubagentEnd: info => { seen.push(`subagent-end:${info.id}:${String(info.stopReason)}`) },
   })
   const agent = { id: 'S', session: { id: 'S', header: {} } }
   const fire = (name: string, ...args: unknown[]): void => {
@@ -5001,4 +5047,1116 @@ test('G-ACP2-PR1 QU-06: another owner settling a continued call reclaims the exa
   assert.equal(claim.questionForms?.size, 0)
   view.commit('turn/end', { turn: 70, reason: { kind: 'completed' } })
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+// ─────────────────────────── G-ACP2-PR2: list/load projections ───────────────
+
+/** Every optional read-only capability negotiated (the "capable client"). */
+const PR2_CAPABILITIES: AcpNegotiatedCapabilities = {
+  plan: true,
+  compaction: true,
+  subagents: true,
+  notices: true,
+}
+
+/** A connection that negotiated none of the optional read-only capabilities. */
+const PR2_BASELINE: AcpNegotiatedCapabilities = {
+  plan: false,
+  compaction: false,
+  subagents: false,
+  notices: false,
+}
+
+/** Bounded condition wait on a REAL fact (never a fixed sleep as evidence). */
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  assert.fail(message)
+}
+
+/**
+ * One View harness for the load/replay and read-only projection contracts.
+ * The projection sink records every standard update of the exact Session and
+ * can be held to model a slow drain.
+ */
+function projectionView(
+  sessionId = 'L1',
+  options: {
+    readonly capabilities?: AcpNegotiatedCapabilities
+    readonly history?: AcpSessionHistory
+    readonly mcpServers?: readonly unknown[]
+    readonly channels?: Partial<AcpViewChannels>
+  } = {},
+): {
+  access: FakeAccess
+  agent: AgentLike
+  registry: AcpSessionViewRegistry
+  conn: ReturnType<AcpSessionViewRegistry['createConnection']>
+  notifications: SessionUpdate[]
+  load: () => Promise<Record<string, never>>
+  resume: () => Promise<Record<string, never>>
+  holdProjection: () => { readonly entered: Promise<void>; readonly release: () => void }
+  failProjection: (times: number) => Promise<void>
+  commit: (type: string, data: Record<string, unknown>, time?: number) => void
+  nextSeq: () => number
+} {
+  const access = new FakeAccess()
+  access.sessionReadReady = true
+  const agent = makeAgent(sessionId, '/w')
+  access.seed(agent)
+  access.sessionHistory = options.history ?? { header: { sessionId, cwd: '/w' }, events: [] }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const notifications: SessionUpdate[] = []
+  let gate: Promise<void> | undefined
+  let entered: (() => void) | undefined
+  let failures = 0
+  let failureDrain: (() => void) | undefined
+  const channels: AcpViewChannels = {
+    capabilities: options.capabilities ?? PR2_CAPABILITIES,
+    ...(options.channels ?? {}),
+    notifyProjection: async (_sessionId, update) => {
+      if (gate !== undefined) {
+        entered?.()
+        entered = undefined
+        await gate
+      }
+      if (failures > 0) {
+        failures -= 1
+        if (failures === 0) {
+          failureDrain?.()
+          failureDrain = undefined
+        }
+        throw new Error('projection sink failed')
+      }
+      notifications.push(update)
+    },
+  }
+  let seq = 100
+  return {
+    access,
+    agent,
+    registry,
+    conn,
+    notifications,
+    load: async () => await registry.loadSession(
+      conn,
+      access,
+      { sessionId, cwd: '/w', mcpServers: [...(options.mcpServers ?? [])] },
+      channels,
+    ),
+    resume: async () => await registry.resumeSession(conn, access, { sessionId, cwd: '/w' }, channels),
+    holdProjection: () => {
+      const held = Promise.withResolvers<void>()
+      const blocked = Promise.withResolvers<void>()
+      gate = held.promise
+      entered = blocked.resolve
+      return {
+        entered: blocked.promise,
+        release: () => {
+          gate = undefined
+          held.resolve()
+        },
+      }
+    },
+    failProjection: (times: number) => {
+      failures = times
+      const settled = Promise.withResolvers<void>()
+      failureDrain = settled.resolve
+      return settled.promise
+    },
+    commit: (type: string, data: Record<string, unknown>, time?: number) => {
+      seq += 1
+      registry.onSessionEvent(agent.session, { seq, type, data, ...(time === undefined ? {} : { time }) })
+    },
+    nextSeq: () => seq + 1,
+  }
+}
+
+test('G-ACP2-PR2 LOAD-01: session/load replays the complete canonical history in order before answering', async () => {
+  const history: AcpSessionHistory = {
+    header: { sessionId: 'L1', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'how do I run it?' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'with make' }] } } },
+      { seq: 2, type: 'tool/call', data: { callId: 'c1', name: 'bash', arguments: '{"cmd":"make"}' } },
+      {
+        seq: 3,
+        type: 'tool/result',
+        data: { message: { toolCallId: 'c1', isError: false, content: [{ type: 'text', text: 'ok' }, { type: 'image', attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }] } },
+      },
+      { seq: 4, type: 'todo/write', data: { todos: [{ content: 'run make', status: 'completed' }] } },
+    ],
+  }
+  const view = projectionView('L1', { history })
+  view.access.storedImages.set('img-1', { bytes: Uint8Array.of(1, 2, 3), mediaType: 'image/png' })
+
+  await view.load()
+
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), [
+    'user_message_chunk',
+    'agent_message_chunk',
+    'tool_call',
+    'tool_call_update',
+    'plan_update',
+  ])
+  assert.deepEqual(view.notifications[0], {
+    sessionUpdate: 'user_message_chunk',
+    messageId: 'u1',
+    content: { type: 'text', text: 'how do I run it?' },
+  })
+  const toolUpdate = view.notifications[3] as { content?: readonly { type: string; content?: { type: string; data?: string } }[] }
+  assert.equal(toolUpdate.content?.length, 2)
+  assert.equal(toolUpdate.content?.[1]?.content?.type, 'image')
+  assert.equal(toolUpdate.content?.[1]?.content?.data, Buffer.from(Uint8Array.of(1, 2, 3)).toString('base64'),
+    'the history image carries the verified Store bytes')
+  assert.deepEqual(view.notifications[4], {
+    sessionUpdate: 'plan_update',
+    plan: { type: 'items', planId: 'dsh-todos:L1', entries: [{ content: 'run make', status: 'completed', priority: 'medium' }] },
+  })
+  assert.equal(view.registry.claimCount(), 1, 'the loaded Session keeps its one View')
+})
+
+test('G-ACP2-PR2 LOAD-02: live events during the snapshot join exactly once, ordered after the replayed seq', async () => {
+  const view = projectionView('L1')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  // A live event the snapshot already contains (seq 0) and a new one (seq 1)
+  // arrive while the canonical read is in flight.
+  view.registry.onSessionEvent(view.agent.session, { seq: 0, type: 'todo/write', data: { todos: [{ content: 'duplicate', status: 'pending' }] } })
+  view.registry.onSessionEvent(view.agent.session, { seq: 1, type: 'todo/write', data: { todos: [{ content: 'live', status: 'pending' }] } })
+  readRelease.resolve({
+    header: { sessionId: 'L1', cwd: '/w' },
+    events: [{ seq: 0, type: 'todo/write', data: { todos: [{ content: 'snapshot', status: 'pending' }] } }],
+  })
+  await loading
+  const planContents = view.notifications.map(update =>
+    (update as { plan?: { entries?: readonly { content?: string }[] } }).plan?.entries?.[0]?.content)
+  assert.deepEqual(planContents, ['snapshot', 'live'],
+    'the duplicated seq 0 is dropped and the newer seq 1 is replayed once, after the snapshot')
+})
+
+test('G-ACP2-PR2 LOAD-01 negative: session/resume NEVER replays history', async () => {
+  const view = projectionView('R1', {
+    history: {
+      header: { sessionId: 'R1', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'old', source: { kind: 'user' }, content: [{ type: 'text', text: 'past' }], role: 'user' } }],
+    },
+  })
+  await view.resume()
+  assert.deepEqual(view.notifications, [], 'resume attaches without replaying a single historical update')
+  assert.equal(view.access.historyCalls.length, 0, 'resume never reads canonical history')
+})
+
+test('G-ACP2-PR2 LOAD-05: unrepresentable history, a broken seq order or an unreadable image fail closed and release only this View', async () => {
+  for (const [events, code, stored] of [
+    [
+      [
+        { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'file', attachment: { attachmentId: 'f1', name: 'a.txt', bytes: 1 } }], role: 'user' } },
+      ],
+      'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT',
+      false,
+    ],
+    [
+      [
+        { seq: 2, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'a' }], role: 'user' } },
+        { seq: 2, type: 'user/message', data: { id: 'u2', source: { kind: 'user' }, content: [{ type: 'text', text: 'b' }], role: 'user' } },
+      ],
+      'LOCAL_ACP_LOAD_INVALID_HISTORY',
+      false,
+    ],
+    [
+      [
+        { seq: 0, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'image', attachment: { attachmentId: 'missing', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }] } } },
+      ],
+      'LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED',
+      true,
+    ],
+  ] as const) {
+    const view = projectionView('F1', { history: { header: { sessionId: 'F1', cwd: '/w' }, events: [...events] } })
+    if (stored) view.access.imageReadImpl = async () => { throw new Error('missing object') }
+    await assert.rejects(view.load(), isPromptError(code))
+    assert.equal(view.registry.claimCount(), 0, `${code}: the failed load releases its own claim`)
+    assert.equal(view.registry.phaseOf(view.conn), 'idle', `${code}: the connection is free for a later attach`)
+    assert.deepEqual(view.notifications, [], `${code}: no partial history is reported as a complete load`)
+  }
+})
+
+test('G-ACP2-PR2 LOAD-02 negative: a close during the replay read delivers no history and refuses the load', async () => {
+  const view = projectionView('C1')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  await view.registry.closeSession(view.conn, view.access, 'C1')
+  readRelease.resolve({
+    header: { sessionId: 'C1', cwd: '/w' },
+    events: [{ seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'secret' }], role: 'user' } }],
+  })
+  await assert.rejects(loading, isPromptError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.deepEqual(view.notifications, [], 'a closed View never receives the history it was reading')
+  assert.equal(view.registry.claimCount(), 0)
+})
+
+test('G-ACP2-PR2 LOAD-02 negative: an over-budget live window fails the load with the replay backpressure class', async () => {
+  const view = projectionView('B1')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  for (let index = 0; index < 1025; index += 1) {
+    view.registry.onSessionEvent(view.agent.session, { seq: index + 1, type: 'turn/start', data: { turn: index } })
+  }
+  readRelease.resolve({ header: { sessionId: 'B1', cwd: '/w' }, events: [] })
+  await assert.rejects(loading, isPromptError('LOCAL_ACP_LOAD_BACKPRESSURE'))
+  assert.deepEqual(view.notifications, [])
+  assert.equal(view.registry.claimCount(), 0, 'the over-budget replay releases only its own View')
+})
+
+test('G-ACP2-PR2 LOAD-04: a prompt is refused as VIEW_BUSY while the load replay is still open', async () => {
+  const view = projectionView('P2')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  await assert.rejects(
+    view.registry.promptSession(view.conn, view.access, { sessionId: 'P2', prompt: [{ type: 'text', text: 'new' }] }, new AbortController().signal, false, async () => {}),
+    isPromptError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  readRelease.resolve({ header: { sessionId: 'P2', cwd: '/w' }, events: [] })
+  await loading
+  assert.equal(view.access.promptCalls.length, 0, 'no prompt is dispatched into a replaying View')
+})
+
+test('G-ACP2-PR2 META-01/PLAN-01/USAGE-01: live read-only projections are capability-gated and official-sourced', async () => {
+  const capable = projectionView('M1')
+  await capable.resume()
+  capable.access.pressureValue = { projectedTokens: 42, pressureTokens: 40, contextWindow: 200 }
+  capable.access.todosValue = null
+  capable.notifications.length = 0
+  // A baseline `plan` for a client without the negotiated capability.
+  const baseline = projectionView('M2', { capabilities: PR2_BASELINE })
+  await baseline.resume()
+  baseline.notifications.length = 0
+  baseline.commit('todo/write', { todos: [{ content: 'step', status: 'in_progress' }] })
+  await waitUntil(() => baseline.notifications.length === 1, 'the baseline plan replaces the list')
+  assert.deepEqual(baseline.notifications, [{
+    sessionUpdate: 'plan',
+    entries: [{ content: 'step', status: 'in_progress', priority: 'medium' }],
+  }])
+
+  capable.commit('todo/write', { todos: [{ content: 'step', status: 'in_progress' }] })
+  capable.commit('todo/write', { todos: [] })
+  capable.commit('assistant/message', {
+    turn: 1,
+    step: 1,
+    usage: { inputTokens: 10, outputTokens: 2 },
+    message: { id: 'a1', content: [{ type: 'text', text: 'done' }] },
+  })
+  capable.commit('session/title', { title: 'A real title', messageSeqs: [], source: 'user' })
+  capable.commit('compaction/start', { compactionId: 'cp1', turn: null })
+  capable.commit('compaction/end', { compactionId: 'cp1', turn: null })
+  capable.registry.onSubagentStart({ runId: 'run1', id: 'CHILD', parentSessionId: 'M1', local: true })
+  capable.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'M1', origin: 'subagent', cwd: '/w/child' }
+  await waitUntil(() => capable.notifications.length >= 7, 'the live read-only projections are delivered')
+
+  assert.deepEqual(capable.notifications.slice(0, 6), [
+    {
+      sessionUpdate: 'plan_update',
+      plan: { type: 'items', planId: 'dsh-todos:M1', entries: [{ content: 'step', status: 'in_progress', priority: 'medium' }] },
+    },
+    { sessionUpdate: 'plan_update', plan: { type: 'items', planId: 'dsh-todos:M1', entries: [] } },
+    { sessionUpdate: 'usage_update', used: 42, size: 200 },
+    { sessionUpdate: 'session_info_update', title: 'A real title' },
+    { sessionUpdate: 'compaction_update', compactionId: 'cp1', status: 'in_progress' },
+    { sessionUpdate: 'compaction_update', compactionId: 'cp1', status: 'completed' },
+  ])
+  const subagent = capable.notifications[6] as { sessionUpdate: string; sessionId: string; capabilities?: unknown; state?: unknown; cwd?: string }
+  assert.equal(subagent.sessionUpdate, 'subagent_update')
+  assert.equal(subagent.sessionId, 'CHILD')
+  assert.deepEqual(subagent.state, { state: 'running' })
+  assert.equal(subagent.cwd, '/w/child')
+  assert.equal(subagent.capabilities, undefined, 'no child mutation capability is ever announced')
+})
+
+test('G-ACP2-PR2 USAGE-01 negative: no provider sample or no capacity means NO usage update (never a fabricated 0)', async () => {
+  const view = projectionView('U1')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.pressureValue = { projectedTokens: 42 }
+  view.commit('assistant/message', { turn: 1, step: 1, message: { id: 'a1', content: [{ type: 'text', text: 'x' }] } })
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(view.notifications, [], 'a message without provider usage produces no occupancy update')
+  view.access.pressureValue = { projectedTokens: 42, contextWindow: 200 }
+  view.commit('assistant/message', { turn: 1, step: 1, usage: { inputTokens: 1, outputTokens: 1 }, message: { id: 'a2', content: [{ type: 'text', text: 'y' }] } })
+  await waitUntil(() => view.notifications.length === 1, 'the real occupancy update is delivered')
+  assert.deepEqual(view.notifications, [{ sessionUpdate: 'usage_update', used: 42, size: 200 }])
+})
+
+test('G-ACP2-PR2 COMPACT-01/SUB-01/MESSAGE-01 negatives: an unnegotiated client receives no supplemental frame', async () => {
+  const view = projectionView('N1', { capabilities: PR2_BASELINE })
+  await view.resume()
+  view.notifications.length = 0
+  view.access.pressureValue = { projectedTokens: 1, contextWindow: 10 }
+  view.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'N1', origin: 'subagent', cwd: '/w' }
+  view.commit('compaction/start', { compactionId: 'cp1', turn: null })
+  view.commit('compaction/end', { compactionId: 'cp1', turn: null })
+  view.commit('assistant/message', { turn: 1, step: 1, usage: { inputTokens: 1, outputTokens: 1 }, message: { id: 'a1', content: [{ type: 'text', text: 'x' }] } })
+  view.commit('user/message', { id: 'am1', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'S2' }, content: [{ type: 'text', text: 'hi' }], role: 'user' })
+  view.registry.onSubagentStart({ runId: 'r1', id: 'CHILD', parentSessionId: 'N1', local: true })
+  await waitUntil(() => view.notifications.length >= 1, 'the baseline usage update is delivered')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(view.notifications, [{ sessionUpdate: 'usage_update', used: 1, size: 10 }],
+    'compaction, session_message and subagent updates require their negotiated capability')
+})
+
+test('G-ACP2-PR2 COMPACT-02: a failed compaction notification does not consume the lifecycle transition', async () => {
+  const view = projectionView('C4')
+  await view.resume()
+  view.notifications.length = 0
+  const failed = view.failProjection(1)
+  view.commit('compaction/start', { compactionId: 'cp-retry', turn: null })
+  await failed
+  // The SAME official start is not a duplicate when the first attempt never
+  // reached the client: the state is recorded only after a successful send.
+  view.commit('compaction/start', { compactionId: 'cp-retry', turn: null })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(view.notifications.map(update => (update as { status?: string }).status), ['in_progress'])
+})
+
+test('G-ACP2-PR2 META-02: a failed title notification does not suppress the same durable title', async () => {
+  const view = projectionView('M3')
+  await view.resume()
+  view.notifications.length = 0
+  const failed = view.failProjection(1)
+  view.commit('session/title', { title: 'Retry title', messageSeqs: [], source: 'user' })
+  await failed
+  view.commit('session/title', { title: 'Retry title', messageSeqs: [], source: 'user' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(view.notifications.map(update => (update as { title?: string }).title), ['Retry title'])
+})
+
+test('G-ACP2-PR2 LOAD-09: a close during a history Store read is a cancellation, not a corrupt attachment', async () => {
+  const view = projectionView('LD9', {
+    history: {
+      header: { sessionId: 'LD9', cwd: '/w' },
+      events: [{
+        seq: 0, type: 'tool/result',
+        data: { message: { toolCallId: 'c1', isError: false, content: [{ type: 'image', attachment: { attachmentId: 'img-held', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }] } },
+      }],
+    },
+  })
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<void>()
+  view.access.imageReadImpl = async () => {
+    readStarted.resolve()
+    await readRelease.promise
+    throw new Error('store read aborted')
+  }
+  const loading = view.load()
+  await readStarted.promise
+  await view.registry.closeSession(view.conn, view.access, 'LD9')
+  readRelease.resolve()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
+    'the abort class wins over the attachment error')
+})
+
+test('G-ACP2-PR2 LOAD-13: a subagent-edge overflow aborts the waiting read and fails the load with BACKPRESSURE', async () => {
+  const view = projectionView('LD15', {
+    history: {
+      header: { sessionId: 'LD15', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: {
+          id: 'am1',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'COLD' },
+          role: 'user',
+          content: [{ type: 'text', text: 'from a cold child' }],
+        },
+      }],
+    },
+  })
+  const entered = Promise.withResolvers<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.headerFactsImpl = async (_sessionId, signal) => {
+    readSignal = signal
+    entered.resolve()
+    await new Promise<void>(resolve => {
+      if (signal?.aborted === true) { resolve(); return }
+      signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    return undefined
+  }
+  const loading = view.load()
+  await entered.promise
+  // Fill the OTHER replay buffer (official subagent lifecycle edges) past its
+  // cap: MAX_REPLAY_BUFFERED_EVENTS is 1024.
+  for (let index = 0; index <= 1024; index += 1) {
+    view.registry.onSubagentStart({
+      runId: `run-${String(index)}`, id: `child-${String(index)}`, parentSessionId: 'LD15', local: true,
+    })
+  }
+  assert.equal(readSignal?.aborted, true, 'the edge overflow aborts the waiting read')
+  await assert.rejects(loading, isViewError('LOCAL_ACP_LOAD_BACKPRESSURE'),
+    'the load reports backpressure, not a plain cancellation')
+  assert.equal(view.registry.hasClaim('LD15'), false, 'the failed load releases only this View')
+})
+
+test('G-ACP2-PR2 LIVE-01: a live close aborts an in-flight cold header read without publishing a late frame', async () => {
+  const view = projectionView('L15')
+  await view.resume()
+  view.notifications.length = 0
+  const entered = Promise.withResolvers<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.headerFactsImpl = async (_sessionId, signal) => {
+    readSignal = signal
+    entered.resolve()
+    // Settles ONLY through the claim's cancellation owner: no manual release.
+    await new Promise<void>(resolve => {
+      if (signal?.aborted === true) { resolve(); return }
+      signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    return undefined
+  }
+  view.commit('user/message', {
+    id: 'am-live',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'COLD-CHILD' },
+    role: 'user',
+    content: [{ type: 'text', text: 'from a cold child' }],
+  })
+  await entered.promise
+  await view.registry.closeSession(view.conn, view.access, 'L15')
+  assert.equal(readSignal?.aborted, true, 'close aborts the live cold header read')
+  await flushOutput()
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'no late frame from the cancelled live projection')
+})
+
+test('G-ACP2-PR2 LIVE-02: a live close aborts an in-flight attachment Store read', async () => {
+  const view = projectionView('L16')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'L16', cwd: '/w' }
+  const entered = Promise.withResolvers<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.imageReadImpl = async (_ref, signal) => {
+    readSignal = signal
+    entered.resolve()
+    await new Promise<void>(resolve => {
+      if (signal?.aborted === true) { resolve(); return }
+      signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+    throw new Error('store read aborted')
+  }
+  view.commit('user/message', {
+    id: 'am-live-image',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+    role: 'user',
+    content: [
+      { type: 'text', text: 'with an image' },
+      { type: 'image', attachment: { attachmentId: 'img-live', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } },
+    ],
+  })
+  await entered.promise
+  await view.registry.closeSession(view.conn, view.access, 'L16')
+  assert.equal(readSignal?.aborted, true, 'close aborts the live Store read')
+  await flushOutput()
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'the aborted read never publishes a partial message')
+})
+
+test('G-ACP2-PR2 LOAD-12: load offers the official continued question after its history drained', async () => {
+  const channel = formChannel()
+  const view = projectionView('LD12', {
+    channels: { requestElicitation: channel.requester },
+    history: {
+      header: { sessionId: 'LD12', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  view.access.questionService = true
+  const continued = [{ callId: 'call-first', questions: [{ id: 'q0', question: 'first?', options: [{ label: 'yes' }] }] }]
+  view.access.questionSnapshotImpl = () => ({ kind: 'current', continued, settled: new Set() })
+  const answered: string[] = []
+  view.access.answerContinuedImpl = (_sessionId, _agent, _session, callId) => {
+    answered.push(callId)
+    return { kind: 'queued' }
+  }
+  const hold = view.holdProjection()
+  const loading = view.load()
+  // The canonical history is still blocked at the sink: the reverse Form must
+  // not exist yet.
+  await hold.entered
+  assert.equal(channel.forms.length, 0, 'the continued Form waits for the drained history')
+  hold.release()
+  await loading
+  await flushOutput()
+  assert.equal(channel.forms.length, 1, 'load offers the pending continued question exactly once')
+  assert.equal(channel.forms[0]!.request.toolCallId, 'call-first')
+  assert.equal(view.notifications.at(0)?.sessionUpdate, 'user_message_chunk',
+    'the canonical history is delivered before the reverse Form')
+  channel.forms[0]!.respond({ action: 'accept', content: { q0: 'yes' } })
+  await flushOutput()
+  assert.deepEqual(answered, ['call-first'], 'the answer returns to the official owner')
+})
+
+test('G-ACP2-PR2 LOAD-12 negative: a load without continued questions or Form capability offers nothing', async () => {
+  {
+    const channel = formChannel()
+    const view = projectionView('LD13', { channels: { requestElicitation: channel.requester } })
+    view.access.questionService = true
+    view.access.questionSnapshotImpl = () => ({ kind: 'current', continued: [], settled: new Set() })
+    await view.load()
+    await flushOutput()
+    assert.equal(channel.forms.length, 0, 'no pending question means no Form')
+  }
+  {
+    let snapshots = 0
+    // No `requestElicitation`: the client did not declare the Form capability.
+    const view = projectionView('LD14')
+    view.access.questionService = true
+    view.access.questionSnapshotImpl = () => {
+      snapshots += 1
+      return { kind: 'current', continued: [{ callId: 'call-x', questions: [{ id: 'q', question: 'x?', options: [{ label: 'yes' }] }] }], settled: new Set() }
+    }
+    await view.load()
+    await flushOutput()
+    assert.equal(snapshots, 0, 'a client without the Form capability never asks for continued questions')
+  }
+})
+
+test('G-ACP2-PR2 LOAD-10: a title committed during the replay keeps its official durable time', async () => {
+  const view = projectionView('LD10', {
+    history: {
+      header: { sessionId: 'LD10', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  const hold = view.holdProjection()
+  const loading = view.load()
+  await hold.entered
+  // The official durable event carries its own time; the buffered window must
+  // keep it so the replay projects the same `updatedAt` the live path would.
+  view.commit('session/title', { title: 'Committed mid-replay', messageSeqs: [], source: 'user' }, 1_750_000_000_000)
+  hold.release()
+  await loading
+  const info = view.notifications.find(update => update.sessionUpdate === 'session_info_update')
+  assert.equal((info as { title?: string } | undefined)?.title, 'Committed mid-replay')
+  assert.equal((info as { updatedAt?: string } | undefined)?.updatedAt,
+    new Date(1_750_000_000_000).toISOString(),
+    'the replayed title carries the event time, never a fabricated one')
+})
+
+test('G-ACP2-PR2 LOAD-11: a close aborts an in-flight cold header read instead of waiting for it', async () => {
+  const view = projectionView('LD11', {
+    history: {
+      header: { sessionId: 'LD11', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: {
+          id: 'am1',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+          role: 'user',
+          content: [{ type: 'text', text: 'from the child' }],
+        },
+      }],
+    },
+  })
+  const entered = Promise.withResolvers<void>()
+  const releaseRead = Promise.withResolvers<void>()
+  view.access.headerFactsImpl = async () => {
+    entered.resolve()
+    await releaseRead.promise
+    return undefined
+  }
+  const loading = view.load()
+  await entered.promise
+  const signal = view.access.headerFactsSignals[0]
+  assert(signal !== undefined, 'the header read receives a cancellation signal')
+  await view.registry.closeSession(view.conn, view.access, 'LD11')
+  assert.equal(signal?.aborted, true, 'close aborts the waiting official header read')
+  releaseRead.resolve()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'no late session_message from the cancelled replay')
+})
+
+test('G-ACP2-PR2 MESSAGE-01: a verified child message is announced by its association first, while the runtime settlement notice never is', async () => {
+  const view = projectionView('A1')
+  await view.resume()
+  view.notifications.length = 0
+  // The sender's OFFICIAL header proves it is a subagent child of this Session.
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'A1', cwd: '/w' }
+  // A durable `user/message` event's data IS the message object.
+  view.commit('user/message', {
+    id: 'am1',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'the child says hi' }],
+    role: 'user',
+  })
+  view.commit('user/message', {
+    id: 'settled1',
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child finished', senderSessionId: 'CHILD' },
+    content: [{ type: 'text', text: 'runtime account' }],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 2, 'the association and the agent message are projected')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  // Stable v1: `subagent_update` announces the child BEFORE its traffic, and it
+  // never invents an activity snapshot the Host did not report.
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'subagent_update', sessionId: 'SENDER', cwd: '/w' },
+    {
+      sessionUpdate: 'session_message',
+      messageId: 'am1',
+      senderSessionId: 'SENDER',
+      recipientSessionId: 'A1',
+      content: [{ type: 'text', text: 'the child says hi' }],
+    },
+  ])
+  // A second message from the SAME child never re-announces it.
+  view.commit('user/message', {
+    id: 'am2',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'and again' }],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 3, 'the second agent message is projected')
+  assert.deepEqual(view.notifications.slice(2).map(update => update.sessionUpdate), ['session_message'])
+})
+
+test('G-ACP2-PR2 MESSAGE-01 negative: an unprovable author never fabricates a session_message or a child association', async () => {
+  const view = projectionView('A3')
+  await view.resume()
+  view.notifications.length = 0
+  // No official header at all: a forged sender cannot be proven to be a child.
+  view.access.headerFacts = undefined
+  view.commit('user/message', {
+    id: 'am9',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'FORGED' },
+    content: [{ type: 'text', text: 'from nowhere' }],
+    role: 'user',
+  })
+  // A real Session that is neither this Session's child nor its parent.
+  view.access.headerFacts = { sessionId: 'STRANGER', cwd: '/w' }
+  view.commit('user/message', {
+    id: 'am10',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'STRANGER' },
+    content: [{ type: 'text', text: 'from a sibling' }],
+    role: 'user',
+  })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.deepEqual(view.notifications, [], 'an unproven author projects nothing')
+})
+
+test('G-ACP2-PR2 MESSAGE-02: a child Session receives its verified parent author without inventing a child association', async () => {
+  const view = projectionView('CHILD1')
+  await view.resume()
+  view.notifications.length = 0
+  // This View's Session is itself a subagent child of PARENT; the author is the
+  // parent, which is a real Session but never an announced child.
+  view.access.headerFactsImpl = async sessionId => {
+    if (sessionId === 'CHILD1') return { sessionId: 'CHILD1', origin: 'subagent', parentSessionId: 'PARENT' }
+    if (sessionId === 'PARENT') return { sessionId: 'PARENT', cwd: '/w' }
+    return undefined
+  }
+  view.commit('user/message', {
+    id: 'am20',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'PARENT' },
+    content: [{ type: 'text', text: 'instructions from the parent' }],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 1, 'the parent message is projected')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['session_message'])
+})
+
+test('G-ACP2-PR2 SUB-01 negative: an ordinary fork (parentSession without origin=subagent) never announces a child', async () => {
+  const view = projectionView('F2')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'FORK', parentSessionId: 'F2' }
+  view.registry.onSubagentStart({ runId: 'r1', id: 'FORK', parentSessionId: 'F2', local: true })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(view.notifications, [], 'a fork header is not a subagent association')
+})
+
+test('G-ACP2-PR2 PLAN-02: the official turn/start reset removes the already announced plan', async () => {
+  const view = projectionView('P1')
+  await view.resume()
+  view.notifications.length = 0
+  view.commit('todo/write', { todos: [{ content: 'first turn work', status: 'completed' }] })
+  await waitUntil(() => view.notifications.length >= 1, 'the first plan is projected')
+  view.commit('turn/start', { turn: 2 })
+  await waitUntil(() => view.notifications.length >= 2, 'the reset removes the announced plan')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'],
+    'a negotiated client gets plan_removed for the exact plan id')
+  assert.equal((view.notifications[1] as { planId?: string }).planId, 'dsh-todos:P1')
+  // A turn start with NOTHING announced sends nothing: official null is not a
+  // plan removal.
+  view.notifications.length = 0
+  view.commit('turn/start', { turn: 3 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(view.notifications.length, 0)
+})
+
+test('G-ACP2-PR2 PLAN-03: a baseline client gets the empty whole-list replacement on the same reset', async () => {
+  const view = projectionView('P2', { capabilities: PR2_BASELINE })
+  await view.resume()
+  view.notifications.length = 0
+  view.commit('todo/write', { todos: [{ content: 'first turn work', status: 'pending' }] })
+  await waitUntil(() => view.notifications.length >= 1, 'the legacy plan is projected')
+  view.commit('turn/start', { turn: 2 })
+  await waitUntil(() => view.notifications.length >= 2, 'the reset replaces the legacy plan')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan', 'plan'])
+  assert.deepEqual((view.notifications[1] as { entries?: unknown[] }).entries, [])
+})
+
+test('G-ACP2-PR2 PLAN-04: a replayed plan then turn/start keeps the same reset order', async () => {
+  const view = projectionView('P3', {
+    history: {
+      header: { sessionId: 'P3', cwd: '/w' },
+      events: [
+        { seq: 0, type: 'todo/write', data: { todos: [{ content: 'history work', status: 'completed' }] } },
+        { seq: 1, type: 'turn/start', data: { turn: 2 } },
+      ],
+    },
+  })
+  await view.load()
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'])
+})
+
+test('G-ACP2-PR2 PLAN-01: resume reads the CURRENT official plan once, and a null projection sends nothing', async () => {
+  const view = projectionView('R2')
+  view.access.todosValue = [{ content: 'open work', status: 'pending' }]
+  await view.resume()
+  await waitUntil(() => view.notifications.length === 1, 'the current plan is projected on resume')
+  assert.deepEqual(view.notifications, [{
+    sessionUpdate: 'plan_update',
+    plan: { type: 'items', planId: 'dsh-todos:R2', entries: [{ content: 'open work', status: 'pending', priority: 'medium' }] },
+  }])
+
+  const none = projectionView('R3')
+  none.access.todosValue = null
+  await none.resume()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(none.notifications, [], 'no todo write yet means no plan at all')
+})
+
+test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message as session_message', async () => {
+  const view = projectionView('H1', {
+    history: {
+      header: { sessionId: 'H1', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: { id: 'am1', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, content: [{ type: 'text', text: 'from the child' }], role: 'user' },
+      }],
+    },
+  })
+  // The canonical history replays the verified child association first, exactly
+  // like the live path: stable v1 announces a child before its traffic.
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'H1', cwd: '/w' }
+  await view.load()
+  assert.deepEqual(view.notifications, [
+    { sessionUpdate: 'subagent_update', sessionId: 'SENDER', cwd: '/w' },
+    {
+      sessionUpdate: 'session_message',
+      messageId: 'am1',
+      senderSessionId: 'SENDER',
+      recipientSessionId: 'H1',
+      content: [{ type: 'text', text: 'from the child' }],
+    },
+  ])
+  // A baseline client never receives the supplemental frame.
+  const baseline = projectionView('H2', {
+    capabilities: PR2_BASELINE,
+    history: {
+      header: { sessionId: 'H2', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: { id: 'am1', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, content: [{ type: 'text', text: 'from the child' }], role: 'user' },
+      }],
+    },
+  })
+  await baseline.load()
+  assert.deepEqual(baseline.notifications, [])
+})
+
+test('G-ACP2-PR2 LOAD-03: a turn committed while the snapshot is read replays completely and once', async () => {
+  const view = projectionView('L3', {
+    history: {
+      header: { sessionId: 'L3', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'before the snapshot' }], role: 'user' } }],
+    },
+  })
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  // A DIFFERENT surface (the TUI) commits a whole real turn while the canonical
+  // snapshot is being read: it is NOT part of the snapshot and NOT live flight
+  // output of this View, but it IS that Session's durable history.
+  view.commit('user/message', { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'during the read' }], role: 'user' })
+  view.commit('assistant/message', { message: { id: 'a1', content: [{ type: 'text', text: 'while reading' }] } })
+  view.commit('tool/call', { callId: 'c2', name: 'bash', arguments: '{"cmd":"ls"}' })
+  view.commit('tool/result', { message: { toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'ok' }] } })
+  readRelease.resolve({
+    header: { sessionId: 'L3', cwd: '/w' },
+    events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'before the snapshot' }], role: 'user' } }],
+  })
+  await loading
+  const kinds = view.notifications.map(update => update.sessionUpdate)
+  assert.deepEqual(kinds, [
+    'user_message_chunk',
+    'user_message_chunk',
+    'agent_message_chunk',
+    'tool_call',
+    'tool_call_update',
+  ], 'the snapshot history then the buffered turn, each transcript fact exactly once')
+  assert.equal((view.notifications[2] as { content?: { text?: string } }).content?.text, 'while reading')
+})
+
+test('G-ACP2-PR2 LOAD-07: the replay barrier stays closed until the history really drained', async () => {
+  const view = projectionView('LD1', {
+    history: {
+      header: { sessionId: 'LD1', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  const hold = view.holdProjection()
+  const loading = view.load()
+  // Deterministic: the sink itself signals that the history notification is
+  // blocked, so the ordered tail is provably still draining here.
+  await hold.entered
+  await assert.rejects(
+    view.registry.promptSession(view.conn, view.access, {
+      sessionId: 'LD1', prompt: [{ type: 'text', text: 'too early' }],
+    }, new AbortController().signal, false, async () => {}),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+    'a prompt cannot enter while the load history is still being sent',
+  )
+  // A DIFFERENT surface commits a durable humch while the drain is running: it
+  // must still ride the canonical replay, never the live-only path.
+  view.commit('user/message', { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'during drain' }], role: 'user' })
+  hold.release()
+  await loading
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['user_message_chunk', 'user_message_chunk'],
+    'the snapshot AND the turn committed during the drain are replayed')
+  assert.equal((view.notifications[1] as { content?: { text?: string } }).content?.text, 'during drain')
+})
+
+test('G-ACP2-PR2 LOAD-08: close during the drain cancels the replay instead of publishing a stale history', async () => {
+  const view = projectionView('LD2', {
+    history: {
+      header: { sessionId: 'LD2', cwd: '/w' },
+      events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }], role: 'user' } }],
+    },
+  })
+  const hold = view.holdProjection()
+  const loading = view.load()
+  await hold.entered
+  await view.registry.closeSession(view.conn, view.access, 'LD2')
+  hold.release()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'),
+    'a closed View never publishes a stale load history')
+  // The ONE frame already handed to the transport before the close cannot be
+  // retracted; nothing after it may be published.
+  assert.equal(view.notifications.length, 1)
+  assert.equal(view.notifications[0]?.sessionUpdate, 'user_message_chunk')
+  assert.equal(view.registry.hasClaim('LD2'), false)
+})
+
+test('G-ACP2-PR2 SUB-02: an official child edge observed inside a load barrier never precedes the canonical history', async () => {
+  const view = projectionView('S7')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  view.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'S7', cwd: '/w' }
+  const loading = view.load()
+  await readStarted.promise
+  view.registry.onSubagentStart({ runId: 'run-barrier', id: 'CHILD', parentSessionId: 'S7', local: true })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(view.notifications.length, 0, 'a child edge cannot overtake the history it must follow')
+  readRelease.resolve({
+    header: { sessionId: 'S7', cwd: '/w' },
+    events: [{ seq: 0, type: 'user/message', data: { id: 'u0', source: { kind: 'user' }, content: [{ type: 'text', text: 'history first' }], role: 'user' } }],
+  })
+  await loading
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['user_message_chunk', 'subagent_update'],
+    'the canonical history comes first, then the child association announced inside the same tail')
+})
+
+test('G-ACP2-PR2 PLAN-05: a turn/start reset arriving while the plan send is still held is not lost', async () => {
+  const view = projectionView('P5')
+  await view.resume()
+  view.notifications.length = 0
+  const hold = view.holdProjection()
+  view.commit('todo/write', { todos: [{ content: 'held plan', status: 'pending' }] })
+  // The sink proves the plan notification is STILL HELD when the official reset
+  // arrives. The reset must still enter the one ordered tail; deciding at
+  // arrival time would drop it while `announcedPlan` is not set yet.
+  await hold.entered
+  view.commit('turn/start', { turn: 2 })
+  hold.release()
+  await waitUntil(() => view.notifications.length >= 2, 'the held plan then exactly one reset')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan_update', 'plan_removed'])
+})
+
+test('G-ACP2-PR2 PLAN-06: a HELD legacy plan send followed by the official reset yields one empty replacement', async () => {
+  const view = projectionView('P6', { capabilities: PR2_BASELINE })
+  await view.resume()
+  view.notifications.length = 0
+  const hold = view.holdProjection()
+  view.commit('todo/write', { todos: [{ content: 'held legacy plan', status: 'pending' }] })
+  await hold.entered
+  view.commit('turn/start', { turn: 2 })
+  hold.release()
+  await waitUntil(() => view.notifications.length >= 2, 'the held legacy plan then exactly one reset')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['plan', 'plan'])
+  assert.deepEqual((view.notifications[1] as { entries?: unknown[] }).entries, [],
+    'a baseline client gets the complete empty replacement, never a fabricated plan_removed')
+})
+
+test('G-ACP2-PR2 LOAD-06: an unreadable agent-message image fails the load instead of dropping the message', async () => {
+  const event = (image: unknown) => [{
+    seq: 0,
+    type: 'user/message',
+    data: {
+      id: 'am1',
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+      role: 'user',
+      content: [{ type: 'text', text: 'see the image' }, image],
+    },
+  }]
+  const broken = projectionView('LD6', {
+    history: { header: { sessionId: 'LD6', cwd: '/w' }, events: event({ type: 'image', attachment: { attachmentId: 'img-missing', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }) },
+  })
+  broken.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'LD6', cwd: '/w' }
+  await assert.rejects(broken.load(), isViewError('LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED'),
+    'an incomplete canonical replay fails closed instead of dropping the message')
+  // The same committed message with a readable Store object replays normally.
+  const healthy = projectionView('LD7', {
+    history: { header: { sessionId: 'LD7', cwd: '/w' }, events: event({ type: 'image', attachment: { attachmentId: 'img-ok', mediaType: 'image/png', bytes: 3, width: 1, height: 1 } }) },
+  })
+  healthy.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'LD7', cwd: '/w' }
+  healthy.access.storedImages.set('img-ok', { bytes: Uint8Array.of(1, 2, 3), mediaType: 'image/png' })
+  await healthy.load()
+  const message = healthy.notifications.find(update => update.sessionUpdate === 'session_message')
+  assert.deepEqual(message?.content?.map(block => block.type), ['text', 'image'])
+})
+
+test('G-ACP2-PR2 LOAD-02: buffered live events join in seq order, once per seq, even when delivered out of order', async () => {
+  const view = projectionView('O1')
+  const readStarted = Promise.withResolvers<void>()
+  const readRelease = Promise.withResolvers<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  // Delivered 3 → 2 → 2 (a duplicate) while the snapshot is read.
+  for (const title of ['third', 'second', 'second']) {
+    view.registry.onSessionEvent(view.agent.session, {
+      seq: title === 'third' ? 3 : 2,
+      type: 'session/title',
+      data: { title, messageSeqs: [], source: 'user' },
+    })
+  }
+  readRelease.resolve({ header: { sessionId: 'O1', cwd: '/w' }, events: [] })
+  await loading
+  assert.deepEqual(view.notifications.map(update => (update as { title?: string }).title), ['second', 'third'],
+    'the live window is projected in ascending seq order exactly once per seq')
+})
+
+test('G-ACP2-PR2 COMPACT-01: a duplicated compaction callback never re-projects the lifecycle', async () => {
+  const view = projectionView('C2')
+  await view.resume()
+  view.notifications.length = 0
+  const start = { compactionId: 'cp1', turn: null }
+  view.commit('compaction/start', start)
+  view.commit('compaction/start', start)
+  view.commit('compaction/summary', { compactionId: 'cp1', summary: [{ type: 'text', text: 'sum' }] })
+  view.commit('compaction/summary', { compactionId: 'cp1', summary: [{ type: 'text', text: 'sum' }] })
+  view.commit('compaction/end', { compactionId: 'cp1', turn: null })
+  view.commit('compaction/end', { compactionId: 'cp1', turn: null })
+  await waitUntil(() => view.notifications.length >= 3, 'the compaction lifecycle is projected')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(view.notifications.map(update => (update as { status?: string }).status),
+    ['in_progress', 'in_progress', 'completed'])
+  assert.equal((view.notifications[1] as { summary?: unknown }).summary !== undefined, true)
+})
+
+test('G-ACP2-PR2 SUB-01: an end arriving while the start notification is still held still joins it in order', async () => {
+  const view = projectionView('S8')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'S8', origin: 'subagent', cwd: '/w' }
+  const hold = view.holdProjection()
+  view.registry.onSubagentStart({ runId: 'run-held', id: 'CHILD', parentSessionId: 'S8', local: true })
+  await hold.entered
+  view.registry.onSubagentEnd({ runId: 'run-held', id: 'CHILD', parentSessionId: 'S8', local: true, stopReason: 'completed' })
+  hold.release()
+  await waitUntil(() => view.notifications.length >= 2, 'the held start then its end are delivered in order')
+  const states = view.notifications
+    .filter(update => update.sessionUpdate === 'subagent_update')
+    .map(update => (update as { state?: { state?: string; stopReason?: unknown } }).state)
+  assert.deepEqual(states, [{ state: 'running' }, { state: 'idle', stopReason: 'end_turn' }],
+    'the runId join resolves inside the one FIFO tail, so a held start cannot orphan its end')
+})
+
+test('G-ACP2-PR2 SUB-01 negative: an end edge whose start this View never projected announces nothing', async () => {
+  const view = projectionView('S9')
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'CHILD', parentSessionId: 'S9', origin: 'subagent', cwd: '/w' }
+  view.registry.onSubagentEnd({ runId: 'never-started', id: 'CHILD', parentSessionId: 'S9', local: true, stopReason: 'completed' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(view.notifications, [], 'a lone idle snapshot is not a verified association')
+})
+
+test('G-ACP2-PR2 META-01: identical titles are not re-sent and another Session never receives this one projection', async () => {
+  const view = projectionView('T1')
+  await view.resume()
+  view.notifications.length = 0
+  view.commit('session/title', { title: 'Same', messageSeqs: [], source: 'user' })
+  view.commit('session/title', { title: 'Same', messageSeqs: [], source: 'user' })
+  view.commit('session/title', { title: 'Changed', messageSeqs: [], source: 'user' })
+  await waitUntil(() => view.notifications.length === 2, 'only the two real title changes are projected')
+  assert.deepEqual(view.notifications.map(update => (update as { title?: string }).title), ['Same', 'Changed'])
+  // A sibling Session's event never reaches this claim's connection.
+  view.registry.onSessionEvent({ id: 'other' }, { seq: 900, type: 'todo/write', data: { todos: [] } })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(view.notifications.length, 2)
 })

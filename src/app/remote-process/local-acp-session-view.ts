@@ -96,6 +96,28 @@ import {
   type AcpScopedMcpCurrentness,
   type AcpScopedMcpLease,
 } from './local-acp-scoped-mcp.ts'
+import {
+  AcpProjectionError,
+  compactionUpdate,
+  durableAgentMessageOf,
+  imageRef,
+  planEntriesFromTodos,
+  planEntriesOf,
+  planRemoval,
+  planUpdate,
+  projectSessionHistory,
+  sessionInfoUpdateOf,
+  usageUpdateOf,
+  type AcpHistoryAgentMessage,
+  type AcpHistoryEvent,
+  type AcpHistoryHeader,
+  type AcpHistoryImage,
+  type AcpHistoryToolResult,
+  type AcpHistoryUnit,
+  type AcpNegotiatedCapabilities,
+  type AcpSessionHistory,
+  type AcpSessionReadRow,
+} from './local-acp-projections.ts'
 
 /** The exact live identity a borrowed Session View is allowed to believe. */
 export interface LiveAgentViewIdentity {
@@ -150,6 +172,36 @@ export interface HostAcpSessionAccess {
   currentAgent(sessionId: string): LiveAgentViewIdentity | undefined
   /** The CURRENT live Session object for a Session id, or `undefined`. */
   currentSession(sessionId: string): object | undefined
+  /**
+   * Whether every official read seam a LOAD/LIST capability depends on is
+   * bound on this Host (Session Controller authorization + Session Query
+   * canonical history/titles). A missing seam is a truthful capability
+   * absence: the listener never advertises a method it cannot honor.
+   */
+  supportsSessionRead(): boolean
+  /**
+   * The authorized ROOT Session roster of the official Session Controller.
+   * Authorization is the Controller's (`remoteAccess.allows`); this seam only
+   * forwards its already-filtered summaries plus the official durable title
+   * fold of exactly those ids. It never resumes or activates a Session.
+   */
+  readSessionList(signal?: AbortSignal): Promise<readonly AcpSessionReadRow[]>
+  /**
+   * Read ONE complete canonical Session history from the official Session
+   * Query (replay-validated, ascending seq). This is the ONLY history source:
+   * no raw persistence file, no bounded surface window and no cold synthesized
+   * closer is ever used.
+   */
+  readSessionHistory(sessionId: string, signal?: AbortSignal): Promise<AcpSessionHistory>
+  /**
+   * The official header facts of one exact Session (the subagent provenance
+   * cross-check), or `undefined` when the Host cannot prove one.
+   */
+  sessionHeaderFacts(sessionId: string, signal?: AbortSignal): Promise<AcpHistoryHeader | undefined>
+  /** The detached official `contextPressure` projection value of one exact Session. */
+  contextPressure(session: object): unknown
+  /** The detached official `todos` projection value of one exact Session. */
+  sessionTodos(session: object): unknown
   /** The current boot-frozen Host image limits needed to derive UDS framing. */
   imageLimits(): AcpImageLimits | undefined
   /**
@@ -254,6 +306,41 @@ export interface HostAcpSessionAccess {
 export type AcpConfigOptionsNotifier = (sessionId: string, options: readonly SessionConfigOption[]) => Promise<void>
 
 /**
+ * The read-only projection sink of ONE connection: a standard `session/update`
+ * of this exact Session. It is bound once at attach (exactly like the
+ * config-options notifier) and stays usable until the View detaches.
+ */
+export type AcpProjectionNotifier = (sessionId: string, update: SessionUpdate) => Promise<void>
+
+/**
+ * The stable `session/list` classifications. A malformed cwd/cursor is the
+ * standard invalid-params refusal; an absent read seam is a truthful
+ * capability absence.
+ */
+export type LocalAcpListErrorCode =
+  | 'LOCAL_ACP_LIST_INVALID_REQUEST'
+  | 'LOCAL_ACP_LIST_UNAVAILABLE'
+
+/**
+ * The stable `session/load` and read-only projection classifications. They
+ * never carry content, a path or an exception: a replay that cannot be proven
+ * complete and ordered fails closed and releases only this View.
+ */
+export type LocalAcpLoadErrorCode =
+  /** The canonical history's seq order is not strictly increasing. */
+  | 'LOCAL_ACP_LOAD_INVALID_HISTORY'
+  /** A committed block has no standard ACP v1 projection. */
+  | 'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT'
+  /** An image the history/compaction references could not be read and verified. */
+  | 'LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED'
+  /** Live events during the replay window exceeded the bounded replay buffer. */
+  | 'LOCAL_ACP_LOAD_BACKPRESSURE'
+  /** This View cannot replay history because the Host read seam is absent. */
+  | 'LOCAL_ACP_LOAD_UNAVAILABLE'
+  /** A live read-only projection could not keep up with its bounded tail. */
+  | 'LOCAL_ACP_PROJECTION_BACKPRESSURE'
+
+/**
  * The stable View failure codes. They are the internal Host contract the
  * qualification asserts; they never carry a path, token or exception text.
  */
@@ -351,6 +438,8 @@ export type LocalAcpSessionErrorCode =
   | LocalAcpViewErrorCode
   | LocalAcpPromptErrorCode
   | LocalAcpQuestionErrorCode
+  | LocalAcpLoadErrorCode
+  | LocalAcpListErrorCode
   | AcpModelErrorCode
 
 /**
@@ -399,6 +488,17 @@ export interface AcpSetConfigOptionParams extends AcpModelOptionRequest {
   readonly sessionId: string
 }
 
+/**
+ * The `session/load` request facts. `mcpServers` is mandatory in the ACP v1
+ * schema; `cwd` is a claim proposal (the official Session keeps its own cwd)
+ * and `additionalDirectories` is not supported by this Host.
+ */
+export interface AcpLoadSessionParams {
+  readonly sessionId: string
+  readonly cwd: string
+  readonly mcpServers: readonly unknown[]
+  readonly additionalDirectories?: readonly string[]
+}
 /** Raster MIME vocabulary shared by the ACP wire and official Host admission. */
 export const ACP_IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
 
@@ -499,6 +599,28 @@ export interface AcpPromptFactListener {
    * from a timer or from a client's still-open form.
    */
   onQuestionProjection(session: object, key: string): void
+  /**
+   * The official `subagent/start` lifecycle edge of one child run. The View
+   * cross-checks the child Session header before announcing the association on
+   * its immediate parent Session; an unprovable association announces nothing.
+   */
+  onSubagentStart(info: AcpSubagentRunInfo): void
+  /** The official `subagent/end` lifecycle edge paired by `runId`. */
+  onSubagentEnd(info: AcpSubagentRunInfo): void
+}
+
+/** The official `subagent/start|end` run identity facts (structural). */
+export interface AcpSubagentRunInfo {
+  /** Identity shared by one residency epoch's start/end pair. */
+  readonly runId: string
+  /** The child Agent/Session identity. */
+  readonly id: string
+  /** The durable direct creator Session id. */
+  readonly parentSessionId: string
+  /** Whether this activation owns a local Agent. */
+  readonly local: boolean
+  /** The child's terminal stop reason (`subagent/end` only). */
+  readonly stopReason?: string
 }
 
 /** The official `approval/request` facts the View reads. */
@@ -566,6 +688,14 @@ export interface AcpViewChannels {
   readonly notifyConfigOptions?: AcpConfigOptionsNotifier
   /** The reverse elicitation channel of this connection (absent = no Form). */
   readonly requestElicitation?: AcpElicitationRequester
+  /**
+   * The read-only projection sink of this connection (plan/info/usage/
+   * compaction/subagent/session-message updates). Absent means the View sends
+   * no read-only projection at all.
+   */
+  readonly notifyProjection?: AcpProjectionNotifier
+  /** The capabilities this connection froze at `initialize` (never re-read). */
+  readonly capabilities?: AcpNegotiatedCapabilities
 }
 
 /**
@@ -617,6 +747,8 @@ export interface AcpSessionEventLike {
    * the durable message the Host committed.
    */
   readonly seq: number
+  /** The official durable event time in epoch milliseconds (its own fact). */
+  readonly time?: number
   readonly data: unknown
 }
 
@@ -677,6 +809,13 @@ interface UnclaimedHostObligation {
 interface ViewClaim {
   readonly connectionIdentity: ConnectionViewState
   readonly sessionId: string
+  /**
+   * The ONE cancellation owner of this claim's read-only IO: a cold header read
+   * or an attachment Store read. It covers BOTH the replay window and ordinary
+   * live projection; Close/EOF/Off/dispose abort it, and a replay overflow
+   * aborts it too because that replay can never answer.
+   */
+  readonly readAbort: AbortController
   /** The exact live Agent object verified at `commitAttached`; `undefined` until attached. */
   exactAgent?: LiveAgentViewIdentity
   /** The exact live Session object verified at `commitAttached`; `undefined` until attached. */
@@ -757,6 +896,82 @@ interface ViewClaim {
   offeredQuestions?: Set<string>
   /** Serializes the resumed continued-question offers of this claim (one Form at a time). */
   questionOfferTail?: Promise<void>
+  /**
+   * The ONE read-only projection sink of this claim's connection. It carries
+   * no durable state and dies with the claim; an absent sink (or a closed/
+   * replaced claim) means no plan/info/usage/compaction/subagent/session-message
+   * update is sent.
+   */
+  notifyProjection?: AcpProjectionNotifier
+  /** The capabilities frozen for this claim's connection at `initialize`. */
+  capabilities?: AcpNegotiatedCapabilities
+  /** The ordered read-only projection chain of this claim (never rejects). */
+  projectionTail?: Promise<void>
+  /** Read-only projection tasks queued but not yet settled. */
+  projectionPending?: number
+  /** A bounded projection overflow stopped further read-only updates for this claim. */
+  projectionStalled?: boolean
+  /**
+   * The load replay barrier of a `session/load`ed View: present from the
+   * attach critical point until its buffered live events were drained into the
+   * ordered tail. It is the ONLY state that makes history replay possible.
+   */
+  replay?: ViewReplay
+  /**
+   * The last session-info fields this View proved, so a later durable title
+   * event only patches what actually changed (never a fabricated activity).
+   */
+  lastInfo?: { readonly title?: string }
+  /**
+   * The verified child associations of THIS View, keyed by the official
+   * `subagent/start` runId. The runId is the lifecycle join key: its `end` edge
+   * announces the SAME verified child instead of re-reading a lineage after
+   * the child's Agent was already disposed. It lives only with this claim.
+   */
+  subagentRuns?: Map<string, { readonly childId: string; readonly cwd?: string }>
+  /**
+   * The exact compacted lifecycles this View already projected, keyed by the
+   * durable `compactionId`: at most one start, one summary and one end per id,
+   * in order. A duplicated or out-of-order callback never re-projects it.
+   */
+  compactions?: Map<string, 'started' | 'summarized' | 'ended'>
+  /** Child Session ids whose association this View already announced. */
+  announcedChildren?: Set<string>
+  /**
+   * Whether this View already announced a standing plan. The official `todos`
+   * projection resets to null at the next `turn/start`; only an ALREADY
+   * announced plan needs removal then (null never means "unavailable").
+   */
+  announcedPlan?: boolean
+  /** This Session's own official header, read once for inter-agent lineage. */
+  selfHeader?: AcpHistoryHeader
+}
+
+/** One official subagent lifecycle edge observed by the Host fact source. */
+interface AcpSubagentEdge {
+  readonly edge: 'start' | 'end'
+  readonly info: AcpSubagentRunInfo
+}
+
+/** The bounded load replay fence of one View. */
+interface ViewReplay {
+  /**
+   * Live durable events observed while the canonical snapshot was being read.
+   * Bounded: an overflow aborts the replay instead of growing without limit.
+   */
+  readonly buffered: AcpHistoryEvent[]
+  /**
+   * Official subagent lifecycle edges observed inside the same barrier. They
+   * are NOT Session events (they carry no seq), so they are released in arrival
+   * order after the canonical history and before the buffered turn.
+   */
+  readonly subagents: AcpSubagentEdge[]
+  /** Aborts the history read and its ordered Store reads on close/EOF/Off. */
+  readonly abort: AbortController
+  /** Set when the bounded buffer could not hold the live window. */
+  overflowed: boolean
+  /** Set by close/EOF/Off before the replay owned its output. */
+  stopped: boolean
 }
 
 /** The abort handle of ONE outstanding reverse Form. */
@@ -782,6 +997,21 @@ interface ContinuedQuestionObligation {
 
 /** The maximum number of not-yet-written notifications ONE prompt flight may queue. */
 const MAX_PENDING_OUTPUT_UPDATES = 64
+
+/**
+ * The maximum number of read-only projection TASKS one claim may queue. A task
+ * is one durable event's complete projection; exceeding the bound stops the
+ * claim's read-only stream (a fixed diagnostic) instead of growing a second
+ * unbounded queue.
+ */
+const MAX_PENDING_PROJECTION_TASKS = 64
+
+/**
+ * The maximum number of live durable events the load replay barrier keeps
+ * while the canonical snapshot is read. An overflow aborts that replay with
+ * `LOCAL_ACP_LOAD_BACKPRESSURE` and releases only its own View.
+ */
+const MAX_REPLAY_BUFFERED_EVENTS = 1024
 
 /**
  * One synchronously validated committed-output unit. The flight builds the WHOLE
@@ -1332,7 +1562,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
 
     // Reserve the brand-new id synchronously BEFORE the identity await.
-    const claim: ViewClaim = { connectionIdentity: state, sessionId }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
     this.claims.set(sessionId, claim)
     // resolveForView carries the authoritative { sessionId } on failure, so a
     // failed Agent borrow after a CONFIRMED create still preserves the identity.
@@ -1376,7 +1606,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.resetIdleIfCurrent(state, op)
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
     }
-    const claim: ViewClaim = { connectionIdentity: state, sessionId }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
     this.claims.set(sessionId, claim)
     const agent = await this.resolveForView(access, state, op, claim)
     // cwd is a claim proposal only; a difference is a fixed non-sensitive note,
@@ -1402,7 +1632,780 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (claim.requestElicitation !== undefined && access.hasQuestionService()) {
       this.offerContinuedQuestions(claim, claim.requestElicitation)
     }
+    // `resume` replays NO history, so the current official plan is read once
+    // from the projection of the EXACT attached Session: `null` (no write yet)
+    // sends nothing and an empty list is a real clear.
+    this.offerCurrentPlan(claim, access)
     return {}
+  }
+
+  /**
+   * Attach an EXISTING Session AND replay its complete canonical history.
+   *
+   * This reuses the SAME official attach path as `resume` (one cold resume at
+   * most, the same one-View-per-Session rule, the same MCP lease policy) and
+   * adds ONE thing: a bounded replay barrier opens at the attach critical point,
+   * the complete canonical log is read from the official Session Query, every
+   * projectable durable fact is handed to this claim's ordered tail, the live
+   * events that arrived meanwhile are joined by their official `seq` (each seq
+   * exactly once), and only after that ordered drain does the request answer.
+   *
+   * It never creates a second Agent/Writer/Session and never fabricates
+   * history: an unrepresentable block, a non-monotonic canonical order, an
+   * unreadable committed image or an over-budget live window fails the load
+   * closed and releases ONLY this View.
+   */
+  async loadSession(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    request: AcpLoadSessionParams,
+    channels?: AcpViewChannels,
+    requestSignal?: AbortSignal,
+  ): Promise<Record<string, never>> {
+    const op = this.beginAttach(state)
+    try {
+      this.validateLoad(request)
+      if (!access.supportsSessionRead()) {
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_LOAD_UNAVAILABLE',
+          'this Host cannot read canonical Session history',
+          JSONRPC_INVALID_PARAMS,
+        )
+      }
+    } catch (error) {
+      this.resetIdleIfCurrent(state, op)
+      throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
+    }
+    const sessionId = request.sessionId
+    if (this.claims.has(sessionId)) {
+      this.resetIdleIfCurrent(state, op)
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
+    }
+    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
+    this.claims.set(sessionId, claim)
+    const agent = await this.resolveForView(access, state, op, claim)
+    if (agent.session.header.cwd !== request.cwd) {
+      this.diag.warn('local-acp.view.cwd-mismatch', { mismatch: true })
+    }
+    claim.exactAgent = agent
+    claim.exactSession = agent.session
+    if (request.mcpServers.length > 0) {
+      try {
+        await this.installScopedMcp(state, op, claim, access, agent, request.mcpServers, requestSignal)
+      } catch (error) {
+        this.releaseReservation(state, claim)
+        this.resetIdleIfCurrent(state, op)
+        throw error
+      }
+    }
+    // REPLAY_BARRIER_OPEN: committed BEFORE the View becomes attached, so no
+    // live update of this Session can ever precede the canonical snapshot.
+    const replay: ViewReplay = { buffered: [], subagents: [], abort: new AbortController(), overflowed: false, stopped: false }
+    claim.replay = replay
+    this.commitAttached(state, op, claim, access, agent, channels)
+    if (claim.notifyProjection === undefined) {
+      this.releaseFailedLoad(state, op, claim, access, replay)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_LOAD_UNAVAILABLE',
+        'this ACP connection has no read-only projection sink for a loaded session',
+        JSONRPC_INTERNAL_ERROR,
+      )
+    }
+    const signal = requestSignal === undefined
+      ? replay.abort.signal
+      : AbortSignal.any([requestSignal, replay.abort.signal])
+    try {
+      const history = await access.readSessionHistory(sessionId, signal)
+      // The loaded Session's own official header is the ONLY authority for its
+      // lineage when it is itself a subagent child.
+      claim.selfHeader = history.header
+      // The pure converter validates the WHOLE canonical order and every
+      // committed block BEFORE a single notification is sent.
+      const units = projectSessionHistory(history.events, claim.capabilities ?? NO_PROJECTION_CAPABILITIES, sessionId)
+      const cut = history.events[history.events.length - 1]?.seq ?? -1
+      // Currentness after the Host await: a closed/replaced claim (or a stopped
+      // replay) never publishes a stale history.
+      if (this.claims.get(sessionId) !== claim || replay.stopped) {
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released while its history was read', JSONRPC_INVALID_PARAMS)
+      }
+      if (replay.overflowed) throw loadBackpressure()
+      // DRAIN: the barrier stays OPEN until the ordered tail really drained, so
+      // this View still refuses a new prompt and close/EOF can still abort the
+      // replay's Store reads for the whole output phase. `seq <= cut` duplicates
+      // the snapshot and is dropped; the rest joins by ascending seq exactly
+      // once. The loop re-takes the buffer after every await, and closes the
+      // barrier in the SAME synchronous step as an empty check — no observation
+      // callback can interleave between them.
+      await this.enqueueProjectionTask(claim, async () => {
+        await this.sendHistoryUnits(claim, replay, units, access)
+        const sentSeqs = new Set<number>()
+        for (;;) {
+          if (replay.stopped) return
+          if (replay.overflowed) throw loadBackpressure()
+          // Official child edges were NOT Session events: announce them before
+          // the buffered turn, so a child's association precedes any buffered
+          // message that names it (stable v1 `subagent_update` ordering).
+          const edges = replay.subagents.splice(0, replay.subagents.length)
+          const unique = new Map<number, AcpHistoryEvent>()
+          for (const event of replay.buffered.splice(0, replay.buffered.length)) {
+            if (event.seq <= cut || sentSeqs.has(event.seq) || unique.has(event.seq)) continue
+            unique.set(event.seq, event)
+          }
+          const events = [...unique.values()].sort((left, right) => left.seq - right.seq)
+          for (const event of events) sentSeqs.add(event.seq)
+          if (edges.length === 0 && events.length === 0) {
+            claim.replay = undefined
+            return
+          }
+          for (const edge of edges) await this.releaseSubagent(claim, access, replay, edge)
+          // The buffered window is still canonical HISTORY: every transcript fact
+          // converts through the SAME pure converter, so a turn committed while
+          // the snapshot was read is neither dropped nor re-invented. The
+          // live-only read-only classes keep their own projection (a durable
+          // title arrives only as a live event; provider usage needs the live
+          // projection read).
+          for (const event of events) {
+            if (event.type === 'session/title') {
+              await this.sendLiveEvent(claim, replay, event)
+              continue
+            }
+            await this.sendHistoryUnits(
+              claim, replay,
+              projectSessionHistory([event], claim.capabilities ?? NO_PROJECTION_CAPABILITIES, claim.sessionId),
+              access,
+            )
+            if (event.type === 'assistant/message') await this.sendLiveEvent(claim, replay, event)
+          }
+        }
+      })
+      if (this.claims.get(sessionId) !== claim || replay.stopped) {
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+      }
+      // A loaded View resumes the SAME official continued questions a resume
+      // would offer. It happens only AFTER the complete history drained and the
+      // exact claim is still current: `load` is not a history-only variant of
+      // `resume` that forgets the pending human question.
+      if (claim.requestElicitation !== undefined && access.hasQuestionService()) {
+        this.offerContinuedQuestions(claim, claim.requestElicitation)
+      }
+      return {}
+    } catch (error) {
+      // The cancellation class must be read BEFORE the release marks the replay
+      // stopped, otherwise every failure would be classified as a cancellation.
+      const cancelled = replay.stopped || signal.aborted
+      this.releaseFailedLoad(state, op, claim, access, replay)
+      throw this.mapLoadFailure(error, replay, signal, cancelled)
+    }
+  }
+
+  /** Release a failed load's OWN View without touching the Host Session/Agent/TUI. */
+  private releaseFailedLoad(
+    state: ConnectionViewState,
+    op: number,
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    replay: ViewReplay,
+  ): void {
+    replay.stopped = true
+    if (replay.abort.signal.aborted === false) replay.abort.abort()
+    claim.replay = undefined
+    claim.projectionStalled = true
+    this.releaseClaimWithMcp(state, claim, access)
+    // The slot always returns to idle when THIS attach generation is still
+    // current, exactly like `finishClose`: a fenced MCP retirement keeps its
+    // claim but never blocks the connection's next attach with a stale phase.
+    if (state.op === op && state.phase === 'attached') state.phase = 'idle'
+  }
+
+  /** Classify one load failure without leaking an exception or a Host path. */
+  private mapLoadFailure(error: unknown, replay: ViewReplay, signal: AbortSignal, cancelled: boolean): unknown {
+    if (replay.overflowed) return loadBackpressure()
+    // The cancellation class is decided FIRST: a Store/notify failure observed
+    // after close/EOF/abort is the replay being cancelled, never a corrupt
+    // attachment or a business rejection.
+    if (cancelled) {
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+    }
+    if (error instanceof LocalAcpViewError || error instanceof AcpScopedMcpError) return error
+    if (error instanceof AcpProjectionError) {
+      return new LocalAcpViewError(error.code, error.message, JSONRPC_INTERNAL_ERROR)
+    }
+    return new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_HOST_ERROR',
+      'the Host could not read the canonical Session history',
+      JSONRPC_INTERNAL_ERROR,
+    )
+  }
+
+  /**
+   * Send the CURRENT official plan of one freshly attached View (resume only:
+   * load already replays every `todo/write`). `null`/absent projection sends
+   * nothing; an empty list is a formal clear.
+   */
+  /**
+   * The ONE plan-removal path: the official `todos` projection reset (a new
+   * `turn/start`) removes the plan this View already announced, with the
+   * negotiated `plan_removed` or the baseline complete empty `plan`. A View
+   * that never announced a plan sends nothing.
+   */
+  private async resetPlan(claim: ViewClaim): Promise<void> {
+    if (claim.announcedPlan !== true) return
+    await this.sendProjection(claim, planRemoval(claim.capabilities?.plan === true, claim.sessionId))
+    claim.announcedPlan = false
+  }
+
+  private offerCurrentPlan(claim: ViewClaim, access: HostAcpSessionAccess): void {
+    if (claim.notifyProjection === undefined) return
+    const task = this.enqueueProjectionTask(claim, async () => {
+      const todos = access.sessionTodos(claim.exactSession as object)
+      if (todos === undefined) {
+        this.diag.warn('local-acp.projection.unavailable', { key: 'todos' })
+        return
+      }
+      if (todos === null) return
+      const entries = planEntriesFromTodos(todos)
+      if (entries === undefined) {
+        this.diag.warn('local-acp.projection.unsupported', { key: 'todos' })
+        return
+      }
+      await this.sendProjection(claim, planUpdate(entries, claim.capabilities?.plan === true, claim.sessionId))
+      claim.announcedPlan = true
+    })
+    task.catch(error => { this.reportProjectionFailure(error) })
+  }
+
+  /** Project one durable Session event into this claim's read-only tail. */
+  private observeSessionProjection(claim: ViewClaim, event: AcpSessionEventLike): void {
+    if (claim.notifyProjection === undefined) return
+    const replay = claim.replay
+    if (replay !== undefined) {
+      if (replay.buffered.length >= MAX_REPLAY_BUFFERED_EVENTS) {
+        replay.overflowed = true
+        if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
+        replay.abort.abort()
+        return
+      }
+      // Keep the official durable time: a title buffered during the replay must
+      // later project the same `updatedAt` the live path would.
+      replay.buffered.push({ seq: event.seq, type: event.type, data: event.data, time: event.time })
+      return
+    }
+    if (!this.projectionEventRelevant(claim, event)) return
+    const task = this.enqueueProjectionTask(claim, () => this.sendLiveEvent(claim, undefined, event))
+    task.catch(error => { this.reportProjectionFailure(error) })
+  }
+
+  /** Whether one live durable event carries a read-only ACP projection. */
+  private projectionEventRelevant(claim: ViewClaim, event: AcpSessionEventLike): boolean {
+    switch (event.type) {
+      case 'todo/write':
+      case 'session/title':
+        return true
+      case 'turn/start':
+        // ALWAYS queue the reset: the decision whether a plan needs removal
+        // belongs to the moment this task RUNS in the one ordered tail, after
+        // any earlier plan notification completed. Deciding here would drop the
+        // reset while a slow plan send is still in flight.
+        return true
+      case 'compaction/start':
+      case 'compaction/summary':
+      case 'compaction/end':
+        return claim.capabilities?.compaction === true
+      case 'assistant/message':
+        // The usage update is part of the baseline schema, so no capability
+        // gates it; only a real provider usage sample can prove occupancy.
+        return true
+      case 'user/message':
+        return claim.capabilities?.subagents === true
+      default:
+        return false
+    }
+  }
+
+  /**
+   * Project ONE live durable event into standard updates. Every update of this
+   * branch is read-only and independent of any prompt flight: it never settles
+   * a flight and never re-projects owned assistant output.
+   */
+  private async sendLiveEvent(claim: ViewClaim, replay: ViewReplay | undefined, event: AcpSessionEventLike): Promise<void> {
+    switch (event.type) {
+      case 'todo/write': {
+        const entries = planEntriesOf(event.data)
+        if (entries === undefined) {
+          this.diag.warn('local-acp.projection.unsupported', { key: 'todo/write' })
+          return
+        }
+        await this.sendProjection(claim, planUpdate(entries, claim.capabilities?.plan === true, claim.sessionId))
+        claim.announcedPlan = true
+        return
+      }
+      case 'turn/start': {
+        // The official `todos` fold clears at every turn start; the removal is
+        // sent only when this View already announced a plan.
+        await this.resetPlan(claim)
+        return
+      }
+      case 'compaction/start':
+      case 'compaction/summary':
+      case 'compaction/end': {
+        const update = compactionUpdate({ seq: event.seq, type: event.type, data: event.data })
+        if (!this.acceptCompaction(claim, update)) return
+        await this.sendProjection(claim, update)
+        this.acceptCompaction(claim, update, true)
+        return
+      }
+      case 'session/title': {
+        const update = sessionInfoUpdateOf(event.data, event.time)
+        if (update === undefined) return
+        const title = (update as { readonly title?: string }).title
+        if (title !== undefined && claim.lastInfo?.title === title) return
+        await this.sendProjection(claim, update)
+        // Recorded only after delivery: a failed send must not suppress the
+        // retry of the same durable title.
+        claim.lastInfo = { ...(title === undefined ? {} : { title }) }
+        return
+      }
+      case 'assistant/message': {
+        // Occupancy is read ONLY after a message that carries the provider's
+        // own usage, and only from the official context-pressure projection.
+        if ((event.data as { readonly usage?: unknown } | null)?.usage === undefined) return
+        const access = this.access
+        if (access === undefined || claim.exactSession === undefined) return
+        const update = usageUpdateOf(access.contextPressure(claim.exactSession))
+        if (update === undefined) return
+        await this.sendProjection(claim, update)
+        return
+      }
+      case 'user/message': {
+        const access = this.access
+        if (access === undefined) return
+        let message: AcpHistoryAgentMessage | undefined
+        try {
+          message = durableAgentMessageOf(event.data)
+        } catch {
+          this.diag.warn('local-acp.projection.unsupported', { key: 'user/message' })
+          return
+        }
+        if (message === undefined) return
+        await this.projectSessionMessage(claim, access, replay, message)
+        return
+      }
+      default:
+        return
+    }
+  }
+
+  /**
+   * Send ONE durable inter-agent message as a standard `session_message`.
+   *
+   * Provenance is proven from OFFICIAL Session headers before anything is sent:
+   * either the sender is a subagent child of this Session (its header carries
+   * `origin:'subagent'` and this exact durable parent), or this Session is
+   * itself a subagent child and the sender is its immediate parent (a real
+   * author that is not a child association to announce). Any other author is
+   * Host-internal or fabricated and projects NOTHING.
+   *
+   * When the sender IS a child, its association is announced with a
+   * `subagent_update` first — at most once per claim — because the stable v1
+   * contract has `subagent_update` announce a child before the Client sees that
+   * child's traffic. The announcement omits `state`: this View never invents an
+   * activity snapshot the Host did not report.
+   */
+  private async projectSessionMessage(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    replay: ViewReplay | undefined,
+    message: AcpHistoryAgentMessage,
+  ): Promise<void> {
+    const lineage = await this.sessionMessageLineage(claim, access, message.senderSessionId)
+    if (lineage === 'unproven') {
+      this.diag.warn('local-acp.projection.session-message-unverified', { key: 'session_message' })
+      return
+    }
+    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return
+    const blocks: AcpWireContentBlock[] = []
+    for (const part of message.content) {
+      if (part.type === 'text') {
+        if (part.text.length === 0) continue
+        blocks.push({ type: 'text', text: part.text })
+        continue
+      }
+      try {
+        blocks.push(await this.readProjectionImage(claim, replay, part.ref))
+      } catch (error) {
+        // A CANONICAL HISTORY read is fail-closed: a committed image the Store
+        // cannot produce must fail the load (the same rule as any other
+        // history image), never silently drop the message and report a
+        // complete replay. A live projection only loses this one message.
+        if (replay !== undefined) throw error
+        this.diag.warn('local-acp.projection.attachment-failed', { key: 'session_message' })
+        return
+      }
+    }
+    if (blocks.length === 0) return
+    await this.sendProjection(claim, {
+      sessionUpdate: 'session_message',
+      messageId: message.messageId,
+      senderSessionId: message.senderSessionId,
+      recipientSessionId: claim.sessionId,
+      content: blocks,
+    })
+  }
+
+  /**
+   * Classify one inter-agent author with the official header facts: `child`
+   * (a verified subagent child of this Session), `parent` (this Session is the
+   * verified child), or `unproven`.
+   */
+  private async sessionMessageLineage(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    senderSessionId: string,
+  ): Promise<'child' | 'parent' | 'unproven'> {
+    if (senderSessionId === claim.sessionId) return 'unproven'
+    // A header read is a real official (possibly cold) read: it must be
+    // cancellable with THIS claim, for the replay AND for the ordinary live
+    // projection, so close/EOF/Off never waits on it.
+    const signal = claim.readAbort.signal
+    signal?.throwIfAborted()
+    const sender = await access.sessionHeaderFacts(senderSessionId, signal)
+    signal?.throwIfAborted()
+    if (sender?.sessionId !== senderSessionId) return 'unproven'
+    if (sender.origin === 'subagent' && sender.parentSessionId === claim.sessionId) return 'child'
+    const self = claim.selfHeader ??= await access.sessionHeaderFacts(claim.sessionId, signal)
+    signal?.throwIfAborted()
+    if (self?.origin === 'subagent' && self.parentSessionId === senderSessionId) return 'parent'
+    return 'unproven'
+  }
+
+  /**
+   * Announce ONE verified child association at most once per claim, without a
+   * fabricated state. An unprovable child projects nothing.
+   */
+  private async announceChildAssociation(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    childId: string,
+  ): Promise<boolean> {
+    const announced = claim.announcedChildren ??= new Set()
+    if (announced.has(childId)) return true
+    const signal = claim.readAbort.signal
+    signal?.throwIfAborted()
+    const facts = await access.sessionHeaderFacts(childId, signal)
+    signal?.throwIfAborted()
+    if (facts?.sessionId !== childId || facts.origin !== 'subagent' || facts.parentSessionId !== claim.sessionId) {
+      this.diag.warn('local-acp.projection.subagent-unverified', {
+        edge: 'message',
+        reason: facts === undefined ? 'header-unavailable' : 'lineage-mismatch',
+      })
+      return false
+    }
+    await this.sendProjection(claim, {
+      sessionUpdate: 'subagent_update',
+      sessionId: childId,
+      ...(facts.cwd === undefined ? {} : { cwd: facts.cwd }),
+    })
+    announced.add(childId)
+    return true
+  }
+
+  /**
+   * Append ONE read-only projection task to this claim's single ordered tail.
+   * The tail is the ONLY read-only queue: it never grows past its bounded task
+   * count, the returned promise settles with THIS task (a live caller observes
+   * it, the load request awaits it before answering) and the chain itself never
+   * rejects.
+   */
+  private enqueueProjectionTask(claim: ViewClaim, run: () => Promise<void>): Promise<void> {
+    if (claim.projectionStalled === true) return Promise.reject(projectionBackpressure())
+    const pending = (claim.projectionPending ?? 0) + 1
+    if (pending > MAX_PENDING_PROJECTION_TASKS) {
+      claim.projectionStalled = true
+      this.diag.warn('local-acp.projection.backpressure', { code: 'LOCAL_ACP_PROJECTION_BACKPRESSURE' })
+      return Promise.reject(projectionBackpressure())
+    }
+    claim.projectionPending = pending
+    const settled = Promise.withResolvers<void>()
+    const execute = async (): Promise<void> => {
+      try {
+        if (claim.projectionStalled !== true && this.projectionCurrent(claim)) await run()
+        settled.resolve()
+      } catch (error) {
+        settled.reject(error)
+      } finally {
+        claim.projectionPending = (claim.projectionPending ?? 1) - 1
+      }
+    }
+    claim.projectionTail = (claim.projectionTail ?? Promise.resolve()).then(execute, execute)
+    return settled.promise
+  }
+
+  /** Whether this exact claim may still deliver a read-only update. */
+  private projectionCurrent(claim: ViewClaim): boolean {
+    return claim.notifyProjection !== undefined
+      && claim.connectionIdentity.phase !== 'closed'
+      && claim.detachedWithFence !== true
+      && this.claims.get(claim.sessionId) === claim
+  }
+
+  /**
+   * End this claim's read-only output for good: drop every queued projection,
+   * invalidate a still-open load replay and stop its IO (idempotent). Only the
+   * claim's OWN connection is affected; the Session/Agent/TUI keep their Host
+   * authority.
+   */
+  private stopProjectionOutput(claim: ViewClaim): void {
+    claim.notifyProjection = undefined
+    claim.projectionStalled = true
+    if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
+    const replay = claim.replay
+    claim.replay = undefined
+    if (replay === undefined) return
+    replay.stopped = true
+    if (!replay.abort.signal.aborted) replay.abort.abort()
+  }
+
+  /** Send ONE read-only update through this claim's OWN connection sink. */
+  private async sendProjection(claim: ViewClaim, update: SessionUpdate): Promise<void> {
+    const notify = claim.notifyProjection
+    if (notify === undefined) {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view has no projection sink', JSONRPC_INTERNAL_ERROR)
+    }
+    await notify(claim.sessionId, update)
+  }
+
+  /**
+   * The ONE per-claim compaction lifecycle gate. Each durable `compactionId`
+   * may contribute at most one start, one summary and one end, in that order;
+   * a duplicated or out-of-order callback is dropped instead of re-projecting
+   * a lifecycle the client already received.
+   */
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate): boolean
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate, commit: true): void
+  private acceptCompaction(claim: ViewClaim, update: SessionUpdate, commit = false): boolean | void {
+    if (update.sessionUpdate !== 'compaction_update') return commit ? undefined : true
+    const states = claim.compactions ??= new Map()
+    const current = states.get(update.compactionId)
+    let next: 'started' | 'summarized' | 'ended' | undefined
+    if (update.status === 'in_progress' && update.summary === undefined) {
+      if (current === undefined) next = 'started'
+    } else if (update.status === 'in_progress') {
+      if (current === 'started') next = 'summarized'
+    } else if (current === 'started' || current === 'summarized') {
+      next = 'ended'
+    }
+    if (next === undefined) return commit ? undefined : false
+    // The lifecycle is recorded only AFTER the send succeeded, so a failed
+    // notification cannot consume the one allowed transition.
+    if (commit) {
+      states.set(update.compactionId, next)
+      return undefined
+    }
+    return true
+  }
+
+  /** Record one live projection failure without failing a Host request. */
+  private reportProjectionFailure(error: unknown): void {
+    const code = error instanceof LocalAcpViewError
+      ? error.code
+      : error instanceof AcpProjectionError ? error.code : 'LOCAL_ACP_PROJECTION_FAILED'
+    this.diag.warn('local-acp.projection.failed', { code })
+  }
+
+  /**
+   * Send the converted canonical history in order. Every image is re-read and
+   * verified by the official Host Attachment Store inside this tail, so one
+   * event keeps its FIFO position and no fabricated placeholder is ever sent.
+   */
+  private async sendHistoryUnits(
+    claim: ViewClaim,
+    replay: ViewReplay,
+    units: readonly AcpHistoryUnit[],
+    access: HostAcpSessionAccess,
+  ): Promise<void> {
+    for (const unit of units) {
+      if (replay.stopped || !this.projectionCurrent(claim)) {
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+      }
+      if (unit.kind === 'plan-reset') {
+        await this.resetPlan(claim)
+        continue
+      }
+      if (unit.kind === 'update') {
+        if (!this.acceptCompaction(claim, unit.update)) continue
+        await this.sendProjection(claim, unit.update)
+        this.acceptCompaction(claim, unit.update, true)
+        if (unit.update.sessionUpdate === 'plan' || unit.update.sessionUpdate === 'plan_update') claim.announcedPlan = true
+        if (unit.update.sessionUpdate === 'plan_removed') claim.announcedPlan = false
+        continue
+      }
+      if (unit.kind === 'image') {
+        await this.sendProjection(claim, {
+          sessionUpdate: unit.image.sessionUpdate,
+          messageId: unit.image.messageId,
+          content: await this.readProjectionImage(claim, replay, unit.image.ref),
+        })
+        continue
+      }
+      if (unit.kind === 'session-message') {
+        await this.projectSessionMessage(claim, access, replay, unit.message)
+        continue
+      }
+      const content: ToolCallContent[] = []
+      for (const part of unit.result.content) {
+        if (part.type === 'text') {
+          content.push({ type: 'content', content: { type: 'text', text: part.text } })
+          continue
+        }
+        content.push({ type: 'content', content: await this.readProjectionImage(claim, replay, part.ref) })
+      }
+      await this.sendProjection(claim, {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: unit.result.toolCallId,
+        status: unit.result.status,
+        content,
+      })
+    }
+  }
+
+  /** Read ONE committed image through the official Store and encode its verified bytes. */
+  private async readProjectionImage(
+    claim: ViewClaim,
+    replay: ViewReplay | undefined,
+    ref: AcpStoredImageRef,
+  ): Promise<AcpWireContentBlock> {
+    const access = this.access
+    if (access === undefined) throw attachmentLoadFailed()
+    try {
+      const stored = await access.readOutputImage(ref, claim.readAbort.signal)
+      return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType }
+    } catch {
+      // A close/EOF/Off during the Store read is NOT a corrupt attachment: it
+      // is THIS claim's read being cancelled (replay or live).
+      if (claim.readAbort.signal.aborted || replay?.stopped === true) {
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+      }
+      throw attachmentLoadFailed()
+    }
+  }
+
+  /** One official `subagent/start` edge: announce the verified child association. */
+  onSubagentStart(info: AcpSubagentRunInfo): void {
+    this.announceSubagent(info, 'start')
+  }
+
+  /** One official `subagent/end` edge: the same association becomes idle. */
+  onSubagentEnd(info: AcpSubagentRunInfo): void {
+    this.announceSubagent(info, 'end')
+  }
+
+  /**
+   * Announce ONE verified child association on its IMMEDIATE parent Session.
+   * The child Session header must prove `origin:'subagent'` AND the exact
+   * durable creator, so an ordinary fork's `parentSession` is never mistaken
+   * for a subagent. Capabilities are always omitted (no child mutation) and an
+   * unprovable association announces nothing.
+   */
+  private announceSubagent(info: AcpSubagentRunInfo, edge: 'start' | 'end'): void {
+    for (const claim of this.claims.values()) {
+      if (claim.sessionId !== info.parentSessionId) continue
+      if (claim.capabilities?.subagents !== true || claim.notifyProjection === undefined) continue
+      const access = this.access
+      if (access === undefined) continue
+      const replay = claim.replay
+      if (replay !== undefined) {
+        // Inside a load barrier this official edge is NOT a Session event, so it
+        // is held with the history and released after it — never before the
+        // canonical snapshot it must follow.
+        if (replay.subagents.length >= MAX_REPLAY_BUFFERED_EVENTS) {
+          replay.overflowed = true
+          // The SAME terminal abort as the Session-event buffer: this replay can
+          // never succeed, so any read it still waits on must stop now instead
+          // of after the drain notices the overflow.
+          if (!claim.readAbort.signal.aborted) claim.readAbort.abort()
+          replay.abort.abort()
+          return
+        }
+        replay.subagents.push({ edge, info })
+        continue
+      }
+      const task = this.enqueueProjectionTask(claim, async () => {
+        await this.releaseSubagent(claim, access, undefined, { edge, info })
+      })
+      task.catch(error => { this.reportProjectionFailure(error) })
+    }
+  }
+
+  /**
+   * Release ONE official child edge inside this claim's ordered tail: verify
+   * the child lineage, send the lifecycle update and keep the runId join.
+   */
+  private async releaseSubagent(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    replay: ViewReplay | undefined,
+    buffered: AcpSubagentEdge,
+  ): Promise<void> {
+    const { edge, info } = buffered
+    if (replay?.stopped === true) return
+    // The official runId joins the end edge to the association the start
+    // edge already verified on THIS claim. Both edges are resolved INSIDE
+    // one FIFO tail, so an end published while the start notification is
+    // still held sees the start's verified entry. The child Agent is
+    // disposed before `end` is published, so a second lineage read would
+    // race that disposal; an end whose start this View never projected
+    // announces NOTHING — a lone idle snapshot would create an association
+    // this connection never observed.
+    const known = edge === 'end' ? claim.subagentRuns?.get(info.runId) : undefined
+    if (edge === 'end' && (known === undefined || known.childId !== info.id)) {
+      this.diag.warn('local-acp.projection.subagent-unverified', { edge, reason: 'run-unknown' })
+      return
+    }
+    const verified = known !== undefined && known.childId === info.id
+      ? { childId: known.childId, ...(known.cwd === undefined ? {} : { cwd: known.cwd }) }
+      : await this.verifySubagentChild(claim, access, info, edge)
+    if (verified === undefined) return
+    await this.sendProjection(claim, {
+      sessionUpdate: 'subagent_update',
+      sessionId: verified.childId,
+      state: edge === 'start'
+        ? { state: 'running' }
+        : { state: 'idle', stopReason: subagentStopReason(info.stopReason) },
+      ...(verified.cwd === undefined ? {} : { cwd: verified.cwd }),
+    })
+    if (edge === 'start') {
+      const runs = claim.subagentRuns ??= new Map()
+      runs.set(info.runId, { childId: verified.childId, ...(verified.cwd === undefined ? {} : { cwd: verified.cwd }) })
+      ;(claim.announcedChildren ??= new Set()).add(verified.childId)
+      return
+    }
+    claim.subagentRuns?.delete(info.runId)
+  }
+
+  /**
+   * Cross-check one announced child against the official Session header:
+   * `origin:'subagent'` AND the exact durable creator. An unprovable child
+   * announces nothing and leaves a bounded diagnostic.
+   */
+  private async verifySubagentChild(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    info: AcpSubagentRunInfo,
+    edge: 'start' | 'end',
+  ): Promise<{ readonly childId: string; readonly cwd?: string } | undefined> {
+    const signal = claim.readAbort.signal
+    signal?.throwIfAborted()
+    const facts = await access.sessionHeaderFacts(info.id, signal)
+    signal?.throwIfAborted()
+    if (facts === undefined || facts.sessionId !== info.id
+      || facts.origin !== 'subagent' || facts.parentSessionId !== info.parentSessionId) {
+      this.diag.warn('local-acp.projection.subagent-unverified', {
+        edge,
+        reason: facts === undefined ? 'header-unavailable' : 'lineage-mismatch',
+      })
+      return undefined
+    }
+    return { childId: facts.sessionId, ...(facts.cwd === undefined ? {} : { cwd: facts.cwd }) }
   }
 
   /** Whether one MCP admission is still owned by the same live attach op. */
@@ -1681,6 +2684,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (this.claims.get(sessionId) !== claim || claim.detachedWithFence || state.phase === 'closed') return {}
     // A closed View owns no connection output or reverse Form any more.
     claim.notifyConfigOptions = undefined
+    // The read-only projection sink dies with the detach: a queued projection
+    // is dropped and a still-open load replay is invalidated here.
+    this.stopProjectionOutput(claim)
     this.releaseQuestionForms(claim)
     // A transient terminal fact may still outlive the View: a retired-turn
     // approval fence (F2) or an unclaimed Host obligation (v1.1). The View
@@ -1903,6 +2909,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       || claim.exactSession === undefined
     ) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
+    }
+    if (claim.replay !== undefined) {
+      // A loaded View is still replaying its complete history. A new prompt is
+      // refused instead of being interleaved into the replay: the client asked
+      // for the whole past before any new turn.
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_BUSY',
+        'the loaded session is still replaying its history',
+        JSONRPC_INVALID_PARAMS,
+      )
     }
     if (claim.inflight !== undefined || claim.unclaimedHostObligation !== undefined) {
       // A previous accepted Prompt still owes a Host terminal fact: the View
@@ -2186,6 +3202,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (event.type === 'model/selection' && claim.notifyConfigOptions !== undefined) {
         this.enqueueConfigNotification(claim, session)
       }
+      // The read-only projection branch is INDEPENDENT of any prompt flight: a
+      // TUI/Goal turn's plan, title, usage, compaction and agent message are
+      // projected too, while its assistant output stays out of this View's
+      // flight (never a second answer to an ACP prompt). During a load replay
+      // the same branch buffers by seq behind the canonical snapshot.
+      this.observeSessionProjection(claim, event)
       const data = event.data as { readonly turn?: unknown } | undefined
       // The retired-turn fence dies on its own terminal record even when no
       // flight is open any more (the flight settled before this turn/end).
@@ -2842,7 +3864,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     for (const claim of this.claims.values()) {
       if (claim.exactAgent !== agent) continue
       // The disposed Agent can neither ask nor accept an answer any more: every
-      // reverse Form of this claim ends here.
+      // reverse Form of this claim and its read-only projection end here.
+      this.stopProjectionOutput(claim)
       this.releaseQuestionForms(claim)
       const flight = claim.inflight
       if (flight !== undefined && !flight.settledDone) {
@@ -3025,10 +4048,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     for (const [sessionId, claim] of this.claims) {
       if (claim.connectionIdentity !== state) continue
       // A physical teardown/Off/replacement ends this connection's notification
-      // capability and every reverse Form/continued obligation immediately,
-      // even when the claim survives for a fence fact. The Host's own durable
-      // `userQuestions` projection is never touched.
+      // capability, every reverse Form/continued obligation and every queued
+      // read-only projection immediately, even when the claim survives for a
+      // fence fact. The Host's own durable `userQuestions` projection is never
+      // touched.
       claim.notifyConfigOptions = undefined
+      this.stopProjectionOutput(claim)
       this.releaseQuestionForms(claim)
       const bound = access ?? this.access
       // An in-flight MCP admission is not cancellable synchronously; commit the
@@ -3261,10 +4286,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim.exactAgent = agent
     claim.exactSession = agent.session
     // The transient per-connection channels are bound at the SAME moment the
-    // View becomes attached, so no model/selection event or owned question can
-    // slip between attach and wiring.
+    // View becomes attached, so no model/selection event, owned question or
+    // read-only projection can slip between attach and wiring. The negotiated
+    // capabilities were frozen at `initialize`, never re-read per attach.
     claim.notifyConfigOptions = channels?.notifyConfigOptions
     claim.requestElicitation = channels?.requestElicitation
+    claim.notifyProjection = channels?.notifyProjection
+    claim.capabilities = channels?.capabilities
   }
 
   /**
@@ -3834,6 +4862,75 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (request.additionalDirectories !== undefined && request.additionalDirectories.length !== 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP additional directories are not supported by this Host', JSONRPC_INVALID_PARAMS)
     }
+  }
+
+  private validateLoad(request: AcpLoadSessionParams): void {
+    if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'a non-empty sessionId is required', JSONRPC_INVALID_PARAMS)
+    }
+    validateCwd(request.cwd)
+    if (!Array.isArray(request.mcpServers)) {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'mcpServers must be an array', JSONRPC_INVALID_PARAMS)
+    }
+    parseAcpMcpServers(request.mcpServers)
+    if (request.additionalDirectories !== undefined && request.additionalDirectories.length !== 0) {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP additional directories are not supported by this Host', JSONRPC_INVALID_PARAMS)
+    }
+  }
+}
+
+/** The capabilities of a connection that negotiated none of the optional ones. */
+const NO_PROJECTION_CAPABILITIES: AcpNegotiatedCapabilities = {
+  plan: false,
+  compaction: false,
+  subagents: false,
+  notices: false,
+}
+
+/** The bounded load replay window could not hold every live event. */
+function loadBackpressure(): LocalAcpViewError {
+  return new LocalAcpViewError(
+    'LOCAL_ACP_LOAD_BACKPRESSURE',
+    'the live Session events exceeded the bounded replay window',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/** The bounded read-only projection tail could not keep up. */
+function projectionBackpressure(): LocalAcpViewError {
+  return new LocalAcpViewError(
+    'LOCAL_ACP_PROJECTION_BACKPRESSURE',
+    'the read-only projection tail exceeded its bound',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/** The official Store could not read and verify one projected image. */
+function attachmentLoadFailed(): LocalAcpViewError {
+  return new LocalAcpViewError(
+    'LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED',
+    'a projected image attachment could not be read and verified',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/**
+ * Map one official subagent terminal stop reason onto the standard ACP work
+ * state. An unrecognized reason is `error`: a child whose ending cannot be
+ * named is never reported as a clean finish.
+ */
+function subagentStopReason(reason: string | undefined): 'end_turn' | 'max_tokens' | 'cancelled' | 'refusal' | { readonly stopReason: 'error' } {
+  switch (reason) {
+    case 'completed':
+      return 'end_turn'
+    case 'max-tokens':
+      return 'max_tokens'
+    case 'aborted':
+      return 'cancelled'
+    case 'refusal':
+      return 'refusal'
+    default:
+      return { stopReason: 'error' }
   }
 }
 

@@ -63,6 +63,10 @@ const SCENARIOS = new Set([
   // itself keeps its original rewriting behaviour for the TUI cases that prove
   // the authoritative-block-end supersede.
   'long-turn-stream',
+  // G-ACP2-PR2 protocol projection: the scripted provider's three real turns
+  // (official `todo_write`, one real `subagent` child, provider usage, then a
+  // step-pressure compaction) are the durable facts an ACP client consumes.
+  'acp-projection',
   // G-ACP2 transient streaming: the ONLY scripted provider whose deltas and
   // durable block agree. Its first delta is held so a case can prove the ACP
   // chunk precedes the durable append, and one prompt selects a deliberately
@@ -1219,7 +1223,7 @@ function createScopedMcpB1Workload(ctx, { root, record }) {
 }
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -1229,10 +1233,22 @@ class C1Model extends LlmAdapter {
     this.imageProbe = imageProbe
     this.markdownFileProbe = markdownFileProbe
     this.po4c = po4c
+    this.probeRegistry = probeRegistry
     this.toolIssued = new Set()
     this.longTurnCount = new Map()
     this.failflowStep = new Map()
+    // G-ACP2-PR2: the real provider step counter of the protocol-projection
+    // scenario (one extra turn per official tool result).
+    this.projectionStep = new Map()
     this.childHeld = false
+  }
+
+  projectionStepOf(sessionId) {
+    return this.projectionStep.get(sessionId) ?? 0
+  }
+
+  setProjectionStep(sessionId, step) {
+    this.projectionStep.set(sessionId, step)
   }
 
   /** Emit ONE standard provider tool-call block (the same chunk shape every
@@ -1262,6 +1278,11 @@ class C1Model extends LlmAdapter {
     const modelSwitchContext = process.env.C1_MODEL_S1_ROUTE === model
       ? { context: { contextWindow: 200_000 } }
       : {}
+    // G-ACP2-PR2: the protocol-projection scenario needs a REAL declared route
+    // capacity so the official token meter can pair provider usage with it.
+    const projectionRouteContext = this.scenario === 'acp-projection' && model === 'c1'
+      ? { context: { contextWindow: Number(process.env.C1_PROJECTION_CONTEXT_WINDOW ?? 200_000) } }
+      : {}
     const modelS1Reasoning = process.env.C1_MODEL_S1_ROUTE === model
       ? { reasoning: { efforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], defaultEffort: 'low' } }
       : {}
@@ -1270,6 +1291,7 @@ class C1Model extends LlmAdapter {
       id: model,
       name: model,
       ...modelSwitchContext,
+      ...projectionRouteContext,
       ...modelS1Reasoning,
       ...(po4a && model === 'c1' ? { inputModalities: ['text', 'image'] } : {}),
       ...(po4a && model === 'c1-text-only' ? { inputModalities: ['text'] } : {}),
@@ -1302,6 +1324,21 @@ class C1Model extends LlmAdapter {
     }
     recordPromptFacts(options)
     const userText = allUserText(options.messages ?? [])
+    // QUALIFICATION-ONLY read-only observation of the official live registries
+    // for ONE watched Session id (`C1_WATCH_SESSION`). The phase marker comes
+    // from the CURRENT authored prompt only: the official agent loop forwards
+    // the derived history, so an older marker must never shadow this step's.
+    // The pack does not ship this.
+    const reversedMessages = [...(options.messages ?? [])].reverse()
+    // The request's last user message IS this step's prompt; when the message
+    // shape carries an explicit source, prefer the user-authored one.
+    const authored = reversedMessages.find(message => message?.role === 'user' && message?.source?.kind === 'user')
+      ?? reversedMessages.find(message => message?.role === 'user')
+    const phaseText = authored === undefined ? '' : allUserText([authored])
+    const phaseMatch = /projection-registry-marker:([a-z0-9-]+)/u.exec(phaseText)
+    if (phaseMatch !== null) this.record('live-registry-phase', { phase: phaseMatch[1] })
+    const registry = this.probeRegistry?.({ phase: phaseMatch?.[1] ?? null, sessionId })
+    if (registry !== undefined) this.record('live-registry', registry)
     const afterTool = Array.isArray(options.messages) && options.messages.at(-1)?.role === 'tool'
     const token = `${this.scenario}-${sessionId}`
 
@@ -1457,6 +1494,104 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `po4c answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `po4c answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'acp-projection') {
+      // The compaction summarizer runs with its OWN purpose: the answer must be
+      // a plain text summary, never one of the scenario's tool turns.
+      if (options.purpose === 'compaction') {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'projection compaction summary' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'projection compaction summary' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // A delegated CHILD session first sends ONE real message to its creator
+      // through the official `send_message` tool — the only real producer of a
+      // durable `source.kind:'agent-message'` — and then answers its own task.
+      if (userText.includes('projection-child-task')) {
+        if (!afterTool) {
+          yield* this.toolCall('send_message', `projection-child-message-${sessionId}`, {
+            agent: 'lead',
+            message: `projection child message ${token}`,
+          })
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `projection child answer ${token}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `projection child answer ${token}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // G-ACP2-PR2 protocol projection: three REAL provider turns per Session.
+      // Step 0 writes the official whole-list todo snapshot through the real
+      // `todo_write` tool, step 1 delegates one REAL subagent child through the
+      // `subagent` tool, and step 2 answers with text plus its own provider
+      // usage so the official token meter has a real occupancy sample.
+      const step = this.projectionStepOf(sessionId)
+      this.setProjectionStep(sessionId, step + 1)
+      if (step === 0) {
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `projection-todo-${sessionId}`,
+            name: 'todo_write',
+            arguments: JSON.stringify({
+              todos: [
+                { content: 'inspect the projection', status: 'in_progress' },
+                { content: 'prove the replay', status: 'pending' },
+              ],
+            }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (step === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: `projection-child-${sessionId}`,
+            name: 'subagent',
+            arguments: JSON.stringify({
+              description: 'projection child',
+              prompt: `projection-child-task ${token}`,
+            }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      // The first prompt's CLOSING answer reports a LARGE provider occupancy,
+      // so the official step-pressure check compacts the context before the
+      // NEXT prompt's first step. Any later answer reports a small real sample.
+      // The closing answer of the FIRST prompt is deliberately large and
+      // reports the scripted provider's occupancy: the next step's official
+      // pressure check then has a real surface to compact (the retained tail is
+      // the big assistant node, the prefix is the system prompt + first user
+      // message), which is what makes a REAL durable compaction happen.
+      const closingAnswer = step === 2
+        ? {
+          text: `projection answer ${token} ${'projection long context '.repeat(6_000)}`,
+          usage: {
+            inputTokens: Number(process.env.C1_PROJECTION_PRESSURE_TOKENS ?? 150_000),
+            outputTokens: 20,
+            totalTokens: Number(process.env.C1_PROJECTION_PRESSURE_TOKENS ?? 150_000) + 20,
+          },
+        }
+        : { text: `projection answer ${token}`, usage: { inputTokens: 1_200, outputTokens: 20, totalTokens: 1_220 } }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: closingAnswer.text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: closingAnswer.text } }
+      yield { type: 'usage', usage: closingAnswer.usage }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
@@ -2319,10 +2454,30 @@ export async function apply(ctx) {
     ? await createPo4cOutputProbe(ctx, record)
     : undefined
 
+  const watchSession = process.env.C1_WATCH_SESSION
+  const probeRegistry = watchSession === undefined || watchSession === ''
+    ? undefined
+    : ({ phase, sessionId }) => {
+      // Global live counts come from the official registries' own `list()`; the
+      // call's OWN session is the known-live positive control, so a probe that
+      // always reports false cannot pass.
+      const sessionIds = ctx.get('sessions')?.list().map(session => session.id) ?? []
+      const agentIds = ctx.get('agents')?.list().map(agent => agent.id) ?? []
+      return {
+        phase,
+        watched: watchSession,
+        watchedSessionLive: sessionIds.includes(watchSession),
+        watchedAgentLive: agentIds.includes(watchSession),
+        sessionCount: sessionIds.length,
+        agentCount: agentIds.length,
+        selfSessionLive: sessionIds.includes(sessionId),
+        selfAgentLive: agentIds.includes(sessionId),
+      }
+    }
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe, markdownFileProbe, po4c)
+  }, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 

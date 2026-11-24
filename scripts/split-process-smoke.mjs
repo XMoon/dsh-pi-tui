@@ -114,6 +114,7 @@ import {
   selectedNotVerifiedLine,
   selectedPassLine,
 } from './lib/split-smoke-selection.mjs'
+import { pinnedSdkVersion } from './lib/split-smoke-sdk.mjs'
 import { ENTRY_ADMISSION_MUTATIONS } from './smoke/split-process/entry-admission.mjs'
 
 // Re-exported for the tooling guards that drive the bounded condition wait.
@@ -891,7 +892,7 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.healthyAfterFailure === true
       && result?.tuiHostSurvivedClientClose === true
       && isDigest(evidence?.candidateSha256)
-      && evidence?.sdkVersion === '1.4.0'
+      && evidence?.sdkVersion === pinnedSdkVersion()
       && evidence?.protocolVersion === 1
       && isHostPid(input?.hostPid)
       && isName(input?.hostInstanceId)

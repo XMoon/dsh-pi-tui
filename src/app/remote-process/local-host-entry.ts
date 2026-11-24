@@ -99,6 +99,11 @@ import {
   type HostAcpSessionAccess,
   type LiveAgentViewIdentity,
 } from './local-acp-session-view.ts'
+import type {
+  AcpHistoryHeader,
+  AcpSessionHistory,
+  AcpSessionReadRow,
+} from './local-acp-projections.ts'
 import type { AcpAccessStatus } from '../../runtime/acp-access-port.ts'
 import {
   AcpSessionModelService,
@@ -575,6 +580,18 @@ interface WorkspaceControllerLike {
 }
 interface SessionControllerLike {
   create(request: { workspaceId: string }): Promise<{ sessionId: string }>
+  /**
+   * The official authorized Session roster: the Controller already filters it
+   * through `remoteAccess.allows({kind:'session'})` and never resumes an Agent.
+   */
+  list(request: { readonly cursor?: string }, signal: AbortSignal): Promise<{
+    readonly items: readonly {
+      readonly sessionId: string
+      readonly updatedAt: number
+      readonly cwd?: string
+      readonly origin?: 'subagent'
+    }[]
+  }>
   resolveAgent(sessionId: string): Promise<
     { agent: LiveAgentViewIdentity } | { error: { code: string; message: string } }
   >
@@ -638,7 +655,51 @@ interface UserQuestionProjectionStateLike {
 /** The structural seam of the official `sessionProjections` registry. */
 interface SessionProjectionServiceLike {
   stateOf(session: object, key: string): unknown
+  snapshot(session: object, keys?: readonly string[]): {
+    readonly asOfSeq: number
+    readonly values: Readonly<Record<string, unknown>>
+  }
   onChanged(listener: (session: object, key: string) => void): () => void
+}
+
+/** The official header facts a Session List/History read needs (structural). */
+export interface SessionHeaderFactsLike {
+  readonly id: string
+  readonly cwd?: string
+  readonly parentSession?: string
+  readonly origin?: 'subagent'
+}
+
+/**
+ * One title/header observation result of the official Session Query
+ * (structural). The official `SessionTitleObservation` carries the folded
+ * header as `value.session` (a `structuredClone` of the durable header) plus an
+ * optional `value.title`; the seam is asserted against that official result in
+ * `test/app/local-acp-host-cold-header.test.ts` so a renamed field cannot fall
+ * through to `undefined` at runtime.
+ */
+export type SessionTitleObservationLike =
+  | {
+    readonly sessionId: string
+    readonly status: 'fulfilled'
+    readonly value: {
+      readonly session: SessionHeaderFactsLike
+      readonly title?: { readonly title: string }
+    }
+  }
+  | { readonly sessionId: string; readonly status: 'rejected' }
+
+/**
+ * The structural seam of the official `sessionQuery` read surface. It is
+ * declared structurally (never imported) so this Host composition root does
+ * not pull a second physical copy of `dsh-session` into the program.
+ */
+interface SessionQueryReadLike {
+  readSession(sessionId: string): Promise<{
+    readonly session: SessionHeaderFactsLike
+    readonly events: readonly { readonly seq: number; readonly type: string; readonly data: unknown; readonly time?: number }[]
+  }>
+  readTitleSnapshots(sessionIds: readonly string[], signal?: AbortSignal): Promise<readonly SessionTitleObservationLike[]>
 }
 
 /**
@@ -688,6 +749,9 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
   // ACP-owned question (the View fails it closed instead).
   const userQuestions = context.reflect.get('userQuestions') as UserQuestionServiceLike | undefined
   const sessionProjections = context.reflect.get('sessionProjections') as SessionProjectionServiceLike | undefined
+  // The official canonical-history/title read plane is REQUIRED for a truthful
+  // load/list advertisement: without it the listener advertises neither.
+  const sessionQuery = context.reflect.get('sessionQuery') as SessionQueryReadLike | undefined
   if (
     workspaceController === undefined
     || sessionController === undefined
@@ -761,6 +825,36 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
     resolveAgent: sessionId => sessionController.resolveAgent(sessionId),
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
+    supportsSessionRead: () => sessionQuery !== undefined,
+    readSessionList: async signal => await readAuthorizedSessionRows(sessionController, sessionQuery, signal),
+    readSessionHistory: async (sessionId, signal) => {
+      if (sessionQuery === undefined) {
+        throw new Error('local host entry: no official sessionQuery service can read canonical Session history')
+      }
+      signal?.throwIfAborted()
+      const snapshot = await sessionQuery.readSession(sessionId)
+      signal?.throwIfAborted()
+      return {
+        header: headerFactsOf(snapshot.session),
+        events: snapshot.events.map(event => ({ seq: event.seq, type: event.type, data: event.data, time: event.time })),
+      } satisfies AcpSessionHistory
+    },
+    sessionHeaderFacts: async (sessionId, signal) => {
+      // LIVE-FIRST: a currently attached child Session exposes the official
+      // header directly, which is the exact identity the subagent edge names.
+      // Only a child this Host cannot see live falls back to the query fold.
+      const live = sessions.get(sessionId)
+      if (live !== undefined) return headerFactsOf((live as { readonly header: SessionHeaderFactsLike }).header)
+      if (sessionQuery === undefined) return undefined
+      const [result] = await sessionQuery.readTitleSnapshots([sessionId], signal)
+      if (result === undefined || result.status !== 'fulfilled') return undefined
+      // The official observation carries the folded header as `value.session`;
+      // its id must still be the exact Session this View asked about.
+      const facts = headerFactsOf(result.value.session)
+      return facts.sessionId === sessionId ? facts : undefined
+    },
+    contextPressure: session => projectionValueOf(sessionProjections, session, 'contextPressure'),
+    sessionTodos: session => projectionValueOf(sessionProjections, session, 'todos'),
     mountScopedMcp: async (agent, session, servers, stillCurrent, signal) => {
       // The exact Host identities are re-verified synchronously before the
       // Agent-scoped maintenance window can mount any child process.
@@ -974,6 +1068,26 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
         context.on('agent/disposed', payload => {
           listener.onAgentDisposed(payload.agent)
         }),
+        // The official subagent lifecycle edges. The View cross-checks the
+        // child Session header (origin + durable creator) before announcing an
+        // association; nothing here invents a parent/child relationship.
+        context.on('subagent/start', info => {
+          listener.onSubagentStart({
+            runId: String(info.runId),
+            id: String(info.id),
+            parentSessionId: String(info.parentSessionId),
+            local: info.local,
+          })
+        }),
+        context.on('subagent/end', info => {
+          listener.onSubagentEnd({
+            runId: String(info.runId),
+            id: String(info.id),
+            parentSessionId: String(info.parentSessionId),
+            local: info.local,
+            stopReason: String(info.stopReason),
+          })
+        }),
         // The ONE question classification seat of the shared waterfall. It is
         // prepended for the same reason as the approval seat: a proven
         // ACP-owned question is answered (or fails closed) here and never
@@ -1011,6 +1125,58 @@ export function createHostAcpSessionAccess(context: import('@deepseek-ai/cordis'
       }
     },
   }
+}
+
+/**
+ * Read the official authorized Session roster plus the durable title fold of
+ * EXACTLY those ids. Titles are read only for ids the Session Controller
+ * already admitted, so an ACP client can never receive an unauthorized title.
+ * A per-session title failure leaves that row without a title instead of
+ * failing the whole roster.
+ */
+async function readAuthorizedSessionRows(
+  sessionController: SessionControllerLike,
+  sessionQuery: SessionQueryReadLike | undefined,
+  signal: AbortSignal | undefined,
+): Promise<readonly AcpSessionReadRow[]> {
+  const page = await sessionController.list({}, signal ?? new AbortController().signal)
+  const rows: AcpSessionReadRow[] = page.items.map(item => ({
+    sessionId: item.sessionId,
+    updatedAt: item.updatedAt,
+    ...(item.cwd === undefined ? {} : { cwd: item.cwd }),
+    ...(item.origin === undefined ? {} : { origin: item.origin }),
+  }))
+  if (sessionQuery === undefined || rows.length === 0) return rows
+  const titles = new Map<string, string>()
+  for (const result of await sessionQuery.readTitleSnapshots(rows.map(row => row.sessionId), signal)) {
+    if (result.status !== 'fulfilled') continue
+    const title = result.value.title?.title
+    if (title !== undefined && title.length > 0) titles.set(result.sessionId, title)
+  }
+  return rows.map(row => {
+    const title = titles.get(row.sessionId)
+    return title === undefined ? row : { ...row, title }
+  })
+}
+
+/** Project one official Session header onto the neutral history facts. */
+function headerFactsOf(header: SessionHeaderFactsLike): AcpHistoryHeader {
+  return {
+    sessionId: header.id,
+    ...(header.cwd === undefined ? {} : { cwd: header.cwd }),
+    ...(header.origin === undefined ? {} : { origin: header.origin }),
+    ...(header.parentSession === undefined ? {} : { parentSessionId: header.parentSession }),
+  }
+}
+
+/** Read ONE detached official projection value of the exact Session, or `undefined`. */
+function projectionValueOf(
+  projections: SessionProjectionServiceLike | undefined,
+  session: object,
+  key: string,
+): unknown {
+  if (projections === undefined) return undefined
+  return projections.snapshot(session, [key]).values[key]
 }
 
 /** Detach one official answer batch into the mutable wire shape consumers expect. */

@@ -377,9 +377,12 @@ export async function runAcpStdioA1(context) {
     assert(init?.agentInfo?.name === 'dsh-pi-tui', 'A1-01: the Host must identify as dsh-pi-tui')
     assert(init?.agentInfo?.version === installedVersion,
       `A1-01: agentInfo.version must be the installed candidate ${installedVersion} (got ${String(init?.agentInfo?.version)})`)
-    assert(init?.agentCapabilities?.loadSession === false, 'A1-01: loadSession must stay false')
-    assert(init?.agentCapabilities?.sessionCapabilities?.resume !== undefined,
-      'A1-01: the existing Host View must advertise resume')
+    // G-ACP2-PR2: the same Host now serves the canonical history/roster the
+    // bridge relays, so the truthful advertisement includes load and list.
+    assert(init?.agentCapabilities?.loadSession === true, 'A1-01: a read-seam-ready Host must advertise session/load')
+    assert(init?.agentCapabilities?.sessionCapabilities?.resume !== undefined
+      && init?.agentCapabilities?.sessionCapabilities?.list !== undefined,
+    'A1-01: the existing Host View must advertise resume and list')
     const adapterCountDuring = adapterProcesses(context).length
     assert(adapterCountDuring === 1,
       `A1-01: exactly one internal Adapter process may exist, got ${JSON.stringify(adapterProcesses(context))}`)
