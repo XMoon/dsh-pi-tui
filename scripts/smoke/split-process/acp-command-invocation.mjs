@@ -108,9 +108,9 @@ export async function runAcpCommandInvocation(context) {
     // A real project Skill: the standard `.agents/skills/<name>/SKILL.md` source
     // the official filesystem provider reads. `disable-model-invocation`
     // proves the human-only path is the one advertised.
-    const skillDir = join(workDir, '.agents', 'skills', SKILL_NAME)
+    const skillDir = join(hostCwd, '.agents', 'skills', SKILL_NAME)
     mkdirSync(skillDir, { recursive: true, mode: 0o700 })
-    execFileSync('git', ['init', '--quiet'], { cwd: workDir, stdio: 'ignore' })
+    execFileSync('git', ['init', '--quiet'], { cwd: hostCwd, stdio: 'ignore' })
     writeFileSync(join(skillDir, 'SKILL.md'), [
       '---',
       `name: ${SKILL_NAME}`,
