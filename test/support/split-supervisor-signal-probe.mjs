@@ -1472,8 +1472,16 @@ try {
     if (sentinelIdentity !== undefined) {
       const state = identityLiveness(kernel, sentinelIdentity.pid, sentinelIdentity.birth)
       if (state === 'live') {
-        try { process.kill(-sentinelIdentity.pid, 'SIGKILL') } catch {
-          try { sentinel.kill('SIGKILL') } catch { /* already gone */ }
+        try {
+          process.kill(-sentinelIdentity.pid, 'SIGKILL')
+        } catch (error) {
+          // ESRCH: the captured group vanished between the identity check and
+          // this signal, so it is gone; never retry the numeric bare PID. Any
+          // other failure is retained and fails the probe.
+          if (error?.code !== 'ESRCH') {
+            console.error(`SPLIT_SUPERVISOR_SIGNAL_PROBE_FAIL: the captured sentinel group could not be signalled (${String(error?.code ?? 'unknown')}); refusing destructive cleanup`)
+            process.exitCode = 1
+          }
         }
       } else if (state === 'unknown') {
         console.error('SPLIT_SUPERVISOR_SIGNAL_PROBE_FAIL: the probe-owned sentinel identity is unverifiable; refusing destructive cleanup')
