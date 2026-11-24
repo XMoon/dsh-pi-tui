@@ -201,6 +201,9 @@ function imageRefOf(block) {
 const READ_ONLY_PROJECTION_KINDS = new Set([
   'plan', 'plan_update', 'plan_removed', 'session_info_update', 'usage_update',
   'compaction_update', 'subagent_update', 'session_message', 'notice',
+  // PR3A adds the complete command catalog and connection-owned config options
+  // as baseline attach notifications. They are not assistant content.
+  'available_commands_update', 'config_option_update',
 ])
 const flightOnly = updates => updates.filter(entry =>
   !READ_ONLY_PROJECTION_KINDS.has(entry?.message?.params?.update?.sessionUpdate))

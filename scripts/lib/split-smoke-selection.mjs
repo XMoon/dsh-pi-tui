@@ -100,6 +100,7 @@ import { runAcpScopedMcpB1 } from '../smoke/split-process/acp-scoped-mcp-b1.mjs'
 import { runAcpMultiSessionB2 } from '../smoke/split-process/acp-multi-session-b2.mjs'
 import { runAcpV1ConformanceB3 } from '../smoke/split-process/acp-v1-conformance-b3.mjs'
 import { runAcpProtocolProjection } from '../smoke/split-process/acp-protocol-projection.mjs'
+import { runAcpCommandInvocation } from '../smoke/split-process/acp-command-invocation.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -733,6 +734,13 @@ const CASE_REGISTRY = Object.freeze([
     title: 'an installed Host negotiates the ACP v1 entry, advertises only real Session capabilities, serves a standard prompt and refuses unadvertised methods without Host side effects',
     platforms: LINUX_DARWIN,
     run: runAcpV1ConformanceB3,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    id: 'acp.command-invocation',
+    title: 'one real packed Host advertises the exact official command and human Skill catalog, executes /feedback through the official command runtime, runs /compact through the exact retained maintenance engine and injects a native project Skill through the ordinary prompt path',
+    platforms: LINUX_DARWIN,
+    run: runAcpCommandInvocation,
   }),
   Object.freeze({
     suite: 'acp',

@@ -21,6 +21,7 @@ import { connect, createServer } from 'node:net'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { type LocalScope } from '../../src/app/remote-process/local-scope.ts'
 import {
@@ -53,6 +54,11 @@ import type {
   AcpSessionHistory,
   AcpSessionReadRow,
 } from '../../src/app/remote-process/local-acp-projections.ts'
+import {
+  EMPTY_COMMAND_CATALOG,
+  type AcpCommandCatalogRead,
+  type AcpNativeSkillCatalog,
+} from '../../src/app/remote-process/local-acp-commands.ts'
 import type { AcpModelCurrentness, AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import type { AcpScopedMcpCurrentness, AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
 import { AcpModelError } from '../../src/app/remote-process/local-acp-model-selection.ts'
@@ -82,10 +88,18 @@ function recordingDiag(): { diag: Diag; warnings: Array<{ code?: string }> } {
 }
 
 /** One raw NDJSON JSON-RPC client over a real UDS connection. */
+/** Whether one raw JSON-RPC message is the standard command catalog update. */
+function isAvailableCommandsUpdate(message: unknown): boolean {
+  const update = (message as { readonly params?: { readonly update?: { readonly sessionUpdate?: unknown } } } | null)
+    ?.params?.update
+  return update?.sessionUpdate === 'available_commands_update'
+}
+
 class RawClient {
   private readonly socket: ReturnType<typeof connect>
   private buffer = ''
   private readonly queue: unknown[] = []
+  private readonly catalog: unknown[] = []
   private waiter: ((value: unknown) => void) | undefined
   private failure: Error | undefined
   readonly closed: Promise<void>
@@ -100,6 +114,13 @@ class RawClient {
         this.buffer = this.buffer.slice(newline + 1)
         if (line === '') continue
         const message: unknown = JSON.parse(line)
+        // Every attached View now receives the baseline command catalog. It is
+        // an independent standard notification; keep it observable through the
+        // dedicated queue so historical request/update assertions stay exact.
+        if (isAvailableCommandsUpdate(message)) {
+          this.catalog.push(message)
+          continue
+        }
         const waiter = this.waiter
         if (waiter !== undefined) {
           this.waiter = undefined
@@ -158,6 +179,11 @@ class RawClient {
     })
     this.failure = undefined
     return awaitable
+  }
+
+  /** Read the catalog notifications this connection actually received. */
+  catalogMessages(): readonly unknown[] {
+    return [...this.catalog]
   }
 
   getLastFailure(): Error | undefined {
@@ -1286,6 +1312,21 @@ function makeFakeAccess(options: {
         prompts.push(request)
         return { accepted: true as const }
       },
+      readCommandCatalog(): AcpCommandCatalogRead {
+        return EMPTY_COMMAND_CATALOG
+      },
+      async readNativeSkills(): Promise<AcpNativeSkillCatalog> {
+        return { kind: 'absent' }
+      },
+      async executeStandaloneCommand() {
+        return undefined
+      },
+      async executeManualCompact() {
+        return null
+      },
+      parseCommand(line: string) {
+        return parseCommand(line)
+      },
       pendingMessage(sessionId: string, agent: LiveAgentViewIdentity, session: object, messageId: string) {
         if (agents.get(sessionId) !== agent || agents.get(sessionId)?.session !== session || agent.session !== session) return 'stale'
         return pendingInbox.has(messageId) ? 'pending' : 'absent'
@@ -1343,6 +1384,8 @@ function makeFakeAccess(options: {
             listener.onInboxClaimed(agent, message, turn)
           },
           onInboxDiscarded: (agent, message) => listener.onInboxDiscarded(agent, message),
+          onCommandCatalogInvalidated: () => listener.onCommandCatalogInvalidated(),
+          onSkillCatalogInvalidated: () => listener.onSkillCatalogInvalidated(),
           onSessionEvent(session, event) {
             if (event.type === 'turn/end' && (event.data as { turn?: number }).turn === turnFence.lastTurn) {
               turnFence.openTurnStartSeq = null
@@ -2025,6 +2068,21 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     },
     currentTurn() {
       return { kind: 'stale' as const }
+    },
+    readCommandCatalog() {
+      return EMPTY_COMMAND_CATALOG
+    },
+    async readNativeSkills() {
+      return { kind: 'absent' as const }
+    },
+    async executeStandaloneCommand() {
+      return undefined
+    },
+    async executeManualCompact() {
+      return null
+    },
+    parseCommand(line: string) {
+      return parseCommand(line)
     },
     observePromptFacts() {
       return () => {}

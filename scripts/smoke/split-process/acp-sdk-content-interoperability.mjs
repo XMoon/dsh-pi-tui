@@ -154,6 +154,7 @@ export function throwSceneFailure(kind, failure, cleanupErrors) {
 const READ_ONLY_PROJECTION_KINDS = new Set([
   'plan', 'plan_update', 'plan_removed', 'session_info_update', 'usage_update',
   'compaction_update', 'subagent_update', 'session_message', 'notice',
+  'available_commands_update', 'config_option_update',
 ])
 
 /** The committed user message, not an inbox splice alone, proves dispatch. */

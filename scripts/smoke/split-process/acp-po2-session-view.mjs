@@ -180,10 +180,16 @@ class AcpRawClient {
     }
   }
 
-  /** The next notification already retained by a request, or a fresh inbound message. */
-  nextNotification(timeoutMs = 30_000) {
-    if (this.notifications.length > 0) return Promise.resolve(this.notifications.shift())
-    return this.next(timeoutMs)
+  /** The next non-catalog notification already retained, or a fresh inbound message. */
+  async nextNotification(timeoutMs = 30_000) {
+    while (this.notifications.length > 0) {
+      const notification = this.notifications.shift()
+      if (notification?.params?.update?.sessionUpdate !== 'available_commands_update') return notification
+    }
+    while (true) {
+      const notification = await this.next(timeoutMs)
+      if (notification?.params?.update?.sessionUpdate !== 'available_commands_update') return notification
+    }
   }
 
   close() {

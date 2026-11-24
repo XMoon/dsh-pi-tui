@@ -32,7 +32,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'm4-c1-host-work'
-export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
+export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'sessions', 'sessionQuery', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
 
 const SCENARIOS = new Set([
   'long-turn',
@@ -67,6 +67,9 @@ const SCENARIOS = new Set([
   // (official `todo_write`, one real `subagent` child, provider usage, then a
   // step-pressure compaction) are the durable facts an ACP client consumes.
   'acp-projection',
+  // G-ACP2-PR3A commands: one plain, large assistant answer per prompt with no
+  // tool/subagent side effects, so an explicit `/compact` is deterministic.
+  'acp-command',
   // G-ACP2 transient streaming: the ONLY scripted provider whose deltas and
   // durable block agree. Its first delta is held so a case can prove the ACP
   // chunk precedes the durable append, and one prompt selects a deliberately
@@ -1565,6 +1568,56 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    if (this.scenario === 'acp-command') {
+      if (options.purpose === 'compaction') {
+        const hold = process.env.C1_COMPACT_HOLD
+        if (typeof hold === 'string' && hold !== '') {
+          appendFileSync(`${hold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
+          const deadline = Date.now() + 30_000
+          while (!existsSync(`${hold}.release`)) {
+            if (options.signal?.aborted === true) {
+              appendFileSync(`${hold}.aborted`, `${String(process.pid)}\n`, { mode: 0o600 })
+              throw options.signal.reason instanceof Error
+                ? options.signal.reason
+                : new Error('acp-command compaction hold aborted')
+            }
+            if (Date.now() > deadline) throw new Error('acp-command compaction hold timed out')
+            await new Promise(resolveWait => setTimeout(resolveWait, 25))
+          }
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'acp command compaction summary' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'acp command compaction summary' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const turnHold = process.env.C1_TURN_HOLD
+      if (typeof turnHold === 'string' && turnHold !== '' && existsSync(turnHold)) {
+        const targets = readFileSync(turnHold, 'utf8').split('\n').map(line => line.trim()).filter(Boolean)
+        if (targets.includes(sessionId)) {
+          appendFileSync(`${turnHold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
+          appendFileSync(`${turnHold}.entered.${sessionId}`, `${String(process.pid)}\n`, { mode: 0o600 })
+          const deadline = Date.now() + 30_000
+          const release = `${turnHold}.release.${sessionId}`
+          while (!existsSync(`${turnHold}.release`) && !existsSync(release)) {
+            if (options.signal?.aborted === true) {
+              throw options.signal.reason instanceof Error
+                ? options.signal.reason
+                : new Error('acp-command turn hold aborted')
+            }
+            if (Date.now() > deadline) throw new Error('acp-command turn hold timed out')
+            await new Promise(resolveWait => setTimeout(resolveWait, 25))
+          }
+        }
+      }
+      const answer = `acp command answer ${token} ${'acp command long context '.repeat(6_000)}`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     if (this.scenario === 'acp-projection') {
       // The compaction summarizer runs with its OWN purpose: the answer must be
       // a plain text summary, never one of the scenario's tool turns.
@@ -2412,6 +2465,198 @@ export async function apply(ctx) {
   const { root, proof } = prepareWorkRoot(process.env.C1_WORK_ROOT)
   const record = (kind, fields = {}) => {
     appendFileSync(proof, `${JSON.stringify({ kind, scenario, time: Date.now(), pid: process.pid, ...fields })}\n`, { mode: 0o600 })
+  }
+
+  // Test-only lifecycle controls for the packed PR3A qualification. The smoke
+  // writes immutable action files under its private work root; this fixture
+  // only invokes OFFICIAL Host capabilities (Agent.cancel, the live Agent
+  // Fiber disposer and the official Session flush). No product branch exists.
+  const lifecycleControl = process.env.C1_LIFECYCLE_CONTROL
+  if (typeof lifecycleControl === 'string' && lifecycleControl !== '') {
+    const actions = new Set()
+    const commandDisposers = new Map()
+    let commandsChangeSequence = 0
+    ctx.on('commands/change', () => {
+      commandsChangeSequence += 1
+      record('lifecycle-commands-change', { sequence: commandsChangeSequence })
+    })
+    const flushFailureSessions = new Set()
+    const flushSummarySeen = new Set()
+    const flushHoldSessions = new Map()
+    const sessions = ctx.sessions
+    const originalFlush = sessions.flush
+    const lifecycleFlush = async function (...args) {
+      // Fail only the exact Session's flush that follows its real committed
+      // summary; the engine's earlier start/admission flush keeps its real
+      // behavior, and a different Session can never consume this fault.
+      const sessionId = String(args[0]?.id ?? '')
+      const holdRelease = flushHoldSessions.get(sessionId)
+      if (holdRelease !== undefined && flushSummarySeen.has(sessionId)) {
+        flushHoldSessions.delete(sessionId)
+        record('lifecycle-flush-held', { sessionId, release: holdRelease })
+        const deadline = Date.now() + 30_000
+        while (!existsSync(holdRelease)) {
+          if (Date.now() > deadline) throw new Error('m4-c1-host-work: held flush timed out')
+          await new Promise(resolveWait => setTimeout(resolveWait, 25))
+        }
+      }
+      if (flushFailureSessions.has(sessionId) && flushSummarySeen.has(sessionId)) {
+        flushFailureSessions.delete(sessionId)
+        flushSummarySeen.delete(sessionId)
+        record('lifecycle-flush-failure-hit', { sessionId })
+        throw new Error('m4-c1-host-work: injected official Session flush failure')
+      }
+      return await originalFlush.apply(this, args)
+    }
+    sessions.flush = lifecycleFlush
+    ctx.effect(() => () => {
+      const owned = sessions.flush === lifecycleFlush
+      if (owned) sessions.flush = originalFlush
+      record('lifecycle-flush-restored', { restored: owned })
+    }, 'lifecycle-flush-restore')
+    const runAction = async action => {
+      const agent = action.sessionId === undefined ? undefined : ctx.agents.get(action.sessionId)
+      if (action.action === 'arm-flush-failure') {
+        flushFailureSessions.add(String(action.sessionId))
+        flushSummarySeen.delete(String(action.sessionId))
+        record('lifecycle-flush-failure-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'arm-hold-flush') {
+        flushHoldSessions.set(String(action.sessionId), String(action.release))
+        record('lifecycle-flush-hold-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'arm-end-failure') {
+        const target = String(action.sessionId)
+        const session = agent.session
+        const originalAppend = session.append
+        const lifecycleAppend = function (...args) {
+          if (String(this?.id ?? target) === target && args[0] === 'compaction/end') {
+            record('lifecycle-end-failure-hit', { sessionId: target })
+            throw new Error('m4-c1-host-work: injected compaction/end failure')
+          }
+          return originalAppend.apply(this, args)
+        }
+        session.append = lifecycleAppend
+        ctx.effect(() => () => {
+          const owned = session.append === lifecycleAppend
+          if (owned) session.append = originalAppend
+          record('lifecycle-end-failure-restored', { restored: owned })
+        }, 'lifecycle-end-failure-restore')
+        record('lifecycle-end-failure-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'register-test-command' || action.action === 'unregister-test-command') {
+        const name = String(action.name)
+        if (action.action === 'register-test-command') {
+          if (!commandDisposers.has(name)) {
+            commandDisposers.set(name, ctx.commands.register({
+              name,
+              description: 'TEST-ONLY dynamic catalog command',
+              handler: invocation => {
+                record('lifecycle-command-handler', {
+                  name,
+                  sessionId: String(invocation.agent.session.id),
+                  commandId: String(invocation.commandId),
+                })
+                return { kind: 'success', text: `registered command ${name} ran` }
+              },
+            }))
+          }
+          record('lifecycle-command-registered', { sessionId: action.sessionId, name })
+          return
+        }
+        if (action.action === 'unregister-test-command') {
+          const dispose = commandDisposers.get(name)
+          if (dispose !== undefined) {
+            dispose()
+            commandDisposers.delete(name)
+          }
+          record('lifecycle-command-unregistered', { sessionId: action.sessionId, name, removed: dispose !== undefined })
+          return
+        }
+      }
+      if (action.action === 'cold-read') {
+        // CMP-06 cold phase: the official logical-log read validates and
+        // replays the persisted Session WITHOUT making it live or attaching a
+        // client. The smoke compares the exact ids and bracket facts only.
+        const snapshot = await ctx.sessionQuery.readSession(SessionId(String(action.sessionId)))
+        record('lifecycle-cold-read', {
+          sessionId: action.sessionId,
+          inheritedEventCount: snapshot.inheritedEventCount,
+          events: snapshot.events.map(event => ({
+            type: event.type,
+            seq: event.seq,
+            compactionId: event.data?.compactionId,
+            turn: event.data?.turn,
+            error: typeof event.data?.error === 'string' ? event.data.error : undefined,
+            hasSummary: event.data?.summary !== undefined,
+            hasCheckpoint: event.data?.checkpoint !== undefined,
+            commandId: typeof event.data?.commandId === 'string' ? event.data.commandId : undefined,
+            feedbackText: event.type === 'feedback/record' && typeof event.data?.text === 'string' ? event.data.text : undefined,
+          })),
+        })
+        return
+      }
+      if (agent === undefined) {
+        record('lifecycle-action-no-agent', { action: action.action, sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'set-working-directory') {
+        const cwd = await ctx.workingDirectory.set(agent, String(action.path))
+        record('lifecycle-working-directory-set', { sessionId: action.sessionId, path: String(action.path), cwd })
+        return
+      }
+      if (action.action === 'flush-now') {
+        await ctx.sessions.flush(agent.session)
+        record('lifecycle-flush-complete', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'cancel') {
+        agent.cancel({ kind: 'user' })
+        record('lifecycle-agent-cancelled', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'dispose') {
+        // DSH defines disposal as a disposed-cause cancel followed by fiber
+        // quiescence; both are official Agent/Fiber capabilities.
+        agent.cancel({ kind: 'disposed' }, { keepInbox: true })
+        await agent.ctx.fiber.dispose()
+        record('lifecycle-agent-disposed', { sessionId: action.sessionId })
+        return
+      }
+      throw new Error(`m4-c1-host-work: unknown lifecycle action ${String(action.action)}`)
+    }
+    ctx.effect(() => {
+      const timer = setInterval(() => {
+        let names
+        try {
+          names = readdirSync(lifecycleControl)
+        } catch {
+          return
+        }
+        for (const name of names) {
+          if (!name.endsWith('.json') || actions.has(name)) continue
+          actions.add(name)
+          try {
+            const action = JSON.parse(readFileSync(join(lifecycleControl, name), 'utf8'))
+            void runAction(action).catch(error => record('lifecycle-action-failed', {
+              action: String(action?.action),
+              message: error instanceof Error ? error.message : String(error),
+            }))
+          } catch (error) {
+            record('lifecycle-action-unreadable', { name, message: error instanceof Error ? error.message : String(error) })
+          }
+        }
+      }, 25)
+      return () => clearInterval(timer)
+    }, 'lifecycle-control-poll')
+    ctx.effect(() => ctx.on('session/event', (session, event) => {
+      const sessionId = String(session.id)
+      if (event?.type === 'compaction/start') flushSummarySeen.delete(sessionId)
+      if (event?.type === 'compaction/summary') flushSummarySeen.add(sessionId)
+    }), 'lifecycle-flush-facts')
   }
   // PO-3B never negative: set the OFFICIAL durable approval policy of one
   // Session through the official service (the same seam the F8 case proves).

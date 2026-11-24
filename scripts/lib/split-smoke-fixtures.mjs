@@ -74,6 +74,8 @@ function recordPrompt(options) {
   const allText = [options.system, ...(options.messages ?? [])
     .map(message => message.content)]
     .map(textOf).join('\\n')
+  const userText = [...(options.messages ?? [])].reverse()
+    .find(message => message?.role === 'user')?.content
   const markerCount = systemText.split(guidanceMarker).length - 1
   const toolNames = Array.isArray(options.tools)
     ? options.tools.map(tool => tool?.name).filter(name => typeof name === 'string').sort()
@@ -88,6 +90,7 @@ function recordPrompt(options) {
     // canonical mention before Host normalization.
     referencedSessions: allText.includes('## Referenced sessions'),
     canonicalSessionUri: allText.includes('dsh-session:'),
+    userText: textOf(userText),
     // M6 PR-C C4: the model-facing TUI prompt-section facts (the parity sink).
     focusSection: systemText.includes('# Focus mode'),
     progressSection: systemText.includes('# Progress updates:'),

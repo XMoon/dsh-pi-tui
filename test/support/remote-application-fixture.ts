@@ -62,7 +62,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Loader, { type EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -404,6 +404,14 @@ export async function createRemoteApplicationHostFixture(
      * assembly.
      */
     readonly preferences?: Record<string, unknown>
+    /**
+     * Optional child plugin entries for the fixture's default preset. The
+     * production host reads these entries through the same AgentPresetRegistry
+     * a real profile uses; the compaction C4 owner test mounts the official
+     * compaction-basic + command-compact modules here, never a substitute
+     * engine.
+     */
+    readonly presetPlugins?: readonly EntryOptions[]
   } = {},
 ): Promise<{
   ctx: Context
@@ -469,7 +477,7 @@ export async function createRemoteApplicationHostFixture(
       await ctx.plugin(PluginManager, {})
     }
     await ctx.plugin(AgentPresetRegistry, { default: presetId })
-    await ctx.get('agentPresets')!.register({ id: presetId, name: `preset ${presetId}`, plugins: [] })
+    await ctx.get('agentPresets')!.register({ id: presetId, name: `preset ${presetId}`, plugins: options.presetPlugins ?? [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })

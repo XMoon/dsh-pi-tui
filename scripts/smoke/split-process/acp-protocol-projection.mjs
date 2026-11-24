@@ -81,7 +81,7 @@ function deadline(promise, label, ms = 180_000) {
 }
 
 /** One official ACP SDK client over the real local socket. */
-async function openSdkClient(endpoint, onUpdate) {
+export async function openSdkClient(endpoint, onUpdate) {
   let socket
   if (endpoint.dir !== undefined) {
     const dirFd = openSync(endpoint.dir, 'r')
@@ -106,6 +106,9 @@ async function openSdkClient(endpoint, onUpdate) {
   const app = acp.client({ name: CASE_ID })
   app.onNotification(acp.methods.client.session.update, ({ params }) => { onUpdate(params) })
   const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
+  // A peer-side EOF is a normal scene teardown; keep the SDK's closed promise
+  // observed so it can never become an uncaught rejection after a failure.
+  connection.closed.catch(() => {})
   return {
     connection,
     socket,
@@ -113,10 +116,16 @@ async function openSdkClient(endpoint, onUpdate) {
     async request(method, params) {
       return await deadline(connection.agent.request(method, params), `ACP ${method}`)
     },
+    async notify(method, params) {
+      await deadline(connection.agent.notify(method, params), `ACP notify ${method}`)
+    },
     async close() {
-      try { await connection.close() } catch { /* already closed by the peer */ }
+      // Destroying the socket is the complete teardown here; the SDK's close()
+      // can throw/reject after a peer EOF, which must never mask the verdict.
       socket.destroy()
-      await deadline(Promise.allSettled([connection.closed, socketClosed]), 'ACP connection close', 30_000).catch(() => {})
+      try {
+        await deadline(Promise.allSettled([connection.closed, socketClosed]), 'ACP connection close', 30_000)
+      } catch { /* the caller's original failure owns the verdict */ }
     },
   }
 }
@@ -139,7 +148,12 @@ function userText(event) {
 
 /** Every `session/update` payload a connection received for one Session. */
 function updatesOf(updates, sessionId) {
-  return updates.filter(params => params?.sessionId === sessionId).map(params => params.update)
+  // The baseline command catalog is an independent standard notification every
+  // attached View receives; it is not replayed history or a supplemental frame.
+  return updates
+    .filter(params => params?.sessionId === sessionId)
+    .map(params => params.update)
+    .filter(update => update?.sessionUpdate !== 'available_commands_update')
 }
 
 /** The kinds of a collected update list. */

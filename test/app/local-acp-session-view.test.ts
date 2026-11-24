@@ -16,6 +16,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
   AcpSessionViewRegistry,
@@ -43,6 +44,11 @@ import {
   type AcpQuestionSpec,
 } from '../../src/app/remote-process/local-acp-question-form.ts'
 import { AcpAssistantStream } from '../../src/app/remote-process/local-acp-live-stream.ts'
+import {
+  EMPTY_COMMAND_CATALOG,
+  type AcpCommandCatalogRead,
+  type AcpNativeSkillCatalog,
+} from '../../src/app/remote-process/local-acp-commands.ts'
 import { AcpModelError, type AcpModelCurrentness, type AcpModelOptionRequest } from '../../src/app/remote-process/local-acp-model-selection.ts'
 import { AcpScopedMcpError, type AcpScopedMcpCurrentness, type AcpScopedMcpLease } from '../../src/app/remote-process/local-acp-scoped-mcp.ts'
 import type {
@@ -288,6 +294,42 @@ class FakeAccess implements HostAcpSessionAccess {
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
     return () => {}
+  }
+
+  readCommandCatalogImpl: (agent: LiveAgentViewIdentity, session: object) => AcpCommandCatalogRead =
+    () => EMPTY_COMMAND_CATALOG
+  readCommandCatalog(agent: LiveAgentViewIdentity, session: object): AcpCommandCatalogRead {
+    return this.readCommandCatalogImpl(agent, session)
+  }
+
+  readNativeSkillsImpl: (agent: LiveAgentViewIdentity, session: object, signal: AbortSignal) => Promise<AcpNativeSkillCatalog> =
+    async () => ({ kind: 'absent' })
+  async readNativeSkills(agent: LiveAgentViewIdentity, session: object, signal: AbortSignal): Promise<AcpNativeSkillCatalog> {
+    return await this.readNativeSkillsImpl(agent, session, signal)
+  }
+
+  readonly standaloneCommandCalls: Array<{ readonly agent: LiveAgentViewIdentity; readonly session: object; readonly line: string; readonly signal: AbortSignal }> = []
+  executeStandaloneCommandImpl: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    line: string,
+    signal: AbortSignal,
+  ) => Promise<unknown> = async () => undefined
+  executeStandaloneCommand(agent: LiveAgentViewIdentity, session: object, line: string, signal: AbortSignal): Promise<unknown> {
+    this.standaloneCommandCalls.push({ agent, session, line, signal })
+    return this.executeStandaloneCommandImpl(agent, session, line, signal)
+  }
+
+  readonly manualCompactCalls: Array<{ readonly agent: LiveAgentViewIdentity; readonly session: object; readonly signal: AbortSignal }> = []
+  executeManualCompactImpl: (agent: LiveAgentViewIdentity, session: object, signal: AbortSignal) => Promise<unknown> =
+    async () => null
+  executeManualCompact(agent: LiveAgentViewIdentity, session: object, signal: AbortSignal): Promise<unknown> {
+    this.manualCompactCalls.push({ agent, session, signal })
+    return this.executeManualCompactImpl(agent, session, signal)
+  }
+
+  parseCommand(line: string): { readonly name: string; readonly rawInput: string } | undefined {
+    return parseCommand(line)
   }
 
   /** Whether this fake Host bound the official Controller/Query read seams. */
@@ -903,6 +945,166 @@ test('the Host image facade reads the default and exact live model routes and re
   defaultModel = undefined
   assert.equal(await createHostAcpSessionAccess(context).supportsImagePrompts(), false)
   liveSession = undefined
+})
+
+test('the production Host command access binds only the audited identities and the exact retained compaction engine', async () => {
+  const session = { id: 'S-command', header: { cwd: '/w' } }
+  const agent = { id: session.id, session, ctx: {} }
+  const feedback = {
+    name: 'feedback',
+    description: 'Send feedback.',
+    definitionId: '@deepseek-ai/dsh-command-feedback',
+    input: { hint: 'What should we know?' },
+  }
+  const compact = {
+    name: 'compact',
+    description: 'Compact this session.',
+    definitionId: '@deepseek-ai/dsh-command-compact',
+  }
+  const executed: Array<{ line: string; attachments: readonly unknown[]; signal: AbortSignal }> = []
+  const compacted: Array<{ signal: AbortSignal; sourceCommandId?: unknown }> = []
+  let modules = ['@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact']
+  class OfficialEngine {
+    async compactNow(_agent: object, signal: AbortSignal, sourceCommandId?: unknown) {
+      compacted.push({ signal, ...sourceCommandId === undefined ? {} : { sourceCommandId } })
+      return null
+    }
+  }
+  const officialEngine = new OfficialEngine()
+  const rootEngine = { async compactNow() { throw new Error('the root engine must never be used') } }
+  let scopedEngine: unknown = officialEngine
+  let skillsSnapshot: { skills: unknown[]; complete: boolean } = { skills: [], complete: true }
+  let skillLoader = true
+  const skills = {
+    async snapshot() { return skillsSnapshot },
+  }
+  let scopedSkills: unknown = skills
+  const globalSkills = skills
+  let presetId = 'standard'
+  let serviceThrow = false
+  const context = {
+    reflect: { get(name: string) {
+      if (name === 'workspaceController') return { create: async () => ({ workspace: { workspaceId: 'ws', path: '/w' } }) }
+      if (name === 'sessionController') return {
+        create: async () => ({ sessionId: session.id }),
+        resolveAgent: async () => ({ agent }),
+        modelCatalog: async () => ({ groups: [] }),
+      }
+      if (name === 'agents') return { get: () => agent }
+      if (name === 'sessions') return { get: () => session }
+      if (name === 'llm') return { resolveModelInfo: async () => ({}) }
+      if (name === 'tools') return { definitions: () => [] }
+      if (name === 'commands') return {
+        list: () => [feedback, compact],
+        find: (_agent: object, command: string) => command === 'feedback' ? feedback : command === 'compact' ? compact : undefined,
+        execute: async (_agent: object, line: string, attachments: readonly unknown[], signal: AbortSignal) => {
+          executed.push({ line, attachments, signal })
+          return { result: { kind: 'success', text: 'recorded' } }
+        },
+      }
+      if (name === 'agentPresets') return {
+        inspectCompositions: () => [{
+          id: presetId,
+          modules: [
+            ...modules,
+            ...skillLoader ? ['@deepseek-ai/dsh-tool-skill'] : [],
+          ].map(moduleName => ({ moduleName })),
+        }],
+        serviceFor: (_agent: object, service: string) => {
+          if (serviceThrow) throw new Error('retained service read failed')
+          return service === 'compaction' ? scopedEngine : service === 'skills' ? scopedSkills : undefined
+        },
+      }
+      if (name === 'workingDirectory') return { get: () => '/w' }
+      if (name === 'skills') return globalSkills
+      if (name === 'compaction') return rootEngine
+      return undefined
+    } },
+  } as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
+  const access = createHostAcpSessionAccess(context, undefined, OfficialEngine)
+  const catalog = access.readCommandCatalog(agent, session)
+  assert.deepEqual(catalog.effectiveNames, ['feedback', 'compact'])
+  assert.equal(catalog.feedback, 'available')
+  assert.equal(catalog.compact, 'available')
+  assert.deepEqual(catalog.rows.map(row => row.name), ['feedback', 'compact'])
+  await access.executeStandaloneCommand(agent, session, '/feedback hello', new AbortController().signal)
+  assert.equal(executed.length, 1)
+  assert.equal(executed[0]?.line, '/feedback hello')
+  assert.deepEqual(executed[0]?.attachments, [])
+  await access.executeManualCompact(agent, session, new AbortController().signal)
+  assert.equal(compacted.length, 1)
+  assert.equal(compacted[0]?.sourceCommandId, undefined, 'ACP never fabricates the command identity')
+  // A custom composition with a second compaction engine is not audited.
+  modules = ['@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact', 'custom-compaction-engine']
+  assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable')
+  assert.throws(() => access.executeManualCompact(agent, session, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'unavailable')
+  assert.equal(compacted.length, 1, 'no fallback engine was reached')
+  modules = ['@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact']
+  presetId = 'custom'
+  assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable')
+  assert.throws(() => access.executeManualCompact(agent, session, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'unavailable')
+  presetId = 'standard'
+  serviceThrow = true
+  assert.throws(() => access.readCommandCatalog(agent, session), (error: unknown) =>
+    (error as { code?: string }).code === 'unavailable')
+  await assert.rejects(access.readNativeSkills(agent, session, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'unavailable')
+  serviceThrow = false
+  scopedEngine = { async compactNow() { return null } }
+  assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable',
+    'a same-shape nonofficial engine is not the anchored official implementation')
+  scopedEngine = undefined
+  assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable')
+  assert.throws(() => access.executeManualCompact(agent, session, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'unavailable')
+  scopedEngine = officialEngine
+
+  // Native Skill reads require the exact loader and a COMPLETE official snapshot.
+  skillsSnapshot = {
+    complete: true,
+    skills: [
+      { name: 'deploy', description: 'Deploy the app.', invocation: { userInvocable: true, modelInvocable: false } },
+      { name: 'model-only', description: 'Model only.', invocation: { userInvocable: false, modelInvocable: true } },
+      { name: 'broken', description: 3, invocation: { userInvocable: true } },
+    ],
+  }
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), {
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  })
+  skillsSnapshot = { ...skillsSnapshot, complete: false }
+  await assert.rejects(access.readNativeSkills(agent, session, new AbortController().signal), (error: unknown) =>
+    (error as { code?: string }).code === 'unavailable')
+  // The standard composition mounts tool-skill against the global skills
+  // service; when the retained scope publishes no scoped service that global
+  // registry is the effective authority.
+  skillsSnapshot = { ...skillsSnapshot, complete: true }
+  scopedSkills = undefined
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), {
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  }, 'the official global registry is used when the retained loader has no scoped service')
+  // A real scoped registry wins and is not unioned with the global one.
+  scopedSkills = {
+    async snapshot() {
+      return {
+        complete: true,
+        skills: [{ name: 'scoped-only', description: 'Scoped only.', invocation: { userInvocable: true } }],
+      }
+    },
+  }
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), {
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'scoped-only', description: 'Scoped only.' }],
+  }, 'the scoped registry is the exact authority when it exists')
+  scopedSkills = skills
+  skillLoader = false
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), { kind: 'absent' })
 })
 
 test('the production Host access classifier maps official errors to the right create outcome', async () => {
@@ -1742,6 +1944,8 @@ test('the production Host access subscribes the prompt fact sink and disposes ex
     onInboxClaimed: (agent, message, turn) => { seen.push(`claimed:${agent.id}:${message.id}:${String(turn)}`) },
     onSessionEvent: (session, event) => { seen.push(`event:${String((session as { id: string }).id)}:${event.type}`) },
     onInboxDiscarded: (agent, message) => { seen.push(`discarded:${agent.id}:${message.id}`) },
+    onCommandCatalogInvalidated: () => {},
+    onSkillCatalogInvalidated: () => {},
     onAgentError: (agent, turn) => { seen.push(`error:${agent.id}:${String(turn)}`) },
     onAgentDisposed: agent => { seen.push(`disposed:${agent.id}`) },
     onApprovalRequest: (request, next) => {
@@ -3676,6 +3880,45 @@ test('a model change is refused as VIEW_BUSY while this View owns an unsettled p
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
 })
 
+test('a model validation pending before a command is rejected as VIEW_BUSY and the command still completes', async () => {
+  const view = projectionView('S-model-command')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  await view.resume()
+  const validationEntered = deferred<void>()
+  const validationRelease = deferred<void>()
+  let observed: AcpModelCurrentness | undefined
+  view.access.selectModelImpl = async (_agent, _session, _request, _signal, stillCurrent) => {
+    validationEntered.resolve()
+    await validationRelease.promise
+    observed = stillCurrent()
+    throw new AcpModelError('LOCAL_ACP_MODEL_VIEW_BUSY', 'view busy', -32046)
+  }
+  const selection = view.registry.setModelOption(
+    view.conn, view.access,
+    { sessionId: 'S-model-command', configId: 'model', value: '["p1","b"]' },
+    new AbortController().signal,
+  )
+  await validationEntered.promise
+  const commandEntered = deferred<void>()
+  const commandRelease = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    commandEntered.resolve()
+    return await commandRelease.promise
+  }
+  const command = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'S-model-command', prompt: [{ type: 'text', text: '/feedback held model' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await commandEntered.promise
+  validationRelease.resolve()
+  await assert.rejects(selection, isViewError('LOCAL_ACP_MODEL_VIEW_BUSY'))
+  assert.equal(observed, 'view-busy', 'the final currentness gate sees the command slot')
+  assert.equal(view.access.selectModelCalls.length, 1, 'the Host model write is rejected once')
+  commandRelease.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await command, { stopReason: 'end_turn' })
+})
+
 test('a prompt admitted while model validation is pending is rejected at the last View busy gate', async () => {
   const view = promptView('S-model-race')
   await view.attach()
@@ -5095,12 +5338,14 @@ function projectionView(
   registry: AcpSessionViewRegistry
   conn: ReturnType<AcpSessionViewRegistry['createConnection']>
   notifications: SessionUpdate[]
+  catalogNotifications: SessionUpdate[]
   load: () => Promise<Record<string, never>>
   resume: () => Promise<Record<string, never>>
   holdProjection: () => { readonly entered: Promise<void>; readonly release: () => void }
   failProjection: (times: number) => Promise<void>
   commit: (type: string, data: Record<string, unknown>, time?: number) => void
   nextSeq: () => number
+  lastSeq: () => number
 } {
   const access = new FakeAccess()
   access.sessionReadReady = true
@@ -5111,6 +5356,7 @@ function projectionView(
   registry.bindAccess(access)
   const conn = registry.createConnection()
   const notifications: SessionUpdate[] = []
+  const catalogNotifications: SessionUpdate[] = []
   let gate: Promise<void> | undefined
   let entered: (() => void) | undefined
   let failures = 0
@@ -5132,7 +5378,12 @@ function projectionView(
         }
         throw new Error('projection sink failed')
       }
-      notifications.push(update)
+      // Catalog delivery is the one baseline notification every attached View
+      // now receives. Keep it out of the historical PR2 lists (which assert
+      // plan/usage/compaction payloads) while a dedicated catalog assertion
+      // still observes the real wire row and its ordering.
+      if (update.sessionUpdate === 'available_commands_update') catalogNotifications.push(update)
+      else notifications.push(update)
     },
   }
   let seq = 100
@@ -5142,6 +5393,7 @@ function projectionView(
     registry,
     conn,
     notifications,
+    catalogNotifications,
     load: async () => await registry.loadSession(
       conn,
       access,
@@ -5173,6 +5425,7 @@ function projectionView(
       registry.onSessionEvent(agent.session, { seq, type, data, ...(time === undefined ? {} : { time }) })
     },
     nextSeq: () => seq + 1,
+    lastSeq: () => seq,
   }
 }
 
@@ -6159,4 +6412,798 @@ test('G-ACP2-PR2 META-01: identical titles are not re-sent and another Session n
   view.registry.onSessionEvent({ id: 'other' }, { seq: 900, type: 'todo/write', data: { todos: [] } })
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(view.notifications.length, 2)
+})
+
+/** One detached command catalog for the new ACP command owner tests. */
+function commandCatalog(commandNames: readonly ('feedback' | 'compact')[] = []): AcpCommandCatalogRead {
+  const rows = commandNames.map(name => ({
+    kind: 'command' as const,
+    name,
+    description: name === 'feedback' ? 'Send feedback to the product team.' : 'Compact this session.',
+    ...(name === 'feedback' ? {} : { inputHint: 'No arguments' }),
+  }))
+  return {
+    effectiveNames: [...commandNames],
+    feedback: commandNames.includes('feedback') ? 'available' : 'missing',
+    compact: commandNames.includes('compact') ? 'available' : 'missing',
+    rows,
+  }
+}
+
+/** One scripted official ManualCompactionError (structural; never the real class). */
+
+test('ACP /feedback executes the official standalone command once, never a prompt or model turn', async () => {
+  const view = projectionView('CMD1')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const entered = deferred<void>()
+  const release = deferred<{ readonly result: { readonly kind: 'success'; readonly text: string } }>()
+  let executionSignal: AbortSignal | undefined
+  view.access.executeStandaloneCommandImpl = async (_agent, _session, line, signal) => {
+    assert.equal(line, '/feedback hello')
+    executionSignal = signal
+    entered.resolve()
+    return await release.promise
+  }
+  await view.resume()
+  view.notifications.length = 0
+  const signal = new AbortController()
+  const updates: SessionUpdate[] = []
+  const request = view.registry.promptSession(
+    view.conn,
+    view.access,
+    { sessionId: 'CMD1', prompt: [{ type: 'text', text: '/feedback hello' }] },
+    signal.signal,
+    false,
+    async update => { updates.push(update) },
+  )
+  await entered.promise
+  assert.equal(view.access.promptCalls.length, 0, 'the command is never sent to the model prompt path')
+  assert.equal(view.access.standaloneCommandCalls.length, 1)
+  view.registry.cancelSession(view.conn, view.access, 'CMD1')
+  await Promise.resolve()
+  assert.equal(executionSignal?.aborted, false, 'a dispatched standalone command is not interruptible by the client')
+  release.resolve({ result: { kind: 'success', text: 'Feedback recorded.' } })
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+  assert.deepEqual(updates, [{
+    sessionUpdate: 'agent_message_chunk',
+    messageId: updates[0]?.sessionUpdate === 'agent_message_chunk' ? (updates[0] as { messageId: string }).messageId : '',
+    content: { type: 'text', text: 'Feedback recorded.' },
+  }])
+  assert.equal(view.registry.hasUnsettledHostWork(), false)
+})
+
+test('ACP command admission is one exact slot: a second prompt/command is refused until the official Promise settles', async () => {
+  const view = projectionView('CMD2')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const entered = deferred<void>()
+  const release = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  await view.resume()
+  const signal = new AbortController()
+  const first = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD2', prompt: [{ type: 'text', text: '/feedback first' }] },
+    signal.signal, false, async () => {},
+  )
+  await entered.promise
+  await assert.rejects(
+    view.registry.promptSession(
+      view.conn, view.access,
+      { sessionId: 'CMD2', prompt: [{ type: 'text', text: '/feedback second' }] },
+      signal.signal, false, async () => {},
+    ),
+    isPromptError('LOCAL_ACP_PROMPT_IN_FLIGHT'),
+  )
+  assert.equal(view.access.standaloneCommandCalls.length, 1, 'no second official execution was admitted')
+  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await first, { stopReason: 'end_turn' })
+})
+
+test('ACP /compact exposes one exact scoped operation and orders its PR2 updates before the command result', async () => {
+  const view = projectionView('CMP1')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  view.access.executeManualCompactImpl = async () => {
+    view.commit('compaction/start', { compactionId: 'c1', turn: null })
+    const startSeq = view.lastSeq()
+    view.commit('compaction/summary', {
+      compactionId: 'c1', summary: [{ type: 'text', text: 'summary' }],
+      shadowedRange: { start: 1, end: 2 }, shadowedSeqs: [1, 2], shadowedTokenCount: 12,
+      provider: 'p', model: 'm',
+    })
+    const summarySeq = view.lastSeq()
+    view.commit('user/message', {
+      role: 'user', id: 'checkpoint-c1', content: [],
+      source: { kind: 'compact-checkpoint', compactionId: 'c1' },
+    })
+    view.commit('compaction/end', { compactionId: 'c1', turn: null })
+    const endSeq = view.lastSeq()
+    return {
+      compactionId: 'c1', startSeq, summarySeq, endSeq,
+      shadowedSeqs: [1, 2], shadowedTokenCount: 12,
+    }
+  }
+  await view.resume()
+  view.notifications.length = 0
+  const result = await view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMP1', prompt: [{ type: 'text', text: '/compact' }] },
+    new AbortController().signal, false,
+    async update => { view.notifications.push(update) },
+  )
+  assert.deepEqual(result, { stopReason: 'end_turn' })
+  assert.equal(view.access.promptCalls.length, 0)
+  assert.equal(view.access.manualCompactCalls.length, 1)
+  const kinds = view.notifications.map(update => update.sessionUpdate)
+  assert.deepEqual(kinds, ['compaction_update', 'compaction_update', 'compaction_update', 'agent_message_chunk'],
+    'the existing PR2 updates are delivered before the command result text')
+  assert.deepEqual(view.notifications.at(-1), {
+    sessionUpdate: 'agent_message_chunk',
+    messageId: (view.notifications.at(-1) as { messageId: string }).messageId,
+    content: { type: 'text', text: 'Compacted 2 history items (~12 tokens).' },
+  })
+})
+
+test('ACP /compact commit wins the reverse synchronous race and is never aborted', async () => {
+  const view = projectionView('CMP2')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  let executionSignal: AbortSignal | undefined
+  let startSeq = 0
+  let summarySeq = 0
+  let endSeq = 0
+  view.access.executeManualCompactImpl = async (_agent, _session, signal) => {
+    executionSignal = signal
+    view.commit('compaction/start', { compactionId: 'c2', turn: null })
+    startSeq = view.lastSeq()
+    entered.resolve()
+    await release.promise
+    return {
+      compactionId: 'c2', startSeq, summarySeq, endSeq,
+      shadowedSeqs: [1], shadowedTokenCount: 1,
+    }
+  }
+  await view.resume()
+  const result = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMP2', prompt: [{ type: 'text', text: '/compact' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  view.registry.cancelSession(view.conn, view.access, 'CMP2')
+  // The cancel intent is recorded, but the summarizer output and the whole
+  // commit bracket are published in the SAME synchronous stack before the
+  // deferred decision can run. The commit must win.
+  view.commit('compaction/summary', {
+    compactionId: 'c2', summary: [{ type: 'text', text: 'summary' }],
+    shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 1,
+    provider: 'p', model: 'm',
+  })
+  summarySeq = view.lastSeq()
+  view.commit('compaction/end', { compactionId: 'c2', turn: null })
+  endSeq = view.lastSeq()
+  release.resolve()
+  assert.deepEqual(await result, { stopReason: 'end_turn' })
+  await Promise.resolve()
+  assert.equal(executionSignal?.aborted, false, 'a committed operation is never aborted by the deferred decision')
+})
+
+test('ACP /compact abort is deferred exactly one microtask and the real precommit cancellation settles', async () => {
+  const view = projectionView('CMP3')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  const entered = deferred<void>()
+  view.access.executeManualCompactImpl = async (_agent, _session, signal) => {
+    view.commit('compaction/start', { compactionId: 'c3', turn: null })
+    entered.resolve()
+    return await new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        view.commit('compaction/end', { compactionId: 'c3', turn: null, error: 'cancelled' })
+        reject(signal.reason)
+      }, { once: true })
+    })
+  }
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMP3', prompt: [{ type: 'text', text: '/compact' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  view.registry.cancelSession(view.conn, view.access, 'CMP3')
+  assert.deepEqual(await request, { stopReason: 'cancelled' })
+  assert.equal(view.access.manualCompactCalls[0]?.signal.aborted, true)
+})
+
+test('ACP catalog publishes a complete sorted replacement and never executes a shadowed Skill', async () => {
+  const view = projectionView('CAT1')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  })
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the initial catalog is delivered')
+  const first = view.catalogNotifications[0] as { availableCommands: Array<{ name: string }> }
+  assert.deepEqual(first.availableCommands.map(row => row.name), ['compact', 'deploy'])
+  // A real Host command named deploy now shadows the Skill: the next complete
+  // catalog drops the Skill row, and a submitted deploy line is unsupported.
+  view.access.readCommandCatalogImpl = () => ({
+    effectiveNames: ['compact', 'deploy'],
+    feedback: 'missing',
+    compact: 'available',
+    rows: [
+      { kind: 'command', name: 'compact', description: 'Compact this session.' },
+    ],
+  })
+  view.registry.onCommandCatalogInvalidated()
+  await waitUntil(() => view.catalogNotifications.length === 2, 'the replacement catalog is delivered')
+  const second = view.catalogNotifications[1] as { availableCommands: Array<{ name: string }> }
+  assert.deepEqual(second.availableCommands.map(row => row.name), ['compact'])
+  view.access.executeStandaloneCommandImpl = async () => {
+    throw new Error('the shadowed command must never be executed')
+  }
+  await assert.rejects(
+    view.registry.promptSession(
+      view.conn, view.access,
+      { sessionId: 'CAT1', prompt: [{ type: 'text', text: '/deploy now' }] },
+      new AbortController().signal, false, async () => {},
+    ),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_UNSUPPORTED',
+  )
+  assert.equal(view.access.standaloneCommandCalls.length, 0, 'the supported-name set never grants execution authority')
+})
+
+test('an advertised native Skill keeps the ordinary prompt path and revalidates before dispatch', async () => {
+  const view = projectionView('SK1')
+  view.access.readCommandCatalogImpl = () => commandCatalog([])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  })
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the Skill catalog is delivered')
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'SK1', prompt: [{ type: 'text', text: '/deploy production' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await waitUntil(() => view.access.promptCalls.length === 1, 'the native prompt reaches the official Controller')
+  assert.equal(view.access.standaloneCommandCalls.length, 0, 'a Skill is never the standalone command route')
+  const prompt = view.access.promptCalls[0]
+  assert.notEqual(prompt, undefined)
+  view.registry.onInboxInserted(view.agent, { id: 'skill-msg', source: { kind: 'user', rpcId: prompt?.requestId } })
+  view.registry.onInboxClaimed(view.agent, { id: 'skill-msg' }, 1)
+  view.commit('assistant/message', { turn: 1, message: { id: 'skill-answer', content: [{ type: 'text', text: 'deployed' }] } })
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
+
+test('a held Skill preflight is cancellable before any Host insertion and releases the claim', async () => {
+  const view = projectionView('SK2')
+  view.access.readCommandCatalogImpl = () => commandCatalog([])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  })
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the Skill catalog is delivered')
+  let entered!: () => void
+  const held = new Promise<void>(resolve => { entered = resolve })
+  view.access.readNativeSkillsImpl = async (_agent, _session, signal) => {
+    entered()
+    return await new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+  }
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'SK2', prompt: [{ type: 'text', text: '/deploy' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await held
+  view.registry.cancelSession(view.conn, view.access, 'SK2')
+  assert.deepEqual(await request, { stopReason: 'cancelled' })
+  assert.equal(view.access.promptCalls.length, 0, 'no prompt may be inserted after a cancelled preflight')
+  assert.equal(view.registry.hasUnsettledHostWork(), false, 'the pre-dispatch cancellation leaves no Host obligation')
+})
+
+test('a Host command registering during the Skill preflight wins: the stale Skill intent is refused', async () => {
+  const view = projectionView('SK3')
+  view.access.readCommandCatalogImpl = () => commandCatalog([])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  })
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the Skill catalog is delivered')
+  let entered!: () => void
+  const enteredRead = new Promise<void>(resolve => { entered = resolve })
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  view.access.readNativeSkillsImpl = async () => {
+    entered()
+    await held
+    return { kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }] }
+  }
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'SK3', prompt: [{ type: 'text', text: '/deploy' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await enteredRead
+  // The same name becomes a real Host command while the read is held.
+  view.access.readCommandCatalogImpl = () => ({
+    effectiveNames: ['deploy'],
+    feedback: 'missing',
+    compact: 'missing',
+    rows: [],
+  })
+  release()
+  await assert.rejects(request, (error: unknown) =>
+    error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_STALE')
+  assert.equal(view.access.promptCalls.length, 0, 'a Host command registration never falls through to a model prompt')
+})
+
+test('Close waits for the original command Promise and never releases the claim on delivery alone', async () => {
+  const view = projectionView('CMD3')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const entered = deferred<void>()
+  const release = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD3', prompt: [{ type: 'text', text: '/feedback held' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  let closed = false
+  const closing = view.registry.closeSession(view.conn, view.access, 'CMD3').then(value => {
+    closed = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(closed, false, 'close cannot detach before the official command Promise settles')
+  assert.equal(view.registry.hasUnsettledHostWork(), true)
+  assert.equal(view.registry.hasClaim('CMD3'), true)
+  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await closing, {})
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+  assert.equal(view.registry.hasClaim('CMD3'), false)
+})
+
+test('a physical EOF keeps the command claim fenced and releases it only after the original Promise settles', async () => {
+  const view = projectionView('CMD4')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const entered = deferred<void>()
+  const release = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD4', prompt: [{ type: 'text', text: '/feedback eof' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  view.registry.releaseConnection(view.conn, view.access)
+  await Promise.resolve()
+  assert.equal(view.registry.hasClaim('CMD4'), true, 'EOF is a delivery close, not a Host terminal')
+  assert.equal(view.registry.hasUnsettledHostWork(), true)
+  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+  await waitUntil(() => !view.registry.hasClaim('CMD4'), 'the command claim is released after its real terminal')
+})
+
+test('a failed catalog re-read retains the last delivered complete catalog and later converges', async () => {
+  const view = projectionView('CAT2')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the initial catalog is delivered')
+  view.access.readCommandCatalogImpl = () => {
+    throw new Error('registry unavailable')
+  }
+  view.registry.onCommandCatalogInvalidated()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(view.catalogNotifications.length, 1, 'a read failure never publishes an empty replacement')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback', 'compact'])
+  view.registry.onCommandCatalogInvalidated()
+  await waitUntil(() => view.catalogNotifications.length === 2, 'a later successful read publishes the replacement')
+  const names = (view.catalogNotifications[1] as { availableCommands: Array<{ name: string }> }).availableCommands.map(row => row.name)
+  assert.deepEqual(names, ['compact', 'feedback'])
+})
+
+test('a held catalog snapshot that loses its epoch never delivers its stale replacement', async () => {
+  const view = projectionView('CAT3')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.readNativeSkillsImpl = async () => ({ kind: 'available', cwd: '/w', skills: [] })
+  await view.resume()
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the initial catalog is delivered')
+  const entered = deferred<void>()
+  const release = deferred<AcpNativeSkillCatalog>()
+  view.access.readNativeSkillsImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback', 'compact'])
+  view.registry.onCommandCatalogInvalidated()
+  await entered.promise
+  // A newer invalidation lands while the first snapshot is held. The stale
+  // read must lose its epoch after the await; only the newest complete catalog
+  // may reach the client.
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  view.registry.onCommandCatalogInvalidated()
+  view.access.readNativeSkillsImpl = async () => ({ kind: 'available', cwd: '/w', skills: [] })
+  release.resolve({ kind: 'available', cwd: '/w', skills: [] })
+  await waitUntil(() => view.catalogNotifications.length === 2, 'the newest complete catalog is delivered')
+  const delivered = (view.catalogNotifications[1] as { availableCommands: Array<{ name: string }> })
+    .availableCommands.map(row => row.name)
+  assert.deepEqual(delivered, ['compact'], 'the stale held replacement never reaches the client')
+})
+
+test('session/load holds the first history notification and publishes the catalog only after the replay barrier', async () => {
+  const history: AcpSessionHistory = {
+    header: { sessionId: 'CAT5', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'load question' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'load answer' }] } } },
+    ],
+  }
+  const view = projectionView('CAT5', { history })
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const held = view.holdProjection()
+  const loading = view.load()
+  await held.entered
+  assert.equal(view.catalogNotifications.length, 0, 'the catalog waits for the replay barrier')
+  held.release()
+  await loading
+  await waitUntil(() => view.catalogNotifications.length === 1, 'the complete catalog is delivered after load')
+  const names = (view.catalogNotifications[0] as { availableCommands: Array<{ name: string }> })
+    .availableCommands.map(row => row.name)
+  assert.deepEqual(names, ['feedback'])
+  assert.equal(view.notifications.filter(update => update.sessionUpdate === 'user_message_chunk').length, 1,
+    'the held history user message is delivered exactly once')
+  assert.equal(view.notifications.filter(update => update.sessionUpdate === 'agent_message_chunk').length, 1,
+    'the held history assistant message is delivered exactly once')
+})
+
+test('a compact settled through end but held before flush is not aborted by a late cancel', async () => {
+  const view = projectionView('CMP7')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  let startSeq = 0
+  let summarySeq = 0
+  let endSeq = 0
+  view.access.executeManualCompactImpl = async (_agent, _session, signal) => {
+    view.commit('compaction/start', { compactionId: 'c7', turn: null })
+    startSeq = view.lastSeq()
+    view.commit('compaction/summary', {
+      compactionId: 'c7', summary: [{ type: 'text', text: 'summary' }],
+      shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 1,
+      provider: 'p', model: 'm',
+    })
+    summarySeq = view.lastSeq()
+    view.commit('compaction/end', { compactionId: 'c7', turn: null })
+    endSeq = view.lastSeq()
+    entered.resolve()
+    await release.promise
+    assert.equal(signal.aborted, false, 'the end-before-flush window is not a cancellation boundary')
+    return { compactionId: 'c7', startSeq, summarySeq, endSeq, shadowedSeqs: [1], shadowedTokenCount: 1 }
+  }
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMP7', prompt: [{ type: 'text', text: '/compact' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  view.registry.cancelSession(view.conn, view.access, 'CMP7')
+  await Promise.resolve()
+  assert.equal(view.access.manualCompactCalls[0]?.signal.aborted, false)
+  release.resolve()
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
+
+test('a failed command result notification is OUTPUT_FAILED, never a business cancellation or retry', async () => {
+  const view = projectionView('CMD5')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'Feedback recorded.' } })
+  await view.resume()
+  await assert.rejects(
+    view.registry.promptSession(
+      view.conn, view.access,
+      { sessionId: 'CMD5', prompt: [{ type: 'text', text: '/feedback hi' }] },
+      new AbortController().signal, false,
+      async () => { throw new Error('wire write failed') },
+    ),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_OUTPUT_FAILED',
+  )
+  assert.equal(view.access.standaloneCommandCalls.length, 1, 'the official command ran exactly once and was never retried')
+})
+
+test('Close during a held command never retires the scoped MCP lease before the original Promise', async () => {
+  const view = projectionView('CMD6', { mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] })
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.mountScopedMcpImpl = async (agent, session) => makeScopedLease(agent, session)
+  const retireCalls: string[] = []
+  const retire = deferred<void>()
+  view.access.retireScopedMcpImpl = async lease => {
+    retireCalls.push(lease.serverNames.join(','))
+    await retire.promise
+  }
+  const entered = deferred<void>()
+  const release = deferred<unknown>()
+  view.access.executeStandaloneCommandImpl = async () => {
+    entered.resolve()
+    return await release.promise
+  }
+  await view.load()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD6', prompt: [{ type: 'text', text: '/feedback held' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  await entered.promise
+  let closed = false
+  const closing = view.registry.closeSession(view.conn, view.access, 'CMD6').then(value => {
+    closed = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(closed, false)
+  assert.deepEqual(retireCalls, [], 'the MCP lease is not retired before the command terminal')
+  release.resolve({ result: { kind: 'success', text: 'ok' } })
+  assert.deepEqual(await closing, {})
+  await waitUntil(() => retireCalls.length === 1, 'the exact MCP lease retires after the command terminal')
+  retire.resolve()
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
+
+test('R1: a cancel from the synchronous compaction/start observer is replayed after dispatch', async () => {
+  const view = projectionView('CMP8')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  let aborted = false
+  view.access.executeManualCompactImpl = async (_agent, _session, signal) => {
+    view.commit('compaction/start', { compactionId: 'c8', turn: null })
+    // Reenter cancellation synchronously INSIDE the official call's prefix,
+    // before executeManualCompact returns to the View.
+    view.registry.cancelSession(view.conn, view.access, 'CMP8')
+    return await new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        aborted = true
+        view.commit('compaction/end', { compactionId: 'c8', turn: null, error: 'cancelled' })
+        reject(signal.reason)
+      }, { once: true })
+    })
+  }
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMP8', prompt: [{ type: 'text', text: '/compact' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  assert.deepEqual(await request, { stopReason: 'cancelled' })
+  assert.equal(aborted, true, 'the post-dispatch cancel replayed onto the captured controller')
+})
+
+test('R2: close resolves after the raw Host terminal even while the result notification is held', async () => {
+  const view = projectionView('CMD7')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const entered = deferred<void>()
+  const gate = deferred<void>()
+  let closeSettled = false
+  view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'held result' } })
+  await view.resume()
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD7', prompt: [{ type: 'text', text: '/feedback held delivery' }] },
+    new AbortController().signal, false,
+    async () => {
+      entered.resolve()
+      await gate.promise
+    },
+  )
+  await entered.promise
+  const closing = view.registry.closeSession(view.conn, view.access, 'CMD7').then(value => {
+    closeSettled = true
+    return value
+  })
+  await new Promise(resolveWait => setTimeout(resolveWait, 20))
+  assert.equal(closeSettled, true, 'a settled Host operation must not retain close on a dead output wait')
+  assert.deepEqual(await closing, {})
+  gate.resolve()
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
+
+test('R2: an aborted command request abandons only its held result delivery', async () => {
+  const view = projectionView('CMD10')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'held request result' } })
+  await view.resume()
+  const entered = deferred<void>()
+  const gate = deferred<void>()
+  const controller = new AbortController()
+  const first = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD10', prompt: [{ type: 'text', text: '/feedback first' }] },
+    controller.signal, false,
+    async () => { entered.resolve(); await gate.promise },
+  )
+  await entered.promise
+  controller.abort()
+  assert.deepEqual(await first, { stopReason: 'end_turn' }, 'the exact request abort releases its own dead delivery wait')
+  // The already-started wire send is not cancellable; once the test releases
+  // that held sink, the next request must be admitted and delivered.
+  gate.resolve()
+  const second = await view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD10', prompt: [{ type: 'text', text: '/feedback second' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  assert.deepEqual(second, { stopReason: 'end_turn' }, 'the command slot is available for the next request')
+  assert.equal(view.access.standaloneCommandCalls.length, 2)
+})
+
+test('R3: a failed own mandatory compaction frame is OUTPUT_FAILED, not a successful command', async () => {
+  const view = projectionView('CMP9')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
+  view.access.executeManualCompactImpl = async () => {
+    view.commit('compaction/start', { compactionId: 'c9', turn: null })
+    view.commit('compaction/summary', {
+      compactionId: 'c9', summary: [{ type: 'text', text: 'summary' }],
+      shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 1,
+      provider: 'p', model: 'm',
+    })
+    view.commit('compaction/end', { compactionId: 'c9', turn: null })
+    return { compactionId: 'c9', startSeq: 101, summarySeq: 102, endSeq: 103, shadowedSeqs: [1], shadowedTokenCount: 1 }
+  }
+  await view.resume()
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  const drained = view.failProjection(1)
+  await assert.rejects(
+    view.registry.promptSession(
+      view.conn, view.access,
+      { sessionId: 'CMP9', prompt: [{ type: 'text', text: '/compact' }] },
+      new AbortController().signal, false, async () => {},
+    ),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_OUTPUT_FAILED',
+  )
+  await drained
+})
+
+test('R5: a cancel that lands after the Skill preflight helper returns is caught at final admission', async () => {
+  const view = projectionView('SKL5')
+  view.access.readCommandCatalogImpl = () => commandCatalog([])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy.' }],
+  })
+  await view.resume()
+  for (let attempt = 0; attempt < 100 && view.catalogNotifications.length === 0; attempt += 1) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 5))
+  }
+  assert.equal(view.catalogNotifications.length, 1, 'the Skill catalog is delivered before the prompt')
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  let catalogReads = 0
+  view.access.readCommandCatalogImpl = () => {
+    catalogReads += 1
+    // Invocation-time reads only: 1 route, 2 helper re-read, 3 outer final
+    // read. Reenter cancel at the LAST read, after the helper returned.
+    if (catalogReads === 3) view.registry.cancelSession(view.conn, view.access, 'SKL5')
+    return commandCatalog([])
+  }
+  const result = await view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'SKL5', prompt: [{ type: 'text', text: '/deploy now' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  assert.deepEqual(result, { stopReason: 'cancelled' })
+  assert.equal(catalogReads, 3, 'the test actually reached the final post-read admission guard')
+  assert.equal(view.access.promptCalls.length, 0, 'the revoked Skill never reached the official prompt')
+  const claim = (view.registry as unknown as { claims: Map<string, { unclaimedHostObligation?: object }> }).claims.get('SKL5')
+  assert.equal(claim?.unclaimedHostObligation, undefined, 'no unclaimed Host obligation was planted')
+})
+
+test('R5: a definite Skill no-dispatch failure racing Close rejects the request and closes', async () => {
+  const view = projectionView('SKLCLOSE')
+  view.access.readCommandCatalogImpl = () => commandCatalog([])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy.' }],
+  })
+  await view.resume()
+  for (let attempt = 0; attempt < 100 && view.catalogNotifications.length === 0; attempt += 1) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 5))
+  }
+  assert.equal(view.catalogNotifications.length, 1, 'the Skill catalog is delivered before the race')
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  const closeDone = deferred<Record<string, never>>()
+  let invocationReads = 0
+  view.access.readCommandCatalogImpl = () => {
+    invocationReads += 1
+    if (invocationReads >= 2) {
+      queueMicrotask(() => {
+        void view.registry.closeSession(view.conn, view.access, 'SKLCLOSE').then(
+          value => closeDone.resolve(value),
+          error => closeDone.reject(error),
+        )
+      })
+      throw new Error('controlled final Skill read failure')
+    }
+    return commandCatalog([])
+  }
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'SKLCLOSE', prompt: [{ type: 'text', text: '/deploy close race' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  const [requestResult, closeResult] = await Promise.allSettled([request, closeDone.promise])
+  assert.equal(closeResult.status, 'fulfilled')
+  assert.deepEqual(closeResult.status === 'fulfilled' ? closeResult.value : undefined, {})
+  assert.equal(requestResult.status, 'rejected')
+  assert.equal(requestResult.status === 'rejected' && requestResult.reason instanceof LocalAcpViewError
+    ? requestResult.reason.code : '', 'LOCAL_ACP_COMMAND_UNAVAILABLE')
+  assert.equal(view.access.promptCalls.length, 0, 'no official prompt was invoked')
+  assert.equal(view.access.cancelledTurns.length, 0, 'Close did not fabricate a foreign turn cancellation')
+  assert.equal(view.registry.hasClaim('SKLCLOSE'), false)
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'SKLCLOSE'), {},
+    'Close is idempotent after the definite no-dispatch terminal')
+})
+
+test('R2: a held predecessor projection cannot retain close after the raw Host command settled', async () => {
+  const view = projectionView('CMD8')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'behind held predecessor' } })
+  await view.resume()
+  view.notifications.length = 0
+  const held = view.holdProjection()
+  view.commit('todo/write', { todos: [{ content: 'held predecessor', status: 'pending' }] })
+  await held.entered
+  let resultEntered = false
+  let closeSettled = false
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD8', prompt: [{ type: 'text', text: '/feedback predecessor' }] },
+    new AbortController().signal, false,
+    async () => { resultEntered = true },
+  )
+  await new Promise(resolveWait => setTimeout(resolveWait, 20))
+  assert.equal(resultEntered, false, 'the result must be queued behind the real held predecessor')
+  const closing = view.registry.closeSession(view.conn, view.access, 'CMD8').then(value => {
+    closeSettled = true
+    return value
+  })
+  await new Promise(resolveWait => setTimeout(resolveWait, 20))
+  assert.equal(closeSettled, true, 'a dead output predecessor must not retain the settled Host operation')
+  assert.deepEqual(await closing, {})
+  held.release()
+  assert.deepEqual(await request, { stopReason: 'end_turn' })
+})
+
+test('R7: command admission refuses a still-retired turn', async () => {
+  const view = projectionView('CMD9')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  await view.resume()
+  const claims = (view.registry as unknown as { claims: Map<string, { retiringTurn?: object }> }).claims
+  claims.get('CMD9')!.retiringTurn = { turn: 1, origin: 'tui' }
+  await assert.rejects(
+    view.registry.promptSession(
+      view.conn, view.access,
+      { sessionId: 'CMD9', prompt: [{ type: 'text', text: '/feedback blocked' }] },
+      new AbortController().signal, false, async () => {},
+    ),
+    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_VIEW_BUSY',
+  )
+  assert.equal(view.access.standaloneCommandCalls.length, 0)
 })

@@ -254,7 +254,8 @@ export async function runAcpTransientStreamSettlement(context) {
     const preCommitEvents = hostSessionEvents(dshHome, sessionA) ?? []
     assert(assistantEventWithText(preCommitEvents, FIRST_MARKER, promptStart) === undefined,
       `TS-04: the first chunk must arrive BEFORE its durable assistant/message (events: ${JSON.stringify(preCommitEvents.slice(promptStart).map(event => event.type))})`)
-    assert(updatesB.length === 0, 'TS-04: the sibling ACP Session must receive none of these transient frames')
+    assert(updatesB.filter(update => update?.update?.sessionUpdate !== 'available_commands_update').length === 0,
+      'TS-04: the sibling ACP Session must receive none of these transient frames')
     trace('acp-transient/first-chunk-before-commit', { turn, chunks: firstChunk.length })
 
     // ── E) Release the provider: the second delta and the durable commit follow.
@@ -281,7 +282,8 @@ export async function runAcpTransientStreamSettlement(context) {
       `TS-05: the delivered transient text must equal the committed text exactly (${JSON.stringify(chunkTexts.join(''))} vs ${JSON.stringify(durable)})`)
     assert(chunkTextsOf(updatesA, sessionA).length === 2,
       'TS-05: the committed text must never be re-sent after the join')
-    assert(updatesB.length === 0, 'TS-05: the sibling Session must still have received nothing')
+    assert(updatesB.filter(update => update?.update?.sessionUpdate !== 'available_commands_update').length === 0,
+      'TS-05: the sibling Session must still have received nothing')
 
     // ── F) Negative control: a provider that rewrites an already-streamed block
     //      cannot be reported as a committed answer.
@@ -312,7 +314,8 @@ export async function runAcpTransientStreamSettlement(context) {
     await scene.assertHostIdentityKept(host, hostIdentity, 'TS-07 Host identity')
     await acpA.request(acp.methods.agent.session.close, { sessionId: sessionA })
     await acpA.request(acp.methods.agent.session.close, { sessionId: sessionA })
-    assert(updatesB.length === 0, 'TS-07: the sibling connection observed nothing through the whole case')
+    const siblingUpdates = updatesB.filter(update => update?.update?.sessionUpdate !== 'available_commands_update')
+    assert(siblingUpdates.length === 0, 'TS-07: the sibling connection observed nothing through the whole case')
     assert((hostSessionEvents(dshHome, sessionA) ?? []).length >= eventsBefore.length, 'TS-07: the durable log must stay readable')
     await acpA.request(acp.methods.agent.session.close, { sessionId: sessionB }).catch(() => {})
 
@@ -338,7 +341,7 @@ export async function runAcpTransientStreamSettlement(context) {
         provisionalChunks: provisional.length,
         rewrittenChunkAppended: afterCommit.length > 1,
       },
-      leak: { siblingSessionUpdates: updatesB.length },
+      leak: { siblingSessionUpdates: siblingUpdates.length },
       verdict: 'PASS',
     }
 
@@ -360,7 +363,7 @@ export async function runAcpTransientStreamSettlement(context) {
       committedTextMatches: chunkTexts.join('') === durable,
       streamDivergenceFailClosed: inconsistentOutcome.error?.data?.code === 'LOCAL_ACP_PROMPT_STREAM_DIVERGENCE',
       noRewriteResend: afterCommit.length === 1,
-      siblingSessionIsolated: updatesB.length === 0,
+      siblingSessionIsolated: siblingUpdates.length === 0,
       hostIdentityKept: true,
       acpProtocolVersion: initA.protocolVersion,
       stopReason: settled.value?.stopReason,

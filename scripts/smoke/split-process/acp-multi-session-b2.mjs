@@ -468,6 +468,7 @@ export async function runAcpMultiSessionB2(context) {
       assert(JSON.stringify(await acpMain.client.request(acp.methods.agent.session.close, { sessionId })) === '{}',
         `B2-14: extra Session ${sessionId} must close without affecting A/B`)
     }
+    allUpdates.length = 0
 
     // B2-03: A and B prompts are independent and their notifications stay on
     // their own sessionId. A mounts the real MCP echo tool; B gets UNKNOWN_TOOL.
@@ -502,6 +503,10 @@ export async function runAcpMultiSessionB2(context) {
     assert(hostAssistantHasText(eventsB, 'B1_ECHO_B settled'), 'B2-03: B assistant output missing')
     assert(modelRecords(sessionA, 'B1_ECHO_A').some(record => record.hasEchoTool === true), 'B2-09: A model step must see its scoped MCP tool')
     assert(modelRecords(sessionB, 'B1_ECHO_B').every(record => record.hasEchoTool === false), 'B2-09: B model step must not see A tool')
+    // F4: catalogs are never excluded by type. The observation window was
+    // reset at the start of the A/B phase, where only A and B are the owned
+    // Sessions; any other Session id — including one that emits only a
+    // catalog — is cross-Session leakage.
     const foreignUpdates = allUpdates.filter(update => update?.sessionId !== sessionA && update?.sessionId !== sessionB)
     assert(foreignUpdates.length === 0, `B2-03: foreign Session updates: ${JSON.stringify(foreignUpdates)}`)
     assertOnlySession(readUpdates(updatesA), sessionA, 'B2-03 A updates')

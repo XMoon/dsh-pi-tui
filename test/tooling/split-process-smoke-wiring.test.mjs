@@ -578,6 +578,10 @@ test('every registry entry declares a conservative platform list and the audited
     // four Host generations, one Direct negative and quiesced cleanup. The
     // Linux arm is the same case behind the attested isolated systemd gate.
     'daemon-control.host-default-environment',
+    // The ACP command case drives the same shared Split harness and real
+    // official ACP/services on both platforms; its packed-candidate Darwin
+    // selected run passed.
+    'acp.command-invocation',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {
