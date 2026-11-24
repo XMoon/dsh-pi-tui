@@ -189,7 +189,9 @@ export async function runReadAuthority(context) {
       //    projection with the roster, discover X's real pending question
       //    without a Gateway state sample per row, promote it to an exact pair,
       //    and NEVER take an all-roster sample.
-      const activityNonce = signalProbe(clientA, { op: 'activity', windowMs: 6_000 })
+      // A short window keeps the real timed question answerable for the rest of
+      // this scene while still draining a 2-row corpus many times over.
+      const activityNonce = signalProbe(clientA, { op: 'activity', windowMs: 3_000 })
       const activity = await waitProbe(clientA, activityNonce,
         record => record.phase === 'activity-result', 'UA activity observation result', 60_000)
       const counters = activity.counters ?? {}
