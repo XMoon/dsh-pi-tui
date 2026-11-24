@@ -524,6 +524,8 @@ interface Harness {
   readonly subagentLimitsWrites: () => readonly { maxDepth?: number; maxActiveSubagents?: number }[]
   /** FR5-B: every Agent-loop field write, in dispatch order. */
   readonly agentLoopWrites: () => readonly HostSectionWrite[]
+  /** FR5-B: every EXPLICIT Agent-loop refresh the page requested. */
+  readonly agentLoopRefreshes: () => number
   /** Advance the fake Agent-loop revision without a write (another writer). */
   readonly advanceAgentLoopRevision: () => void
   /** Replace the fake Agent-loop Host generation (a Host A -> B replacement). */
@@ -641,6 +643,7 @@ function setup(options: HarnessOptions = {}): Harness {
       ...(options.agentLoop.unreadable === true ? { unreadable: true } : {}),
     }
   const agentLoopWrites: HostSectionWrite[] = []
+  let agentLoopRefreshes = 0
   const agentLoopWriteGate = (): Promise<void> => options.agentLoopWriteGate === undefined
     ? Promise.resolve()
     : options.agentLoopWriteGate()
@@ -1226,7 +1229,7 @@ function setup(options: HarnessOptions = {}): Harness {
             overridden: { maxParallelToolCalls: agentLoopValue.maxParallelToolCalls !== agentLoopValue.inherited },
           }
         },
-        refresh: async () => {},
+        refresh: async () => { agentLoopRefreshes += 1 },
         mutate: async (
           patch: import('../../src/runtime/config-port.ts').SectionPatch<import('../../src/runtime/config-port.ts').AgentLoopSettings>,
           revision: number,
@@ -1485,6 +1488,7 @@ function setup(options: HarnessOptions = {}): Harness {
     subagentWrites: () => subagentWrites,
     subagentLimitsWrites: () => subagentLimitsWrites,
     agentLoopWrites: () => agentLoopWrites,
+    agentLoopRefreshes: () => agentLoopRefreshes,
     advanceAgentLoopRevision: () => { agentLoopRevision += 1 },
     replaceAgentLoopGeneration: () => { agentLoopGeneration = { host: 'agent-loop-b' } },
     shellExecutionWrites: () => shellExecutionWrites,
@@ -2832,6 +2836,204 @@ test('a held tenant gesture is refused across BOTH resize directions and cross o
   h.dispose()
 })
 
+test('a mounted tenant with a bar-only grant admits no hidden action', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x1b') // Cancel -> the clean tenant
+  await settle(h, 6)
+  const refreshesBefore = h.agentLoopRefreshes()
+  h.vt.resize(44, 2) // ZERO body rows: the child really gets a bar-only grant
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'the bar-only row paints ONLY the page Back')
+  await key(h, '\r')
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Value:/u, 'a hidden raw Input is never started')
+  await key(h, '?')
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Effective/u, 'a hidden disclosure is never opened')
+  await key(h, 'r')
+  await settle(h, 4)
+  assert.equal(h.agentLoopRefreshes(), refreshesBefore, 'a hidden official refresh is never requested')
+  // The page's own Back is the ONE admitted action at this grant.
+  await key(h, '\x1b')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Rows/u)
+  // A restored grant admits a fresh explicit Change again.
+  h.vt.resize(160, 44)
+  await h.vt.waitForRender()
+  await key(h, '\r')
+  await settle(h, 6)
+  await key(h, '\x15')
+  await key(h, '7')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 7 }])
+  h.dispose()
+})
+
+test('a bar-only grant also covers the Advanced, Input and confirmation states', async () => {
+  // Advanced: x/r must be inert at zero body rows.
+  const advanced = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await advanced.open('Agent')
+  await key(advanced, '\r')
+  await highlightRow(advanced, 'Parallel tool calls')
+  await key(advanced, '\r')
+  await key(advanced, '\x1b')
+  await settle(advanced, 6)
+  await key(advanced, '?') // the Advanced disclosure
+  await settle(advanced, 6)
+  const advancedRefreshes = advanced.agentLoopRefreshes()
+  advanced.vt.resize(44, 2)
+  await advanced.vt.waitForRender()
+  assert.match(advanced.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u)
+  await key(advanced, 'x')
+  await settle(advanced, 4)
+  assert.doesNotMatch(advanced.view(), /The Host readback decides the value\./u, 'no hidden reset question')
+  await key(advanced, 'r')
+  await settle(advanced, 4)
+  assert.equal(advanced.agentLoopRefreshes(), advancedRefreshes, 'no hidden refresh from Advanced either')
+  assert.deepEqual(advanced.agentLoopWrites(), [])
+  advanced.dispose()
+
+  // Confirmation: a painted Confirm is never admitted by a NEWER bar-only frame.
+  const confirming = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await confirming.open('Agent')
+  await key(confirming, '\r')
+  await highlightRow(confirming, 'Parallel tool calls')
+  await key(confirming, '\r')
+  await key(confirming, '\x1b')
+  await settle(confirming, 6)
+  await key(confirming, '?')
+  await settle(confirming, 6)
+  await key(confirming, 'x')
+  await settle(confirming, 6)
+  assert.match(confirming.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'the grant hosts the whole risk copy')
+  confirming.vt.resize(44, 2)
+  await confirming.vt.waitForRender()
+  assert.match(confirming.rowsPlain().at(-1) ?? '', /^Keep \[Esc\]\s*$/u, 'the confirmation bar degrades to Keep')
+  await key(confirming, '\r')
+  await settle(confirming, 6)
+  assert.deepEqual(confirming.agentLoopWrites(), [], 'a dropped Confirm span is never keyboard-admitted')
+  confirming.dispose()
+})
+
+test('a release delivered before the resize repaint never activates the tenant', async () => {
+  const h = setup({ columns: 200, rows: 50, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '5')
+  await settle(h, 6)
+  const confirmRow = rowOf(h, 'Confirm [Enter]')
+  const confirmCol = cellIndexOf(h, confirmRow, 'Confirm [Enter]')
+  press(h, confirmRow, confirmCol)
+  await h.vt.waitForRender()
+  // No wait: the release lands inside the resize window, when the painted
+  // geometry is already stale.
+  h.vt.resize(80, 24)
+  release(h, confirmRow, confirmCol)
+  await settle(h, 10)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a pre-repaint release never writes')
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant survives the resize')
+  // A rows-only shrink keeps the columns but changes the body grant: the same
+  // pre-repaint release is refused by the geometry fence too.
+  const bodyRow = rowOf(h, 'Value')
+  const bodyCol = cellIndexOf(h, bodyRow, 'Value')
+  press(h, bodyRow, bodyCol)
+  await h.vt.waitForRender()
+  h.vt.resize(80, 12)
+  release(h, bodyRow, bodyCol)
+  await settle(h, 8)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a pre-repaint release on a body cell never writes')
+  // A fresh gesture after the repaint works.
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 5 }],
+    'a fresh gesture after the repaint writes once')
+  h.dispose()
+})
+
+test('a forced teardown while a tenant write is in flight leaves a fresh tenant clean', async () => {
+  let releaseWrite: (() => void) | undefined
+  const h = setup({
+    columns: 160,
+    rows: 44,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteGate: () => new Promise<void>(resolve => { releaseWrite = resolve }),
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '9')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Saving…/u)
+  assert.equal(h.agentLoopWrites().length, 1)
+  // The tenant refuses every user leave while the write is owned, so the only
+  // forced teardown is the app's own disposal. The admitted write keeps its
+  // owner and completes exactly once.
+  h.dispose()
+  releaseWrite?.()
+  await new Promise<void>(resolve => setTimeout(resolve, 20))
+  assert.equal(h.agentLoopWrites().length, 1, 'the owned write completes exactly once after the teardown')
+  // A newly mounted tenant is a FRESH instance: it never inherits the retired
+  // page's Saving/Verified state.
+  const fresh = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 9, inherited: 2 } })
+  await fresh.open('Agent')
+  await key(fresh, '\r')
+  await highlightRow(fresh, 'Parallel tool calls')
+  await key(fresh, '\r')
+  await settle(fresh, 6)
+  assert.doesNotMatch(fresh.view(), /Saving…|Verified|Not saved/u, 'a fresh tenant never inherits a retired settlement')
+  assert.match(fresh.view(), /Current value\s+9/u)
+  fresh.dispose()
+})
+
+test('the short-screen leave question scrolls under the wheel and refuses a hidden confirm', async () => {
+  const h = setup({
+    columns: 44,
+    rows: 24,
+    agentLoop: { maxParallelToolCalls: 10, inherited: 2 },
+    agentLoopWriteFailure: 'read-only profile',
+  })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [], 'the Host refused the write before it landed')
+  // ONE body row: the leave copy cannot fit whole, so the bar keeps only Keep.
+  h.vt.resize(44, 3)
+  await h.vt.waitForRender()
+  await key(h, '\x1b') // leaving a dirty page asks its OWN question
+  await settle(h, 6)
+  const before = h.view()
+  assert.match(before, /Keep \[Esc\]/u)
+  assert.doesNotMatch(h.rowsPlain().at(-1) ?? '', /Discard and leave/u, 'an unreadable copy never offers the action')
+  wheel(h, 1, 20, true)
+  await settle(h, 4)
+  assert.notEqual(h.view(), before, 'the wheel really scrolls the short question body')
+  await key(h, 'd')
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'no hidden discard/leave from a dropped action')
+  assert.deepEqual(h.agentLoopWrites(), [], 'no write is ever dispatched')
+  await key(h, '\x1b') // Keep
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'Keep returns to the same dirty page')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh \[R\] · Back \[Esc\]/u, 'the refused draft is read-only here')
+  h.dispose()
+})
+
 test('a wrapped reset risk statement still has to be painted before Confirm exists', async () => {
   const h = setup({ columns: 44, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
   await h.open('Agent')
@@ -2840,9 +3042,18 @@ test('a wrapped reset risk statement still has to be painted before Confirm exis
   await key(h, '\r') // the tenant's raw Input
   await key(h, '\x1b') // Cancel -> the clean Detail
   await settle(h, 6)
-  await key(h, '?') // Advanced
+  // POINTER ENTRY on the short screen: the painted Details affordance opens the
+  // disclosure, and the painted Reset action opens the guarded confirmation.
+  await clickPainted(h, 'Details…')
   await settle(h, 6)
-  await key(h, 'x') // the guarded reset confirmation
+  assert.match(h.view(), /Effective\s+10/u, 'the painted Details affordance opened the disclosure')
+  for (let step = 0; step < 12; step += 1) {
+    if (h.rowsPlain().some(line => line.includes('Reset to inherited…'))) break
+    wheel(h, 4, 20, true)
+    await settle(h, 4)
+  }
+  assert.ok(h.rowsPlain().some(line => line.includes('Reset to inherited…')), `the wheel reached the painted Reset action:\n${h.view()}`)
+  await clickPainted(h, 'Reset to inherited…')
   await settle(h, 6)
   const first = h.view()
   // The 44-cell risk copy wraps, so the last statement is NOT on screen yet.

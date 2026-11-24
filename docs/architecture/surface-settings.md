@@ -739,10 +739,12 @@ a key press uses.
   whose necessary risk copy must have been painted before Confirm is admitted,
   and it sends the official `unset` even when the effective value already equals
   the inherited one — never `set(inherited)` and never a USER-field deletion
-  claim. Every frame's action is admitted only through its own REALLY painted
-  span: an action segment that a narrow row drops is inert for the keyboard and
-  the pointer alike, and a grant that paints no body row admits nothing but the
-  page's own Back. The scrollable confirmation body obeys the same wheel the
+  claim. The confirming actions are admitted only through their own REALLY
+  painted span: a confirmation, leave or refresh segment that a narrow row drops
+  is inert for the keyboard and the pointer alike, and a grant that paints no
+  body row admits nothing but the page's own Back. A grant that DOES paint a
+  body keeps the page's documented page-local entry keys (a dropped bar hint is
+  not a revoked key). The scrollable confirmation body obeys the same wheel the
   tenant body uses, so a pointer-only user can reach the risk fragments that
   gate Confirm.
 - **Entry is explicit.** Row selection and Tab are never a mount: an ordinary
