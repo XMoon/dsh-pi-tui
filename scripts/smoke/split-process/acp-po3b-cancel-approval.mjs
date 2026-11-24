@@ -187,7 +187,9 @@ async function readUntilResponse(client, id, notifications) {
   for (;;) {
     const message = await client.next(180_000)
     if (message?.method === 'session/update') {
-      notifications.push(message.params)
+      // The baseline command catalog is an independent standard notification,
+      // not turn output and not a response.
+      if (message.params?.update?.sessionUpdate !== 'available_commands_update') notifications.push(message.params)
       continue
     }
     // The SDK's cooperative cancellation of an outgoing reverse request (a
