@@ -686,11 +686,24 @@ class RemoteActivityObservation implements ActivityObservation {
   private readonly discoveryQueue: string[] = []
   /** The ONE in-flight read of a row. The token is the operation identity: an
    *  older read settling can never retire a newer request's ownership. */
-  private readonly inflight = new Map<string, { readonly token: symbol; readonly controller: AbortController }>()
+  private readonly inflight = new Map<string, {
+    readonly token: symbol
+    readonly controller: AbortController
+    /** The row INCARNATION the read was dispatched for (identity): a re-added id
+     *  is a new incarnation even when its epoch number restarts. */
+    readonly row: ActivityRow
+    /** The epoch the OWNING read was dispatched for: a same-epoch request for an
+     *  already in-flight row is a duplicate, never a newer invalidation. */
+    readonly epoch: number
+  }>()
   /** Work recorded while a row's read is in flight (latest invalidation wins).
    *  It is dispatched once when the owning read settles, so no newer epoch is
    *  lost behind an old blocked response. */
   private readonly pendingWork = new Map<string, 'priority' | 'discovery'>()
+  /** The caller-accepted authorized membership (`ids` minus subagents). A row
+   *  still present in `rows` after an official removal is NOT dispatchable until
+   *  the caller accepts the new roster. */
+  private authorizedIds = new Set<string>()
   private activePriority = 0
   private activeDiscovery = 0
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -753,6 +766,7 @@ class RemoteActivityObservation implements ActivityObservation {
       admitted.push(id)
     }
     this.rosterOrder = authorized
+    this.authorizedIds = new Set(authorized)
     this.receipts.prune(authorized)
     this.receipts.pruneStale(id => this.witnessOf(id), id => this.officialRunningOf(id))
     // The official running projection is published in the SAME roster frame.
@@ -871,6 +885,9 @@ class RemoteActivityObservation implements ActivityObservation {
     const listed = this.sessions.list.getSnapshot()
     if (listed.phase !== 'ready') return
     for (const [id, row] of this.rows) {
+      // `byId` is not the roster: an id the caller has not accepted (e.g. an
+      // official removal not yet consumed) can never dispatch a read.
+      if (!this.authorizedIds.has(id)) continue
       const entry = listed.byId[id]
       if (entry === undefined) continue
       row.running = entry.running
@@ -906,6 +923,9 @@ class RemoteActivityObservation implements ActivityObservation {
     let changed = false
     let scheduled = false
     for (const [id, row] of this.rows) {
+      // `byId` is not the roster: an id the caller has not accepted (e.g. an
+      // official removal not yet consumed) can never dispatch a read.
+      if (!this.authorizedIds.has(id)) continue
       const entry = listed.byId[id]
       const witness = this.witnessOf(id)
       const listRunning = entry?.running === true
@@ -935,9 +955,16 @@ class RemoteActivityObservation implements ActivityObservation {
       // while the same positive stays unproven must not re-dirty a queued or
       // in-flight recovery read. The current exact state/status proves the fact,
       // never the replayed row.
-      if (runningTransition && listRunning && !row.runningProven && this.rowIsCandidate(row)) {
-        this.scheduleAfterRelevantChange(row)
-        scheduled = true
+      if (runningTransition) {
+        // A running-only transition is a RELEVANT source change even though the
+        // replayed bit is never proof: retire this row's precise evidence/epoch
+        // (an in-flight old-bit read must never commit or stamp a receipt), then
+        // schedule the targeted recovery read only for a rising unproven bit.
+        changed = this.invalidateRow(row) || changed
+        if (listRunning && !row.runningProven && this.rowIsCandidate(row)) {
+          this.scheduleAfterRelevantChange(row)
+          scheduled = true
+        }
       }
     }
     if (changed) {
@@ -1132,6 +1159,11 @@ class RemoteActivityObservation implements ActivityObservation {
 
   /** Schedule the fixed post-change work of one invalidated row. */
   private scheduleAfterRelevantChange(row: ActivityRow): void {
+    // The latest intent owns the slot: an already queued (or in-flight) entry is
+    // re-evaluated from the NEW state instead of retaining its old tier/queue.
+    this.removePriority(row.sessionId)
+    const discoveryIndex = this.discoveryQueue.indexOf(row.sessionId)
+    if (discoveryIndex >= 0) this.discoveryQueue.splice(discoveryIndex, 1)
     if (this.rowIsCandidate(row)) {
       this.schedulePriority(row.sessionId, { front: true })
       return
@@ -1209,10 +1241,15 @@ class RemoteActivityObservation implements ActivityObservation {
   private schedulePriority(sessionId: string, options: { readonly front?: boolean } = {}): void {
     const candidate = this.rows.get(sessionId)
     if (this.disposed || candidate === undefined) return
-    if (this.inflight.has(sessionId)) {
-      // The row is being read under an older epoch: coalesce the newer work so
-      // it is dispatched when that read settles, never silently dropped.
-      this.pendingWork.set(sessionId, 'priority')
+    const current = this.inflight.get(sessionId)
+    if (current !== undefined) {
+      // Only a genuinely newer epoch coalesces work behind the in-flight read;
+      // a same-epoch duplicate (e.g. the periodic recheck while a change is
+      // already being read) is dropped instead of forcing a redundant pair.
+      const currentRow = this.rows.get(sessionId)
+      if (currentRow !== undefined && (current.row !== currentRow || current.epoch < currentRow.epoch)) {
+        this.pendingWork.set(sessionId, 'priority')
+      }
       return
     }
     const discoveryIndex = this.discoveryQueue.indexOf(sessionId)
@@ -1258,8 +1295,14 @@ class RemoteActivityObservation implements ActivityObservation {
 
   private scheduleDiscovery(sessionId: string): void {
     if (this.disposed || !this.rows.has(sessionId)) return
-    if (this.inflight.has(sessionId)) {
-      if (this.pendingWork.get(sessionId) !== 'priority') this.pendingWork.set(sessionId, 'discovery')
+    const current = this.inflight.get(sessionId)
+    if (current !== undefined) {
+      const currentRow = this.rows.get(sessionId)
+      if (currentRow !== undefined
+        && (current.row !== currentRow || current.epoch < currentRow.epoch)
+        && this.pendingWork.get(sessionId) !== 'priority') {
+        this.pendingWork.set(sessionId, 'discovery')
+      }
       return
     }
     if (this.priorityQueued(sessionId) || this.discoveryQueue.includes(sessionId)) return
@@ -1319,9 +1362,14 @@ class RemoteActivityObservation implements ActivityObservation {
     if (row === undefined) return
     const controller = new AbortController()
     const token = Symbol(`priority:${sessionId}`)
-    this.inflight.set(sessionId, { token, controller })
-    this.activePriority += 1
+    // Capture the row witnesses AT DISPATCH: a receipt belongs to the source
+    // revision this read was dispatched for, never to a newer one that arrived
+    // while the read was in flight.
     const epoch = row.epoch
+    const dispatchWitness = row.witness
+    const dispatchRunning = row.listRunning
+    this.inflight.set(sessionId, { token, controller, row, epoch })
+    this.activePriority += 1
     const generation = this.capturedGeneration
     // The projection reuse is the ONE promotion transfer from a discovery read
     // of THIS epoch; an independent recheck always re-reads its pair.
@@ -1335,16 +1383,15 @@ class RemoteActivityObservation implements ActivityObservation {
     }
     this.track((async () => {
       try {
-        const witness = row.witness
         const pending = await this.readState(sessionId, controller.signal)
         if (!this.committable(row, epoch, generation)) return
         const projection = promotedProjection ?? await this.readProjections(sessionId, controller.signal)
         if (!this.committable(row, epoch, generation)) return
         row.exactProjection = { epoch, read: projection }
         const negative = this.isNegativeDiscovery(projection)
-        row.discovery = { epoch, witness, negative }
-        if (negative && row.witness === witness) {
-          this.receipts.record(sessionId, generation, witness, this.officialRunningOf(sessionId))
+        row.discovery = { epoch, witness: dispatchWitness, negative }
+        if (negative && row.epoch === epoch && row.witness === dispatchWitness && row.listRunning === dispatchRunning) {
+          this.receipts.record(sessionId, generation, dispatchWitness, dispatchRunning)
         }
         this.commitPair(row, epoch, pending, projection)
       } finally {
@@ -1358,9 +1405,11 @@ class RemoteActivityObservation implements ActivityObservation {
     if (row === undefined) return
     const controller = new AbortController()
     const token = Symbol(`discovery:${sessionId}`)
-    this.inflight.set(sessionId, { token, controller })
-    this.activeDiscovery += 1
     const epoch = row.epoch
+    const dispatchWitness = row.witness
+    const dispatchRunning = row.listRunning
+    this.inflight.set(sessionId, { token, controller, row, epoch })
+    this.activeDiscovery += 1
     const generation = this.capturedGeneration
     if (generation === undefined) {
       this.finishWork(sessionId, 'discovery', token)
@@ -1368,7 +1417,6 @@ class RemoteActivityObservation implements ActivityObservation {
     }
     this.track((async () => {
       try {
-        const witness = row.witness
         const projection = await this.readProjections(sessionId, controller.signal)
         if (!this.committable(row, epoch, generation)) return
         row.exactProjection = { epoch, read: projection }
@@ -1378,16 +1426,16 @@ class RemoteActivityObservation implements ActivityObservation {
           // exact projection response is the ONE-shot promotion transfer.
           row.promote = true
           row.reuseProjection = true
-          row.discovery = { epoch, witness, negative: false }
+          row.discovery = { epoch, witness: dispatchWitness, negative: false }
           return
         }
         // Record the scheduling bookkeeping/receipt BEFORE the publication that
         // may re-enter the owner: a listener must never observe a published
         // state whose discovery evidence is still missing.
         const negative = this.isNegativeDiscovery(projection)
-        row.discovery = { epoch, witness, negative }
-        if (negative && row.witness === witness) {
-          this.receipts.record(sessionId, generation, witness, this.officialRunningOf(sessionId))
+        row.discovery = { epoch, witness: dispatchWitness, negative }
+        if (negative && row.epoch === epoch && row.witness === dispatchWitness && row.listRunning === dispatchRunning) {
+          this.receipts.record(sessionId, generation, dispatchWitness, dispatchRunning)
         }
         // An ordinary row that proved no active entry has NOT proven "no
         // pending": without a Gateway state sample the attention fact stays
@@ -1396,7 +1444,6 @@ class RemoteActivityObservation implements ActivityObservation {
       } finally {
         this.finishWork(sessionId, 'discovery', token)
       }
-
     })())
   }
 
@@ -1541,7 +1588,12 @@ class RemoteActivityObservation implements ActivityObservation {
       // is never a trigger.
       const current = this.activeRowIds()
       if (current.length === 0) return
-      for (const id of current) this.schedulePriority(id)
+      for (const id of current) {
+        // A settled priority lane is re-armed by finishWork; an id already
+        // being read or waiting in a tier is never nudged by the old timer.
+        if (this.inflight.has(id) || this.priorityQueued(id)) continue
+        this.schedulePriority(id)
+      }
       this.pump()
     }, ACTIVITY_RECHECK_MS)
   }
@@ -1605,6 +1657,9 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   /** The adopted Connection generation; undefined while the Connection is
    *  lost (the membership proof is revoked with it). */
   private capturedGeneration: RemoteConnectionGeneration | undefined
+  /** The generation of the LAST ACCEPTED BASELINE. A terminal failure is legal
+   *  to reopen only when this does not name the live generation. */
+  private provenBaselineGeneration: RemoteConnectionGeneration | undefined
   /** The `single-generation` raw official follow (opened exactly once). */
   private raw: (AsyncIterable<RemoteWorkspaceFollowFrameLike> & { dispose(): void }) | undefined
   private logical: RemoteLogicalStreamLike<RemoteWorkspaceFollowFrameLike> | undefined
@@ -1650,6 +1705,12 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     return Object.is(this.generation.getSnapshot(), this.capturedGeneration)
   }
 
+  /** The generation whose baseline this handle last PROVED (never merely
+   *  adopted): the owner's legal-rebind discriminator. */
+  generationIdentity(): RemoteConnectionGeneration | undefined {
+    return this.provenBaselineGeneration
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -1680,6 +1741,9 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     if (this.disposed) return
     if (this.invalidations.length > 0 && this.invalidations[this.invalidations.length - 1] === reason) return
     this.invalidations.push(reason)
+    // The membership is no longer proven: a terminal failure after this point
+    // must be able to reopen on the live generation.
+    this.provenBaselineGeneration = undefined
     this.resumeDeadline ??= Date.now() + WORKSPACE_RESUME_TIMEOUT_MS
     const wake = this.wake
     this.wake = undefined
@@ -1725,6 +1789,7 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           }
           baselined = true
         }
+        if (mapped?.type === 'baseline') this.provenBaselineGeneration = this.capturedGeneration
         if (mapped !== undefined) yield mapped
       }
     } finally {
@@ -2016,10 +2081,18 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
   }
 
   followWorkspaces(signal?: AbortSignal, mode: WorkspaceFollowMode = 'single-generation'): WorkspaceFactsHandle {
-    return new RemoteWorkspaceFactsHandle(this.source, signal, mode)
+    const handle = new RemoteWorkspaceFactsHandle(this.source, signal, mode)
+    // The port's optional identity member: the owner distinguishes a terminal
+    // failure on the handle's ADOPTED generation from one whose generation is
+    // already gone.
+    return Object.assign(handle, { provenGeneration: () => handle.generationIdentity() })
   }
 
   observeConnectionGeneration(listener: () => void): () => void {
     return this.generation.subscribe(listener)
+  }
+
+  connectionGeneration(): RemoteConnectionGeneration | undefined {
+    return this.generation.getSnapshot()
   }
 }

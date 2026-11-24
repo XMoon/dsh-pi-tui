@@ -839,6 +839,17 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
      *  already gone either way. */
     const rebindAfterTerminal = (): void => {
       if (!isActive(panel) || panel.workspaceHandle !== undefined) return
+      const failedGeneration = handle.provenGeneration?.()
+      const liveGeneration = options.sessionWorkspaceFacts?.connectionGeneration?.()
+      if (failedGeneration !== undefined && liveGeneration !== undefined) {
+        // A terminal failure on the generation this handle actually reached is
+        // NOT retried: only a replacement generation (a different live identity)
+        // may open one new logical handle. A change that the handle already
+        // adopted cannot be the recovery trigger again.
+        if (Object.is(failedGeneration, liveGeneration)) return
+        startWorkspaceFollow(panel)
+        return
+      }
       if (panel.workspaceEpoch === openedEpoch) return
       startWorkspaceFollow(panel)
     }
@@ -886,10 +897,14 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   const acceptReadyRoster = (
     panel: ActiveRead,
     listed: readonly SessionBrowserRow[],
-    initial: boolean,
   ): void => {
+    // The FIRST ready acceptance — from the initial read OR a push — owns the
+    // one-shot direct match, settlement and the initial projection chain. A
+    // later arrival of the same snapshot (the initial read settling after a
+    // ready notification arrived first) only re-accepts enrichment.
+    const firstAcceptance = panel.listRevision === 0
     const { listedRows, changed } = acceptRoster(panel, listed)
-    if (!initial) {
+    if (!firstAcceptance) {
       publish(panel)
       if (!isActive(panel)) return
       applyRosterChange(panel, changed)
@@ -998,7 +1013,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       publish(panel)
       return
     }
-    acceptReadyRoster(panel, snapshot.rows as readonly SessionBrowserRow[], initial)
+    acceptReadyRoster(panel, snapshot.rows as readonly SessionBrowserRow[])
   }
 
   const applyListError = (panel: ActiveRead, error: unknown): void => {
@@ -1046,7 +1061,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           scheduleRefresh(panel)
           return
         }
-        acceptReadyRoster(panel, listed as readonly SessionBrowserRow[], true)
+        acceptReadyRoster(panel, listed as readonly SessionBrowserRow[])
       },
       onError: (error) => { applyListError(panel, error) },
     })

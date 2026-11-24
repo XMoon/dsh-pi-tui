@@ -86,6 +86,8 @@ async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_
  *  case can prove WHEN a frame really reaches (or cannot reach) the UI. */
 class ControlledFactsHandle implements WorkspaceFactsHandle {
   disposed = 0
+  /** The generation whose baseline this controlled handle last proved. */
+  proven: object | undefined
   private readonly queue: WorkspaceFactsFrame[] = []
   private resolveNext: ((result: IteratorResult<WorkspaceFactsFrame>) => void) | undefined
   private rejectNext: ((error: unknown) => void) | undefined
@@ -132,6 +134,10 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
    *  aborts or is disposed; the UI suites do not drive generation replacement. */
   isCurrent(): boolean {
     return !this.done && this.signal?.aborted !== true
+  }
+
+  provenGeneration(): unknown {
+    return this.proven
   }
 
   dispose(): void {
@@ -191,6 +197,10 @@ interface FactsSource {
   setFacts(facts: readonly SessionActivityFact[]): void
   /** Fire the official Connection generation change for a terminal rebind. */
   notifyGeneration(): void
+  /** The live Connection generation identity (the owner's rebind discriminator). */
+  generation(): object
+  /** Roll to ONE new generation identity and notify its observers. */
+  rollGeneration(): object
   /** Make the next follow require a live Connection generation (a disconnected
    *  open), and let `notifyGeneration` make one available. */
   requireGeneration(): void
@@ -200,6 +210,7 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
   const handles: ControlledFactsHandle[] = []
   const observations: ControlledActivityObservation[] = []
   let generationLive = true
+  let currentGeneration: object = {}
   const state = {
     followCalls: 0,
     facts: initial,
@@ -215,6 +226,7 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
       generationListeners.add(listener)
       return () => { generationListeners.delete(listener) }
     },
+    connectionGeneration: () => currentGeneration,
     observeActivity: (signal): ActivityObservation => {
       let rosterRevision = 0
       let revision = 0
@@ -293,6 +305,13 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
     notifyGeneration: () => {
       generationLive = true
       for (const listener of [...generationListeners]) listener()
+    },
+    generation: () => currentGeneration,
+    rollGeneration: () => {
+      currentGeneration = {}
+      generationLive = true
+      for (const listener of [...generationListeners]) listener()
+      return currentGeneration
     },
     requireGeneration: () => { generationLive = false },
   }
@@ -1140,6 +1159,39 @@ test('a terminal Workspace failure opens exactly ONE new handle on a NEW Connect
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(h.facts.handles.length, 2, 'a generation change without a new terminal failure opens nothing')
 })
+test('a terminal failure on the generation this handle already proved never reopens until a NEW generation arrives', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  assert.equal(h.facts.handles.length, 1, 'one open = one logical follow')
+  // The handle is opened on A and proves A's baseline.
+  h.facts.handles[0]!.proven = h.facts.generation()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-a', path: '/ws', title: 'a-project', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('a-project'), 'the first baseline paints')
+  // A real replacement B arrives INSIDE this same handle, which then proves B.
+  const second = h.facts.rollGeneration()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-b', path: '/ws', title: 'b-project', sessionIds: [CURRENT] },
+  ))
+  h.facts.handles[0]!.proven = second
+  await waitUntil(() => h.view().includes('b-project'), 'the replacement baseline is proved on the same handle')
+  // The handle now fails on B. Retrying B is NOT legal: the generation this
+  // handle already proved cannot be its own recovery trigger.
+  h.facts.handles[0]!.fail(new Error('the Host failed the follow after proving B'))
+  await waitUntil(() => h.view().includes('Workspace membership unavailable'), 'the failure is visible')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.facts.handles.length, 1, 'the already-proved generation is never reopened')
+  // A genuinely NEW generation opens exactly ONE new handle.
+  h.facts.rollGeneration()
+  await waitUntil(() => h.facts.handles.length === 2, 'a new generation opens ONE handle')
+  h.facts.handles[1]!.push(baseline(
+    { workspaceId: 'ws-c', path: '/ws', title: 'c-project', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('c-project'), 'the new generation restores membership')
+})
+
 
 test('a generation change that landed BEFORE a terminal Workspace failure is still the ONE legal rebind trigger', async () => {
   const h = harness({ currentSessionId: CURRENT })
@@ -1351,6 +1403,34 @@ test('a stale Activity revision never paints onto a newer accepted roster', asyn
   await waitUntil(() => !h.view().includes('Needs attention'), 'the current revision facts repaint')
   observation.publish([questionFact(CURRENT)], acceptedRevision)
   await waitUntil(() => h.view().includes('Needs attention'), 'the current revision re-proves the need')
+})
+
+test('a ready push arriving before the initial read result settles runs ONE one-shot acceptance', async () => {
+  let batchCalls = 0
+  const h = harness({
+    currentSessionId: CURRENT,
+    observableList: true,
+    eligibility: () => [],
+    projection: async () => {
+      batchCalls += 1
+      return new Map([
+        [CURRENT, { title: 'Current session' }],
+        [OTHER, { title: 'Other session' }],
+      ])
+    },
+  })
+  // The open subscribes and then yields one real event-loop turn before its
+  // initial read result settles. The official roster publishes INSIDE that
+  // window: the push is the FIRST ready acceptance and must own the one-shot
+  // settlement/match and the ONE projection chain. The later initial read is a
+  // re-accept of the same snapshot, never a second chain.
+  const opening = h.runSessions('')
+  h.pushRoster([row(CURRENT, 3_100), row(OTHER, 2_000)])
+  await opening
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('Current session'), 'the pushed roster paints')
+  assert.equal(batchCalls, 1, 'the push-first open starts exactly ONE projection chain')
+  assert.ok(h.view().includes('Other session'), 'the pushed roster is the accepted one')
 })
 
 test('a stale projection batch never enriches a newer accepted roster', async () => {

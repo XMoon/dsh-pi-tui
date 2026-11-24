@@ -701,6 +701,22 @@ export async function mountRemoteClientDomainPrerequisites(
     return await unwind(error)
   }
 
+  // The DOMAIN's initial Connection identity is the FIRST generation observed
+  // once the official Session Client is mounted — never a later generation
+  // re-captured after the remaining startup awaits (the Client Session domain
+  // already observes a possibly rolling Connection). It is retained for the
+  // domain lifetime and only its own subscription is released.
+  let initialGeneration = connection.generation.getSnapshot()
+  let initialOff: (() => void) | undefined
+  if (initialGeneration === undefined) {
+    initialOff = connection.generation.subscribe(() => {
+      initialGeneration ??= connection.generation.getSnapshot()
+      if (initialGeneration === undefined) return
+      initialOff?.()
+      initialOff = undefined
+    })
+  }
+
   return {
     context,
     connection,
@@ -712,19 +728,6 @@ export async function mountRemoteClientDomainPrerequisites(
         try {
           state.jobsFiber = context.plugin(source.modules.jobs)
           await state.jobsFiber
-          // Record the FIRST established Connection generation NOW, before the
-          // readiness wait can settle: a later surface-revision mount must never
-          // re-capture a replacement generation as "initial".
-          let initialGeneration = connection.generation.getSnapshot()
-          let initialOff: (() => void) | undefined
-          if (initialGeneration === undefined) {
-            initialOff = connection.generation.subscribe(() => {
-              initialGeneration ??= connection.generation.getSnapshot()
-              if (initialGeneration === undefined) return
-              initialOff?.()
-              initialOff = undefined
-            })
-          }
           try {
             // Initial readiness is part of construction: a failure (an aborted
             // lifecycle signal included) must unwind the whole partial
@@ -732,7 +735,10 @@ export async function mountRemoteClientDomainPrerequisites(
             // already-aborted lifecycle keeps its abort classification.
             await waitForInitialReadiness(connection, state.sessions, completeOptions.signal)
           } finally {
+            // The domain identity is retained for its lifetime; only the
+            // wait-for-first subscription is released here.
             initialOff?.()
+            initialOff = undefined
           }
           const jobs = context.get('jobs') as unknown as IJobs
           if (jobs === undefined) throw new Error('remote client domains: the official Jobs Client did not install')

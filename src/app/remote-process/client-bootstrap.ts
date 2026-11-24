@@ -1374,15 +1374,15 @@ async function startSurfaceLocalClient(
             let failed: string | undefined
             /** The first generation DIFFERENT from the failed handle's opening
              *  one; a change already present resolves immediately. */
-            const waitForNewGeneration = async (): Promise<boolean> => {
+            const waitForNewGeneration = async (baseline: unknown): Promise<boolean> => {
               const current = generation.getSnapshot()
-              if (current !== undefined && !Object.is(current, openedGeneration)) return true
+              if (current !== undefined && !Object.is(current, baseline)) return true
               return await new Promise<boolean>((resolve) => {
                 let off: (() => void) | undefined
                 const timer = setTimeout(() => { off?.(); resolve(false) }, Math.max(0, deadlineAt - Date.now()))
                 off = generation.subscribe(() => {
                   const next = generation.getSnapshot()
-                  if (next === undefined || Object.is(next, openedGeneration)) return
+                  if (next === undefined || Object.is(next, baseline)) return
                   clearTimeout(timer)
                   off?.()
                   resolve(true)
@@ -1425,7 +1425,14 @@ async function startSurfaceLocalClient(
                     failed = error instanceof Error ? error.message : String(error)
                     break
                   }
-                  if (!await waitForNewGeneration()) break
+                  // The failure belongs to the generation the handle actually
+                  // ADOPTED, not to its opening identity: a replacement already
+                  // adopted by this handle cannot be the recovery trigger again.
+                  const adopted = (handle as { provenGeneration?(): unknown }).provenGeneration?.()
+                  if (!await waitForNewGeneration(adopted !== undefined ? adopted : openedGeneration)) {
+                    failed = error instanceof Error ? error.message : String(error)
+                    break
+                  }
                   if (frames >= maxFrames || Date.now() >= deadlineAt) break
                   handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, 'recovering')
                   openedGeneration = generation.getSnapshot()

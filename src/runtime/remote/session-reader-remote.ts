@@ -217,6 +217,7 @@ export class RemoteSessionReader implements SessionReader {
   private readonly generation: RemoteConnectionGenerationSource
   private readonly listeners = new Set<() => void>()
   private unsubscribeList: (() => void) | undefined
+  private unsubscribeGeneration: (() => void) | undefined
   /** The observable list face's own publication counter (see
    *  {@link SessionReaderListSnapshot}). It advances once per official list
    *  notification while the face has a subscriber. */
@@ -287,11 +288,16 @@ export class RemoteSessionReader implements SessionReader {
     subscribe: (listener: () => void): (() => void) => {
       this.listeners.add(listener)
       if (this.unsubscribeList === undefined) {
-        this.unsubscribeList = this.sessions.list.subscribe(() => {
+        const notify = (): void => {
           this.publication += 1
           // Snapshot the listener set: a listener may unsubscribe synchronously.
           for (const registered of [...this.listeners]) registered()
-        })
+        }
+        // The official roster view is not the only source of its availability:
+        // a Connection change (loss/replacement) must notify even when the list
+        // store publishes nothing.
+        this.unsubscribeList = this.sessions.list.subscribe(notify)
+        this.unsubscribeGeneration = this.generation.subscribe(notify)
       }
       let active = true
       return (): void => {
@@ -301,6 +307,8 @@ export class RemoteSessionReader implements SessionReader {
         if (this.listeners.size === 0) {
           this.unsubscribeList?.()
           this.unsubscribeList = undefined
+          this.unsubscribeGeneration?.()
+          this.unsubscribeGeneration = undefined
         }
       }
     },

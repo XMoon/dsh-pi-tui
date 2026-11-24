@@ -106,6 +106,11 @@ export interface WorkspaceFactsHandle extends AsyncIterable<WorkspaceFactsFrame>
    * stale membership.
    */
   isCurrent(): boolean
+  /** The generation identity this handle has ADOPTED (or failed on). The owner
+   *  uses it to distinguish a terminal failure on the generation the handle
+   *  actually reached from a failure after a replacement already arrived: only
+   *  a NEW live generation may open one new logical handle. */
+  provenGeneration?(): unknown
   /** Release this open generation exactly once. Async SDK quiescence is
    *  initiated and observed inside the handle (never a bare floating promise). */
   dispose(): void
@@ -195,4 +200,8 @@ export interface SessionWorkspaceFactsPort {
    *  and keeps its own registry-handle lifetime. This exposes no Host fact and
    *  never creates a second transport. */
   observeConnectionGeneration?(listener: () => void): () => void
+  /** The LIVE Connection generation identity, for comparing a failed handle's
+   *  adopted generation with the current one. Omitted by backends with no
+   *  reconnecting transport (Direct). */
+  connectionGeneration?(): unknown
 }
