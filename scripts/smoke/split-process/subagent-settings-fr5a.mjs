@@ -212,8 +212,8 @@ export async function runSubagentSettingsFr5A(context) {
     // Whether the shared document-updated event has already refreshed A's mirror
     // or A discovers the revision at Save, the real Settings page refuses the
     // stale intent and the bytes remain B's committed value.
-    await waitForPattern(clientA, /Limits: (Unsaved|Verified|Last-known)/u,
-      'FR5-A Client A actual frame before its stale save')
+    await waitForPattern(clientA, /Settings · Agent · Subagent settings[\s\S]*Current: 1 · Unsaved/u,
+      'FR5-A Client A actual staged frame before its stale save')
     clientA.send('s')
     const aFrame = await waitForPattern(clientA,
       /Last-known|Not saved · settings changed|Refresh to review/u,
