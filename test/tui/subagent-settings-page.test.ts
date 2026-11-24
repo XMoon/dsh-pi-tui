@@ -535,10 +535,10 @@ const positiveFiniteText = (text: string): boolean => {
   return Number.isFinite(value) && value > 0
 }
 
-function numericShellRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean } = {}) {
+function numericShellRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; effectiveTimeout?: number } = {}) {
   const generation = {}
   let revision = 1
-  let effective: NumericShellSettings = { timeoutMs: 60_000, maxOutputBytes: 64_000 }
+  let effective: NumericShellSettings = { timeoutMs: options.effectiveTimeout ?? 60_000, maxOutputBytes: 64_000 }
   const inherited: NumericShellSettings = { timeoutMs: 120_000, maxOutputBytes: 64_000 }
   const writes: { patch: SectionPatch<NumericShellSettings>; revision: number; generation: object }[] = []
   let releaseMutation: (() => void) | undefined
@@ -594,7 +594,7 @@ function numericShellRig(options: { holdMutation?: boolean; reject?: boolean; un
   return { port, fields, writes, inherited, effective: () => ({ ...effective }), releaseMutation: () => { releaseMutation?.() }, mutationStarted: started }
 }
 
-function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; onRender?: () => void } = {}) {
+function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; effectiveTimeout?: number; onRender?: () => void } = {}) {
   const shell = numericShellRig(options)
   const actions: string[] = []
   const tasks: Promise<void>[] = []
@@ -636,7 +636,7 @@ function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfi
   }
 }
 
-async function startedNumeric(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; onRender?: () => void } = {}) {
+async function startedNumeric(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; effectiveTimeout?: number; onRender?: () => void } = {}) {
   const harness = numericRig(options)
   harness.page.setMaxRows(12)
   harness.page.focused = true
@@ -775,7 +775,6 @@ test('a grouped Stage keeps the draft local and ONE Save dispatches the whole pa
     maxOutputBytes: { kind: 'set', value: 128_000 },
   })
   assert.equal(h.writes[0]?.revision, 1, 'the captured revision fences the batch')
-  assert.equal(h.writes[0]?.generation, (h.page.render(80), h.writes[0]?.generation))
   assert.deepEqual(h.effective(), { timeoutMs: 45_000, maxOutputBytes: 128_000 })
   plain = h.page.render(80).map(strip).join('\n')
   assert.match(plain, /Status\s+Verified/u)
@@ -2027,8 +2026,24 @@ test('a grouped leave question publishes Save only when its necessary copy is co
   await h.drain()
   assert.deepEqual(h.writes, [], 'no invisible Save/Discard may dispatch')
   assert.equal(strip(h.page.render(80).at(-1) ?? '').replace(/\s+$/u, ''), 'Keep [Esc]', 'the question is still open with only the safe Keep')
+  // Sequential scrolling through EVERY fragment still cannot turn a one-row
+  // grant into a current complete copy: the ordinary question answers from the
+  // CURRENT frame, not from accumulated history.
+  for (let step = 0; step < 6; step += 1) {
+    h.page.handleInput(DOWN)
+    const scrolled = h.page.render(80)
+    assert.equal(strip(scrolled.at(-1) ?? '').replace(/\s+$/u, ''), 'Keep [Esc]',
+      'an insufficient grant never publishes S/D, however far it is scrolled')
+  }
+  h.page.handleInput('s')
+  h.page.handleInput('d')
+  await h.drain()
+  assert.deepEqual(h.writes, [], 'the sequential-scroll bypass never dispatches')
+  assert.match(h.page.render(80).map(strip).join('\n'), /Discard and leave loses staged values\./u,
+    'the question still owns the frame')
   h.page.setMaxRows(12)
   frame = h.page.render(80)
+  assert.match(frame.map(strip).join('\n'), /1 unsaved change · Shell execution/u, 'the draft survives the bypass')
   assert.match(strip(frame.at(-1) ?? ''), /Save(?: \[S\])? · Discard (?:and leave )?\[D\] · Keep \[Esc\]/u)
   h.page.handleInput('s')
   await h.drain()
@@ -2188,5 +2203,73 @@ test('a refused grouped Save is read-only until Refresh, and its local Discard s
   h.page.handleInput('r')
   await h.drain()
   assert.match(strip(h.page.render(80).at(-1) ?? ''), /Edit \[Enter\]/u, 'an explicit Refresh re-enables editing')
+  h.page.dispose()
+})
+
+test('a width-only reflow revokes the grouped Reset until its facts are read again', async () => {
+  const h = await startedNumeric()
+  h.page.setMaxRows(4)
+  h.page.handleInput(DOWN)
+  h.page.handleInput('?')
+  h.page.render(44)
+  let frame = scrollGroupedUntil(h.page, 44, 'Reset to inherited…')
+  assert.match(strip(frame.at(-1) ?? ''), /Reset \[X\]/u, 'the sequential read publishes the bar action')
+  // Width-only reflow: the facts' receipt is invalidated even though the row
+  // grant is unchanged; neither the bar nor the key may advertise the old one.
+  frame = h.page.render(72)
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Reset \[X\]/u, 'a width reflow revokes the bar Reset')
+  h.page.handleInput('x')
+  frame = h.page.render(72)
+  assert.doesNotMatch(frame.map(strip).join('\n'), /Reset staged/u, 'the stale key cannot stage')
+  assert.deepEqual(h.writes, [])
+  // The fresh sequential read at the new width publishes a genuine action.
+  h.page.handleInput(HOME)
+  frame = scrollGroupedUntil(h.page, 72, 'Reset to inherited…')
+  assert.match(strip(frame.at(-1) ?? ''), /Reset \[X\]/u)
+  const resetRow = numericRowIndex(frame, 'Reset to inherited…')
+  assert.ok(resetRow >= 0)
+  clickNumericRow(h.page, frame, resetRow, 72, 'Reset to inherited…')
+  assert.match(h.page.render(72).map(strip).join('\n'), /Reset staged/u)
+  assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('a legal draft with trailing whitespace still requires a readable sent value', async () => {
+  const h = await startedNumeric()
+  h.page.setMaxRows(20)
+  h.page.handleInput(ENTER)
+  h.page.render(44)
+  h.page.handleInput('\x15')
+  for (const character of '45000') h.page.handleInput(character)
+  for (let index = 0; index < 40; index += 1) h.page.handleInput(' ')
+  const frame = h.page.render(44)
+  const plain = frame.map(strip).join('\n')
+  assert.match(plain, /Value sends/u, 'a clipped full buffer requires the canonical fact')
+  assert.match(plain, /45000 ms/u)
+  assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
+  h.page.handleInput(ENTER)
+  assert.match(h.page.render(80).map(strip).join('\n'), /45000 ms/u)
+  assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('the dirty block receipt measures the real composed Current line', async () => {
+  const h = await startedNumeric({ effectiveTimeout: 123_456_789 })
+  h.page.setMaxRows(4)
+  h.page.handleInput(ENTER)
+  h.page.render(32)
+  h.page.handleInput('\x15')
+  for (const character of '45000') h.page.handleInput(character)
+  h.page.render(32)
+  h.page.handleInput(ENTER)
+  const frame = h.page.render(32)
+  const plain = frame.map(strip).join('\n')
+  assert.match(plain, /Current: 123456789 ms/u, 'the current value is whole')
+  assert.doesNotMatch(plain, /Current: 123456789 ms · /u, 'the 33-cell one-line form is never composed into a clip')
+  assert.match(plain, /^\s*· Unsaved\s*$/mu, 'the separate Unsaved marker proves the split block')
+  assert.match(strip(frame.at(-1) ?? ''), /Save \[S\]/u, 'the complete split block is a real Save receipt')
+  h.page.handleInput('s')
+  await h.drain()
+  assert.deepEqual(h.writes[0]?.patch, { timeoutMs: { kind: 'set', value: 45_000 } })
   h.page.dispose()
 })
