@@ -796,10 +796,13 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
 - **ONE Save, ONE batch.** The grouped Save is admitted only while the patch is
   current, valid, non-pending and its dirty facts (the count, or one complete
   staged field block) and the Save span were really painted: the bar publishes
-  NO Save span while those facts are scrolled out. The canonical `Value sends`
-  fact is laid out without clipping (`fact`/`prose` split at the real width);
-  a value that cannot be shown WHOLE admits no Stage span or Enter at all, and
-  a sufficient grant returns it with the raw Input and prior patch intact. It dispatches the
+  NO Save span while those facts are scrolled out. Every labelled fact is
+  composed as its REAL physical lines: the complete label wraps, a numeric
+  value moves to its own line (indent only when the indent itself fits) and a
+  value that cannot be shown WHOLE admits no Stage span or Enter at all. The
+  raw Input's own window is part of that proof: when it clips the number, the
+  canonical fact is required even for already-canonical text. A sufficient
+  grant returns the action with the raw Input and prior patch intact. It dispatches the
   whole set/reset patch as ONE revision-checked official mutation on the
   captured executor row, keeps the group and its field selection, and paints
   the Host readback as `Verified`. Empty/whitespace/invalid Input keeps the raw
@@ -810,8 +813,11 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   effective/inherited/comparison/revision/scope, the Host executor identity and
   the reset semantics. `Reset to inherited…` (or `x` there) stages the official
   `unset` of THAT field and returns to the browse: no second confirmation and
-  no write, and the action is admitted only after the selected identity and the
-  staging/unset explanation were really painted in THIS disclosure instance. A reset is a real dirty intent even when the effective value equals
+  no write, and the action (bar and body alike) is published only after the
+  complete selected identity and the unset/stage-until-Save explanation were
+  really painted in THIS disclosure instance. An unread or jumped-past
+  disclosure publishes NO Reset action; a sequential scroll that really paints
+  the facts publishes it for a genuine fresh activation. A reset is a real dirty intent even when the effective value equals
   the inherited one, and `Reset staged` is never painted as the inherited
   value. A later legal Stage of another field keeps it; staging the same value
   of the reset field removes only that field's intent. The Host readback decides
@@ -830,8 +836,10 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   a body action too (`Discard…`) and stays; `Refresh` asks before it discards
   the draft and re-reads. The raw Input, the Advanced disclosure and a
   pending/unknown write refuse every parent route outright. Unknown outcomes
-  offer only `Leave anyway… · Keep [Esc]` (plus the requested/last-confirmed
-  facts); leaving does not undo a possibly applied Host write.
+  offer only `Leave anyway` (never compacted to a `Discard` label) plus `Keep`
+  and the requested intents with BOTH last-confirmed caps; leaving does not undo
+  a possibly applied Host write. A stale/refused capture's leave copy states
+  that Save is unavailable until an explicit Refresh instead of advertising it.
 - **Bar-only and short grants.** A grant that paints no body row admits only the
   page's own Back/Keep/Cancel/Wait, and the Root never takes the grouped Tab for
   a parent focus move. A short body keeps the selected field's value/unit, its
@@ -840,8 +848,10 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   and its shortcut key stays inert until a repaint admits it. The bar and the
   body use ONE admission contract: a displayed action always means what its
   handler does. A question publishes its accept only while its necessary copy
-  is complete in that frame; a browse Save disappears with its dirty facts; the
-  local Discard keeps a real body affordance.
+  is complete in that frame (optional requested detail stays scrollable); a
+  browse Save disappears with its dirty facts; the local Discard keeps a real
+  body affordance; the ambiguous outcome never compacts its acknowledgement to
+  the definite `Discard` wording.
 - **Authority and status.** Effective/inherited/revision/generation and the
   executor identity stay owned by the ConfigPort and the per-open controller;
   the page paints the same `Verified` / `No changes` / `Not saved` /
