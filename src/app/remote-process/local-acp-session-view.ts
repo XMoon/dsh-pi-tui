@@ -3268,6 +3268,9 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim.commandOperation = op
     const onAbort = (): void => {
       op.deliveryClosed = true
+      // This exact command request channel owns only its delivery wait. The
+      // raw Host Promise remains the ownership terminal.
+      this.abandonCommandDelivery(op)
       this.requestCommandCancel(claim, op)
     }
     requestSignal.addEventListener('abort', onAbort, { once: true })
@@ -3662,7 +3665,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // The request channel is gone: this flight's OWN output IO stops here
       // (a later settlement still owns the real Host fact). The Agent is
       // untouched — an aborted request is never a Host cancellation proof.
-      if (claim.commandOperation !== undefined) this.abandonCommandDelivery(claim.commandOperation)
       this.stopFlightOutput(flight)
       this.abortPermissionRequests(flight)
       if (!flight.settledDone && !flight.cancelRequested) {

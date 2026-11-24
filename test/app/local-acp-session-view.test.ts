@@ -6965,11 +6965,12 @@ test('Close during a held command never retires the scoped MCP lease before the 
 test('R1: a cancel from the synchronous compaction/start observer is replayed after dispatch', async () => {
   const view = projectionView('CMP8')
   view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
-  const entered = deferred<void>()
   let aborted = false
   view.access.executeManualCompactImpl = async (_agent, _session, signal) => {
     view.commit('compaction/start', { compactionId: 'c8', turn: null })
-    entered.resolve()
+    // Reenter cancellation synchronously INSIDE the official call's prefix,
+    // before executeManualCompact returns to the View.
+    view.registry.cancelSession(view.conn, view.access, 'CMP8')
     return await new Promise<never>((_resolve, reject) => {
       signal.addEventListener('abort', () => {
         aborted = true
@@ -6984,8 +6985,6 @@ test('R1: a cancel from the synchronous compaction/start observer is replayed af
     { sessionId: 'CMP8', prompt: [{ type: 'text', text: '/compact' }] },
     new AbortController().signal, false, async () => {},
   )
-  await entered.promise
-  view.registry.cancelSession(view.conn, view.access, 'CMP8')
   assert.deepEqual(await request, { stopReason: 'cancelled' })
   assert.equal(aborted, true, 'the post-dispatch cancel replayed onto the captured controller')
 })
@@ -7019,6 +7018,35 @@ test('R2: close resolves after the raw Host terminal even while the result notif
   assert.deepEqual(await request, { stopReason: 'end_turn' })
 })
 
+test('R2: an aborted command request abandons only its held result delivery', async () => {
+  const view = projectionView('CMD10')
+  view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'held request result' } })
+  await view.resume()
+  const entered = deferred<void>()
+  const gate = deferred<void>()
+  const controller = new AbortController()
+  const first = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD10', prompt: [{ type: 'text', text: '/feedback first' }] },
+    controller.signal, false,
+    async () => { entered.resolve(); await gate.promise },
+  )
+  await entered.promise
+  controller.abort()
+  assert.deepEqual(await first, { stopReason: 'end_turn' }, 'the exact request abort releases its own dead delivery wait')
+  // The already-started wire send is not cancellable; once the test releases
+  // that held sink, the next request must be admitted and delivered.
+  gate.resolve()
+  const second = await view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'CMD10', prompt: [{ type: 'text', text: '/feedback second' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  assert.deepEqual(second, { stopReason: 'end_turn' }, 'the command slot is available for the next request')
+  assert.equal(view.access.standaloneCommandCalls.length, 2)
+})
+
 test('R3: a failed own mandatory compaction frame is OUTPUT_FAILED, not a successful command', async () => {
   const view = projectionView('CMP9')
   view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
@@ -7049,9 +7077,16 @@ test('R3: a failed own mandatory compaction frame is OUTPUT_FAILED, not a succes
 test('R5: a cancel that lands after the Skill preflight helper returns is caught at final admission', async () => {
   const view = projectionView('SKL5')
   view.access.readCommandCatalogImpl = () => commandCatalog([])
-  view.access.readNativeSkillsImpl = async () => {
-    queueMicrotask(() => view.registry.cancelSession(view.conn, view.access, 'SKL5'))
-    return { kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy.' }] }
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy.' }],
+  })
+  let catalogReads = 0
+  view.access.readCommandCatalogImpl = () => {
+    catalogReads += 1
+    // The third read is the final synchronous admission check. Reenter cancel
+    // here, after the Skill helper has returned but before dispatch.
+    if (catalogReads >= 3) view.registry.cancelSession(view.conn, view.access, 'SKL5')
+    return commandCatalog([])
   }
   await view.resume()
   for (let attempt = 0; attempt < 100 && view.catalogNotifications.length === 0; attempt += 1) {
@@ -7072,17 +7107,20 @@ test('R2: a held predecessor projection cannot retain close after the raw Host c
   view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
   view.access.executeStandaloneCommandImpl = async () => ({ result: { kind: 'success', text: 'behind held predecessor' } })
   await view.resume()
-  await new Promise(resolveWait => setImmediate(resolveWait))
+  view.notifications.length = 0
   const held = view.holdProjection()
-  const resultEntered = deferred<void>()
+  view.commit('todo/write', { todos: [{ content: 'held predecessor', status: 'pending' }] })
+  await held.entered
+  let resultEntered = false
   let closeSettled = false
   const request = view.registry.promptSession(
     view.conn, view.access,
     { sessionId: 'CMD8', prompt: [{ type: 'text', text: '/feedback predecessor' }] },
     new AbortController().signal, false,
-    async () => { resultEntered.resolve() },
+    async () => { resultEntered = true },
   )
-  await resultEntered.promise
+  await new Promise(resolveWait => setTimeout(resolveWait, 20))
+  assert.equal(resultEntered, false, 'the result must be queued behind the real held predecessor')
   const closing = view.registry.closeSession(view.conn, view.access, 'CMD8').then(value => {
     closeSettled = true
     return value

@@ -2499,9 +2499,9 @@ export async function apply(ctx) {
     }
     sessions.flush = lifecycleFlush
     ctx.effect(() => () => {
-      const restored = sessions.flush === originalFlush
-      if (!restored) sessions.flush = originalFlush
-      record('lifecycle-flush-restored', { restored })
+      const owned = sessions.flush === lifecycleFlush
+      if (owned) sessions.flush = originalFlush
+      record('lifecycle-flush-restored', { restored: owned })
     }, 'lifecycle-flush-restore')
     const runAction = async action => {
       const agent = action.sessionId === undefined ? undefined : ctx.agents.get(action.sessionId)
@@ -2525,14 +2525,19 @@ export async function apply(ctx) {
         const target = String(action.sessionId)
         const session = agent.session
         const originalAppend = session.append
-        session.append = function lifecycleAppend(...args) {
+        const lifecycleAppend = function (...args) {
           if (String(this?.id ?? target) === target && args[0] === 'compaction/end') {
             record('lifecycle-end-failure-hit', { sessionId: target })
             throw new Error('m4-c1-host-work: injected compaction/end failure')
           }
           return originalAppend.apply(this, args)
         }
-        ctx.effect(() => () => { if (session.append !== lifecycleAppend) session.append = originalAppend }, 'lifecycle-end-failure-restore')
+        session.append = lifecycleAppend
+        ctx.effect(() => () => {
+          const owned = session.append === lifecycleAppend
+          if (owned) session.append = originalAppend
+          record('lifecycle-end-failure-restored', { restored: owned })
+        }, 'lifecycle-end-failure-restore')
         record('lifecycle-end-failure-armed', { sessionId: action.sessionId })
         return
       }

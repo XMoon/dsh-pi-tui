@@ -654,6 +654,8 @@ export async function runAcpCommandInvocation(context) {
     const heldFlushRequest = settle(client.request(acp.methods.agent.session.prompt, {
       sessionId: holdFlushSession, prompt: promptText('/compact'),
     }))
+    let heldFlushSettled = false
+    void heldFlushRequest.then(() => { heldFlushSettled = true })
     await waitForFile(`${holdRoot}.entered`, 'CMP-05 the held summarizer before the held flush')
     await lifecycleAction('arm-hold-flush', holdFlushSession, 'lifecycle-flush-hold-armed', 'CMP-05 arm the held flush', { release: flushRelease })
     writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
@@ -662,17 +664,20 @@ export async function runAcpCommandInvocation(context) {
       'CMP-05 the real flush is held', 120_000)
     await client.notify(acp.methods.agent.session.cancel, { sessionId: holdFlushSession })
     await new Promise(resolveWait => setTimeout(resolveWait, 50))
+    assert(heldFlushSettled === false, 'CMP-05: the command cannot answer while the official flush is held')
     writeFileSync(flushRelease, '1', { mode: 0o600 })
     const heldFlushOutcome = await heldFlushRequest
-    assert(heldFlushOutcome.error?.data?.code !== 'cancelled'
-      && heldFlushOutcome.value?.stopReason !== 'cancelled',
-    `CMP-05: a late cancel during the post-summary flush is never cancelled (${JSON.stringify(heldFlushOutcome.error?.data ?? heldFlushOutcome.value)})`)
+    assert(heldFlushOutcome.value?.stopReason === 'end_turn',
+      `CMP-05: commit wins and the held flush ends normally (${JSON.stringify(heldFlushOutcome.error?.data ?? heldFlushOutcome.value)})`)
     const heldFlushEvents = (hostSessionEvents(dshHome, holdFlushSession) ?? []).slice(beforeHeldFlush)
     const heldFlushStart = heldFlushEvents.find(event => event.type === 'compaction/start')
     const heldFlushId = heldFlushStart?.data?.compactionId
     assert(typeof heldFlushId === 'string', 'CMP-05: the held flush has a real id')
     assert(heldFlushEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === heldFlushId),
       'CMP-05: the summary survived the late cancel')
+    assert(heldFlushEvents.some(event => event.type === 'compaction/end'
+      && event.data?.compactionId === heldFlushId && event.data?.error === undefined),
+    'CMP-05: the clean end survived the late cancel')
     trace('acp-command/held-flush', { compactionId: heldFlushId })
 
     // Invalid arguments are refused before the official engine is called.
