@@ -579,6 +579,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private coveragePersistenceBasis: CoveragePersistenceBasis | undefined
   /** False once the official source binding changed in this Host lifetime. */
   private priorProofReuseAllowed = true
+  /**
+   * A mounted index temporarily lost one of its required official services.
+   * This is a RECOVERABLE absence: accepted obligations are retained, prior
+   * proof reuse is retired, and the next owned full pass on the same index may
+   * re-establish coverage once every required service resolves again.
+   */
+  private serviceGap = false
   /** A pass or repair failed to read the official source; a later full pass clears it. */
   private sourceFaulted = false
   private pendingEventCount = 0
@@ -663,13 +670,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const runSignal = this.liveSignal(signal, invocation)
     runSignal.throwIfAborted()
     if (this.disposed) return { kind: 'unavailable', reason: 'index-unavailable' }
-    // The authenticated Owner read observes the live source binding BEFORE it
-    // waits for accepted short writes: a replaced official service must
-    // downgrade the visible state, never publish the previous epoch as ready.
-    this.observeCoverageBasis()
     await this.awaitWrites(runSignal)
     runSignal.throwIfAborted()
     this.assertSameLiveInvocation(invocation)
+    // Revalidate the actual source binding AFTER the writer wait: a replacement
+    // that landed while this read waited must downgrade the visible epoch, never
+    // let this read answer from the previous source generation.
+    this.observeCoverageBasis()
     const stateAnswer = this.stateAnswer()
     if (stateAnswer !== undefined) return stateAnswer
     const index = this.requireIndex()
@@ -749,13 +756,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const runSignal = this.liveSignal(signal, invocation)
     runSignal.throwIfAborted()
     if (this.disposed) return { kind: 'unavailable', reason: 'index-unavailable' }
-    // The authenticated Owner read observes the live source binding BEFORE it
-    // waits for accepted short writes: a replaced official service must
-    // downgrade the visible state, never publish the previous epoch as ready.
-    this.observeCoverageBasis()
     await this.awaitWrites(runSignal)
     runSignal.throwIfAborted()
     this.assertSameLiveInvocation(invocation)
+    // Revalidate the actual source binding AFTER the writer wait: a replacement
+    // that landed while this read waited must downgrade the visible epoch, never
+    // let this read answer from the previous source generation.
+    this.observeCoverageBasis()
     const stateAnswer = this.stateAnswer()
     if (stateAnswer !== undefined) return stateAnswer
     const index = this.requireIndex()
@@ -942,7 +949,50 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.verifiedRevisions.clear()
     this.coverage = 'unproven'
     this.coverageRound = undefined
+    if (this.requiredServicesMissing()) {
+      this.enterServiceGap()
+      return
+    }
+    // Leave a previous recoverable gap through the normal incomplete path:
+    // markReconcileNeeded must still see the gap while it downgrades the state.
     this.markReconcileNeeded('reconciling')
+    this.serviceGap = false
+    this.refreshCompleteness()
+  }
+
+  /** Whether any required official service is currently absent. */
+  private requiredServicesMissing(): boolean {
+    return this.deps.sessionPersistence() === undefined
+      || this.deps.sessions() === undefined
+      || this.deps.sessionQuery() === undefined
+  }
+
+  /**
+   * Record a RECOVERABLE service absence on a mounted index. Every accepted
+   * obligation, repair intent and sticky fault is retained; only the coverage
+   * proof and prior-proof reuse are retired.
+   */
+  private enterServiceGap(): void {
+    if (this.index === undefined) {
+      this.state = { kind: 'unavailable', reason: 'service-missing' }
+      return
+    }
+    this.serviceGap = true
+    this.priorProofReuseAllowed = false
+    this.verifiedRevisions.clear()
+    this.coverage = 'unproven'
+    this.coverageRound = undefined
+    this.state = { kind: 'unavailable', reason: 'service-missing' }
+  }
+
+  /** All required services are present again on the SAME mounted index. */
+  private leaveServiceGap(): void {
+    if (!this.serviceGap) return
+    this.coverage = 'unproven'
+    this.coverageRound = undefined
+    // Publish the recoverable downgrade while the gap flag still permits it.
+    this.state = { kind: 'incomplete', reason: 'reconciling' }
+    this.serviceGap = false
     this.refreshCompleteness()
   }
 
@@ -964,6 +1014,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // Save the new actual binding (an absent service is recorded as absent) so
     // a later recovery is another observable change, never a silent re-open.
     this.coveragePersistenceBasis = current
+    if (current.persistence === undefined || current.sessions === undefined) {
+      if (this.index !== undefined) this.enterServiceGap()
+      return
+    }
+    this.serviceGap = false
     this.invalidateCoverageBinding()
   }
 
@@ -1134,6 +1189,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   // ── live observation ─────────────────────────────────────────────────────
 
+  /** Whether the mounted index may keep preserving accepted input right now. */
+  private acceptsLiveEvents(): boolean {
+    return this.state.kind !== 'unavailable' || (this.serviceGap && this.index !== undefined)
+  }
+
   private rememberLiveSession(session: unknown): void {
     if (this.disposed) return
     const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
@@ -1151,9 +1211,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   private observeLiveEvent(session: unknown, event: unknown): void {
     if (this.disposed) return
-    // An unavailable index has no reconciliation path in this service
-    // lifetime; buffering events would only delay the unavoidable overflow.
-    if (this.state.kind === 'unavailable') return
+    // A permanently unavailable index has no reconciliation path in this
+    // service lifetime. A MOUNTED index in a recoverable service gap still
+    // preserves accepted input under the existing bounded-buffer rules.
+    if (!this.acceptsLiveEvents()) return
     const record = session as { readonly id?: unknown; readonly header?: { readonly cwd?: string }; readonly inheritedEventCount?: number }
     if (record.id === undefined) return
     const sessionId = String(record.id)
@@ -1419,9 +1480,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const sessions = this.deps.sessions()
       const query = this.deps.sessionQuery()
       if (persistence === undefined || sessions === undefined || query === undefined) {
-        this.state = { kind: 'unavailable', reason: 'service-missing' }
+        this.enterServiceGap()
         return
       }
+      // A point repair cannot prove full coverage; leave the recoverable gap
+      // as honest incomplete/unproven for the next full pass to prove.
+      this.leaveServiceGap()
       if (kind === 'disposal') {
         if (this.index.checkpointOf(sessionId) === undefined) return
         await this.verifySessionAgainstPersistence(sessionId)
@@ -2092,8 +2156,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     // A Session replaced during the pass may not have been re-read: re-validate
     // the EXACT enumerated live identity for every record before this pass is
-    // allowed to settle.
-    for (const sessionId of this.staleOfficialIdentities(official, sessions)) {
+    // allowed to settle. Pending-only payload already owns its drain obligation
+    // and must not be turned into a replacement reconcile marker.
+    for (const sessionId of this.replacedOfficialIdentities(official, sessions)) {
       this.markRoundInvalidating()
       this.reconcilePending.add(sessionId)
       this.markReconcileNeeded('reconciling')
@@ -2114,6 +2179,27 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         this.rebuildLiveSession(sessionId, persistence, sessions, query, counters))
       if (outcome === 'failed') return false
       if (outcome === 'complete') this.settleRoundSession(sessionId)
+    }
+    // A final ordinary drain can be the terminal owner of the traversed round
+    // and may already have proved coverage. Do not mistake that retired round
+    // for a stale one, but still detect a live replacement that landed during
+    // the drain. An ACTIVE round with prior `proven` coverage is not settled.
+    if (this.coverageRound === undefined && this.coverage === 'proven') {
+      for (const sessionId of this.replacedOfficialIdentities(official, sessions)) {
+        this.reconcilePending.add(sessionId)
+        this.markReconcileNeeded('reconciling')
+        this.invalidateCoverageBinding()
+        return false
+      }
+      return true
+    }
+    // Final pending/live work may have yielded long enough for the source
+    // binding or a consumed proof authority to change. The retired round must
+    // not settle or publish readiness.
+    const finalRound = this.coverageRound
+    if (finalRound === undefined || !this.roundSourceCurrent(finalRound)) {
+      this.invalidateCoverageBinding()
+      return false
     }
     this.finishCoverageRound()
     this.refreshCompleteness()
@@ -2697,10 +2783,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const sessions = this.deps.sessions()
       const query = this.deps.sessionQuery()
       if (persistence === undefined || sessions === undefined || query === undefined) {
-        this.state = { kind: 'unavailable', reason: 'service-missing' }
+        this.enterServiceGap()
         outcome = 'unavailable'
         return
       }
+      // The same mounted index is usable again: re-prove coverage with the
+      // ordinary authoritative pass (never reopen or reset sticky faults).
+      this.leaveServiceGap()
       const signal = this.lifecycle.signal
       counters.sourceProofRevokedBase = this.index.sourceProofRevocations
       this.observeCoverageBasis()
@@ -2759,15 +2848,56 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (this.pendingEventCount === pendingEventsBefore) break
       }
       if (drained !== 'committed') this.markRoundInvalidating()
+      // A final drain can settle the traversed round itself. In that case there
+      // is no live round left to invalidate, but a live replacement during the
+      // drain must still retire the just-proved epoch. An ACTIVE round with
+      // prior `proven` coverage is not settled; it must reach finish below.
+      if (this.coverageRound === undefined) {
+        if (this.coverage !== 'proven') {
+          this.invalidateCoverageBinding()
+          outcome = 'incomplete'
+          return
+        }
+        let replaced = false
+        for (const sessionId of this.replacedOfficialIdentities(official, sessions)) {
+          replaced = true
+          this.reconcilePending.add(sessionId)
+          this.markReconcileNeeded('reconciling')
+        }
+        if (replaced) {
+          this.invalidateCoverageBinding()
+          outcome = 'incomplete'
+          return
+        }
+        this.sourceFaulted = false
+        this.refreshCompleteness()
+        outcome = this.settledPhaseOutcome()
+        return
+      }
+      // Final drains may have yielded long enough for the source binding or a
+      // consumed proof authority to change. A retired round must not settle
+      // flags, mutate obligations or clear a fault from its old roster.
+      if (!this.roundSourceCurrent(traversedRound)) {
+        this.invalidateCoverageBinding()
+        outcome = 'incomplete'
+        return
+      }
       // A Session replaced during the pass may not have been re-read (no new
       // event): re-validate the EXACT enumerated live identity for every record
-      // before this pass is allowed to publish ready.
-      for (const sessionId of this.staleOfficialIdentities(official, sessions)) {
+      // before this pass is allowed to publish ready. An ordinary pending batch
+      // is already an owned obligation and is NEVER manufactured into a
+      // replacement repair here.
+      for (const sessionId of this.replacedOfficialIdentities(official, sessions)) {
         this.markRoundInvalidating()
         this.reconcilePending.add(sessionId)
         this.markReconcileNeeded('reconciling')
       }
       this.dropSettledReconcilePending(official)
+      if (this.coverage !== 'proven' && !this.roundSourceCurrent(traversedRound)) {
+        this.invalidateCoverageBinding()
+        outcome = 'incomplete'
+        return
+      }
       // A healthy completed pass clears the transient source fault BEFORE the
       // round proof; the coverage fact must not be denied by the fault it just
       // proved stale.
@@ -3049,16 +3179,23 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     return allApplied ? 'complete' : 'stale'
   }
 
-  /** Official records whose exact enumerated live source identity no longer holds. */
-  private staleOfficialIdentities(
+  /**
+   * Official LIVE records whose exact enumerated live source object no longer
+   * holds. A COLD record that became live is deliberately NOT included: it is
+   * an accepted/live-repair obligation already fenced by the existing pending
+   * and reconcile machinery, not an unrelated periodic reconcile barrier. An
+   * ordinary pending batch is likewise owned by its existing drain.
+   */
+  private replacedOfficialIdentities(
     official: ReadonlyMap<string, OfficialSession>,
     sessions: HistorySearchSessionsLike,
   ): string[] {
-    const stale: string[] = []
+    const replaced: string[] = []
     for (const [sessionId, record] of official) {
-      if (this.pending.has(sessionId) || sessions.get(sessionId) !== record.liveObject) stale.push(sessionId)
+      if (record.liveObject === undefined) continue
+      if (sessions.get(sessionId) !== record.liveObject) replaced.push(sessionId)
     }
-    return stale
+    return replaced
   }
 
   /** IDs that are neither official nor derivable no longer keep the barrier up. */
@@ -3150,9 +3287,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const sessions = this.deps.sessions()
       const query = this.deps.sessionQuery()
       if (persistence === undefined || sessions === undefined || query === undefined) {
-        this.state = { kind: 'unavailable', reason: 'service-missing' }
+        this.enterServiceGap()
         return
       }
+      this.leaveServiceGap()
       // A Session without a derived checkpoint has nothing to prove: skip the
       // official read instead of observing a Session this index never held.
       const checkpoint = this.index.checkpointOf(sessionId)
@@ -3435,7 +3573,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   /** Truthful immediate downgrade; never overrides a definite `unavailable`. */
   private markReconcileNeeded(reason: HistorySearchIncompleteReason = 'reconciling'): void {
-    if (this.state.kind === 'unavailable') return
+    if (this.state.kind === 'unavailable') {
+      if (!(this.serviceGap && this.index !== undefined && this.state.reason === 'service-missing')) return
+    }
     if (this.state.kind === 'loading' && this.coverage === 'booting') return
     this.state = { kind: 'incomplete', reason }
   }
@@ -3448,7 +3588,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    */
   private refreshCompleteness(): void {
     if (this.disposed || this.index === undefined) return
-    if (this.state.kind === 'unavailable') return
+    if (this.state.kind === 'unavailable') {
+      if (!(this.serviceGap && this.state.reason === 'service-missing')) return
+      if (this.requiredServicesMissing()) {
+        // Recoverable absence: stay truthfully unavailable until every required
+        // official service resolves again. Accepted obligations are untouched.
+        this.state = { kind: 'unavailable', reason: 'service-missing' }
+        return
+      }
+      this.serviceGap = false
+      this.coverage = 'unproven'
+      this.state = { kind: 'incomplete', reason: 'reconciling' }
+    }
     if (this.coverage === 'booting') {
       this.state = { kind: 'loading' }
       return

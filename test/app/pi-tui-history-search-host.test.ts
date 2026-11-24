@@ -725,7 +725,6 @@ function historyDebugProbeScript(historyModuleUrl: string): string {
   return `
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { PiTuiHistorySearchHostService } from ${JSON.stringify(historyModuleUrl)}
@@ -835,14 +834,68 @@ test('explicit debug diagnostics reach the standard file sink without Session co
   const log = readFileSync(debugLogPath, 'utf8')
   assert.match(log, /history-search\.inventory\.start phase=cold_start directPersistenceListCalls=0 queryListSessionsCalls=0 liveSessionsObserved=0/u)
   assert.match(log, /history-search\.inventory\.end phase=cold_start outcome=ok elapsedMs=\d+(?:\.\d)? persistedRows=1 mergedRows=1 liveSessionsObserved=0 directPersistenceListCalls=1 queryListSessionsCalls=0/u)
-  // The full cold phase owns exactly its own official calls: ONE open + ONE
-  // final currentness stat for the single cold source, no observation.
-  assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)? directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directPersistenceReadCalls=1 directPersistenceCloseCalls=1 directSessionObserveCalls=0 prefixProofAttempted=0 revisionAuthorityQualified=0 revisionAuthorityUnavailable=0 revisionAuthorityElapsedMsTotal=0 sourceProofHit=0 sourceProofMiss=0 sourceProofMissIneligible=0 sourceProofMissNoProof=0 sourceProofMissBindingMismatch=0 sourceProofMissCheckpointMismatch=0 sourceProofMissObligationOrFault=0 sourceProofStale=0 sourceProofFailed=0 sourceProofMinted=0 sourceProofRevoked=0/u)
+  // Decisive counter facts are parsed by field, not by incidental log order.
+  // The full cold phase owns exactly its own official calls: ONE open + ONE read
+  // + ONE close + ONE final currentness stat for the single cold source.
+  const bootstrap = diagnosticFields(log, 'history-search.bootstrap.end')
+  assert.equal(bootstrap.outcome, 'ready')
+  for (const [field, expected] of [
+    ['sessionsVisited', '1'],
+    ['replayAttempted', '1'],
+    ['replayCompleted', '1'],
+    ['directPersistenceStatCalls', '1'],
+    ['directPersistenceOpenCalls', '1'],
+    ['directPersistenceReadCalls', '1'],
+    ['directPersistenceCloseCalls', '1'],
+    ['directSessionObserveCalls', '0'],
+    ['prefixProofAttempted', '0'],
+    ['revisionAuthorityQualified', '0'],
+    ['revisionAuthorityUnavailable', '0'],
+    ['sourceProofHit', '0'],
+    ['sourceProofMiss', '0'],
+    ['sourceProofMinted', '0'],
+    ['sourceProofRevoked', '0'],
+  ] as const) {
+    assert.equal(bootstrap[field], expected, `bootstrap.${field}`)
+  }
   // An unchanged stable epoch: the periodic pass makes no direct official call.
-  assert.match(log, /history-search\.verify\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0 directPersistenceStatCalls=0 directPersistenceOpenCalls=0 directPersistenceReadCalls=0 directPersistenceCloseCalls=0 directSessionObserveCalls=0 prefixProofAttempted=0 revisionAuthorityQualified=0 revisionAuthorityUnavailable=0 revisionAuthorityElapsedMsTotal=0 sourceProofHit=0 sourceProofMiss=0 sourceProofMissIneligible=0 sourceProofMissNoProof=0 sourceProofMissBindingMismatch=0 sourceProofMissCheckpointMismatch=0 sourceProofMissObligationOrFault=0 sourceProofStale=0 sourceProofFailed=0 sourceProofMinted=0 sourceProofRevoked=0/u)
+  const verify = diagnosticFields(log, 'history-search.verify.end')
+  assert.equal(verify.outcome, 'ready')
+  for (const [field, expected] of [
+    ['sessionsVisited', '1'],
+    ['replayAttempted', '0'],
+    ['replayCompleted', '0'],
+    ['directPersistenceStatCalls', '0'],
+    ['directPersistenceOpenCalls', '0'],
+    ['directPersistenceReadCalls', '0'],
+    ['directPersistenceCloseCalls', '0'],
+    ['directSessionObserveCalls', '0'],
+    ['prefixProofAttempted', '0'],
+    ['sourceProofHit', '0'],
+    ['sourceProofMinted', '0'],
+    ['sourceProofRevoked', '0'],
+  ] as const) {
+    assert.equal(verify[field], expected, `verify.${field}`)
+  }
   // The point scope is separate from every full phase and is reported on its
-  // first completion: one stat + one prefix open, no replay.
-  assert.match(log, /history-search\.point-repairs completed=1 directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directPersistenceReadCalls=1 directPersistenceCloseCalls=1 directSessionObserveCalls=0 prefixProofAttempted=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0 revisionAuthorityQualified=0 revisionAuthorityUnavailable=0 revisionAuthorityElapsedMsTotal=0 sourceProofHit=0 sourceProofMiss=0 sourceProofMissIneligible=0 sourceProofMissNoProof=0 sourceProofMissBindingMismatch=0 sourceProofMissCheckpointMismatch=0 sourceProofMissObligationOrFault=0 sourceProofStale=0 sourceProofFailed=0 sourceProofMinted=0 sourceProofRevoked=0/u)
+  // first completion: one stat + one prefix open/read/close, no replay.
+  const point = diagnosticFields(log, 'history-search.point-repairs')
+  for (const [field, expected] of [
+    ['completed', '1'],
+    ['directPersistenceStatCalls', '1'],
+    ['directPersistenceOpenCalls', '1'],
+    ['directPersistenceReadCalls', '1'],
+    ['directPersistenceCloseCalls', '1'],
+    ['directSessionObserveCalls', '0'],
+    ['prefixProofAttempted', '1'],
+    ['replayAttempted', '0'],
+    ['replayCompleted', '0'],
+    ['sourceProofHit', '0'],
+    ['sourceProofMinted', '0'],
+    ['sourceProofRevoked', '0'],
+  ] as const) {
+    assert.equal(point[field], expected, `point.${field}`)
+  }
   assert.equal(log.match(/history-search\.point-repairs/gu)?.length, 1, 'one ended point task must emit exactly one bounded aggregate')
   assert.match(log, /history-search\.writer phase=cold_start writerCommitted=\d+ writerFailed=0/u)
   assert.match(log, /history-search\.disposals seen=1 statCalls=1 statNotFound=0 proofProven=1 proofInsufficient=0 proofRollback=0 proofUnreadable=0 statElapsedMsTotal=\d+(?:\.\d)? verifyElapsedMsTotal=\d+(?:\.\d)?/u)
@@ -5580,6 +5633,18 @@ test('a materialized empty cold Session and a real empty live Session settle a c
 
 // ── durable cold source proof recovery ────────────────────────────────────
 
+/** Parse the last named diagnostic record into its `key=value` fields. */
+function diagnosticFields(log: string, message: string): Record<string, string> {
+  const line = log.split('\n').filter(candidate => candidate.includes(message)).at(-1)
+  assert.ok(line !== undefined, `missing ${message} diagnostic`)
+  const fields: Record<string, string> = {}
+  for (const part of line.split(' ')) {
+    const match = /^([A-Za-z][A-Za-z]+)=(.+)$/u.exec(part)
+    if (match !== null) fields[match[1]!] = match[2]!
+  }
+  return fields
+}
+
 /**
  * One structural pass authority equivalent to a qualified Q capture. The H
  * policy tests use it as a TEST STAND-IN for the real runtime classification;
@@ -6061,76 +6126,342 @@ test('a replaced official persistence binding downgrades ready and the next full
   }
 })
 
-test('a live replacement during hit admission refuses the hit and hands the ID to the live repair owner', async (t) => {
+test('a real accepted event during a held cold-proof hit refuses the hit and preserves the accepted input', async (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-history-proof-live-root-')
   const profileDir = life.tempDir('dsh-history-proof-live-profile-')
+  const logDir = life.tempDir('dsh-history-proof-live-log-')
   const source = proofSource(root)
   const probe = proofAuthority(root)
   seedColdProof(profileDir, source, probe.authority)
   const { deps, calls } = mutableDeps(source)
-  const baseSessions = deps.sessions()!
   const liveObject = { id: source.header.id, header: source.header }
-  let armed = false
-  let getCalls = 0
+  let live = false
+  // Before the accepted event the official registry is cold (the proof is
+  // eligible); the created/event listeners below make it live in the same
+  // stack, exactly like a real Session replacement.
   const sessions: HistorySearchSessionsLike = {
-    list: () => baseSessions.list(),
-    get: () => {
-      if (!armed) return undefined
-      getCalls += 1
-      // The first read is the admission's exact-absence observation; the
-      // writer callback then observes the SAME id live and must refuse.
-      return getCalls > 1 ? liveObject : undefined
+    list: () => (live ? [liveObject] : []),
+    get: () => (live ? liveObject : undefined),
+  }
+  const acceptedEvent = {
+    type: 'agent/inbox/spliced',
+    seq: 3,
+    time: 1003,
+    data: {
+      target: 'next-turn',
+      start: 2,
+      inserted: [{
+        id: 'msg-live-3',
+        role: 'user',
+        content: [{ type: 'text', text: 'mutable live third' }],
+        source: { kind: 'user', rpcId: 'rpc-live-3' },
+      }],
     },
   }
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  const previousLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  const logPath = join(logDir, 'bootstrap.log')
+  process.env.DSH_PI_TUI_LOG = logPath
+  process.env.DSH_PI_TUI_LOG_LEVEL = 'debug'
   const ctx = new Context()
   const service = directService(ctx, {
     ...deps,
     sessions: () => sessions,
     revisionAuthority: async () => probe.authority,
   }, profileDir)
+  const internals = service as unknown as {
+    enqueueWrite(task: () => void | Promise<void>): Promise<unknown>
+    commitWitness(witness: unknown, action: () => void): Promise<string>
+    pointCounters: { replayAttempted: number }
+    pending: Map<string, unknown>
+  }
+  let releaseHold!: () => void
+  const holdGate = new Promise<void>(resolve => { releaseHold = resolve })
+  const hold = internals.enqueueWrite(async () => { await holdGate })
+  let admitted!: () => void
+  const hitAdmitted = new Promise<void>(resolve => { admitted = resolve })
+  const originalCommitWitness = internals.commitWitness
+  internals.commitWitness = function observedCommitWitness(witness, action) {
+    admitted()
+    return originalCommitWitness.call(service, witness, action)
+  }
+  try {
+    await Promise.race([
+      hitAdmitted,
+      new Promise<never>((_resolve, reject) => {
+        // Bounded failure deadline only: the real hit signal is the authoritative wake-up.
+        setTimeout(() => reject(new Error('the cold proof hit never reached its writer callback')), 10_000).unref()
+      }),
+    ])
+    // The writer is held BEFORE the admitted hit's transaction. The visible
+    // epoch must not publish the previous source generation while that source
+    // work is unsettled. (Do not call Owner search here: its awaitWrites would
+    // correctly wait for this held writer.)
+    assert.equal((service as unknown as { state: { kind: string } }).state.kind, 'loading')
+
+    // A REAL official session/created + accepted session/event arrives while
+    // the hit is queued behind the writer hold. This is the production listener
+    // path, not a precomputed decision: it invalidates the admitted candidate
+    // and buffers the accepted payload in the same synchronous stack.
+    live = true
+    source.events.push(acceptedEvent)
+    ctx.emit('session/created', liveObject as never)
+    ctx.emit('session/event', liveObject as never, acceptedEvent as never)
+    releaseHold()
+    await hold
+    await waitDirectReady(service)
+
+    assert.equal(calls.openCalls(), 0, 'the refused hit must not open a persisted handle')
+    assert.ok(calls.observeCalls() > 0, 'the live repair must own the authoritative observation')
+    assert.equal(internals.pointCounters.replayAttempted, 1, 'exactly one live repair replay must settle the ID')
+    assert.equal(indexOfService(service).occurrence('proof-session', 'msg-live-3')?.content, 'mutable live third',
+      'the accepted event must survive the refused hit through the ordinary/live repair path')
+    assert.equal(internals.pending.size, 0, 'the final drain must not leave an accepted payload behind')
+    const answer = await service.search(
+      { scope: 'session', sessionId: 'proof-session', query: 'mutable', limit: 10 },
+      new AbortController().signal,
+    )
+    assert.equal(answer.kind, 'ready')
+    assert.ok(answer.kind === 'ready' && answer.items.length === 3,
+      'the repaired projection must contain the exact accepted rows')
+    const fields = diagnosticFields(readFileSync(logPath, 'utf8'), 'history-search.bootstrap.end')
+    assert.equal(fields.sourceProofHit, '0', 'a refused hit must never be counted as a hit')
+    assert.ok(Number(fields.sourceProofStale) >= 1, 'the refused admission must be reported as stale')
+  } finally {
+    releaseHold()
+    await hold.catch(() => {})
+    process.env.DSH_PI_TUI_LOG = previousLog
+    process.env.DSH_PI_TUI_LOG_LEVEL = previousLevel
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a source replacement during the OLD Owner writer wait cannot answer from the previous epoch', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-query-replace-')
+  const source = mutableSource('/repo/query-replace')
+  const { deps } = mutableDeps(source)
+  const first = deps.sessionPersistence()!
+  const second: HistorySearchPersistenceLike = {
+    identity: Symbol('query-replace-second'),
+    list: options => first.list(options),
+    stat: (id, options) => first.stat(id, options),
+    open: (id, access, options) => first.open(id, access, options),
+  }
+  let current = first
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    sessionPersistence: () => current,
+  }, profileDir)
+  const internals = service as unknown as {
+    awaitWrites(signal: AbortSignal): Promise<void>
+  }
+  const originalAwait = internals.awaitWrites
   try {
     await waitDirectReady(service)
-    const internals = service as unknown as {
-      coverage: string
-      tryReuseSourceProof(
-        sessionId: string,
-        record: unknown,
-        persistence: HistorySearchPersistenceLike,
-        sessions: HistorySearchSessionsLike,
-        authority: HistoryRevisionAuthority,
-        counters: object,
-      ): Promise<string>
-      emptyPhaseCounters(): object
-      sessionRepairFlights: Map<string, unknown>
+    const ready = await service.search({ scope: 'session', sessionId: 'mutable-session', query: 'mutable first', limit: 5 }, new AbortController().signal)
+    assert.equal(ready.kind, 'ready')
+    if (ready.kind !== 'ready') throw new Error('expected ready')
+    const item = ready.items[0]!
+    let replaced = false
+    // The replacement lands while the Owner read is inside its writer wait,
+    // AFTER admission and BEFORE the state answer. This is the real supported
+    // provider-replacement window the previous pre-await check could not see.
+    internals.awaitWrites = async (signal: AbortSignal) => {
+      await originalAwait.call(service, signal)
+      if (!replaced) {
+        replaced = true
+        current = second
+      }
     }
-    // The ready epoch has no unproven admission; drive the SAME production
-    // admission once against a cold, unproven state.
-    internals.coverage = 'unproven'
-    armed = true
-    getCalls = 0
-    const counters = internals.emptyPhaseCounters() as { sourceProofHit: number; sourceProofStale: number }
-    const outcome = await internals.tryReuseSourceProof(
-      'proof-session',
-      { header: source.header, live: false, ...proofSnapshot(source) },
-      deps.sessionPersistence()!,
-      sessions,
-      probe.authority,
-      counters,
-    )
-    assert.equal(outcome, 'stale')
-    assert.equal(counters.sourceProofHit, 0, 'a refused admission must never count as a hit')
-    assert.equal(counters.sourceProofStale, 1)
-    assert.equal(internals.sessionRepairFlights.size, 1, 'the refused hit must hand the ID to a repair owner')
-    const deadline = Date.now() + 15_000
-    while (internals.sessionRepairFlights.size > 0 && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
-    assert.ok(calls.observeCalls() > 0, 'the coalesced repair must own the live observation')
-    assert.equal(calls.openCalls(), 0, 'the refused hit must not open a persisted handle')
-    const row = indexOfService(service).occurrence('proof-session', 'msg-1')
-    assert.equal(row?.content, 'mutable first', 'the live repair must project the accepted occurrences')
+    const search = await service.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
+    assert.equal(search.kind, 'incomplete', JSON.stringify(search))
+    const read = await service.readText({
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset: 0,
+      limit: 16,
+    }, new AbortController().signal)
+    assert.notEqual(read.kind, 'ready', JSON.stringify(read))
+    assert.equal(read.kind, 'incomplete', JSON.stringify(read))
   } finally {
+    internals.awaitWrites = originalAwait
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a temporary missing-service gap preserves accepted input and recovers through one full official pass', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-history-service-gap-root-')
+  const profileDir = life.tempDir('dsh-history-service-gap-profile-')
+  const source = proofSource(root)
+  const probe = proofAuthority(root)
+  seedColdProof(profileDir, source, probe.authority)
+  const { deps, calls } = mutableDeps(source)
+  const firstPersistence = deps.sessionPersistence()!
+  const firstSessions = deps.sessions()!
+  const firstQuery = deps.sessionQuery()!
+  const replacementPersistence: HistorySearchPersistenceLike = {
+    identity: Symbol('gap-replacement-persistence'),
+    list: options => firstPersistence.list(options),
+    stat: (id, options) => firstPersistence.stat(id, options),
+    open: (id, access, options) => firstPersistence.open(id, access, options),
+  }
+  let persistenceCurrent: HistorySearchPersistenceLike | undefined = firstPersistence
+  let sessionsCurrent: HistorySearchSessionsLike | undefined = firstSessions
+  let queryCurrent: HistorySearchQueryLike | undefined = firstQuery
+  const ctx = new Context()
+  const service = directService(ctx, {
+    ...deps,
+    sessionPersistence: () => persistenceCurrent,
+    sessions: () => sessionsCurrent,
+    sessionQuery: () => queryCurrent,
+    revisionAuthority: async () => probe.authority,
+  }, profileDir)
+  try {
+    await waitDirectReady(service)
+    const mounted = indexOfService(service)
+    persistenceCurrent = undefined
+    sessionsCurrent = undefined
+    queryCurrent = undefined
+    await verifyFullPass(service)
+    const absent = await service.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
+    assert.equal(absent.kind, 'unavailable', JSON.stringify(absent))
+    if (absent.kind === 'unavailable') {
+      assert.equal(absent.reason, 'service-missing', JSON.stringify(absent))
+    }
+
+    // A real accepted event arrives while the mounted index temporarily has no
+    // official source service. The listener must preserve it (bounded buffer),
+    // not discard it as if the index were permanently unavailable.
+    const liveSession = { id: source.header.id, header: source.header }
+    const acceptedEvent = {
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 1003,
+      data: {
+        target: 'next-turn',
+        start: 2,
+        inserted: [{
+          id: 'msg-gap-3',
+          role: 'user',
+          content: [{ type: 'text', text: 'mutable gap third' }],
+          source: { kind: 'user', rpcId: 'rpc-gap-3' },
+        }],
+      },
+    }
+    source.events.push(acceptedEvent)
+    ctx.emit('session/created', liveSession as never)
+    ctx.emit('session/event', liveSession as never, acceptedEvent as never)
+    assert.equal((service as unknown as { pending: Map<string, unknown> }).pending.size, 1,
+      'the recoverable gap must buffer the accepted event')
+
+    // The replacement official binding becomes available again on the SAME
+    // mounted index. The next full pass must not reuse the prior proof, must
+    // replay the official source and must retain the accepted occurrence.
+    persistenceCurrent = replacementPersistence
+    sessionsCurrent = firstSessions
+    queryCurrent = firstQuery
+    const openBefore = calls.openCalls()
+    await verifyFullPass(service)
+    await waitDirectReady(service)
+    assert.equal(indexOfService(service), mounted, 'the mounted index must not be reopened')
+    assert.ok(calls.openCalls() > openBefore, 'the recovered pass must replay officially instead of reusing the prior proof')
+    const recovered = await service.search(
+      { scope: 'session', sessionId: 'proof-session', query: 'mutable', limit: 10 },
+      new AbortController().signal,
+    )
+    assert.equal(recovered.kind, 'ready')
+    assert.ok(recovered.kind === 'ready' && recovered.items.some(item => item.preview === 'mutable gap third'),
+      'the accepted event must survive the temporary service gap')
+    const internals = service as unknown as { serviceGap: boolean; priorProofReuseAllowed: boolean; pending: Map<string, unknown> }
+    assert.equal(internals.serviceGap, false)
+    assert.equal(internals.priorProofReuseAllowed, false, 'proof reuse must stay retired for this Host lifetime')
+    assert.equal(internals.pending.size, 0)
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a pending accepted event on an unchanged live Session never manufactures a reconcile repair', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-pending-only-')
+  const early = mutableSource('/repo/early', 'early-live')
+  early.live = true
+  const late = mutableSource('/repo/late', 'late-cold')
+  const { deps, calls } = mutableDeps(early, [late])
+  const basePersistence = deps.sessionPersistence()!
+  let latched: () => void = () => {}
+  const latchedSignal = new Promise<void>(resolve => { latched = resolve })
+  let release = (): void => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const gated: HistorySearchPersistenceLike = {
+    identity: basePersistence.identity,
+    list: options => basePersistence.list(options),
+    stat: (id, options) => basePersistence.stat(id, options),
+    open: async (id, access, options) => {
+      if (String(id) === 'late-cold') {
+        latched()
+        await gate
+      }
+      return basePersistence.open(id, access, options)
+    },
+  }
+  const ctx = new Context()
+  const service = directService(ctx, { ...deps, sessionPersistence: () => gated }, profileDir)
+  try {
+    await latchedSignal
+    const earlyLive = deps.sessions().get('early-live')
+    assert.ok(earlyLive !== undefined)
+    const acceptedEvent = {
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 1003,
+      data: {
+        target: 'next-turn',
+        start: 2,
+        inserted: [{
+          id: 'early-live-3',
+          role: 'user',
+          content: [{ type: 'text', text: 'early live third' }],
+          source: { kind: 'user', rpcId: 'rpc-early-3' },
+        }],
+      },
+    }
+    early.events.push(acceptedEvent)
+    // The early live source object itself is UNCHANGED; only its accepted
+    // pending payload arrives while the later cold read is held.
+    ctx.emit('session/event', earlyLive as never, acceptedEvent as never)
+    assert.equal((service as unknown as { pending: Map<string, unknown> }).pending.size, 1)
+    release()
+    // No periodic verification is invoked: the final ordinary drain must settle
+    // this pass without an orphan reconcile/repair obligation.
+    await waitDirectReady(service)
+    const internals = service as unknown as {
+      reconcilePending: Set<string>
+      pointCounters: { replayAttempted: number }
+      pending: Map<string, unknown>
+    }
+    assert.equal(internals.reconcilePending.size, 0, 'pending-only payload must not create a reconcile obligation')
+    assert.equal(internals.pointCounters.replayAttempted, 0, 'no point repair may be manufactured for pending-only input')
+    assert.equal(internals.pending.size, 0)
+    assert.equal(indexOfService(service).occurrence('early-live', 'early-live-3')?.content, 'early live third')
+    assert.equal(calls.openCalls(), 1, 'only the latched cold Session is opened')
+    assert.equal(calls.observeCalls(), 1, 'only the early live Session is observed once')
+    const answer = await service.search(
+      { scope: 'session', sessionId: 'early-live', query: 'early live', limit: 10 },
+      new AbortController().signal,
+    )
+    assert.equal(answer.kind, 'ready')
+    assert.ok(answer.kind === 'ready' && answer.items.length === 1)
+  } finally {
+    release()
     await service.dispose()
     await ctx.fiber.dispose()
   }

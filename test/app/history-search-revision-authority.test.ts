@@ -35,6 +35,7 @@ import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { PluginPackages } from '@deepseek-ai/dsh-app-boot'
 import {
   captureHistoryRevisionAuthority,
@@ -43,6 +44,12 @@ import {
   type HistoryRevisionSnapshotLike,
 } from '../../src/app/host/features/history-search-revision-authority.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { PiTuiHistorySearchHostService } from '../../src/app/host/features/history-search.ts'
+import type {
+  HistorySearchPersistenceLike,
+  HistorySearchQueryLike,
+  HistorySearchSessionsLike,
+} from '../../src/app/host/features/history-search.ts'
 
 const PROVIDER_PACKAGE = '@deepseek-ai/dsh-session-persistence-jsonl'
 const WORKSPACE_ROOT = fileURLToPath(new URL('../../', import.meta.url))
@@ -302,6 +309,108 @@ test('a same-name provider whose published bytes differ is not qualified', async
   try {
     const captured = await capture(fixture)
     assert.equal(captured, undefined, 'the package discriminator must reject an unverified same-name package')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
+
+test('a real Loader provider restart moves the actual history service to incomplete and the next pass rebuilds', async (t) => {
+  const life = testLifecycle(t)
+  const persistenceRoot = life.tempDir('dsh-history-q-h-root-')
+  const fixture = await mountAuthorityFixture(life, { root: persistenceRoot, provider: 'real' })
+  try {
+    const persistence = fixture.persistence as HistorySearchPersistenceLike
+    // The official JSONL writer extends the narrowed H read surface with the
+    // production create handle; this qualification test owns a real source.
+    const created = await (persistence as unknown as {
+      create(header: object): Promise<{
+        append(events: object[]): Promise<void>
+        flush(): Promise<void>
+        close(): Promise<void>
+      }>
+    }).create({
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId('q-h-restart-session'),
+      createdAt: Date.now(),
+      cwd: persistenceRoot,
+      isSeeded: false,
+    })
+    try {
+      await created.append([{
+        type: 'user/message',
+        seq: 0,
+        time: Date.now(),
+        surfaceOp: 'append',
+        data: {
+          id: 'q-h-restart-message',
+          role: 'user',
+          content: [{ type: 'text', text: 'real provider restart accepted input' }],
+          source: { kind: 'user', rpcId: 'q-h-restart-rpc' },
+        },
+      }])
+      await created.flush()
+    } finally {
+      await created.close()
+    }
+
+    const sessions: HistorySearchSessionsLike = {
+      list: () => [],
+      get: () => undefined,
+    }
+    const query: HistorySearchQueryLike = {
+      async observeSession() { throw new Error('a cold restart path must not observe a live Session') },
+    }
+    const profile = fixture.ctx.reflect.get('profileContext') as { dir: string }
+    const controller = new AbortController()
+    const invocationCtx = fixture.ctx.extend({
+      invocation: {
+        peer: { principal: { kind: 'owner' }, signal: controller.signal } as never,
+        signal: controller.signal,
+      } as never,
+    })
+    const service = new PiTuiHistorySearchHostService(invocationCtx, {
+      profileContext: () => ({ dir: profile.dir }) as never,
+      sessionPersistence: () => fixture.ctx.reflect.get('sessionPersistence') as HistorySearchPersistenceLike | undefined,
+      sessions: () => sessions,
+      sessionQuery: () => query,
+      revisionAuthority: (current, signal) => captureHistoryRevisionAuthority(fixture.ctx, current, signal),
+    })
+    try {
+      const waitReady = async (label: string): Promise<void> => {
+        const deadline = Date.now() + 15_000
+        while (Date.now() < deadline) {
+          const answer = await service.search({ scope: 'all', query: 'real provider restart', limit: 10 }, controller.signal)
+          if (answer.kind === 'ready') return
+          if (answer.kind === 'unavailable') throw new Error(`${label}: ${JSON.stringify(answer)}`)
+          await new Promise(resolve => setTimeout(resolve, 20))
+        }
+        throw new Error(`${label}: readiness timeout`)
+      }
+      await waitReady('real Q+H first pass')
+      const first = await service.search({ scope: 'all', query: 'real provider restart', limit: 10 }, controller.signal)
+      assert.equal(first.kind, 'ready')
+      assert.ok(first.kind === 'ready' && first.items.length === 1)
+
+      // The REAL official provider activation restarts in place. The derived
+      // epoch must not answer from the old raw service/Symbol, and the next
+      // owned full pass must replay the actual new handle.
+      const activation = Object.getPrototypeOf(fixture.entry.fiber) as { restart(): Promise<void> }
+      await activation.restart()
+      const stale = await service.search({ scope: 'all', query: 'real provider restart', limit: 10 }, controller.signal)
+      assert.notEqual(stale.kind, 'ready', 'the old epoch must not remain ready after the real provider restart')
+      await (service as unknown as { verifySources(): Promise<void> }).verifySources()
+      await waitReady('real Q+H recovered pass')
+      const recovered = await service.search({ scope: 'all', query: 'real provider restart', limit: 10 }, controller.signal)
+      assert.equal(recovered.kind, 'ready')
+      assert.ok(recovered.kind === 'ready' && recovered.items.length === 1)
+      assert.equal(recovered.items[0]?.preview, 'real provider restart accepted input')
+      const internals = service as unknown as { priorProofReuseAllowed: boolean }
+      assert.equal(internals.priorProofReuseAllowed, false,
+        'the real replacement must retire old proof reuse for this Host lifetime')
+    } finally {
+      await service.dispose()
+    }
   } finally {
     await fixture.dispose()
   }

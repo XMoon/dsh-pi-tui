@@ -21,14 +21,12 @@
  */
 
 import { createHash } from 'node:crypto'
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-import { Context } from '@deepseek-ai/cordis'
-import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { hostStatus } from '../../lib/split-smoke-processes.mjs'
@@ -111,6 +109,37 @@ async function search(client, requestPath, request, label) {
   return probe(client, requestPath, { op: 'search', ...request }, label)
 }
 
+/** Read every page of one Owner search in order. */
+async function readAllHistoryItems(client, requestPath, request, label) {
+  const items = []
+  let cursor
+  for (let page = 0; page < 1000; page += 1) {
+    const answer = assertReady(await searchSettled(client, requestPath, {
+      ...request,
+      ...(cursor === undefined ? {} : { cursor }),
+    }, `${label} page ${String(page)}`), label)
+    items.push(...answer.items)
+    if (answer.nextCursor === null) return items
+    cursor = answer.nextCursor
+  }
+  throw new SplitSmokeAssertionError(`${label}: pagination did not terminate`)
+}
+
+/** The comparable semantic identity of one accepted occurrence. */
+function historySemantic(item) {
+  return {
+    sessionId: item.sessionId,
+    messageId: item.messageId,
+    firstEventSeq: item.firstEventSeq,
+    acceptedAt: item.acceptedAt,
+    effectiveCwd: item.effectiveCwd,
+    preview: item.preview,
+    contentLength: item.contentLength,
+    contentSha256: item.contentSha256,
+    hasNonText: item.hasNonText,
+  }
+}
+
 async function readText(client, requestPath, request, label) {
   return probe(client, requestPath, { op: 'readText', ...request }, label)
 }
@@ -159,73 +188,140 @@ async function readFullText(client, requestPath, item, label, chunkLimit = 5) {
 }
 
 /**
- * Create ONE cold official current-format Session with the INSTALLED package-root
- * write handle (never a raw parser/writer). The writer process exits before any
- * Host starts, so the Session never becomes live in this smoke.
+ * Test-only child writer source. It is executed by a SEPARATE Node process
+ * against the isolated installed DSH family (resolved from the installation
+ * harness), never against this workspace's modules. It only uses official
+ * persistence handles and reports its PID/versions/closed facts.
  */
-async function seedOfficialColdSession(dshHome, { id, cwd, texts }) {
-  const ctx = new Context()
-  try {
-    await ctx.plugin(JsonlSessionPersistence, { root: join(dshHome, 'sessions') })
-    const persistence = ctx.reflect.get('sessionPersistence')
-    const header = {
+const INSTALLED_WRITER_SOURCE = String.raw`
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+const require = createRequire(process.env.HSP_HARNESS_PACKAGE)
+const load = async (id) => import(pathToFileURL(require.resolve(id)).href)
+const manifest = (id) => JSON.parse(readFileSync(require.resolve(id + '/package.json'), 'utf8'))
+const { Context } = await load('@deepseek-ai/cordis')
+const Jsonl = await load('@deepseek-ai/dsh-session-persistence-jsonl')
+const { SESSION_FORMAT_VERSION, SessionId } = await load('@deepseek-ai/dsh-session')
+const spec = JSON.parse(process.env.HSP_WRITER_SPEC)
+const facts = {
+  pid: process.pid,
+  writer: 'installed-official',
+  closed: false,
+  versions: {
+    jsonl: manifest('@deepseek-ai/dsh-session-persistence-jsonl').version,
+    seam: manifest('@deepseek-ai/dsh-session-persistence').version,
+    session: manifest('@deepseek-ai/dsh-session').version,
+  },
+}
+const ctx = new Context()
+let handle
+try {
+  await ctx.plugin(Jsonl, { root: spec.root })
+  const persistence = ctx.reflect.get('sessionPersistence')
+  if (spec.op === 'create') {
+    handle = await persistence.create({
       version: SESSION_FORMAT_VERSION,
-      id: SessionId(id),
+      id: SessionId(spec.id),
       createdAt: Date.now(),
-      cwd,
+      cwd: spec.cwd,
       isSeeded: false,
-    }
-    const handle = await persistence.create(header)
-    try {
-      const accepted = texts.map((text, seq) => ({
-        type: 'user/message',
-        seq,
-        time: Date.now() + seq,
-        surfaceOp: 'append',
-        data: {
-          id: `seed-${id}-${String(seq)}`,
-          role: 'user',
-          content: [{ type: 'text', text }],
-          source: { kind: 'user', rpcId: `seed-rpc-${id}-${String(seq)}` },
-        },
-      }))
-      if (accepted.length > 0) await handle.append(accepted)
-      await handle.flush()
-    } finally {
-      await handle.close()
-    }
-  } finally {
-    await ctx.fiber.dispose()
+    })
+  } else {
+    handle = await persistence.open(SessionId(spec.id), 'write')
   }
+  const events = spec.events.map((event) => ({
+    type: 'user/message',
+    seq: event.seq,
+    time: Date.now() + event.seq,
+    surfaceOp: 'append',
+    data: {
+      id: event.id,
+      role: 'user',
+      content: [{ type: 'text', text: event.text }],
+      source: { kind: 'user', rpcId: event.rpcId },
+    },
+  }))
+  if (events.length > 0) await handle.append(events)
+  await handle.flush()
+  await handle.close()
+  facts.closed = true
+} finally {
+  await ctx.fiber.dispose()
+}
+console.log(JSON.stringify(facts))
+`
+
+/** Run ONE isolated installed-family write child and prove its terminal facts. */
+async function runInstalledWriter(installation, workDir, spec) {
+  const scriptPath = join(workDir, `.hsp-installed-writer-${String(process.pid)}-${Date.now().toString(36)}.mjs`)
+  writeFileSync(scriptPath, INSTALLED_WRITER_SOURCE, { mode: 0o600 })
+  const child = spawn(process.execPath, [scriptPath], {
+    cwd: installation.harnessDir,
+    env: {
+      ...process.env,
+      HSP_HARNESS_PACKAGE: join(installation.harnessDir, 'package.json'),
+      HSP_WRITER_SPEC: JSON.stringify(spec),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const code = await new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('exit', (exitCode, signal) => resolve({ exitCode, signal }))
+  }).then(result => result)
+  assert(code.exitCode === 0, `installed writer exited ${JSON.stringify(code)}: ${stderr}`)
+  const facts = JSON.parse(stdout.trim().split('\n').at(-1))
+  assert(facts.pid === child.pid, `installed writer PID ${String(facts.pid)} != spawned ${String(child.pid)}`)
+  assert(facts.writer === 'installed-official' && facts.closed === true,
+    `installed writer did not report an official closed handle: ${JSON.stringify(facts)}`)
+  appendFileSync(join(workDir, 'installed-writer-facts.jsonl'), `${JSON.stringify({
+    ...facts,
+    parentPid: process.pid,
+    exit: code,
+    op: spec.op,
+    id: spec.id,
+    seqs: spec.events.map(event => event.seq),
+  })}\n`, { mode: 0o600 })
+  return facts
 }
 
-/** Append ONE official accepted event to a cold Session with the installed write handle. */
-async function appendOfficialColdEvent(dshHome, sessionId, { text, seq }) {
-  const ctx = new Context()
-  try {
-    await ctx.plugin(JsonlSessionPersistence, { root: join(dshHome, 'sessions') })
-    const persistence = ctx.reflect.get('sessionPersistence')
-    const handle = await persistence.open(SessionId(sessionId), 'write')
-    try {
-      await handle.append([{
-        type: 'user/message',
-        seq,
-        time: Date.now(),
-        surfaceOp: 'append',
-        data: {
-          id: `append-${sessionId}-${String(seq)}`,
-          role: 'user',
-          content: [{ type: 'text', text }],
-          source: { kind: 'user', rpcId: `append-rpc-${sessionId}-${String(seq)}` },
-        },
-      }])
-      await handle.flush()
-    } finally {
-      await handle.close()
-    }
-  } finally {
-    await ctx.fiber.dispose()
-  }
+/** Create ONE cold official current-format Session with an installed child writer. */
+async function seedOfficialColdSession(installation, dshHome, workDir, { id, cwd, texts }) {
+  const facts = await runInstalledWriter(installation, workDir, {
+    op: 'create',
+    root: join(dshHome, 'sessions'),
+    id,
+    cwd,
+    events: texts.map((text, seq) => ({
+      seq,
+      id: `seed-${id}-${String(seq)}`,
+      text,
+      rpcId: `seed-rpc-${id}-${String(seq)}`,
+    })),
+  })
+  return facts
+}
+
+/** Append ONE official accepted event to a cold Session with the installed child writer. */
+async function appendOfficialColdEvent(installation, dshHome, workDir, sessionId, { text, seq }) {
+  const facts = await runInstalledWriter(installation, workDir, {
+    op: 'open',
+    root: join(dshHome, 'sessions'),
+    id: sessionId,
+    events: [{
+      seq,
+      id: `append-${sessionId}-${String(seq)}`,
+      text,
+      rpcId: `append-rpc-${sessionId}-${String(seq)}`,
+    }],
+  })
+  return facts
 }
 
 /** Write a legacy v1 file set and capture its full observable identity. */
@@ -416,8 +512,8 @@ export async function runHostHistorySearch(context) {
     // Host: neither is ever resumed, so their durable proof lifecycle is the
     // only thing the restarts exercise.
     const sentinelCwd = realpathSync(workDir)
-    await seedOfficialColdSession(dshHome, { id: sentinelId, cwd: sentinelCwd, texts: sentinelTexts })
-    await seedOfficialColdSession(dshHome, { id: emptySentinelId, cwd: sentinelCwd, texts: [] })
+    await seedOfficialColdSession(context.installation, dshHome, workDir, { id: sentinelId, cwd: sentinelCwd, texts: sentinelTexts })
+    await seedOfficialColdSession(context.installation, dshHome, workDir, { id: emptySentinelId, cwd: sentinelCwd, texts: [] })
     legacySentinel = writeLegacyV1Sentinel(context.installation.profileDir)
 
     const firstHost = await scene.startC1Host('skills-standing', 'history host 1', {
@@ -673,7 +769,7 @@ export async function runHostHistorySearch(context) {
 
     // ── W05: one offline official append is the ONLY rebuilt source. ───────
     const appendedText = 'hsp-sentinel-appended'
-    await appendOfficialColdEvent(dshHome, sentinelId, { text: appendedText, seq: sentinelTexts.length })
+    await appendOfficialColdEvent(context.installation, dshHome, workDir, sentinelId, { text: appendedText, seq: sentinelTexts.length })
     fourthHost = await scene.startC1Host('skills-standing', 'history host 4', {
       DSH_PI_TUI_LOG: logD,
       DSH_PI_TUI_LOG_LEVEL: 'debug',
@@ -712,6 +808,17 @@ export async function runHostHistorySearch(context) {
       'W05: the changed source was not read')
     assert(Number(countersD.sourceProofMiss) >= 1,
       'W05: the changed revision did not miss its durable proof')
+    // Complete D Owner witness: every ordered semantic row + exact full text.
+    // This is the comparison witness for the independent fresh-v2 rebuild.
+    const recoveredItems = await readAllHistoryItems(clientB, requestPath, {
+      scope: 'all', query: '', limit: 7,
+    }, 'W05 recovery witness')
+    assert(recoveredItems.length >= 3, `W05: recovery witness has ${String(recoveredItems.length)} rows`)
+    const recoveredText = new Map()
+    for (const item of recoveredItems) {
+      recoveredText.set(`${item.sessionId}/${item.messageId}`,
+        await readFullText(clientB, requestPath, item, 'W05 recovery witness text'))
+    }
     await scene.exitC1Client(clientB, 'history client D exit')
     clientB = undefined
     await scene.stopC1Host(host)
@@ -728,15 +835,70 @@ export async function runHostHistorySearch(context) {
     mkdirSync(join(workDir, 'history-cwd-two'), { recursive: true, mode: 0o700 })
     const cwdOne = realpathSync(join(workDir, 'history-cwd-one'))
     const cwdTwo = realpathSync(join(workDir, 'history-cwd-two'))
+    // ── S01 oracle: independent fresh-v2 cold rebuild before any new input. ─
+    // D is stopped and the seat free. Move the EXACT active v2 set aside, start
+    // the existing W02c Host against an absent derived store, and compare its
+    // complete Owner pages + readText with D's witness BEFORE opening a Session.
+    const historyDir = join(context.installation.profileDir, '.dsh-pi-tui', 'history-search')
+    const backupDir = join(historyDir, `.oracle-v2-${String(process.pid)}-${Date.now().toString(36)}`)
+    mkdirSync(backupDir, { recursive: true, mode: 0o700 })
+    chmodSync(backupDir, 0o700)
+    let movedFiles = 0
+    for (const suffix of ['', '-wal', '-shm']) {
+      const file = join(historyDir, `v2.sqlite${suffix}`)
+      if (!existsSync(file)) continue
+      renameSync(file, join(backupDir, `v2.sqlite${suffix}`))
+      movedFiles += 1
+    }
+    assert(movedFiles >= 1, 'S01 oracle: the active v2 set was not moved')
+    assert(!existsSync(join(historyDir, 'v2.sqlite')), 'S01 oracle: the fresh v2 path is still present')
+    const oracleLog = join(workDir, 'history-search-host-oracle.log')
     const cwdHost = await scene.startC1Host('skills-standing', 'history cwd host', {
       HISTORY_SEARCH_EXTRA_PROOF: cwdProof,
       HISTORY_SEARCH_CWD_TARGET: cwdTwo,
+      DSH_PI_TUI_LOG: oracleLog,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
     })
     host = cwdHost.host
     const cwdClientResult = await scene.startC1Client('history cwd client', {
       SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
     }, { cwd: cwdOne })
     const cwdClient = cwdClientResult.client
+    const oracleItems = await readAllHistoryItems(cwdClient, requestPath, {
+      scope: 'all', query: '', limit: 7,
+    }, 'S01 oracle')
+    assert(JSON.stringify(oracleItems.map(historySemantic)) === JSON.stringify(recoveredItems.map(historySemantic)),
+      'S01 oracle: the fresh cold rebuild is not semantically equal to D')
+    for (const item of oracleItems) {
+      assert(await readFullText(cwdClient, requestPath, item, 'S01 oracle text')
+        === recoveredText.get(`${item.sessionId}/${item.messageId}`),
+      `S01 oracle: readText differs for ${item.sessionId}/${item.messageId}`)
+    }
+    const countersOracle = await waitForBootstrapCounters(oracleLog, 'S01 oracle host')
+    assert(Number(countersOracle.sourceProofHit) === 0,
+      `S01 oracle: a fresh v2 reused a proof: ${JSON.stringify(countersOracle)}`)
+    assert(Number(countersOracle.sourceProofMinted) >= 3,
+      `S01 oracle: the fresh cold rebuild minted ${String(countersOracle.sourceProofMinted)} proofs`)
+    assert(Number(countersOracle.directPersistenceOpenCalls) >= 3,
+      'S01 oracle: the fresh rebuild did not read the official sources')
+    trace('host-history-search/pr3a-oracle', {
+      movedFiles,
+      rows: oracleItems.length,
+      hits: Number(countersOracle.sourceProofHit),
+      minted: Number(countersOracle.sourceProofMinted),
+      opens: Number(countersOracle.directPersistenceOpenCalls),
+      backupDir,
+    })
+    writeFileSync(join(workDir, 'history-search-oracle-facts.json'), `${JSON.stringify({
+      movedFiles,
+      backupDir,
+      oraclePid: cwdClientResult.ready.pid,
+      recovered: recoveredItems.map(historySemantic),
+      oracle: oracleItems.map(historySemantic),
+      recoveredTextLengths: Object.fromEntries([...recoveredText].map(([key, text]) => [key, text.length])),
+      oracleTextLengths: Object.fromEntries(oracleItems.map(item => [`${item.sessionId}/${item.messageId}`, item.contentLength])),
+      counters: countersOracle,
+    }, null, 2)}\n`, { mode: 0o600 })
     const cwdSession = await scene.openC1Session(cwdClient, 'hsp-cwd-one', 'history cwd first prompt')
     const cwdHeader = await waitForHostSessionHeader(dshHome, cwdSession, 'history cwd durable header')
     await waitForHostSessionEvent(dshHome, cwdSession, event => event.type === 'turn/end', 'W02c first turn settled')
@@ -839,7 +1001,6 @@ export async function runHostHistorySearch(context) {
 
     // W06: the active derived store is v2, private and profile-local; the
     // legacy v1 file set stayed byte/mode/inode identical.
-    const historyDir = join(context.installation.profileDir, '.dsh-pi-tui', 'history-search')
     const dbPath = join(historyDir, 'v2.sqlite')
     const dbStat = statSync(dbPath)
     const dirStat = statSync(historyDir)

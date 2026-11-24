@@ -850,3 +850,73 @@ test('proof-only transactions fail closed on unsafe or unmaterialized sidecars',
     if (existsSync(dbPath)) chmodSync(dbPath, 0o600)
   }
 })
+
+test('a failed checkpoint update after the proof delete rolls the proof back atomically', (t) => {
+  const dir = profileDir(t)
+  const { dbPath } = historyPaths(dir)
+  const index = HistorySearchIndex.open({ profileDir: dir })
+  const control = new DatabaseSync(dbPath)
+  const trigger = 'fail_s_a_checkpoint_update'
+  try {
+    seedProof(index, 's-a')
+    const checkpoint = index.checkpointOf('s-a')
+    const proof = index.sourceProofOf('s-a')
+    assert.ok(checkpoint !== undefined && proof !== undefined)
+    const revocations = index.sourceProofRevocations
+    const revision = index.revision
+    const occurrences = index.occurrenceCount()
+
+    // The UPDATE is deliberately aborted AFTER the batch already executed the
+    // proof DELETE: this is the rollback boundary that stale-admission tests do
+    // not exercise. The trigger is test-owned schema, removed in cleanup.
+    control.exec(`CREATE TRIGGER ${trigger} BEFORE UPDATE ON history_sessions
+      WHEN OLD.session_id = 's-a'
+      BEGIN SELECT RAISE(ABORT, 'forced checkpoint failure'); END`)
+    assert.throws(() => index.commitBatch({
+      sessionId: 's-a',
+      headerHash: sessionHeaderHash({ id: 's-a' }),
+      inheritedCut: 0,
+      baseNextSeq: 10,
+      nextSeq: 11,
+      headerCwd: '/repo/a',
+      effectiveCwd: '/repo/a',
+      lastEventHash: 'next-tail',
+      sourceState: 'persisted',
+      uncertainSourcesDelta: 0,
+      occurrences: [],
+    }), /forced checkpoint failure/u)
+
+    assert.deepEqual(index.checkpointOf('s-a'), checkpoint, 'the old checkpoint must be restored')
+    assert.deepEqual(index.sourceProofOf('s-a'), proof, 'the old durable proof must be restored')
+    assert.equal(index.sourceProofRevocations, revocations, 'the revocation counter must not advance')
+    assert.equal(index.revision, revision, 'the content generation must not change')
+    assert.equal(index.occurrenceCount(), occurrences, 'the occurrence rows must not change')
+  } finally {
+    try {
+      control.exec(`DROP TRIGGER IF EXISTS ${trigger}`)
+    } finally {
+      control.close()
+      index.close()
+    }
+  }
+
+  const reopened = HistorySearchIndex.open({ profileDir: dir })
+  try {
+    assert.deepEqual(reopened.checkpointOf('s-a'), {
+      sessionId: 's-a',
+      headerCwd: '/repo/a',
+      inheritedCut: 0,
+      nextSeq: 10,
+      effectiveCwd: '/repo/a',
+      lastEventHash: 'tail-s-a',
+      headerHash: sessionHeaderHash({ id: 's-a' }),
+      sourceState: 'persisted',
+      uncertainSources: 0,
+      dirty: false,
+    })
+    assert.equal(reopened.sourceProofOf('s-a')?.sourceRevision, 'rev-1')
+    assert.equal(reopened.sourceProofRevocations, 0, 'a fresh handle starts with no committed revocation')
+  } finally {
+    reopened.close()
+  }
+})
