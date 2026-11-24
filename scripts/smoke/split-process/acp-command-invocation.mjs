@@ -21,7 +21,7 @@ import * as acp from '@agentclientprotocol/sdk'
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
-import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
+import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 import { openSdkClient } from './acp-protocol-projection.mjs'
 import { CliProcess } from './acp-stdio-a1.mjs'
@@ -591,18 +591,19 @@ export async function runAcpCommandInvocation(context) {
         sessionId: stdioSession, prompt: promptText('/feedback stdio real wire'),
       })
       assert(stdioFeedback?.stopReason === 'end_turn', 'STDIO-01: public stdio /feedback must end_turn')
-      const stdioFeedbackEvents = hostSessionEvents(dshHome, stdioSession) ?? []
-      assert(stdioFeedbackEvents.some(event => event.type === 'feedback/record'),
+      await waitForHostSessionEventAfter(dshHome, stdioSession, 0,
+        event => event.type === 'feedback/record',
         'STDIO-01: public stdio /feedback must reach the official Host sink')
       const stdioCompact = await stdio.connection.agent.request(acp.methods.agent.session.prompt, {
         sessionId: stdioSession, prompt: promptText('/compact'),
       })
       assert(stdioCompact?.stopReason === 'end_turn', 'STDIO-01: public stdio /compact must end_turn')
+      await waitForHostSessionEventAfter(dshHome, stdioSession, 0,
+        event => event.type === 'compaction/summary',
+        'STDIO-01: public stdio /compact must commit a real summary')
       const stdioCompactEvents = hostSessionEvents(dshHome, stdioSession) ?? []
       assert(stdioCompactEvents.some(event => event.type === 'compaction/start'),
         'STDIO-01: public stdio /compact must reach the official engine')
-      assert(stdioCompactEvents.some(event => event.type === 'compaction/summary'),
-        'STDIO-01: public stdio /compact must commit a real summary')
       trace('acp-command/public-stdio', { sessionId: stdioSession })
     } finally {
       await stdio.close().catch(() => {})
