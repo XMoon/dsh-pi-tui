@@ -177,7 +177,6 @@ test('the extracted split-smoke modules import without starting a lane', (t) => 
     'scripts/smoke/split-process/account-composition.mjs',
     'scripts/smoke/split-process/subagent-settings-fr5a.mjs',
     'scripts/split-process-smoke.mjs',
-    'scripts/split-process-upgrade-smoke.mjs',
   ].map(relative => JSON.stringify(pathToFileURL(join(ROOT, relative)).href))
   const probe = `
     for (const url of [${urls.join(', ')}]) await import(url)

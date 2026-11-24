@@ -374,7 +374,6 @@ mise exec -- pnpm smoke:macos-split -- --list                          # macOS: 
 mise exec -- pnpm smoke:macos-split -- <candidate.tgz> --case <id>     # macOS: the shared selected runner
 mise exec -- pnpm smoke:macos-split -- <candidate.tgz> --suite <suite>
 mise exec -- pnpm smoke:macos-split -- <candidate.tgz>                 # macOS: the legacy A/P/M/L parity scene (no selector)
-mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
 ```
 
 The GitHub Actions `CI` workflow also accepts an optional
@@ -493,91 +492,42 @@ true`. Historical F1/F2 upgrades may retain an old Profile's existing policy.
 `pack:release` runs this gate against the same single packed tarball after the
 eight public-package smokes.
 
-The Upgrade lane has its own strict selector over two genuinely different
-packaged builds pinned to the same exact DSH runtime (internal qualification
-samples, not a supported historical user release):
+The internal Upgrade qualification is the opt-in Vitest suite described under
+[Split-process Vitest E2E](#split-process-vitest-e2e); it has no selector-based
+CLI, no full/selected report shape and no compatibility alias. Both artifacts
+in every upgrade scene are internal qualification
+packages built from this repository or the candidate under test, not a
+supported historical user release; the suite does not promise user upgrade or
+rollback compatibility with early unpublished development snapshots.
 
-```sh
-mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz>   # complete U01-U09
-mise exec -- pnpm smoke:split-upgrade -- --list
-mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --suite client-reload
-mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> --case upgrade.cross-build-compatibility
-```
+The complete Split Process lane and the opt-in Upgrade Vitest scenes install
+packaged payloads and drive real Host/Client processes over a PTY, so they
+share the same exact-runtime input rule. A selected Process case runs only the
+resources its own contract needs — the `bootstrap.host-runtime-disabled`
+negative starts one real Host and deliberately no TUI Client. The DSH runtime
+of a run is the exact `@deepseek-ai/dsh-agent` development pin of this
+checkout, and every artifact must declare that SAME pin in its own
+`package/package.json` — not a range, not a floor, and not the version a file
+name suggests. The production Client refuses a replacement target pinned to a
+different runtime, so an artifact built against another DSH version can never
+produce the behaviour these lanes assert. Such a pairing stops before any work
+root, install or process exists and is reported as `INPUT_UNQUALIFIED` with the
+role, the artifact identity, both exact versions and the reason: it is an
+invalid test pairing, not a product regression, and the fix is to rebuild the
+artifact against the current pin. The full and selected Process entries use the
+same preflight; a selected case installs nothing until that preflight has
+qualified the exact pin. The Upgrade Vitest projects run the same pair guard
+before their Scene root exists.
 
-The DEFAULT form is the complete U01-U09 qualification: it runs every
-default-lane registered case and emits only actual case results. Two OS native
-cases are selectable-only and never join the default lane —
-`managed-daemon.cross-build-upgrade-rollback` requires a real isolated Linux
-systemd user manager, and `launchd-managed-daemon.cross-build-upgrade` requires
-a real macOS `gui/<uid>` LaunchAgent. Run either explicitly:
-
-```sh
-mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
-  --case managed-daemon.cross-build-upgrade-rollback
-mise exec -- pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> \
-  --case launchd-managed-daemon.cross-build-upgrade
-```
-
-Both artifacts in every upgrade case are internal qualification packages built
-from this repository or the candidate under test, not a supported historical
-user release; the lane does not promise user upgrade or rollback compatibility
-with early unpublished development snapshots.
-
-`--list` prints `SPLIT_UPGRADE_SELECTABLE_CASES scope=SELECTABLE_ONLY` followed
-by one `suite=<suite> case=<id> title=<title>` line per registry entry in
-execution order (including both opt-in native cases:
-`managed-daemon.cross-build-upgrade-rollback` and
-`launchd-managed-daemon.cross-build-upgrade`), without reading a tarball,
-creating a work root or installing DSH. `--case` and `--suite` run only the
-registered cases of that id/suite in their own work root and print one
-`SPLIT_UPGRADE_SELECTED_PASS id=<id> scope=SELECTABLE_ONLY` per executed case;
-their stdout and `--evidence` document are the partial `scope: SELECTABLE_ONLY`
-JSON carrying `selectedCases` and only the executed cases' facts. Each opt-in
-native case only earns that line with a real
-`{status: PASS, scope: REAL_SYSTEMD_USER_L6}` or
-`{status: PASS, scope: REAL_MACOS_GUI_L6}` verdict: a missing isolated systemd
-user-manager or macOS GUI launchd environment returns an honest `NOT_VERIFIED`,
-prints `SPLIT_UPGRADE_SELECTED_NOT_VERIFIED` instead and makes the lane exit
-nonzero. A selected run never emits `SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)`,
-`status: PASS` or `verdict: cross-build-compatible`. Only the complete form (no
-selector) runs all three DEFAULT-lane registered cases; the opt-in native cases
-never join it, and the complete form may emit the historical full marker and
-`status: PASS`/`verdict: cross-build-compatible`. Unknown, repeated or combined
-selectors, a missing `--old`/`--new`, and a same-path, same-SHA or differently
-pinned pairing all fail closed before any work root, profile or DSH installation
-exists. The same-package-version rule still binds the complete form and every
-default-lane selection; only an exclusively opt-in native selection may pair
-two builds of one version, and their real difference is the production
-`computeBuildId`, never the SemVer string. `SPLIT_UPGRADE_SMOKE_FAIL_AFTER` accepts only the three fixed
-`<case-id>.after-…-host-spawn` values used by the cases; any other value has no
-effect.
-
-The complete Split lane and the Upgrade lane install packaged payloads and
-drive real Host/Client processes over a PTY, so they share the same input rule.
-A selected case runs only the resources its own contract needs — the
-`bootstrap.host-runtime-disabled` negative starts one real Host and
-deliberately no TUI Client. The DSH runtime of a run is the exact
-`@deepseek-ai/dsh-agent` development pin of this checkout, and every artifact
-must declare that SAME pin in its own `package/package.json` — not a range, not
-a floor, and not the version a file name suggests. The production Client
-refuses a replacement target pinned to a different runtime, so an artifact
-built against another DSH version can never produce the behaviour these lanes
-assert. Such a pairing stops before any work root, install or process exists
-and is reported as `INPUT_UNQUALIFIED` with the role, the artifact identity,
-both exact versions and the reason: it is an invalid test pairing, not a
-product regression, and the fix is to rebuild the artifact against the current
-pin. The full and selected entries use the same preflight; a selected case
-installs nothing until that preflight has qualified the exact pin.
-
-A default run is diagnosable without any environment variable. Both lanes
-announce the qualified artifact identity at startup, one checkpoint per setup
-phase and per business milestone (for example the Web Product group,
+A default Split Process run is diagnosable without any environment variable.
+The lane announces the qualified artifact identity at startup, one checkpoint
+per setup phase and per business milestone (for example the Web Product group,
 stale-peer and WP11 markers, so a long scene keeps default-visible interim
 progress), and one lifecycle scope per case and Recovery subscene:
 `[split] <ISO-UTC> START <scope>`, then `DONE <scope> durationMs=…` or
 `ERROR <scope> durationMs=…` (nested scopes print their own ERROR; the raw
-stack is printed once). On failure they print a fixed summary plus the REAL
-caught error (its stack when available) and write exactly one default-retained
+stack is printed once). On failure it prints a fixed summary plus the REAL
+caught error (its stack when available) and writes exactly one default-retained
 artifact — a `failure.json` in a fresh private directory under the OS temp root
 (directory `0700`, file `0600`), never inside the work root the lane deletes
 during cleanup. The report keeps the structural fields (lane, category, stable
@@ -588,8 +538,8 @@ entries, per-process exit and official event names) and appends the caught
 does not disappear. A failed lane assertion is locatable through its own
 `<lane>.mjs:<line>` site, derived from the real stack, restricted to the lane
 scripts and their extracted case/support modules, and omitted entirely when
-nothing trusted can be read. The only code a report may name is one the lanes
-declare; an unknown `error.code` leaves the entry at its category instead of
+nothing trusted can be read. The only code a report may name is one the lane
+declares; an unknown `error.code` leaves the entry at its category instead of
 becoming reported text, and a report write that fails is announced as
 `DIAGNOSTIC_WRITE_FAILURE` with its errno only — never turning a failure into a
 pass or blocking the cleanup. A passing run writes no report.
@@ -601,21 +551,15 @@ Authorization header and loopback origin before the terminal and the report.
 Non-Web scopes keep their real error text. The diagnostics never capture raw
 terminal bytes, record contents or session text on their own.
 
-`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` preserve the isolated
-work root, which holds the real profile, session logs and private telemetry of
-the run; they do not gate whether the error text is visible. That directory
-stays local: never attach or upload it as evidence. `--evidence` is a requested
-deliverable, not a diagnostic: the PASS document is written onto a freshly
-created private `0600` inode BEFORE the success marker is printed, so a lane
-that cannot land the evidence its operator asked for fails instead of
-announcing a pass, and a pre-existing target never keeps a looser mode. A
-failure writes the same failure projection to that path instead. Its path is
-outside the work root.
+`SPLIT_PROCESS_SMOKE_KEEP=1` preserves the isolated Process work root, which
+holds the real profile, session logs and private telemetry of the run; it does
+not gate whether the error text is visible. That directory stays local: never
+attach or upload it as evidence.
 
-Record a lane result exactly as the lane reports it: the candidate and old
-package SHA256 values, the exact DSH pin, the command, and the per-lane
-PASS/FAIL with the checkpoint a failure reached. Synthetic manifest-only
-tarballs are input-preflight fixtures; they never qualify a pairing.
+Record a lane result exactly as the lane reports it: the candidate package
+SHA256, the exact DSH pin, the command, and the PASS/FAIL with the checkpoint a
+failure reached. Synthetic manifest-only tarballs are input-preflight
+fixtures; they never qualify a pairing.
 
 `mise exec -- pnpm smoke:direct-empty-retirement -- <candidate.tgz>` is a Linux/PTY-only
 real-DSH smoke for the Direct session-retirement contract: it boots the
@@ -671,10 +615,15 @@ artifacts from genuinely different builds: `SPLIT_VITEST_UPGRADE_OLD_TGZ` and
 `@deepseek-ai/dsh-agent` development pin as this checkout; the default project
 requires different package versions and different SHA256 digests. The pair is
 qualified before any scene root, profile install or Host exists, and an invalid
-pairing fails as `INPUT_UNQUALIFIED`, not as a product regression. The two native
-projects (`test:split:upgrade:systemd`, `test:split:upgrade:launchd`) are explicit
-opt-in entries only: no default command selects them. An empty project run exits non-zero with no tests; that empty result is a
-truthful `NOT_READY`, never an Upgrade PASS.
+pairing fails as `INPUT_UNQUALIFIED`, not as a product regression. The default
+project runs the three default business files with `maxWorkers=2` and real file
+parallelism; it starts no native OS manager. The two native projects
+(`test:split:upgrade:systemd`, `test:split:upgrade:launchd`) are explicit
+opt-in entries only, each with `maxWorkers=1` in its own manager conflict
+domain: systemd needs an isolated Linux user manager, launchd a real macOS
+`gui/<uid>` LaunchAgent. A missing manager environment is a nonzero
+`NOT_VERIFIED`, never a skipped pass. An empty project run exits non-zero with
+no tests; that empty result is a truthful `NOT_READY`, never an Upgrade PASS.
 
 ### Isolated single-file and probe runs
 
@@ -728,7 +677,7 @@ probes it delegates:
    are no longer needed. Confirm owned processes have stopped before deleting
    their resources; never delete by a broad `/tmp` prefix or glob.
 3. Preserve artifacts needed for handoff and evidence explicitly requested by
-   the operator (for example, an `--out`, `--evidence` or documented evidence
+   the operator (for example, an `--out` path or a documented evidence
    destination). Do not remove another run's artifacts. For each handoff
    artifact, identify its exact path, purpose and cleanup owner.
 4. In the final task report, confirm cleanup of the agent's failed-run artifacts
