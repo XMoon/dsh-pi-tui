@@ -1593,14 +1593,16 @@ export class TranscriptFolder {
     // turn value / grouped turn from that anchor.
     const turn = transcriptTurnOf(message)
     const anchorTurn = turn ?? this.placementAnchorTurn()
-    if (turn === undefined && (message.kind === 'command' || message.kind === 'compaction')) {
-      this.standalonePlacementTurns.set(message, anchorTurn)
-    }
     this.searchEntries.push({
       turn: anchorTurn,
       normalizedText: corpus.normalizedText,
       spans: corpus.spans,
     })
+    // Standalone placement goes through the ONE write path (which also keeps
+    // the search entry in sync); the anchor is never semantic ownership.
+    if (turn === undefined && (message.kind === 'command' || message.kind === 'compaction')) {
+      this.setPlacementAnchor(message, index, anchorTurn)
+    }
     if (turn === undefined && !this.seenAcceptedTurnStart) this.pendingAnchorEntries.push(index)
     this.searchRevisionCounter += 1
     if (turn !== undefined) {
@@ -4870,7 +4872,7 @@ export class TranscriptFolder {
     // the visible/searchable representative now. A standalone card has no
     // semantic turn at all; a defensive numeric card keeps its real owner for
     // registration while the anchor still steers window/search placement.
-    const anchor = this.standalonePlacementTurns.get(message)
+    const anchor = this.placementAnchorOf(message)
     if (anchor !== undefined) this.setPlacementAnchor(message, index, anchor)
     // The card's corpus now carries the command fields and the raw command
     // entry stops producing hits — both entries re-normalize lazily.

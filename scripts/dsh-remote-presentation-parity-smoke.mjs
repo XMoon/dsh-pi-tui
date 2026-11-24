@@ -135,6 +135,29 @@ const STANDALONE_AFTER_TURN = 57
 const STANDALONE_COMPACTION_ID = 'presentation-standalone-compaction'
 const STANDALONE_COMPACTION_ERROR = 'standalone fixture failure'
 
+/**
+ * Deterministic fixture clock for the durable seed. `Session.append` stamps
+ * `Date.now()`, and real wall-clock milliseconds can coalesce a whole turn —
+ * that would make an absolute Activity-boundary assertion vacuous. The seed
+ * only needs strictly increasing event times, so advance one millisecond per
+ * append and restore the real clock immediately afterwards. Production code is
+ * untouched; the live transient keeps its own explicit times.
+ */
+function withFixtureClock(body) {
+  const originalNow = Date.now
+  let current = 1_700_000_000_000
+  Date.now = () => {
+    const value = current
+    current += 1
+    return value
+  }
+  try {
+    return body()
+  } finally {
+    Date.now = originalNow
+  }
+}
+
 function appendTurn(session, turn, text, context = false) {
   session.append('turn/start', { turn })
   if (context) {
@@ -273,23 +296,25 @@ async function createHost() {
   const session = ctx.get('sessions').create(SessionId('presentation-session'), {
     meta: { cwd: '/tmp/dsh-d1-3-presentation', createdAt: 4_000 },
   })
-  for (let turn = 0; turn < 60; turn += 1) {
-    // The extra counted surface message shifts the 50-message initial page so
-    // the boundary turn's assistant is within the oldest included turn. The
-    // lifetime Work's real tool result (turn 58) is surface-visible and REPLACES
-    // the latest turn's extra context row, so the page composition stays tuned.
-    appendTurn(session, turn, `prompt ${turn}`, turn === 0)
-    if (turn === STANDALONE_AFTER_TURN) {
-      // A standalone maintenance transaction BETWEEN two real turns: the
-      // official `turn: null` owner must stay independent of both.
-      session.append('compaction/start', { compactionId: STANDALONE_COMPACTION_ID, turn: null })
-      session.append('compaction/end', {
-        compactionId: STANDALONE_COMPACTION_ID,
-        turn: null,
-        error: STANDALONE_COMPACTION_ERROR,
-      })
+  withFixtureClock(() => {
+    for (let turn = 0; turn < 60; turn += 1) {
+      // The extra counted surface message shifts the 50-message initial page so
+      // the boundary turn's assistant is within the oldest included turn. The
+      // lifetime Work's real tool result (turn 58) is surface-visible and REPLACES
+      // the latest turn's extra context row, so the page composition stays tuned.
+      appendTurn(session, turn, `prompt ${turn}`, turn === 0)
+      if (turn === STANDALONE_AFTER_TURN) {
+        // A standalone maintenance transaction BETWEEN two real turns: the
+        // official `turn: null` owner must stay independent of both.
+        session.append('compaction/start', { compactionId: STANDALONE_COMPACTION_ID, turn: null })
+        session.append('compaction/end', {
+          compactionId: STANDALONE_COMPACTION_ID,
+          turn: null,
+          error: STANDALONE_COMPACTION_ERROR,
+        })
+      }
     }
-  }
+  })
 
   const agentFiber = ctx.plugin(() => {})
   const agent = {
@@ -427,10 +452,18 @@ async function main() {
       && event.data?.commandId === COMMAND_ID)
     const lifetimeToolResult = directSnapshot.durableEvents.find(event => event.type === 'tool/result'
       && event.data?.message?.toolCallId === LIFETIME_TOOL_CALL)
+    const lifetimeClosingAssistant = directSnapshot.durableEvents.find(event => event.type === 'assistant/message'
+      && event.data?.turn === COMMAND_TURN)
     assert.ok(lifetimeCommandRun !== undefined, 'fixture did not retain the lifetime command run')
     assert.ok(lifetimeToolResult !== undefined, 'fixture did not retain the lifetime tool result')
-    assert.ok(lifetimeToolResult.time <= lifetimeCommandRun.time,
-      'fixture ordering: the member settles before the real command boundary')
+    assert.ok(lifetimeClosingAssistant !== undefined, 'fixture did not retain the later assistant boundary')
+    // STRICT seed ordering is part of the proof: if the whole turn shared one
+    // millisecond, a command-free fold could still land on the same time and the
+    // absolute assertion below would be vacuous.
+    assert.ok(lifetimeToolResult.time < lifetimeCommandRun.time,
+      'fixture ordering: the member settles STRICTLY before the real command boundary')
+    assert.ok(lifetimeCommandRun.time < lifetimeClosingAssistant.time,
+      'fixture ordering: a later boundary follows STRICTLY after the real command point')
     const standaloneCompactionEnd = directSnapshot.durableEvents.find(event => event.type === 'compaction/end'
       && event.data?.compactionId === STANDALONE_COMPACTION_ID)
     assert.ok(standaloneCompactionEnd !== undefined, 'fixture did not retain the standalone compaction bracket')
