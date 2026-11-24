@@ -612,24 +612,27 @@ class ProcessScene implements SplitProcessScene {
       const other = this.#findOtherParallelScene(auditRunId, otherLabel)
       if (other !== undefined) {
         this.#assertParallelSeparation(other, host, client)
-        this.#assertReceiptSceneLive(other)
         const ownReceipt = this.#ownReceipt()
         assert(ownReceipt !== undefined, `${label}: this Scene has no durable Supervisor receipt`)
-        this.#assertReceiptSceneLive(ownReceipt)
-        // Re-check THIS Scene after the other side was observed: both live
-        // intervals genuinely intersect.
-        await this.hostStatus(host)
-        const after = await client.state()
-        assert(after.exited === false && after.sessionListed === true,
-          `${label}: this Scene's Client stopped during the overlap check`)
-        await this.report('parallel-overlap', {
-          label,
-          otherRunId: other.runId,
-          otherLabel,
-          otherHostPid: other.host?.pid ?? null,
-          checkedAt: new Date().toISOString(),
-        })
-        return
+        // A kernel read can be transiently unavailable under system load; the
+        // STATIC missing birth still fails, while an unreadable live PID keeps
+        // polling within this bounded overlap window.
+        if (this.#isReceiptSceneLive(other) && this.#isReceiptSceneLive(ownReceipt)) {
+          // Re-check THIS Scene after the other side was observed: both live
+          // intervals genuinely intersect.
+          await this.hostStatus(host)
+          const after = await client.state()
+          assert(after.exited === false && after.sessionListed === true,
+            `${label}: this Scene's Client stopped during the overlap check`)
+          await this.report('parallel-overlap', {
+            label,
+            otherRunId: other.runId,
+            otherLabel,
+            otherHostPid: other.host?.pid ?? null,
+            checkedAt: new Date().toISOString(),
+          })
+          return
+        }
       }
       if (Date.now() - started >= 120_000) {
         throw new Error(`${label}: the other split-process Scene never reported a live parallel-ready checkpoint`)
@@ -713,24 +716,28 @@ class ProcessScene implements SplitProcessScene {
     return this.#receipts().find(receipt => receipt.runId === this.runId)
   }
 
-  #assertSameLiveKernel(pid: number | null | undefined, birth: string | undefined, label: string): void {
+  #isSameLiveKernel(pid: number | null | undefined, birth: string | undefined, label: string): boolean {
     assert(typeof pid === 'number' && Number.isInteger(pid) && pid > 0, `${label}: no real PID`)
     assert(typeof birth === 'string' && birth !== '', `${label}: no recorded kernel birth`)
-    assert(kernelBirthOf(pid) === birth, `${label}: not the live kernel process it registered`)
+    const live = kernelBirthOf(pid)
+    if (live === undefined) return false
+    assert(live === birth, `${label}: not the live kernel process it registered`)
+    return true
   }
 
-  /** Re-prove the other receipt names live, still-same kernel identities. */
-  #assertReceiptSceneLive(other: SupervisorReceipt): void {
-    this.#assertSameLiveKernel(other.host?.pid, other.host?.birth,
-      'the other parallel Scene Host')
+  /** Re-prove the receipt names live, still-same kernel identities. */
+  #isReceiptSceneLive(other: SupervisorReceipt): boolean {
+    let live = this.#isSameLiveKernel(other.host?.pid, other.host?.birth,
+      'the parallel Scene Host')
     for (const entry of other.processClients ?? []) {
-      this.#assertSameLiveKernel(entry.shellPid, entry.shellBirth,
-        'the other parallel Scene Client shell')
+      live = this.#isSameLiveKernel(entry.shellPid, entry.shellBirth,
+        'the parallel Scene Client shell') && live
       for (const business of entry.businessIdentities ?? []) {
-        this.#assertSameLiveKernel(business.pid, business.birth,
-          'the other parallel Scene Client business process')
+        live = this.#isSameLiveKernel(business.pid, business.birth,
+          'the parallel Scene Client business process') && live
       }
     }
+    return live
   }
 
   /**
