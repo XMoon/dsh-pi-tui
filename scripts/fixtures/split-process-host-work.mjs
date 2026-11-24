@@ -1576,6 +1576,7 @@ class C1Model extends LlmAdapter {
           const deadline = Date.now() + 30_000
           while (!existsSync(`${hold}.release`)) {
             if (options.signal?.aborted === true) {
+              appendFileSync(`${hold}.aborted`, `${String(process.pid)}\n`, { mode: 0o600 })
               throw options.signal.reason instanceof Error
                 ? options.signal.reason
                 : new Error('acp-command compaction hold aborted')

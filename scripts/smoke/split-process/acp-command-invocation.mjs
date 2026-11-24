@@ -83,6 +83,7 @@ async function waitForFile(path, label, timeoutMs = 120_000) {
 function resetHold(root) {
   rmSync(`${root}.entered`, { force: true })
   rmSync(`${root}.release`, { force: true })
+  rmSync(`${root}.aborted`, { force: true })
 }
 
 function clearTurnHold(root, sessions) {
@@ -163,6 +164,17 @@ export async function runAcpCommandInvocation(context) {
       lifecycleSignal(action, targetSession, fields)
       return await waitForC1WorkEvent(hostWorkRoot,
         event => event.kind === kind && event.sessionId === targetSession, label, 120_000)
+    }
+    let accessSequence = 0
+    const acpAccess = async (peerProcess, label, value) => {
+      const requestId = `command-acp-access-${String(++accessSequence)}-${String(peerProcess.pid)}`
+      peerProcess.send({
+        op: 'qualification-acp-access',
+        requestId,
+        ...(value === undefined ? {} : { acpEnabled: value }),
+      })
+      return await peerProcess.waitFor(entry => entry.op === 'acp-access' && entry.requestId === requestId,
+        `${label} acp-access`, 120_000)
     }
     const settle = promise => promise.then(value => ({ value }), error => ({ error }))
     const captureError = async (label, promise) => {
@@ -365,6 +377,7 @@ export async function runAcpCommandInvocation(context) {
         'CMP-03: the exact-session turn hold must not enter before maintenance ends')
 
       await client.notify(acp.methods.agent.session.cancel, { sessionId })
+      await waitForFile(`${holdRoot}.aborted`, 'CMP-03 the real provider signal aborts', 30_000)
       writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
       const cancelledOutcome = await cancelledRequest
       const cmp03ReplyUpdates = updates.slice(cmp03FrameOffset)
@@ -1147,6 +1160,171 @@ export async function runAcpCommandInvocation(context) {
       'CMP-06: Fiber disposal before commit never produces a summary')
     trace('acp-command/fiber-disposal', { compactionId: disposeId, code: disposeError.data.code })
 
+    // LIFE-03: Off→On while a real /compact is held at the official
+    // post-summary flush. Off closes ACP delivery, but the exact command claim
+    // and its scoped MCP lease stay fenced until the raw execution Promise
+    // settles. A different Session's real TUI keeps working; after On, the old
+    // Session is refused until that terminal, then reattaches and prompts
+    // without receiving the old command's result.
+    if (typeof scene.c1Work.scopedMcpServerPath !== 'string') {
+      throw new SplitSmokeAssertionError(`${CASE_ID}: the scoped MCP server fixture was not installed for LIFE-03`)
+    }
+    const offRoot = join(workDir, 'acp-command-off-on')
+    mkdirSync(offRoot, { recursive: true, mode: 0o700 })
+    const offProof = join(offRoot, 'mcp-proof.jsonl')
+    rmSync(offProof, { force: true })
+    const offSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd,
+      mcpServers: [{
+        name: 'off-on-scope',
+        command: process.execPath,
+        args: [scene.c1Work.scopedMcpServerPath],
+        env: [
+          { name: 'B0_FIXTURE_PROOF', value: offProof },
+          { name: 'B0_SERVER_TAG', value: 'off-on-scope' },
+          { name: 'B0_RUN_NONCE', value: `offon-${String(process.pid)}` },
+        ],
+      }],
+    })).sessionId
+    const offMcpEvents = () => existsSync(offProof)
+      ? readFileSync(offProof, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)] } catch { return [] }
+      })
+      : []
+    await waitFor(() => offMcpEvents().some(event => event.kind === 'server-start') ? true : undefined,
+      'LIFE-03 the real scoped MCP server start')
+    const bOffSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const offRelease = join(offRoot, 'flush-release')
+    rmSync(offRelease, { force: true })
+    try {
+      const offSeed = await client.request(acp.methods.agent.session.prompt, {
+        sessionId: offSession, prompt: promptText(HISTORY_PROMPT),
+      })
+      assert(offSeed?.stopReason === 'end_turn', 'LIFE-03: the Off/On seed must end_turn')
+      resetHold(holdRoot)
+      const beforeOff = hostSessionEvents(dshHome, offSession).length
+      const offFrameOffset = updates.length
+      let offSettled = false
+      const offCommand = settle(client.request(acp.methods.agent.session.prompt, {
+        sessionId: offSession, prompt: promptText('/compact'),
+      }))
+      void offCommand.then(() => { offSettled = true })
+      await waitForFile(`${holdRoot}.entered`, 'LIFE-03 the held summarizer before Off')
+      await lifecycleAction('arm-hold-flush', offSession, 'lifecycle-flush-hold-armed', 'LIFE-03 arm the held flush', { release: offRelease })
+      writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+      await waitForC1WorkEvent(hostWorkRoot,
+        event => event.kind === 'lifecycle-flush-held' && event.sessionId === offSession,
+        'LIFE-03 the post-summary flush is held', 120_000)
+      // The post-summary flush is the durability boundary; the live ACP frames
+      // prove the clean bracket before that flush is held, while the durable log
+      // is checked only after the release below. The end frame is projected
+      // asynchronously after the durable end, so wait for that real frame.
+      await waitFor(() => updates.slice(offFrameOffset).some(params => params?.sessionId === offSession
+        && params.update?.sessionUpdate === 'compaction_update'
+        && params.update.status === 'completed') ? true : undefined,
+      'LIFE-03 the live completed frame', 10_000)
+      const heldFrames = updates.slice(offFrameOffset)
+        .filter(params => params?.sessionId === offSession
+          && params.update?.sessionUpdate === 'compaction_update')
+        .map(params => params.update)
+      const heldId = heldFrames[0]?.compactionId
+      assert(typeof heldId === 'string'
+        && heldFrames.some(frame => frame.compactionId === heldId
+          && frame.status === 'in_progress' && frame.summary === undefined)
+        && heldFrames.some(frame => frame.compactionId === heldId
+          && frame.status === 'in_progress' && frame.summary !== undefined)
+        && heldFrames.some(frame => frame.compactionId === heldId
+          && frame.status === 'completed' && frame.error === undefined),
+      `LIFE-03: the held command must have delivered its clean live bracket (${JSON.stringify(heldFrames)})`)
+      assert(offSettled === false, 'LIFE-03: the command cannot answer while the official flush is held')
+
+      const disabled = await acpAccess(peer, 'LIFE-03 Off', false)
+      assert(disabled.ok === true && disabled.status?.state === 'disabled',
+        `LIFE-03: ACP Off must disable the same Host listener (${JSON.stringify(disabled)})`)
+      assert((await scene.hostIdentityFacts(host)).hostPid === hostIdentity.hostPid,
+        'LIFE-03: Off must not replace the Host')
+      await waitFor(() => offSettled ? true : undefined,
+        'LIFE-03 the old ACP delivery closes on Off', 60_000)
+      const offOutcome = await offCommand
+      assert(offOutcome.error !== undefined,
+        `LIFE-03: Off must not fabricate a command success (${JSON.stringify(offOutcome.value)})`)
+
+      // A real TUI on a DIFFERENT Session keeps working while ACP is off.
+      const bOffTui = await scene.startC1Client('LIFE-03 B TUI', { SPLIT_PROCESS_CLIENT_SESSION: bOffSession })
+      await waitForSurfaceStatus(bOffTui.client, record => record.sessionOpen === true
+        && record.openSessionId === bOffSession && record.surfaceMounted === true
+        && record.transport === 'connected',
+        'LIFE-03 the B TUI opened while ACP is off')
+      const bOffBefore = hostSessionEvents(dshHome, bOffSession).length
+      bOffTui.client.send('LIFE-03 B works while ACP is off\r')
+      await waitForHostSessionEventAfter(dshHome, bOffSession, bOffBefore,
+        event => event.type === 'user/message'
+          && String(event.data?.content?.[0]?.text ?? '').includes('B works while ACP is off'),
+        'LIFE-03 B works while ACP is off')
+      await waitForHostSessionEventAfter(dshHome, bOffSession, bOffBefore,
+        event => event.type === 'turn/end' && event.data?.reason?.kind === 'completed',
+        'LIFE-03 B completes while ACP is off')
+      await scene.exitC1Client(bOffTui.client, 'LIFE-03 B TUI')
+
+      const enabled = await acpAccess(peer, 'LIFE-03 On', true)
+      assert(enabled.ok === true && enabled.status?.state === 'enabled',
+        `LIFE-03: ACP On must rebind on the same Host (${JSON.stringify(enabled)})`)
+      const offUpdates = []
+      const offClient = await openSdkClient(endpoint, params => { offUpdates.push(params) })
+      clients.push(offClient)
+      await offClient.request(acp.methods.agent.initialize, {
+        protocolVersion: 1, clientCapabilities: { session: { compaction: {} } },
+      })
+      const fenced = await captureError('LIFE-03 fenced resume', settle(offClient.request(acp.methods.agent.session.resume, {
+        sessionId: offSession, cwd: hostCwd,
+      })))
+      assert(fenced?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+        `LIFE-03: the old command claim must fence the Session until its raw terminal (${JSON.stringify(fenced?.data)})`)
+      const activeMcpStart = offMcpEvents().filter(event => event.kind === 'server-start').at(-1)
+      assert(activeMcpStart !== undefined, 'LIFE-03: the scoped MCP server is active')
+      assert(!offMcpEvents().some(event => (event.kind === 'server-sigterm' || event.kind === 'server-stdin-closed')
+        && event.time >= activeMcpStart.time),
+      'LIFE-03: Off/On must not retire the held command lease before its raw terminal')
+
+      writeFileSync(offRelease, '1', { mode: 0o600 })
+      await waitFor(() => offMcpEvents().some(event => (event.kind === 'server-sigterm' || event.kind === 'server-stdin-closed')
+        && event.time >= activeMcpStart.time) ? true : undefined,
+      'LIFE-03 the held command lease retires after the raw terminal', 120_000)
+      const committedEvents = (hostSessionEvents(dshHome, offSession) ?? []).slice(beforeOff)
+      assert(committedEvents.some(event => event.type === 'compaction/start'
+        && event.data?.compactionId === heldId && event.data?.turn === null)
+        && committedEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === heldId)
+        && committedEvents.some(event => event.type === 'compaction/end'
+          && event.data?.compactionId === heldId && event.data?.error === undefined),
+      'LIFE-03: the held command must commit its clean durable bracket')
+      const offResumeOffset = offUpdates.length
+      const resumed = await offClient.request(acp.methods.agent.session.resume, {
+        sessionId: offSession, cwd: hostCwd,
+      })
+      assert(resumed?.sessionId === undefined || resumed.sessionId === offSession,
+        `LIFE-03: A must reattach after the raw terminal (${JSON.stringify(resumed)})`)
+      const offPrompt = await offClient.request(acp.methods.agent.session.prompt, {
+        sessionId: offSession, prompt: promptText(HISTORY_PROMPT),
+      })
+      assert(offPrompt?.stopReason === 'end_turn',
+        `LIFE-03: A must prompt normally after reattach (${JSON.stringify(offPrompt)})`)
+      const staleText = offUpdates.slice(offResumeOffset)
+        .filter(params => params?.sessionId === offSession && params.update?.sessionUpdate === 'agent_message_chunk')
+        .map(params => params.update.content?.text ?? '')
+        .join('')
+      assert(!staleText.includes('Compacted'),
+        'LIFE-03: the new view must not receive the old command result')
+      trace('acp-command/off-on', {
+        heldCompactionId: heldId,
+        oldDeliveryError: offOutcome.error?.data?.code ?? offOutcome.error?.message ?? null,
+        fenceCode: fenced.data.code,
+        bSession: bOffSession,
+      })
+    } finally {
+      writeFileSync(offRelease, '1', { mode: 0o600 })
+    }
 
     const facts = {
       caseId: CASE_ID,
