@@ -1110,6 +1110,23 @@ test('INS-O3 same-source changes coalesce ONE trailing read and a source replace
     h.presentation.latest()?.inspector?.state === 'ready'
     && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 3)
   assert.equal(probe.states.length, 1, 'a source replacement reuses the ONE selected source')
+
+  // The SAME source must keep its invalidation duty after `source-replaced`.
+  // A replacement fences the in-flight READ identity; it does not retire the
+  // source's future changed/replaced notifications.
+  source.invalidate('changed')
+  await waitUntil('a post-replacement same-source change', () => source.probe.reads === 4)
+  source.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 4) })
+  await waitUntil('the post-replacement refreshed cut', () =>
+    h.presentation.latest()?.inspector?.state === 'ready'
+    && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 4)
+  source.invalidate('source-replaced')
+  await waitUntil('a second replacement revokes again', () => h.presentation.latest()?.inspector?.state === 'loading')
+  await waitUntil('the second replacement read', () => source.probe.reads === 5)
+  source.resolveNext({ kind: 'ready', data: inspectorData(INS_A, 5) })
+  await waitUntil('the twice-replaced cut', () =>
+    h.presentation.latest()?.inspector?.state === 'ready'
+    && (h.presentation.latest()?.inspector as { data?: SessionInspectorData }).data?.stats?.turns === 5)
 })
 
 test('INS-O4 a metadata-only roster revision keeps the cut; a removed target clears it and invalidates a late read', async (t) => {

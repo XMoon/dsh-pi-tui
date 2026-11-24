@@ -440,12 +440,8 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }, INSPECTOR_DEBOUNCE_MS)
   }
 
-  const onInspectorInvalidated = (
-    panel: ActiveRead,
-    sourceEpoch: number,
-    reason: InspectorInvalidation,
-  ): void => {
-    if (!isActive(panel) || panel.inspectorSourceEpoch !== sourceEpoch || panel.inspectorId === undefined) return
+  const onInspectorInvalidated = (panel: ActiveRead, reason: InspectorInvalidation): void => {
+    if (!isActive(panel) || panel.inspectorId === undefined) return
     if (reason === 'source-replaced') {
       // Revoke the old exact cut and fence the in-flight read by epoch; the same
       // source stays responsible for the fresh identity.
@@ -481,7 +477,6 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // Commit the new selection identity BEFORE releasing the old source/read.
     panel.inspectorId = sessionId
     panel.inspectorSourceEpoch += 1
-    const sourceEpoch = panel.inspectorSourceEpoch
     if (panel.inspectorTimer !== undefined) {
       clearTimeout(panel.inspectorTimer)
       panel.inspectorTimer = undefined
@@ -500,8 +495,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     let source: SessionInspectorSource | undefined
     try {
       source = openInspector.call(facts, sessionId, (reason) => {
+        // The source OBJECT identity owns the callback lifetime. `sourceEpoch`
+        // fences READ results only: a `source-replaced` bumps it while keeping
+        // this same source responsible for its future changes.
         if (source === undefined || panel.inspectorSource !== source) return
-        onInspectorInvalidated(panel, sourceEpoch, reason)
+        onInspectorInvalidated(panel, reason)
       })
     } catch (error) {
       options.diag.error('session inspector source', { error: safeErrorMessage(error) })
