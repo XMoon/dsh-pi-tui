@@ -1542,7 +1542,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // is not comparable here and a tail hash alone cannot prove the prefix,
       // so cold start always rebuilds from the official source.
       const outcome = await this.withFullSessionOwnership(sessionId, () =>
-        this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true }))
+        this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true }))
       // A failed source/write aborts coverage. A stale/pending handoff is an
       // ordinary accepted-work obligation owned by the point repair; keep
       // traversing the remaining authoritative IDs.
@@ -1665,7 +1665,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
     counters: HistorySearchPhaseCounters,
-    options: { readonly rebuild: boolean },
+    options: { readonly rebuild: boolean; readonly requiredHandoff?: boolean },
   ): Promise<ReplayOutcome> {
     counters.replayAttempted += 1
     const startedAt = performance.now()
@@ -1683,14 +1683,29 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     try {
       // The enumeration's exact live identity must still describe the SAME
       // source; a replacement here is stale, never merged blindly.
-      if (sessions.get(sessionId) !== record.liveObject) return 'stale'
+      if (sessions.get(sessionId) !== record.liveObject) {
+        if (options.requiredHandoff === true) this.scheduleSessionRepair(sessionId, 'rebuild')
+        return 'stale'
+      }
       if (options.rebuild && witness.expected !== undefined) {
         const reset = await this.resetWitness(witness)
-        if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
+        if (reset !== 'committed') {
+          if (reset === 'failed') return 'failed'
+          // A required authoritative replay was invalidated by ordinary accepted
+          // work (typically pending). Hand that mandatory replay to the same
+          // point-repair owner; the normal drain must not count the old clean
+          // checkpoint as current proof.
+          if (options.requiredHandoff === true) this.scheduleSessionRepair(sessionId, 'rebuild')
+          return 'stale'
+        }
       }
       if (witness.expected !== undefined && witness.expected.headerHash !== sessionHeaderHash(record.header)) {
         const reset = await this.resetWitness(witness)
-        if (reset !== 'committed') return reset === 'failed' ? 'failed' : 'stale'
+        if (reset !== 'committed') {
+          if (reset === 'failed') return 'failed'
+          if (options.requiredHandoff === true) this.scheduleSessionRepair(sessionId, 'rebuild')
+          return 'stale'
+        }
       }
       let outcome: ReplayOutcome
       if (record.live) {
@@ -2130,15 +2145,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     counters: HistorySearchPhaseCounters,
   ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
-    // First/full coverage has NOT been established. A clean on-disk checkpoint
-    // from another incarnation (or an earlier aborted pass) plus a matching live
-    // object cannot prove this Host observed the complete current source; DSH
-    // seed events do not republish on session/event. Force an authoritative
-    // current-incarnation rebuild for every unproven ID.
-    if (this.coverage !== 'proven') {
-      this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
-    }
     let checkpoint = this.index?.checkpointOf(sessionId)
     if (
       checkpoint !== undefined
@@ -2161,7 +2167,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (proof === 'rollback') {
         // Header/cut/tail explicitly replaced: the official source is the
         // authoritative rollback and a rebuild is safe.
-        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
       }
       // The claimed prefix is present: settle the provisional marker, then
       // apply the normal revision rules below.
@@ -2184,11 +2190,24 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // that finds no new tail events would never call writeBatch(), leaving
       // dirty set forever. Reconcile from official events instead.
       this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+    }
+    // Only the normal no-read eligibility changes for an unproven epoch. The
+    // disposed-live dirty/short-durable-source guard ABOVE has priority and must
+    // retain accepted provisional rows; it is never bypassed by this replay. A
+    // clean prior-process checkpoint plus a matching live object is not proof of
+    // this Host's observed source. DSH seed events do not republish on
+    // session/event, so an unproven clean ID needs a current-incarnation replay.
+    if (this.coverage !== 'proven') {
+      this.markRoundInvalidating()
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, {
+        rebuild: true,
+        requiredHandoff: true,
+      })
     }
     if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
       this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
     }
     const droppedCoverage = this.droppedAccepted.get(sessionId)
     if (droppedCoverage !== undefined && checkpoint.nextSeq <= droppedCoverage) {
@@ -2199,7 +2218,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // watermark stays until the committed checkpoint passes it.
       this.markRoundInvalidating()
       if (record.live) return this.rebuildLiveSession(sessionId, persistence, sessions, query)
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
     }
     if (!record.live && record.eventCount !== undefined && record.eventCount < checkpoint.nextSeq) {
       // A durable tail shrink is a rollback: rebuild from the official log. A
@@ -2207,7 +2226,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // events (append is not the durability barrier), so it is never read as a
       // shrink here.
       this.markRoundInvalidating()
-      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
+      return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
     }
     if (!record.live) {
       const unchanged = this.revisionUnchanged(sessionId, record, persistence)
@@ -2217,7 +2236,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // prefix survived a middle-of-log repair, even when the tail event hash
         // still matches. Rebuild from official events instead of trusting it.
         this.markRoundInvalidating()
-        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: !unchanged })
+        return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: !unchanged, requiredHandoff: true })
       }
     }
     if (checkpoint.sourceState === 'live' && !record.live && record.eventCount !== undefined && record.eventCount >= checkpoint.nextSeq) {

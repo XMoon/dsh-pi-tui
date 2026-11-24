@@ -4235,3 +4235,191 @@ test('the round finish requires the full traversal proof even with no outstandin
     await ctx.fiber.dispose()
   }
 })
+
+test('a required initial replay invalidated by ordinary pending is handed to the point repair owner', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r10-replay-handoff-')
+  const source = mutableSource('/repo/r10-a', 'r10-a')
+  source.live = true
+  const firstCtx = new Context()
+  const first = directService(firstCtx, mutableDeps(source).deps, profileDir)
+  try {
+    await waitDirectReady(first)
+  } finally {
+    await first.dispose()
+    await firstCtx.fiber.dispose()
+  }
+
+  const { deps } = mutableDeps(source)
+  const persistence = deps.sessionPersistence()
+  const realList = persistence.list
+  let listEntered!: () => void
+  const listReached = new Promise<void>(resolve => { listEntered = resolve })
+  let releaseList!: () => void
+  const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  const deliver = (seq: number, text: string): void => {
+    const event = {
+      type: 'agent/inbox/spliced',
+      seq,
+      time: 26_000 + seq,
+      data: {
+        target: 'next-turn',
+        start: seq,
+        inserted: [{
+          id: `r10-a-${String(seq)}`,
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user', rpcId: `rpc-r10-a-${String(seq)}` },
+        }],
+      },
+    }
+    source.events.push(event)
+    internals.observeLiveEvent(liveSessionOf(source), event)
+  }
+  try {
+    persistence.list = async () => {
+      listEntered()
+      await listGate
+      return realList.call(persistence)
+    }
+    await listReached
+    // Ordinary accepted work arrives BEFORE the required initial reset against
+    // the retained clean prior-incarnation checkpoint.
+    deliver(3, 'r10-a new three')
+    deliver(4, 'r10-a new four')
+    releaseList()
+    const readyStarted = Date.now()
+    let ready = false
+    while (Date.now() - readyStarted < 3_000) {
+      const answer = await service.search({ scope: 'all', query: 'r10-a new four', limit: 25 }, new AbortController().signal)
+      if (answer.kind === 'ready') {
+        ready = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(ready, true, 'the required replay owner must not wait for the 30 s timer')
+    assert.equal(internals.index.checkpointOf('r10-a')?.nextSeq, 5)
+    const old = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(old.kind, 'ready', JSON.stringify(old))
+    if (old.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(old.items.length, 1)
+    const three = await service.search({ scope: 'all', query: 'r10-a new three', limit: 25 }, new AbortController().signal)
+    assert.equal(three.kind, 'ready', JSON.stringify(three))
+    if (three.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(three.items.length, 1)
+    const four = await service.search({ scope: 'all', query: 'r10-a new four', limit: 25 }, new AbortController().signal)
+    assert.equal(four.kind, 'ready', JSON.stringify(four))
+    if (four.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(four.items.length, 1)
+  } finally {
+    releaseList()
+    persistence.list = realList
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('unproven coverage never resets disposed-live accepted rows against a short durable source', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r10-disposed-short-')
+  const a = mutableSource('/repo/r10-disposed-a', 'r10-disposed-a')
+  const b = mutableSource('/repo/r10-disposed-b', 'r10-disposed-b')
+  a.live = true
+  b.live = true
+  const { deps } = mutableDeps(a, [b])
+  const query = deps.sessionQuery()
+  const realObserve = query.observeSession.bind(query)
+  let bFailed = false
+  query.observeSession = async (id, options) => {
+    if (!bFailed && String(id) === 'r10-disposed-b') {
+      bFailed = true
+      throw new Error('R10-01 injected first-pass B failure')
+    }
+    return realObserve(id, options)
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number; dirty: boolean; sourceState: string } | undefined; occurrenceCount(): number }
+    verifySources(): Promise<void>
+    observeLiveEvent(session: unknown, event: unknown): void
+    observeDisposedSession(session: unknown): void
+  }
+  const waitNotLoading = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const answer = await service.search({ scope: 'all', query: 'r10-disposed', limit: 25 }, new AbortController().signal)
+      if (answer.kind !== 'loading') return
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    throw new Error('first pass did not settle')
+  }
+  const accepted = {
+    type: 'agent/inbox/spliced',
+    seq: 3,
+    time: 27_000,
+    data: {
+      target: 'next-turn',
+      start: 3,
+      inserted: [{
+        id: 'r10-disposed-a-new',
+        role: 'user',
+        content: [{ type: 'text', text: 'r10 disposed accepted new' }],
+        source: { kind: 'user', rpcId: 'rpc-r10-disposed-a' },
+      }],
+    },
+  }
+  try {
+    await waitNotLoading()
+    assert.equal(bFailed, true)
+    assert.equal(internals.index.checkpointOf('r10-disposed-a')?.nextSeq, 3)
+    // A current-incarnation accepted live row, while coverage is unproven (B).
+    a.events.push(accepted)
+    internals.observeLiveEvent(liveSessionOf(a), accepted)
+    const acceptedStarted = Date.now()
+    while (internals.index.checkpointOf('r10-disposed-a')?.nextSeq !== 4 && Date.now() - acceptedStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r10-disposed-a')?.nextSeq, 4)
+    // A retires with a readable but SHORT durable source. The disposal proof
+    // retains the accepted rows and marks dirty.
+    a.live = false
+    a.events = a.events.slice(0, 3)
+    internals.observeDisposedSession({ id: 'r10-disposed-a' })
+    const dirtyStarted = Date.now()
+    while (internals.index.checkpointOf('r10-disposed-a')?.dirty !== true && Date.now() - dirtyStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r10-disposed-a')?.dirty, true)
+    assert.equal(internals.index.occurrenceCount(), 3)
+
+    // B recovers; the next full pass sees A dirty/short under unproven coverage.
+    // It must preserve A's accepted rows instead of resetting to the short log.
+    await internals.verifySources()
+    let answer = await service.search({ scope: 'all', query: 'r10 disposed accepted new', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+    assert.equal(internals.index.checkpointOf('r10-disposed-a')?.nextSeq, 4)
+    assert.equal(internals.index.occurrenceCount(), 5)
+
+    // Restore the authoritative durable source; the current-incarnation replay
+    // repairs A and the exact Owner hit is visible.
+    a.events.push(accepted)
+    await internals.verifySources()
+    await waitDirectReady(service)
+    answer = await service.search({ scope: 'all', query: 'r10 disposed accepted new', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(answer.items.length, 1)
+    assert.equal(internals.index.checkpointOf('r10-disposed-a')?.nextSeq, 4)
+  } finally {
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})

@@ -1651,7 +1651,12 @@ unproven, each authoritative ID requires a current-incarnation authoritative
 replay: a clean prior-process checkpoint plus a matching live identity is not a
 proof of this Host's observed source. A completed final ordinary pending drain
 is also a terminal owner and can settle the traversed round without waiting for
-the periodic timer.
+the periodic timer. While coverage is unproven, the forced current-incarnation
+replay is ordered AFTER the disposed-live dirty/short-durable-source guard;
+accepted provisional rows are never reset before that official proof. A
+required initial authoritative reset invalidated by ordinary pending is handed
+to the point-repair owner; a normal contiguous drain against an older clean
+checkpoint is not full coverage.
 
 The search is a literal Unicode lower-case substring match over the first
 accepted text. `all` addresses every accessible Session of the authenticated
