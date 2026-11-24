@@ -465,7 +465,21 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
    */
   private readonly reconcilePending = new Set<string>()
   /** The first cold pass has not settled yet: queries stay a truthful `loading`. */
-  private initialPassComplete = false
+  /** `booting` only while the first cold pass is still running; `unproven` is truthful incomplete. */
+  private coverage: 'booting' | 'unproven' | 'proven' = 'booting'
+  /**
+   * ONE round-local completeness/ownership record. `expected` is present only
+   * while first/full coverage is unproven; a proven periodic round uses it only
+   * as the destructive barrier. `settled` is the round's per-ID proof; the
+   * round finishes only when every expected ID and deletion settled and no
+   * accepted-payload/repair obligation remains.
+   */
+  private coverageRound: {
+    readonly expected: Set<string> | undefined
+    readonly settled: Set<string>
+    deletionsSettled: boolean
+    invalidating: boolean
+  } | undefined
   /** A pass or repair failed to read the official source; a later full pass clears it. */
   private sourceFaulted = false
   private pendingEventCount = 0
@@ -966,9 +980,34 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         this.scheduleSessionRepair(sessionId, 'rebuild')
         return
       }
+      this.finishCoverageRound()
       if (this.pending.size > 0) this.enqueueDrain()
       this.refreshCompleteness()
     })
+  }
+
+  /**
+   * ONE per-ID destructive owner: the full pass claims the ID in the existing
+   * repair-flight map, so a point repair requested during the full candidate is
+   * coalesced and starts only after the release. The terminal witness remains
+   * the second, non-substitutable fence.
+   */
+  private async withFullSessionOwnership<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    for (;;) {
+      const active = this.sessionRepairFlights.get(sessionId)
+      if (active === undefined) break
+      await active.promise.then(() => undefined, () => undefined)
+    }
+    const claim = Promise.resolve()
+    this.sessionRepairFlights.set(sessionId, { promise: claim, kind: 'rebuild' })
+    try {
+      return await work()
+    } finally {
+      const registered = this.sessionRepairFlights.get(sessionId)
+      if (registered?.promise === claim) this.sessionRepairFlights.delete(sessionId)
+      if (this.disposalRequests.delete(sessionId)) this.scheduleSessionRepair(sessionId, 'disposal')
+      else if (this.rebuildRequests.delete(sessionId)) this.scheduleSessionRepair(sessionId, 'rebuild')
+    }
   }
 
   /**
@@ -1426,6 +1465,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const counters = this.emptyPhaseCounters()
     const writerBefore = { ...this.writerCounters }
     let outcome: HistorySearchPhaseOutcome = 'incomplete'
+    let coverageComplete = false
     try {
       const profile = this.deps.profileContext()
       const persistence = this.deps.sessionPersistence()
@@ -1448,8 +1488,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         return
       }
       this.index = index
-      await this.coldStart(persistence, sessions, query, counters)
-      this.sourceFaulted = false
+      coverageComplete = await this.coldStart(persistence, sessions, query, counters)
+      if (coverageComplete) this.sourceFaulted = false
     } catch (error) {
       if (!this.lifecycle.signal.aborted && !this.disposed) {
         this.sourceFaulted = true
@@ -1457,10 +1497,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         this.diag.warn('history search bootstrap failed', { category: error instanceof Error ? error.name : 'unknown' })
       }
     } finally {
-      this.initialPassComplete = true
+      // A failed/partial first pass never establishes initial coverage. A later
+      // completed full pass (or the round's point repairs) may.
+      if (this.coverage === 'booting') this.coverage = coverageComplete ? 'proven' : 'unproven'
       if (this.lifecycle.signal.aborted || this.disposed) {
         outcome = 'cancelled'
       } else {
+        if (this.pending.size > 0) this.enqueueDrain()
         this.refreshCompleteness()
         outcome = this.settledPhaseOutcome()
       }
@@ -1475,30 +1518,34 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
     counters: HistorySearchPhaseCounters,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const signal = this.lifecycle.signal
     // Capture the deletion cut BEFORE the persisted roster is sampled. A
     // Session created later in this round is not a deletion candidate even if
     // the old roster and the live registry both omit it.
     const deletionCut = this.deletionCut()
     const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'cold_start')
-    await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut)
+    this.beginCoverageRound(official)
+    this.markRoundInvalidating()
+    const deletion = await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut)
+    if (deletion === 'failed') return false
+    if (this.coverageRound !== undefined) this.coverageRound.deletionsSettled = deletion === 'complete'
     for (const [sessionId, record] of official) {
       counters.sessionsVisited += 1
       signal.throwIfAborted()
       // A checkpoint read from disk belongs to a PREVIOUS process. Its revision
       // is not comparable here and a tail hash alone cannot prove the prefix,
       // so cold start always rebuilds from the official source.
-      const outcome = await this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
-      if (outcome === 'failed') return
-      if (outcome === 'complete') {
-        // The pending live batch is a SHORT commit: it must use the ONE serial
-        // writer and settle before the cold pass continues.
-        const drained = await this.enqueueWrite(() => {
-          this.drainPendingSession(sessionId)
-        })
-        if (drained === 'failed') return
-      }
+      const outcome = await this.withFullSessionOwnership(sessionId, () =>
+        this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true }))
+      if (outcome !== 'complete') return false
+      this.settleRoundSession(sessionId)
+      // The pending live batch is a SHORT commit: it must use the ONE serial
+      // writer and settle before the cold pass continues.
+      const drained = await this.enqueueWrite(() => {
+        this.drainPendingSession(sessionId)
+      })
+      if (drained !== 'committed') return false
       await yieldEventLoop()
     }
     // Sessions born during the warmup window were buffered by the listener
@@ -1508,14 +1555,18 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const drained = await this.enqueueWrite(() => {
           this.drainPendingSession(sessionId)
         })
-        if (drained === 'failed') return
+        if (drained !== 'committed') return false
         continue
       }
       counters.sessionsVisited += 1
-      const outcome = await this.rebuildLiveSession(sessionId, persistence, sessions, query)
-      if (outcome === 'failed') return
+      const outcome = await this.withFullSessionOwnership(sessionId, () =>
+        this.rebuildLiveSession(sessionId, persistence, sessions, query))
+      if (outcome !== 'complete') return false
+      this.settleRoundSession(sessionId)
     }
+    this.finishCoverageRound()
     this.refreshCompleteness()
+    return this.coverage === 'proven'
   }
 
   /**
@@ -1664,6 +1715,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           this.settleDroppedCoverage(sessionId)
           this.rememberVerifiedRevision(sessionId, record, persistence)
           this.reconcilePending.delete(sessionId)
+          this.settleRoundSession(sessionId)
         })
         if (terminal === 'committed') {
           counters.replayCompleted += 1
@@ -1886,6 +1938,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           this.settleHeldBatch(sessionId)
           this.settleDroppedCoverage(sessionId)
           this.reconcilePending.delete(sessionId)
+          this.settleRoundSession(sessionId)
         })
         if (terminal === 'stale') this.scheduleSessionRepair(sessionId, 'rebuild')
         return terminal === 'committed' ? 'complete' : terminal
@@ -1989,25 +2042,27 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const signal = this.lifecycle.signal
       const deletionCut = this.deletionCut()
       const official = await this.enumerateOfficialSessions(persistence, sessions, signal, 'periodic_verify')
-      if (await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut) === 'failed') {
+      this.beginCoverageRound(official)
+      const deletion = await this.reconcileRemovedSessions(official, persistence, sessions, deletionCut)
+      if (deletion === 'failed') {
         outcome = 'incomplete'
         return
       }
+      if (this.coverageRound !== undefined) this.coverageRound.deletionsSettled = deletion === 'complete'
       for (const [sessionId, record] of official) {
         counters.sessionsVisited += 1
         signal.throwIfAborted()
-        const activeRepair = this.sessionRepairFlights.get(sessionId)
-        if (activeRepair !== undefined) {
-          // Same-id work never races: let the already-registered repair settle
-          // (its own error owner classifies a failure), then re-read the current
-          // checkpoint and decide whether this round still needs an observation.
-          await activeRepair.promise.then(() => undefined, () => undefined)
-        }
-        const result = await this.reconcileOfficialSession(sessionId, record, persistence, sessions, query, counters)
+        // Full and point work never independently own the same id: an active
+        // repair is awaited, then this round claims the id in the single-flight
+        // map. A repair requested during the claim is coalesced to the release.
+        const result = await this.withFullSessionOwnership(sessionId, () =>
+          this.reconcileOfficialSession(sessionId, record, persistence, sessions, query, counters))
         if (result === 'failed') {
           outcome = 'incomplete'
           return
         }
+        if (result === 'complete') this.settleRoundSession(sessionId)
+        else this.markRoundInvalidating()
       }
       // Accepted live events that arrived during the pass merge in order BEFORE
       // the completeness decision. Each writer turn commits at most one bounded
@@ -2022,16 +2077,22 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // A loading/closed edge can refuse to drain; never spin this pass.
         if (this.pendingEventCount === pendingEventsBefore) break
       }
+      if (drained !== 'committed') this.markRoundInvalidating()
       // A Session replaced during the pass may not have been re-read (no new
       // event): re-validate the EXACT enumerated live identity for every record
       // before this pass is allowed to publish ready.
       for (const sessionId of this.staleOfficialIdentities(official, sessions)) {
+        this.markRoundInvalidating()
         this.reconcilePending.add(sessionId)
         this.markReconcileNeeded('reconciling')
       }
       this.dropSettledReconcilePending(official)
-      this.refreshCompleteness()
+      // A healthy completed pass clears the transient source fault BEFORE the
+      // round proof; the coverage fact must not be denied by the fault it just
+      // proved stale.
       if (drained === 'committed') this.sourceFaulted = false
+      this.finishCoverageRound()
+      this.refreshCompleteness()
       outcome = this.settledPhaseOutcome()
     } catch (error) {
       if (!this.lifecycle.signal.aborted && !this.disposed) {
@@ -2068,6 +2129,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // Disposed provisional rows: never reset before the official durable
       // source proves the claimed prefix. A short source is append lag, not a
       // rollback; truncating it into `ready` would silently drop accepted rows.
+      this.markRoundInvalidating()
       const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
       signal.throwIfAborted()
       if (proof === 'insufficient' || proof === 'unreadable') {
@@ -2101,9 +2163,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // alone (a middle event may have been repaired), and an incremental replay
       // that finds no new tail events would never call writeBatch(), leaving
       // dirty set forever. Reconcile from official events instead.
+      this.markRoundInvalidating()
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
     }
     if (checkpoint.headerHash !== sessionHeaderHash(record.header)) {
+      this.markRoundInvalidating()
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
     }
     const droppedCoverage = this.droppedAccepted.get(sessionId)
@@ -2113,6 +2177,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // exists once the payload was freed. Force an authoritative read: observe
       // the live source, or fully replay the persisted source. The shared
       // watermark stays until the committed checkpoint passes it.
+      this.markRoundInvalidating()
       if (record.live) return this.rebuildLiveSession(sessionId, persistence, sessions, query)
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
     }
@@ -2121,6 +2186,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // LIVE Session's persistence count may legitimately lag its accepted
       // events (append is not the durability barrier), so it is never read as a
       // shrink here.
+      this.markRoundInvalidating()
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true })
     }
     if (!record.live) {
@@ -2130,10 +2196,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // A changed or absent same-instance revision is NOT proof that the old
         // prefix survived a middle-of-log repair, even when the tail event hash
         // still matches. Rebuild from official events instead of trusting it.
+        this.markRoundInvalidating()
         return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: !unchanged })
       }
     }
     if (checkpoint.sourceState === 'live' && !record.live && record.eventCount !== undefined && record.eventCount >= checkpoint.nextSeq) {
+      this.markRoundInvalidating()
       const settled = await this.commitCheckpointMarker(sessionId, persistence, sessions, checkpoint, { sourceState: 'persisted' })
       if (settled !== 'committed') {
         this.reconcilePending.add(sessionId)
@@ -2150,6 +2218,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       return 'stale'
     }
     this.reconcilePending.delete(sessionId)
+    this.settleRoundSession(sessionId)
     return 'complete'
   }
 
@@ -2197,6 +2266,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     for (const checkpoint of deletionCut.values()) {
       const sessionId = checkpoint.sessionId
       if (official.has(sessionId)) continue
+      this.markRoundInvalidating()
       const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)
       try {
         let stale = false
@@ -2412,6 +2482,8 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           return
         }
         this.reconcilePending.delete(sessionId)
+        this.settleRoundSession(sessionId)
+        this.finishCoverageRound()
         this.refreshCompleteness()
       } finally {
         this.releaseWitness(witness)
@@ -2487,6 +2559,48 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     })
   }
 
+  private beginCoverageRound(official: ReadonlyMap<string, OfficialSession>): void {
+    const previous = this.coverageRound
+    this.coverageRound = {
+      expected: this.coverage === 'proven' ? undefined : new Set(official.keys()),
+      settled: new Set(),
+      deletionsSettled: false,
+      // An unresolved destructive obligation survives a new round; only a
+      // complete same-round proof may release it.
+      invalidating: previous?.invalidating ?? false,
+    }
+  }
+
+  /** The round's first known destructive publication holds the incomplete barrier. */
+  private markRoundInvalidating(): void {
+    const round = this.coverageRound
+    if (round === undefined) return
+    if (round.invalidating) return
+    round.invalidating = true
+    // Publish the downgrade immediately; the Owner read must not observe a
+    // ready state between two destructive commits of the same round.
+    this.markReconcileNeeded('reconciling')
+  }
+
+  private settleRoundSession(sessionId: string): void {
+    if (this.coverageRound?.expected?.has(sessionId) === true) {
+      this.coverageRound.settled.add(sessionId)
+    }
+  }
+
+  private finishCoverageRound(): void {
+    const round = this.coverageRound
+    if (round === undefined) return
+    if (!round.deletionsSettled) return
+    if (round.expected !== undefined && round.expected.size !== round.settled.size) return
+    if (this.sourceFaulted || this.indexFaulted) return
+    if (this.reconcilePending.size > 0 || this.pending.size > 0 || this.droppedAccepted.size > 0) return
+    if (this.sessionRepairFlights.size > 0) return
+    this.coverageRound = undefined
+    this.coverage = 'proven'
+    this.refreshCompleteness()
+  }
+
   /** The diagnostic outcome of a pass that settled normally. */
   private settledPhaseOutcome(): HistorySearchPhaseOutcome {
     if (this.state.kind === 'ready') return 'ready'
@@ -2497,7 +2611,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   /** Truthful immediate downgrade; never overrides a definite `unavailable`. */
   private markReconcileNeeded(reason: HistorySearchIncompleteReason = 'reconciling'): void {
     if (this.state.kind === 'unavailable') return
-    if (this.state.kind === 'loading' && !this.initialPassComplete) return
+    if (this.state.kind === 'loading' && this.coverage === 'booting') return
     this.state = { kind: 'incomplete', reason }
   }
 
@@ -2510,7 +2624,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
   private refreshCompleteness(): void {
     if (this.disposed || this.index === undefined) return
     if (this.state.kind === 'unavailable') return
-    if (!this.initialPassComplete) {
+    if (this.coverage === 'booting') {
       this.state = { kind: 'loading' }
       return
     }
@@ -2550,6 +2664,19 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     }
     if (incomplete === 'uncertain') {
       this.state = { kind: 'incomplete', reason: 'source-uncertain' }
+      return
+    }
+    // A round that began a known destructive publication holds the barrier
+    // through all of its remaining work. A subsequent read-only round does not
+    // clear an unresolved prior obligation; only a complete same-round proof.
+    if (this.coverageRound?.invalidating === true) {
+      this.state = { kind: 'incomplete', reason: 'reconciling' }
+      return
+    }
+    // Failure/partial first coverage is not a ready state, and a point repair
+    // of one Session cannot prove an unvisited/failed rest of the roster.
+    if (this.coverage !== 'proven') {
+      this.state = { kind: 'incomplete', reason: 'reconciling' }
       return
     }
     if (this.state.kind === 'loading' || this.state.kind === 'incomplete') {

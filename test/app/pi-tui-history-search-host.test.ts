@@ -3532,3 +3532,265 @@ test('a startup accepted event is handed to the bounded drain without waiting fo
     await ctx.fiber.dispose()
   }
 })
+
+test('a destructive round barrier covers the interval between deletion commits', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r801b-')
+  const a = mutableSource('/repo/r801b-a', 'r801b-a')
+  const b = mutableSource('/repo/r801b-b', 'r801b-b')
+  a.live = true
+  b.live = true
+  const { deps } = mutableDeps(a, [b])
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): unknown }
+    enqueueWrite<T>(work: () => T): Promise<'committed' | 'failed' | 'stale'>
+    verifySources(): Promise<void>
+  }
+  const realEnqueue = internals.enqueueWrite.bind(service)
+  let writeCalls = 0
+  let secondEntered!: () => void
+  const secondReached = new Promise<void>(resolve => { secondEntered = resolve })
+  let releaseSecond!: () => void
+  const secondGate = new Promise<void>(resolve => { releaseSecond = resolve })
+  try {
+    await waitDirectReady(service)
+    assert.notEqual(internals.index.checkpointOf('r801b-a'), undefined)
+    assert.notEqual(internals.index.checkpointOf('r801b-b'), undefined)
+    a.present = false
+    a.live = false
+    b.present = false
+    b.live = false
+    internals.enqueueWrite = async work => {
+      writeCalls += 1
+      if (writeCalls === 2) {
+        secondEntered()
+        await secondGate
+      }
+      return realEnqueue(work)
+    }
+    const pass = internals.verifySources()
+    await secondReached
+    // The first absent Session is already deleted; the second writer turn has
+    // not committed. The Owner must not see the surviving stale row as ready.
+    const interim = await service.search({ scope: 'all', query: 'r801b', limit: 25 }, new AbortController().signal)
+    assert.equal(interim.kind, 'incomplete', JSON.stringify(interim))
+    releaseSecond()
+    await pass
+    await waitDirectReady(service)
+    assert.equal(internals.index.checkpointOf('r801b-a'), undefined)
+    assert.equal(internals.index.checkpointOf('r801b-b'), undefined)
+  } finally {
+    releaseSecond()
+    internals.enqueueWrite = realEnqueue
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a failed/partial first pass cannot become ready through a point repair alone', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r801a-')
+  const a = mutableSource('/repo/r801a-a', 'r801a-a')
+  const b = mutableSource('/repo/r801a-b', 'r801a-b')
+  a.live = true
+  b.live = true
+  const { deps } = mutableDeps(a, [b])
+  const query = deps.sessionQuery()
+  const realObserve = query.observeSession.bind(query)
+  let failA = true
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    verifySources(): Promise<void>
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  const waitNotLoading = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const answer = await service.search({ scope: 'all', query: 'r801a', limit: 25 }, new AbortController().signal)
+      if (answer.kind !== 'loading') return
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    throw new Error('first pass did not settle')
+  }
+  try {
+    // The first A observation fails before B is visited. This is the
+    // initial/full coverage failure, not a storage-health detail.
+    query.observeSession = async (id, options) => {
+      if (failA && String(id) === 'r801a-a') throw new Error('R8-01A injected first-pass observe failure')
+      return realObserve(id, options)
+    }
+    await waitNotLoading()
+    assert.equal(failA, true)
+    assert.equal(internals.index.checkpointOf('r801a-a'), undefined)
+    assert.equal(internals.index.checkpointOf('r801a-b'), undefined)
+    let answer = await service.search({ scope: 'all', query: 'r801a-b', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+
+    // A later successful A point repair clears A's obligation but cannot prove
+    // the unvisited B or full coverage.
+    failA = false
+    a.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 21_000,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'r801a-a-live',
+          role: 'user',
+          content: [{ type: 'text', text: 'r801a A point repair' }],
+          source: { kind: 'user', rpcId: 'rpc-r801a-a' },
+        }],
+      },
+    })
+    internals.observeLiveEvent(liveSessionOf(a), a.events[3])
+    const repairStarted = Date.now()
+    while (internals.index.checkpointOf('r801a-a')?.nextSeq !== 4 && Date.now() - repairStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r801a-a')?.nextSeq, 4)
+    assert.equal(internals.index.checkpointOf('r801a-b'), undefined)
+    answer = await service.search({ scope: 'all', query: 'r801a-b', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+
+    // B gets a unique accepted fact; a complete later full pass visits it and
+    // only then establishes coverage.
+    b.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 20_500,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'r801a-b-unique',
+          role: 'user',
+          content: [{ type: 'text', text: 'r801a B unique' }],
+          source: { kind: 'user', rpcId: 'rpc-r801a-b' },
+        }],
+      },
+    })
+    await internals.verifySources()
+    await waitDirectReady(service)
+    const hit = await service.search({ scope: 'all', query: 'r801a B unique', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a stale first pass stops before an unvisited persisted Session and its repair cannot prove coverage', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r801a-stale-')
+  const a = mutableSource('/repo/r801a-stale-a', 'r801a-stale-a')
+  const b = mutableSource('/repo/r801a-stale-b', 'r801a-stale-b')
+  a.live = true
+  b.live = false
+  b.present = true
+  const { deps } = mutableDeps(a, [b])
+  const query = deps.sessionQuery()
+  const sessions = deps.sessions()
+  const realObserve = query.observeSession.bind(query)
+  const realSessionsList = sessions.list.bind(sessions)
+  const realSessionsGet = sessions.get.bind(sessions)
+  type LiveSession = NonNullable<ReturnType<typeof realSessionsGet>>
+  const replacement = liveSessionOf(a) as unknown as LiveSession
+  let replaced = false
+  query.observeSession = async (id, options) => {
+    if (!replaced && String(id) === 'r801a-stale-a') {
+      // Replace A's live identity DURING its cold observation. The witness was
+      // created against the enumerated object, so its terminal must go stale.
+      replaced = true
+      sessions.list = () => realSessionsList().map(session => (String(session.id) === 'r801a-stale-a' ? replacement : session))
+      sessions.get = sessionId => (sessionId === 'r801a-stale-a' ? replacement : realSessionsGet(sessionId))
+    }
+    return realObserve(id, options)
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    verifySources(): Promise<void>
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  const waitNotLoading = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const answer = await service.search({ scope: 'all', query: 'r801a-stale', limit: 25 }, new AbortController().signal)
+      if (answer.kind !== 'loading') return
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    throw new Error('first pass did not settle')
+  }
+  try {
+    await waitNotLoading()
+    assert.equal(replaced, true)
+    // A may already be repaired by the coalesced stale-round intent; what
+    // matters for coverage is that B was never visited.
+    assert.equal(internals.index.checkpointOf('r801a-stale-b'), undefined)
+    let answer = await service.search({ scope: 'all', query: 'r801a-stale-b', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+
+    // Repair A alone; B was never visited, so coverage must stay unproven.
+    a.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 23_000,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'r801a-stale-a-live',
+          role: 'user',
+          content: [{ type: 'text', text: 'r801a stale A repair' }],
+          source: { kind: 'user', rpcId: 'rpc-r801a-stale-a' },
+        }],
+      },
+    })
+    internals.observeLiveEvent(replacement, a.events[3])
+    const repairStarted = Date.now()
+    while (internals.index.checkpointOf('r801a-stale-a')?.nextSeq !== 4 && Date.now() - repairStarted < 5_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r801a-stale-a')?.nextSeq, 4)
+    assert.equal(internals.index.checkpointOf('r801a-stale-b'), undefined)
+    answer = await service.search({ scope: 'all', query: 'r801a-stale-b', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'incomplete', JSON.stringify(answer))
+
+    // A full pass visits B before coverage can be proven.
+    b.events.push({
+      type: 'agent/inbox/spliced',
+      seq: 3,
+      time: 23_500,
+      data: {
+        target: 'next-turn',
+        start: 3,
+        inserted: [{
+          id: 'r801a-stale-b-unique',
+          role: 'user',
+          content: [{ type: 'text', text: 'r801a stale unvisited B' }],
+          source: { kind: 'user', rpcId: 'rpc-r801a-stale-b' },
+        }],
+      },
+    })
+    await internals.verifySources()
+    await waitDirectReady(service)
+    const hit = await service.search({ scope: 'all', query: 'r801a stale unvisited B', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    query.observeSession = realObserve
+    sessions.list = realSessionsList
+    sessions.get = realSessionsGet
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
