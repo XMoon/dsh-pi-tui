@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
+import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 import { openSdkClient } from './acp-protocol-projection.mjs'
@@ -100,6 +101,9 @@ export async function runAcpCommandInvocation(context) {
   const hostCwd = realpathSync(workDir)
   const holdRoot = join(workDir, 'acp-command-compaction-hold')
   resetHold(holdRoot)
+  const lifecycleControl = join(workDir, 'acp-command-lifecycle')
+  mkdirSync(lifecycleControl, { recursive: true, mode: 0o700 })
+  let lifecycleSequence = 0
   const clients = []
   let peer
   let host
@@ -126,8 +130,25 @@ export async function runAcpCommandInvocation(context) {
     const started = await scene.startC1Host('acp-command', 'command A host', {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
       C1_COMPACT_HOLD: holdRoot,
+      C1_LIFECYCLE_CONTROL: lifecycleControl,
     })
     host = started.host
+    const hostWorkRoot = started.workRoot
+    const lifecycleSignal = (action, targetSession) => {
+      const name = `action-${String(++lifecycleSequence)}-${action}.json`
+      writeFileSync(join(lifecycleControl, name), JSON.stringify({ action, sessionId: targetSession }), { mode: 0o600 })
+    }
+    const lifecycleAction = async (action, targetSession, kind, label) => {
+      lifecycleSignal(action, targetSession)
+      return await waitForC1WorkEvent(hostWorkRoot,
+        event => event.kind === kind && event.sessionId === targetSession, label, 120_000)
+    }
+    const settle = promise => promise.then(value => ({ value }), error => ({ error }))
+    const captureError = async (label, promise) => {
+      const outcome = await promise
+      if (outcome.error !== undefined) return outcome.error
+      assert(false, `${label}: the request unexpectedly succeeded`)
+    }
     const ready = started.ready
     const scopeId = ready.localHost?.scopeId
     assert(typeof scopeId === 'string' && scopeId.length === 64, 'CMD-01: the Host Ready must publish a full scope id')
@@ -253,15 +274,16 @@ export async function runAcpCommandInvocation(context) {
     // controller; the official failed bracket closes without a summary.
     resetHold(holdRoot)
     const beforeCancel = hostSessionEvents(dshHome, sessionId).length
-    const cancelledRequest = client.request(acp.methods.agent.session.prompt, {
+    const cancelledRequest = settle(client.request(acp.methods.agent.session.prompt, {
       sessionId,
       prompt: promptText('/compact'),
-    })
+    }))
     await waitForFile(`${holdRoot}.entered`, 'CMD-07 the held summarizer before ACP cancel')
     await client.notify(acp.methods.agent.session.cancel, { sessionId })
     writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
-    const cancelled = await cancelledRequest
-    assert(cancelled?.stopReason === 'cancelled',
+    const cancelledOutcome = await cancelledRequest
+    const cancelled = cancelledOutcome.value
+    assert(cancelledOutcome.error === undefined && cancelled?.stopReason === 'cancelled',
       `CMD-07: the precommit ACP cancel must stopReason cancelled (${JSON.stringify(cancelled)})`)
     const cancelEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(beforeCancel)
     const cancelStart = cancelEvents.find(event => event.type === 'compaction/start')
@@ -312,6 +334,121 @@ export async function runAcpCommandInvocation(context) {
       .join('')
     assert(/Compacted \d+ history items/.test(compactText), `CMD-08: the real result text must reach the client (${JSON.stringify(compactText)})`)
 
+    // LIFE-02: Close during a held official command closes delivery but waits
+    // for the original Promise. A second close is idempotent and a later
+    // resume on the SAME connection proves the View was released only after
+    // that terminal.
+    const closeSessionId = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const closeSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: closeSessionId,
+      prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(closeSeed?.stopReason === 'end_turn', 'CMD-12: the close Session seed must end_turn')
+    resetHold(holdRoot)
+    const beforeClose = hostSessionEvents(dshHome, closeSessionId).length
+    const closePrompt = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: closeSessionId,
+      prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMD-12 the held summarizer before close')
+    let promptSettled = false
+    closePrompt.then(() => { promptSettled = true })
+    const closeResult = await client.request(acp.methods.agent.session.close, { sessionId: closeSessionId })
+    assert(promptSettled === true, 'CMD-12: close answers only after the command Promise terminal')
+    assert(Object.keys(closeResult).length === 0, 'CMD-12: close returns the standard empty result')
+    const closePromptOutcome = await closePrompt
+    const closePromptResult = closePromptOutcome.value
+    assert(closePromptOutcome.error === undefined && closePromptResult?.stopReason === 'cancelled',
+      `CMD-12: the held precommit command settles cancelled (${JSON.stringify(closePromptResult)})`)
+    const closeEvents = (hostSessionEvents(dshHome, closeSessionId) ?? []).slice(beforeClose)
+    const closeStart = closeEvents.find(event => event.type === 'compaction/start')
+    const closeId = closeStart?.data?.compactionId
+    assert(typeof closeId === 'string' && closeId.length > 0, 'CMD-12: close captured the real compaction start')
+    assert(!closeEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === closeId),
+      'CMD-12: close during the precommit hold never commits a summary')
+    assert(Object.keys(await client.request(acp.methods.agent.session.close, { sessionId: closeSessionId })).length === 0,
+      'CMD-12: a repeated close stays idempotent')
+    const resumedAfterClose = await client.request(acp.methods.agent.session.resume, { sessionId: closeSessionId, cwd: hostCwd })
+    assert(typeof resumedAfterClose === 'object' && resumedAfterClose !== null,
+      'CMD-12: the same connection can attach again only after the real terminal')
+    await client.request(acp.methods.agent.session.close, { sessionId: closeSessionId })
+    trace('acp-command/close', { stopReason: closePromptResult.stopReason })
+
+    // CMP-06: an OFFICIAL independent Host cancellation (Agent.cancel with its
+    // own cause) while the summarizer is held must be a Host failure, never
+    // the ACP client's `cancelled`, and must not fabricate a summary.
+    resetHold(holdRoot)
+    const beforeIndependent = hostSessionEvents(dshHome, sessionId).length
+    const independentRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMP-06 the held summarizer before independent cancellation')
+    await lifecycleAction('cancel', sessionId, 'lifecycle-agent-cancelled', 'CMP-06 the official Agent cancel')
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const independentError = await captureError('CMP-06', independentRequest)
+    assert(independentError?.data?.code === 'LOCAL_ACP_COMMAND_FAILED',
+      `CMP-06: an independent Host cancellation must be COMMAND_FAILED (${JSON.stringify(independentError?.data)})`)
+    const independentEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(beforeIndependent)
+    const independentStart = independentEvents.find(event => event.type === 'compaction/start')
+    const independentId = independentStart?.data?.compactionId
+    assert(typeof independentId === 'string' && independentId.length > 0,
+      'CMP-06: the independent cancellation has a real start/compactionId')
+    assert(!independentEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === independentId),
+      'CMP-06: an independently cancelled compaction never commits a summary')
+    assert(independentEvents.some(event => event.type === 'compaction/end'
+      && event.data?.compactionId === independentId && typeof event.data?.error === 'string'),
+    'CMP-06: the independent cancellation closes the official failed bracket')
+    trace('acp-command/independent-cancel', { compactionId: independentId, code: independentError.data.code })
+
+    // CMP-05: the official Session flush fails after the summary/end committed.
+    // The ACP answer must be COMMITTED_WITH_ERROR, never success or cancelled.
+    const flushSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const flushSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: flushSession,
+      prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(flushSeed?.stopReason === 'end_turn', 'CMP-05: the fresh Session seed must end_turn')
+    resetHold(holdRoot)
+    const beforeFlush = hostSessionEvents(dshHome, flushSession).length
+    const flushRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: flushSession,
+      prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMP-05 the held summarizer before flush failure')
+    await lifecycleAction('arm-flush-failure', flushSession, 'lifecycle-flush-failure-armed', 'CMP-05 arm the official flush failure')
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const flushError = await captureError('CMP-05', flushRequest)
+    const flushEvents = (hostSessionEvents(dshHome, flushSession) ?? []).slice(beforeFlush)
+    assert(flushError?.data?.code === 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR',
+      `CMP-05: a post-commit flush failure must be COMMITTED_WITH_ERROR (${JSON.stringify({
+        data: flushError?.data,
+        message: flushError?.message,
+        eventTypes: flushEvents.map(event => event.type),
+        proof: readC1WorkEvents(hostWorkRoot).filter(event => String(event.kind).includes('lifecycle-flush')),
+      })})`)
+    const flushStart = flushEvents.find(event => event.type === 'compaction/start')
+    const flushId = flushStart?.data?.compactionId
+    assert(typeof flushId === 'string', 'CMP-05: the failed flush has a real compactionId')
+    // The live operation committed the summary/end before the official flush
+    // rejected. A failed flush must never be rewritten as a clean success, and
+    // the durable log may legitimately stop at `start` (partial persistence).
+    const flushSummary = flushEvents.find(event => event.type === 'compaction/summary'
+      && event.data?.compactionId === flushId)
+    const flushEnd = flushEvents.find(event => event.type === 'compaction/end'
+      && event.data?.compactionId === flushId)
+    assert(!(flushSummary !== undefined && flushEnd !== undefined && flushEnd.data?.error === undefined),
+      'CMP-05: a failed flush never leaves a clean summary+end in the durable log')
+    trace('acp-command/flush-failure', {
+      compactionId: flushId,
+      code: flushError.data.code,
+      durableTypes: flushEvents.map(event => event.type),
+    })
+
     // Invalid arguments are refused before the official engine is called.
     const beforeInvalid = hostSessionEvents(dshHome, sessionId).length
     let invalidError
@@ -353,35 +490,45 @@ export async function runAcpCommandInvocation(context) {
     assert(commandEvents(hostSessionEvents(dshHome, sessionId), 'unknown').length === beforeUnknown,
       'CMD-11: an unknown slash creates no Host command lifecycle')
 
-    // LIFE-02: Close during a held official command closes delivery but waits
-    // for the original Promise. A second close is idempotent and a later
-    // resume on the SAME connection proves the View was released only after
-    // that terminal.
+    // CMP-06/LIFE-03: dispose the LIVE Agent's own Cordis Fiber while the
+    // summarizer is held. This is the official host-side disposal capability,
+    // not a synthetic abort; the ACP request must observe a Host failure, not
+    // the client's cancellation, and must never fabricate a summary.
+    const disposeSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const disposeSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: disposeSession,
+      prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(disposeSeed?.stopReason === 'end_turn', 'CMP-06: the disposal Session seed must end_turn')
     resetHold(holdRoot)
-    const closePrompt = client.request(acp.methods.agent.session.prompt, {
-      sessionId,
+    const beforeDispose = hostSessionEvents(dshHome, disposeSession).length
+    const disposeRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: disposeSession,
       prompt: promptText('/compact'),
-    })
-    await waitForFile(`${holdRoot}.entered`, 'CMD-12 the held summarizer before close')
-    let closeSettled = false
-    const closeRequest = client.request(acp.methods.agent.session.close, { sessionId }).then(value => {
-      closeSettled = true
-      return value
-    })
-    await new Promise(resolveWait => setTimeout(resolveWait, 100))
-    assert(closeSettled === false, 'CMD-12: close cannot detach while the official command Promise is held')
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMP-06 the held summarizer before Fiber disposal')
+    lifecycleSignal('dispose', disposeSession)
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-agent-disposed' && event.sessionId === disposeSession,
+      'CMP-06 the official Agent Fiber disposal', 120_000)
     writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
-    assert(Object.keys(await closeRequest).length === 0, 'CMD-12: close answers only after the command terminal')
-    const closePromptResult = await closePrompt
-    assert(closePromptResult?.stopReason === 'cancelled',
-      `CMD-12: the held precommit command settles cancelled (${JSON.stringify(closePromptResult)})`)
-    assert(Object.keys(await client.request(acp.methods.agent.session.close, { sessionId })).length === 0,
-      'CMD-12: a repeated close stays idempotent')
-    const resumedAfterClose = await client.request(acp.methods.agent.session.resume, { sessionId, cwd: hostCwd })
-    assert(typeof resumedAfterClose === 'object' && resumedAfterClose !== null,
-      'CMD-12: the same connection can attach again only after the real terminal')
-    await client.request(acp.methods.agent.session.close, { sessionId })
-    trace('acp-command/close', { stopReason: closePromptResult.stopReason })
+    const disposeError = await captureError('CMP-06 dispose', disposeRequest)
+    assert(disposeError?.data?.code !== 'cancelled' && disposeError?.data?.code !== 'LOCAL_ACP_COMMAND_CANCELLED',
+      `CMP-06: actual Fiber disposal is never the client cancellation (${JSON.stringify(disposeError?.data)})`)
+    assert(['LOCAL_ACP_COMMAND_FAILED', 'LOCAL_ACP_COMMAND_INDETERMINATE', 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR']
+      .includes(disposeError?.data?.code),
+    `CMP-06: Fiber disposal must be a Host-side failure class (${JSON.stringify(disposeError?.data)})`)
+    const disposeEvents = (hostSessionEvents(dshHome, disposeSession) ?? []).slice(beforeDispose)
+    const disposeStart = disposeEvents.find(event => event.type === 'compaction/start')
+    const disposeId = disposeStart?.data?.compactionId
+    assert(typeof disposeId === 'string' && disposeId.length > 0,
+      'CMP-06: the disposal path captured the real compaction start')
+    assert(!disposeEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === disposeId),
+      'CMP-06: Fiber disposal before commit never produces a summary')
+    trace('acp-command/fiber-disposal', { compactionId: disposeId, code: disposeError.data.code })
+
 
     const facts = {
       caseId: CASE_ID,

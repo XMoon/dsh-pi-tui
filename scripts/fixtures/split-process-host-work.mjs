@@ -32,7 +32,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'm4-c1-host-work'
-export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
+export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'sessions', 'workingDirectory', 'typertGateway', 'connection', 'commands', 'attachments']
 
 const SCENARIOS = new Set([
   'long-turn',
@@ -1575,6 +1575,11 @@ class C1Model extends LlmAdapter {
           appendFileSync(`${hold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
           const deadline = Date.now() + 30_000
           while (!existsSync(`${hold}.release`)) {
+            if (options.signal?.aborted === true) {
+              throw options.signal.reason instanceof Error
+                ? options.signal.reason
+                : new Error('acp-command compaction hold aborted')
+            }
             if (Date.now() > deadline) throw new Error('acp-command compaction hold timed out')
             await new Promise(resolveWait => setTimeout(resolveWait, 25))
           }
@@ -2440,6 +2445,100 @@ export async function apply(ctx) {
   const { root, proof } = prepareWorkRoot(process.env.C1_WORK_ROOT)
   const record = (kind, fields = {}) => {
     appendFileSync(proof, `${JSON.stringify({ kind, scenario, time: Date.now(), pid: process.pid, ...fields })}\n`, { mode: 0o600 })
+  }
+
+  // Test-only lifecycle controls for the packed PR3A qualification. The smoke
+  // writes immutable action files under its private work root; this fixture
+  // only invokes OFFICIAL Host capabilities (Agent.cancel, the live Agent
+  // Fiber disposer and the official Session flush). No product branch exists.
+  const lifecycleControl = process.env.C1_LIFECYCLE_CONTROL
+  if (typeof lifecycleControl === 'string' && lifecycleControl !== '') {
+    const actions = new Set()
+    let flushFailureArmed = false
+    let flushSummarySeen = false
+    let killAfterSummary = false
+    const sessions = ctx.sessions
+    const originalFlush = sessions.flush
+    sessions.flush = async function lifecycleFlush(...args) {
+      // Fail only the flush that follows a real committed summary; the
+      // engine's earlier start/admission flush must keep its real behavior.
+      if (flushFailureArmed && flushSummarySeen) {
+        flushFailureArmed = false
+        record('lifecycle-flush-failure-hit')
+        throw new Error('m4-c1-host-work: injected official Session flush failure')
+      }
+      return await originalFlush.apply(this, args)
+    }
+    ctx.effect(() => () => {
+      if (sessions.flush === lifecycleFlush) sessions.flush = originalFlush
+    }, 'lifecycle-flush-restore')
+    const runAction = async action => {
+      const agent = action.sessionId === undefined ? undefined : ctx.agents.get(action.sessionId)
+      if (action.action === 'arm-flush-failure') {
+        flushFailureArmed = true
+        flushSummarySeen = false
+        record('lifecycle-flush-failure-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'arm-kill-after-summary') {
+        killAfterSummary = true
+        record('lifecycle-kill-after-summary-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (agent === undefined) {
+        record('lifecycle-action-no-agent', { action: action.action, sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'cancel') {
+        agent.cancel({ kind: 'user' })
+        record('lifecycle-agent-cancelled', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'dispose') {
+        // DSH defines disposal as a disposed-cause cancel followed by fiber
+        // quiescence; both are official Agent/Fiber capabilities.
+        agent.cancel({ kind: 'disposed' }, { keepInbox: true })
+        await agent.ctx.fiber.dispose()
+        record('lifecycle-agent-disposed', { sessionId: action.sessionId })
+        return
+      }
+      throw new Error(`m4-c1-host-work: unknown lifecycle action ${String(action.action)}`)
+    }
+    ctx.effect(() => {
+      const timer = setInterval(() => {
+        let names
+        try {
+          names = readdirSync(lifecycleControl)
+        } catch {
+          return
+        }
+        for (const name of names) {
+          if (!name.endsWith('.json') || actions.has(name)) continue
+          actions.add(name)
+          try {
+            const action = JSON.parse(readFileSync(join(lifecycleControl, name), 'utf8'))
+            void runAction(action).catch(error => record('lifecycle-action-failed', {
+              action: String(action?.action),
+              message: error instanceof Error ? error.message : String(error),
+            }))
+          } catch (error) {
+            record('lifecycle-action-unreadable', { name, message: error instanceof Error ? error.message : String(error) })
+          }
+        }
+      }, 25)
+      return () => clearInterval(timer)
+    }, 'lifecycle-control-poll')
+    ctx.effect(() => ctx.on('session/event', (session, event) => {
+      if (event?.type === 'compaction/start') flushSummarySeen = false
+      if (event?.type === 'compaction/summary') flushSummarySeen = true
+      if (!killAfterSummary || event?.type !== 'compaction/summary') return
+      killAfterSummary = false
+      record('lifecycle-kill-after-summary', {
+        sessionId: String(session.id),
+        compactionId: String(event.data?.compactionId ?? ''),
+      })
+      process.kill(process.pid, 'SIGKILL')
+    }), 'lifecycle-kill-after-summary')
   }
   // PO-3B never negative: set the OFFICIAL durable approval policy of one
   // Session through the official service (the same seam the F8 case proves).
