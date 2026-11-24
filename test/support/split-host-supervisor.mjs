@@ -1722,14 +1722,24 @@ async function cleanup(reason, options = {}) {
       }
       for (const handle of [...hosts].reverse()) {
         try {
-          if (handle.exited) await assertHostGroupGone(handle, reason)
-          else await terminateHost(handle, reason)
+          // A leader that is already exiting is not a live target: let its real
+          // close settle first (a bare exitCode/ownership read is a torn state).
+          if (!handle.exited && handle.closePromise !== undefined) {
+            await Promise.race([handle.closePromise, sleep(1_000)])
+          }
+          if (handle.exited) {
+            await waitForGroupGone(hostPgid(handle), 15_000)
+            await assertHostGroupGone(handle, reason)
+          } else {
+            await terminateHost(handle, reason)
+          }
         } catch (error) {
           clean = false
           appendNote('host-termination-failed', {
             hostId: handle.hostId,
             generation: handle.generation,
             reason: boundedError(error),
+            detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 400),
           })
           if (scene?.kind !== 'process') throw error
         }
@@ -1766,12 +1776,13 @@ async function cleanup(reason, options = {}) {
         // a half-restored install.
         if (scene.kind === 'process' && processInstallationMutation !== undefined) {
           try {
-            await restoreInstallationMutation()
+            await restoreInstallationMutation({ compensating: true })
           } catch (error) {
             clean = false
             appendNote('installation-mutation-restore-failed', {
               fault: processInstallationMutation?.fault ?? null,
               reason: boundedError(error),
+              detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 400),
             })
           }
         }
@@ -6878,14 +6889,17 @@ async function handleSetInstallationFault(message) {
 }
 
 /** Restore the ONE registered installed-copy mutation. */
-async function restoreInstallationMutation() {
+async function restoreInstallationMutation({ compensating = false } = {}) {
   const mutation = processInstallationMutation
   if (mutation === undefined) throw new Error('RESTORE_INSTALLATION: no scoped installation mutation is active')
   if (mutation.fault !== 'client-bootstrap-drift' && activeHost !== undefined) {
     throw new Error('RESTORE_INSTALLATION: the Host artifact mutation cannot be restored under a live Host')
   }
-  if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true)) {
+  if (!compensating && hosts.some(handle => handle.mode !== undefined && handle.finished !== true)) {
     throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
+  }
+  if (compensating && hosts.some(handle => !handle.exited)) {
+    throw new Error('RESTORE_INSTALLATION: a Host attempt is still live during compensation')
   }
   if (qualificationClients.some(handle => !handle.exited)) {
     throw new Error('RESTORE_INSTALLATION: a qualification Client is still live')
