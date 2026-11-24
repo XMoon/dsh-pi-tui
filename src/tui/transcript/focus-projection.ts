@@ -298,13 +298,12 @@ function focusPrimaryRegion(
 
 /**
  * One linear pass over the window: each turn's WHOLE-TURN action aggregate
- * (addendum v2 §18). Focus stats describe the turn, not the row run: a
- * turn-less entry can split one turn into separate consecutive runs
- * ({@link consecutiveTurnGroup}), and every Thought block of that turn must
- * still report the same turn-level number — never merely its own run's.
- * A search reveal / disclosure state cannot change it because none of them
- * participate here. O(n) once per projection, never a per-frame rescan of an
- * unchanged window.
+ * (addendum v2 §18). Focus stats describe the logical Turn, not its primary
+ * presentation region: bridged control rows and a fail-open later region change
+ * neither the aggregate nor its loaded-window scope, and the ONE summary always
+ * reports the same turn-level number. A search reveal / disclosure state cannot
+ * change it because none of them participate here. O(n) once per projection,
+ * never a per-frame rescan of an unchanged window.
  */
 function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<number, CompactActionStats> {
   const accumulators = new Map<number, CompactActionStatsAccumulator>()
