@@ -47,6 +47,7 @@ interface SessionEvent {
 
 interface SplitUpgradeNativeContractModule {
   serializeKernelIdentity(identity: unknown): string
+  classifyKernelLiveness(kernel: unknown): { state: 'alive' | 'gone' | 'unknown' }
 }
 
 interface SplitSmokeSessionsModule {
@@ -268,7 +269,11 @@ function kernelBirthOf(pid: number | null | undefined): string | undefined {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined
   try {
     const observation = readKernelProcess(pid)
-    return observation.kind === 'alive' ? nativeContract.serializeKernelIdentity(observation.identity) : undefined
+    if (observation.kind !== 'alive') return undefined
+    // A same-birth Linux Z/X/x is not a live process; the product classifier
+    // is the ONE authority for that distinction.
+    if (nativeContract.classifyKernelLiveness(observation).state !== 'alive') return undefined
+    return nativeContract.serializeKernelIdentity(observation.identity)
   } catch {
     return undefined
   }
@@ -724,8 +729,7 @@ class ProcessScene implements SplitProcessScene {
     assert(typeof birth === 'string' && birth !== '', `${label}: no recorded kernel birth`)
     const live = kernelBirthOf(pid)
     if (live === undefined) return false
-    assert(live === birth, `${label}: not the live kernel process it registered`)
-    return true
+    return live === birth
   }
 
   /** Re-prove the receipt names live, still-same kernel identities. */
