@@ -1620,11 +1620,48 @@ or the current Ctrl+R/↑↓ contract owned by
 | Accepted occurrence | the official durable `session/event`: an `agent/inbox/spliced.inserted[]` or `user/message` with `source.kind === 'user'` AND a non-empty `rpcId`; the FIRST event per `(sessionId, messageId)` is the one immutable occurrence |
 | Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing directory stays `null` (never the Client cwd) |
 | Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
+| Official corpus roster | ONE `sessionPersistence.list` snapshot merged with the Host `sessions` live registry; a same-id live/persisted Header must pass the official `assertSessionHeadersCompatible` check, and the live Header is the visible one |
 | Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v1.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
-| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list |
+| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round |
 | Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
+| Destructive round | before the first known destructive publication of a full round (deletion, rebuild or marker rewrite), the round establishes an `incomplete` barrier and holds it through every required deletion, accepted-payload/repair settlement and per-ID terminal commit. Read-only discovery preserves the prior `ready` epoch; the round-local deletion cut and its cut-bound witness fence derived deletion |
+| Full/point ownership | one full-inventory round and independent exact-ID repairs share ONE per-ID single-flight claim: a repair requested while the full round owns that id is coalesced and handed off after the full candidate settles. The terminal `commitWitness` is the second, non-substitutable fence |
+| Verification/read boundary | the single Host maintenance owner runs the 30 s full-corpus roster check and per-Session official repairs OUTSIDE the serial index writer; Owner `search`/`readText` wait only for accepted short index commits, never for a background `list`/`open`/`stat`/`observeSession` Promise. The writer completeness check uses an index-owned SQL existence probe, never a full checkpoint materialization |
 | Remote surface | the private `piTuiHistorySearch` namespace with exactly two Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash) and `readText` (exact original text chunks by content hash) |
 | Direct | unchanged: the Direct Host never mounts this index and keeps its existing Client-local input history |
+
+The Host actively prewarms the complete index without blocking Host readiness;
+the first import answers `loading` until every official Session, every buffered
+live event and the error verdict have settled, and it answers `incomplete`
+rather than `ready` if the first full round was partial or failed. Coverage is
+a round-local proof: a successful point repair of one Session never proves an
+unvisited or unsettled ID; a later complete full round may establish it. The
+30 s roster check and the per-Session official repairs are single-flight
+maintenance work: they may make the index `incomplete` while a destructive
+round is committed, but they never hold the Owner read barrier. An already
+verified epoch stays readable during a read-only background check; a keyset
+cursor becomes stale only when committed content actually changes. An
+unresolved accepted-coverage obligation is fail-closed: it is settled only by a
+current authoritative replay, never by a timeout, repeated roster absence or an
+equal checkpoint alone. A full round finishes only after its official-ID
+traversal has completed and every required deletion, accepted payload, repair
+and terminal settlement has settled; a point completion observed while the
+traversal is still pending cannot release the global barrier. While coverage is
+unproven, each authoritative ID requires a current-incarnation authoritative
+replay: a clean prior-process checkpoint plus a matching live identity is not a
+proof of this Host's observed source. A completed final ordinary pending drain
+is also a terminal owner and can settle the traversed round without waiting for
+the periodic timer. While coverage is unproven, the forced current-incarnation
+replay is ordered AFTER the disposed-live dirty/short-durable-source guard;
+accepted provisional rows are never reset before that official proof. A
+required initial authoritative reset invalidated by ordinary pending is handed
+to the point-repair owner AFTER the round's own ordinary drain settles, so the
+mandatory replay observes the post-drain accepted checkpoint; a normal
+contiguous drain against an older clean checkpoint is not full coverage. A live
+authoritative replay first takes an ordinary pending remainder over as its own
+held obligation, so an unchanged backlog cannot refuse every reset; only after
+that ownership transfer may a stale candidate re-arm the same coalesced repair,
+and a mandatory source proof never falls back to the periodic timer.
 
 The search is a literal Unicode lower-case substring match over the first
 accepted text. `all` addresses every accessible Session of the authenticated

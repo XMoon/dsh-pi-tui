@@ -625,6 +625,25 @@ export class HistorySearchIndex {
     return rows.map(checkpointOfRaw)
   }
 
+  /**
+   * O(1)-bound status probe for the short-writer completeness check. It never
+   * materializes checkpoint rows: the EXISTS probes are evaluated by SQLite and
+   * return at most one scalar row. This replaces the corpus-sized
+   * `listSessions().some(...)` scan on the Owner write tail.
+   */
+  incompleteReason(): 'dirty' | 'uncertain' | undefined {
+    this.assertOpen()
+    const row = this.db.prepare(`
+      SELECT
+        EXISTS(SELECT 1 FROM history_sessions WHERE dirty = 1) AS dirty,
+        EXISTS(SELECT 1 FROM history_sessions WHERE uncertain_sources > 0) AS uncertain
+    `).get() as { readonly dirty: number; readonly uncertain: number } | undefined
+    if (row === undefined) return undefined
+    if (row.dirty === 1) return 'dirty'
+    if (row.uncertain === 1) return 'uncertain'
+    return undefined
+  }
+
   checkpointOf(sessionId: string): HistorySessionCheckpointRow | undefined {
     this.assertOpen()
     const row = this.db.prepare('SELECT * FROM history_sessions WHERE session_id = ?').get(sessionId) as unknown as RawSessionRow | undefined
