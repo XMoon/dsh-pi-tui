@@ -535,7 +535,7 @@ const positiveFiniteText = (text: string): boolean => {
   return Number.isFinite(value) && value > 0
 }
 
-function numericShellRig(options: { holdMutation?: boolean; reject?: boolean } = {}) {
+function numericShellRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean } = {}) {
   const generation = {}
   let revision = 1
   let effective: NumericShellSettings = { timeoutMs: 60_000, maxOutputBytes: 64_000 }
@@ -559,6 +559,19 @@ function numericShellRig(options: { holdMutation?: boolean; reject?: boolean } =
       writes.push({ patch, revision: expectedRevision, generation: expectedGeneration })
       if (options.reject === true) return { kind: 'rejected', reason: 'official validator refused the caps' }
       if (expectedRevision !== revision || expectedGeneration !== generation) return { kind: 'conflict', reason: 'revision changed' }
+      if (options.unconfirmed === true) {
+        // The Host may have applied it: the readback is a NEWER row with the
+        // requested caps, but the Client never received an accepted answer.
+        const next = { ...effective }
+        for (const field of ['timeoutMs', 'maxOutputBytes'] as const) {
+          const edit = patch[field]
+          if (edit === undefined) continue
+          next[field] = edit.kind === 'reset' ? inherited[field] : edit.value
+        }
+        effective = next
+        revision += 1
+        return { kind: 'outcome-unconfirmed', reason: 'connection dropped after dispatch' }
+      }
       if (options.holdMutation === true) {
         mutationStarted()
         await new Promise<void>(resolve => { releaseMutation = resolve })
@@ -581,7 +594,7 @@ function numericShellRig(options: { holdMutation?: boolean; reject?: boolean } =
   return { port, fields, writes, inherited, effective: () => ({ ...effective }), releaseMutation: () => { releaseMutation?.() }, mutationStarted: started }
 }
 
-function numericRig(options: { holdMutation?: boolean; reject?: boolean; onRender?: () => void } = {}) {
+function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; onRender?: () => void } = {}) {
   const shell = numericShellRig(options)
   const actions: string[] = []
   const tasks: Promise<void>[] = []
@@ -623,7 +636,7 @@ function numericRig(options: { holdMutation?: boolean; reject?: boolean; onRende
   }
 }
 
-async function startedNumeric(options: { holdMutation?: boolean; reject?: boolean; onRender?: () => void } = {}) {
+async function startedNumeric(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; onRender?: () => void } = {}) {
   const harness = numericRig(options)
   harness.page.setMaxRows(12)
   harness.page.focused = true
@@ -643,6 +656,16 @@ function clickNumericRow(page: HostNumericSettingsPage<NumericShellSettings>, fr
   assert.equal(page.handleMouse(mouse('press', x, row, width, frame.length))?.handled, true)
   page.render(width)
   assert.equal(page.handleMouse(mouse('click', x, row, width, frame.length))?.handled, true)
+}
+
+function stageNumeric(page: HostNumericSettingsPage<NumericShellSettings>, width: number, clear: string, value: string): void {
+  page.handleInput(ENTER)
+  page.render(width)
+  page.handleInput(clear)
+  for (const character of value) page.handleInput(character)
+  page.render(width)
+  page.handleInput(ENTER)
+  page.render(width)
 }
 
 const UP = '\x1b[A'
@@ -835,7 +858,7 @@ test('the grouped Advanced stages the SELECTED field reset without a confirmatio
   assert.match(plain, /Comparison\s+Matches base/u, 'effective==inherited is not a fake dirty fact')
   assert.match(plain, /Revision\s+\d+/u)
   assert.match(plain, /Scope\s+DSH Host profile/u)
-  assert.match(plain, /Reset stages the official unset\./u)
+  assert.match(plain, /Reset stages the official unset\./u, 'the identity/unset receipt is at the top')
   assert.match(plain, /Changes are staged until Save\./u)
   assert.match(strip(h.page.render(80).at(-1) ?? ''), /Reset \[X\](?: · Up\/Down scroll)? · Back \[Esc\]/u)
   assert.equal(h.writes.length, 0, 'opening Advanced never writes')
@@ -843,7 +866,6 @@ test('the grouped Advanced stages the SELECTED field reset without a confirmatio
   // explicit Reset action, which is what the reset admission reads.
   h.page.handleInput(END)
   plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /Reset stages the official unset\./u)
   assert.match(plain, /The USER patch may retain the inherited value\./u)
   assert.match(plain, /The Host readback decides the value\./u)
   assert.match(plain, /Reset to inherited…/u)
@@ -1034,6 +1056,67 @@ test('a stale grouped pointer press cannot open an editor on a newer painted fra
   const next = h.page.render(80)
   assert.equal(h.page.handleMouse(mouse('click', 1, row, 80, next.length)), undefined)
   assert.doesNotMatch(h.page.render(80).map(strip)[0] ?? '', /Edit Command timeout/u)
+  // The stale release never re-selected the pressed field; the explicit DOWN
+  // selection stands, and a FRESH click selects the other field.
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Output cap per stream \(bytes\)/mu,
+    'the stale release never moved the selection')
+  const fresh = h.page.render(80)
+  const firstRow = numericRowIndex(fresh, 'Command timeout (ms)')
+  clickNumericRow(h.page, fresh, firstRow, 80, 'Command timeout (ms)')
+  assert.match(h.page.render(80).map(strip).join('\n'), /^> Command timeout \(ms\)/mu,
+    'a fresh click selects the first field')
+  h.page.dispose()
+})
+
+test('a dropped grouped Stage span denies Enter, keeps the raw Input and the prior patch', async () => {
+  const h = await startedNumeric()
+  h.page.setMaxRows(30)
+  stageNumeric(h.page, 80, '\x15', '45000') // a real prior patch
+  assert.equal(h.writes.length, 0)
+  h.page.handleInput(DOWN)
+  h.page.render(80)
+  h.page.handleInput(ENTER) // Edit the second field
+  h.page.render(80)
+  h.page.handleInput('\x15')
+  for (const character of '5') h.page.handleInput(character)
+  h.page.render(80)
+  let frame = h.page.render(24) // too narrow for `Stage [Enter] · Cancel [Esc]`
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u, 'the Stage span is dropped WHOLE')
+  h.page.handleInput(ENTER)
+  frame = h.page.render(24)
+  assert.match(frame.map(strip).join('\n'), /Value: 5/u, 'the denied Enter keeps the raw Input')
+  assert.match(strip(frame.at(-1) ?? ''), /Cancel \[Esc\]/u)
+  // The prior patch is intact; the restored grant admits a FRESH Stage.
+  frame = h.page.render(80)
+  assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
+  h.page.handleInput(ENTER)
+  frame = h.page.render(80)
+  assert.match(frame.map(strip).join('\n'), /2 unsaved changes/u, 'the prior draft was retained, the new Stage lands')
+  h.page.dispose()
+})
+
+test('a pending grouped Save refuses duplicate Save, parent/exit and Refresh', async () => {
+  const h = await startedNumeric({ holdMutation: true })
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.handleInput('s')
+  await h.mutationStarted
+  h.page.handleInput('s') // duplicate
+  h.page.handleInput('\x1b') // exit intent
+  h.page.handleInput('r') // refresh intent
+  h.page.handleInput('d') // discard intent
+  h.page.handleInput('\r')
+  const frame = h.page.render(80)
+  const plain = frame.map(strip).join('\n')
+  assert.match(plain, /Saving…/u)
+  assert.match(plain, /Dispatched writes continue\./u)
+  assert.equal(h.writes.length, 1, 'a pending save never dispatches twice')
+  assert.deepEqual(h.actions, [], 'no exit, refresh or discard is admitted while pending')
+  assert.doesNotMatch(plain, /Discard unsaved changes\?/u)
+  assert.match(strip(frame.at(-1) ?? ''), /Saving… · Wait \[Esc\]/u)
+  h.releaseMutation()
+  await h.drain()
+  assert.match(h.page.render(80).map(strip).join('\n'), /Status\s+Verified/u, 'the admitted batch still settles')
+  assert.equal(h.writes.length, 1)
   h.page.dispose()
 })
 
@@ -1103,8 +1186,9 @@ test('the grouped browse stays truthful when the section is unavailable, unreada
   await Promise.resolve()
   assert.match(page.render(80).map(strip).join('\n'), /Current: 60000|Command timeout \(ms\)\s+60000 ms/u)
   revision = 2
-  assert.match(page.render(80).map(strip).join('\n'), /Last-known · the Host has newer state; refresh to review\./u,
-    'an external edit is never painted as Ready')
+  const stale = page.render(80).map(strip).join('\n')
+  assert.match(stale, /Last-known · Host model-tool executor/u, 'an external edit is never painted as the current row')
+  assert.match(strip(page.render(80).at(-1) ?? ''), /Refresh \[R\] · Back \[Esc\]/u, 'the stale group offers its real recovery')
   page.dispose()
 })
 
@@ -1149,7 +1233,9 @@ test('44x8 keeps the second field, its Reset and the dirty leave actions reachab
   plain = frame.map(strip).join('\n')
   assert.match(plain, /Save keeps you here\./u)
   assert.match(plain, /Discard and leave loses staged values\./u)
-  assert.match(strip(frame.at(-1) ?? ''), /Save \[S\] · Discard \[D\] · Keep \[Esc\]/u, 'the compact leave bar keeps all three complete actions')
+  const compactLeaveBar = strip(frame.at(-1) ?? '').replace(/\s+$/u, '')
+  assert.match(compactLeaveBar, /Save(?: \[S\])? · Discard (?:and leave )?\[D\] · Keep \[Esc\]$/u,
+    `the compact leave bar keeps all three complete actions: ${JSON.stringify(compactLeaveBar)}`)
   h.page.handleInput(ESC)
   assert.match(h.page.render(44).map(strip).join('\n'), /Reset staged/u, 'Keep preserves the reset draft')
   h.page.handleInput('s')
@@ -1187,6 +1273,38 @@ test('a grouped stage retires its Input before the controller callback and never
   await h.drain()
   assert.equal(h.writes.length, 1, 'the later explicit Save is the ONE official batch')
   assert.deepEqual(h.writes[0]?.patch, { timeoutMs: { kind: 'set', value: 45_000 } })
+  h.page.dispose()
+})
+
+test('a grouped Reset staged inside its own callback stays local to the selected field', async () => {
+  let onRender: (() => void) | undefined
+  const h = await startedNumeric({ onRender: () => onRender?.() })
+  h.page.setMaxRows(30)
+  h.page.handleInput(DOWN) // the SECOND field
+  h.page.handleInput('?')
+  h.page.render(80)
+  h.page.handleInput(END) // the receipt and the Reset action are painted
+  h.page.render(80)
+  let reentered = false
+  onRender = () => {
+    if (reentered) return
+    reentered = true
+    // A synchronous callback delivers Save and a second Stage into the reset.
+    h.page.handleInput('s')
+    h.page.handleInput(ENTER)
+  }
+  h.page.handleInput('x')
+  onRender = undefined
+  assert.ok(reentered, 'the callback really ran inside the reset stage')
+  assert.equal(h.writes.length, 0, 'a local Reset never writes inside its own callback')
+  const plain = h.page.render(80).map(strip).join('\n')
+  assert.match(plain, /Output cap per stream \(bytes\)\s+Reset staged/u, 'the exact SELECTED field stages the unset')
+  assert.match(plain, /Command timeout \(ms\)\s+60000 ms/u, 'the sibling field is untouched')
+  assert.match(plain, /1 unsaved change/u)
+  h.page.handleInput('s')
+  await h.drain()
+  assert.equal(h.writes.length, 1, 'the later explicit Save is the ONE official batch')
+  assert.deepEqual(h.writes[0]?.patch, { maxOutputBytes: { kind: 'reset' } })
   h.page.dispose()
 })
 
@@ -1806,5 +1924,212 @@ test('44x8 paints the SECOND field and its complete Reset target stages THAT fie
   assert.match(plain, /Reset staged/u, 'the painted second-field Reset target stages THAT field')
   assert.match(plain, /Current: 64000 bytes · Unsaved/u)
   assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('the grouped leave bar keeps all three complete actions at the medium child width', async () => {
+  const h = await startedNumeric()
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.setMaxRows(20)
+  h.page.handleInput(ESC)
+  const frame = h.page.render(32) // the real 76-column medium Detail child bar
+  const bar = strip(frame.at(-1) ?? '').replace(/\s+$/u, '')
+  assert.match(bar, /^Save · Discard \[D\] · Keep \[Esc\]$/u,
+    `the 32-cell child bar keeps all three complete leave actions: ${JSON.stringify(bar)}`)
+  assert.match(frame.map(strip).join('\n'), /Discard and leave…/u, 'the body also carries the complete action')
+  // Keep is safe; the bar's Discard really leaves without writing.
+  h.page.handleInput(LEFT)
+  h.page.render(32)
+  h.page.handleInput(ESC)
+  h.page.render(32)
+  h.page.handleInput('d')
+  assert.deepEqual(h.actions, ['done'])
+  assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('a grouped question accept stays reachable in its body when the bar drops the third span', async () => {
+  const h = await startedNumeric()
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.setMaxRows(20)
+  h.page.handleInput(ESC)
+  const frame = h.page.render(26) // narrower than Save · Discard [D] · Keep [Esc]
+  const bar = strip(frame.at(-1) ?? '')
+  assert.doesNotMatch(bar, /Discard/u, 'the bar cannot host the third span here')
+  assert.match(bar, /Save · Keep \[Esc\]/u)
+  const acceptRow = numericRowIndex(frame, 'Discard and leave…')
+  assert.ok(acceptRow >= 0, `the complete accept action is painted in the body:\n${frame.join('\n')}`)
+  clickNumericRow(h.page, frame, acceptRow, 26, 'Discard and leave…')
+  assert.deepEqual(h.actions, ['done'])
+  assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('a grouped Save is only published while its own dirty facts are really on screen', async () => {
+  const h = await startedNumeric()
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.setMaxRows(4) // body 3: the field block fits, the count may not
+  h.page.render(80) // consume the resize reveal, then really scroll away
+  h.page.handleInput(END) // the explanatory tail, no dirty fact
+  let frame = h.page.render(80)
+  let plain = frame.map(strip).join('\n')
+  assert.doesNotMatch(plain, /1 unsaved change/u)
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]/u, 'the bar publishes NO Save without its facts')
+  h.page.handleInput('s')
+  await h.drain()
+  assert.deepEqual(h.writes, [], 'the refused Save span never dispatches')
+  // A sufficient grant reveals the dirty block again and the fresh Save works.
+  h.page.setMaxRows(12)
+  frame = h.page.render(80)
+  assert.match(strip(frame.at(-1) ?? ''), /Save \[S\]/u)
+  h.page.handleInput('s')
+  await h.drain()
+  assert.equal(h.writes.length, 1)
+  h.page.dispose()
+})
+
+test('a grouped leave question publishes Save only when its necessary copy is complete', async () => {
+  const h = await startedNumeric()
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.setMaxRows(2) // body 1: the leave copy cannot be complete at once
+  h.page.handleInput(ESC)
+  let frame = h.page.render(80)
+  const bar = strip(frame.at(-1) ?? '')
+  assert.equal(bar, 'Keep [Esc]'.padEnd(80), 'only the safe Keep is admitted')
+  h.page.handleInput('s')
+  h.page.handleInput('d')
+  await h.drain()
+  assert.deepEqual(h.writes, [], 'no invisible Save/Discard may dispatch')
+  assert.equal(strip(h.page.render(80).at(-1) ?? '').replace(/\s+$/u, ''), 'Keep [Esc]', 'the question is still open with only the safe Keep')
+  h.page.setMaxRows(12)
+  frame = h.page.render(80)
+  assert.match(strip(frame.at(-1) ?? ''), /Save(?: \[S\])? · Discard (?:and leave )?\[D\] · Keep \[Esc\]/u)
+  h.page.handleInput('s')
+  await h.drain()
+  assert.equal(h.writes.length, 1)
+  assert.match(h.page.render(80).map(strip).join('\n'), /Status\s+Verified/u)
+  h.page.dispose()
+})
+
+test('the grouped canonical fact splits before it clips, and an unshowable value admits no Stage', async () => {
+  const h = await startedNumeric()
+  h.page.setMaxRows(20)
+  h.page.handleInput(ENTER)
+  h.page.render(80)
+  h.page.handleInput('\x15')
+  for (const character of '1234567890123456789012345') h.page.handleInput(character)
+  let frame = h.page.render(34)
+  let plain = frame.map(strip).join('\n')
+  assert.match(plain, /Value sends/u, 'the canonical label never shares a clipped line')
+  assert.match(plain, /^\s+1\.2345678901234568e\+24 ms\s*$/mu, 'the complete canonical value is on its own line')
+  assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
+  h.page.handleInput(ENTER)
+  plain = h.page.render(80).map(strip).join('\n')
+  assert.match(plain, /1\.2345678901234568e\+24 ms/u)
+  assert.deepEqual(h.writes, [])
+  // Re-open the editor and shrink the grant until the value cannot be whole.
+  h.page.handleInput(ENTER)
+  h.page.render(80)
+  h.page.handleInput('\x15')
+  for (const character of '1234567890123456789012345') h.page.handleInput(character)
+  frame = h.page.render(26)
+  plain = frame.map(strip).join('\n')
+  assert.match(plain, /Value sends/u)
+  assert.match(plain, /…/u, 'the clipped value is visibly not the whole number')
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
+  h.page.handleInput(ENTER)
+  assert.match(strip(h.page.render(26).at(-1) ?? ''), /Cancel \[Esc\]/u, 'the refused Stage keeps the editor')
+  // A sufficient grant returns the Stage; the draft is untouched.
+  frame = h.page.render(40)
+  assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
+  h.page.handleInput(ENTER)
+  assert.match(h.page.render(80).map(strip).join('\n'), /1\.2345678901234568e\+24 ms/u)
+  h.page.dispose()
+})
+
+test('an unconfirmed grouped outcome keeps the captured row truthful and offers only explicit recovery', async () => {
+  const h = await startedNumeric({ unconfirmed: true })
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.handleInput('s')
+  await h.drain()
+  assert.equal(h.writes.length, 1)
+  h.page.setMaxRows(8) // the short grant must keep the settlement state first
+  let frame = h.page.render(80)
+  let plain = frame.map(strip).join('\n')
+  assert.match(plain, /Status\s+Outcome unconfirmed/u)
+  assert.match(plain, /possibly saved;\s+refresh before retrying/u)
+  assert.match(plain, /Last-known · Host model-tool executor · POSIX Bash/u, 'the old row is named last-known')
+  assert.match(plain, /Last confirmed: 60000 ms · Unsaved/u, 'the captured value is not painted as Current')
+  assert.doesNotMatch(plain, /Current: 60000 ms/u)
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]/u, 'no blind retry is published')
+  assert.doesNotMatch(plain, /Discard…/u, 'an ambiguous outcome has no ordinary local discard')
+  assert.match(strip(frame.at(-1) ?? ''), /Refresh \[R\] · Back \[Esc\]/u)
+  // Back opens the ambiguous leave question with the requested/last-confirmed facts.
+  h.page.handleInput(ESC)
+  frame = h.page.render(80)
+  plain = frame.map(strip).join('\n')
+  assert.match(plain, /The Host may have applied this change\./u)
+  assert.match(plain, /Leaving does not undo it\./u)
+  assert.match(plain, /Leave anyway \[D\]/u)
+  assert.match(plain, /Requested Command timeout \(ms\)\s+45000 ms/u)
+  assert.match(plain, /Last confirmed\s+60000 ms/u)
+  h.page.handleInput(LEFT) // Keep
+  assert.match(h.page.render(80).map(strip).join('\n'), /Outcome unconfirmed/u)
+  // Refresh requires the explicit question, then re-reads the served row.
+  h.page.handleInput('r')
+  frame = h.page.render(80)
+  assert.match(frame.map(strip).join('\n'), /Refresh discards unsaved edits\./u)
+  h.page.handleInput('r')
+  await h.drain()
+  frame = h.page.render(80)
+  plain = frame.map(strip).join('\n')
+  assert.match(plain, /^> Command timeout \(ms\)\s+45000 ms\s*$/mu, 'the refresh reads the new served row')
+  assert.doesNotMatch(plain, /Last-known · /u, 'no stale tag survives a successful refresh')
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]/u, 'a refresh does not replay the lost Save')
+  // A NEW explicit edit/stage/save is required.
+  h.page.handleInput(ENTER)
+  h.page.render(80)
+  h.page.handleInput('\x15')
+  for (const character of '5000') h.page.handleInput(character)
+  h.page.render(80)
+  h.page.handleInput(ENTER)
+  h.page.render(80)
+  assert.match(strip(h.page.render(80).at(-1) ?? ''), /Save \[S\]/u, 'the new staged draft publishes its Save')
+  h.page.handleInput('s')
+  await h.drain()
+  assert.equal(h.writes.length, 2)
+  assert.deepEqual(h.writes[1]?.patch, { timeoutMs: { kind: 'set', value: 5000 } })
+  h.page.dispose()
+})
+
+test('a refused grouped Save is read-only until Refresh, and its local Discard stays a real body action', async () => {
+  const h = await startedNumeric({ reject: true })
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.handleInput('s')
+  await h.drain()
+  let frame = h.page.render(80)
+  let plain = frame.map(strip).join('\n')
+  assert.match(plain, /Status\s+Not saved/u)
+  assert.match(plain, /refresh to review\./u)
+  assert.match(plain, /Last-known · Host model-tool executor · POSIX Bash/u,
+    'a refused capture is not reprinted as the current row')
+  assert.match(plain, /Last confirmed: 60000 ms · Unsaved/u)
+  assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Save \[S\]|Edit \[Enter\]/u, 'a refused capture publishes no retry/edit')
+  assert.match(strip(frame.at(-1) ?? ''), /Refresh \[R\] · Back \[Esc\]/u)
+  const discardRow = numericRowIndex(frame, 'Discard…')
+  assert.ok(discardRow >= 0, 'the local Discard is a real body action')
+  clickNumericRow(h.page, frame, discardRow, 80, 'Discard…')
+  frame = h.page.render(80)
+  assert.match(frame.map(strip).join('\n'), /Discard unsaved changes\?/u)
+  h.page.handleInput('d')
+  frame = h.page.render(80)
+  plain = frame.map(strip).join('\n')
+  assert.doesNotMatch(plain, /1 unsaved change/u, 'the local discard clears the draft')
+  assert.doesNotMatch(plain, /Status\s+Not saved/u)
+  assert.doesNotMatch(plain, /Save \[S\]|Edit \[Enter\]/u, 'the stale capture is still read-only')
+  assert.equal(h.writes.length, 1, 'discarding never dispatches another write')
+  h.page.handleInput('r')
+  await h.drain()
+  assert.match(strip(h.page.render(80).at(-1) ?? ''), /Edit \[Enter\]/u, 'an explicit Refresh re-enables editing')
   h.page.dispose()
 })

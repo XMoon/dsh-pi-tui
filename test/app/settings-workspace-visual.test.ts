@@ -4061,6 +4061,21 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
     shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000, inheritedMaxOutputBytes: 32_000 },
   })
   await openShellGroup(h)
+  // The Input and the Advanced disclosure refuse every parent route outright.
+  await clickPainted(h, 'Command timeout (ms)')
+  await clickPainted(h, 'Edit [Enter]', true)
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Visual tools')
+  assert.doesNotMatch(h.view(), /Discard unsaved changes\?|Save keeps you here/u, 'a raw Input never opens a parent question')
+  assert.match(h.view(), /Value:\s*/u, 'the Input keeps its keys')
+  await key(h, '\x1b')
+  await key(h, '?')
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Visual tools')
+  assert.doesNotMatch(h.view(), /Discard unsaved changes\?|Save keeps you here/u, 'Advanced never opens a parent question')
+  await key(h, '\x1b') // leave Advanced
+  await h.vt.waitForRender()
+
   await stageShellField(h, 'Command timeout (ms)', '45000')
 
   // Dirty Back opens the page's OWN leave question; Keep preserves the draft.
@@ -4118,21 +4133,27 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   assert.match(h.view(), /Settings · Tools · Rows/u, 'Discard and leave returns to the Rows level')
   assert.equal(h.shellExecutionBatches().length, 1, 'leaving never writes again')
 
-  // The Input and the Advanced disclosure refuse every parent route outright.
-  await key(h, '\r') // the SAME Rows selection: its forward action re-opens the group
+  // A parent CATEGORY click carries a destination. Save must not chase it.
+  await highlightRow(h, 'Shell execution')
+  await key(h, '\r')
   await settle(h, 4)
-  assert.match(h.view(), /Settings · Tools · Shell execution/u)
-  await clickPainted(h, 'Command timeout (ms)')
-  await clickPainted(h, 'Edit [Enter]', true)
+  await stageShellField(h, 'Command timeout (ms)', '44000')
+  await clickPainted(h, 'Models')
   await h.vt.waitForRender()
-  await clickPainted(h, 'Visual tools')
-  assert.doesNotMatch(h.view(), /Discard unsaved changes\?|Save keeps you here/u, 'a raw Input never opens a parent question')
-  assert.match(h.view(), /Value:\s*/u, 'the Input keeps its keys')
-  await key(h, '\x1b')
-  await key(h, '?')
+  assert.match(h.view(), /Discard and leave loses staged values\./u, 'a category click is the same leave gate')
+  await key(h, 's')
+  await settle(h, 12)
+  assert.equal(h.shellExecutionBatches().length, 2)
+  assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save keeps the page and does NOT follow the captured category')
+  // A fresh category click + Discard reaches THAT destination exactly.
+  await stageShellField(h, 'Command timeout (ms)', '43000')
+  await clickPainted(h, 'Models')
   await h.vt.waitForRender()
-  await clickPainted(h, 'Visual tools')
-  assert.doesNotMatch(h.view(), /Discard unsaved changes\?|Save keeps you here/u, 'Advanced never opens a parent question')
+  await key(h, 'd')
+  await settle(h, 8)
+  assert.match(h.view(), /Settings · Categories/u, 'Discard and leave reaches the captured category destination')
+  assert.match(h.view(), /> Models/u, 'the captured category is really selected')
+  assert.equal(h.shellExecutionBatches().length, 2, 'the destination change never writes again')
   h.dispose()
 })
 
@@ -4212,6 +4233,20 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   assert.match(refused.view(), /the official validator refused the caps/u)
   assert.equal(refused.shellExecutionAttempts(), 1, 'a definite refusal is dispatched once, never retried')
   assert.match(refused.view(), /Refresh \[R\]/u, 'the refused state offers its real recovery')
+  assert.doesNotMatch(refused.view(), /Save \[S\]|Edit \[Enter\]/u, 'a refused capture publishes no blind retry')
+  assert.match(refused.view(), /Last-known · Host model-tool executor · POSIX Bash/u)
+  assert.match(refused.view(), /Last confirmed: 60000 ms · Unsaved/u)
+  // The local Discard is a REAL body action even in this read-only state.
+  await clickPainted(refused, 'Discard…')
+  await refused.vt.waitForRender()
+  assert.match(refused.view(), /Discard unsaved changes\?/u)
+  await clickPainted(refused, 'Discard…') // the question's own body accept
+  await refused.vt.waitForRender()
+  assert.doesNotMatch(refused.view(), /unsaved change/u, 'the local body Discard cleared the draft')
+  assert.equal(refused.shellExecutionAttempts(), 1, 'discarding never retries the write')
+  await clickPainted(refused, 'Refresh [R]')
+  await settle(refused, 8)
+  assert.match(refused.view(), /Edit \[Enter\]/u, 'the explicit refresh re-enables editing')
   refused.dispose()
 })
 
@@ -4240,7 +4275,8 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
   await key(h, '\x1b') // dirty Back -> the compact leave bar
   await h.vt.waitForRender()
   const leaveBar = (h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, '')
-  assert.match(leaveBar, /Save \[S\] · Discard \[D\] · Keep \[Esc\]/u, `the 44x8 leave bar keeps all three complete actions: ${JSON.stringify(leaveBar)}`)
+  assert.match(leaveBar, /Save(?: \[S\])? · Discard (?:and leave )?\[D\] · Keep \[Esc\]$/u,
+    `the 44x8 leave bar keeps all three complete actions: ${JSON.stringify(leaveBar)}`)
   await key(h, '\x1b')
   await h.vt.waitForRender()
   assert.match(h.view(), /1 unsaved change/u, 'Keep preserves the draft at 44x8')
@@ -4310,6 +4346,228 @@ test('a held Shell Save is refused across a resize and a fresh click still saves
   await settle(h, 12)
   assert.equal(h.shellExecutionAttempts(), 1, 'a fresh gesture after the repaint saves once')
   assert.equal(h.shellExecutionBatches().length, 1)
+
+  // REVERSE resize: a press admitted at 200, a real repaint at 120, then the
+  // release on the NEW same-semantic Save cell. The old gesture must not save.
+  // This fresh press targets the SAME Save cell, so the fork's multi-click
+  // window must expire first (bounded observation; no other signal exists).
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  await stageShellField(h, 'Command timeout (ms)', '6000')
+  h.vt.resize(200, 50)
+  await h.vt.waitForRender()
+  await settle(h, 4)
+  let wideRow = h.rowsPlain().length - 1
+  let wideCol = cellIndexOf(h, wideRow, 'Save [S]')
+  press(h, wideRow, wideCol)
+  await h.vt.waitForRender()
+  h.vt.resize(120, 50)
+  await h.vt.waitForRender()
+  await settle(h, 6)
+  wideRow = h.rowsPlain().length - 1
+  wideCol = cellIndexOf(h, wideRow, 'Save [S]')
+  release(h, wideRow, wideCol)
+  await settle(h, 10)
+  assert.equal(h.shellExecutionAttempts(), 1, 'a cross-width release after the repaint never saves')
+  assert.match(h.view(), /6000 ms/u, 'the draft survives the refused cross-width release')
+  // The fresh gesture re-uses the same Save cell, so the fork's multi-click
+  // window (bounded observation) must expire before that press.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  wideRow = h.rowsPlain().length - 1
+  wideCol = cellIndexOf(h, wideRow, 'Save [S]')
+  press(h, wideRow, wideCol)
+  await h.vt.waitForRender()
+  release(h, wideRow, wideCol)
+  await settle(h, 12)
+  assert.equal(h.shellExecutionAttempts(), 2, 'the fresh gesture after that refusal saves once')
+
+  // A FIELD-SELECT press across a width change must not re-select; the fresh
+  // click selects the other field. (The negative is a visual selection, not a
+  // no-write body.)
+  h.vt.resize(120, 50)
+  await h.vt.waitForRender()
+  await settle(h, 4)
+  const fieldRow = rowOf(h, 'Output cap per stream (bytes)')
+  const fieldCol = cellIndexOf(h, fieldRow, 'Output cap per stream (bytes)')
+  press(h, fieldRow, fieldCol)
+  await h.vt.waitForRender()
+  h.vt.resize(76, 24)
+  await h.vt.waitForRender()
+  await settle(h, 6)
+  const narrowFieldRow = rowOf(h, 'Output cap per stream (bytes)')
+  const narrowFieldCol = cellIndexOf(h, narrowFieldRow, 'Output cap per stream (bytes)')
+  release(h, narrowFieldRow, narrowFieldCol)
+  await settle(h, 6)
+  assert.match(h.view(), /> Command timeout \(ms\)/u, 'the stale wide press never re-selects a field')
+  await clickPainted(h, 'Output cap per stream (bytes)')
+  await settle(h, 4)
+  assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the fresh click selects the second field')
+  h.dispose()
+})
+
+test('the Shell row preview facts and blank Detail cells stay passive until Open…', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 50,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await h.open('Tools')
+  await key(h, '\r')
+  await highlightRow(h, 'Shell execution')
+  await settle(h, 4)
+  const refreshes = h.shellExecutionRefreshes()
+  assert.equal(h.shellExecutionAttempts(), 0)
+  assert.match(h.view(), /POSIX Bash/u, 'the Rows summary carries the executor fact')
+  await clickPainted(h, 'POSIX Bash')
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'a preview fact click never mounts the group')
+  assert.equal(h.shellExecutionRefreshes(), refreshes, 'a preview fact click never reads the Host')
+  // A blank cell inside the passive Detail column is inert too.
+  press(h, 10, 150)
+  await h.vt.waitForRender()
+  release(h, 10, 150)
+  await settle(h, 4)
+  assert.doesNotMatch(h.view(), /Command timeout \(ms\)/u, 'a blank Detail cell never mounts the group')
+  assert.equal(h.shellExecutionRefreshes(), refreshes, 'a blank Detail cell never reads the Host')
+  // The explicit Open… is the ONE grant, and the ONE mount read.
+  await clickPainted(h, 'Open…')
+  await settle(h, 4)
+  assert.match(h.view(), /Command timeout \(ms\)/u)
+  assert.equal(h.shellExecutionRefreshes(), refreshes + 1, 'the real grant performs the ONE Host read')
+  h.dispose()
+})
+
+test('the real Root Shell medium grant paints the complete canonical fact and sends it once', async () => {
+  const h = setup({
+    columns: 76,
+    rows: 24,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(h, 'enter')
+  await clickPainted(h, 'Command timeout (ms)')
+  await clickPainted(h, 'Edit [Enter]', true)
+  await h.vt.waitForRender()
+  await key(h, '\x15')
+  for (const character of '1234567890123456789012345') await key(h, character)
+  await settle(h, 4)
+  assert.match(h.view(), /Value sends/u, 'the canonical label never shares a clipped line')
+  assert.match(h.view(), /1\.2345678901234568e\+24 ms/u, 'the complete canonical value is painted')
+  await clickPainted(h, 'Stage [Enter]', true)
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  const batches = h.shellExecutionBatches()
+  assert.equal(batches.length, 1, 'the medium grant sends exactly one batch')
+  assert.deepEqual(batches[0]?.patch, { timeoutMs: { kind: 'set', value: 1.2345678901234568e24 } })
+  assert.match(h.view(), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('the Root Shell group keeps an unconfirmed outcome out of the current-row story', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 50,
+    shellExecutionUnconfirmed: true,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(h)
+  await stageShellField(h, 'Command timeout (ms)', '45000')
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  assert.equal(h.shellExecutionAttempts(), 1)
+  assert.equal(h.shellExecutionBatches().length, 1)
+  h.vt.resize(160, 14)
+  await h.vt.waitForRender()
+  await settle(h, 6)
+  assert.match(h.view(), /Status\s+Outcome unconfirmed/u, 'the settlement state leads the short frame')
+  assert.match(h.view(), /possibly saved;/u)
+  assert.match(h.view(), /before retrying\./u)
+  assert.match(h.view(), /Last-known · Host model-tool executor · POSIX Bash/u, 'the captured executor is not painted as current')
+  assert.match(h.view(), /Last confirmed: 60000 ms · Unsaved/u)
+  assert.doesNotMatch(h.view(), /Current: 60000/u)
+  assert.doesNotMatch(h.view(), /Save \[S\]|Edit \[Enter\]/u, 'no blind retry or edit is published')
+  assert.doesNotMatch(h.view(), /Discard…/u, 'an ambiguous outcome has no ordinary local discard')
+  // The leave question discloses the requested/last-confirmed facts.
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /The Host may have applied this change\./u)
+  assert.match(h.view(), /Leaving does not undo it\./u)
+  assert.match(h.view(), /Leave anyway \[D\]/u)
+  assert.match(h.view(), /Requested Command timeout \(ms\)\s+45000 ms/u)
+  assert.match(h.view(), /Last confirmed\s+60000 ms/u)
+  await key(h, '\x1b') // Keep
+  await h.vt.waitForRender()
+  // Refresh requires the explicit question, then re-reads the served row.
+  await clickPainted(h, 'Refresh [R]')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Refresh discards unsaved edits\./u)
+  await clickPainted(h, 'Refresh…')
+  await settle(h, 8)
+  assert.match(h.view(), /^.*Command timeout \(ms\)\s+45000 ms/mu, 'the refresh reads the new served row')
+  assert.doesNotMatch(h.view(), /Last-known · Host/u, 'no stale tag survives a successful refresh')
+  assert.doesNotMatch(h.view(), /Save \[S\]/u, 'the refresh never replays the lost Save')
+  // A NEW explicit edit/stage/save is required.
+  await stageShellField(h, 'Command timeout (ms)', '5000')
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h, 12)
+  const batches = h.shellExecutionBatches()
+  assert.equal(batches.length, 2, 'the recovery Save is a fresh admitted batch')
+  assert.deepEqual(batches[1]?.patch, { timeoutMs: { kind: 'set', value: 5000 } })
+  assert.ok((batches[1]?.revision ?? 0) > (batches[0]?.revision ?? 0), 'the fresh Save uses the refreshed revision')
+  h.dispose()
+})
+
+test('the real Root Shell short grant completes the whole pointer journey', async () => {
+  const h = setup({
+    columns: 44,
+    rows: 8,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(h, 'enter')
+  assert.match(h.view(), /Settings · Tools · Shell execution/u)
+  wheel(h, 4, 20, true)
+  await settle(h, 4)
+  await clickPainted(h, 'Output cap per stream (bytes)')
+  await clickPainted(h, 'Edit [Enter]', true)
+  await h.vt.waitForRender()
+  await key(h, '\x15')
+  for (const character of '128000') await key(h, character)
+  await clickPainted(h, 'Stage [Enter]', true)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /128000 bytes/u, 'the staged draft is painted')
+  wheel(h, 4, 20, true) // the short browse scrolls under the wheel to its facts
+  await settle(h, 2)
+  // The 44x8 dirty bar drops Details; its REAL body action stays reachable.
+  for (let step = 0; step < 14 && !h.view().includes('Details…'); step += 1) {
+    wheel(h, 4, 20, true)
+    await settle(h, 2)
+  }
+  assert.match(h.view(), /Details…/u, 'the short browse wheel reaches the Details body affordance')
+  await clickPainted(h, 'Details…')
+  await h.vt.waitForRender()
+  for (let step = 0; step < 22 && !h.view().includes('Reset to inherited…'); step += 1) {
+    wheel(h, 4, 20, true)
+    await settle(h, 2)
+  }
+  assert.match(h.view(), /Reset to inherited…/u, 'the wheel reaches the short disclosure action')
+  await clickPainted(h, 'Reset to inherited…')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Reset staged/u)
+  await clickPainted(h, 'Back [Esc]', true)
+  await h.vt.waitForRender()
+  wheel(h, 4, 20, true) // reveal the staged field's complete dirty block
+  await settle(h, 2)
+  const leaveBar = (h.rowsPlain().at(-1) ?? '').replace(/\s+$/u, '')
+  assert.match(leaveBar, /Save(?: \[S\])? · Discard (?:and leave )?\[D\] · Keep \[Esc\]$/u,
+    `all three complete actions stay on the 44x8 bar: ${JSON.stringify(leaveBar)}`)
+  await clickPainted(h, 'Save', true)
+  await settle(h, 12)
+  const batches = h.shellExecutionBatches()
+  assert.equal(batches.length, 1, 'the pointer journey sends exactly one batch')
+  assert.deepEqual(batches[0]?.patch, { maxOutputBytes: { kind: 'reset' } }, 'the pointer Reset is the official unset')
+  assert.match(h.view(), /Status\s+Verified/u)
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h, 4)
+  assert.match(h.view(), /Settings · Tools · Rows/u, 'the pointer journey exits to Rows')
   h.dispose()
 })
 
@@ -12623,27 +12881,13 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
       await shell.vt.waitForRender()
       const leaveBar = (shell.rowsPlain().at(-1) ?? '').replace(/\s+$/u, '')
       assert.match(leaveBar, /Keep \[Esc\]$/u, `${columns}x${rows} ${theme}: the leave question's Keep`)
+      assert.match(leaveBar, /Save(?: \[S\])? · Discard (?:and leave )?\[D\] · Keep \[Esc\]$/u,
+        `${columns}x${rows} ${theme}: all three complete leave actions stay on the painted bar`)
       assert.match(shell.view(), /Save keeps you here\./u, `${columns}x${rows} ${theme}: the leave facts stay readable`)
-      let discarded = false
-      if (/Discard (?:and leave )?\[D\]/u.test(leaveBar)) {
-        await key(shell, 'd') // Discard and leave through its REALLY painted action
-        discarded = true
-      } else {
-        // A narrower child bar may keep only Save/Keep (plan §2.4 priority):
-        // the valid exit is the explicit Save, then the clean Back.
-        assert.match(leaveBar, /Save \[S\]/u, `${columns}x${rows} ${theme}: a two-item leave bar keeps Save and Keep`)
-        await key(shell, 's')
-        await settle(shell, 12)
-        await key(shell, '\x1b')
-      }
+      await key(shell, 'd') // Discard and leave through its REALLY painted action
       await settle(shell)
       assert.match(shell.view(), /Settings · Tools · Rows/u, `${columns}x${rows} ${theme}: the group leaves to Rows`)
-      if (discarded) {
-        assert.deepEqual(shell.shellExecutionBatches(), [], `${columns}x${rows} ${theme}: Discard and leave never writes`)
-      } else {
-        assert.deepEqual(shell.shellExecutionBatches().map(batch => batch.patch), [{ timeoutMs: { kind: 'set', value: 45_000 } }],
-          `${columns}x${rows} ${theme}: the two-item fallback really saved the staged draft`)
-      }
+      assert.deepEqual(shell.shellExecutionBatches(), [], `${columns}x${rows} ${theme}: Discard and leave never writes`)
       shell.dispose()
     }
   }
