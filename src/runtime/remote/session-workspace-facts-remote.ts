@@ -636,12 +636,6 @@ class DiscoveryReceipts {
 }
 
 /** The observation-level failure: the source generation is gone for good. */
-class ObservationUnavailableError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ObservationUnavailableError'
-  }
-}
 
 /**
  * The ONE per-open incremental Remote Activity observation.
@@ -1665,7 +1659,6 @@ class RemoteActivityObservation implements ActivityObservation {
  */
 class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
   private readonly workspace: RemoteWorkspaceNamespaceLike
-  private readonly callerSignal: AbortSignal | undefined
   private readonly mode: WorkspaceFollowMode
   private readonly officialStream: RemoteWorkspaceStreamSource | undefined
   private readonly generation: RemoteConnectionGenerationSource
@@ -1699,7 +1692,6 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
       throw new SupersededReadError('the Host Workspace stream requires a current Connection generation')
     }
     this.workspace = source.remote.workspace
-    this.callerSignal = signal
     this.mode = mode
     this.capturedGeneration = captured
     this.generation = source.connection.generation
