@@ -316,6 +316,19 @@ export function createRemoteM3ASemantics(
     ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
   })
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
+  const sessionWorkspaceFacts = new RemoteSessionWorkspaceFacts({
+    sessions,
+    remote: { session: remote.session, workspace: remote.workspace },
+    connection: { generation },
+    // The ONE forwarded status seat (recovery currentness only).
+    events: {
+      onSessionStatus: listener => sessionStatusEvents('api-session/status', listener),
+    },
+    // The official reconnecting Gateway lifecycle: the SAME `$stream`
+    // receiver and the captured same-installation carrier-error class.
+    workspaceStream: runtime.workspaceStream,
+    initialGeneration: runtime.initialGeneration,
+  })
   let disposed = false
   return {
     sessionReader: new RemoteSessionReader(sessions, generation),
@@ -348,20 +361,9 @@ export function createRemoteM3ASemantics(
     deliveredFileRead: new RemoteDeliveredFileReadPort(remote.workspaceFiles, generation),
     // M5-U-A: passive `session.state`/`session.projections` reads over the SAME
     // generated namespace and the official `workspace.follow` stream. No second
-    // Client/Remote, no retain, no writer.
-    sessionWorkspaceFacts: new RemoteSessionWorkspaceFacts({
-      sessions,
-      remote: { session: remote.session, workspace: remote.workspace },
-      connection: { generation },
-      // The ONE forwarded status seat (recovery currentness only).
-      events: {
-        onSessionStatus: listener => sessionStatusEvents('api-session/status', listener),
-      },
-      // The official reconnecting Gateway lifecycle: the SAME `$stream`
-      // receiver and the captured same-installation carrier-error class.
-      workspaceStream: runtime.workspaceStream,
-      initialGeneration: runtime.initialGeneration,
-    }),
+    // Client/Remote, no retain, no writer. Its adapter-lifetime discovery
+    // receipts own Client-store subscriptions, released with this adapter.
+    sessionWorkspaceFacts,
     // S5-PR4: the official generated `schedule` namespace over the SAME
     // Client Remote and the SAME Connection generation; a missing namespace is
     // a truthful unavailable, never a Direct fallback.
@@ -386,6 +388,7 @@ export function createRemoteM3ASemantics(
       modelCatalog.disposeCache()
       presetCatalog.disposeCache()
       interaction.dispose()
+      sessionWorkspaceFacts.dispose()
     },
   }
 }

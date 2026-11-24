@@ -1517,10 +1517,15 @@ workspace/question/approval store and keeps no cross-session cache.
   discovery attempt is remembered as SCHEDULING evidence only, scoped to the
   Connection generation and the relevant hint witness; it lives for the facts
   adapter's surface-runtime lifetime, so a close/reopen with an unchanged source
-  does not repeat ordinary discovery, is pruned by the official authorized
-  roster, is discarded on a generation replacement/loss, records nothing for a
-  denied/unavailable/failed read, and is never an answerability fact, never
-  cached payload and never consulted by the answer gate or the Writer. Only
+  does not repeat ordinary discovery. The adapter observes the official list and
+  Connection generation for that whole lifetime (Client-store subscriptions
+  only, no Host work while closed), so a relevant source revision change — even
+  one that changes and reverts while the panel is closed — deletes the receipt;
+  equal witness values are not proof of the same revision. Receipts are bound to
+  the official authorized roster, are discarded on a generation
+  replacement/loss, record nothing for a denied/unavailable/failed read, and are
+  never an answerability fact, never cached payload and never consulted by the
+  answer gate or the Writer. Only
   active rows (running, eligible, observed pending, current) keep ONE re-armed
   20 s recheck, because the Gateway has no global public pending event; ordinary
   idle rows are never re-sampled. Each read owns an operation identity: an

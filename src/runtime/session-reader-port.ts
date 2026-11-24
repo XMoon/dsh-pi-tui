@@ -31,6 +31,10 @@ export interface SessionSummary {
   /** Effective agent preset id, when a caller has already enriched this row.
    * Initial list results may omit it while projection replay is pending. */
   preset?: string
+  /** Present when the source has a READABLE preset projection: the row's
+   *  `preset` is then its final value and an absent `preset` is a known "none"
+   *  (never an unmeasured fallback to a previously accepted enrichment). */
+  presetKnown?: boolean
   /** The session this one was forked from, when it has lineage. */
   parentSession?: string
   /** Subagent children carry the `sub` marker. */

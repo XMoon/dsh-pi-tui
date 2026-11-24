@@ -1174,7 +1174,9 @@ test('UA-12 a recovering follow that never resumes after a carrier loss fails tr
 const activeQuestions = {
   kind: 'sequenced' as const,
   values: {
-    userQuestions: { active: [{ callId: 'q1', state: 'continued' }], settled: [] },
+    // The classifier reads the QUESTION ITEMS (`questions[].intent`), so a real
+    // continued fixture must carry them; a bare callId would be malformed.
+    userQuestions: { active: [{ callId: 'q1', state: 'continued', questions: [{ id: 'q1', question: 'Continue?' }] }], settled: [] },
     inbox: { 'next-step': [], 'next-turn': [] },
   },
 }
@@ -1184,7 +1186,9 @@ const flushTurns = async (): Promise<void> => { await new Promise<void>(resolve 
 test('R1 a continued hint that arrives during a BLOCKED discovery is sampled by the newer epoch once it settles', async () => {
   const listed = [row('x')]
   const listedRunning = { x: false }
-  const states = { x: { result: { running: true, pendingInput: ['question'] } } }
+  // A REAL continued late answer: the Gateway reports NO pending input; only
+  // the readable projection/inbox proves the continued call.
+  const states = { x: { result: { running: false, pendingInput: [] as string[] } } }
   const projections: Record<string, { readonly result: unknown }> = { x: { result: emptyQuestions } }
   const hints: Record<string, { readonly values: unknown; readonly state: 'idle' }> = {}
   let releaseDiscovery!: () => void
@@ -1210,6 +1214,8 @@ test('R1 a continued hint that arrives during a BLOCKED discovery is sampled by 
     releaseDiscovery()
     await waitFor(() => observation.getSnapshot().facts[0]?.attention === 'question',
       'the newer epoch is sampled after the old read settles')
+    assert.deepEqual(observation.getSnapshot().facts[0]?.continuedQuestionCallIds, ['q1'],
+      'the REAL continued call (no Gateway pending) is classified from the readable projection')
     assert.ok(h.projectionCalls.length >= 2, 'the newer evidence was really re-read, not the old response committed')
   })
 })
@@ -1411,6 +1417,15 @@ test('R8 a close/reopen with an unchanged source repeats NO ordinary discovery, 
     assert.ok(!h.projectionCalls.includes('a'), 'an unchanged sibling keeps its receipt')
   })
   h.projectionCalls.length = 0
+  // A source revision that genuinely REVERTS to an earlier witness is a new
+  // revision, not a resurrected receipt: W1→W2→W1 must discover on the return.
+  hints.b = {}
+  projections.b = { result: emptyQuestions }
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    await waitFor(() => h.projectionCalls.includes('b'), 'the reverted witness is discovered again')
+  })
+  h.projectionCalls.length = 0
   // A generation replacement discards every receipt.
   h.setGeneration('gen-2')
   await withObservation(h, async (observation) => {
@@ -1448,4 +1463,120 @@ test('R10 a repeated opening baseline inside ONE physical generation is rejected
   await iterator.next()
   await assert.rejects(() => iterator.next(), /repeated an opening baseline/)
   handle.dispose()
+})
+
+test('R13 a late positive list row schedules AND pumps its recovery read with no other activity', async () => {
+  const listedRunning = { x: false }
+  const h = harness({
+    listed: [row('x')],
+    listedRunning,
+    states: { x: { result: { running: true, pendingInput: [] } } },
+    projections: { x: { result: emptyQuestions } } as never,
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([row('x')], 1, undefined)
+    // The replacement generation's discovery pass settles with no active row,
+    // no candidate, no in-flight work and no armed recheck.
+    h.setGeneration('gen-2')
+    await waitFor(() => observation.getSnapshot().facts[0]?.attentionSourceState === 'known', 'the replacement discovery settles')
+    const before = h.stateCalls.filter(id => id === 'x').length
+    // The real list then publishes running=true with NO status transition.
+    listedRunning.x = true
+    h.notifyList()
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length > before,
+      'the queued recovery read is pumped, not left stranded in the queue')
+    await waitFor(() => observation.getSnapshot().facts[0]?.running === true, 'the current state proves running')
+  })
+})
+
+test('R13b a failed precise state in a replacement generation is unknown, never the stale list bit', async () => {
+  const h = harness({
+    listed: [row('x')],
+    listedRunning: { x: true },
+    states: { x: { failure: { code: 'remote-access/denied' } } },
+    projections: { x: { result: emptyQuestions } } as never,
+  })
+  h.setGeneration('gen-2')
+  const facts = await h.facts.readActivity([row('x')])
+  assert.equal(facts[0].running, undefined,
+    'a denied exact state is unknown; the replayed ready row cannot resurrect running')
+})
+
+test('R14 a source that changes and REVERTS (W1→W2→W1) is discovered on the return', async () => {
+  const hints: Record<string, unknown> = {}
+  const projections: Record<string, unknown> = { b: { result: emptyQuestions } }
+  const h = harness({
+    listed: [row('b')],
+    listedRunning: { b: false },
+    projections: projections as never,
+    projectionsBySession: hints as never,
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([row('b')], 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 1, 'W1 is discovered')
+    // W2: the source becomes active while the Browser is open.
+    hints.b = { values: { userQuestions: { active: [{ callId: 'q2', state: 'continued', questions: [{ id: 'q2', question: 'Continue?' }] }], settled: [] } }, state: 'idle' }
+    projections.b = { result: activeQuestions }
+    h.notifyList()
+    await waitFor(() => h.projectionCalls.length === 2, 'W2 discards the W1 receipt and reads its own revision')
+    // Back to W1: a reverted revision is NOT the earlier completed one.
+    hints.b = {}
+    projections.b = { result: emptyQuestions }
+    h.notifyList()
+    await waitFor(() => h.projectionCalls.length === 3, 'the reverted witness is discovered again')
+  })
+})
+
+test('R14b a source that changes and reverts while the Browser is CLOSED is still discovered on reopen', async () => {
+  const hints: Record<string, unknown> = {}
+  const projections: Record<string, unknown> = { b: { result: emptyQuestions } }
+  const h = harness({
+    listed: [row('b')],
+    listedRunning: { b: false },
+    projections: projections as never,
+    projectionsBySession: hints as never,
+  })
+  // First open records the W1 receipt, then closes.
+  await withObservation(h, async (observation) => {
+    observation.setRoster([row('b')], 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 1, 'W1 is discovered')
+  })
+  h.projectionCalls.length = 0
+  // The adapter's lifetime subscription sees both revisions while closed.
+  hints.b = { values: { userQuestions: { active: [{ callId: 'q3', state: 'continued', questions: [{ id: 'q3', question: 'Continue?' }] }], settled: [] } }, state: 'idle' }
+  h.notifyList()
+  hints.b = {}
+  h.notifyList()
+  // The revert to W1 must not resurrect the W1 receipt: reopen discovers again.
+  await withObservation(h, async (observation) => {
+    observation.setRoster([row('b')], 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 1, 'the reverted revision is discovered on reopen')
+  })
+})
+
+test('R15 a stale completion after removal/re-add records no receipt a later reopen could trust', async () => {
+  const releases: Array<() => void> = []
+  const h = harness({
+    listed: [row('x')],
+    listedRunning: { x: false },
+    projections: { x: { result: emptyQuestions } } as never,
+    projectionGate: () => new Promise<void>((resolve) => { releases.push(resolve) }),
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([row('x')], 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 1, 'the first incarnation discovery is blocked in flight')
+    observation.setRoster([], 2, undefined)
+    observation.setRoster([row('x')], 3, undefined)
+    releases[0]!()
+    await waitFor(() => h.projectionCalls.length === 2, 'the re-added incarnation starts its OWN discovery')
+    // That read is still blocked: disposing aborts it (no receipt), while the
+    // stale completion must not have recorded one for the new id either.
+    observation.dispose()
+  })
+  releases[1]?.()
+  h.projectionCalls.length = 0
+  await withObservation(h, async (observation) => {
+    observation.setRoster([row('x')], 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 1, 'the stale incarnation left no trusted receipt')
+  })
 })

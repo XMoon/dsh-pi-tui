@@ -3123,3 +3123,41 @@ test('R12 an open with no Connection generation installs the ONE generation obse
   await waitUntil(() => h.view().includes('project-a · 1'), 'the fresh baseline paints in the same panel')
   h.close()
 })
+
+test('R16 a preset-only official push updates the accepted preset and a known-absent preset clears it', async () => {
+  const snapshots: SessionBrowserReadSnapshot[] = []
+  const presentation: SessionBrowserPresentation = {
+    open: (request) => ({
+      isDisposed: () => false,
+      setSnapshot: (snapshot) => { snapshots.push(snapshot) },
+      close: () => { request.onClose() },
+    }),
+    notify: () => {},
+  }
+  const presets: Record<string, string | undefined> = { [CURRENT]: 'reviewer' }
+  const h = harness({
+    currentSessionId: CURRENT,
+    observableList: true,
+    nativePresentation: presentation,
+    rows: [row(CURRENT, 3_000)],
+    projection: async () => new Map(presets[CURRENT] === undefined ? [] : [[CURRENT, { preset: presets[CURRENT] }]]),
+  })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  await waitUntil(() => snapshots.at(-1)?.rows[0]?.preset === 'reviewer', 'the projection enrichment lands')
+  const listCallsBefore = h.listCalls
+  const revisionBefore = snapshots.at(-1)!.listRevision
+  // Another Client selects a preset on this blank Session: the official list
+  // push carries the projection value with the same id/title/updatedAt.
+  presets[CURRENT] = 'writer'
+  h.pushRoster([row(CURRENT, 3_000, { preset: 'writer', presetKnown: true })])
+  await waitUntil(() => snapshots.at(-1)?.rows[0]?.preset === 'writer', 'the official preset change reaches the same owner')
+  assert.equal(h.listCalls, listCallsBefore, 'a preset-only update never triggers a Host list read')
+  assert.ok(snapshots.at(-1)!.listRevision > revisionBefore, 'a genuine metadata delta is a real roster revision')
+  // A readable projection that says "no preset" is a known absence, never a
+  // reason to keep the previous enrichment.
+  delete presets[CURRENT]
+  h.pushRoster([row(CURRENT, 3_000, { presetKnown: true })])
+  await waitUntil(() => snapshots.at(-1)?.rows[0]?.preset === undefined, 'a known-absent preset clears the accepted value')
+  h.close()
+})

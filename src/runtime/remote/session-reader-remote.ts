@@ -241,6 +241,15 @@ export class RemoteSessionReader implements SessionReader {
         id,
         updatedAt: row.updatedAt,
         ...(row.title === undefined ? {} : { title: row.title }),
+        // The official list row carries the shared projection values, so a
+        // preset-only change (another Client selects a preset on a blank
+        // Session) reaches the accepted roster without any extra read.
+        ...(typeof row.projectionValues?.agentPreset === 'string' && row.projectionValues.agentPreset !== ''
+          ? { preset: row.projectionValues.agentPreset }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(row.projectionValues ?? {}, 'agentPreset')
+          ? { presetKnown: true }
+          : {}),
         cwd: row.cwd,
         ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
         ...(row.origin === undefined ? {} : { origin: row.origin }),

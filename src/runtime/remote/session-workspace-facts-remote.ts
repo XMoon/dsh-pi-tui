@@ -469,10 +469,12 @@ function userQuestionsSignature(value: unknown): string {
   for (const entry of value.active) {
     if (!isRecord(entry)) return 'malformed'
     if (typeof entry.callId !== 'string' || typeof entry.state !== 'string') return 'malformed'
-    // Only the fields the classification reads: identity, timed state and the
-    // plan-review intent identity.
-    const intent = isRecord(entry.intent) && typeof entry.intent.kind === 'string' ? entry.intent.kind : '-'
-    entries.push(`${entry.callId}:${entry.state}:${intent}`)
+    // The classification reads the intent from the QUESTION ITEM
+    // (`entry.questions[].intent`, see `isPlanReview`), so the scheduling
+    // witness must read the same official shape: a parallel approximation on
+    // `entry.intent` could miss a plan-review change.
+    const planReview = isPlanReview(entry.questions)
+    entries.push(`${entry.callId}:${entry.state}:${planReview === undefined ? 'malformed' : String(planReview)}`)
   }
   return `active(${entries.join(',')})`
 }
@@ -495,6 +497,35 @@ function inboxSignature(value: unknown): string {
   }
   // Lane membership is irrelevant to the answerable fact; the SET is the fact.
   return `queued(${callIds.sort().join(',')})`
+}
+
+/**
+ * The relevant hint values for one id from ONE official list snapshot: the full
+ * shared-store view when it carries the two relevant keys, else the row's
+ * summary projection values. This is the scheduling source for both the
+ * observation and the adapter-lifetime receipt invalidation, so the two can
+ * never approximate the same source differently.
+ */
+export function relevantHintValuesOf(
+  listed: ReturnType<RemoteSessionsReadSource['list']['getSnapshot']>,
+  id: string,
+): RemoteProjectionValues | undefined {
+  if (listed.phase !== 'ready') return undefined
+  const store = listed.projectionsBySession[id]?.values
+  if (store !== undefined
+    && (Object.prototype.hasOwnProperty.call(store, USER_QUESTIONS_PROJECTION_KEY)
+      || Object.prototype.hasOwnProperty.call(store, INBOX_PROJECTION_KEY))) {
+    return store
+  }
+  return listed.byId[id]?.projectionValues
+}
+
+/** The scheduling witness of one id in one official list snapshot. */
+export function relevantWitnessOf(
+  listed: ReturnType<RemoteSessionsReadSource['list']['getSnapshot']>,
+  id: string,
+): string {
+  return relevantHintSignature(relevantHintValuesOf(listed, id))
 }
 
 /** The authority one row's `running` fact came from. The normal path is the
@@ -559,6 +590,21 @@ class DiscoveryReceipts {
 
   record(sessionId: string, generation: RemoteConnectionGeneration, witness: string): void {
     this.byId.set(sessionId, { generation, witness })
+  }
+
+  /** Drop one row's receipt: a relevant source revision change invalidates the
+   *  completed discovery even if the source later returns to an identical
+   *  witness value. A receipt is never resurrected by a reverted source. */
+  delete(sessionId: string): void {
+    this.byId.delete(sessionId)
+  }
+
+  /** Drop receipts whose relevant source is no longer the current witness: a
+   *  stale revision must not survive to (incorrectly) match a later revert. */
+  pruneStale(currentWitness: (sessionId: string) => string): void {
+    for (const [id, receipt] of [...this.byId]) {
+      if (receipt.witness !== currentWitness(id)) this.byId.delete(id)
+    }
   }
 
   /** Keep receipts bounded by the official authorized membership. */
@@ -683,6 +729,7 @@ class RemoteActivityObservation implements ActivityObservation {
     }
     this.rosterOrder = authorized
     this.receipts.prune(authorized)
+    this.receipts.pruneStale(id => this.witnessOf(id))
     // The official running projection is published in the SAME roster frame.
     this.refreshRunningFromList()
     this.pruneQueues()
@@ -795,15 +842,7 @@ class RemoteActivityObservation implements ActivityObservation {
   /** The relevant hint values of one authorized id: the full shared store view
    *  when it carries the keys, else the list row's summary values. */
   private hintValuesOf(id: string): RemoteProjectionValues | undefined {
-    const listed = this.sessions.list.getSnapshot()
-    if (listed.phase !== 'ready') return undefined
-    const store = listed.projectionsBySession[id]?.values
-    if (store !== undefined
-      && (Object.prototype.hasOwnProperty.call(store, USER_QUESTIONS_PROJECTION_KEY)
-        || Object.prototype.hasOwnProperty.call(store, INBOX_PROJECTION_KEY))) {
-      return store
-    }
-    return listed.byId[id]?.projectionValues
+    return relevantHintValuesOf(this.sessions.list.getSnapshot(), id)
   }
 
   private witnessOf(id: string): string {
@@ -818,6 +857,7 @@ class RemoteActivityObservation implements ActivityObservation {
     if (listed.phase !== 'ready') return
     const baseline = this.isInitialGeneration()
     let changed = false
+    let scheduled = false
     for (const [id, row] of this.rows) {
       const entry = listed.byId[id]
       const witness = this.witnessOf(id)
@@ -828,6 +868,7 @@ class RemoteActivityObservation implements ActivityObservation {
         changed = true
         this.invalidateRow(row)
         this.scheduleAfterRelevantChange(row)
+        scheduled = true
         continue
       }
       if (witness !== row.witness) {
@@ -835,6 +876,7 @@ class RemoteActivityObservation implements ActivityObservation {
         changed = true
         this.invalidateRow(row)
         this.scheduleAfterRelevantChange(row)
+        scheduled = true
         continue
       }
       // The list may carry a fresh positive running fact for a row this
@@ -842,12 +884,17 @@ class RemoteActivityObservation implements ActivityObservation {
       // trigger only: the targeted read proves it, never the replayed row.
       if (!row.runningProven && entry?.running === true && this.rowIsCandidate(row)) {
         this.scheduleAfterRelevantChange(row)
+        scheduled = true
       }
     }
-    if (!changed) return
-    this.revision += 1
-    this.emit()
-    this.pump()
+    if (changed) {
+      this.revision += 1
+      this.emit()
+    }
+    // A newly queued read must start even when no VISIBLE fact changed: a
+    // late positive list row is scheduling-only and its recovery read would
+    // otherwise sit in the queue with nothing to pump it.
+    if (changed || scheduled) this.pump()
   }
 
   /** One current-generation official Agent status event. It is the recovery
@@ -984,6 +1031,11 @@ class RemoteActivityObservation implements ActivityObservation {
    *  keep painting the OLD sample (a revoked Needs must leave the same frame).
    *  Returns whether anything actually changed. */
   private invalidateRow(row: ActivityRow): boolean {
+    // The completed-discovery receipt belongs to the source revision this change
+    // just replaced: deleting it (rather than only comparing the witness at use)
+    // means a source that later reverts to an identical witness still needs its
+    // own discovery.
+    this.receipts.delete(row.sessionId)
     row.epoch += 1
     row.exactProjection = undefined
     row.reuseProjection = false
@@ -1178,9 +1230,9 @@ class RemoteActivityObservation implements ActivityObservation {
       try {
         const witness = row.witness
         const pending = await this.readState(sessionId, controller.signal)
-        if (!this.committable(sessionId, epoch, generation)) return
+        if (!this.committable(row, epoch, generation)) return
         const projection = promotedProjection ?? await this.readProjections(sessionId, controller.signal)
-        if (!this.committable(sessionId, epoch, generation)) return
+        if (!this.committable(row, epoch, generation)) return
         row.exactProjection = { epoch, read: projection }
         const negative = this.isNegativeDiscovery(projection)
         row.discovery = { epoch, witness, negative }
@@ -1211,7 +1263,7 @@ class RemoteActivityObservation implements ActivityObservation {
       try {
         const witness = row.witness
         const projection = await this.readProjections(sessionId, controller.signal)
-        if (!this.committable(sessionId, epoch, generation)) return
+        if (!this.committable(row, epoch, generation)) return
         row.exactProjection = { epoch, read: projection }
         if (projection.kind === 'known' && projection.active.length > 0) {
           // A real active entry promotes this id to the priority lane once this
@@ -1222,15 +1274,18 @@ class RemoteActivityObservation implements ActivityObservation {
           row.discovery = { epoch, witness, negative: false }
           return
         }
-        // An ordinary row that proved no active entry has NOT proven "no
-        // pending": without a Gateway state sample the attention fact stays
-        // unknown. Publishing a `none` here would fabricate an absence.
-        this.setUnmeasuredAttention(row, projection.kind)
+        // Record the scheduling bookkeeping/receipt BEFORE the publication that
+        // may re-enter the owner: a listener must never observe a published
+        // state whose discovery evidence is still missing.
         const negative = this.isNegativeDiscovery(projection)
         row.discovery = { epoch, witness, negative }
         if (negative && row.witness === witness) {
           this.receipts.record(sessionId, generation, witness)
         }
+        // An ordinary row that proved no active entry has NOT proven "no
+        // pending": without a Gateway state sample the attention fact stays
+        // unknown. Publishing a `none` here would fabricate an absence.
+        this.setUnmeasuredAttention(row, projection.kind)
       } finally {
         this.finishWork(sessionId, 'discovery', token)
       }
@@ -1248,6 +1303,9 @@ class RemoteActivityObservation implements ActivityObservation {
     const row = this.rows.get(sessionId)
     if (row?.promote === true) {
       row.promote = false
+      // The promotion read IS the newest work for this id: a coalesced entry
+      // recorded earlier would otherwise start a second redundant read.
+      this.pendingWork.delete(sessionId)
       this.schedulePriority(sessionId, { front: true })
     } else {
       const pending = this.pendingWork.get(sessionId)
@@ -1263,7 +1321,7 @@ class RemoteActivityObservation implements ActivityObservation {
 
   /** Commit one exact state+projection pair onto the current row epoch. */
   private commitPair(row: ActivityRow, epoch: number, pending: PendingRead, projection: QuestionProjectionRead): void {
-    if (row.epoch !== epoch) return
+    if (this.rows.get(row.sessionId) !== row || row.epoch !== epoch) return
     const runningChanged = this.applyPendingRunning(row, pending)
     const derivation = deriveAttention(pending, projection)
     const next: SessionActivityFact = {
@@ -1296,11 +1354,13 @@ class RemoteActivityObservation implements ActivityObservation {
       && projection.active.length === 0
   }
 
-  /** Whether a read started for this row/epoch/generation may still commit. */
-  private committable(sessionId: string, epoch: number, generation: RemoteConnectionGeneration): boolean {
+  /** Whether a read started for this exact row incarnation/epoch/generation
+   *  may still commit. `freshRow` resets the epoch to 0, so comparing the
+   *  integer alone would admit a removed row's queued completion into its
+   *  replacement; the captured row object is the incarnation identity. */
+  private committable(row: ActivityRow, epoch: number, generation: RemoteConnectionGeneration): boolean {
     if (this.disposed || this.capturedGeneration === undefined) return false
-    const row = this.rows.get(sessionId)
-    if (row === undefined || row.epoch !== epoch) return false
+    if (this.rows.get(row.sessionId) !== row || row.epoch !== epoch) return false
     const current = this.generation.getSnapshot()
     return current !== undefined && Object.is(current, generation) && Object.is(current, this.capturedGeneration)
   }
@@ -1349,6 +1409,10 @@ class RemoteActivityObservation implements ActivityObservation {
    *  positive official hint. */
   private rowIsActive(row: ActivityRow): boolean {
     if (row.running === true) return true
+    // A latest-known positive list row the current generation has not proved is
+    // an active recovery candidate: ONE bounded recheck keeps trying while the
+    // official list still says running (never a whole-roster poll).
+    if (!row.runningProven && this.listSaysRunning(row.sessionId)) return true
     if (row.sessionId === this.currentSessionId) return true
     if (this.priorityIds.has(row.sessionId)) return true
     if (row.attention === 'question' || row.attention === 'approval' || row.attention === 'plan-review') return true
@@ -1692,12 +1756,43 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
    *  every observation this adapter creates, so a close/reopen with an
    *  unchanged source does not repeat ordinary discovery. */
   private readonly discoveryReceipts = new DiscoveryReceipts()
+  private readonly receiptListOff: () => void
+  private readonly receiptGenerationOff: () => void
+  private lastReceiptGeneration: RemoteConnectionGeneration | undefined
 
   constructor(source: RemoteSessionWorkspaceFactsSource) {
     this.source = source
     this.sessions = source.sessions
     this.remote = source.remote
     this.generation = source.connection.generation
+    // The receipt invalidation authority must observe the official sources for
+    // the ADAPTER's lifetime, not only while a Browser observation is open:
+    // otherwise a source revision that changes (and reverts) while the panel is
+    // closed would resurrect a stale receipt. These are Client-store
+    // subscriptions only — no Host work while closed.
+    this.lastReceiptGeneration = this.generation.getSnapshot()
+    this.receiptListOff = this.sessions.list.subscribe(() => { this.pruneStaleReceipts() })
+    this.receiptGenerationOff = this.generation.subscribe(() => {
+      const current = this.generation.getSnapshot()
+      if (Object.is(current, this.lastReceiptGeneration)) return
+      this.lastReceiptGeneration = current
+      this.discoveryReceipts.clear()
+    })
+  }
+
+  /** Invalidate every receipt whose relevant source revision is no longer the
+   *  current one (bounded by the receipts that exist, never a roster scan). */
+  private pruneStaleReceipts(): void {
+    const listed = this.sessions.list.getSnapshot()
+    if (listed.phase !== 'ready') return
+    this.discoveryReceipts.prune(listed.ids.map(String))
+    this.discoveryReceipts.pruneStale(id => relevantWitnessOf(listed, id))
+  }
+
+  /** Release the receipt invalidation subscriptions with the adapter. */
+  dispose(): void {
+    this.receiptListOff()
+    this.receiptGenerationOff()
   }
 
   /** Whether the live Connection is still the one captured at domain mount. */
@@ -1757,9 +1852,12 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
         // the current exact state is the recovery evidence and a possibly stale
         // ready row can never masquerade as it.
         const listRow = byId?.[row.id]
-        const running = this.isInitialGeneration() && listRow !== undefined
-          ? listRow.running
-          : (pending.kind === 'known' ? pending.running : listRow?.running)
+        // Only the INITIAL generation may answer from the ready row. A
+        // replacement generation's failed/unavailable precise state is a
+        // truthful unknown — the replayed row can never resurrect a stale bit.
+        const running = this.isInitialGeneration()
+          ? (listRow !== undefined ? listRow.running : (pending.kind === 'known' ? pending.running : undefined))
+          : (pending.kind === 'known' ? pending.running : undefined)
         return {
           sessionId: row.id,
           running,

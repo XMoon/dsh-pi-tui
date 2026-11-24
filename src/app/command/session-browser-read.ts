@@ -604,7 +604,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   const rosterSemanticsOf = (rows: readonly SessionBrowserRow[]): string => rows
     .filter((row) => row.origin !== 'subagent')
     .map((row) => [
-      row.id, row.updatedAt, row.title ?? '', row.preset ?? '', row.cwd ?? '',
+      row.id, row.updatedAt, row.title ?? '', row.preset ?? '', row.presetKnown === true ? '1' : '0', row.cwd ?? '',
       row.formatStatus ?? '', row.parentSession ?? '', row.origin ?? '',
     ].join('\u0000'))
     .join('\u0001')
@@ -628,7 +628,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       return {
         ...row,
         ...(row.title === undefined && kept.title !== undefined ? { title: kept.title } : {}),
-        ...(row.preset === undefined && kept.preset !== undefined ? { preset: kept.preset } : {}),
+        // A raw row with a READABLE preset projection is authoritative even when
+        // it omits the value (a known "none"); only an unmeasured row inherits
+        // the accepted enrichment.
+        ...(row.preset === undefined && row.presetKnown !== true && kept.preset !== undefined
+          ? { preset: kept.preset }
+          : {}),
       }
     })
     const semantics = rosterSemanticsOf(listedRows)
@@ -701,6 +706,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         const { changed } = acceptRoster(panel, listed as readonly SessionBrowserRow[])
         publish(panel)
         if (!isActive(panel)) return
+        // An explicit/pull refresh re-reads the accepted enrichment: the raw
+        // list may be unchanged while a metadata projection (a preset selected
+        // by another Client) moved. The push path relies on its own semantics.
+        startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
         applyRosterChange(panel, changed)
         scheduleRefresh(panel)
       },
