@@ -16,6 +16,8 @@ import {
   type SessionContentSearchPage,
   type SessionProjectionSummary,
   type SessionReader,
+  type SessionReaderListSnapshot,
+  type SessionReaderObservableList,
   type SessionSummary,
 } from '../session-reader-port.ts'
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
@@ -33,10 +35,23 @@ export interface RemoteConnectionGenerationSource {
   subscribe(listener: () => void): () => void
 }
 
-/** The detached projection values retained on an official Client list row. */
+/** The detached projection values retained on an official Client list row.
+ *  `userQuestions`/`inbox` are the official summary-facing pending hints: they
+ *  are a SCHEDULING clue only (merged cached/sequenced values carry no per-key
+ *  provenance here) and are never read as an exact answerable fact. */
 export interface RemoteProjectionValues {
   readonly title?: unknown
   readonly agentPreset?: unknown
+  readonly userQuestions?: unknown
+  readonly inbox?: unknown
+}
+
+/** One listed Session's retained projection snapshot: the full shared store
+ *  view plus its explicit-load lifecycle. Used for the SAME scheduling hints as
+ *  the summary values, never as an exact read. */
+export interface RemoteSessionProjectionSnapshot {
+  readonly values: RemoteProjectionValues
+  readonly state: 'idle' | 'loading' | 'ready' | 'migration-required' | 'error'
 }
 
 /** The official Client Session list row subset consumed by this adapter. */
@@ -60,6 +75,9 @@ export interface RemoteSessionListState {
   readonly ids: readonly string[]
   readonly byId: Readonly<Record<string, RemoteSessionListRow>>
   readonly phase: 'pending' | 'ready'
+  /** The shared projection store's per-Session values (including Sessions this
+   *  Client has not retained) and their explicit-load state. */
+  readonly projectionsBySession: Readonly<Record<string, RemoteSessionProjectionSnapshot>>
 }
 
 /** Observable list snapshot face from the official Session Controller client. */
@@ -190,27 +208,22 @@ export const CURRENT_STATUS_PROJECTION_KEYS: readonly string[] = [...STATUS_PROJ
 export class RemoteSessionReader implements SessionReader {
   private readonly sessions: RemoteSessionsReadSource
   private readonly generation: RemoteConnectionGenerationSource
+  private readonly listeners = new Set<() => void>()
+  private unsubscribeList: (() => void) | undefined
+  /** The observable list face's own publication counter (see
+   *  {@link SessionReaderListSnapshot}). It advances once per official list
+   *  notification while the face has a subscriber. */
+  private publication = 0
 
   constructor(sessions: RemoteSessionsReadSource, generation: RemoteConnectionGenerationSource) {
     this.sessions = sessions
     this.generation = generation
   }
 
-  async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
-    void currentSessionId
-    signal?.throwIfAborted()
-    const capturedGeneration = this.generation.getSnapshot()
-    if (capturedGeneration === undefined) return undefined
-
-    // The official Client owns refresh single-flight and its failure state. A
-    // resolved refresh does not itself promise a new baseline; the snapshot's
-    // phase is the only list-arrival fact this adapter consumes.
-    await this.sessions.refresh()
-    signal?.throwIfAborted()
-    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) return undefined
-
-    const snapshot = this.sessions.list.getSnapshot()
-    if (snapshot.phase !== 'ready') return undefined
+  /** The ONE official row mapping shared by the explicit `list()` pull and the
+   *  observable snapshot: `ids` is the ordered membership/identity authority and
+   *  `byId[id]` only detaches that id's metadata. */
+  private rowsOf(snapshot: RemoteSessionListState): SessionSummary[] {
     return snapshot.ids.map(id => {
       const row = snapshot.byId[id]
       return {
@@ -230,6 +243,65 @@ export class RemoteSessionReader implements SessionReader {
         live: false,
       }
     })
+  }
+
+  /** The synchronous observable snapshot: the SAME row mapping `list()` uses,
+   *  with the official list arrival phase as availability. A missing
+   *  Connection generation is `unavailable`, never an empty roster. */
+  private snapshot(): SessionReaderListSnapshot {
+    if (this.generation.getSnapshot() === undefined) {
+      return { generation: this.publication, availability: 'unavailable', rows: [] }
+    }
+    const listed = this.sessions.list.getSnapshot()
+    if (listed.phase !== 'ready') {
+      return { generation: this.publication, availability: 'loading', rows: [] }
+    }
+    return { generation: this.publication, availability: 'ready', rows: this.rowsOf(listed) }
+  }
+
+  /** The push-driven roster face over the official observable list. The
+   *  underlying subscription exists only while this face has a subscriber, and
+   *  it NEVER triggers an official list refresh: the Client Session Controller
+   *  owns list arrival. */
+  readonly observableList: SessionReaderObservableList = {
+    getSnapshot: () => this.snapshot(),
+    subscribe: (listener: () => void): (() => void) => {
+      this.listeners.add(listener)
+      if (this.unsubscribeList === undefined) {
+        this.unsubscribeList = this.sessions.list.subscribe(() => {
+          this.publication += 1
+          // Snapshot the listener set: a listener may unsubscribe synchronously.
+          for (const registered of [...this.listeners]) registered()
+        })
+      }
+      let active = true
+      return (): void => {
+        if (!active) return
+        active = false
+        this.listeners.delete(listener)
+        if (this.listeners.size === 0) {
+          this.unsubscribeList?.()
+          this.unsubscribeList = undefined
+        }
+      }
+    },
+  }
+
+  async list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined> {
+    void currentSessionId
+    signal?.throwIfAborted()
+    const capturedGeneration = this.generation.getSnapshot()
+    if (capturedGeneration === undefined) return undefined
+
+    // The official Client owns refresh single-flight and its failure state. A
+    // resolved refresh does not itself promise a new baseline; the snapshot's
+    // phase is the only list-arrival fact this adapter consumes.
+    await this.sessions.refresh()
+    signal?.throwIfAborted()
+    if (!Object.is(capturedGeneration, this.generation.getSnapshot())) return undefined
+
+    const snapshot = this.snapshot()
+    return snapshot.availability === 'ready' ? [...snapshot.rows] : undefined
   }
 
   /** Official Client Session-summary blank bit — the Remote mapping of the

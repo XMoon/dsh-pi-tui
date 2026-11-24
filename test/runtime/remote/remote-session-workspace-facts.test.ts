@@ -14,7 +14,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  ACTIVITY_READ_CAPACITY,
   RemoteSessionWorkspaceFacts,
+  type RemoteStreamItemLike,
   SESSION_FACTS_READ_CONCURRENCY,
   classifyReadFailure,
   deriveAttention,
@@ -30,7 +32,13 @@ import type {
 } from '../../../src/runtime/remote/session-reader-remote.ts'
 import { SupersededReadError } from '../../../src/runtime/read-error.ts'
 import type { SessionSummary } from '../../../src/runtime/session-reader-port.ts'
-import type { SessionPendingKind } from '../../../src/runtime/session-workspace-facts-port.ts'
+import type { SessionPendingKind, WorkspaceFactsFrame } from '../../../src/runtime/session-workspace-facts-port.ts'
+import type { RemoteProjectionValues } from '../../../src/runtime/remote/session-reader-remote.ts'
+import {
+  silentSessionStatusEvents,
+  TestRemoteStreamCarrierError,
+  unconfiguredWorkspaceStream,
+} from '../../support/remote-session-workspace-source.ts'
 
 // ── L1: the fixed classification ────────────────────────────────────────────
 
@@ -223,14 +231,25 @@ function harness(options: {
   /** Omit the current Connection generation entirely. */
   noGeneration?: boolean
   workspace?: RemoteWorkspaceNamespaceLike
+  /** The shared projection store values (the scheduling hint source). */
+  projectionsBySession?: Readonly<Record<string, { readonly values: RemoteProjectionValues; readonly state: 'idle' }>>
+  events?: RemoteSessionWorkspaceFactsSource['events']
+  workspaceStream?: RemoteSessionWorkspaceFactsSource['workspaceStream']
+  initialGeneration?: RemoteSessionWorkspaceFactsSource['initialGeneration']
+  /** Register a callback that receives the official list notification. */
+  onListNotify?: (notify: () => void) => void
 }): Harness {
   const stateCalls: string[] = []
   const projectionCalls: string[] = []
   const otherCalls: string[] = []
   let generation = options.noGeneration === true ? undefined : { id: 'gen-1' }
+  const generationListeners = new Set<() => void>()
   const generationSource: RemoteConnectionGenerationSource = {
     getSnapshot: () => generation,
-    subscribe: () => () => {},
+    subscribe: (listener: () => void) => {
+      generationListeners.add(listener)
+      return () => { generationListeners.delete(listener) }
+    },
   }
   const listed = options.listed ?? []
   const sessions = {
@@ -243,8 +262,12 @@ function harness(options: {
           updatedAt: row.updatedAt,
         }])),
         phase: options.listPhase ?? 'ready',
+        projectionsBySession: options.projectionsBySession ?? {},
       }),
-      subscribe: () => () => {},
+      subscribe: (listener: () => void) => {
+        options.onListNotify?.(listener)
+        return () => {}
+      },
     },
     refresh: async () => { otherCalls.push('refresh') },
     search: async () => ({ ok: true, value: { items: [], hasMore: false } }),
@@ -274,6 +297,9 @@ function harness(options: {
       workspace: options.workspace ?? { create: async () => ({ ok: false, error: {} }), follow: () => { throw new Error('no workspace stream in this case') } },
     },
     connection: { generation: generationSource },
+    events: options.events ?? silentSessionStatusEvents(),
+    workspaceStream: options.workspaceStream ?? unconfiguredWorkspaceStream(),
+    initialGeneration: options.initialGeneration ?? generation,
   }
   return {
     facts: new RemoteSessionWorkspaceFacts(source),
@@ -281,7 +307,10 @@ function harness(options: {
     projectionCalls,
     otherCalls,
     generation: generationSource,
-    setGeneration: id => { generation = id === undefined ? undefined : { id } },
+    setGeneration: id => {
+      generation = id === undefined ? undefined : { id }
+      for (const listener of [...generationListeners]) listener()
+    },
   }
 }
 
@@ -338,17 +367,30 @@ test('UA-01 a row read failure keeps an in-row Unknown/Denied and does not clear
   assert.deepEqual(facts.map(fact => fact.running), [true, true, false])
 })
 
-test('UA-01 a list/state running disagreement is unknown, never one guessed value', async () => {
+test('UA-01 the official list row owns normal running; the passive state only answers without a list row', async () => {
   const h = harness({
-    listed: [row('disagree'), row('agree-idle')],
-    listedRunning: { disagree: true, 'agree-idle': false },
-    states: { disagree: { result: { running: false, pendingInput: [] } }, 'agree-idle': { result: { running: false, pendingInput: [] } }, 'no-list-row': { result: { running: true, pendingInput: [] } } },
+    listed: [row('list-running'), row('agree-idle'), row('state-only')],
+    listedRunning: { 'list-running': true, 'agree-idle': false, 'state-only': false },
+    // `list-running`'s passive state disagrees: the list row is the normal
+    // authority (its status mutations are replayed by the Client Session
+    // Manager), so no second cut is compared and no Unknown is fabricated.
+    states: {
+      'list-running': { result: { running: false, pendingInput: [] } },
+      'agree-idle': { result: { running: false, pendingInput: [] } },
+      'no-list-row': { result: { running: true, pendingInput: [] } },
+      'state-only': { failure: { code: 'gateway/internal' } },
+    },
     projections: {},
   })
-  const facts = await h.facts.readActivity([row('disagree'), row('agree-idle'), row('no-list-row')])
-  assert.equal(facts[0].running, undefined)
+  const facts = await h.facts.readActivity([row('list-running'), row('agree-idle'), row('state-only'), row('no-list-row')])
+  assert.equal(facts[0].running, true, 'the list row is the normal running authority')
   assert.equal(facts[1].running, false)
-  assert.equal(facts[2].running, true)
+  // A listed row whose list entry exists keeps the list answer even when the
+  // passive state failed: the two sources are never compared.
+  assert.equal(facts[2].running, false, 'a failed passive state never overrides the list row')
+  // An id with NO list row answers from the passive state (the pending list
+  // phase case); the roster alone is not a running authority.
+  assert.equal(facts[3].running, true, 'without a list row the passive state answers')
 })
 
 test('UA-01 a pending list phase is not an idle claim: running comes from the passive state', async () => {
@@ -558,4 +600,436 @@ test('UA-10 an already-aborted signal never opens a Workspace stream', () => {
 test('UA-09 a Workspace stream cannot be opened without a current generation', () => {
   const h = harness({ noGeneration: true })
   assert.throws(() => h.facts.followWorkspaces(), SupersededReadError)
+})
+
+// ── L3: the per-open INCREMENTAL Activity observation ───────────────────────
+
+/** Run one observation case and ALWAYS release its recheck timer. */
+async function withObservation(
+  h: Harness,
+  run: (observation: import('../../../src/runtime/session-workspace-facts-port.ts').ActivityObservation) => Promise<void>,
+): Promise<void> {
+  const controller = new AbortController()
+  const observation = h.facts.observeActivity(controller.signal)
+  try {
+    await run(observation)
+  } finally {
+    observation.dispose()
+    controller.abort()
+  }
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+    if (predicate()) return
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.fail(message)
+}
+
+function activityRow(id: string, updatedAt = 1): SessionSummary {
+  return { id, updatedAt, live: false }
+}
+
+const emptyQuestions = { kind: 'sequenced', values: { userQuestions: { active: [], settled: [] }, inbox: { 'next-step': [], 'next-turn': [] } } }
+
+test('UA-11 the observation publishes the official running projection with the roster and schedules bounded work', async () => {
+  const h = harness({
+    listed: [activityRow('a'), activityRow('b'), activityRow('c')],
+    listedRunning: { a: true, b: false, c: false },
+    projections: { a: { result: emptyQuestions }, b: { result: emptyQuestions }, c: { result: emptyQuestions } },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a'), activityRow('b'), activityRow('c')], 1, 'a')
+    const snapshot = observation.getSnapshot()
+    assert.equal(snapshot.rosterRevision, 1)
+    assert.deepEqual(snapshot.facts.map(fact => fact.sessionId), ['a', 'b', 'c'], 'one fact per authorized row, in roster order')
+    assert.deepEqual(snapshot.facts.map(fact => fact.running), [true, false, false],
+      'the official list running projection is published in the SAME roster frame')
+    assert.ok(snapshot.facts.every(fact => fact.attention === 'unknown' && fact.pendingKinds === undefined),
+      'an unmeasured row is honestly unknown, never idle/none')
+    // The current Session is priority work; the ordinary rows get ONE background
+    // discovery each. All three are scheduled without blocking the roster frame.
+    await waitFor(() => h.projectionCalls.length >= 3, 'every unresolved row receives its discovery')
+    await waitFor(() => h.stateCalls.includes('a'), 'the priority candidate is sampled as an exact pair')
+    assert.equal(h.stateCalls.filter(id => id === 'a').length, 1, 'the priority row is never sampled twice concurrently')
+    assert.equal(h.stateCalls.filter(id => id === 'b' || id === 'c').length, 0,
+      'ordinary rows never get a Gateway state sample from discovery alone')
+  })
+})
+
+test('UA-11 the observation keeps at most four ACTUAL unary requests across both lanes', async () => {
+  const ids = Array.from({ length: 12 }, (_, index) => `s${index}`)
+  let inFlight = 0
+  let peak = 0
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const gateCall = async (): Promise<void> => {
+    inFlight += 1
+    peak = Math.max(peak, inFlight)
+    await gate
+    inFlight -= 1
+  }
+  const h = harness({
+    listed: ids.map(id => activityRow(id)),
+    listedRunning: Object.fromEntries(ids.map(id => [id, false])),
+    states: Object.fromEntries(ids.map(id => [id, { result: { running: false, pendingInput: [] } }])),
+    projections: Object.fromEntries(ids.map(id => [id, { result: emptyQuestions }])),
+    stateGate: gateCall,
+  })
+  await withObservation(h, async (observation) => {
+    observation.setPriorityIds(new Set(ids.slice(0, 6)))
+    observation.setRoster(ids.map(id => activityRow(id)), 1, ids[0])
+    await waitFor(() => peak === ACTIVITY_READ_CAPACITY, 'the observation reaches its documented capacity')
+    assert.equal(peak, ACTIVITY_READ_CAPACITY, 'peak actual unary concurrency is exactly the fixed capacity')
+    release()
+    await waitFor(() => h.projectionCalls.length + h.stateCalls.length >= ids.length, 'the queue drains after the gate')
+  })
+  release()
+})
+
+test('UA-11 an unchanged relevant source revision never repeats an ordinary discovery', async () => {
+  let notifyList: (() => void) | undefined
+  const h = harness({
+    listed: [activityRow('a'), activityRow('b')],
+    listedRunning: { a: false, b: false },
+    projections: { a: { result: emptyQuestions }, b: { result: emptyQuestions } },
+    onListNotify: notify => { notifyList = notify },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a'), activityRow('b')], 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 2, 'both ordinary rows are discovered once')
+    const afterFirst = h.projectionCalls.length
+    // The official list re-publishes unchanged content: a status/projection
+    // notification that changes no relevant semantics must not requeue anything.
+    notifyList?.()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(h.projectionCalls.length, afterFirst, 'an unchanged source revision never repeats discovery')
+    assert.ok(observation.getSnapshot().revision >= 1, 'the roster commit itself published')
+  })
+})
+
+test('UA-11 a discovery that finds a real active entry promotes the row and reuses the exact projection', async () => {
+  const continued = {
+    kind: 'sequenced',
+    values: {
+      userQuestions: { active: [{ callId: 'c1', state: 'continued', questions: [] }], settled: [] },
+      inbox: { 'next-step': [], 'next-turn': [] },
+    },
+  }
+  const h = harness({
+    listed: [activityRow('a'), activityRow('cold')],
+    listedRunning: { a: false, cold: false },
+    states: { cold: { result: { running: true, pendingInput: [] } } },
+    projections: { a: { result: emptyQuestions }, cold: { result: continued } },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a'), activityRow('cold')], 1, 'a')
+    await waitFor(() => observation.getSnapshot().facts.some(fact => fact.sessionId === 'cold' && fact.attention === 'question'),
+      'the discovered continued call becomes a real attention fact after the exact state sample')
+    const coldFact = observation.getSnapshot().facts.find(fact => fact.sessionId === 'cold')!
+    assert.deepEqual(coldFact.continuedQuestionCallIds, ['c1'], 'the continued call is the late-answer candidate')
+    assert.equal(coldFact.attentionSourceState, 'known')
+    assert.equal(h.projectionCalls.filter(id => id === 'cold').length, 1,
+      'the promoted row reuses the discovery response instead of a second projections read')
+    assert.equal(h.stateCalls.filter(id => id === 'cold').length, 1)
+  })
+})
+
+test('UA-11 a denied discovery stays unknown and never becomes a successful negative', async () => {
+  let notifyList: (() => void) | undefined
+  const h = harness({
+    listed: [activityRow('denied')],
+    listedRunning: { denied: false },
+    projections: { denied: { failure: { code: 'remote-access/denied' } } },
+    onListNotify: notify => { notifyList = notify },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('denied')], 1, undefined)
+    await waitFor(() => observation.getSnapshot().facts[0]?.attentionSourceState === 'denied',
+      'the denied discovery commits its truthful reason')
+    const fact = observation.getSnapshot().facts[0]!
+    assert.equal(fact.attention, 'unknown')
+    assert.equal(fact.attentionSourceState, 'denied', 'the denial stays a truthful reason, never none')
+    assert.equal(fact.pendingKinds, undefined)
+    notifyList?.()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(h.projectionCalls.length, 1, 'a denied discovery is not retried on the same unchanged witness')
+  })
+})
+
+test('UA-11 a generation replacement revokes every positive fact and re-runs one discovery pass', async () => {
+  const h = harness({
+    listed: [activityRow('a')],
+    listedRunning: { a: true },
+    states: { a: { result: { running: true, pendingInput: ['question'] } } },
+    projections: { a: { result: { kind: 'sequenced', values: { userQuestions: { active: [{ callId: 'c1', state: 'open', questions: [] }], settled: [] }, inbox: { 'next-step': [], 'next-turn': [] } } } } },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a')], 1, 'a')
+    await waitFor(() => observation.getSnapshot().facts[0]?.attention === 'question', 'the exact pair classifies the pending question')
+    const before = h.projectionCalls.length
+    h.setGeneration('gen-2')
+    const revoked = observation.getSnapshot().facts[0]!
+    assert.equal(revoked.running, undefined, 'the old generation running proof is revoked')
+    assert.equal(revoked.attention, 'unknown', 'the old generation attention proof is revoked')
+    await waitFor(() => h.projectionCalls.length > before, 'the new generation runs its one discovery pass')
+  })
+})
+
+test('UA-11 a current-generation status event re-proves running after a rollover', async () => {
+  let statusListener: ((sessionId: string, running: boolean) => void) | undefined
+  const h = harness({
+    listed: [activityRow('a')],
+    listedRunning: { a: false },
+    states: { a: { result: { running: false, pendingInput: [] } } },
+    projections: { a: { result: emptyQuestions } },
+    events: { onSessionStatus: listener => { statusListener = listener; return () => { statusListener = undefined } } },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a')], 1, 'a')
+    await waitFor(() => observation.getSnapshot().facts[0]?.attentionSourceState === 'known', 'the first exact pair lands')
+    h.setGeneration('gen-2')
+    assert.equal(observation.getSnapshot().facts[0]?.running, undefined, 'a replayed list cannot re-prove running')
+    statusListener?.('a', true)
+    await waitFor(() => observation.getSnapshot().facts[0]?.running === true, 'the current-generation status event proves running')
+  })
+})
+
+test('UA-11 disposing the observation aborts its work and publishes nothing afterwards', async () => {
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const h = harness({
+    listed: [activityRow('a')],
+    listedRunning: { a: true },
+    stateGate: async () => { await gate },
+  })
+  const controller = new AbortController()
+  const observation = h.facts.observeActivity(controller.signal)
+  observation.setRoster([activityRow('a')], 1, 'a')
+  await waitFor(() => h.stateCalls.length === 1, 'the priority read started')
+  const revision = observation.getSnapshot().revision
+  const published: number[] = []
+  observation.subscribe(() => published.push(observation.getSnapshot().revision))
+  observation.dispose()
+  release()
+  await new Promise<void>(resolve => setTimeout(resolve, 5))
+  assert.deepEqual(published, [], 'a disposed observation never notifies')
+  assert.equal(observation.getSnapshot().revision, revision)
+  controller.abort()
+})
+
+test('UA-11 an already-aborted signal never opens an observation', () => {
+  const controller = new AbortController()
+  controller.abort()
+  const h = harness({})
+  assert.throws(() => h.facts.observeActivity(controller.signal),
+    (error: unknown) => (error as Error).name === 'AbortError')
+})
+
+// ── L3: the OFFICIAL reconnecting Workspace lifecycle ───────────────────────
+
+/** Drive ONE structural `$stream` lifecycle the way the official supervisor
+ *  does: the scripted physical generations, then a live wait until the handle
+ *  is disposed (a real logical stream never ends on its own). */
+function scriptedWorkspaceStream(script: (options: {
+  readonly carrierFailed?: (error: Error) => void
+}) => readonly { readonly generation: number; readonly frame: RemoteWorkspaceFollowFrameLike }[]): {
+  readonly source: RemoteSessionWorkspaceFactsSource['workspaceStream']
+  readonly accepted: number[]
+  readonly lastOptions: () => Parameters<RemoteSessionWorkspaceFactsSource['workspaceStream']['stream']>[0] | undefined
+  readonly carrierFailures: Error[]
+  readonly disposed: () => number
+} {
+  const accepted: number[] = []
+  const carrierFailures: Error[] = []
+  let lastOptions: Parameters<RemoteSessionWorkspaceFactsSource['workspaceStream']['stream']>[0] | undefined
+  let disposeCount = 0
+  const source: RemoteSessionWorkspaceFactsSource['workspaceStream'] = {
+    stream: (options) => {
+      lastOptions = options
+      let finish!: () => void
+      const live = new Promise<void>(resolve => { finish = resolve })
+      const iterator = (async function* (): AsyncGenerator<RemoteStreamItemLike<RemoteWorkspaceFollowFrameLike>> {
+        let acceptedGeneration: number | undefined
+        for (const item of script(options)) {
+          if (item.generation !== acceptedGeneration && options.carrierFailed !== undefined && accepted.length > 0 && item.generation > 1) {
+            const error = new TestRemoteStreamCarrierError('api gateway: Remote stream WebSocket closed')
+            carrierFailures.push(error)
+            options.carrierFailed(error)
+          }
+          yield {
+            generation: item.generation,
+            value: item.frame,
+            signal: new AbortController().signal,
+            accept: () => {
+              if (acceptedGeneration === item.generation) return
+              acceptedGeneration = item.generation
+              accepted.push(item.generation)
+            },
+          }
+        }
+        await live
+      })()
+      return {
+        [Symbol.asyncIterator]: () => iterator,
+        dispose: async () => {
+          disposeCount += 1
+          finish()
+        },
+        restart: () => {},
+      }
+    },
+    // A test-defined class: the adapter must construct ITS carrier error from
+    // the exact constructor the source supplies.
+    carrierError: TestRemoteStreamCarrierError,
+  }
+  return {
+    source,
+    accepted,
+    lastOptions: () => lastOptions,
+    carrierFailures,
+    disposed: () => disposeCount,
+  }
+}
+
+test('UA-12 a recovering follow invalidates membership on a carrier failure and restores a fresh baseline in the SAME handle', async () => {
+  const stream = scriptedWorkspaceStream(() => [
+    { generation: 1, frame: { type: 'baseline', value: { items: [workspaceView('old')] } } },
+    { generation: 2, frame: { type: 'baseline', value: { items: [workspaceView('new')] } } },
+    { generation: 2, frame: { type: 'upsert', workspace: workspaceView('extra') } },
+  ])
+  const h = harness({ workspaceStream: stream.source })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  const iterator = handle[Symbol.asyncIterator]()
+  const frames: WorkspaceFactsFrame[] = []
+  for (let index = 0; index < 4; index += 1) {
+    const next = await iterator.next()
+    assert.equal(next.done, false)
+    frames.push(next.value)
+  }
+  handle.dispose()
+  await iterator.next()
+  assert.deepEqual(frames, [
+    { type: 'baseline', items: [{ workspaceId: 'old', path: '/host/old', title: 'Workspace old', sessionIds: [] }] },
+    { type: 'invalidated', reason: 'reconnecting' },
+    { type: 'baseline', items: [{ workspaceId: 'new', path: '/host/new', title: 'Workspace new', sessionIds: [] }] },
+    { type: 'upsert', workspace: { workspaceId: 'extra', path: '/host/extra', title: 'Workspace extra', sessionIds: [] } },
+  ])
+  assert.equal(stream.carrierFailures.length, 1)
+  assert.equal(stream.carrierFailures[0]!.constructor, TestRemoteStreamCarrierError,
+    'the reported carrier loss is the official same-installation class')
+  assert.deepEqual(stream.accepted, [1, 2], 'each physical generation accepts exactly ONE opening baseline')
+})
+
+test('UA-12 the recovering ended() classification uses the SAME carrier-error constructor for an accepted generation', async () => {
+  const stream = scriptedWorkspaceStream(() => [])
+  const h = harness({ workspaceStream: stream.source })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  const iterator = handle[Symbol.asyncIterator]()
+  const pending = iterator.next()
+  const options = stream.lastOptions()
+  assert.ok(options !== undefined, 'the recovering handle opened the official stream factory')
+  const acceptedEnd = options!.ended(true)
+  assert.equal(acceptedEnd.constructor, TestRemoteStreamCarrierError,
+    'an accepted baseline that then ends is a retryable carrier loss of the SAME installation class')
+  const unopenedEnd = options!.ended(false)
+  assert.notEqual(unopenedEnd.constructor, TestRemoteStreamCarrierError,
+    'an end before the baseline is a real protocol/availability error, not a retryable carrier loss')
+  handle.dispose()
+  await pending
+})
+
+test('UA-12 a terminal recovering failure ends the handle truthfully and never retries the same generation', async () => {
+  let streams = 0
+  const h = harness({
+    workspaceStream: {
+      carrierError: TestRemoteStreamCarrierError,
+      stream: () => {
+        streams += 1
+        const iterator = (async function* (): AsyncGenerator<RemoteStreamItemLike<RemoteWorkspaceFollowFrameLike>> {
+          yield {
+            generation: 1,
+            value: { type: 'baseline', value: { items: [] } },
+            signal: new AbortController().signal,
+            accept: () => {},
+          }
+          throw new Error('the Host denied the Workspace follow')
+        })()
+        return { [Symbol.asyncIterator]: () => iterator, dispose: async () => {}, restart: () => {} }
+      },
+    },
+  })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  await assert.rejects(async () => { for await (const _frame of handle) { /* consume */ } },
+    /the Host denied the Workspace follow/u)
+  assert.equal(streams, 1, 'no same-generation retry and no duplicate logical stream')
+})
+
+test('UA-12 the one-shot follow never consumes the reconnecting stream source', async () => {
+  let streams = 0
+  const workspace = workspaceNamespace([{ type: 'baseline', value: { items: [workspaceView('only')] } }])
+  const h = harness({
+    workspace: workspace.namespace,
+    workspaceStream: {
+      carrierError: TestRemoteStreamCarrierError,
+      stream: () => {
+        streams += 1
+        throw new Error('the one-shot contract must not open the reconnecting stream')
+      },
+    },
+  })
+  const handle = h.facts.followWorkspaces()
+  const frames: WorkspaceFactsFrame[] = []
+  for await (const frame of handle) frames.push(frame)
+  assert.equal(streams, 0)
+  assert.deepEqual(frames.map(frame => frame.type), ['baseline'], 'the raw one-shot baseline is preserved')
+  assert.equal(workspace.disposed(), 1, 'the one-shot raw stream is disposed exactly once')
+})
+
+test('UA-11 an observation opened while disconnected publishes unknown facts and adopts the first real generation', async () => {
+  const h = harness({
+    noGeneration: true,
+    listed: [activityRow('a')],
+    listedRunning: { a: true },
+    states: { a: { result: { running: true, pendingInput: [] } } },
+    projections: { a: { result: emptyQuestions } },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a')], 1, 'a')
+    assert.equal(observation.getSnapshot().facts[0]?.running, undefined,
+      'no Connection generation means no proven running fact, never a fabricated idle')
+    assert.equal(h.stateCalls.length, 0, 'no read is issued without a generation')
+    h.setGeneration('gen-1')
+    await waitFor(() => observation.getSnapshot().facts[0]?.running === true,
+      'the first real generation re-proves what it can')
+  })
+})
+
+test('UA-11 the exact state sample establishes running only while list/status has not proven it', async () => {
+  let statusListener: ((sessionId: string, running: boolean) => void) | undefined
+  const h = harness({
+    listed: [activityRow('a')],
+    listedRunning: { a: false },
+    states: { a: { result: { running: true, pendingInput: [] } } },
+    projections: { a: { result: emptyQuestions } },
+    events: { onSessionStatus: listener => { statusListener = listener; return () => { statusListener = undefined } } },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster([activityRow('a')], 1, 'a')
+    // The initial generation's list owns running: the disagreeing state sample
+    // never overwrites it.
+    await waitFor(() => observation.getSnapshot().facts[0]?.attentionSourceState === 'known', 'the exact pair lands')
+    assert.equal(observation.getSnapshot().facts[0]?.running, false, 'the list/status authority owns normal running')
+    // A rollover revokes the list proof; the CURRENT generation's exact state
+    // may then establish running until the official status changes.
+    h.setGeneration('gen-2')
+    await waitFor(() => observation.getSnapshot().facts[0]?.running === true,
+      'the recovery path re-proves running from the exact current state')
+    statusListener?.('a', false)
+    await waitFor(() => observation.getSnapshot().facts[0]?.running === false, 'a current status event wins')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(observation.getSnapshot().facts[0]?.running, false,
+      'a later exact state can never override a current status event')
+  })
 })

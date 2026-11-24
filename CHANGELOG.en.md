@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Faster, steadier Session list status.** The PiTui/TSP `/sessions` view no longer runs a periodic whole-roster refresh that waits for every Session's status read: it follows the official Session list updates and reads only the Sessions whose facts really need confirming. The first roster and `Working` rows appear immediately, and a slow cold Session no longer blocks the rest of the list. After a Daemon/Remote reconnect the list status and Workspace membership recover in the same panel without leaving the page, while real failures are still reported truthfully. Direct mode is unchanged.
 - **Truthful, clickable Settings row actions.** The Settings Rows action bar now names the row's real forward action (`Open`, `Choose` or `Details`) and the fully painted hint is clickable through the same Enter path as the keyboard; an unavailable or uncomposed specialist page is never advertised as `Open`. Clicking the row itself still only selects it.
 
 ## [0.5.8] - 2026-11-22

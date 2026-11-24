@@ -33,7 +33,7 @@ function state(
   byId: Readonly<Record<string, RemoteSessionListRow>>,
   phase: RemoteSessionListState['phase'] = 'ready',
 ): RemoteSessionListState {
-  return { ids, byId, phase }
+  return { ids, byId, phase, projectionsBySession: {} }
 }
 
 function binding(values: RemoteProjectionValues & Readonly<Record<string, unknown>>): RemoteSessionBinding {

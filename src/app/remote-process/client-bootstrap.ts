@@ -1284,6 +1284,7 @@ async function startSurfaceLocalClient(
             readonly path?: unknown
             readonly abort?: unknown
             readonly namespace?: unknown
+            readonly mode?: unknown
           }
           nonce = request.nonce
           const backend = currentRevision?.application?.selected.backend
@@ -1352,16 +1353,23 @@ async function startSurfaceLocalClient(
             return
           }
           if (request.op === 'workspaces') {
-            const handle = backend.sessionWorkspaceFacts.followWorkspaces()
+            // The explicit one-shot probe keeps the historical default; a
+            // requested `recovering` mode consumes the official reconnecting
+            // stream lifecycle (physical carrier replacement + fresh baseline).
+            const mode = request.mode === 'recovering' ? 'recovering' as const : 'single-generation' as const
+            const handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, mode)
             const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 30_000
             const maxFrames = typeof request.maxFrames === 'number' ? request.maxFrames : Number.POSITIVE_INFINITY
             const deadline = setTimeout(() => { handle.dispose() }, windowMs)
-            emit({ phase: 'workspaces-open', windowMs, maxFrames })
+            emit({ phase: 'workspaces-open', mode, windowMs, maxFrames })
             try {
               let frames = 0
               for await (const frame of handle) {
                 frames += 1
                 switch (frame.type) {
+                  case 'invalidated':
+                    emit({ phase: 'workspaces-frame', type: frame.type, reason: frame.reason })
+                    break
                   case 'baseline':
                   case 'replace':
                     emit({ phase: 'workspaces-frame', type: frame.type, items: frame.items })
@@ -1379,10 +1387,84 @@ async function startSurfaceLocalClient(
                 if (frames >= maxFrames) break
               }
               emit({ phase: 'workspaces-ended' })
+            } catch (error) {
+              emit({ phase: 'workspaces-failed', error: error instanceof Error ? error.message : String(error) })
             } finally {
               clearTimeout(deadline)
               handle.dispose()
             }
+            return
+          }
+          if (request.op === 'activity') {
+            // Session Workspace PR1 qualification: drive the PRODUCTION
+            // incremental Activity observation over the REAL generated Client
+            // faces and count the ACTUAL unary requests it issues (peak
+            // in-flight and totals per endpoint). This is a test-only probe —
+            // the production adapter owns the same scheduling internally.
+            const rows = await backend.sessionReader.list(undefined)
+            if (rows === undefined) throw new Error('activity probe: the Host Session list is unavailable')
+            const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 5_000
+            const target = domains.remote.session as unknown as {
+              state: (...args: never[]) => unknown
+              projections: (...args: never[]) => unknown
+            }
+            const originalState = target.state
+            const originalProjections = target.projections
+            const counters = { state: 0, projections: 0, inFlight: 0, peak: 0 }
+            const counted = (name: 'state' | 'projections', original: (...args: never[]) => unknown) =>
+              async (...args: never[]): Promise<unknown> => {
+                counters[name] += 1
+                counters.inFlight += 1
+                counters.peak = Math.max(counters.peak, counters.inFlight)
+                try {
+                  return await original.apply(target, args)
+                } finally {
+                  counters.inFlight -= 1
+                }
+              }
+            const observation = backend.sessionWorkspaceFacts.observeActivity(new AbortController().signal)
+            const snapshots: unknown[] = []
+            const record = (): void => {
+              const snapshot = observation.getSnapshot()
+              snapshots.push({
+                rosterRevision: snapshot.rosterRevision,
+                revision: snapshot.revision,
+                facts: snapshot.facts.map(fact => ({
+                  sessionId: fact.sessionId,
+                  running: fact.running,
+                  pendingKinds: fact.pendingKinds,
+                  continuedQuestionCallIds: fact.continuedQuestionCallIds,
+                  attention: fact.attention,
+                  attentionSourceState: fact.attentionSourceState,
+                })),
+                ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+                counters: { ...counters },
+              })
+              emit({ phase: 'activity-snapshot', revision: snapshot.revision, rosterRevision: snapshot.rosterRevision })
+            }
+            const unsubscribe = observation.subscribe(record)
+            target.state = counted('state', originalState)
+            target.projections = counted('projections', originalProjections)
+            try {
+              // The qualification probe composes no root interaction delivery,
+              // so it proves the CURRENT-session priority input only.
+              const probeStatus = status()
+              observation.setPriorityIds(new Set())
+              observation.setRoster(rows, 1, probeStatus.openSessionId ?? undefined)
+              await new Promise<void>(resolve => setTimeout(resolve, windowMs))
+              record()
+            } finally {
+              unsubscribe()
+              observation.dispose()
+              target.state = originalState
+              target.projections = originalProjections
+            }
+            emit({
+              phase: 'activity-result',
+              rows: rows.length,
+              counters: { ...counters },
+              snapshots,
+            })
             return
           }
           if (request.op === 'directory-browse') {

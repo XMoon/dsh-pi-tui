@@ -398,6 +398,10 @@ function foldWorkspaceFrame(projection: WorkspaceProjection, frame: WorkspaceFac
         proven: projection.proven,
       }
     }
+    case 'invalidated':
+      // The current generation's membership is no longer proven: drop it now
+      // and keep the panel's flat fallback until a fresh baseline arrives.
+      return EMPTY_PROJECTION
   }
 }
 
@@ -634,9 +638,12 @@ export class SessionWorkspacePanel implements Component {
       this.activityRevisionSeen = activitySnapshot.activityRevision
       this.activity = activitySnapshot.activity
       this.activityError = activitySnapshot.activityError
-      this.answerEligibility = activitySnapshot.answerEligibility
       this.activitySampleRevision = snapshot.listRevision
     }
+    // The Client-root answer eligibility is a LIVE gate, not a sample: every
+    // publication carries its exact current value, and a revocation must drop
+    // a Needs row in THIS frame even when the Activity revision did not move.
+    if (activitySnapshot !== undefined) this.answerEligibility = activitySnapshot.answerEligibility
     this.snapshot = snapshot
     // An EMPTY seed is not a search: the bare `/sessions` command carries one
     // only because its command edge always passes a trimmed argument.

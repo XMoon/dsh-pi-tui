@@ -26,6 +26,54 @@ import {
   sendSelect,
   type WireNode,
 } from '../support/tsp-picker-wire.ts'
+import { inertActivityObservation } from '../support/session-workspace-facts-fake.ts'
+import type { ActivityObservation } from '../../src/runtime/session-workspace-facts-port.ts'
+
+/** An observation that publishes the given facts for every roster commit. */
+function fixedActivityObservation(
+  factsFor: (rows: readonly SessionSummary[]) => readonly import('../../src/runtime/session-workspace-facts-port.ts').SessionActivityFact[],
+): ActivityObservation {
+  let rosterRevision = 0
+  let revision = 0
+  let facts: readonly import('../../src/runtime/session-workspace-facts-port.ts').SessionActivityFact[] = []
+  const listeners = new Set<() => void>()
+  return {
+    setRoster(rows, nextRosterRevision) {
+      rosterRevision = nextRosterRevision
+      facts = factsFor(rows)
+      revision += 1
+      for (const listener of [...listeners]) listener()
+    },
+    setPriorityIds() {},
+    getSnapshot: () => ({ rosterRevision, revision, facts }),
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    dispose: () => { listeners.clear() },
+  }
+}
+
+/** An observation that publishes ONE whole-observation failure. */
+function failingActivityObservation(message: string): ActivityObservation {
+  let rosterRevision = 0
+  let error: string | undefined
+  const listeners = new Set<() => void>()
+  return {
+    setRoster(_rows, nextRosterRevision) {
+      rosterRevision = nextRosterRevision
+      error = message
+      for (const listener of [...listeners]) listener()
+    },
+    setPriorityIds() {},
+    getSnapshot: () => ({ rosterRevision, revision: 1, facts: [], ...(error === undefined ? {} : { error }) }),
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    dispose: () => { listeners.clear() },
+  }
+}
 
 const BROWSER = 'session-browser-'
 const props = (pane: TspPane): Record<string, unknown> => pickerProps(pane, BROWSER)
@@ -300,6 +348,7 @@ test('whitespace-only input while typed Resume loads suppresses the native direc
 
 test('workspace-first TSP browse uses official Workspace ids and emits real folder items', async (t) => {
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -328,6 +377,7 @@ test('workspace-first TSP browse uses official Workspace ids and emits real fold
 test('keyboard Enter toggles the selected Folder and reveals selected Show more rows, never resuming a stale Session', async (t) => {
   const sessionRows = [row('session-current', { live: true }), ...Array.from({ length: 10 }, (_, index) => row(`session-history-${index}`, { updatedAt: 900 - index }))]
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -361,6 +411,7 @@ test('expanding a non-current TSP folder reveals its first five history rows', a
   const history = Array.from({ length: 7 }, (_, index) => row(`session-tsp-history-${index}`, { updatedAt: 900 - index }))
   const allRows = [row('session-current', { live: true }), ...history]
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -391,6 +442,7 @@ test('expanding a non-current TSP folder reveals its first five history rows', a
 test('sessionless TSP Browse prioritizes the Host-confirmed next-create Workspace without claiming Session membership', async (t) => {
   const nextRows = Array.from({ length: 10 }, (_, index) => row(`session-next-${index}`, { updatedAt: 1000 - index }))
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -420,6 +472,7 @@ test('Welcome chooser lists official folders and Add directory retains rejected 
   const settlements: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
   let selectedWorkspace: { readonly id: string; readonly path: string } | undefined
   const workspaceFacts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -467,7 +520,8 @@ test('Welcome chooser lists official folders and Add directory retains rejected 
 
 test('a failed Activity sample is ONE low-noise diagnostic and never fabricates idle facts', async (t) => {
   const facts: SessionWorkspaceFactsPort = {
-    readActivity: async () => { throw new Error('activity sample refused') },
+    observeActivity: () => failingActivityObservation('activity sample refused'),
+    readActivity: async () => { throw new Error('the Browser never takes a whole-roster sample') },
     followWorkspaces: (signal) => ({
       dispose() {},
       isCurrent: () => true,
@@ -507,6 +561,7 @@ test('a failed Activity sample is ONE low-noise diagnostic and never fabricates 
 test('a Folder or Show more selection never inherits the previous Session actions', async (t) => {
   const history = Array.from({ length: 12 }, (_, index) => row(`session-history-${index}`, { updatedAt: 80 - index }))
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -549,6 +604,7 @@ test('a Folder or Show more selection never inherits the previous Session action
 
 test('synthetic Unassigned/ambiguous groups never authorize a Host create or directory adoption', async (t) => {
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -591,7 +647,8 @@ test('the same Activity facts paint the compact row status and the complete Deta
     },
   ]
   const facts: SessionWorkspaceFactsPort = {
-    readActivity: async () => activity,
+    observeActivity: () => fixedActivityObservation(rows => activity.filter(fact => rows.some(row => row.id === fact.sessionId))),
+    readActivity: async () => { throw new Error('the Browser never takes a whole-roster sample') },
     followWorkspaces: (signal) => ({
       dispose() {},
       isCurrent: () => true,
@@ -636,6 +693,7 @@ test('the same Activity facts paint the compact row status and the complete Deta
 
 test('global Cards search never keeps a Folder-only Footer action target', async (t) => {
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -672,6 +730,7 @@ test('global Cards search never keeps a Folder-only Footer action target', async
 test('the Folder New session action delegates its exact Workspace and retires only on the commit continuation', async (t) => {
   const requests: Array<{ readonly workspaceId: string; readonly close: () => void }> = []
   const facts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},
@@ -749,6 +808,7 @@ test('a failed first-submit chooser opens the same TSP Browser prefilled in Host
 test('Use directory selects a canonical official Workspace and closes the sessionless chooser', async (t) => {
   let selectedWorkspace: { readonly id: string; readonly path: string } | undefined
   const workspaceFacts: SessionWorkspaceFactsPort = {
+    observeActivity: () => inertActivityObservation(),
     readActivity: async () => [],
     followWorkspaces: (signal) => ({
       dispose() {},

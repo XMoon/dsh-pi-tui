@@ -130,6 +130,13 @@ function runtimeSource(): {
       remote: remote as never,
       jobs: { state: { getSnapshot: () => ({ rows: {}, observed: {} }), subscribe: () => () => {} } } as never,
       connection: { generation: generation.source },
+      // The two Client-domain-scoped stream inputs the facts adapter requires:
+      // this suite proves WIRING identities, never a real reconnecting stream.
+      workspaceStream: {
+        stream: () => { throw new Error('the wiring suite never opens a reconnecting stream') },
+        carrierError: class WiringCarrierError extends Error {},
+      },
+      initialGeneration: generation.source.getSnapshot(),
     },
   }
 }

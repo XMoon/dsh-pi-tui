@@ -72,6 +72,39 @@ export interface SessionProjectionSummary {
   readonly preset?: string
 }
 
+/** The arrival lifecycle of one observable roster snapshot. `loading` is "no
+ *  successful official list has arrived for this source yet" — it is NOT an
+ *  empty roster; `unavailable` is a source that cannot serve a roster at all
+ *  (a missing Connection generation), never a zero-row list. */
+export type SessionReaderListAvailability = 'loading' | 'ready' | 'unavailable'
+
+/** One synchronous roster snapshot of the observable list face.
+ *
+ *  `rows` are the SAME main-session rows `list()` maps (official `ids`
+ *  membership/order, subagent children filtered by the consumer), never a
+ *  second corpus. `generation` is the snapshot source's own monotone
+ *  publication counter: it changes on every official list notification, so a
+ *  consumer can tell "this source re-published" without assuming a semantic
+ *  change — the consumer owns the semantic roster delta (membership, order and
+ *  painted metadata only). */
+export interface SessionReaderListSnapshot {
+  readonly generation: number
+  readonly availability: SessionReaderListAvailability
+  readonly rows: readonly SessionSummary[]
+}
+
+/** The optional push-driven roster face.
+ *
+ *  Only a backend that already owns an official observable list (Remote's
+ *  `ISessions.list`) implements it. Direct keeps its explicit `list()` pull,
+ *  because its local reader is the pull authority and must not be wrapped in a
+ *  second roster service. A consumer that sees this face subscribes instead of
+ *  polling; a consumer that does not keeps its existing pull cadence. */
+export interface SessionReaderObservableList {
+  getSnapshot(): SessionReaderListSnapshot
+  subscribe(listener: () => void): () => void
+}
+
 /** The session READ domain port. */
 export interface SessionReader {
   /** List semantic session-query rows newest-first: live rows remain visible,
@@ -79,6 +112,12 @@ export interface SessionReader {
    * unavailable. `signal` cancels optional cache inspection without changing
    * the row contract. */
   list(currentSessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary[] | undefined>
+  /** The optional push-driven roster face (see
+   *  {@link SessionReaderObservableList}). Present ONLY when the backend
+   *  already owns an official observable list; its synchronous snapshot is the
+   *  same row mapping `list()` performs, without triggering an official
+   *  refresh request. */
+  readonly observableList?: SessionReaderObservableList
   /** Read the Host-owned DSH session projections (`title` + `agentPreset`)
    * for a batch of already-listed rows: one combined semantic read per
    * batch — live projection snapshot for live rows and the zero-I/O

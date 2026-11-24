@@ -15,7 +15,11 @@
  * @module @xmoon76/dsh-pi-tui/test/support/session-workspace-facts-fake
  */
 
-import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
+import type {
+  ActivityObservation,
+  SessionActivityFact,
+  SessionWorkspaceFactsPort,
+} from '../../src/runtime/session-workspace-facts-port.ts'
 
 function unconfigured(): never {
   throw new Error('the official Session Workspace facts port is not configured for this test')
@@ -25,6 +29,46 @@ function unconfigured(): never {
 export function unconfiguredSessionWorkspaceFacts(): SessionWorkspaceFactsPort {
   return {
     readActivity: async () => unconfigured(),
+    // The Session Browser always opens ONE observation: without a configured
+    // source it publishes the truthful unknown facts instead of failing the
+    // whole open. `readActivity`/`followWorkspaces` remain fail-fast because a
+    // suite that reaches them asked for real Host facts.
+    observeActivity: () => inertActivityObservation(),
     followWorkspaces: () => unconfigured(),
+  }
+}
+
+/** An inert per-open Activity observation: it accepts every roster commit and
+ *  publishes the truthful UNKNOWN facts for each row. Suites whose case does
+ *  not exercise real activity facts use it as the port's observation seat; a
+ *  suite that asserts activity facts supplies its OWN observation. */
+export function inertActivityObservation(): ActivityObservation {
+  let rosterRevision = 0
+  let revision = 0
+  let facts: readonly SessionActivityFact[] = []
+  const listeners = new Set<() => void>()
+  return {
+    setRoster(rows, revisionOfRoster) {
+      rosterRevision = revisionOfRoster
+      facts = rows
+        .filter(row => row.origin !== 'subagent')
+        .map(row => ({
+          sessionId: row.id,
+          running: undefined,
+          pendingKinds: undefined,
+          continuedQuestionCallIds: undefined,
+          attention: 'unknown',
+          attentionSourceState: 'unknown',
+        }))
+      revision += 1
+      for (const listener of [...listeners]) listener()
+    },
+    setPriorityIds() {},
+    getSnapshot: () => ({ rosterRevision, revision, facts }),
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    dispose: () => { listeners.clear() },
   }
 }

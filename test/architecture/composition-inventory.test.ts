@@ -386,6 +386,13 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   // Workspace registry after each committed Workspace domain write (it never
   // derives an increment from the event payload and keeps no second table).
   ['domain/changed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  // Session Workspace PR1: the Direct incremental Activity observation is
+  // INVALIDATED by the official Agent lifecycle. It re-derives the fact from
+  // the exact live Agent (never from the event payload) and keeps no second
+  // status registry; these are observers of the SAME Host events.
+  ['agent/status', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  ['agent/created', 'src/runtime/direct/session-workspace-facts-direct.ts'],
+  ['agent/disposed', 'src/runtime/direct/session-workspace-facts-direct.ts'],
   // The Direct Account adapter invalidates local observations immediately when
   // Cordis replaces the official Host binding; this is not a business Account event.
   ['internal/service', 'src/runtime/direct/config-direct.ts'],

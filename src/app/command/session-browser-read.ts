@@ -7,6 +7,8 @@ import type {
   SessionContentSearchPage,
   SessionProjectionSummary,
   SessionReader,
+  SessionReaderListSnapshot,
+  SessionReaderObservableList,
 } from '../../runtime/session-reader-port.ts'
 import { sanitizeSessionSearchInput, sessionRowMatchesQuery } from '../../domain/session/browser.ts'
 import type {
@@ -23,7 +25,8 @@ import type {
   SessionBrowserWorkspaceSnapshot,
 } from './session-browser-presentation.ts'
 import type {
-  SessionActivityFact,
+  ActivityObservation,
+  ActivityObservationSnapshot,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
   WorkspaceFactsFrame,
@@ -110,12 +113,20 @@ interface ActiveRead {
   workspaceState: 'loading' | 'ready' | 'unavailable'
   workspaceRevision: number
   workspaceError: string | undefined
-  activityController: AbortController | undefined
-  activityFacts: readonly SessionActivityFact[] | undefined
-  activityRevision: number | undefined
-  activitySequence: number
-  sampledActivityRevision: number | undefined
-  activityError: string | undefined
+  /** Whether the ONE Workspace follow ended terminally for this generation: a
+   *  NEW Connection generation may open ONE new logical handle. */
+  workspaceTerminal: boolean
+  workspaceGenerationOff: (() => void) | undefined
+  /** The accepted roster's painted semantics: the ONE input of the roster
+   *  delta, so an unchanged official list never bumps the revision or restarts
+   *  projections/search. */
+  rosterSemantics: string
+  /** The ONE per-open incremental activity observation. */
+  activityHandle: ActivityObservation | undefined
+  activityUnsubscribe: (() => void) | undefined
+  activitySnapshot: ActivityObservationSnapshot | undefined
+  /** The push-driven official list subscription (Remote only). */
+  listSubscription: (() => void) | undefined
   answerEligibility: readonly SessionBrowserAnswerEligibility[] | undefined
   eligibilitySubscription: (() => void) | undefined
   resumePending: boolean
@@ -181,6 +192,25 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   let active: ActiveRead | undefined
   let disposed = false
 
+  /** The accepted Activity observation's provenance. A snapshot measured on an
+   *  OLDER roster is inert: its facts and revision can never be relabeled as the
+   *  current roster. The revision and the roster revision travel SEPARATELY. */
+  const activityProvenanceOf = (panel: ActiveRead): {
+    readonly activityRevision?: number
+    readonly activityRosterRevision?: number
+    readonly activity?: ActivityObservationSnapshot['facts']
+    readonly activityError?: string
+  } => {
+    const snapshot = panel.activitySnapshot
+    if (snapshot === undefined || snapshot.rosterRevision !== panel.listRevision) return {}
+    return {
+      activityRevision: snapshot.revision,
+      activityRosterRevision: snapshot.rosterRevision,
+      activity: snapshot.facts,
+      ...(snapshot.error === undefined ? {} : { activityError: snapshot.error }),
+    }
+  }
+
   const workspaceSnapshotOf = (panel: ActiveRead): SessionBrowserWorkspaceSnapshot | undefined => {
     if (options.sessionWorkspaceFacts === undefined) return undefined
     return {
@@ -191,11 +221,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         return fact === undefined ? [] : [fact]
       }),
       baselineProven: panel.workspaceBaselineProven,
-      ...(panel.activityRevision === undefined ? {} : { activityRevision: panel.activityRevision, activityRosterRevision: panel.listRevision }),
-      ...(panel.activityFacts === undefined ? {} : { activity: panel.activityFacts }),
+      ...activityProvenanceOf(panel),
       answerEligibility: panel.answerEligibility,
       ...(panel.workspaceError === undefined ? {} : { error: panel.workspaceError }),
-      ...(panel.activityError === undefined ? {} : { activityError: panel.activityError }),
     }
   }
 
@@ -248,11 +276,22 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.refreshing = false
     panel.queryController?.abort()
     panel.controller.abort()
-    panel.activityController?.abort()
-    panel.activityController = undefined
+    const activityUnsubscribe = panel.activityUnsubscribe
+    panel.activityUnsubscribe = undefined
+    activityUnsubscribe?.()
+    const activityHandle = panel.activityHandle
+    panel.activityHandle = undefined
+    panel.activitySnapshot = undefined
+    activityHandle?.dispose()
+    const listSubscription = panel.listSubscription
+    panel.listSubscription = undefined
+    listSubscription?.()
     const workspaceHandle = panel.workspaceHandle
     panel.workspaceHandle = undefined
     workspaceHandle?.dispose()
+    const workspaceGenerationOff = panel.workspaceGenerationOff
+    panel.workspaceGenerationOff = undefined
+    workspaceGenerationOff?.()
     const unsubscribeEligibility = panel.eligibilitySubscription
     panel.eligibilitySubscription = undefined
     unsubscribeEligibility?.()
@@ -349,6 +388,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.workspaceOrder = [...known, ...panel.workspaceOrder.filter(id => !listed.has(id))]
         break
       }
+      case 'invalidated':
+        // The current generation's membership is no longer proven. The panel
+        // keeps its ONE handle and falls back to the flat roster until the
+        // official stream delivers a fresh baseline.
+        clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+        return
     }
     panel.workspaceState = 'ready'
     panel.workspaceError = undefined
@@ -546,21 +591,38 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return true
   }
 
+  /** The PAINTED roster semantics a list publication must actually change.
+   *  Activity (running/pending) is NOT part of it: it travels the incremental
+   *  observation channel, so a status update never bumps the roster revision,
+   *  restarts projections or re-runs a content search. */
+  const rosterSemanticsOf = (rows: readonly SessionBrowserRow[]): string => rows
+    .filter((row) => row.origin !== 'subagent')
+    .map((row) => [
+      row.id, row.updatedAt, row.title ?? '', row.preset ?? '', row.cwd ?? '',
+      row.formatStatus ?? '', row.parentSession ?? '', row.origin ?? '',
+    ].join('\u0000'))
+    .join('\u0001')
+
   /** Accept ONE official roster as this panel's ONLY listing: the subagent
-   *  children never enter it and the accepted revision advances. */
-  const acceptRoster = (panel: ActiveRead, listed: readonly SessionBrowserRow[]): readonly SessionBrowserRow[] => {
+   *  children never enter it and a SEMANTIC change advances the revision.
+   *  `changed` tells the caller whether anything painted actually moved, so an
+   *  unchanged official notification never restarts projections or search. */
+  const acceptRoster = (
+    panel: ActiveRead,
+    listed: readonly SessionBrowserRow[],
+  ): { readonly listedRows: readonly SessionBrowserRow[]; readonly changed: boolean } => {
     const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
-    panel.activityController?.abort()
-    panel.activityController = undefined
-    panel.activityFacts = undefined
-    panel.activityRevision = undefined
-    panel.activityError = undefined
-    panel.activitySequence += 1
+    const semantics = rosterSemanticsOf(listedRows)
+    // The FIRST accepted roster is always a real revision, including a truly
+    // empty one (which must reach the distinct `empty` list state).
+    const changed = panel.listRevision === 0 || semantics !== panel.rosterSemantics
+    panel.rosterSemantics = semantics
     panel.rosterRows = listedRows.filter((row) => row.origin !== 'subagent')
     panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
     panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
     panel.listError = undefined
     panel.refreshError = undefined
+    if (!changed) return { listedRows, changed }
     panel.listRevision += 1
     panel.projectionGeneration += 1
     // A presented search RESULT is a claim about one roster row: when the
@@ -572,13 +634,22 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       const live = new Set(panel.rows.map((row) => row.id))
       panel.searchResults = panel.searchResults.filter((result) => live.has(result.row.id))
     }
-    return listedRows
+    // Commit the new roster identity/epochs on the ONE Activity observation
+    // BEFORE the presenter is notified; the observation publishes its
+    // provisional running facts synchronously inside this call.
+    panel.activityHandle?.setRoster(panel.rosterRows, panel.listRevision, panel.subject.currentSessionId)
+    return { listedRows, changed }
   }
 
-  /** Re-arm the ONE refresh timer. Only a COMPLETED read re-arms it, so two
-   *  roster reads never overlap; a retired panel never re-arms. */
+  /** Re-arm the ONE pull-refresh timer. Only a COMPLETED read re-arms it, so
+   *  two roster reads never overlap; a retired panel never re-arms.
+   *
+   *  The cadence is PULL-ONLY: a reader with the observable list face is pushed
+   *  by the official Client list and must never poll (no renderer network
+   *  branch chooses this — the capability does). */
   const scheduleRefresh = (panel: ActiveRead): void => {
-    if (options.autoRefreshMs === undefined || panel.disposed || panel.controller.signal.aborted) return
+    if (options.autoRefreshMs === undefined || options.reader.observableList !== undefined) return
+    if (panel.disposed || panel.controller.signal.aborted) return
     if (panel.refreshTimer !== undefined) return
     panel.refreshTimer = setTimeout(() => {
       panel.refreshTimer = undefined
@@ -586,9 +657,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }, options.autoRefreshMs)
   }
 
-  /** ONE background roster refresh through the SAME reader/owner. It never
-   *  re-runs the direct match, never resolves a settlement, never rewrites the
-   *  user's editor text and never resumes a Session. */
+  /** ONE explicit background roster refresh through the SAME reader/owner
+   *  (the pull cadence and the explicit `refresh()` request). It never re-runs
+   *  the direct match, never resolves a settlement, never rewrites the user's
+   *  editor text and never resumes a Session. */
   const startRefresh = (panel: ActiveRead): void => {
     if (!isActive(panel) || panel.refreshing || panel.listState === 'loading') return
     panel.refreshing = true
@@ -607,16 +679,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           scheduleRefresh(panel)
           return
         }
-        acceptRoster(panel, listed as readonly SessionBrowserRow[])
+        const { changed } = acceptRoster(panel, listed as readonly SessionBrowserRow[])
         publish(panel)
         if (!isActive(panel)) return
-        startActivitySample(panel)
-        startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
-        // Re-run the ONE content search of the CURRENT query generation against
-        // the refreshed roster. No second timer, no second generation.
-        if (panel.query !== '' && panel.queryController !== undefined && panel.searchState === 'ready') {
-          startSearch(panel, panel.queryGeneration)
-        }
+        applyRosterChange(panel, changed)
         scheduleRefresh(panel)
       },
       onError: (error) => {
@@ -629,50 +695,76 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     })
   }
 
-  const startActivitySample = (panel: ActiveRead): void => {
-    const facts = options.sessionWorkspaceFacts
-    const revision = panel.listRevision
-    if (facts === undefined || panel.sampledActivityRevision === revision) return
-    panel.sampledActivityRevision = revision
-    panel.activityController?.abort()
-    const controller = new AbortController()
-    panel.activityController = controller
-    const signal = AbortSignal.any([panel.controller.signal, controller.signal])
-    runOwned('session workspace activity read', () => facts.readActivity(panel.rosterRows, signal), {
-      diag: options.diag,
-      sessionId: options.sessionId,
-      isCancellation: () => cancellation(panel) || controller.signal.aborted || panel.listRevision !== revision,
-      onResult: (activity) => {
-        if (!isActive(panel) || controller.signal.aborted || panel.listRevision !== revision) return
-        panel.activityFacts = activity
-        panel.activitySequence += 1
-        panel.activityRevision = panel.activitySequence
-        panel.activityError = undefined
-        publish(panel)
-      },
-      onError: (error) => {
-        if (!isActive(panel) || controller.signal.aborted || panel.listRevision !== revision) return
-        panel.activityFacts = undefined
-        panel.activitySequence += 1
-        panel.activityRevision = panel.activitySequence
-        panel.activityError = safeErrorMessage(error)
-        publish(panel)
-      },
-    })
+  /** The ONE post-accept work a SEMANTIC roster change triggers: enriched
+   *  labels and the content search of the current query generation. An
+   *  unchanged official roster does none of it. */
+  const applyRosterChange = (panel: ActiveRead, changed: boolean): void => {
+    if (!changed || !isActive(panel)) return
+    startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+    if (panel.query !== '' && panel.queryController !== undefined && panel.searchState === 'ready') {
+      startSearch(panel, panel.queryGeneration)
+    }
   }
 
+  /** Start the ONE per-open incremental Activity observation. It is created at
+   *  open (before the first roster) so the observation subscribes to its
+   *  official sources exactly once; every accepted roster is committed through
+   *  `setRoster` and each measured row arrives as its own publication. */
+  const startActivityObservation = (panel: ActiveRead): void => {
+    const facts = options.sessionWorkspaceFacts
+    if (facts === undefined || panel.activityHandle !== undefined) return
+    const handle = facts.observeActivity(panel.controller.signal)
+    panel.activityHandle = handle
+    panel.activityUnsubscribe = handle.subscribe(() => { onActivityChanged(panel) })
+    handle.setPriorityIds(eligibleIdsOf(panel))
+  }
+
+  /** One Activity publication from the observation: accepted only while it was
+   *  measured on THIS panel's accepted roster. The presenter sees the
+   *  observation's OWN revision, never a relabelled roster revision. */
+  const onActivityChanged = (panel: ActiveRead): void => {
+    if (!isActive(panel)) return
+    const snapshot = panel.activityHandle?.getSnapshot()
+    if (snapshot === undefined || snapshot.rosterRevision !== panel.listRevision) return
+    panel.activitySnapshot = snapshot
+    publish(panel)
+  }
+
+  const eligibleIdsOf = (panel: ActiveRead): ReadonlySet<string> =>
+    new Set((panel.answerEligibility ?? []).map(entry => entry.sessionId))
+
+  /** Release the ONE Workspace handle of this panel (exactly once). */
+  const disposeWorkspaceHandle = (panel: ActiveRead): void => {
+    const handle = panel.workspaceHandle
+    panel.workspaceHandle = undefined
+    handle?.dispose()
+  }
+
+  /** Open the ONE per-open Workspace follow in the OFFICIAL recovering mode:
+   *  a lost physical carrier invalidates the membership and the official
+   *  Gateway stream restores a fresh baseline in the SAME handle. A terminal
+   *  failure marks the handle ended; a NEW Connection generation may open ONE
+   *  new logical handle (never a same-generation retry). */
   const startWorkspaceFollow = (panel: ActiveRead): void => {
     const facts = options.sessionWorkspaceFacts
-    if (facts === undefined) return
+    if (facts === undefined || panel.disposed || panel.workspaceHandle !== undefined) return
     let handle: WorkspaceFactsHandle
     try {
-      handle = facts.followWorkspaces(panel.controller.signal)
+      handle = facts.followWorkspaces(panel.controller.signal, 'recovering')
     } catch (error) {
       options.diag.error('session workspace follow failed', { error: safeErrorMessage(error) })
+      panel.workspaceTerminal = true
       clearWorkspaceFacts(panel, 'Workspace membership unavailable')
       return
     }
+    panel.workspaceTerminal = false
     panel.workspaceHandle = handle
+    if (panel.workspaceGenerationOff === undefined && facts.observeConnectionGeneration !== undefined) {
+      panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
+        if (!isActive(panel) || !panel.workspaceTerminal) return
+        startWorkspaceFollow(panel)
+      })
+    }
     runOwned('session workspace follow', async () => {
       for await (const frame of handle) {
         if (cancellation(panel)) return
@@ -685,10 +777,14 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       isCancellation: () => cancellation(panel),
       onResult: () => {
         if (!isActive(panel)) return
+        panel.workspaceTerminal = true
+        disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
       },
       onError: () => {
         if (!isActive(panel)) return
+        panel.workspaceTerminal = true
+        disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
       },
     })
@@ -698,13 +794,150 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     if (!isActive(panel)) return
     const read = options.forwardedAnswerEligibility
     panel.answerEligibility = read === undefined ? undefined : [...read()]
-    panel.activitySequence += 1
-    if (panel.activityRevision !== undefined) panel.activityRevision = panel.activitySequence
+    // The answer gate repaints in THIS frame (the classification is a fact, not
+    // a deferred animation) and the observation re-reads ONLY the affected ids:
+    // an eligibility change never triggers a roster read.
+    panel.activityHandle?.setPriorityIds(eligibleIdsOf(panel))
     publish(panel)
-    if (panel.listRevision > 0) startRefresh(panel)
   }
 
-  const startList = (panel: ActiveRead): void => {
+  /** One ready official roster from either list path. `initial` is the open's
+   *  ONE one-shot pass (CLI direct match / fallback query / settlement); later
+   *  push or pull publications only apply the incremental work. */
+  const acceptReadyRoster = (
+    panel: ActiveRead,
+    listed: readonly SessionBrowserRow[],
+    initial: boolean,
+  ): void => {
+    const { listedRows, changed } = acceptRoster(panel, listed)
+    if (!initial) {
+      publish(panel)
+      if (!isActive(panel)) return
+      applyRosterChange(panel, changed)
+      return
+    }
+    const directMatch = panel.openOptions.directMatch
+    if (directMatch !== undefined && listedRows.length === 0) {
+      // An EMPTY roster only proves "no readable sessions": the official
+      // listing publishes a Session from its header only, so a store whose
+      // logs the reader refuses is indistinguishable here. Never claim
+      // there are no persisted Sessions (the S2 limited contract).
+      publish(panel)
+      panel.settle({ kind: 'refused', text: 'No readable sessions' })
+      return
+    }
+    // Native TSP direct matching is limited to visible main-session rows,
+    // and an explicit Browser query edit supersedes the typed argument.
+    const match = directMatch === undefined || panel.userQueryChanged
+      ? undefined
+      : directMatch.find(panel.rows, directMatch.query)
+    if (match !== undefined) {
+      if (match.id === panel.subject.currentSessionId) {
+        panel.settle({ kind: 'refused', text: 'already on this session' })
+        retire(panel, true)
+        return
+      }
+      const accepted = requestResume(panel, {
+        sessionId: match.id,
+        currentSessionId: panel.subject.currentSessionId,
+        source: 'direct',
+      }, panel.rows)
+      if (accepted) {
+        panel.settle({ kind: 'matched', sessionId: match.id })
+        retire(panel, true)
+      } else {
+        panel.settle({ kind: 'cancelled' })
+      }
+      return
+    }
+    const fallbackQuery = directMatch?.query ?? panel.openOptions.initialQuery
+    if (fallbackQuery !== undefined && !panel.userQueryChanged) {
+      const previousQuery = panel.query
+      changeQuery(panel, fallbackQuery, false)
+      if (panel.query === previousQuery) {
+        publish(panel, sanitizeSessionSearchInput(fallbackQuery))
+      }
+    } else {
+      publish(panel)
+      if (panel.query !== '') scheduleSearch(panel)
+    }
+    panel.settle({ kind: 'ready' })
+    if (!isActive(panel)) return
+    startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+    scheduleRefresh(panel)
+  }
+
+  /** The push-driven list path: subscribe FIRST, then read the synchronous
+   *  official snapshot (after the shared input-first turn) so an arrival
+   *  between the two can never be lost. No official refresh request is issued:
+   *  the Client Session Manager owns list arrival. */
+  const startObservableList = (panel: ActiveRead, observable: SessionReaderObservableList): void => {
+    panel.listSubscription = observable.subscribe(() => {
+      applyObservableList(panel, observable.getSnapshot(), false)
+    })
+    runOwned('session browser list', async () => {
+      // The presented panel gets one REAL event-loop turn (not a microtask):
+      // its loading frame must be painted and focused before any Host read can
+      // settle into it (the shared input-first ordering for both renderers).
+      await scheduler.yield()
+      if (cancellation(panel)) throw cancellationError('session browser list cancelled')
+      return observable.getSnapshot()
+    }, {
+      diag: options.diag,
+      sessionId: options.sessionId,
+      isCancellation: () => cancellation(panel),
+      onResult: (snapshot) => { applyObservableList(panel, snapshot, true) },
+      onError: (error) => { applyListError(panel, error) },
+    })
+  }
+
+  /** Apply ONE observable list snapshot. `loading` keeps the loading frame (the
+   *  official arrival is already subscribed); `unavailable` keeps a last-known
+   *  roster as metadata and never claims an empty Session universe. */
+  const applyObservableList = (
+    panel: ActiveRead,
+    snapshot: SessionReaderListSnapshot,
+    initial: boolean,
+  ): void => {
+    if (!isActive(panel)) return
+    if (snapshot.availability === 'loading') return
+    if (snapshot.availability === 'unavailable') {
+      if (panel.listRevision === 0) {
+        panel.listState = 'unavailable'
+        panel.rows = []
+        panel.searchState = 'idle'
+        panel.searchResults = []
+        panel.searchPage = undefined
+        panel.searchError = undefined
+        publish(panel)
+        if (initial) panel.settle({ kind: 'refused', text: 'session persistence unavailable' })
+        return
+      }
+      // The last accepted roster stays listed as latest-known metadata; the
+      // nonfatal freshness fact is painted beside it.
+      panel.refreshError = 'session persistence unavailable'
+      publish(panel)
+      return
+    }
+    acceptReadyRoster(panel, snapshot.rows as readonly SessionBrowserRow[], initial)
+  }
+
+  const applyListError = (panel: ActiveRead, error: unknown): void => {
+    if (!isActive(panel)) return
+    const message = safeErrorMessage(error)
+    panel.listState = 'error'
+    panel.listError = message
+    panel.rows = []
+    panel.searchState = 'idle'
+    panel.searchResults = []
+    publish(panel)
+    panel.settle({ kind: 'refused', text: message })
+    scheduleRefresh(panel)
+  }
+
+  /** The pull-only list path (Direct): the reader's own local listing, on the
+   *  existing cadence. */
+  const startPullList = (panel: ActiveRead): void => {
     if (!isActive(panel)) return
     runOwned('session browser list', async () => {
       // The presented panel gets one REAL event-loop turn (not a microtask):
@@ -734,71 +967,17 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           scheduleRefresh(panel)
           return
         }
-        const listedRows = acceptRoster(panel, listed as readonly SessionBrowserRow[])
-        const directMatch = panel.openOptions.directMatch
-        if (directMatch !== undefined && listedRows.length === 0) {
-          // An EMPTY roster only proves "no readable sessions": the official
-          // listing publishes a Session from its header only, so a store whose
-          // logs the reader refuses is indistinguishable here. Never claim
-          // there are no persisted Sessions (the S2 limited contract).
-          publish(panel)
-          panel.settle({ kind: 'refused', text: 'No readable sessions' })
-          return
-        }
-        // Native TSP direct matching is limited to visible main-session rows,
-        // and an explicit Browser query edit supersedes the typed argument.
-        const match = directMatch === undefined || panel.userQueryChanged
-          ? undefined
-          : directMatch.find(panel.rows, directMatch.query)
-        if (match !== undefined) {
-          if (match.id === panel.subject.currentSessionId) {
-            panel.settle({ kind: 'refused', text: 'already on this session' })
-            retire(panel, true)
-            return
-          }
-          const accepted = requestResume(panel, {
-            sessionId: match.id,
-            currentSessionId: panel.subject.currentSessionId,
-            source: 'direct',
-          }, panel.rows)
-          if (accepted) {
-            panel.settle({ kind: 'matched', sessionId: match.id })
-            retire(panel, true)
-          } else {
-            panel.settle({ kind: 'cancelled' })
-          }
-          return
-        }
-        const fallbackQuery = directMatch?.query ?? panel.openOptions.initialQuery
-        if (fallbackQuery !== undefined && !panel.userQueryChanged) {
-          const previousQuery = panel.query
-          changeQuery(panel, fallbackQuery, false)
-          if (panel.query === previousQuery) {
-            publish(panel, sanitizeSessionSearchInput(fallbackQuery))
-          }
-        } else {
-          publish(panel)
-          if (panel.query !== '') scheduleSearch(panel)
-        }
-        panel.settle({ kind: 'ready' })
-        if (!isActive(panel)) return
-        startActivitySample(panel)
-        startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
-        scheduleRefresh(panel)
+        acceptReadyRoster(panel, listed as readonly SessionBrowserRow[], true)
       },
-      onError: (error) => {
-        if (!isActive(panel)) return
-        const message = safeErrorMessage(error)
-        panel.listState = 'error'
-        panel.listError = message
-        panel.rows = []
-        panel.searchState = 'idle'
-        panel.searchResults = []
-        publish(panel)
-        panel.settle({ kind: 'refused', text: message })
-        scheduleRefresh(panel)
-      },
+      onError: (error) => { applyListError(panel, error) },
     })
+  }
+
+  const startList = (panel: ActiveRead): void => {
+    if (!isActive(panel)) return
+    const observable = options.reader.observableList
+    if (observable === undefined) startPullList(panel)
+    else startObservableList(panel, observable)
   }
 
   return {
@@ -834,12 +1013,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         workspaceState: 'loading',
         workspaceRevision: 0,
         workspaceError: undefined,
-        activityController: undefined,
-        activityFacts: undefined,
-        activityRevision: undefined,
-        activitySequence: 0,
-        sampledActivityRevision: undefined,
-        activityError: undefined,
+        workspaceTerminal: false,
+        workspaceGenerationOff: undefined,
+        rosterSemantics: '',
+        activityHandle: undefined,
+        activityUnsubscribe: undefined,
+        activitySnapshot: undefined,
+        listSubscription: undefined,
         answerEligibility: undefined,
         eligibilitySubscription: undefined,
         listState: 'loading',
@@ -934,6 +1114,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       panel.answerEligibility = options.forwardedAnswerEligibility === undefined
         ? undefined
         : [...options.forwardedAnswerEligibility()]
+      // The ONE incremental Activity observation exists for the whole panel
+      // lifetime; the first roster commit follows in the list path.
+      startActivityObservation(panel)
       const subscribeEligibility = options.subscribeForwardedAnswerEligibility
       if (subscribeEligibility !== undefined) {
         panel.eligibilitySubscription = subscribeEligibility(() => refreshAnswerEligibility(panel))

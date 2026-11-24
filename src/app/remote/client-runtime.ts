@@ -53,6 +53,12 @@ import scheduleRemote from '@deepseek-ai/dsh-schedule/remote'
 import agentTeamsRemote from '@deepseek-ai/dsh-agent-team/remote'
 import cuaRemote from '@deepseek-ai/dsh-cua/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
+import type {
+  RemoteLogicalStreamLike,
+  RemoteWorkspaceStreamSource,
+} from '../../runtime/remote/session-workspace-facts-remote.ts'
+import type { RemoteWorkspaceFollowFrameLike } from '../../runtime/remote/session-lifecycle-remote.ts'
+import type { RemoteConnectionGeneration } from '../../runtime/remote/session-reader-remote.ts'
 import { mergeCause } from './dispose-cause.ts'
 
 type TypertClientModule = typeof typertRegistryClient
@@ -486,6 +492,15 @@ function loadInstalledClientDomainModules(dshAnchor: string): Promise<InstalledC
 }
 
 /** The shared, Domain-only Client composition. Not exported from the package root. */
+/** The narrow `ClientRemote.$stream` factory shape the per-open Workspace
+ *  follow consumes (the generated options are structurally identical). */
+type RemoteWorkspaceStreamFactory = (options: {
+  readonly name: string
+  readonly open: (signal: AbortSignal) => AsyncIterable<RemoteWorkspaceFollowFrameLike>
+  readonly ended: (accepted: boolean) => Error
+  readonly carrierFailed?: (error: Error) => void
+}) => RemoteLogicalStreamLike<RemoteWorkspaceFollowFrameLike>
+
 export interface MountedRemoteClientDomains {
   /** The caller's exact Context (`Object.is` holds; never disposed here). */
   readonly context: Context
@@ -494,6 +509,17 @@ export interface MountedRemoteClientDomains {
   readonly sessions: ISessions
   readonly jobs: IJobs
   readonly remote: ClientRemote
+  /** The official reconnecting Workspace stream source: the ONE
+   *  method-bound `ClientRemote.$stream` receiver and the captured Gateway
+   *  bundle's OWN `RemoteStreamCarrierError` constructor. The class must come
+   *  from the SAME installation the Gateway retries with (`instanceof`), never
+   *  from a second devDependency tree or a code-based stand-in. */
+  readonly workspaceStream: RemoteWorkspaceStreamSource
+  /** The Client-domain FIRST established Connection generation, recorded while
+   *  this Domain graph mounts (never a per-surface-revision id). A later
+   *  surface revision reuses this SAME marker; a replaced generation never
+   *  matches it, so its list can never be claimed as a fresh baseline. */
+  readonly initialGeneration: RemoteConnectionGeneration | undefined
   /** Release exactly the mounted Domains and `/remote` contributions, in
    *  reverse order. Never disposes the Context, Connection or Gateway. */
   dispose(): Promise<void>
@@ -686,11 +712,28 @@ export async function mountRemoteClientDomainPrerequisites(
         try {
           state.jobsFiber = context.plugin(source.modules.jobs)
           await state.jobsFiber
-          // Initial readiness is part of construction: a failure (an aborted
-          // lifecycle signal included) must unwind the whole partial
-          // composition. It runs before the Jobs service assertion so an
-          // already-aborted lifecycle keeps its abort classification.
-          await waitForInitialReadiness(connection, state.sessions, completeOptions.signal)
+          // Record the FIRST established Connection generation NOW, before the
+          // readiness wait can settle: a later surface-revision mount must never
+          // re-capture a replacement generation as "initial".
+          let initialGeneration = connection.generation.getSnapshot()
+          let initialOff: (() => void) | undefined
+          if (initialGeneration === undefined) {
+            initialOff = connection.generation.subscribe(() => {
+              initialGeneration ??= connection.generation.getSnapshot()
+              if (initialGeneration === undefined) return
+              initialOff?.()
+              initialOff = undefined
+            })
+          }
+          try {
+            // Initial readiness is part of construction: a failure (an aborted
+            // lifecycle signal included) must unwind the whole partial
+            // composition. It runs before the Jobs service assertion so an
+            // already-aborted lifecycle keeps its abort classification.
+            await waitForInitialReadiness(connection, state.sessions, completeOptions.signal)
+          } finally {
+            initialOff?.()
+          }
           const jobs = context.get('jobs') as unknown as IJobs
           if (jobs === undefined) throw new Error('remote client domains: the official Jobs Client did not install')
           return {
@@ -699,6 +742,13 @@ export async function mountRemoteClientDomainPrerequisites(
             sessions: state.sessions,
             jobs,
             remote,
+            workspaceStream: {
+              // The Gateway's OWN receiver stays method-bound: `$stream` reads
+              // the installed Gateway service state.
+              stream: (remote.$stream as unknown as RemoteWorkspaceStreamFactory).bind(remote),
+              carrierError: source.modules.gateway.RemoteStreamCarrierError,
+            },
+            initialGeneration,
             async dispose(): Promise<void> {
               const cleanupErrors = await shutdownDomainState(state)
               if (cleanupErrors.length === 0) return

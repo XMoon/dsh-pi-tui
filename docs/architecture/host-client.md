@@ -1457,29 +1457,73 @@ workspace/question/approval store and keeps no cross-session cache.
   `SessionRuntime.switchSessionOutcome(target, expectedScope)`, and only its
   settled `committed` outcome is success — an accepted intent, a matched row or
   a closed Presenter is not.
-- **Roster refresh.** The owner accepts ONE roster per read and advances a
-  monotonic `listRevision` only when an official `list()` succeeds; a projection
-  batch, a search page or a repaint never advances it. The PiTUI fullscreen
-  workspace opts into ONE single-re-armed refresh timer (a completed read
-  schedules the next; two roster reads never overlap) and may request one early
-  refresh through the SAME owner generation — a UI invalidation (for example a
-  forwarded request settled by another Client) never starts a second Host
-  scan. The native TSP Presenter keeps its historical single read, and a failed
-  refresh keeps the last accepted roster with a nonfatal freshness status. An
-  accepted roster also re-filters the presented search results to the Sessions
-  it still lists, so a removed Session is never selectable (or readable) while
-  the refreshed Host search, a projection batch or an unavailable/error search
+- **Roster observation.** The owner advances its monotonic `listRevision` only
+  on a SEMANTIC roster change (membership/order/title/preset/cwd/format/
+  `updatedAt` as actually painted); a projection batch, a search page, a repaint
+  or an Activity update never advances it, and an unchanged official
+  notification restarts neither the projection batch nor the content search.
+  A reader that already owns an official observable list (Remote's
+  `ISessions.list`) exposes the optional internal `SessionReader.observableList`
+  snapshot/subscribe face; the owner then subscribes and NEVER polls: the
+  Client Session Manager owns list arrival, so no periodic roster refresh
+  request is issued. A reader without that face keeps its pull cadence (Direct
+  keeps the PiTUI single-re-armed 20 s local refresh; TSP never adds a poll) —
+  the capability decides, never the renderer's network state, and both
+  renderers receive the same push updates when the face exists. An explicit `refresh()` still asks the reader for one real
+  read. A failed pull keeps the last accepted roster with a nonfatal freshness
+  status; a disconnected observable source keeps that roster as latest-known
+  metadata and never turns it into an empty Session universe. An accepted
+  roster re-filters the presented search results to the Sessions it still
+  lists, so a removed Session is never selectable (or readable) while the
+  refreshed Host search, a projection batch or an unavailable/error search
   state is still pending.
 
-- **Roster.** `readActivity(rows, signal)` consumes exactly the main rows the
-  caller obtained from `SessionReader.list()`; it never lists, refreshes or
-  probes an alternative corpus, and a `subagent` child row is excluded. It adds
-  no row and drops none, so one sampled Session produces at most one fact row.
-- **Running.** `running` comes from the official list row (`RemoteSessionListRow.running`)
-  and/or the passive Host `session.state(...).running`; the two are compared on
-  the same id and a disagreement is `undefined` (unknown), never one guessed
-  value. `SessionSummary.live` (the old Direct attachment bit) is never a
-  running source, and a missing live Agent is unknown rather than idle.
+- **Two activity consumers, one classifier.** `observeActivity(signal)` is the
+  ONE per-open INCREMENTAL observation the Session Browser drives: it commits
+  the caller's roster (identity/epoch first), publishes the official running
+  projection in that same frame with every unmeasured row honestly unknown, and
+  commits each measured row as its own publication. Its snapshot carries the
+  roster revision it was measured on AND its own monotone Activity revision;
+  they never relabel each other. `readActivity(rows, signal)` keeps the EXACT
+  precise sample (one fenced complete answer for an explicit roster) for the
+  qualification probe and focused reads; the Browser never calls it for its
+  ordinary roster. Both consume exactly the main rows the caller obtained —
+  never an alternative corpus, no added or dropped row, `subagent` children
+  excluded — and share the SAME validators/`deriveAttention` classification.
+- **Running.** The official list row (`RemoteSessionListRow.running`) owns the
+  normal running fact: the Client Session Manager replays the Host status
+  mutations into that row, so there is one current authority and no
+  cross-source comparison. A `phase=ready` list is an arrival latch, NOT a
+  fresh generation baseline: only the Client domain's FIRST established
+  Connection generation may claim the list as a running baseline, and a
+  replacement revokes every proven positive. After a rollover only a
+  current-generation forwarded `api-session/status` event or a targeted exact
+  `session.state` may re-prove running; rows without that evidence stay
+  unknown rather than a fabricated idle. `SessionSummary.live` (the old Direct
+  attachment bit) is never a running source, and a missing live Agent is
+  unknown rather than idle.
+- **Bounded scheduling.** The observation owns a fixed budget of at most FOUR
+  actual concurrent unary requests: three for the priority lane (the current
+  Session, locally eligible rows, running rows, positive pending hints) and one
+  reserved background slot for ordinary unresolved discovery. A worker issues
+  each read's `state` and `projections` sequentially (or reuses the epoch's
+  exact projection), so the limit is on real requests, never on worker count.
+  Ordinary unresolved rows receive ONE exact `session.projections` discovery per
+  unchanged relevant source revision — never an all-roster periodic pair scan —
+  and a discovery that proves no active entry leaves `attention: 'unknown'`
+  (the Gateway pending kind was not sampled), never `none`. A completed
+  discovery attempt is remembered as SCHEDULING evidence only, scoped to the
+  Connection generation and the relevant hint witness; it is never an
+  answerability fact, never cached payload and never consulted by the answer
+  gate or the Writer. Only active rows (running, eligible, observed pending,
+  current) keep ONE re-armed 20 s recheck, because the Gateway has no global
+  public pending event; ordinary idle rows are never re-sampled.
+- **Connection loss.** A generation loss or replacement immediately revokes
+  every proven positive fact, cancels queued/in-flight reads and drops the
+  discovery memory; a valid current generation resumes from the official
+  snapshot plus targeted status/state proof and ONE discovery pass. Rows stay
+  unknown until re-proved: an old sample can never revive a Working or Needs
+  row.
 - **Pending.** The two official passive sources are the Host
   `session.state(...).pendingInput` kind sample and the cold-safe
   `session.projections(...).values.userQuestions.active` timed-Question
@@ -1516,17 +1560,27 @@ workspace/question/approval store and keeps no cross-session cache.
   superseded generation is never published as the current one. The Remote
   adapter bounds per-Session passive reads (six concurrent reads) as
   backpressure; the bound never truncates the roster.
-- **Workspaces.** `followWorkspaces(signal)` is one caller-owned per-open
+- **Workspaces.** `followWorkspaces(signal, mode)` is one caller-owned per-open
   observation over the official `workspace.follow` stream (Remote) or the
   official Host `workspaceRegistry` plus `domain/changed` re-reads (Direct). The
-  five forwarded frames are `baseline`/`replace`/`upsert`/`remove`/`order`; the
+  forwarded frames are `baseline`/`replace`/`upsert`/`remove`/`order` plus
+  `invalidated` (the current generation's membership is no longer proven); the
   registry-global `archived`/`pinned` sets are not Workspace membership and are
-  ignored. Every generation starts with exactly one baseline; a missing
-  baseline is an unknown Workspace state, never an empty one. The handle is
-  disposed exactly once and a generation replacement ends the open generation
-  instead of applying a stale increment. Workspace identity/path/title/
-  membership are the Host's values; the Client cwd, HOME or PATH is never a
-  membership input.
+  ignored. Every generation starts with exactly one baseline, and a baseline is
+  validated against the current Connection generation and the physical stream
+  item before it is accepted; a missing baseline is an unknown Workspace state,
+  never an empty one. The `single-generation` mode (the `-c` startup pairing
+  and explicit one-shot probes) ends the observation on a generation
+  replacement and never stitches old membership onto a new roster. The
+  `recovering` mode (the Browser) uses the official reconnecting Gateway
+  `$stream`: a physical carrier loss only emits `invalidated` and the SAME
+  logical handle consumes a fresh baseline from the replacement generation; a
+  terminal (non-carrier) failure ends the handle truthfully and is never
+  retried on the same generation — only a NEW Connection generation may open
+  ONE new logical handle. The handle is disposed exactly once and its
+  asynchronous SDK quiescence is observed, never left floating. Workspace
+  identity/path/title/membership are the Host's values; the Client cwd, HOME or
+  PATH is never a membership input.
 - **Direct parity.** Direct reads the exact live Agent status and the official
   `workspaceRegistry` it already owns; it fabricates no cross-Session pending
   fact (`attention: 'unknown'`) because it owns no Gateway forwarded-event truth

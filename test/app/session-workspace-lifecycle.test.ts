@@ -31,6 +31,7 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import type { SessionContentSearchPage, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
 import type { SessionMarkdownReadResult } from '../../src/runtime/session-markdown-port.ts'
 import type {
+  ActivityObservation,
   SessionActivityFact,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
@@ -159,43 +160,106 @@ class ControlledFactsHandle implements WorkspaceFactsHandle {
   }
 }
 
+/** One controllable per-open incremental Activity observation: the roster
+ *  commit publishes the configured facts and every later measurement is an
+ *  explicit test publication, so the suite drives EXACTLY the incremental
+ *  contract (no whole-roster sample exists to hold). */
+interface ControlledActivityObservation {
+  readonly rosters: Array<{
+    readonly rows: readonly SessionSummary[]
+    readonly rosterRevision: number
+    readonly currentSessionId: string | undefined
+  }>
+  readonly priorityIds: Array<ReadonlySet<string>>
+  readonly disposeCount: () => number
+  /** Publish measured facts for a roster revision (defaults to the current). */
+  publish(facts: readonly SessionActivityFact[], rosterRevision?: number): void
+  /** Publish ONE whole-observation failure. */
+  fail(message: string): void
+}
+
 interface FactsSource {
   readonly port: SessionWorkspaceFactsPort
   readonly handles: ControlledFactsHandle[]
+  /** Every per-open Activity observation the workspace opened, in order. */
+  readonly observations: ControlledActivityObservation[]
   readonly followCalls: number
-  /** Every official Activity sample the workspace requested, in order. */
-  readonly reads: Array<{ readonly rows: readonly SessionSummary[]; readonly signal: AbortSignal | undefined }>
+  /** Every EXACT whole-roster sample the Browser requested: always 0. */
+  readonly readActivityCalls: { count: number }
+  /** Replace the facts a NEW roster commit publishes. */
   setFacts(facts: readonly SessionActivityFact[]): void
-  failNext(error: Error): void
-  /** Hold the NEXT sample open until `releaseHeld()`. */
-  holdNext(): void
-  releaseHeld(): void
 }
 
 function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource {
   const handles: ControlledFactsHandle[] = []
-  const reads: Array<{ rows: readonly SessionSummary[]; signal: AbortSignal | undefined }> = []
+  const observations: ControlledActivityObservation[] = []
   const state = {
     followCalls: 0,
     facts: initial,
-    failNext: undefined as Error | undefined,
-    hold: false,
-    held: [] as Array<() => void>,
+    readActivityCalls: { count: 0 },
   }
   const port: SessionWorkspaceFactsPort = {
-    readActivity: (rows, signal) => {
-      reads.push({ rows, signal })
-      const failure = state.failNext
-      if (failure !== undefined) {
-        state.failNext = undefined
-        return Promise.reject(failure)
+    readActivity: () => {
+      state.readActivityCalls.count += 1
+      throw new Error('the Session Browser never takes a whole-roster Activity sample')
+    },
+    observeActivity: (signal): ActivityObservation => {
+      let rosterRevision = 0
+      let revision = 0
+      let facts: readonly SessionActivityFact[] = []
+      let error: string | undefined
+      let disposed = 0
+      const listeners = new Set<() => void>()
+      const emit = (): void => { for (const listener of [...listeners]) listener() }
+      const observation = {
+        rosters: [] as ControlledActivityObservation['rosters'],
+        priorityIds: [] as ReadonlySet<string>[],
+        disposeCount: () => disposed,
+        publish(next: readonly SessionActivityFact[], publishedRosterRevision?: number): void {
+          if (disposed > 0) return
+          rosterRevision = publishedRosterRevision ?? rosterRevision
+          facts = next
+          error = undefined
+          revision += 1
+          emit()
+        },
+        fail(message: string): void {
+          if (disposed > 0) return
+          error = message
+          facts = []
+          revision += 1
+          emit()
+        },
       }
-      const facts = state.facts
-      if (!state.hold) return Promise.resolve(facts)
-      return new Promise((resolve, reject) => {
-        state.held.push(() => resolve(facts))
-        signal?.addEventListener('abort', () => reject(new Error('activity read aborted')), { once: true })
-      })
+      const handle: ActivityObservation = {
+        setRoster(rows, nextRosterRevision, currentSessionId) {
+          if (disposed > 0) return
+          rosterRevision = nextRosterRevision
+          observation.rosters.push({ rows: [...rows], rosterRevision: nextRosterRevision, currentSessionId })
+          facts = state.facts
+          error = undefined
+          revision += 1
+          emit()
+        },
+        setPriorityIds(ids) { observation.priorityIds.push(new Set(ids)) },
+        getSnapshot: () => ({
+          rosterRevision,
+          revision,
+          facts,
+          ...(error === undefined ? {} : { error }),
+        }),
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+        dispose: () => {
+          if (disposed > 0) return
+          disposed += 1
+          listeners.clear()
+        },
+      }
+      observations.push(observation)
+      return handle
     },
     followWorkspaces: (signal) => {
       state.followCalls += 1
@@ -207,16 +271,10 @@ function factsSource(initial: readonly SessionActivityFact[] = []): FactsSource 
   return {
     port,
     handles,
-    reads,
+    observations,
     get followCalls() { return state.followCalls },
+    readActivityCalls: state.readActivityCalls,
     setFacts: (facts) => { state.facts = facts },
-    failNext: (error) => { state.failNext = error },
-    holdNext: () => { state.hold = true },
-    releaseHeld: () => {
-      state.hold = false
-      const held = state.held.splice(0)
-      for (const release of held) release()
-    },
   }
 }
 
@@ -238,6 +296,8 @@ interface Harness {
   readonly notices: Array<{ readonly text: string; readonly kind: string }>
   /** Fire the Client-root eligibility invalidation the delivery owner emits. */
   notifyEligibility(): void
+  /** Publish one official roster through the observable face (push mode). */
+  pushRoster(next: readonly SessionSummary[]): void
   settleSwitch(outcome: SessionSwitchOutcome): void
   runSessions(rawInput?: string): Promise<{ kind: 'success' } | { kind: 'error'; text: string }>
   /** Run any command registered by this harness (e.g. `/search`). */
@@ -258,6 +318,8 @@ function harness(options: {
   readonly currentSessionId?: string
   readonly rows?: readonly SessionSummary[]
   readonly list?: () => Promise<readonly SessionSummary[]>
+  /** Give the reader the push-driven roster face; publish with `pushRoster`. */
+  readonly observableList?: boolean
   readonly search?: (query: string, signal?: AbortSignal) => Promise<SessionContentSearchPage | undefined>
   readonly nativePresentation?: SessionBrowserPresentation
   /** The Client-root forwarded-answer eligibility read view (G567). Absent on
@@ -371,10 +433,29 @@ function harness(options: {
   ]
   const listCalls = { value: 0 }
   const markdownReads: Array<{ readonly sessionId: string; readonly signal: AbortSignal | undefined }> = []
+  const rosterListeners = new Set<() => void>()
+  let pushedRows: readonly SessionSummary[] | undefined
+  const pushRoster = (next: readonly SessionSummary[]): void => {
+    pushedRows = next
+    for (const listener of [...rosterListeners]) listener()
+  }
   const sessionReader: SessionReader = {
     list: options.list === undefined
       ? async () => { listCalls.value += 1; return rows.map(entry => ({ ...entry })) }
       : async () => { listCalls.value += 1; return (await options.list!()).map(entry => ({ ...entry })) },
+    ...(options.observableList === true ? {
+      observableList: {
+        getSnapshot: () => ({
+          generation: 1,
+          availability: 'ready' as const,
+          rows: (pushedRows ?? rows).map(entry => ({ ...entry })),
+        }),
+        subscribe: (listener: () => void) => {
+          rosterListeners.add(listener)
+          return () => { rosterListeners.delete(listener) }
+        },
+      },
+    } : {}),
     projectionBatch: options.projection ?? (async () => new Map([
       [CURRENT, { title: 'Current session' }],
       [OTHER, { title: 'Other session' }],
@@ -554,6 +635,7 @@ function harness(options: {
     markdownReads,
     notices,
     notifyEligibility: () => { for (const listener of [...eligibilityListeners]) listener() },
+    pushRoster,
     settleSwitch: (outcome) => { assert.ok(pendingSwitch !== undefined, 'no accepted resume is pending'); pendingSwitch(outcome) },
     runSessions: invoke,
     runCommand: (name, rawInput = '') => {
@@ -1055,11 +1137,12 @@ test('the native TSP presenter consumes the shared Browser Workspace facts once'
   await h.runSessions('')
   await h.vt.waitForRender()
   assert.equal(h.facts.followCalls, 1, 'the shared Browser read owner opens exactly one Workspace follow')
-  assert.equal(h.facts.reads.length, 1, 'the shared Browser read owner samples Activity once')
+  assert.equal(h.facts.observations.length, 1, 'the shared Browser read owner opens exactly one Activity observation')
+  assert.equal(h.facts.readActivityCalls.count, 0, 'the Browser never takes a whole-roster Activity sample')
   assert.equal(h.pickerCalls, 0)
 })
 
-// ── M5-U-D: the ONE Activity sample, its fences and the eligibility gate ─────
+// ── M5-U-D: the ONE incremental Activity observation, its fences and gate ───
 
 function activityFact(sessionId: string, extra: Partial<SessionActivityFact> = {}): SessionActivityFact {
   return {
@@ -1083,7 +1166,7 @@ function questionFact(sessionId: string): SessionActivityFact {
   })
 }
 
-test('the workspace samples Activity ONCE per accepted roster revision, on the read owner roster', async () => {
+test('the workspace observes Activity incrementally on the read owner roster, never as one whole-roster sample', async () => {
   const h = harness({
     currentSessionId: CURRENT,
     initialFacts: [questionFact(CURRENT)],
@@ -1091,21 +1174,27 @@ test('the workspace samples Activity ONCE per accepted roster revision, on the r
   })
   await h.runSessions('')
   await waitUntil(() => h.view().includes('Needs attention'), 'the proved need paints')
-  assert.equal(h.facts.reads.length, 1, 'one accepted roster revision = exactly ONE Activity sample')
+  assert.equal(h.facts.readActivityCalls.count, 0, 'the Browser never calls the exact whole-roster sample')
+  assert.equal(h.facts.observations.length, 1, 'one open = exactly ONE Activity observation')
   assert.deepEqual(
-    h.facts.reads[0]!.rows.map(entry => entry.id),
+    h.facts.observations[0]!.rosters[0]!.rows.map(entry => entry.id),
     [CURRENT, OTHER, THIRD],
-    'the sample consumes the ORIGINAL roster array the read owner listed',
+    'the observation is committed the accepted main roster, in order',
   )
-  assert.deepEqual(h.switchCalls, [], 'sampling never switches, opens or answers a Session')
+  assert.deepEqual(h.switchCalls, [], 'observing never switches, opens or answers a Session')
   // The progressive projection batch repaints titles: a repaint must never
-  // re-read the same batch.
+  // re-commit or re-read the roster.
   await waitUntil(() => h.view().includes('Current session'), 'the projection titles land')
   await new Promise<void>(resolve => setImmediate(resolve))
-  assert.equal(h.facts.reads.length, 1, 'a projection repaint never re-samples Activity')
+  assert.equal(h.facts.observations[0]!.rosters.length, 1, 'a projection repaint never re-commits the roster')
+  assert.deepEqual(
+    h.facts.observations[0]!.priorityIds.at(-1),
+    new Set([CURRENT]),
+    'the root answer eligibility is forwarded as the ONE scheduling priority hint',
+  )
 })
 
-test('an eligibility loss drops the Needs row immediately and asks for ONE early roster refresh', async () => {
+test('an eligibility loss drops the Needs row immediately without a roster read', async () => {
   let eligible: readonly SessionBrowserAnswerEligibility[] = [{ sessionId: CURRENT, kind: 'question', live: true }]
   const h = harness({
     currentSessionId: CURRENT,
@@ -1115,101 +1204,94 @@ test('an eligibility loss drops the Needs row immediately and asks for ONE early
   await h.runSessions('')
   await waitUntil(() => h.view().includes('Needs attention'), 'the proved need paints')
   const listCalls = h.listCalls
-  // The user is ACTIVELY browsing (a fresh keyboard gesture) when another
-  // Client wins the official request. The Needs group must drop in the SAME
-  // frame of the invalidation: a revocation is a fact, not an animation.
+  // Another Client wins the official request while the user is actively
+  // browsing. A revocation is a FACT: the Needs row leaves in the same frame.
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
-  h.facts.holdNext()
-  h.facts.setFacts([activityFact(CURRENT, { attention: 'none', attentionSourceState: 'known' })])
   eligible = []
   h.notifyEligibility()
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('Needs attention'),
     `a revoked need never survives a busy cursor:\n${h.view()}`)
-  assert.equal(h.listCalls, listCalls + 1, 'the early refresh goes through the ONE read owner generation')
-  await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster triggers its own Activity sample')
-  h.facts.releaseHeld()
+  assert.equal(h.listCalls, listCalls, 'an eligibility change never reads the roster')
+  assert.deepEqual(
+    h.facts.observations[0]!.priorityIds.at(-1),
+    new Set(),
+    'the revoked id is forwarded as the empty scheduling priority set',
+  )
+  // The incremental re-measurement of the affected id confirms the new fact.
+  h.facts.observations[0]!.publish([activityFact(CURRENT, { attention: 'none', attentionSourceState: 'known' })])
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Needs attention'), 'the refreshed sample confirms no proved need')
+  assert.ok(!h.view().includes('Needs attention'), 'the re-measured row confirms no proved need')
 })
 
-test('closing the workspace aborts the in-flight Activity sample and publishes nothing', async () => {
+test('closing the workspace disposes the ONE Activity observation and publishes nothing', async () => {
   const h = harness({ currentSessionId: CURRENT })
-  h.facts.holdNext()
   await h.runSessions('')
-  await waitUntil(() => h.facts.reads.length === 1, 'the Activity sample starts')
-  const signal = h.facts.reads[0]!.signal
+  await h.vt.waitForRender()
+  const observation = h.facts.observations[0]!
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.equal(signal?.aborted, true, 'the physical lease close aborts the in-flight sample')
+  assert.equal(observation.disposeCount(), 1, 'the physical lease close disposes the observation once')
   assert.equal(h.facts.handles[0]!.disposed, 1, 'the per-open Workspace follow is disposed once')
-  h.facts.releaseHeld()
+  observation.publish([questionFact(CURRENT)])
   await new Promise<void>(resolve => setImmediate(resolve))
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Sessions'), 'a late sample result never resurrects the closed workspace')
+  assert.ok(!h.view().includes('Sessions'), 'a late observation never resurrects the closed workspace')
 })
 
-test('a newer accepted roster revision supersedes the in-flight sample', async () => {
-  const h = harness({ currentSessionId: CURRENT, eligibility: () => [] })
-  h.facts.holdNext()
-  await h.runSessions('')
-  await waitUntil(() => h.facts.reads.length === 1, 'the first Activity sample starts')
-  const first = h.facts.reads[0]!.signal
-  h.notifyEligibility()
-  await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster samples again')
-  assert.equal(first?.aborted, true, 'the superseded sample is aborted')
-  h.facts.releaseHeld()
-  await new Promise<void>(resolve => setImmediate(resolve))
-  await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Activity unavailable'), 'an aborted sample is a cancellation, never a visible failure')
-  assert.ok(h.view().includes('Current session'), 'the roster survives the superseded sample')
-})
-
-test('a failed Activity sample is ONE nonfatal line and keeps the roster and a Resume usable', async () => {
+test('a failed Activity observation is ONE nonfatal line and keeps the roster and a Resume usable', async () => {
   const h = harness({ currentSessionId: CURRENT })
-  h.facts.failNext(new Error('activity read exploded'))
   await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.observations[0]!.fail('activity read exploded')
   await waitUntil(() => h.view().includes('Activity unavailable: activity read exploded'),
-    'the sample failure is visible as one nonfatal line')
-  assert.ok(h.view().includes('Current session'), 'the roster is never emptied by a failed sample')
+    'the observation failure is visible as one nonfatal line')
+  assert.ok(h.view().includes('Current session'), 'the roster is never emptied by a failed observation')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
-  await waitUntil(() => h.switchCalls.length === 1, 'a Resume still reaches the runtime after a failed sample')
+  await waitUntil(() => h.switchCalls.length === 1, 'a Resume still reaches the runtime after a failed observation')
   h.settleSwitch({ kind: 'failed', message: 'refused by the Host' })
 })
 
-test('a newer accepted roster revision never paints the previous sample as a Needs promise', async () => {
+test('a stale Activity revision never paints onto a newer accepted roster', async () => {
   const h = harness({
     currentSessionId: CURRENT,
     initialFacts: [questionFact(CURRENT)],
     eligibility: () => [{ sessionId: CURRENT, kind: 'question', live: true }],
   })
   await h.runSessions('')
-  await waitUntil(() => h.view().includes('Needs attention'), 'the first revision sample paints')
-  // The next roster revision's sample is held. The previous sample belongs to
-  // the OLD roster: an old positive Pending is not a current promise.
-  h.facts.holdNext()
-  h.notifyEligibility()
-  await waitUntil(() => h.facts.reads.length === 2, 'the refreshed roster starts its OWN sample')
+  await waitUntil(() => h.view().includes('Needs attention'), 'the first revision facts paint')
+  const observation = h.facts.observations[0]!
+  const acceptedRevision = observation.rosters[0]!.rosterRevision
+  // A superseded publication carries the OLDER roster revision and a fact that
+  // would revoke the current Needs row. It can never relabel itself as the
+  // current roster, so the accepted row keeps its proven need.
+  observation.publish([activityFact(CURRENT, { attention: 'none', attentionSourceState: 'known' })], acceptedRevision - 1)
   await h.vt.waitForRender()
-  assert.ok(!h.view().includes('Needs attention'),
-    `the previous revision needs survived into the new roster:\n${h.view()}`)
-  h.facts.releaseHeld()
-  await waitUntil(() => h.view().includes('Needs attention'), 'the new revision sample re-proves the need')
+  assert.ok(h.view().includes('Needs attention'),
+    `a stale revision revoked a current need:\n${h.view()}`)
+  // The CURRENT revision's own publication applies truthfully.
+  observation.publish([activityFact(CURRENT, { attention: 'none', attentionSourceState: 'known' })], acceptedRevision)
+  await waitUntil(() => !h.view().includes('Needs attention'), 'the current revision facts repaint')
+  observation.publish([questionFact(CURRENT)], acceptedRevision)
+  await waitUntil(() => h.view().includes('Needs attention'), 'the current revision re-proves the need')
 })
 
 test('a stale projection batch never enriches a newer accepted roster', async () => {
   const pending: Array<(projections: Map<string, { readonly title?: string; readonly preset?: string }>) => void> = []
   const h = harness({
     currentSessionId: CURRENT,
+    observableList: true,
     eligibility: () => [],
     projection: () => new Promise(resolve => { pending.push(resolve) }),
   })
   await h.runSessions('')
   await waitUntil(() => pending.length === 1, 'the first projection batch starts')
-  h.notifyEligibility() // the ONE early roster refresh
+  // The official Host publishes a real roster change while the first batch is
+  // still in flight: the accepted revision must retire that batch.
+  h.pushRoster([row(CURRENT, 3_100), row(OTHER, 2_000), row(THIRD, 1_000)])
   await waitUntil(() => pending.length === 2, 'the newer roster starts its own projection batch')
   pending[0]!(new Map([[CURRENT, { title: 'Stale title' }]]))
   await new Promise<void>(resolve => setImmediate(resolve))
@@ -1226,6 +1308,7 @@ test('a roster refresh drops search results for removed Sessions before the next
   const heldSearches: Array<() => void> = []
   const h = harness({
     currentSessionId: CURRENT,
+    observableList: true,
     eligibility: () => [],
     list: async () => listed,
     // The projection batch is held FOREVER: no later enrichment may filter the
@@ -1259,9 +1342,8 @@ test('a roster refresh drops search results for removed Sessions before the next
   // Another Client removes that Session: the next accepted roster no longer
   // lists it, while the refreshed Host search is still pending.
   listed = [row(CURRENT, 3_000)]
-  const listCalls = h.listCalls
-  h.notifyEligibility() // the ONE early roster refresh
-  await waitUntil(() => h.listCalls > listCalls, 'the refreshed roster was accepted')
+  h.pushRoster(listed)
+  await waitUntil(() => h.view().includes('Sessions · 1'), 'the removed Session left the accepted roster')
   await h.vt.waitForRender()
   const view = h.view()
   assert.ok(!view.includes('Transcript · other-se'),
