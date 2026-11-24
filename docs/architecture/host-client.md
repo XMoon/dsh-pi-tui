@@ -1506,24 +1506,37 @@ workspace/question/approval store and keeps no cross-session cache.
   actual concurrent unary requests: three for the priority lane (the current
   Session, locally eligible rows, running rows, positive pending hints) and one
   reserved background slot for ordinary unresolved discovery. A worker issues
-  each read's `state` and `projections` sequentially (or reuses the epoch's
-  exact projection), so the limit is on real requests, never on worker count.
-  Ordinary unresolved rows receive ONE exact `session.projections` discovery per
+  each read's `state` and `projections` sequentially, so the limit is on real
+  requests, never on worker count. Only a discovery that promotes a row hands
+  its exact projection to the priority lane; every independent recheck re-reads
+  its own pair, so a failed or malformed projection is never reused. Ordinary
+  unresolved rows receive ONE exact `session.projections` discovery per
   unchanged relevant source revision — never an all-roster periodic pair scan —
   and a discovery that proves no active entry leaves `attention: 'unknown'`
   (the Gateway pending kind was not sampled), never `none`. A completed
   discovery attempt is remembered as SCHEDULING evidence only, scoped to the
-  Connection generation and the relevant hint witness; it is never an
-  answerability fact, never cached payload and never consulted by the answer
-  gate or the Writer. Only active rows (running, eligible, observed pending,
-  current) keep ONE re-armed 20 s recheck, because the Gateway has no global
-  public pending event; ordinary idle rows are never re-sampled.
+  Connection generation and the relevant hint witness; it lives for the facts
+  adapter's surface-runtime lifetime, so a close/reopen with an unchanged source
+  does not repeat ordinary discovery, is pruned by the official authorized
+  roster, is discarded on a generation replacement/loss, records nothing for a
+  denied/unavailable/failed read, and is never an answerability fact, never
+  cached payload and never consulted by the answer gate or the Writer. Only
+  active rows (running, eligible, observed pending, current) keep ONE re-armed
+  20 s recheck, because the Gateway has no global public pending event; ordinary
+  idle rows are never re-sampled. Each read owns an operation identity: an
+  invalidation recorded while its row is in flight is coalesced (priority wins)
+  and dispatched when that read settles, so the newest epoch always converges,
+  and an older completion can never release a newer request's slot.
 - **Connection loss.** A generation loss or replacement immediately revokes
-  every proven positive fact, cancels queued/in-flight reads and drops the
-  discovery memory; a valid current generation resumes from the official
-  snapshot plus targeted status/state proof and ONE discovery pass. Rows stay
-  unknown until re-proved: an old sample can never revive a Working or Needs
-  row.
+  every proven positive fact (including a row that only had `running`), cancels
+  queued/in-flight reads, clears the dispatch authority so no new unary read
+  leaves while disconnected, and drops the discovery memory; a valid current
+  generation resumes from the official snapshot plus targeted status/state proof
+  and ONE discovery pass. A latest-known list `running=true` that the new
+  generation has not proved is a SCHEDULING trigger for that targeted read,
+  never a positive fact; a replayed `phase=ready` row can never prove running by
+  itself. Rows stay unknown until re-proved: an old sample can never revive a
+  Working or Needs row.
 - **Pending.** The two official passive sources are the Host
   `session.state(...).pendingInput` kind sample and the cold-safe
   `session.projections(...).values.userQuestions.active` timed-Question
@@ -1573,12 +1586,17 @@ workspace/question/approval store and keeps no cross-session cache.
   and explicit one-shot probes) ends the observation on a generation
   replacement and never stitches old membership onto a new roster. The
   `recovering` mode (the Browser) uses the official reconnecting Gateway
-  `$stream`: a physical carrier loss only emits `invalidated` and the SAME
-  logical handle consumes a fresh baseline from the replacement generation; a
-  terminal (non-carrier) failure ends the handle truthfully and is never
-  retried on the same generation — only a NEW Connection generation may open
-  ONE new logical handle. The handle is disposed exactly once and its
-  asynchronous SDK quiescence is observed, never left floating. Workspace
+  `$stream`: a physical carrier loss or a Connection loss emits `invalidated`
+  and the SAME logical handle consumes a fresh baseline from the replacement
+  generation. A resumed stream that does not prove a fresh baseline within its
+  bounded resume window fails truthfully instead of waiting forever; a terminal
+  (non-carrier) failure ends the handle and is never retried on the same
+  generation — only a NEW Connection generation may open ONE new logical
+  handle. The Browser installs its ONE per-open generation observation from the
+  moment it opens, so even an open with no usable generation rebinds when a real
+  one arrives; a duplicate opening baseline inside one physical generation is a
+  protocol error. The handle is disposed exactly once and its asynchronous SDK
+  quiescence is observed, never left floating. Workspace
   identity/path/title/membership are the Host's values; the Client cwd, HOME or
   PATH is never a membership input.
 - **Direct parity.** Direct reads the exact live Agent status and the official
