@@ -1,11 +1,12 @@
 /**
  * FR5-B official Settings sections over real authenticated Split Clients.
  *
- * One Host with two authenticated Clients proves: the General migration of the
- * two startup preferences (same ids, real profile values), the Session log
- * upload switch and its official Reset readback, the Agent-loop numeric page,
- * the ACTIVE-shell two-cap page, and a two-Client stale-revision refusal that
- * never overwrites the winning profile bytes.
+ * One Host with two authenticated Clients proves: the Host category and the two
+ * next-start preferences its Web UI / ACP access pages own (same ids, real
+ * profile values), the Session log upload switch and its official Reset
+ * readback, the Agent-loop numeric page, the ACTIVE-shell two-cap page, and a
+ * two-Client stale-revision refusal that never overwrites the winning profile
+ * bytes.
  *
  * @module split-process/host-numeric-settings-fr5b
  */
@@ -116,8 +117,8 @@ export async function runHostNumericSettingsFr5B(context) {
   const originalPatch = existsSync(profilePatch) ? readFileSync(profilePatch, 'utf8') : ''
   try {
     // Real pre-existing PROFILE USER values prove the migrated preference rows
-    // read their ORIGINAL ids and values after moving to General (and remain
-    // writable through the same official profile patch).
+    // read their ORIGINAL ids and values on the Host pages that own them (and
+    // remain writable through the same official profile patch).
     const existingRows = existsSync(profilePatch) ? (parseYaml(readFileSync(profilePatch, 'utf8')) ?? []) : []
     assert(Array.isArray(existingRows), 'the isolated profile patch must be a row list')
     writeFileSync(profilePatch, `${JSON.stringify([
@@ -143,42 +144,60 @@ export async function runHostNumericSettingsFr5B(context) {
       clientPids: [clientAStarted.ready.pid, clientBStarted.ready.pid],
     })
 
-    // ── General order + the migrated Web/ACP startup preferences ───────────
-    await openCategory(clientA, 'General', 'FR5-B General')
-    const general = await frameOf(clientA)
-    for (const label of ['Backend', 'Start Web automatically', 'Start ACP automatically', 'Session log upload']) {
-      assert(general.includes(label), `General must paint ${label}: ${JSON.stringify(general)}`)
+    // ── Host order + the next-start preferences its pages own ──────────────
+    await openCategory(clientA, 'Host', 'FR5-B Host')
+    const hostRows = await frameOf(clientA)
+    const listedAt = (lines, label) => lines.findIndex(line => new RegExp(`^ {0,2}(?:> )?${escapeRegExp(label)}(?:\\s|$)`, 'u').test(line))
+    const hostLines = hostRows.split('\n')
+    const order = ['Backend', 'Web UI', 'ACP access', 'Session log upload'].map(label => listedAt(hostLines, label))
+    assert(order.every(index => index >= 0), `Host must paint every row in ${JSON.stringify(order)}: ${JSON.stringify(hostRows)}`)
+    assert(order.every((index, position) => position === 0 || index > order[position - 1]),
+      `the Host rows keep their frozen order: ${JSON.stringify(hostRows)}`)
+    for (const retired of ['Start Web automatically', 'Start ACP automatically',
+      'Auto-enable Web on Host startup', 'Auto-enable ACP on Host startup']) {
+      assert(!hostRows.includes(retired), `the retired Host row ${JSON.stringify(retired)} must not survive`)
     }
-    assert(!general.includes('Auto-enable Web on Host startup'), 'the old Web label must not survive')
-    assert(!general.includes('Auto-enable ACP on Host startup'), 'the old ACP label must not survive')
-    await selectFrame(clientA, frame => selectedRow(frame, 'Start Web automatically'), 'FR5-B Web preference row')
-    const webOn = await frameOf(clientA)
-    assert(/Start Web automatically[^\n]*\bOn\b/u.test(webOn), `the home overlay USER value must read On: ${JSON.stringify(webOn)}`)
-    clientA.send('\r')
-    await waitForText(clientA, 'Choose value', 'FR5-B Web preference choice')
-    await selectFrame(clientA, frame => /^.*> Off(?:\s|$)/mu.test(frame), 'FR5-B Web Off candidate')
-    clientA.send('\r')
-    await waitForPattern(clientA, /Verified/u, 'FR5-B Web preference verified')
-    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
-      'the migrated Web row writes the SAME official preference field')
-    trace('fr5b.general-web-migration', { existingUserValueRead: true, savedProfile: true })
 
-    // The ACP preference still writes its original id from the new location.
-    clientA.send('\x1b') // settled Detail -> Rows
-    await sleep(160)
-    await selectFrame(clientA, frame => selectedRow(frame, 'Start ACP automatically'), 'FR5-B ACP preference row')
+    // The seeded Web USER value is read on the page that OWNS it and written
+    // through the same official preference id (the General row is retired).
+    await selectFrame(clientA, frame => selectedRow(frame, 'Web UI'), 'FR5-B Web UI row')
     clientA.send('\r')
-    await waitForText(clientA, 'Choose value', 'FR5-B ACP preference choice')
-    await selectFrame(clientA, frame => /^.*> Off(?:\s|\n|\r)/mu.test(frame), 'FR5-B ACP Off candidate')
+    await waitForPattern(clientA, /Settings · Host · Web UI/u, 'FR5-B Web UI page')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Start automatically'), 'FR5-B Web start row')
+    const webOn = await frameOf(clientA)
+    assert(/Start automatically[^\n]*\bOn\b/u.test(webOn), `the Web page must read the seeded USER value On: ${JSON.stringify(webOn)}`)
     clientA.send('\r')
-    await waitForPattern(clientA, /Verified/u, 'FR5-B ACP preference verified')
+    await waitForText(clientA, 'Choose the value the next Host start applies:', 'FR5-B Web start choice')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Off'), 'FR5-B Web Off candidate')
+    clientA.send('\r')
+    await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B Web confirm step')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web preference verified')
+    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
+      'the Web page writes the SAME official preference field')
+    trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true })
+    clientA.send('\x1b') // the page -> the Host Rows
+    await sleep(200)
+
+    // The ACP preference still writes its original id from its own page.
+    await selectFrame(clientA, frame => selectedRow(frame, 'ACP access'), 'FR5-B ACP access row')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Settings · Host · ACP access/u, 'FR5-B ACP access page')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Start automatically'), 'FR5-B ACP start row')
+    clientA.send('\r')
+    await waitForText(clientA, 'Choose the value the next Host start applies:', 'FR5-B ACP start choice')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Off'), 'FR5-B ACP Off candidate')
+    clientA.send('\r')
+    await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B ACP confirm step')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP preference verified')
     assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === false,
-      'the migrated ACP row writes its original official preference field')
-    trace('fr5b.general-acp-migration', { savedProfile: true })
+      'the ACP page writes the SAME official preference id')
+    trace('fr5b.host-acp-preference', { savedProfile: true })
+    clientA.send('\x1b') // the page -> the Host Rows
+    await sleep(200)
 
     // ── Session log upload: risk text, Off, and Reset readback ─────────────
-    clientA.send('\x1b') // settled Detail -> Rows
-    await sleep(160)
     await selectFrame(clientA, frame => selectedRow(frame, 'Session log upload'), 'FR5-B Session log row')
     const sessionDetail = await waitForText(clientA, 'session log data with requests',
       'FR5-B Session log risk text')
