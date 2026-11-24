@@ -179,6 +179,8 @@ export interface SplitProcessScene {
   readonly candidate: CandidateFacts
   readonly installation: SplitProcessInstallation
   readonly scope: SplitProcessScopeFacts
+  /** Bounded typed Supervisor IPC, for boundary negatives on a real Scene. */
+  request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
   startHost(): Promise<SplitProcessHostHandle>
   hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>>
   stopHost(host: SplitProcessHostHandle): Promise<SplitProcessClientExitFacts>
@@ -227,6 +229,8 @@ function requireAbsoluteDirectory(name: string): string {
   } catch (error) {
     throw new Error(`INPUT_UNQUALIFIED: ${name} is not a readable existing directory: ${asError(error).message}`)
   }
+  assert(real === raw,
+    `INPUT_UNQUALIFIED: ${name} must be a canonical path, not a symlink alias: ${raw} -> ${real}`)
   assert(stats.isDirectory(), `INPUT_UNQUALIFIED: ${name} is not a directory: ${real}`)
   if (typeof process.getuid === 'function') {
     assert(stats.uid === process.getuid(), `INPUT_UNQUALIFIED: ${name} is not owned by this user: ${real}`)
@@ -344,15 +348,27 @@ class ProcessClient implements SplitProcessClient {
     timeoutMs = 120_000,
   ): Promise<Record<string, any>> {
     const started = Date.now()
-    const last = (): Record<string, any> | undefined => this.readRecords()
-      .filter(record => record?.m4b2s === 'surface-status')
-      .at(-1)
+    // Streaming poll: a live JSONL append may end in a partial record, which is
+    // not a malformed line. The final audit below re-reads strictly.
+    const last = (allowIncompleteTail: boolean): Record<string, any> | undefined =>
+      readOfficialClientRecords(this.recordFile, this.label, { allowIncompleteTail })
+        .filter(record => record?.m4b2s === 'surface-status')
+        .at(-1)
+    let stateCheckedAt = 0
     for (;;) {
-      const status = last()
+      const status = last(true)
       if (status !== undefined && predicate(status)) return status
+      if (Date.now() - stateCheckedAt >= 500) {
+        stateCheckedAt = Date.now()
+        const state = await this.state()
+        if (state.exited) {
+          throw new Error(`${label}: the Client exited before a matching official surface status`)
+        }
+      }
       if (Date.now() - started >= timeoutMs) {
-        // A status written just before the deadline must not be reported as missing.
-        const late = last()
+        // A status written just before the deadline must not be reported as
+        // missing; a genuinely truncated final line still fails this strict read.
+        const late = last(false)
         if (late !== undefined && predicate(late)) return late
         throw new Error(`${label}: no matching official surface status within ${String(timeoutMs)}ms`)
       }
@@ -365,7 +381,8 @@ class ProcessClient implements SplitProcessClient {
     for (;;) {
       const state = await this.state()
       if (state.exited) {
-        this.#closed = true
+        // Observation only: the Supervisor-owned CLOSE settlement is still
+        // required before this Client can be called closed.
         this.#exitFacts = { code: state.exitCode, signal: state.exitSignal }
         return this.#exitFacts
       }
@@ -596,6 +613,9 @@ class ProcessScene implements SplitProcessScene {
       if (other !== undefined) {
         this.#assertParallelSeparation(other, host, client)
         this.#assertReceiptSceneLive(other)
+        const ownReceipt = this.#ownReceipt()
+        assert(ownReceipt !== undefined, `${label}: this Scene has no durable Supervisor receipt`)
+        this.#assertReceiptSceneLive(ownReceipt)
         // Re-check THIS Scene after the other side was observed: both live
         // intervals genuinely intersect.
         await this.hostStatus(host)
@@ -649,31 +669,66 @@ class ProcessScene implements SplitProcessScene {
   }
 
   #assertParallelSeparation(other: SupervisorReceipt, host: SplitProcessHostHandle, client: SplitProcessClient): void {
+    const own = this.#ownReceipt()
+    assert(own !== undefined, 'this parallel Scene has no durable Supervisor receipt')
     assert(other.sceneRoot !== this.workDir, 'the two parallel Scenes share a Scene root')
     assert(other.installation?.dshHome !== this.installation.dshHome, 'the two parallel Scenes share a DSH home')
     assert(other.installation?.profileDir !== this.installation.profileDir, 'the two parallel Scenes share a profile')
     assert(other.scope?.scopeId !== this.scope.scopeId, 'the two parallel Scenes share a Host scope/seat')
+    const otherSeat = other.scope?.hostSeat?.path ?? other.scope?.hostSeat?.name
+    const ownSeat = own.scope?.hostSeat?.path ?? own.scope?.hostSeat?.name
+    assert(typeof otherSeat === 'string' && otherSeat !== ''
+      && typeof ownSeat === 'string' && ownSeat !== ''
+      && otherSeat !== ownSeat, 'the two parallel Scenes share the Host seat')
     assert(other.host?.pid !== host.ready?.localHost?.hostPid, 'the two parallel Scenes share a Host process')
+    assert(other.host?.birth !== own.host?.birth, 'the two parallel Scenes share a Host kernel birth')
+    assert(other.worker?.pid !== own.worker?.pid, 'the two parallel Scenes share a Worker PID')
+    assert(other.worker?.birth !== own.worker?.birth, 'the two parallel Scenes share a Worker kernel birth')
+    assert(typeof other.worker?.ppid === 'number' && typeof own.worker?.ppid === 'number',
+      'a parallel Scene Worker has no real PPID')
     assert(other.candidate?.sha256 === this.candidate.candidateSha256, 'the two parallel Scenes used different candidates')
     const otherClients = other.processClients ?? []
     assert(otherClients.length > 0, 'the other parallel Scene reported no Client')
+    const ownClient = own.processClients?.find(value => value.clientId === client.clientId)
+    assert(ownClient !== undefined, 'this parallel Scene Client is missing from its receipt')
     for (const entry of otherClients) {
       assert(entry.clientId !== client.clientId, 'the two parallel Scenes share a Client identity')
       assert(entry.sessionId !== client.sessionId, 'the two parallel Scenes share a native session')
+      assert(typeof entry.scratch === 'string' && entry.scratch !== ''
+        && typeof ownClient.scratch === 'string' && ownClient.scratch !== ''
+        && entry.scratch !== ownClient.scratch, 'the two parallel Scenes share a Client scratch')
+      for (const business of entry.businessIdentities ?? []) {
+        for (const ownEntry of own.processClients ?? []) {
+          assert(business.pid !== ownEntry.shellPid, 'the two parallel Scenes share a Client shell/business PID')
+          for (const ownBusiness of ownEntry.businessIdentities ?? []) {
+            assert(business.pid !== ownBusiness.pid && business.birth !== ownBusiness.birth,
+              'the two parallel Scenes share a business Client identity')
+          }
+        }
+      }
     }
+  }
+
+  #ownReceipt(): SupervisorReceipt | undefined {
+    return this.#receipts().find(receipt => receipt.runId === this.runId)
+  }
+
+  #assertSameLiveKernel(pid: number | null | undefined, birth: string | undefined, label: string): void {
+    assert(typeof pid === 'number' && Number.isInteger(pid) && pid > 0, `${label}: no real PID`)
+    assert(typeof birth === 'string' && birth !== '', `${label}: no recorded kernel birth`)
+    assert(kernelBirthOf(pid) === birth, `${label}: not the live kernel process it registered`)
   }
 
   /** Re-prove the other receipt names live, still-same kernel identities. */
   #assertReceiptSceneLive(other: SupervisorReceipt): void {
-    const hostPid = other.host?.pid
-    assert(typeof hostPid === 'number' && kernelBirthOf(hostPid) === other.host?.birth,
-      'the other parallel Scene Host is no longer the live kernel process it registered')
+    this.#assertSameLiveKernel(other.host?.pid, other.host?.birth,
+      'the other parallel Scene Host')
     for (const entry of other.processClients ?? []) {
-      assert(typeof entry.shellPid === 'number' && kernelBirthOf(entry.shellPid) === entry.shellBirth,
-        'the other parallel Scene Client shell is no longer the live kernel process it registered')
+      this.#assertSameLiveKernel(entry.shellPid, entry.shellBirth,
+        'the other parallel Scene Client shell')
       for (const business of entry.businessIdentities ?? []) {
-        assert(typeof business.pid === 'number' && kernelBirthOf(business.pid) === business.birth,
-          'the other parallel Scene Client business process is no longer the live kernel process it registered')
+        this.#assertSameLiveKernel(business.pid, business.birth,
+          'the other parallel Scene Client business process')
       }
     }
   }
@@ -727,7 +782,7 @@ async function createScene(): Promise<ProcessScene> {
   const tmpBase = requireAbsoluteDirectory('SPLIT_VITEST_TMP_BASE')
   const tarball = requireCandidateTarball()
   const candidate = profileModule.inspectImmutableSplitCandidate(tarball)
-  const parentRunId = process.env.SPLIT_VITEST_RUN_ID
+  const parentRunId = process.env.SPLIT_VITEST_RUN_ID ?? process.env.SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID
   const runId = `split-process-${randomUUID()}`
   const supervisor = new SupervisorClient({ runId })
   try {

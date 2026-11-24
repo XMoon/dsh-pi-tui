@@ -628,9 +628,9 @@ no tests; that empty result is a truthful `NOT_READY`, never an Upgrade PASS.
 ### Split-process business Project
 
 `mise exec -- pnpm test:split:process` selects only the `split-process-business`
-Vitest project: two business anchors of the installed Split Host/Client path
-(one packed candidate, real Hosts, real PTY Clients). It is opt-in and is not
-part of `mise run test`, `mise run check` or `verify:release`. The package
+Vitest project: the current business anchors of the installed Split Host/Client
+path (one packed candidate, real Hosts, real PTY Clients). It is opt-in and is
+not part of `mise run test`, `mise run check` or `verify:release`. The package
 script always passes `--project`; invoking this config without one runs every
 configured project and is not an entry point.
 
@@ -646,11 +646,18 @@ It requires two private inputs:
   real bytes and SHA256 before a Scene root, install or Host exists; a changed
   or replaced input is `INPUT_CANDIDATE_CHANGED`.
 
-The project runs its two files with two workers and real file parallelism. An
-explicit `SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes both files report a
-`parallel-ready` checkpoint and prove that the other real Scene's Host and
-Client kernel identities are live at the same time; select both files together
-and use a fresh private run root per round.
+The project's files run with real file parallelism. An explicit
+`SPLIT_VITEST_RUN_ID` together with the SAME value in
+`SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes the files report a `parallel-ready`
+checkpoint and prove that the other real Scene's Host and Client kernel
+identities are live at the same time; select the project's files together and
+use a fresh private run root per round:
+
+```sh
+SPLIT_VITEST_RUN_ID=process-overlap-r1 \
+SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=process-overlap-r1 \
+mise exec -- pnpm test:split:process
+```
 
 `SPLIT_VITEST_PROCESS_PROBE_POINT` arms the fixed checkpoints the external
 probe uses; `SPLIT_VITEST_PROCESS_FAILURE_POINT` arms the three failure
@@ -667,8 +674,10 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 `fallback-host-ready`. The probe passes only with the terminal `ABORTED_CLEAN`
 receipt, the exact Host seat free, the registered kernel identities gone or
 provably reused, and — for `clients-ready` — a separate real sibling Scene
-that continues its own business path and finalizes. A checkpoint reached
-without an external signal fails; an unrun window is `NOT_RUN`, never a pass.
+already live at its authenticated checkpoint when the target is signalled,
+held across the target's reclaim, then released to continue its own business
+path and finalize. A checkpoint reached without an external signal fails; an
+unrun window is `NOT_RUN`, never a pass.
 
 This Project is not the release full lane. `smoke:split-process` and
 `smoke:macos-split` remain the separate distribution-boundary lanes described

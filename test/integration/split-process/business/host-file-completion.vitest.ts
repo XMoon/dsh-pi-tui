@@ -8,7 +8,7 @@
  * directly or fakes a Workspace.
  */
 
-import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -169,6 +169,22 @@ test('completes Host workspace files before creating the first session in that w
     const logCountBefore = scene.hostSessionLogCount()
     const host = await scene.startHost()
 
+    // Input boundary on the REAL started Scene: a path-unsafe label, an
+    // escaping cwd/home and an unknown handle are refused before any directory
+    // or native spawn exists.
+    const idsBeforeBoundary = await scene.sessionIds()
+    await expect(scene.startClient({ label: '../../escape', cwd: primary, home: primaryHome }))
+      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
+    await expect(scene.startClient({ label: 'boundary-cwd', cwd: join(root, '..', 'outside'), home: primaryHome }))
+      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
+    await expect(scene.startClient({ label: 'boundary-home', cwd: primary, home: join(root, '..', 'outside') }))
+      .rejects.toThrow(/INPUT_UNQUALIFIED/u)
+    await expect(scene.request('CLOSE_PROCESS_CLIENT', { clientId: 'unknown-process-client' }))
+      .rejects.toThrow(/CLOSE_PROCESS_CLIENT|unknown|not registered/u)
+    expect(await scene.sessionIds()).toEqual(idsBeforeBoundary)
+    expect(readdirSync(root).filter(name => name.startsWith('escape'))).toEqual([])
+    expect(existsSync(join(root, '..', 'outside'))).toBe(false)
+
     const primaryClient = await scene.startClient({ label: 'workspace-primary', cwd: primary, home: primaryHome })
     const secondaryClient = await scene.startClient({ label: 'workspace-secondary', cwd: secondary, home: secondaryHome })
     uiClients.push(primaryClient, secondaryClient)
@@ -287,6 +303,9 @@ test('completes Host workspace files before creating the first session in that w
     expect(secondaryExit).toEqual({ code: 0, signal: null })
 
     await primaryClient.submit('/exit')
+    // Observation is not a close: waitForExit records the real native terminal
+    // state, then close() still owns the Supervisor-owned settlement.
+    expect(await primaryClient.waitForExit()).toEqual({ code: 0, signal: null })
     const primaryExit = await primaryClient.close()
     expect(primaryExit).toEqual({ code: 0, signal: null })
 

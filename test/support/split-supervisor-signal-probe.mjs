@@ -364,7 +364,11 @@ async function loadKernelHelpers() {
   if (kernelHelpers !== undefined) return kernelHelpers
   const identity = await import('../../src/runtime/native-process/identity.ts')
   const contract = await import('./split-upgrade-native-contract.mjs')
-  kernelHelpers = { read: identity.readKernelProcess, serialize: contract.serializeKernelIdentity }
+  kernelHelpers = {
+    read: identity.readKernelProcess,
+    classify: contract.classifyKernelLiveness,
+    serialize: contract.serializeKernelIdentity,
+  }
   return kernelHelpers
 }
 
@@ -377,8 +381,9 @@ function identityLiveness(kernel, pid, birth) {
   } catch {
     return 'unknown'
   }
-  if (observation.kind === 'gone') return 'gone'
-  if (observation.kind === 'unknown') return 'unknown'
+  const liveness = kernel.classify(observation)
+  if (liveness.state === 'gone') return 'gone'
+  if (liveness.state === 'unknown') return 'unknown'
   if (typeof birth !== 'string' || birth === '') return 'unproven'
   return kernel.serialize(observation.identity) === birth ? 'live' : 'foreign'
 }
@@ -475,7 +480,7 @@ function checkProcessReceiptResources(receipt, kernel) {
     if (state !== 'gone' && state !== 'foreign') {
       problems.push(`Host generation ${String(host.generation)} process is ${state}: ${String(host.pid)}`)
     }
-    if (state === 'live' && host.pgid !== undefined && groupAlive(host.pgid)) {
+    if (host.pgid !== undefined && groupAlive(host.pgid)) {
       problems.push(`Host generation ${String(host.generation)} process group still alive: ${String(host.pgid)}`)
     }
   }
@@ -502,6 +507,9 @@ function checkProcessReceiptResources(receipt, kernel) {
     if (state !== 'gone' && state !== 'foreign') {
       problems.push(`fallback Host PID is ${state}: ${String(fallback.pid)}`)
     }
+    if (fallback.pgid !== undefined && groupAlive(fallback.pgid)) {
+      problems.push(`fallback Host process group still alive: ${String(fallback.pgid)}`)
+    }
   }
   if (pidAlive(receipt.supervisor?.pid)) problems.push(`Supervisor PID still alive: ${String(receipt.supervisor?.pid)}`)
   return problems
@@ -519,42 +527,88 @@ async function waitProcessTerminal(tmpBase, parentRunId, timeoutMs) {
 }
 
 /**
- * The sibling must be a DIFFERENT live Scene, not merely another worker count.
- * Wait (bounded) for its authenticated checkpoint: under a loaded shared host
- * the sibling can reach the checkpoint after the target Scene was reclaimed.
- * Then prove the two live Scenes share no root, profile, DSH home, scope/seat,
- * Worker, Host or Client identity before releasing it.
+ * Wait (bounded) for the sibling's authenticated Host + Client checkpoint to be
+ * LIVE **before** the target is signalled, then prove the two live Scenes share
+ * no root, profile, DSH home, scope/seat, Worker, Host, Client or business
+ * identity. The returned receipt is the snapshot that must still describe the
+ * SAME live identities across the target's reclaim.
  */
-async function verifyProcessSiblingLive(tmpBase, siblingRunId, kernel, target) {
+async function waitProcessSiblingCheckpoint(tmpBase, siblingRunId, kernel, target) {
   const sibling = await waitUntil(() => {
     const current = latestProcessReceipt(tmpBase, siblingRunId)
-    if (current === undefined) return undefined
     if (processNote(current, 'process-probe-sibling-ready') === undefined) return undefined
     const host = (current.hosts ?? [])[0]
     const client = (current.processClients ?? [])[0]
     if (host === undefined || client === undefined) return undefined
     if (identityLiveness(kernel, host.pid, host.birth) !== 'live') return undefined
     if (identityLiveness(kernel, client.shellPid, client.shellBirth) !== 'live') return undefined
+    for (const business of client.businessIdentities ?? []) {
+      if (identityLiveness(kernel, business.pid, business.birth) !== 'live') return undefined
+    }
     return current
-  }, 'sibling process Scene authenticated checkpoint', 300_000)
-  const pairs = [
-    ['scene root', sibling.sceneRoot, target.sceneRoot],
-    ['profile', sibling.installation?.profileDir, target.installation?.profileDir],
-    ['DSH home', sibling.installation?.dshHome, target.installation?.dshHome],
-    ['scope', sibling.scope?.scopeId, target.scope?.scopeId],
-    ['host seat', sibling.scope?.hostSeat?.path ?? sibling.scope?.hostSeat?.name,
-      target.scope?.hostSeat?.path ?? target.scope?.hostSeat?.name],
-    ['Worker', sibling.worker?.pid, target.worker?.pid],
-    ['Host', (sibling.hosts ?? [])[0]?.pid, (target.hosts ?? [])[0]?.pid],
-    ['Client', (sibling.processClients ?? [])[0]?.shellPid, (target.processClients ?? [])[0]?.shellPid],
-  ]
-  for (const [what, left, right] of pairs) {
-    if (left === undefined || left === null || left === '' || right === undefined || right === null || right === ''
-      || left === right) {
-      fail(`the sibling process Scene does not have a distinct ${what}: ${JSON.stringify(left)} vs ${JSON.stringify(right)}`)
+  }, 'live sibling process Scene at its authenticated checkpoint', 300_000)
+  assertProcessSiblingDistinct(sibling, target)
+  return sibling
+}
+
+function requireDistinctSiblingFact(what, left, right) {
+  if (left === undefined || left === null || left === ''
+    || right === undefined || right === null || right === ''
+    || left === right) {
+    fail(`the sibling process Scene does not have a distinct live ${what}: ${JSON.stringify(left)} vs ${JSON.stringify(right)}`)
+  }
+}
+
+function assertProcessSiblingDistinct(sibling, target) {
+  requireDistinctSiblingFact('scene root', sibling.sceneRoot, target.sceneRoot)
+  requireDistinctSiblingFact('profile', sibling.installation?.profileDir, target.installation?.profileDir)
+  requireDistinctSiblingFact('DSH home', sibling.installation?.dshHome, target.installation?.dshHome)
+  requireDistinctSiblingFact('scope', sibling.scope?.scopeId, target.scope?.scopeId)
+  requireDistinctSiblingFact('host seat',
+    sibling.scope?.hostSeat?.path ?? sibling.scope?.hostSeat?.name,
+    target.scope?.hostSeat?.path ?? target.scope?.hostSeat?.name)
+  requireDistinctSiblingFact('Worker PID', sibling.worker?.pid, target.worker?.pid)
+  requireDistinctSiblingFact('Worker birth', sibling.worker?.birth, target.worker?.birth)
+  requireDistinctSiblingFact('Worker PPID', sibling.worker?.ppid, target.worker?.ppid)
+  requireDistinctSiblingFact('Host PID', (sibling.hosts ?? [])[0]?.pid, (target.hosts ?? [])[0]?.pid)
+  requireDistinctSiblingFact('Host birth', (sibling.hosts ?? [])[0]?.birth, (target.hosts ?? [])[0]?.birth)
+  const siblingClient = (sibling.processClients ?? [])[0]
+  const targetClient = (target.processClients ?? [])[0]
+  requireDistinctSiblingFact('Client identity', siblingClient?.clientId, targetClient?.clientId)
+  requireDistinctSiblingFact('native session', siblingClient?.sessionId, targetClient?.sessionId)
+  requireDistinctSiblingFact('Client scratch', siblingClient?.scratch, targetClient?.scratch)
+  requireDistinctSiblingFact('Client shell PID', siblingClient?.shellPid, targetClient?.shellPid)
+  requireDistinctSiblingFact('Client shell birth', siblingClient?.shellBirth, targetClient?.shellBirth)
+  const siblingBusiness = (siblingClient?.businessIdentities ?? []).map(value => `${String(value.pid)}:${String(value.birth)}`)
+  if (siblingBusiness.length === 0) fail('the sibling process Scene has no live business Client identity')
+  const targetBusiness = (target.processClients ?? []).flatMap(entry =>
+    (entry.businessIdentities ?? []).map(value => `${String(value.pid)}:${String(value.birth)}`))
+  for (const identity of siblingBusiness) {
+    if (targetBusiness.includes(identity)) {
+      fail(`the sibling process Scene shares a business Client identity with the target: ${identity}`)
     }
   }
-  return sibling
+  if (sibling.candidate?.sha256 !== target.candidate?.sha256) {
+    fail('the sibling process Scene used a different candidate')
+  }
+}
+
+/** The snapshot identities must still be the SAME live kernel processes. */
+function assertProcessSiblingStillLive(kernel, snapshot, label) {
+  const host = (snapshot.hosts ?? [])[0]
+  const client = (snapshot.processClients ?? [])[0]
+  if (host === undefined || client === undefined) fail(`${label}: the sibling snapshot lost its Host/Client`)
+  const workerState = identityLiveness(kernel, snapshot.worker?.pid, snapshot.worker?.birth)
+  if (workerState !== 'live') fail(`${label}: the sibling Worker is ${workerState}`)
+  const hostState = identityLiveness(kernel, host.pid, host.birth)
+  if (hostState !== 'live') fail(`${label}: the sibling Host is ${hostState}`)
+  const shellState = identityLiveness(kernel, client.shellPid, client.shellBirth)
+  if (shellState !== 'live') fail(`${label}: the sibling Client shell is ${shellState}`)
+  for (const business of client.businessIdentities ?? []) {
+    const state = identityLiveness(kernel, business.pid, business.birth)
+    if (state !== 'live') fail(`${label}: the sibling business Client PID ${String(business.pid)} is ${state}`)
+  }
+  if (!existsSync(snapshot.sceneRoot ?? '')) fail(`${label}: the sibling Scene root disappeared`)
 }
 
 async function main() {
@@ -739,6 +793,7 @@ if (upgradeMode) {
 let childExited = false
 let killedWorkerPid
 let siblingReceipt
+let siblingSnapshot
 try {
   let deadline
   const kernel = processMode ? await loadKernelHelpers() : undefined
@@ -810,6 +865,12 @@ try {
           return clients.every(client => identityLiveness(kernel, client.shellPid, client.shellBirth) === 'live')
             ? current : undefined
         }, 'two authenticated process Clients and a live Host', 900_000)
+        // The sibling must already be a LIVE authenticated Scene when the
+        // target is signalled; a later successful installation is not the
+        // required isolation proof.
+        if (mode === 'process-worker-kill' && at === 'clients-ready') {
+          siblingSnapshot = await waitProcessSiblingCheckpoint(tmpBase, siblingRunId, kernel, receipt)
+        }
       } else if (at === 'fallback-host-ready') {
         receipt = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
@@ -1251,7 +1312,8 @@ try {
       fail('the process Scene Host seat is still held after the terminal receipt')
     }
     if (mode === 'process-worker-kill' && at === 'clients-ready') {
-      await verifyProcessSiblingLive(tmpBase, siblingRunId, kernel, receipt)
+      if (siblingSnapshot === undefined) fail('the clients-ready sibling snapshot is missing')
+      assertProcessSiblingStillLive(kernel, siblingSnapshot, 'clients-ready sibling after target reclaim')
       if (siblingChild === undefined) fail('the clients-ready sibling invocation is missing')
       writeFileSync(processSiblingReleaseFile, 'release\n', { mode: 0o600 })
       const siblingExit = await waitChildExit(siblingChild, 900_000)

@@ -131,6 +131,7 @@ let assertIdentityKept
 let seatIsFree
 let readKernelProcess
 let sameKernelProcess
+let listKernelGroupMembers
 let inspectInstalledProfileScope
 let createSplitTerminal
 let readOfficialClientRecords
@@ -242,6 +243,7 @@ const modulesReady = Promise.all([
   readJson = smokeHarness.readJson
   readKernelProcess = nativeIdentity.readKernelProcess
   sameKernelProcess = nativeIdentity.sameKernelProcess
+  listKernelGroupMembers = nativeIdentity.listKernelGroupMembers
   inspectInstalledProfileScope = localScope.inspectInstalledProfileScope
   createSplitTerminal = processClient.createSplitTerminal
   readOfficialClientRecords = processClient.readOfficialClientRecords
@@ -435,6 +437,54 @@ async function waitForHostRecord(target, predicate, label, timeoutMs) {
   throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
 }
 
+/**
+ * The exact ownership proof for ONE Process Scene Host signal: the recorded
+ * kernel birth is still the live PID, it is still its own detached
+ * group/session leader, and it is still a member of that exact group. The
+ * production kernel-group authority is read immediately before every signal;
+ * an unknown/absent/foreign fact refuses the signal instead of falling back to
+ * a bare PID.
+ */
+function assertProcessHostSignalOwnership(handle, reason) {
+  if (typeof handle.birth !== 'string' || handle.birth === '') {
+    throw new Error(`${reason}: the process Host has no captured kernel birth; refusing to signal`)
+  }
+  const pid = handle.child.pid
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`${reason}: the process Host has no real PID; refusing to signal`)
+  }
+  const observation = readKernelProcess(pid)
+  if (observation.kind !== 'alive') {
+    throw new Error(`${reason}: the process Host PID ${String(pid)} is not the live kernel process captured at spawn`)
+  }
+  if (serializeKernelIdentity(observation.identity) !== handle.birth) {
+    throw new Error(`${reason}: the process Host PID ${String(pid)} was replaced by another process; refusing to signal`)
+  }
+  if (observation.identity.pgid !== pid || observation.identity.sid !== pid) {
+    throw new Error(`${reason}: the process Host PID ${String(pid)} is not its own group/session leader; refusing to signal`)
+  }
+  const members = listKernelGroupMembers(pid)
+  if (!Array.isArray(members)) {
+    throw new Error(`${reason}: the process Host group ${String(pid)} cannot be enumerated (${String(members?.code)}); refusing to signal`)
+  }
+  if (!members.some(member => member?.kind === 'alive'
+    && serializeKernelIdentity(member.identity) === handle.birth)) {
+    throw new Error(`${reason}: the captured Host is no longer a member of group ${String(pid)}; refusing to signal`)
+  }
+  return observation
+}
+
+function killProcessHost(handle, signal, reason) {
+  assertProcessHostSignalOwnership(handle, reason)
+  try {
+    process.kill(-handle.child.pid, signal)
+  } catch (error) {
+    if (error?.code !== 'ESRCH') {
+      throw new Error(`${reason}: the owned Host group ${String(handle.child.pid)} could not be signalled (${String(error?.code ?? 'unknown')})`)
+    }
+  }
+}
+
 function killOwnedHost(handle, signal) {
   if (handle === undefined || handle.exited) return
   try {
@@ -490,6 +540,17 @@ async function assertHostGroupGone(handle, reason) {
   // created. Give the group a bounded chance to disappear, then fail closed:
   // a live descendant means the generation cannot be called quiesced.
   await waitForGroupGone(pgid, 3_000)
+  if (scene?.kind === 'process') {
+    const members = listKernelGroupMembers(pgid)
+    if (!Array.isArray(members)) {
+      throw new Error(`${reason}: Host process group ${String(pgid)} cannot be enumerated (${String(members?.code)})`)
+    }
+    const live = members.filter(member => member?.kind === 'alive').map(member => member.identity.pid)
+    if (live.length > 0) {
+      throw new Error(`${reason}: Host process group ${String(pgid)} still has live members: ${JSON.stringify(live)}`)
+    }
+    return
+  }
   if (processGroupAlive(pgid)) {
     throw new Error(`${reason}: Host process group ${String(pgid)} still has live members`)
   }
@@ -732,6 +793,9 @@ function captureProcessClientIdentity(pid, label, { expectedEntry, scratch }) {
   if (observation.kind !== 'alive') {
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} disappeared while its identity was captured`)
   }
+  if (serializeKernelIdentity(observation.identity) !== snapshot.birth) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} changed between its ownership snapshot and its kernel identity`)
+  }
   return { identity: observation.identity, uid: snapshot.uid, command: snapshot.command, birth: snapshot.birth }
 }
 
@@ -832,6 +896,7 @@ async function waitForProcessClientRecord(handle, predicate, label, timeoutMs) {
       throw new Error(`${label}: the Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
     }
     if (handle.exited) throw new Error(`${label}: the Client exited before the record`)
+    if (lifecycleClosed) throw new Error(`${label}: the Supervisor lifecycle closed while the record was awaited`)
     if (Date.now() - started >= timeoutMs) throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
     await sleep(25)
   }
@@ -1251,7 +1316,8 @@ async function assertSceneHostSeatFree(reason) {
 /** Test-only fault injection: simulate an abrupt old-Host crash in one window. */
 async function crashHost(handle, reason) {
   if (handle.exited) return
-  killOwnedHost(handle, 'SIGKILL')
+  if (scene?.kind === 'process') killProcessHost(handle, 'SIGKILL', `crashHost:${reason}`)
+  else killOwnedHost(handle, 'SIGKILL')
   try {
     await waitForChildClose(handle.child, KILL_GRACE_MS)
   } catch (error) {
@@ -1271,11 +1337,15 @@ async function terminateHost(handle, reason) {
     await assertHostGroupGone(handle, reason)
     return handle.exitResult ?? { code: handle.child.exitCode, signal: handle.child.signalCode }
   }
-  killOwnedHost(handle, 'SIGTERM')
+  const kill = signal => {
+    if (scene?.kind === 'process') killProcessHost(handle, signal, `terminateHost:${reason}`)
+    else killOwnedHost(handle, signal)
+  }
+  kill('SIGTERM')
   try {
     await waitForChildClose(handle.child, TERM_GRACE_MS)
   } catch {
-    killOwnedHost(handle, 'SIGKILL')
+    kill('SIGKILL')
     try {
       await waitForChildClose(handle.child, KILL_GRACE_MS)
     } catch (error) {
@@ -1470,6 +1540,8 @@ async function cleanup(reason) {
         for (const handle of [...processClients].reverse()) {
           if (handle.closed) continue
           try {
+            await settleProcessClientHandler(handle, `cleanup:${reason}`)
+            await settleProcessClientClose(handle, `cleanup:${reason}`)
             await reclaimProcessClient(handle, `cleanup:${reason}`)
           } catch (error) {
             clean = false
@@ -1494,12 +1566,29 @@ async function cleanup(reason) {
           clean = false
           appendNote('native-client-reclaim-failed', { reason: boundedError(error) })
         }
+      } else if (scene?.kind === 'process') {
+        try {
+          await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
+        } catch (error) {
+          clean = false
+          appendNote('process-fallback-host-audit-failed', { reason: boundedError(error) })
+        }
       } else {
         await reclaimClientFallbackHosts(`cleanup:${reason}:client`)
       }
       for (const handle of [...hosts].reverse()) {
-        if (handle.exited) await assertHostGroupGone(handle, reason)
-        else await terminateHost(handle, reason)
+        try {
+          if (handle.exited) await assertHostGroupGone(handle, reason)
+          else await terminateHost(handle, reason)
+        } catch (error) {
+          clean = false
+          appendNote('host-termination-failed', {
+            hostId: handle.hostId,
+            generation: handle.generation,
+            reason: boundedError(error),
+          })
+          if (scene?.kind !== 'process') throw error
+        }
       }
       activeHost = undefined
       if (scene !== undefined) {
@@ -2258,6 +2347,12 @@ function publicInstallation(installation) {
   }
 }
 
+/** The durable receipt projection: roots/build facts, never the spawn environment. */
+function receiptInstallation(installation) {
+  const { env: _env, ...baseFacts } = installation.base ?? {}
+  return { ...publicInstallation(installation), base: baseFacts }
+}
+
 function installedPackageFacts(packageRoot, expectedVersion, targetDshVersion, label) {
   const root = realpathSync(packageRoot)
   const manifest = readJson(join(root, 'package.json'), `${label} package.json`)
@@ -2515,7 +2610,7 @@ async function handleBootstrapProcess(message) {
       phase: 'INSTALL_COMPLETE',
       install: { inProgress: false, completed: true, startedAt: receipt.install?.startedAt, completedAt: now() },
       installation: {
-        ...publicInstallation(installation),
+        ...receiptInstallation(installation),
         profilePackage: installation.profilePackage,
         clientPlatformProvisioning: installation.clientPlatformProvisioning,
       },
@@ -3842,8 +3937,9 @@ function processIdentityState(identity) {
   } catch {
     return 'unknown'
   }
-  if (observation.kind === 'unknown') return 'unknown'
-  if (observation.kind === 'gone') return 'gone'
+  const liveness = classifyKernelLiveness(observation)
+  if (liveness.state === 'unknown') return 'unknown'
+  if (liveness.state === 'gone') return 'gone'
   return sameKernelProcess(identity, observation) === 'same' ? 'alive' : 'reused'
 }
 
@@ -3946,6 +4042,9 @@ async function handleStartProcessClient(message) {
   if (typeof label !== 'string' || label === '') {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT requires a non-empty label')
   }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(label)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT label must be a path-safe lowercase component')
+  }
   if (processClients.some(client => client.label === label)) {
     throw new Error(`START_PROCESS_CLIENT: the Client label ${label} is already registered in this Scene`)
   }
@@ -4017,6 +4116,8 @@ async function handleStartProcessClient(message) {
     closed: false,
   }
   processClients.push(handle)
+  handle.settlement = Promise.withResolvers()
+  try {
   appendNote('process-client-reserved', {
     clientId,
     label,
@@ -4075,26 +4176,33 @@ async function handleStartProcessClient(message) {
     }
     handle.exited = true
     handle.exitResult = handle.exitResult ?? { code: null, signal: null }
-    handle.closed = true
-    handle.closedAt = now()
+    if (cleanupError === undefined) {
+      handle.closed = true
+      handle.closedAt = now()
+    } else {
+      handle.closeFailure = cleanupError
+    }
     syncProcessClientsReceipt()
     if (cleanupError !== undefined) {
       throw new AggregateError([error, cleanupError], `${label}: the native run failed and its Client cleanup also failed`)
     }
     throw error
   }
-  if (lifecycleClosed || disconnected) {
-    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle').catch(() => undefined)
-    throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed while the native run was in flight')
-  }
   if (opened.session !== handle.sessionId) {
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the native session identity changed at run()`)
   }
+  // The returned native identity is registered BEFORE the cancellation branch:
+  // a lifecycle that closed while the native run was in flight still reclaims
+  // exactly the shell the run returned.
   handle.openedAt = now()
   handle.shellPid = Number.isInteger(opened.shell_pid) ? opened.shell_pid : null
   handle.shellIdentity = captureShellIdentity(handle.shellPid, `${label} shell`)
   syncProcessClientsReceipt()
   writeReceipt({ phase: 'PROCESS_CLIENT_OPENED' })
+  if (lifecycleClosed || disconnected) {
+    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle')
+    throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed while the native run was in flight')
+  }
   // The real shell/session identity is already registered and durable here;
   // the Worker still has no ACK.
   await processProbeHold('client-opened-before-ack', {
@@ -4115,7 +4223,7 @@ async function handleStartProcessClient(message) {
     120_000,
   )
   if (lifecycleClosed || disconnected) {
-    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle').catch(() => undefined)
+    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle')
     throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed before the Client was authenticated')
   }
   const business = captureProcessClientIdentity(started.pid, `${label} client-started`, {
@@ -4141,7 +4249,7 @@ async function handleStartProcessClient(message) {
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Client authenticated a Host other than this Scene's ready Host`)
   }
   if (lifecycleClosed || disconnected) {
-    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle').catch(() => undefined)
+    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle')
     throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed before the Client was ready')
   }
   const ready = await waitForProcessClientRecord(
@@ -4214,6 +4322,9 @@ async function handleStartProcessClient(message) {
     shellPid: handle.shellPid,
     businessPids: handle.businessPids,
     ready: handle.readyHost,
+  }
+  } finally {
+    handle.settlement.resolve()
   }
 }
 
@@ -4319,6 +4430,7 @@ async function handleCloseProcessClient(message) {
   requireProcessScene('CLOSE_PROCESS_CLIENT')
   assertLifecycleOpen('CLOSE_PROCESS_CLIENT')
   const handle = processClientById(message.clientId, 'CLOSE_PROCESS_CLIENT')
+  if (handle.closeFailure !== undefined) throw handle.closeFailure
   if (handle.closed) {
     return {
       clientId: handle.clientId,
@@ -4327,6 +4439,8 @@ async function handleCloseProcessClient(message) {
       closedAt: handle.closedAt,
     }
   }
+  handle.closeSettlement = Promise.withResolvers()
+  try {
   let failure
   let exit
   try {
@@ -4349,13 +4463,16 @@ async function handleCloseProcessClient(message) {
   }
   handle.exited = true
   handle.exitResult = exit ?? handle.exitResult
-  handle.closed = true
-  handle.closedAt = now()
-  syncProcessClientsReceipt()
   if (failure !== undefined) {
+    handle.closeFailure = failure
+    syncProcessClientsReceipt()
     writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(failure) })
     throw failure
   }
+  handle.closed = true
+  handle.closedAt = now()
+  handle.closeFailure = undefined
+  syncProcessClientsReceipt()
   writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
   return {
     clientId: handle.clientId,
@@ -4363,37 +4480,77 @@ async function handleCloseProcessClient(message) {
     exitSignal: handle.exitResult?.signal ?? null,
     closedAt: handle.closedAt,
   }
+  } finally {
+    handle.closeSettlement.resolve()
+  }
+}
+
+/**
+ * Wait for one START_PROCESS_CLIENT handler to reach its own settlement.
+ * A closing lifecycle aborts its record waits, so this is bounded.
+ */
+async function settleProcessClientHandler(handle, reason, timeoutMs = 120_000) {
+  const settlement = handle.settlement
+  if (settlement === undefined) return
+  const settled = await Promise.race([
+    settlement.promise.then(() => true),
+    sleep(timeoutMs).then(() => false),
+  ])
+  if (!settled) {
+    throw new Error(`${reason}: the ${handle.label} handler did not settle within ${timeoutMs}ms`)
+  }
+}
+
+/** Wait for one in-flight normal-close handler to reach its own settlement. */
+async function settleProcessClientClose(handle, reason, timeoutMs = 120_000) {
+  const settlement = handle.closeSettlement
+  if (settlement === undefined) return
+  const settled = await Promise.race([
+    settlement.promise.then(() => true),
+    sleep(timeoutMs).then(() => false),
+  ])
+  if (!settled) {
+    throw new Error(`${reason}: the ${handle.label} close handler did not settle within ${timeoutMs}ms`)
+  }
 }
 
 /** Reclaim one process Client after a Worker death or a failed close. */
 async function reclaimProcessClient(handle, reason) {
-  if (handle.closed || handle.reclaiming) return
-  handle.reclaiming = true
-  // A handler that already entered a native call owns the settlement; close
-  // only after that operation really returned. Never race a second native call.
-  const started = Date.now()
-  while (processNativeOperation !== undefined && Date.now() - started < 120_000) await sleep(50)
-  let failure
-  if (processNativeOperation !== undefined) {
-    failure = new Error(`${reason}: a native operation is still unsettled after 120000ms`)
-  } else {
-    try {
-      await withProcessNativeOperation('client-reclaim', handle.clientId, () => handle.terminal.closeQuiet())
-    } catch (error) {
-      failure = error
+  if (handle.closed) return
+  if (handle.reclaimPromise !== undefined) return await handle.reclaimPromise
+  handle.reclaimPromise = (async () => {
+    // A handler that already entered a native call owns the settlement; close
+    // only after that operation really returned. Never race a second native call.
+    const started = Date.now()
+    while (processNativeOperation !== undefined && Date.now() - started < 120_000) await sleep(50)
+    let failure
+    if (processNativeOperation !== undefined) {
+      failure = new Error(`${reason}: a native operation is still unsettled after 120000ms`)
+    } else {
+      try {
+        await withProcessNativeOperation('client-reclaim', handle.clientId, () => handle.terminal.closeQuiet())
+      } catch (error) {
+        failure = error
+      }
     }
-  }
-  try {
-    await assertProcessClientQuiesced(handle, reason)
-  } catch (error) {
-    failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} reclaim failed`)
-  }
-  handle.exited = true
-  handle.exitResult = handle.exitResult ?? { code: null, signal: null }
-  handle.closed = true
-  handle.closedAt = now()
-  syncProcessClientsReceipt()
-  if (failure !== undefined) throw failure
+    try {
+      await assertProcessClientQuiesced(handle, reason)
+    } catch (error) {
+      failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} reclaim failed`)
+    }
+    handle.exited = true
+    handle.exitResult = handle.exitResult ?? { code: null, signal: null }
+    if (failure !== undefined) {
+      handle.closeFailure = failure
+      syncProcessClientsReceipt()
+      throw failure
+    }
+    handle.closed = true
+    handle.closedAt = now()
+    handle.closeFailure = undefined
+    syncProcessClientsReceipt()
+  })()
+  return await handle.reclaimPromise
 }
 
 /**
@@ -4466,6 +4623,8 @@ async function handleFinalize(message) {
   for (const handle of processClients) {
     if (handle.closed) continue
     try {
+      await settleProcessClientHandler(handle, 'FINALIZE')
+      await settleProcessClientClose(handle, 'FINALIZE')
       await reclaimProcessClient(handle, 'FINALIZE')
     } catch (error) {
       hostStopError = hostStopError ?? error

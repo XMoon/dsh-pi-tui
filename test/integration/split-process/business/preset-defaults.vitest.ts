@@ -193,8 +193,10 @@ test('persists the preset default, updates the current blank session, and reads 
     )
     const sessionId = String(opened.openSessionId)
     expect(idsBefore.has(sessionId)).toBe(false)
+    await scene.waitForHostSessionHeader(sessionId, 'the real blank Session header')
     const idsAfterNew = await scene.sessionIds()
-    expect(idsAfterNew.filter(id => !idsBefore.has(id))).toEqual(idsAfterNew.includes(sessionId) ? [sessionId] : [])
+    expect(idsAfterNew).toContain(sessionId)
+    expect(idsAfterNew.filter(id => !idsBefore.has(id))).toEqual([sessionId])
     const selectionBaseline = (scene.sessionEvents(sessionId) ?? [])
       .filter(event => event.type === 'agent-preset/selected').length
     expect((scene.sessionEvents(sessionId) ?? []).some(event => event.type === 'turn/start')).toBe(false)
@@ -218,12 +220,12 @@ test('persists the preset default, updates the current blank session, and reads 
     await waitForFrameGone(client, 'Agent presets', 'preset catalog closed after the real write')
     await waitForNotice(client, 'current blank session switched to minimal', 'preset set default notice')
 
-    const afterSet = await client.waitForSurfaceStatus(
-      record => record.sessionOpen === true && record.openSessionId === sessionId,
-      'the same blank Session after the default write',
-      60_000,
-    )
-    expect(afterSet.sessionOpen).toBe(true)
+    // The settings write has no guaranteed new surface-status event: the
+    // durable selection event, the reopened picker and the CURRENT live
+    // Client/Host reads below are the evidence, never a historical status match.
+    const afterSetState = await client.state()
+    expect(afterSetState.exited).toBe(false)
+    expect(afterSetState.sessionListed).toBe(true)
     expect((await scene.hostStatus(host)).localHost?.instanceId).toBe(beforeRestartHost?.instanceId)
     expect(await scene.sessionIds()).toEqual(idsAfterNew)
 

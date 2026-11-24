@@ -35,6 +35,7 @@ import {
   assertPostReadCandidateIdentity,
   inspectImmutableSplitCandidate,
 } from '../../scripts/lib/split-smoke-profile.mjs'
+import { createSplitProcessScene } from '../support/split-process-fixture.ts'
 import { readOfficialClientRecords } from '../support/split-process-client.ts'
 import { SupervisorClient } from '../support/split-supervisor-client.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -128,7 +129,7 @@ test('the immutable candidate preflight refuses every input bypass class', async
   // can carry a canonical in-checkout path; the lifecycle owns its removal.
   const checkoutTemp = join(PACKAGE_ROOT, 'temp')
   mkdirSync(checkoutTemp, { recursive: true })
-  const insideRoot = realpathSync(life.tempDir('p0-inside-', checkoutTemp))
+  const insideRoot = realpathSync(life.tempDir('candidate-inside-checkout-', checkoutTemp))
   const inside = immutableCandidate(insideRoot, 'inside')
   assert.throws(() => inspectImmutableSplitCandidate(inside), /INPUT_CANDIDATE_INSIDE_CHECKOUT/u)
 
@@ -153,6 +154,27 @@ test('a candidate that disappears after its bytes are read is a changed input', 
     assert.match(error.message, /after its bytes were read/u)
     return true
   })
+})
+
+test('a symlinked private tmp base is refused before a Supervisor is forked', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('base-alias-')
+  const canonicalBase = privateBase(life, root, 'base')
+  const alias = join(root, 'base-alias')
+  symlinkSync(canonicalBase, alias, 'dir')
+  const candidate = immutableCandidate(life.tempDir('base-alias-candidate-'), 'candidate')
+  const previousBase = process.env.SPLIT_VITEST_TMP_BASE
+  const previousCandidate = process.env.SPLIT_VITEST_CANDIDATE_TGZ
+  process.env.SPLIT_VITEST_TMP_BASE = alias
+  process.env.SPLIT_VITEST_CANDIDATE_TGZ = candidate
+  try {
+    await assert.rejects(createSplitProcessScene(), /INPUT_UNQUALIFIED: SPLIT_VITEST_TMP_BASE must be a canonical path/u)
+  } finally {
+    if (previousBase === undefined) delete process.env.SPLIT_VITEST_TMP_BASE
+    else process.env.SPLIT_VITEST_TMP_BASE = previousBase
+    if (previousCandidate === undefined) delete process.env.SPLIT_VITEST_CANDIDATE_TGZ
+    else process.env.SPLIT_VITEST_CANDIDATE_TGZ = previousCandidate
+  }
 })
 
 test('a Worker/Supervisor candidate disagreement is refused before any install or Scene root', async t => {
