@@ -116,6 +116,9 @@ interface ActiveRead {
   /** Whether the ONE Workspace follow ended terminally for this generation: a
    *  NEW Connection generation may open ONE new logical handle. */
   workspaceTerminal: boolean
+  /** How many Connection generation changes this open observed. A change that
+   *  landed BEFORE a terminal failure is still the legal rebind trigger. */
+  workspaceEpoch: number
   workspaceGenerationOff: (() => void) | undefined
   /** The accepted roster's painted semantics: the ONE input of the roster
    *  delta, so an unchanged official list never bumps the revision or restarts
@@ -766,9 +769,20 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     const ownsHandle = (): boolean => !panel.disposed && panel.workspaceHandle === handle
     if (panel.workspaceGenerationOff === undefined && facts.observeConnectionGeneration !== undefined) {
       panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
+        panel.workspaceEpoch += 1
         if (!isActive(panel) || !panel.workspaceTerminal) return
         startWorkspaceFollow(panel)
       })
+    }
+    const openedEpoch = panel.workspaceEpoch
+    /** One terminal failure may rebind exactly once. It either waits for the
+     *  NEXT generation change or, when a change already landed since this
+     *  handle opened, reopens immediately — the failed handle's generation is
+     *  already gone either way. */
+    const rebindAfterTerminal = (): void => {
+      if (!isActive(panel) || panel.workspaceHandle !== undefined) return
+      if (panel.workspaceEpoch === openedEpoch) return
+      startWorkspaceFollow(panel)
     }
     runOwned('session workspace follow', async () => {
       for await (const frame of handle) {
@@ -785,12 +799,14 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.workspaceTerminal = true
         disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+        rebindAfterTerminal()
       },
       onError: () => {
         if (!isActive(panel) || !ownsHandle()) return
         panel.workspaceTerminal = true
         disposeWorkspaceHandle(panel)
         clearWorkspaceFacts(panel, 'Workspace membership unavailable')
+        rebindAfterTerminal()
       },
     })
   }
@@ -1019,6 +1035,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         workspaceRevision: 0,
         workspaceError: undefined,
         workspaceTerminal: false,
+        workspaceEpoch: 0,
         workspaceGenerationOff: undefined,
         rosterSemantics: '',
         activityHandle: undefined,

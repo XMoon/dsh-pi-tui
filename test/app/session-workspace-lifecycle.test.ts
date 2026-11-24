@@ -1129,6 +1129,31 @@ test('a terminal Workspace failure opens exactly ONE new handle on a NEW Connect
   assert.equal(h.facts.handles.length, 2, 'a generation change without a new terminal failure opens nothing')
 })
 
+test('a generation change that landed BEFORE a terminal Workspace failure is still the ONE legal rebind trigger', async () => {
+  const h = harness({ currentSessionId: CURRENT })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  h.facts.handles[0]!.push(baseline(
+    { workspaceId: 'ws-old', path: '/ws', title: 'old-project', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('old-project'), 'the first baseline paints')
+  // A change while the handle is healthy opens nothing.
+  h.facts.notifyGeneration()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.facts.handles.length, 1, 'a healthy handle survives a generation change without a rebind')
+  // The handle then fails terminally on that NEW generation: the change that
+  // already landed is the legal trigger, so ONE new handle opens without
+  // waiting for a further change.
+  h.facts.handles[0]!.fail(new Error('the Host denied the Workspace follow'))
+  await waitUntil(() => h.facts.handles.length === 2,
+    'the already-landed generation change rebinds the failed handle once')
+  h.facts.handles[1]!.push(baseline(
+    { workspaceId: 'ws-after', path: '/ws', title: 'after-project', sessionIds: [CURRENT] },
+  ))
+  await waitUntil(() => h.view().includes('after-project'), 'the rebound handle baseline paints')
+  assert.equal(h.facts.handles.length, 2, 'exactly ONE rebind, never a same-generation retry loop')
+})
+
 test('an active close owns the stream end and paints no stale scope failure', async () => {
   const h = harness({ currentSessionId: CURRENT })
   await h.runSessions('')

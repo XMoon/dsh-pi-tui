@@ -48,6 +48,7 @@ import { mergeCause } from '../remote/dispose-cause.ts'
 import type { RemoteBackendFetch } from '../remote/runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
 import type { HostDirectoryBrowseOutcome } from '../../runtime/host-directory-browse-port.ts'
+import type { WorkspaceFactsFrame } from '../../runtime/session-workspace-facts-port.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { CliSessionLaunchIntent } from '../../startup.ts'
@@ -1355,48 +1356,87 @@ async function startSurfaceLocalClient(
           if (request.op === 'workspaces') {
             // The explicit one-shot probe keeps the historical default; a
             // requested `recovering` mode consumes the official reconnecting
-            // stream lifecycle (physical carrier replacement + fresh baseline).
+            // stream lifecycle (physical carrier replacement + fresh baseline)
+            // and mirrors the Browser owner's ONE-legal-rebind rule after a
+            // terminal failure: the failed handle's generation is gone, so a
+            // generation change that already landed since it opened (or the
+            // NEXT one) may establish ONE new logical handle.
             const mode = request.mode === 'recovering' ? 'recovering' as const : 'single-generation' as const
-            const handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, mode)
             const windowMs = typeof request.windowMs === 'number' ? request.windowMs : 30_000
             const maxFrames = typeof request.maxFrames === 'number' ? request.maxFrames : Number.POSITIVE_INFINITY
-            const deadline = setTimeout(() => { handle.dispose() }, windowMs)
+            const deadlineAt = Date.now() + windowMs
+            const generation = domains.connection.generation
+            let handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, mode)
+            let openedGeneration = generation.getSnapshot()
+            const expiry = setTimeout(() => { handle.dispose() }, windowMs)
+            let frames = 0
+            let frameSeq = 0
+            let failed: string | undefined
+            /** The first generation DIFFERENT from the failed handle's opening
+             *  one; a change already present resolves immediately. */
+            const waitForNewGeneration = async (): Promise<boolean> => {
+              const current = generation.getSnapshot()
+              if (current !== undefined && !Object.is(current, openedGeneration)) return true
+              return await new Promise<boolean>((resolve) => {
+                let off: (() => void) | undefined
+                const timer = setTimeout(() => { off?.(); resolve(false) }, Math.max(0, deadlineAt - Date.now()))
+                off = generation.subscribe(() => {
+                  const next = generation.getSnapshot()
+                  if (next === undefined || Object.is(next, openedGeneration)) return
+                  clearTimeout(timer)
+                  off?.()
+                  resolve(true)
+                })
+              })
+            }
+            const emitFrame = (frame: WorkspaceFactsFrame): void => {
+              frames += 1
+              frameSeq += 1
+              switch (frame.type) {
+                case 'invalidated':
+                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, reason: frame.reason })
+                  break
+                case 'baseline':
+                case 'replace':
+                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, items: frame.items })
+                  break
+                case 'upsert':
+                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspace: frame.workspace })
+                  break
+                case 'remove':
+                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceId: frame.workspaceId })
+                  break
+                case 'order':
+                  emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceIds: frame.workspaceIds })
+                  break
+              }
+            }
             emit({ phase: 'workspaces-open', mode, windowMs, maxFrames })
             try {
-              let frames = 0
-              // A monotone frame sequence lets one case address "the fresh
-              // baseline AFTER the invalidation" without guessing.
-              let frameSeq = 0
-              for await (const frame of handle) {
-                frames += 1
-                frameSeq += 1
-                switch (frame.type) {
-                  case 'invalidated':
-                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, reason: frame.reason })
+              consume: for (;;) {
+                try {
+                  for await (const frame of handle) {
+                    emitFrame(frame)
+                    if (frames >= maxFrames || Date.now() >= deadlineAt) break consume
+                  }
+                  break
+                } catch (error) {
+                  if (mode !== 'recovering') {
+                    failed = error instanceof Error ? error.message : String(error)
                     break
-                  case 'baseline':
-                  case 'replace':
-                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, items: frame.items })
-                    break
-                  case 'upsert':
-                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspace: frame.workspace })
-                    break
-                  case 'remove':
-                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceId: frame.workspaceId })
-                    break
-                  case 'order':
-                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceIds: frame.workspaceIds })
-                    break
+                  }
+                  if (!await waitForNewGeneration()) break
+                  if (frames >= maxFrames || Date.now() >= deadlineAt) break
+                  handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, 'recovering')
+                  openedGeneration = generation.getSnapshot()
                 }
-                if (frames >= maxFrames) break
               }
-              emit({ phase: 'workspaces-ended' })
-            } catch (error) {
-              emit({ phase: 'workspaces-failed', error: error instanceof Error ? error.message : String(error) })
             } finally {
-              clearTimeout(deadline)
+              clearTimeout(expiry)
               handle.dispose()
             }
+            if (failed === undefined) emit({ phase: 'workspaces-ended' })
+            else emit({ phase: 'workspaces-failed', error: failed })
             return
           }
           if (request.op === 'activity') {
