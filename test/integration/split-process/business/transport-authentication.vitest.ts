@@ -137,7 +137,6 @@ test('authenticates the installed Host and rejects unauthenticated HTTP and dupl
     expect(Number.isInteger(ready.generationId)).toBe(true)
     expect(ready.host.hostPid).toBe(host.ready.localHost.hostPid)
     assertClientHostMatchesPublished(ready.host as never, host.ready.localHost as never, 'the qualification Client ready')
-    const clientFacts = await scene.entryRecordFacts(client!)
 
     const origin = host.ready.localHost.origin
     const files = readScopeFiles(scene.installation.dshHome, scene.scope.scopeId)
@@ -158,7 +157,7 @@ test('authenticates the installed Host and rejects unauthenticated HTTP and dupl
     // The official admission fence on the identity route.
     const noToken = await rawHttpRequest(origin, { path: '/connect' })
     expect(noToken.status).toBe(401)
-    expect((noToken.headers['set-cookie'] ?? []) as string[]).toHaveLength(0)
+    expect(Boolean(noToken.headers['set-cookie'])).toBe(false)
     const wrongToken = await rawHttpRequest(origin, { path: '/connect?token=deadbeef&interactions=answer' })
     expect(wrongToken.status).toBe(401)
     const fakeCookie = await rawHttpRequest(origin, {
@@ -746,25 +745,25 @@ test('refuses unsafe or forged Host discovery facts without killing or replacing
       await assertHostAndWitnessAlive()
     }
 
-    // A contained symlink alias plus a nonexistent child must be rejected
-    // BEFORE any mkdir: the canonical parent is outside the Scene.
-    const outsideDir = join(dirname(scene.workDir), `outside-sentinel-${randomUUID()}`)
+    // A Scene-local symlink alias to an existing private parent, plus a unique
+    // nonexistent child, must be rejected BEFORE any mkdir. The control creates
+    // no sibling directory and removes only its own alias.
+    const outsideParent = scene.tmpBase
+    const outsideChild = `outside-child-${randomUUID()}`
     const outsideAlias = join(scene.workDir, `outside-alias-${randomUUID()}`)
-    mkdirSync(outsideDir, { recursive: true, mode: 0o700 })
-    symlinkSync(outsideDir, outsideAlias)
+    symlinkSync(outsideParent, outsideAlias)
     try {
       const [aliasClient] = await scene.startQualificationClients({ mode: 'attach' })
       await scene.waitEntryRecord(aliasClient!, { m4a0: 'ready' })
       await expect(scene.qualificationControl(aliasClient!, {
         op: 'qualification-host-foundation',
         requestId: 'outside-alias',
-        workspacePath: join(outsideAlias, 'nested'),
+        workspacePath: join(outsideAlias, outsideChild),
       })).rejects.toThrow(/inside the Scene root|does not exist/u)
-      expect(existsSync(join(outsideDir, 'nested')), 'the rejected contained path created an outside directory').toBe(false)
+      expect(existsSync(join(outsideParent, outsideChild)), 'the rejected alias created an outside child').toBe(false)
       await scene.finishEntry(aliasClient!)
     } finally {
       unlinkSync(outsideAlias)
-      rmSync(outsideDir, { recursive: true, force: true })
     }
 
     const registryReal = `${files.registryPath}.real`

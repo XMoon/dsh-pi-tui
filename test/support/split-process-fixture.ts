@@ -1181,12 +1181,17 @@ class ProcessScene implements SplitProcessScene {
         errors.push(asError(error))
       }
     }
-    for (const host of [...this.#hosts].reverse()) {
-      if (host.exited) continue
-      try {
-        await this.stopHost(host)
-      } catch (error) {
-        errors.push(asError(error))
+    // A failed native PTY close must not let the Worker stop the Host under a
+    // live qualification consumer. Finalize still sends clientsClosed:false so
+    // the Supervisor owns the compensation.
+    if (errors.length === 0) {
+      for (const host of [...this.#hosts].reverse()) {
+        if (host.exited) continue
+        try {
+          await this.stopHost(host)
+        } catch (error) {
+          errors.push(asError(error))
+        }
       }
     }
     const clientsClosed = this.#clients.every(client => client.closed) && errors.length === 0
@@ -1246,36 +1251,6 @@ async function createScene(): Promise<ProcessScene> {
  * unique Supervisor receipt and a unique Scene root under the run's private
  * base.
  */
-/**
- * The smallest real non-Process admission probe: ONE Pilot bootstrap (the
- * already-installed candidate), send the new Process IPC, then close. It does
- * not create a Process Scene or a second installation.
- */
-export async function createPilotAdmissionScene(): Promise<{
-  runId: string
-  request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
-  close(): Promise<void>
-  receipt(): Record<string, any>
-}> {
-  const tmpBase = requireAbsoluteDirectory('SPLIT_VITEST_TMP_BASE')
-  const candidate = profileModule.inspectImmutableSplitCandidate(requireCandidateTarball())
-  const runId = `pilot-admission-${randomUUID()}`
-  const supervisor = new SupervisorClient({ runId })
-  await supervisor.request('BOOTSTRAP', {
-    tarball: candidate.tarball,
-    expectedSha256: candidate.candidateSha256,
-    tmpBase,
-    workerPid: process.pid,
-    workerPpid: process.ppid,
-  }, { timeoutMs: 1_200_000 })
-  return {
-    runId,
-    request: (type, payload, timeoutMs = 30_000) => supervisor.request(type, payload, { timeoutMs }) as Promise<Record<string, any>>,
-    close: async () => { await supervisor.close({ timeoutMs: 300_000, allowKill: false }) },
-    receipt: () => JSON.parse(readFileSync(join(tmpBase, 'split-resources', `${runId}.json`), 'utf8')) as Record<string, any>,
-  }
-}
-
 export async function createSplitProcessScene(): Promise<SplitProcessScene> {
   return await createScene()
 }

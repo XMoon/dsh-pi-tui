@@ -361,21 +361,17 @@ test('the shared official-record reader keeps complete-line strictness and only 
   )
 })
 
-test('the installed-entry qualification operations are refused before any process Scene exists', async t => {
-  const life = testLifecycle(t)
-  const root = realpathSync(life.tempDir('split-process-entry-admission-'))
-  const tmpBase = privateBase(life, root, 'base')
+test('the installed-entry qualification operations are refused before any process Scene exists', async () => {
   const supervisor = new SupervisorClient({ runId: `split-process-entry-admission-${String(process.pid)}` })
   try {
     for (const [type, payload] of [
-      ['ENTRY_RECORDS', { entryId: 'probe' }],
       ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
+      ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
       ['SIGNAL_ENTRY', { entryId: 'probe', signal: 'SIGTERM' }],
-      ['FINISH_ENTRY', { entryId: 'probe' }],
     ]) {
       await assert.rejects(
         supervisor.request(type, payload, { timeoutMs: 30_000 }),
-        /no process scene|unknown entryId|no Scene/,
+        /no process scene/u,
       )
     }
   } finally {
@@ -387,11 +383,14 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
   const life = testLifecycle(t)
   const directory = realpathSync(life.tempDir('close-authority-'))
   const release = join(directory, 'release')
+  const released = join(directory, 'released')
   const grandchild = [
     "const fs = require('node:fs')",
     'const release = process.env.CLOSE_RELEASE',
-    'const check = () => { if (fs.existsSync(release)) { fs.unwatchFile(release); process.exit(0) } }',
-    'fs.watchFile(release, check)',
+    'const released = process.env.CLOSE_RELEASED',
+    'const check = () => { if (fs.existsSync(release)) { fs.writeFileSync(released, "released\\n"); fs.unwatchFile(release); process.exit(0) } }',
+    'fs.watchFile(release, { interval: 100 }, check)',
+    'setTimeout(() => process.exit(2), 10_000)', // bounded fail-safe window: a stuck control cannot leak
     'check()',
   ].join(';')
   const child = spawn(process.execPath, ['-e', [
@@ -400,7 +399,7 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
     'process.exit(0)',
   ].join(';')], {
     stdio: ['ignore', 'pipe', 'ignore'],
-    env: { ...process.env, CLOSE_RELEASE: release },
+    env: { ...process.env, CLOSE_RELEASE: release, CLOSE_RELEASED: released },
   })
   let closeFired = false
   let settleClose
@@ -411,14 +410,16 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
     handle.exited = true
     settleClose({ code, signal })
   })
+  let waiter
+  let primaryError
   try {
-    await new Promise((resolve, reject) => {
+    await bounded(new Promise((resolve, reject) => {
       child.once('exit', resolve)
       child.once('error', reject)
-    })
+    }), 5_000, 'the safe child exit')
     assert.equal(closeFired, false, 'close already fired before the inherited stdout was released')
     let settled = false
-    const waiter = waitForEntryClose(handle, 'close authority control').then(value => {
+    waiter = waitForEntryClose(handle, 'close authority control', 5_000).then(value => {
       settled = true
       return value
     })
@@ -428,7 +429,27 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
     writeFileSync(release, 'release\n', { mode: 0o600 })
     assert.deepEqual(await waiter, { code: 0, signal: null })
     assert.equal(closeFired, true)
+    assert.equal(existsSync(released), true, 'the release watchdog, not the actual marker, settled the control')
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
+    // Release even on the intended early-waiter regression, then bounded-join
+    // the real close so the inherited stdout cannot leak.
+    try { writeFileSync(release, 'release\n', { mode: 0o600 }) } catch {}
+    if (waiter !== undefined) await waiter.catch(() => {})
+    if (!closeFired) await bounded(new Promise(resolve => child.once('close', resolve)), 5_000, 'the close control join').catch(() => {})
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    if (primaryError !== undefined) {
+      // The primary assertion remains the reported failure; the finally only
+      // ensured release/join.
+    }
   }
 })
+
+function bounded(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} exceeded ${String(timeoutMs)}ms`)), timeoutMs)),
+  ])
+}

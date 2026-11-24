@@ -8,10 +8,13 @@
  * and its exact kernel identity.
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { expect, test } from 'vitest'
+
+import { SupervisorClient } from '../../../support/split-supervisor-client.ts'
 
 import {
   assertKernelBirthTerminal,
@@ -22,7 +25,6 @@ import {
   readScopeFiles,
 } from '../../../support/split-process-authentication.ts'
 import {
-  createPilotAdmissionScene,
   createSplitProcessScene,
   type IdentityWitnessHandle,
   type QualificationClientHandle,
@@ -524,14 +526,17 @@ test('refuses unqualified installed-entry operations before any child exists', a
   const scene = await createSplitProcessScene()
   let testError: unknown
   try {
+    const entriesBefore = readdirSync(scene.workDir).sort()
+    const receiptsBefore = readdirSync(join(scene.tmpBase, 'split-resources')).sort()
     const reject = async (type: string, payload: Record<string, unknown>, pattern: RegExp): Promise<void> => {
       await expect(scene.request(type, payload, 30_000)).rejects.toThrow(pattern)
     }
-    await reject('ENTRY_RECORDS', { entryId: 'unknown-entry' }, /unknown entryId/u)
     await reject('SIGNAL_ENTRY', { entryId: 'unknown-entry', signal: 'SIGTERM' }, /unknown entryId/u)
-    await reject('FINISH_ENTRY', { entryId: 'unknown-entry' }, /unknown entryId/u)
-    await reject('RECLAIM_DISCOVERED_HOST', { entryId: 'unknown-entry' }, /unknown entryId/u)
-    await reject('WAIT_ENTRY_RECORD', { entryId: 'unknown-entry', match: { m4a0: 'ready' } }, /unknown entryId/u)
+    await reject('START_HOST_ATTEMPTS', { mode: 'not-a-mode' }, /INPUT_HOST_ATTEMPT_MODE/u)
+    await reject('START_HOST_ATTEMPTS', { mode: 'seat-race', count: 17 }, /INPUT_HOST_ATTEMPT_COUNT/u)
+    await reject('START_HOST_ATTEMPTS', { mode: 'host-runtime-disabled', extraEnv: {} }, /extraEnv/u)
+    await reject('START_QUALIFICATION_CLIENTS', { mode: 'attach' }, /no accepted Host/u)
+    await reject('RESTORE_INSTALLATION', {}, /no scoped installation mutation/u)
 
     // A synthetic credential marker in an IPC diagnostic is redacted at the
     // boundary; the real assertion is that it never reaches the Worker text.
@@ -539,15 +544,13 @@ test('refuses unqualified installed-entry operations before any child exists', a
     const diagnostic = await scene.request('SIGNAL_ENTRY', {
       entryId: `token=${marker}`,
       signal: 'SIGTERM',
-    }, 30_000).then(() => undefined, error => asError(error))
+    }, 30_000).then(() => undefined, error => (error instanceof Error ? error : new Error(String(error))))
     expect(diagnostic?.message).toContain('[redacted]')
     expect(diagnostic?.message).not.toContain(marker)
 
-    // The refused inputs do not poison a later legal Scene.
-    const host = await scene.startHost()
-    await assertAuthenticatedCurrentHost(scene, host)
-    await scene.stopHost(host)
-    await scene.assertEntrySeatsFree()
+    // No refused input created an entry or a second receipt/root ledger.
+    expect(readdirSync(scene.workDir).sort()).toEqual(entriesBefore)
+    expect(readdirSync(join(scene.tmpBase, 'split-resources')).sort()).toEqual(receiptsBefore)
   } catch (error) {
     testError = error
     throw error
@@ -570,12 +573,22 @@ test('compensates a failed finalization without leaking a live Client or witness
   let client: QualificationClientHandle | undefined
   let witness: IdentityWitnessHandle | undefined
   let finalizeRequested = false
+  let primaryError: unknown
   try {
-    await scene.startHost()
+    const host = await scene.startHost()
     await scene.setInstallationFault('client-bootstrap-drift')
     ;[client] = await scene.startQualificationClients({ mode: 'client-bootstrap-drift' })
     await scene.waitEntryRecord(client!, { m4a0: 'ready' })
     witness = await scene.startIdentityWitness('live-non-host')
+
+    // The real ordinary stop path must refuse BEFORE officialStopHost while
+    // the drift Client is still attached, and the same Host must still be live
+    // afterwards. This is the boundary dispose actually reaches on a failed
+    // assertion.
+    await expect(scene.request('STOP_HOST', { hostId: host.hostId }, 60_000))
+      .rejects.toThrow(/qualification Client|live or un-finished/u)
+    const stillLive = await scene.entryRecordFacts(host as never)
+    expect(stillLive.exited, 'STOP_HOST stopped the Host under a live qualification Client').toBe(false)
 
     // The Host is still Ready, the drifted Client is connected, the witness is
     // live and the mutation is registered: FINALIZE must refuse and hand the
@@ -585,7 +598,7 @@ test('compensates a failed finalization without leaking a live Client or witness
       .then(() => undefined, error => asError(error))
     expect(failure, 'a finalization with live qualification state must fail').toBeDefined()
     const exit = await scene.waitSupervisorExit()
-    expect(exit.code, 'a failed FINALIZE must exit nonzero').not.toBe(0)
+    expect(exit, 'a failed FINALIZE must exit 1 with no signal').toEqual({ code: 1, signal: null })
 
     const receipt = await scene.readSupervisorReceipt()
     expect(receipt.phase).toBe('NOT_QUIESCED')
@@ -603,33 +616,66 @@ test('compensates a failed finalization without leaking a live Client or witness
     assertKernelBirthTerminal(client!.pid, client!.birth ?? undefined, 'the abandoned qualification Client')
     assertKernelBirthTerminal(witness!.pid, witness!.birth, 'the abandoned identity witness')
     expect(existsSync(scene.workDir), 'the failed-finalization evidence root was removed').toBe(true)
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
-    if (!finalizeRequested) await scene.dispose().catch(() => undefined)
+    if (!finalizeRequested) {
+      try {
+        await scene.dispose()
+      } catch (cleanupError) {
+        if (primaryError !== undefined) {
+          throw new AggregateError([asError(primaryError), asError(cleanupError)],
+            'the failed-finalization setup failed and its Scene cleanup also failed')
+        }
+        throw cleanupError
+      }
+    }
   }
 })
 
 test('refuses installed-entry operations in a real non-process Scene before any child exists', async () => {
-  const pilot = await createPilotAdmissionScene()
+  const candidatePath = process.env.SPLIT_VITEST_CANDIDATE_TGZ
+  const tmpBase = process.env.SPLIT_VITEST_TMP_BASE
+  expect(candidatePath, 'SPLIT_VITEST_CANDIDATE_TGZ is required').toBeDefined()
+  expect(tmpBase, 'SPLIT_VITEST_TMP_BASE is required').toBeDefined()
+  const candidateSha256 = createHash('sha256').update(readFileSync(candidatePath!)).digest('hex')
+  const pilotRunId = `pilot-admission-${String(Date.now())}-${String(process.pid)}`
+  const pilot = new SupervisorClient({ runId: pilotRunId })
+  let primaryError: unknown
   try {
+    await pilot.request('BOOTSTRAP', {
+      tarball: candidatePath,
+      expectedSha256: candidateSha256,
+      tmpBase,
+      workerPid: process.pid,
+      workerPpid: process.ppid,
+    }, { timeoutMs: 600_000 })
     for (const [type, payload] of [
       ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
-      ['START_QUALIFICATION_CLIENTS', { mode: 'attach' }],
-      ['START_IDENTITY_WITNESS', { kind: 'live-non-host' }],
-      ['ENTRY_RECORDS', { entryId: 'unknown' }],
-      ['WAIT_ENTRY_RECORD', { entryId: 'unknown', match: { m4a0: 'ready' } }],
+      ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
       ['SIGNAL_ENTRY', { entryId: 'unknown', signal: 'SIGTERM' }],
-      ['FINISH_ENTRY', { entryId: 'unknown' }],
-      ['ASSERT_ENTRY_SEATS_FREE', {}],
     ] as const) {
-      await expect(pilot.request(type, payload, 30_000))
+      await expect(pilot.request(type, payload, { timeoutMs: 30_000 }))
         .rejects.toThrow(/no process scene/u)
     }
-    const receipt = pilot.receipt()
+    const receipt = JSON.parse(readFileSync(join(tmpBase!, 'split-resources', `${pilotRunId}.json`), 'utf8')) as Record<string, any>
     expect(receipt.kind).toBe('pilot')
     expect(receipt.hosts ?? []).toEqual([])
-    expect((receipt.qualificationClients ?? [])).toEqual([])
-    expect((receipt.qualificationHelpers ?? [])).toEqual([])
+    expect(receipt.qualificationClients ?? []).toEqual([])
+    expect(receipt.qualificationHelpers ?? []).toEqual([])
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
-    await pilot.close()
+    try {
+      await pilot.close({ timeoutMs: 300_000, allowKill: false })
+    } catch (closeError) {
+      if (primaryError !== undefined) {
+        throw new AggregateError([asError(primaryError), asError(closeError)],
+          'the wrong-kind admission test failed and its Pilot cleanup also failed')
+      }
+      throw closeError
+    }
   }
 })

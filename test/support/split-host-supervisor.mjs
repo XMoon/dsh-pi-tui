@@ -3611,6 +3611,7 @@ async function handleStartHost(message) {
   }
   if (activeHost !== undefined) throw new Error('START_HOST: one active Host per scene is supported')
   if (scene.kind === 'pilot' && hosts.length > 0) throw new Error('START_HOST: one Host per scene is supported')
+  if (scene.kind === 'process') assertNoBootstrapCliPatch('START_HOST')
 
   let source = 'profile'
   let entry
@@ -4388,6 +4389,7 @@ function registerProcessFallbackHost(handle, hostFacts, label) {
 async function handleStartProcessClient(message) {
   requireProcessScene('START_PROCESS_CLIENT')
   assertLifecycleOpen('START_PROCESS_CLIENT')
+  assertNoBootstrapCliPatch('START_PROCESS_CLIENT')
   const label = message.label
   if (typeof label !== 'string' || label === '') {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT requires a non-empty label')
@@ -4952,10 +4954,31 @@ async function auditProcessClientLedger(reason) {
 
 async function handleFinalize(message) {
   if (scene?.kind === 'process') {
-    const liveClient = qualificationClients.some(handle => handle.kind === 'qualification-client' && !handle.exited)
-    const liveHelper = qualificationHelpers.some(handle => !handle.exited)
-    if (liveClient || liveHelper || processInstallationMutation !== undefined || processBootstrapCliPatch !== undefined) {
-      throw new Error('FINALIZE: live Process state requires compensation before Host stop')
+    const preconditions = []
+    for (const handle of qualificationClients) {
+      if (handle.kind !== 'qualification-client') continue
+      if (!handle.exited) preconditions.push(`the qualification Client ${String(handle.label)} is still live`)
+      else if (handle.finished !== true) preconditions.push(`the qualification Client ${String(handle.label)} is not finished`)
+    }
+    for (const handle of qualificationHelpers) {
+      if (!handle.exited) preconditions.push(`the ${entryKindLabel(handle)} ${String(handle.label)} is still live`)
+      else if (handle.finished !== true) preconditions.push(`the ${entryKindLabel(handle)} ${String(handle.label)} is not finished`)
+    }
+    for (const handle of processClients) {
+      if (!handle.closed) preconditions.push(`the process Client ${String(handle.label)} is not closed`)
+    }
+    if (processInstallationMutation !== undefined) {
+      preconditions.push(`the installed-copy mutation ${String(processInstallationMutation.fault)} is not restored`)
+    }
+    if (processBootstrapCliPatch !== undefined) preconditions.push('the inherited profile patch is not restored')
+    if (message.clientsClosed !== true) preconditions.push('the Worker did not confirm its Clients closed')
+    for (const handle of hosts) {
+      if (handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true) {
+        preconditions.push(`the Host attempt ${String(handle.label)} is not finished`)
+      }
+    }
+    if (preconditions.length > 0) {
+      throw new Error(`FINALIZE: Process terminal preconditions failed before Host stop: ${preconditions.join('; ')}`)
     }
   }
   let hostStopError
@@ -5496,7 +5519,7 @@ async function waitForEntryRecord(handle, match, label, timeoutMs) {
     }
     const control = (handle.records ?? []).find(value => value?.m4a0 === 'control-failure' || value?.m4a0 === 'control-error')
     if (control !== undefined) {
-      throw new Error(`${label}: the entry reported ${String(control.m4a0)}${control.error === undefined ? '' : `: ${String(control.error)}`}`)
+      throw new Error(`${label}: the entry reported ${String(control.m4a0)} (code=${String(control.code ?? 'none')}, phase=${String(control.phase ?? 'none')})`)
     }
     const failure = (handle.records ?? []).find(value => value?.m4a0 === 'failure')
     if (failure !== undefined && !recordMatches(failure, match)) {
@@ -5615,6 +5638,7 @@ async function handleStartHostAttempts(message) {
   requireKnownFields(message, ['mode', 'count', 'scratchTarget', 'signal'], 'START_HOST_ATTEMPTS')
   requireProcessScene('START_HOST_ATTEMPTS')
   assertLifecycleOpen('START_HOST_ATTEMPTS')
+  assertNoBootstrapCliPatch('START_HOST_ATTEMPTS')
   const mode = message.mode
   if (!HOST_ATTEMPT_MODES.has(mode)) {
     throw codedInputError('INPUT_HOST_ATTEMPT_MODE', `START_HOST_ATTEMPTS: unknown Host attempt mode ${JSON.stringify(mode)}`)
@@ -5925,6 +5949,7 @@ async function handleStartQualificationClients(message) {
   requireKnownFields(message, ['mode', 'count', 'refusal', 'foundationBarrier'], 'START_QUALIFICATION_CLIENTS')
   requireProcessScene('START_QUALIFICATION_CLIENTS')
   assertLifecycleOpen('START_QUALIFICATION_CLIENTS')
+  assertNoBootstrapCliPatch('START_QUALIFICATION_CLIENTS')
   const mode = message.mode
   if (!QUALIFICATION_CLIENT_MODES.has(mode)) {
     throw codedInputError('INPUT_QUALIFICATION_CLIENT_MODE',
@@ -6213,11 +6238,6 @@ async function handleSignalEntry(message) {
   return { entryId: handle.entryId, signal, pid: handle.child.pid, birth: handle.birth }
 }
 
-function hostAttemptFailureError(handle) {
-  const failure = (handle.records ?? []).find(record => record?.m4a0 === 'failure')
-  return failure === undefined ? undefined : String(failure.error ?? failure.code ?? '')
-}
-
 async function validateHostAttemptTerminal(handle, exit) {
   const label = `FINISH_ENTRY ${handle.label ?? handle.entryId}`
   const ready = (handle.records ?? []).find(record => record?.m4a0 === 'ready')
@@ -6365,7 +6385,7 @@ async function validateQualificationClientTerminal(handle, exit) {
     if (failure !== undefined) {
       expect(exit.code === 1 && exit.signal === null, 'the qualification seat loser must exit 1 with no signal')
       expect(failure.code === 'CLIENT_ALREADY_ACTIVE',
-        `the qualification seat loser reported ${String(failure.code ?? failure.error)}`)
+        `the qualification seat loser reported code=${String(failure.code ?? 'none')} phase=${String(failure.phase ?? 'none')}`)
       return { outcome: 'startup-refusal', mode, code: failure.code, readyEmitted: false }
     }
     expect(ready !== undefined, 'the qualification seat winner never reached Ready')
@@ -6411,7 +6431,7 @@ async function validateQualificationClientTerminal(handle, exit) {
   else if (mode === 'discovery-refusal') expectedCode = DISCOVERY_REFUSALS.get(handle.refusal)
   else throw new Error(`${label}: no terminal contract is implemented for mode ${String(mode)}`)
   expect(failure.code === expectedCode,
-    `expected ${String(expectedCode)} but the Client reported ${String(failure.code ?? failure.error)}`)
+    `expected ${String(expectedCode)} but the Client reported code=${String(failure.code ?? 'none')} phase=${String(failure.phase ?? 'none')}`)
   return {
     outcome: 'startup-refusal',
     mode,
@@ -6442,7 +6462,7 @@ async function finishQualificationClient(handle) {
   if (handle.signalIntent !== undefined) return await waitForEntryClose(handle, 'FINISH_ENTRY')
   if (handle.mode === 'identity-changed') return await waitForEntryClose(handle, 'FINISH_ENTRY')
   const ready = (handle.records ?? []).some(record => record?.m4a0 === 'ready')
-  if (ready && !handle.exited) {
+  if (ready && !handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
     // The one-shot qualification Client owns the official stdin shutdown op.
     handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
   }
@@ -6582,22 +6602,32 @@ const BOOTSTRAP_CLI_MODES = new Set(['inherited-host-role', 'direct-help'])
 const IDENTITY_WITNESS_KINDS = new Set(['live-non-host', 'linux-zombie'])
 
 /** Mutation admission: no live Client/helper/fallback may consume the target. */
-function assertNoLiveMutationConsumers({ allowStableHost, label }) {
+async function assertNoLiveMutationConsumers({ allowStableHost, label }) {
+  const stableHost = allowStableHost ? activeHost : undefined
   if (!allowStableHost && activeHost !== undefined) {
     throw new Error(`${label}: a live Host still consumes the installed copy`)
   }
-  if (hosts.some(handle => handle.mode !== undefined && !handle.exited)) {
-    throw new Error(`${label}: a Host attempt is still live`)
+  for (const handle of hosts) {
+    if (handle === stableHost) continue
+    if (!handle.exited) throw new Error(`${label}: a Host attempt is still live`)
+    await assertHostGroupGone(handle, label)
+  }
+  for (const handle of qualificationClients) {
+    if (!handle.exited || handle.finished !== true) {
+      throw new Error(`${label}: a qualification Client is not terminal`)
+    }
+    await assertHostGroupGone(handle, label)
+  }
+  for (const handle of qualificationHelpers) {
+    if (!handle.exited || handle.finished !== true) {
+      throw new Error(`${label}: a qualification helper is not terminal`)
+    }
+    await assertHostGroupGone(handle, label)
   }
   if (processClients.some(client => !client.closed)) {
     throw new Error(`${label}: a process Client is still live`)
   }
-  if (qualificationClients.some(client => !client.exited)) {
-    throw new Error(`${label}: a qualification Client is still live`)
-  }
-  if (qualificationHelpers.some(helper => !helper.exited)) {
-    throw new Error(`${label}: a qualification helper is still live`)
-  }
+  await auditProcessClientLedger(label)
   if (fallbackHosts.some(record => record.reclaimed !== true)) {
     throw new Error(`${label}: a discovered Host fallback is still live`)
   }
@@ -6698,6 +6728,12 @@ async function runTrackedOnce(invocation, args, cwd, env, label, timeoutMs) {
   return handle
 }
 
+function assertNoBootstrapCliPatch(label) {
+  if (processBootstrapCliPatch !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED', `${label}: an inherited profile patch is still unresolved`)
+  }
+}
+
 async function handleRunBootstrapCli(message) {
   requireKnownFields(message, ['mode'], 'RUN_BOOTSTRAP_CLI')
   requireProcessScene('RUN_BOOTSTRAP_CLI')
@@ -6709,13 +6745,14 @@ async function handleRunBootstrapCli(message) {
   if (processInstallationMutation !== undefined) {
     throw codedInputError('INPUT_INSTALLATION_MUTATED', 'RUN_BOOTSTRAP_CLI is not allowed under a mutated installation')
   }
-  if (processBootstrapCliPatch !== undefined) {
-    throw codedInputError('INPUT_INSTALLATION_MUTATED', 'RUN_BOOTSTRAP_CLI has an unresolved profile-patch rollback')
-  }
+  assertNoBootstrapCliPatch('RUN_BOOTSTRAP_CLI')
   const installation = scene.installation
   const profilePatchPath = join(installation.profileDir, 'cordis.patch.yml')
   let response
   if (mode === 'inherited-host-role') {
+    await assertNoLiveMutationConsumers({ allowStableHost: false, label: 'RUN_BOOTSTRAP_CLI inherited-host-role' })
+    const helpersBefore = qualificationHelpers.length
+    let primaryError
     const previous = existsSync(profilePatchPath)
       ? { bytes: readFileSync(profilePatchPath), mode: statSync(profilePatchPath).mode & 0o777 }
       : undefined
@@ -6734,14 +6771,31 @@ async function handleRunBootstrapCli(message) {
         throw new Error('RUN_BOOTSTRAP_CLI: the real CLI never reported the missing required TUI surface')
       }
       response = { mode, entryId: handle.entryId, exit: handle.terminal.exit, markers }
+    } catch (error) {
+      primaryError = error
+      throw error
     } finally {
-      const liveCli = qualificationHelpers.some(handle => handle.kind === 'bootstrap-cli' && !handle.exited)
-      if (!liveCli && processBootstrapCliPatch !== undefined) {
+      const spawned = qualificationHelpers.slice(helpersBefore)
+        .filter(handle => handle.kind === 'bootstrap-cli')
+      const helper = spawned.at(-1)
+      // No helper was spawned: the private patch is the only effect. Once a
+      // helper exists, only its validated finished state (real close + exact
+      // group audit) permits restoration; otherwise keep the obligation for
+      // the joined compensation.
+      const mayRestore = helper === undefined || helper.finished === true
+      if (mayRestore && processBootstrapCliPatch !== undefined) {
         const patch = processBootstrapCliPatch
-        if (patch.previous === undefined) rmSync(patch.path, { force: true })
-        else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
-        processBootstrapCliPatch = undefined
-      } else if (liveCli) {
+        try {
+          if (patch.previous === undefined) rmSync(patch.path, { force: true })
+          else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
+          processBootstrapCliPatch = undefined
+        } catch (error) {
+          if (primaryError !== undefined) {
+            throw new AggregateError([primaryError, error], 'the inherited CLI failed and its private patch restore also failed')
+          }
+          throw error
+        }
+      } else if (!mayRestore) {
         appendNote('bootstrap-cli-patch-restore-deferred', { path: profilePatchPath })
       }
     }
@@ -6789,6 +6843,7 @@ async function handleSetInstallationFault(message) {
   requireKnownFields(message, ['fault'], 'SET_INSTALLATION_FAULT')
   requireProcessScene('SET_INSTALLATION_FAULT')
   assertLifecycleOpen('SET_INSTALLATION_FAULT')
+  assertNoBootstrapCliPatch('SET_INSTALLATION_FAULT')
   if (processInstallationMutation !== undefined) {
     throw new Error('SET_INSTALLATION_FAULT: a scoped installation mutation is already active')
   }
@@ -6811,7 +6866,7 @@ async function handleSetInstallationFault(message) {
     startedAt: now(),
   }
   if (fault === 'host-runtime-absent') {
-    assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-runtime-absent' })
+    await assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-runtime-absent' })
     const artifact = join(packageRoot, 'dist', 'host-runtime.mjs')
     const absent = `${artifact}.artifact-absent`
     const packageScopeBarrier = join(installation.dshHome, 'package.json')
@@ -6896,7 +6951,7 @@ async function handleSetInstallationFault(message) {
     }
   }
   if (fault === 'host-bootstrap-absent') {
-    assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-bootstrap-absent' })
+    await assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-bootstrap-absent' })
     const chunkPath = installedChunk('host-bootstrap-')
     const absent = `${chunkPath}.absent`
     const mutation = {
@@ -6933,7 +6988,7 @@ async function handleSetInstallationFault(message) {
   }
   // client-bootstrap-drift: a stable live Host and no other qualification Client.
   requireReadyHost('SET_INSTALLATION_FAULT client-bootstrap-drift')
-  assertNoLiveMutationConsumers({ allowStableHost: true, label: 'SET_INSTALLATION_FAULT client-bootstrap-drift' })
+  await assertNoLiveMutationConsumers({ allowStableHost: true, label: 'SET_INSTALLATION_FAULT client-bootstrap-drift' })
   const chunkPath = installedChunk('client-bootstrap-')
   const canonicalChunk = realpathSync(chunkPath)
   if (canonicalChunk !== chunkPath) {
@@ -7014,15 +7069,30 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   if (compensating && hosts.some(handle => !handle.exited)) {
     throw new Error('RESTORE_INSTALLATION: a Host attempt is still live during compensation')
   }
-  if (qualificationClients.some(handle => !handle.exited)) {
-    throw new Error('RESTORE_INSTALLATION: a qualification Client is still live')
+  for (const handle of hosts) {
+    if (mutation.fault === 'client-bootstrap-drift' && handle === activeHost) continue
+    if (!handle.exited) throw new Error('RESTORE_INSTALLATION: a Host is still live')
+    if (!compensating && handle.mode !== undefined && handle.finished !== true) {
+      throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
+    }
+    await assertHostGroupGone(handle, 'RESTORE_INSTALLATION')
   }
-  if (qualificationHelpers.some(handle => !handle.exited)) {
-    throw new Error('RESTORE_INSTALLATION: a qualification helper is still live')
+  for (const handle of qualificationClients) {
+    if (!handle.exited || (!compensating && handle.finished !== true)) {
+      throw new Error('RESTORE_INSTALLATION: a qualification Client is not terminal')
+    }
+    await assertHostGroupGone(handle, 'RESTORE_INSTALLATION')
+  }
+  for (const handle of qualificationHelpers) {
+    if (!handle.exited || (!compensating && handle.finished !== true)) {
+      throw new Error('RESTORE_INSTALLATION: a qualification helper is not terminal')
+    }
+    await assertHostGroupGone(handle, 'RESTORE_INSTALLATION')
   }
   if (processClients.some(handle => !handle.closed)) {
     throw new Error('RESTORE_INSTALLATION: a process Client is not closed')
   }
+  await auditProcessClientLedger('RESTORE_INSTALLATION')
   if (fallbackHosts.some(record => record.reclaimed !== true)) {
     throw new Error('RESTORE_INSTALLATION: a discovered fallback Host is still unreclaimed')
   }
@@ -7534,6 +7604,11 @@ async function dispatch(message) {
       }
       case 'STOP_HOST': {
         if (activeHost === undefined || activeHost.hostId !== message.hostId) throw new Error('STOP_HOST: unknown hostId')
+        if (scene?.kind === 'process') {
+          const blocking = qualificationClients.some(handle => handle.kind === 'qualification-client'
+            && (!handle.exited || handle.finished !== true))
+          if (blocking) throw new Error('STOP_HOST: a live or un-finished qualification Client owns the Host')
+        }
         const stopped = activeHost
         const result = await officialStopHost(stopped)
         if (requestId !== undefined) reply(requestId, { code: result.code, signal: result.signal, generation: stopped.generation })

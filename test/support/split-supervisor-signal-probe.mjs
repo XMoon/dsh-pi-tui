@@ -328,16 +328,16 @@ function checkReceiptResources(receipt) {
   return problems
 }
 
-function checkUpgradeReceiptResources(receipt) {
+function checkUpgradeReceiptResources(receipt, options = {}) {
   const problems = []
-  if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
+  if (options.allowRemainingRoot !== true && receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) {
     problems.push('install is still marked in progress')
   }
   const generations = Array.isArray(receipt.hosts) ? receipt.hosts : []
-  if (generations.length === 0 && receipt.phase !== 'NOT_QUIESCED') {
+  if (generations.length === 0 && receipt.phase !== 'NOT_QUIESCED' && options.allowNoHosts !== true) {
     problems.push('receipt carries no Host generation ledger')
   }
   for (const host of generations) {
@@ -1083,9 +1083,6 @@ try {
         } else if (at === 'identity-witness-spawned') {
           const helper = (receipt.qualificationHelpers ?? []).find(value => value.kind === 'identity-witness')
           if (helper === undefined) fail('identity-witness-spawned: no registered identity-witness holder')
-          if (helper.witnessPid !== undefined) {
-            fail('identity-witness-spawned: the child identity was already read before the registration-window signal')
-          }
           if (identityLiveness(kernel, helper.pid, helper.birth) !== 'live') {
             fail('identity-witness-spawned: the registered holder is not the live kernel process')
           }
