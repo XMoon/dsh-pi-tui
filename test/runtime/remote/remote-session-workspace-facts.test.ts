@@ -884,11 +884,13 @@ function scriptedWorkspaceStream(
         let acceptedGeneration: number | undefined
         let openedGeneration: number | undefined
         for (const item of script(options)) {
+          // The official wait-for-reconnect establishes the replacement
+          // Connection BEFORE the new physical open runs.
+          onItem?.(item.generation)
           if (item.generation !== openedGeneration) {
             openedGeneration = item.generation
             physical.push(options.open(new AbortController().signal))
           }
-          onItem?.(item.generation)
           const emitCarrierFailure = options.carrierFailed !== undefined && emitCarrierFailures
           if (item.generation !== acceptedGeneration && emitCarrierFailure && accepted.length > 0 && item.generation > 1) {
             const error = new TestRemoteStreamCarrierError('api gateway: Remote stream WebSocket closed')
@@ -952,12 +954,11 @@ test('UA-12 a recovering follow invalidates membership on a carrier failure and 
     assert.equal(next.done, false)
     frames.push(next.value)
   }
-  // The REAL adapter records the official Connection that owned the physical
-  // open (never a consumer-supplied value): the attempt identity is the live
-  // generation captured in the official `open` callback.
-  const attempted = (handle as { attemptedGeneration?(): unknown }).attemptedGeneration?.()
+  // A same-Connection carrier retry keeps the SAME attempt identity (A/A
+  // control): only a real Connection replacement makes it B.
+  const attempted = handle.attemptedGeneration?.()
   assert.deepEqual(attempted, { id: 'gen-1' },
-    'the recovering handle recorded the official physical-attempt generation')
+    'a same-Connection carrier retry keeps the attempt identity')
   handle.dispose()
   await iterator.next()
   assert.deepEqual(frames, [
@@ -1160,12 +1161,11 @@ test('UA-12 a recovering follow adopts a Connection replacement and keeps the ne
     assert.equal(next.done, false)
     frames.push(next.value)
   }
-  // The REAL adapter records the official Connection that owned the physical
-  // open (never a consumer-supplied value): the attempt identity is the live
-  // generation captured in the official `open` callback.
-  const attempted = (handle as { attemptedGeneration?(): unknown }).attemptedGeneration?.()
-  assert.deepEqual(attempted, { id: 'gen-1' },
-    'the recovering handle recorded the official physical-attempt generation')
+  // The replacement's LATE physical open belongs to B: the attempt identity
+  // must be the replacement Connection, never the opening A.
+  const attempted = handle.attemptedGeneration?.()
+  assert.deepEqual(attempted, { id: 'gen-2' },
+    'the recovering handle recorded the replacement physical-attempt generation')
   handle.dispose()
   await iterator.next()
   assert.deepEqual(frames, [
@@ -1175,6 +1175,60 @@ test('UA-12 a recovering follow adopts a Connection replacement and keeps the ne
     { type: 'upsert', workspace: { workspaceId: 'extra', path: '/host/extra', title: 'Workspace extra', sessionIds: [] } },
   ])
   assert.deepEqual(stream.accepted, [1, 2], 'both physical generations accept their own baseline')
+})
+
+test('UA-12 a queued item produced by a replaced physical attempt is never admitted as fresh', async () => {
+  let h!: ReturnType<typeof harness>
+  const stream = scriptedWorkspaceStream(
+    () => [
+      { generation: 1, frame: { type: 'baseline', value: { items: [workspaceView('old')] } } },
+      { generation: 1, frame: { type: 'upsert', workspace: workspaceView('stale') } },
+      { generation: 2, frame: { type: 'baseline', value: { items: [workspaceView('fresh')] } } },
+    ],
+    (() => {
+      let calls = 0
+      return (generation: number) => {
+        calls += 1
+        // The replacement lands BETWEEN the two queued items of the old
+        // physical attempt: the second belongs to a Connection that is gone.
+        if (generation === 1 && calls === 2) h.setGeneration('gen-2')
+      }
+    })(),
+    { emitCarrierFailure: false },
+  )
+  h = harness({ workspaceStream: stream.source })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  const iterator = handle[Symbol.asyncIterator]()
+  const frames: WorkspaceFactsFrame[] = []
+  for (let index = 0; index < 3; index += 1) {
+    const next = await iterator.next()
+    assert.equal(next.done, false)
+    frames.push(next.value)
+  }
+  handle.dispose()
+  await iterator.next()
+  assert.deepEqual(frames.map(frame => frame.type), ['baseline', 'invalidated', 'baseline'],
+    'the stale old-attempt upsert is fenced; the fresh B baseline is admitted')
+  assert.equal((handle.attemptedGeneration?.() as { readonly id?: string }).id, 'gen-2',
+    'the late physical attempt identity is the replacement Connection')
+})
+
+test('UA-12 a physical attempt that fails before its baseline retains its attempt identity', async () => {
+  let h!: ReturnType<typeof harness>
+  const stream = scriptedWorkspaceStream(
+    () => [{ generation: 2, frame: { type: 'upsert', workspace: workspaceView('x') } }],
+    () => { h.setGeneration('gen-2') },
+    { emitCarrierFailure: false },
+  )
+  h = harness({ workspaceStream: stream.source })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  const iterator = handle[Symbol.asyncIterator]()
+  const invalidated = await iterator.next()
+  assert.deepEqual(invalidated.value, { type: 'invalidated', reason: 'replaced' })
+  await assert.rejects(async () => { await iterator.next() }, /did not begin with a baseline/u)
+  assert.deepEqual(handle.attemptedGeneration?.(), { id: 'gen-2' },
+    'a failure before baseline still belongs to the attempt Connection, not the opening one')
+  handle.dispose()
 })
 
 test('UA-12 a recovering follow that never resumes after a carrier loss fails truthfully at the bounded deadline', async (t) => {

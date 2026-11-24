@@ -118,7 +118,6 @@ interface ActiveRead {
   workspaceTerminal: boolean
   /** How many Connection generation changes this open observed. A change that
    *  landed BEFORE a terminal failure is still the legal rebind trigger. */
-  workspaceEpoch: number
   /** The attempt identity of the last terminal Workspace failure: only a live
    *  generation different from THIS identity may open one new logical handle. */
   workspaceFailedGeneration: unknown
@@ -804,7 +803,6 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     const facts = options.sessionWorkspaceFacts
     if (panel.workspaceGenerationOff !== undefined || facts?.observeConnectionGeneration === undefined) return
     panel.workspaceGenerationOff = facts.observeConnectionGeneration(() => {
-      panel.workspaceEpoch += 1
       if (!isActive(panel) || !panel.workspaceTerminal) return
       const live = facts.connectionGeneration?.()
       if (live === undefined) return
@@ -843,26 +841,16 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // late completion from the OLD handle must never paint into, or clear, the
     // newer membership.
     const ownsHandle = (): boolean => !panel.disposed && panel.workspaceHandle === handle
-    const openedEpoch = panel.workspaceEpoch
-    /** One terminal failure may rebind exactly once. It either waits for the
-     *  NEXT generation change or, when a change already landed since this
-     *  handle opened, reopens immediately — the failed handle's generation is
-     *  already gone either way. */
+    /** One terminal failure may rebind exactly once. The committed failed
+     *  attempt identity is the SOLE decision input (never the disposed handle):
+     *  only a DEFINED live generation different from it opens a new logical
+     *  handle; an unknown identity never guesses. */
     const rebindAfterTerminal = (): void => {
       if (!isActive(panel) || panel.workspaceHandle !== undefined) return
-      const failedAttempt = handle.attemptedGeneration?.()
       const liveGeneration = options.sessionWorkspaceFacts?.connectionGeneration?.()
-      if (failedAttempt !== undefined) {
-        // The failure belongs to the Connection that owned the real physical
-        // attempt. Only a DEFINED live identity different from that attempt
-        // opens one new logical handle; an unknown live identity never guesses.
-        if (liveGeneration === undefined || Object.is(failedAttempt, liveGeneration)) return
-        startWorkspaceFollow(panel)
-        return
-      }
-      // No real physical attempt could start (the opening was disconnected):
-      // the first DEFINED live generation is the legal recovery trigger.
       if (liveGeneration === undefined) return
+      const failedAttempt = panel.workspaceFailedGeneration
+      if (failedAttempt !== undefined && Object.is(failedAttempt, liveGeneration)) return
       startWorkspaceFollow(panel)
     }
     runOwned('session workspace follow', async () => {
@@ -1135,7 +1123,6 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         workspaceRevision: 0,
         workspaceError: undefined,
         workspaceTerminal: false,
-        workspaceEpoch: 0,
         workspaceFailedGeneration: undefined,
         workspaceGenerationOff: undefined,
         rosterSemantics: '',

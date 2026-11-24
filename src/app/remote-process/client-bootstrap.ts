@@ -1367,7 +1367,6 @@ async function startSurfaceLocalClient(
             const deadlineAt = Date.now() + windowMs
             const generation = domains.connection.generation
             let handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, mode)
-            let openedGeneration = generation.getSnapshot()
             const expiry = setTimeout(() => { handle.dispose() }, windowMs)
             let frames = 0
             let frameSeq = 0
@@ -1428,14 +1427,13 @@ async function startSurfaceLocalClient(
                   // The failure belongs to the generation the handle actually
                   // ADOPTED, not to its opening identity: a replacement already
                   // adopted by this handle cannot be the recovery trigger again.
-                  const attempted = (handle as { attemptedGeneration?(): unknown }).attemptedGeneration?.()
+                  const attempted = handle.attemptedGeneration?.()
                   if (!await waitForNewGeneration(attempted)) {
                     failed = error instanceof Error ? error.message : String(error)
                     break
                   }
                   if (frames >= maxFrames || Date.now() >= deadlineAt) break
                   handle = backend.sessionWorkspaceFacts.followWorkspaces(undefined, 'recovering')
-                  openedGeneration = generation.getSnapshot()
                 }
               }
             } finally {

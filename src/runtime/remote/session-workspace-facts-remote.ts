@@ -1510,14 +1510,16 @@ class RemoteActivityObservation implements ActivityObservation {
     if (this.rows.get(row.sessionId) !== row || row.epoch !== epoch) return false
     // `ids` membership is authorization: an official removal not yet consumed by
     // the caller roster still forbids committing that row's read.
-    if (!this.officialIdsOf(this.sessions.list.getSnapshot()).has(row.sessionId)) return false
+    if (!this.hasOfficialId(this.sessions.list.getSnapshot(), row.sessionId)) return false
     const current = this.generation.getSnapshot()
     return current !== undefined && Object.is(current, generation) && Object.is(current, this.capturedGeneration)
   }
 
-  /** The CURRENT official main corpus ids (never `byId`, which is a catalog). */
-  private officialIdsOf(snapshot: { readonly ids: readonly unknown[] }): ReadonlySet<string> {
-    return new Set(snapshot.ids.map(id => String(id)))
+  /** Allocation-free membership in the CURRENT official main corpus (never
+   *  `byId`, which is a catalog). */
+  private hasOfficialId(snapshot: { readonly ids: readonly unknown[] }, sessionId: string): boolean {
+    for (const id of snapshot.ids) if (String(id) === sessionId) return true
+    return false
   }
 
   /** The accepted row incarnation AND current official membership: the ONE
@@ -1525,7 +1527,7 @@ class RemoteActivityObservation implements ActivityObservation {
   private dispatchable(row: ActivityRow): boolean {
     return !this.disposed
       && this.rows.get(row.sessionId) === row
-      && this.officialIdsOf(this.sessions.list.getSnapshot()).has(row.sessionId)
+      && this.hasOfficialId(this.sessions.list.getSnapshot(), row.sessionId)
   }
 
   private bumpRow(): void {
@@ -1822,6 +1824,15 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
     }
   }
 
+  /** Whether the last physical attempt belongs to the CURRENT official
+   *  Connection. Never promotes a live snapshot into item provenance. */
+  private attemptIsCurrent(): boolean {
+    const current = this.generation.getSnapshot()
+    return current !== undefined
+      && this.attemptedPhysicalGeneration !== undefined
+      && Object.is(current, this.attemptedPhysicalGeneration)
+  }
+
   /** Drain the invalidations recorded by the callbacks. */
   private *drainInvalidations(): Generator<WorkspaceFactsFrame> {
     while (this.invalidations.length > 0) {
@@ -1885,11 +1896,20 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
         if (raced.result.done === true) return
         const item = raced.result.value
         if (this.disposed) return
+        const current = this.generation.getSnapshot()
+        if (current === undefined) continue
         // A physical generation whose own signal was aborted can never be
         // applied: it belongs to a replaced carrier generation.
         if (item.signal.aborted) continue
-        const current = this.generation.getSnapshot()
-        if (current === undefined) continue
+        // A pending/queued item can be produced by an attempt opened on a
+        // Connection that has since been REPLACED (the supervisor only aborts
+        // the attempt later). Its provenance must name the current Connection;
+        // otherwise it is never admitted, and the official supervisor is asked
+        // to retire that attempt (it remains the sole physical retry owner).
+        if (!this.attemptIsCurrent()) {
+          this.logical?.restart()
+          continue
+        }
         if (!Object.is(current, this.capturedGeneration)) {
           this.capturedGeneration = current
           this.noteInvalidation('replaced')
@@ -1901,6 +1921,12 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
           acceptedGeneration = undefined
         }
         yield* this.drainInvalidations()
+        // The invalidation yield above can let a replacement land: recheck the
+        // SAME provenance immediately before acceptance.
+        if (!this.attemptIsCurrent()) {
+          this.logical?.restart()
+          continue
+        }
         const frame = workspaceFrameOf(item.value)
         if (item.generation !== acceptedGeneration) {
           // A new PHYSICAL generation must open with exactly one fresh
