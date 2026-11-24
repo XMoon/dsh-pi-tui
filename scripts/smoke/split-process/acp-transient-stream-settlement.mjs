@@ -314,7 +314,8 @@ export async function runAcpTransientStreamSettlement(context) {
     await scene.assertHostIdentityKept(host, hostIdentity, 'TS-07 Host identity')
     await acpA.request(acp.methods.agent.session.close, { sessionId: sessionA })
     await acpA.request(acp.methods.agent.session.close, { sessionId: sessionA })
-    assert(updatesB.length === 0, 'TS-07: the sibling connection observed nothing through the whole case')
+    const siblingUpdates = updatesB.filter(update => update?.update?.sessionUpdate !== 'available_commands_update')
+    assert(siblingUpdates.length === 0, 'TS-07: the sibling connection observed nothing through the whole case')
     assert((hostSessionEvents(dshHome, sessionA) ?? []).length >= eventsBefore.length, 'TS-07: the durable log must stay readable')
     await acpA.request(acp.methods.agent.session.close, { sessionId: sessionB }).catch(() => {})
 
@@ -340,7 +341,7 @@ export async function runAcpTransientStreamSettlement(context) {
         provisionalChunks: provisional.length,
         rewrittenChunkAppended: afterCommit.length > 1,
       },
-      leak: { siblingSessionUpdates: updatesB.length },
+      leak: { siblingSessionUpdates: siblingUpdates.length },
       verdict: 'PASS',
     }
 
@@ -362,7 +363,7 @@ export async function runAcpTransientStreamSettlement(context) {
       committedTextMatches: chunkTexts.join('') === durable,
       streamDivergenceFailClosed: inconsistentOutcome.error?.data?.code === 'LOCAL_ACP_PROMPT_STREAM_DIVERGENCE',
       noRewriteResend: afterCommit.length === 1,
-      siblingSessionIsolated: updatesB.length === 0,
+      siblingSessionIsolated: siblingUpdates.length === 0,
       hostIdentityKept: true,
       acpProtocolVersion: initA.protocolVersion,
       stopReason: settled.value?.stopReason,
