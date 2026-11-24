@@ -3794,3 +3794,127 @@ test('a stale first pass stops before an unvisited persisted Session and its rep
     await ctx.fiber.dispose()
   }
 })
+
+test('a normal live writer turn stays corpus-independent at 100/1000/10000 checkpoints', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r803-scale-')
+  const source = mutableSource('/repo/r803-scale', 'r803-scale')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: {
+      commitBatch(input: {
+        sessionId: string
+        headerHash: string
+        inheritedCut: number
+        baseNextSeq: number
+        nextSeq: number
+        headerCwd: string | null
+        effectiveCwd: string | null
+        lastEventHash: string | null
+        sourceState: 'persisted' | 'live'
+        uncertainSourcesDelta: number
+        occurrences: readonly unknown[]
+      }): void
+      listSessions(): unknown[]
+      occurrenceCount(): number
+    }
+    writerCounters: { busyMsMax: number; committed: number }
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
+  const realList = internals.index.listSessions.bind(internals.index)
+  let listCalls = 0
+  const percentile = (values: readonly number[], ratio: number): number => {
+    const sorted = [...values].sort((left, right) => left - right)
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1))] ?? 0
+  }
+  const seed = (from: number, to: number): void => {
+    for (let index = from; index < to; index += 1) {
+      internals.index.commitBatch({
+        sessionId: `r803-seed-${String(index)}`,
+        headerHash: `r803-seed-header-${String(index)}`,
+        inheritedCut: 0,
+        baseNextSeq: 0,
+        nextSeq: 1,
+        headerCwd: '/seed',
+        effectiveCwd: null,
+        lastEventHash: null,
+        sourceState: 'persisted',
+        uncertainSourcesDelta: 0,
+        occurrences: [],
+      })
+    }
+  }
+  const measure = async (tier: number, seq: number): Promise<{ writerBusyMsMax: number; searchP95: number; searchP99: number; readP95: number; readP99: number }> => {
+    const text = `r803 scale ${String(tier)}`
+    const messageId = `r803-scale-${String(tier)}`
+    source.events.push({
+      type: 'agent/inbox/spliced',
+      seq,
+      time: 30_000 + seq,
+      data: {
+        target: 'next-turn',
+        start: seq,
+        inserted: [{
+          id: messageId,
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user', rpcId: `rpc-r803-${String(tier)}` },
+        }],
+      },
+    })
+    internals.observeLiveEvent(liveSessionOf(source), source.events[source.events.length - 1])
+    await waitDirectReady(service)
+    const searchLatencies: number[] = []
+    const readLatencies: number[] = []
+    for (let sample = 0; sample < 20; sample += 1) {
+      const searchStarted = performance.now()
+      const search = await service.search({ scope: 'all', query: text, limit: 25 }, new AbortController().signal)
+      searchLatencies.push(performance.now() - searchStarted)
+      assert.equal(search.kind, 'ready', JSON.stringify(search))
+      if (search.kind !== 'ready') throw new Error('expected ready')
+      const item = search.items[0]
+      if (item === undefined) throw new Error('expected one scale hit')
+      const readStarted = performance.now()
+      const chunk = await service.readText({
+        sessionId: item.sessionId,
+        messageId: item.messageId,
+        contentSha256: item.contentSha256,
+        offset: 0,
+        limit: 64,
+      }, new AbortController().signal)
+      readLatencies.push(performance.now() - readStarted)
+      assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
+    }
+    return {
+      writerBusyMsMax: internals.writerCounters.busyMsMax,
+      searchP95: percentile(searchLatencies, 0.95),
+      searchP99: percentile(searchLatencies, 0.99),
+      readP95: percentile(readLatencies, 0.95),
+      readP99: percentile(readLatencies, 0.99),
+    }
+  }
+  try {
+    await waitDirectReady(service)
+    internals.index.listSessions = () => {
+      listCalls += 1
+      return realList()
+    }
+    const results: Record<string, unknown> = {}
+    seed(0, 100)
+    results['100'] = await measure(100, 3)
+    seed(100, 1_000)
+    results['1000'] = await measure(1_000, 4)
+    seed(1_000, 10_000)
+    results['10000'] = await measure(10_000, 5)
+    console.log('R8-03 SCALE', JSON.stringify({ sessions: 10_000, listCalls, occurrenceCount: internals.index.occurrenceCount(), results }))
+    assert.equal(listCalls, 0, 'the completeness path must not materialize checkpoints')
+    assert.equal(internals.index.occurrenceCount(), 5)
+  } finally {
+    internals.index.listSessions = realList
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
