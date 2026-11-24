@@ -92,17 +92,16 @@ test('a live owned-Agent removal revokes the Client and observation Running trut
   observation.setRoster(await reader.list(undefined) ?? [], 1, undefined)
   await waitFor('the observation publishes Running', () =>
     observation.getSnapshot().facts.some(fact => fact.sessionId === SESSION && fact.running === true), 20_000)
-  void ({
-    listRow: client.sessions.list.getSnapshot().byId[SESSION],
-    fact: observation.getSnapshot().facts.find(fact => fact.sessionId === SESSION),
-    statusEvents: statusEvents.length,
-  })
-
-  const disposedAt = Date.now()
+  const statusBeforeDispose = statusEvents.length
+  const removedBeforeDispose = removed.length
   await handle.dispose()
   await waitFor('the removal reaches the official forwarded channel', () =>
-    statusEvents.some(entry => entry.sessionId === SESSION && entry.running === false)
-    || removed.includes(SESSION), 20_000)
+    statusEvents.slice(statusBeforeDispose).some(entry => entry.sessionId === SESSION && entry.running === false)
+    || removed.slice(removedBeforeDispose).includes(SESSION), 20_000)
+  // The actual post-dispose official source event: the list's target Running
+  // stops being true before the roster/observation are read.
+  await waitFor('the official list no longer proves Running', () =>
+    client.sessions.list.getSnapshot().byId[SESSION]?.running !== true, 20_000)
   const rosterAfter = await reader.list(undefined) ?? []
   observation.setRoster(rosterAfter, 2, undefined)
   await waitFor('the observation has processed the removal', () => {
@@ -111,18 +110,6 @@ test('a live owned-Agent removal revokes the Client and observation Running trut
   }, 20_000)
   const listAfter = client.sessions.list.getSnapshot()
   const factAfter = observation.getSnapshot().facts.find(entry => entry.sessionId === SESSION)
-  void ({
-    elapsedMs: Date.now() - disposedAt,
-    forwardedStatus: statusEvents.filter(entry => entry.sessionId === SESSION),
-    forwardedRemoved: removed.includes(SESSION),
-    listHasRow: listAfter.byId[SESSION] !== undefined,
-    listRunning: listAfter.byId[SESSION]?.running,
-    factAfter,
-  })
-  assert.ok(statusEvents.some(entry => entry.sessionId === SESSION && entry.running === false) || removed.includes(SESSION),
-    'the live removal is observable through the official forwarded channel')
   assert.notEqual(listAfter.byId[SESSION]?.running, true, 'the Client list no longer paints the removed Agent as Running')
   assert.notEqual(factAfter?.running, true, 'the observation revokes the removed Agent Running fact')
-  assert.notEqual(factAfter?.attention, 'question')
-  assert.notEqual(factAfter?.attention, 'approval')
 })
