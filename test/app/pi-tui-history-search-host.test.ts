@@ -39,6 +39,7 @@ import {
   type HistorySearchRequest,
   type HistorySearchResponse,
 } from '../../src/runtime/remote/pi-tui-history-search-contract.ts'
+import { sessionHeaderHash } from '../../src/app/host/features/history-search-index.ts'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
 import {
   HISTORY_SEARCH_MAX_PENDING_EVENTS,
@@ -788,6 +789,9 @@ for (;;) {
   if (Date.now() > deadline) throw new Error('history index readiness timeout')
   await new Promise(resolve => setTimeout(resolve, 10))
 }
+// ONE ordinary full verification pass over the now-stable source: this pass
+// makes no official call of its own and must report a zero full phase.
+await service.verifySources()
 service.observeDisposedSession({ id: header.id })
 await Promise.allSettled([...service.sessionRepairFlights.values()].map(entry => entry.promise))
 await service.writeTail
@@ -819,7 +823,15 @@ test('explicit debug diagnostics reach the standard file sink without Session co
   const log = readFileSync(debugLogPath, 'utf8')
   assert.match(log, /history-search\.inventory\.start phase=cold_start directPersistenceListCalls=0 queryListSessionsCalls=0 liveSessionsObserved=0/u)
   assert.match(log, /history-search\.inventory\.end phase=cold_start outcome=ok elapsedMs=\d+(?:\.\d)? persistedRows=1 mergedRows=1 liveSessionsObserved=0 directPersistenceListCalls=1 queryListSessionsCalls=0/u)
-  assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)?/u)
+  // The full cold phase owns exactly its own official calls: ONE open + ONE
+  // final currentness stat for the single cold source, no observation.
+  assert.match(log, /history-search\.bootstrap\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=1 replayCompleted=1 replayElapsedMsTotal=\d+(?:\.\d)? replayElapsedMsMax=\d+(?:\.\d)? directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directSessionObserveCalls=0 prefixProofAttempted=0/u)
+  // An unchanged stable epoch: the periodic pass makes no direct official call.
+  assert.match(log, /history-search\.verify\.end outcome=ready elapsedMs=\d+(?:\.\d)? sessionsVisited=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0 directPersistenceStatCalls=0 directPersistenceOpenCalls=0 directSessionObserveCalls=0 prefixProofAttempted=0/u)
+  // The point scope is separate from every full phase and is reported on its
+  // first completion: one stat + one prefix open, no replay.
+  assert.match(log, /history-search\.point-repairs completed=1 directPersistenceStatCalls=1 directPersistenceOpenCalls=1 directSessionObserveCalls=0 prefixProofAttempted=1 replayAttempted=0 replayCompleted=0 replayElapsedMsTotal=0 replayElapsedMsMax=0/u)
+  assert.equal(log.match(/history-search\.point-repairs/gu)?.length, 1, 'one ended point task must emit exactly one bounded aggregate')
   assert.match(log, /history-search\.writer phase=cold_start writerCommitted=\d+ writerFailed=0/u)
   assert.match(log, /history-search\.disposals seen=1 statCalls=1 statNotFound=0 proofProven=1 proofInsufficient=0 proofRollback=0 proofUnreadable=0 statElapsedMsTotal=\d+(?:\.\d)? verifyElapsedMsTotal=\d+(?:\.\d)?/u)
   assert.equal(log.match(/history-search\.disposals/gu)?.length, 1, 'a single disposal must emit exactly one bounded aggregate')
@@ -890,6 +902,8 @@ function mutableDeps(
     listCalls: () => number
     statCalls: () => number
     statIds: () => readonly string[]
+    openCalls: () => number
+    observeCalls: () => number
   }
 } {
   const sources = [source, ...extras]
@@ -902,6 +916,8 @@ function mutableDeps(
   })
   let listCalls = 0
   let statCalls = 0
+  let openCalls = 0
+  let observeCalls = 0
   const statIds: string[] = []
   const persistence: HistorySearchPersistenceLike = {
     identity: Symbol('mutable-persistence'),
@@ -917,6 +933,7 @@ function mutableDeps(
       return snapshotOf(candidate)
     },
     async open(id) {
+      openCalls += 1
       const candidate = sourceOf(String(id))
       if (candidate === undefined) throw new Error(`mutable persistence: unknown Session ${String(id)}`)
       return {
@@ -932,6 +949,7 @@ function mutableDeps(
   }
   const query: HistorySearchQueryLike = {
     async observeSession(id) {
+      observeCalls += 1
       const candidate = sourceOf(String(id))
       if (candidate === undefined) throw new Error(`mutable query: unknown Session ${String(id)}`)
       return {
@@ -954,7 +972,38 @@ function mutableDeps(
       listCalls: () => listCalls,
       statCalls: () => statCalls,
       statIds: () => [...statIds],
+      openCalls: () => openCalls,
+      observeCalls: () => observeCalls,
     },
+  }
+}
+
+/** The service-lifetime point scope a diagnostics test may inspect. */
+interface PointCountersLike {
+  directPersistenceStatCalls: number
+  directPersistenceOpenCalls: number
+  directSessionObserveCalls: number
+  prefixProofAttempted: number
+  replayAttempted: number
+  replayCompleted: number
+}
+
+/** One comparable view of the point scope (field names are the production ones). */
+function pointCountersOf(counters: PointCountersLike): {
+  stat: number
+  open: number
+  observe: number
+  prefix: number
+  replayAttempted: number
+  replayCompleted: number
+} {
+  return {
+    stat: counters.directPersistenceStatCalls,
+    open: counters.directPersistenceOpenCalls,
+    observe: counters.directSessionObserveCalls,
+    prefix: counters.prefixProofAttempted,
+    replayAttempted: counters.replayAttempted,
+    replayCompleted: counters.replayCompleted,
   }
 }
 
@@ -1157,6 +1206,8 @@ test('a gapped, malformed or tail-truncated official batch is incomplete, never 
   const scenarios: ReadonlyArray<{
     readonly name: string
     readonly mutate: (source: MutableOfficialSource) => void
+    /** A refused replay must not leave a fabricated empty checkpoint behind. */
+    readonly expectNoCheckpoint?: boolean
   }> = [
     {
       name: 'sequence gap',
@@ -1177,6 +1228,14 @@ test('a gapped, malformed or tail-truncated official batch is incomplete, never 
         source.events = [source.events[0]!, { type: 'user/message', seq: 1, time: Number.NaN, data: {} }]
       },
     },
+    {
+      name: 'empty source with an advertised count',
+      mutate: (source) => {
+        source.events = []
+        source.eventCount = 1
+      },
+      expectNoCheckpoint: true,
+    },
   ]
   for (const scenario of scenarios) {
     const life = testLifecycle(t)
@@ -1192,6 +1251,13 @@ test('a gapped, malformed or tail-truncated official batch is incomplete, never 
       if (answer.kind !== 'incomplete') throw new Error('expected incomplete')
       assert.ok(answer.reason === 'source-read-failed' || answer.reason === 'reconciling',
         `${scenario.name}: unexpected reason ${answer.reason}`)
+      if (scenario.expectNoCheckpoint === true) {
+        const checkpoint = (service as unknown as {
+          index: { checkpointOf(id: string): unknown }
+        }).index.checkpointOf(String(source.header.id))
+        assert.equal(checkpoint, undefined,
+          `${scenario.name}: a refused replay must not fabricate an empty checkpoint`)
+      }
     } finally {
       await service.dispose()
       await ctx.fiber.dispose()
@@ -1655,10 +1721,13 @@ test('rebuilding a Session to zero events invalidates the previous cursor', asyn
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-empty-rebuild-')
   const source = mutableSource('/repo/empty-rebuild')
-  const { deps } = mutableDeps(source)
+  const { deps, calls } = mutableDeps(source)
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
   const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  const index = () => (service as unknown as {
+    index: { checkpointOf(id: string): Record<string, unknown> | undefined }
+  }).index
   try {
     await waitDirectReady(service)
     const page = await service.search({
@@ -1678,6 +1747,21 @@ test('rebuilding a Session to zero events invalidates the previous cursor', asyn
     await verify()
     await waitDirectReady(service)
 
+    // The completed empty replay now settles a REAL zero-event checkpoint from
+    // the official Header/cut facts instead of leaving the Session row-less.
+    assert.deepEqual(index().checkpointOf('mutable-session'), {
+      sessionId: 'mutable-session',
+      headerCwd: '/repo/empty-rebuild',
+      inheritedCut: 0,
+      nextSeq: 0,
+      effectiveCwd: '/repo/empty-rebuild',
+      lastEventHash: null,
+      headerHash: sessionHeaderHash(source.header),
+      sourceState: 'persisted',
+      uncertainSources: 0,
+      dirty: false,
+    })
+
     const reused = await service.search({
       scope: 'session',
       sessionId: 'mutable-session',
@@ -1688,7 +1772,144 @@ test('rebuilding a Session to zero events invalidates the previous cursor', asyn
     assert.equal(reused.kind, 'stale', `an empty rebuild must invalidate the old cursor: ${JSON.stringify(reused)}`)
     if (reused.kind !== 'stale') throw new Error('expected stale')
     assert.equal(reused.reason, 'cursor-stale')
+    const gone = await service.search({ scope: 'all', query: 'mutable first', limit: 25 }, new AbortController().signal)
+    assert.equal(gone.kind, 'ready', JSON.stringify(gone))
+    if (gone.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(gone.items, [], 'the rolled-back text must no longer be answerable')
+
+    // The zero-event checkpoint is a settled fact: one unchanged verification
+    // pass must not open/observe/replay this Session again.
+    const openBefore = calls.openCalls()
+    const observeBefore = calls.observeCalls()
+    await verify()
+    assert.equal(calls.openCalls(), openBefore, 'a stable empty checkpoint must not re-open the official source')
+    assert.equal(calls.observeCalls(), observeBefore, 'a stable empty checkpoint must not re-observe a live source')
+    assert.equal(index().checkpointOf('mutable-session')?.nextSeq, 0)
+    assert.equal((await service.search({ scope: 'all', query: '', limit: 1 }, new AbortController().signal)).kind, 'ready')
   } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an empty cold source that changes during its final currentness proof writes no checkpoint and recovers later', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-empty-revision-')
+  const source: MutableOfficialSource = {
+    present: true,
+    header: testHeader('empty-revision', '/repo/empty-revision'),
+    events: [],
+    revision: 1,
+  }
+  const { deps } = mutableDeps(source)
+  const persistence = deps.sessionPersistence()
+  const realStat = persistence.stat
+  let changedDuringProof = false
+  persistence.stat = async (id, options) => {
+    // The official source advances between the completed handle read and the
+    // final same-instance currentness re-check: the REAL production stat seam.
+    if (!changedDuringProof && String(id) === 'empty-revision') {
+      changedDuringProof = true
+      source.revision += 1
+    }
+    return realStat.call(persistence, id, options)
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const index = () => (service as unknown as { index: { checkpointOf(id: string): unknown } }).index
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  try {
+    const settled = await waitDirectSettled(service)
+    assert.equal(changedDuringProof, true, 'the negative control must really change the source at the currentness seam')
+    assert.equal(settled.kind, 'incomplete', JSON.stringify(settled))
+    assert.equal(index().checkpointOf('empty-revision'), undefined,
+      'a stale terminal must never publish an empty checkpoint for a source it did not prove current')
+
+    // The stable next official pass creates the real zero-event checkpoint.
+    await verify()
+    await waitDirectReady(service)
+    assert.deepEqual(index().checkpointOf('empty-revision'), {
+      sessionId: 'empty-revision',
+      headerCwd: '/repo/empty-revision',
+      inheritedCut: 0,
+      nextSeq: 0,
+      effectiveCwd: '/repo/empty-revision',
+      lastEventHash: null,
+      headerHash: sessionHeaderHash(source.header),
+      sourceState: 'persisted',
+      uncertainSources: 0,
+      dirty: false,
+    })
+    const answer = await service.search({ scope: 'all', query: 'empty', limit: 25 }, new AbortController().signal)
+    assert.equal(answer.kind, 'ready', JSON.stringify(answer))
+    if (answer.kind !== 'ready') throw new Error('expected ready')
+    assert.deepEqual(answer.items, [])
+  } finally {
+    persistence.stat = realStat
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an empty terminal write failure keeps the barrier and recovers through the production writer', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-empty-write-failure-')
+  const source: MutableOfficialSource = {
+    present: true,
+    header: testHeader('empty-write-failure', '/repo/empty-write-failure'),
+    events: [],
+    revision: 1,
+  }
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: {
+      checkpointOf(id: string): unknown
+      commitBatch(input: unknown): void
+    }
+    writerCounters: { failed: number }
+    verifySources(): Promise<void>
+  }
+  const realCommit = internals.index.commitBatch
+  let armed = true
+  internals.index.commitBatch = function (input: unknown) {
+    if (armed) {
+      armed = false
+      throw new Error('injected empty terminal write failure')
+    }
+    realCommit.call(this, input)
+  }
+  const verify = () => internals.verifySources()
+  try {
+    const failedBefore = internals.writerCounters.failed
+    const settled = await waitDirectSettled(service)
+    assert.equal(settled.kind, 'incomplete', JSON.stringify(settled))
+    assert.ok(internals.writerCounters.failed > failedBefore,
+      'the empty terminal failure must be classified by the production writer receipt')
+    assert.equal(internals.index.checkpointOf('empty-write-failure'), undefined,
+      'a failed empty commit must not leave a checkpoint behind')
+    const stillIncomplete = await service.search({ scope: 'all', query: 'empty', limit: 25 }, new AbortController().signal)
+    assert.equal(stillIncomplete.kind, 'incomplete', 'an uncommitted empty source must never answer a ready empty list')
+
+    await verify()
+    await waitDirectReady(service)
+    assert.deepEqual(internals.index.checkpointOf('empty-write-failure'), {
+      sessionId: 'empty-write-failure',
+      headerCwd: '/repo/empty-write-failure',
+      inheritedCut: 0,
+      nextSeq: 0,
+      effectiveCwd: '/repo/empty-write-failure',
+      lastEventHash: null,
+      headerHash: sessionHeaderHash(source.header),
+      sourceState: 'persisted',
+      uncertainSources: 0,
+      dirty: false,
+    })
+    const recovered = await service.search({ scope: 'all', query: 'empty', limit: 25 }, new AbortController().signal)
+    assert.equal(recovered.kind, 'ready', JSON.stringify(recovered))
+  } finally {
+    internals.index.commitBatch = realCommit
     await service.dispose()
     await ctx.fiber.dispose()
   }
@@ -1860,6 +2081,10 @@ test('an Owner search and exact readText complete while the periodic persisted l
     const text = 'hsp-blocked-list-still-searchable'
     await wire.host.harness.create(SessionId('history-blocked-list'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
     await prompt(wire, 'history-blocked-list', 'req-blocked-list', text)
+    // ONE unrelated live Session: it exists only so a CONCURRENT point repair
+    // can be admitted inside the held full-pass window.
+    await wire.host.harness.create(SessionId('history-blocked-list-other'), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, 'history-blocked-list-other', 'req-blocked-list-other', 'hsp-blocked-concurrent-other')
     const ready = await waitForSettled(
       wire,
       { scope: 'session', sessionId: 'history-blocked-list', query: 'hsp-blocked-list', limit: 25 },
@@ -1888,9 +2113,13 @@ test('an Owner search and exact readText complete while the periodic persisted l
     const internals = wire.service() as unknown as {
       deps: { sessionPersistence(): HistorySearchPersistenceLike | undefined }
       verifySources(): Promise<void>
+      pointCounters: PointCountersLike
+      sessionRepairFlights: Map<string, { promise: Promise<void> }>
+      scheduleSessionRepair(sessionId: string, kind: 'rebuild' | 'disposal'): void
     }
     const originalPersistence = internals.deps.sessionPersistence
     internals.deps.sessionPersistence = () => blocked
+    let pointAfterConcurrentRepair: ReturnType<typeof pointCountersOf> | undefined
     const pass = internals.verifySources()
     await listEntered
     try {
@@ -1910,11 +2139,41 @@ test('an Owner search and exact readText complete while the periodic persisted l
       assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
       if (chunk.kind !== 'ready') throw new Error('expected ready')
       assert.equal(chunk.chunk, text)
+
+      // A concurrent point repair of an UNRELATED id, admitted while the full
+      // pass is still held inside its persisted listing. Its direct calls must
+      // land in the point scope only, exactly once each.
+      const pointBefore = pointCountersOf(internals.pointCounters)
+      internals.scheduleSessionRepair('history-blocked-list-other', 'rebuild')
+      const pointFlights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      assert.ok(pointFlights.length > 0, 'the concurrent point repair must be registered')
+      await Promise.allSettled(pointFlights)
+      const pointAfter = pointCountersOf(internals.pointCounters)
+      assert.deepEqual({
+        stat: pointAfter.stat - pointBefore.stat,
+        open: pointAfter.open - pointBefore.open,
+        observe: pointAfter.observe - pointBefore.observe,
+        prefix: pointAfter.prefix - pointBefore.prefix,
+        replayAttempted: pointAfter.replayAttempted - pointBefore.replayAttempted,
+        replayCompleted: pointAfter.replayCompleted - pointBefore.replayCompleted,
+      }, {
+        stat: 0,
+        open: 0,
+        observe: 1,
+        prefix: 0,
+        replayAttempted: 1,
+        replayCompleted: 1,
+      }, 'the concurrent point repair must own exactly its own live observation and replay')
+      pointAfterConcurrentRepair = pointAfter
     } finally {
       internals.deps.sessionPersistence = originalPersistence
       releaseList()
       await pass
     }
+    // The full pass's own post-release work never lands in the point scope.
+    assert.deepEqual(pointCountersOf(internals.pointCounters), pointAfterConcurrentRepair,
+      'the full phase must keep its own direct calls out of the point scope')
+    assert.equal((await wire.search({ scope: 'all', query: 'hsp-blocked-concurrent-other', limit: 25 })).kind, 'ready')
   } finally {
     await wire.dispose()
   }
@@ -2086,6 +2345,126 @@ test('a stale official read cannot reset or overwrite a replaced live Session so
     assert.equal(replaced.items.length, 1)
     assert.deepEqual(stale.items, [])
   } finally {
+    query.observeSession = realObserve
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('an invalidated zero-event live candidate commits no empty row and the coalesced repair sees the new event', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-empty-live-stale-')
+  const source: MutableOfficialSource = {
+    present: true,
+    header: testHeader('empty-live-stale', '/repo/empty-live-stale'),
+    events: [],
+    revision: 1,
+    live: true,
+  }
+  const { deps } = mutableDeps(source)
+  const query = deps.sessionQuery()
+  const realObserve = query.observeSession
+  let observeCalls = 0
+  let releaseFirst!: () => void
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+  let firstHeld!: () => void
+  const firstReached = new Promise<void>(resolve => { firstHeld = resolve })
+  let releaseSecond!: () => void
+  const secondGate = new Promise<void>(resolve => { releaseSecond = resolve })
+  let secondHeld!: () => void
+  const secondReached = new Promise<void>(resolve => { secondHeld = resolve })
+  // The FIRST observation belongs to the bootstrap's cold live replay and is
+  // read-then-held, so its release returns the exact zero-event snapshot. The
+  // SECOND belongs to the coalesced repair and holds the intermediate state.
+  query.observeSession = async (id, options) => {
+    observeCalls += 1
+    const observation = await realObserve.call(query, id, options)
+    if (observeCalls === 1) {
+      firstHeld()
+      await firstGate
+    } else if (observeCalls === 2) {
+      secondHeld()
+      await secondGate
+    }
+    return observation
+  }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): unknown; occurrenceCount(): number }
+    pending: Map<string, unknown>
+    reconcilePending: Set<string>
+  }
+  try {
+    await firstReached
+    assert.equal(internals.index.checkpointOf('empty-live-stale'), undefined)
+
+    // The official source accepts its FIRST event while the zero-event
+    // observation is still held: the candidate must be invalidated in the same
+    // synchronous listener stack.
+    const accepted = {
+      type: 'agent/inbox/spliced',
+      seq: 0,
+      time: 40_000,
+      data: {
+        target: 'next-turn',
+        start: 0,
+        inserted: [{
+          id: 'empty-live-stale-first',
+          role: 'user',
+          content: [{ type: 'text', text: 'hsp empty live first event' }],
+          source: { kind: 'user', rpcId: 'rpc-empty-live-stale' },
+        }],
+      },
+    }
+    source.events.push(accepted)
+    source.revision += 1
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), accepted)
+    assert.equal(internals.pending.has('empty-live-stale'), true)
+
+    releaseFirst()
+    await secondReached
+    // The stale candidate settled NOTHING: no empty row, no released accepted
+    // coverage, and the round keeps the Session outstanding.
+    assert.equal(internals.index.checkpointOf('empty-live-stale'), undefined,
+      'an invalidated zero-event candidate must never publish an empty checkpoint')
+    assert.equal(internals.index.occurrenceCount(), 0)
+    assert.equal(internals.reconcilePending.has('empty-live-stale'), true)
+    // The first pass is still the owner, so the truthful intermediate answer is
+    // `loading`/`incomplete` — never a ready epoch built from the stale snapshot.
+    const intermediate = await service.search({ scope: 'all', query: 'hsp empty live first', limit: 25 }, new AbortController().signal)
+    assert.ok(intermediate.kind === 'loading' || intermediate.kind === 'incomplete', JSON.stringify(intermediate))
+
+    releaseSecond()
+    await waitDirectReady(service)
+    const checkpoint = internals.index.checkpointOf('empty-live-stale') as {
+      nextSeq: number
+      lastEventHash: string | null
+      sourceState: string
+      dirty: boolean
+      inheritedCut: number
+      headerCwd: string | null
+      effectiveCwd: string | null
+      uncertainSources: number
+    }
+    assert.equal(checkpoint.nextSeq, 1, 'the repair must replay the CURRENT official source, not the stale snapshot')
+    assert.equal(checkpoint.sourceState, 'live')
+    assert.equal(checkpoint.dirty, false)
+    assert.equal(checkpoint.inheritedCut, 0)
+    assert.equal(checkpoint.headerCwd, '/repo/empty-live-stale')
+    assert.equal(checkpoint.effectiveCwd, '/repo/empty-live-stale')
+    assert.equal(checkpoint.uncertainSources, 0)
+    assert.notEqual(checkpoint.lastEventHash, null)
+    assert.equal(internals.pending.size, 0)
+    const hit = await service.search({ scope: 'all', query: 'hsp empty live first', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+    assert.equal(hit.items[0]?.sessionId, 'empty-live-stale')
+  } finally {
+    releaseFirst()
+    releaseSecond()
     query.observeSession = realObserve
     await service.dispose()
     await ctx.fiber.dispose()
@@ -2276,6 +2655,7 @@ test('a dirty rebuild that becomes cold replays the complete durable source', as
   const internals = service as unknown as {
     index: { occurrenceCount(): number }
     observeDisposedSession(session: unknown): void
+    pointCounters: PointCountersLike
   }
   const query = deps.sessionQuery()
   assert.ok(query !== undefined)
@@ -2343,6 +2723,18 @@ test('a dirty rebuild that becomes cold replays the complete durable source', as
     assert.equal(three.items.length, 1)
     assert.equal(four.items.length, 1)
     assert.equal(internals.index.occurrenceCount(), 5, 'the rebuilt history must include every accepted durable message')
+    // The point scope owns exactly the repair chain's own official calls: the
+    // stale LIVE observation, then the coalesced disposal's cold rebuild and the
+    // follow-up rebuild, each with its snapshot stat, replay open and final
+    // currentness stat.
+    assert.deepEqual(pointCountersOf(internals.pointCounters), {
+      stat: 4,
+      open: 2,
+      observe: 1,
+      prefix: 0,
+      replayAttempted: 3,
+      replayCompleted: 2,
+    }, 'the cold point repair must attribute every direct call to the point scope')
   } finally {
     query.observeSession = realObserve
     await service.dispose()
@@ -3291,7 +3683,10 @@ test('a cold dirty repair completes from the rc.5 no-eventCount source shape', a
   const { deps } = mutableDeps(source)
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
-  const internals = service as unknown as { index: { occurrenceCount(): number } }
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number }
+    pointCounters: PointCountersLike
+  }
   const persistence = deps.sessionPersistence()
   const gap = {
     type: 'agent/inbox/spliced',
@@ -3338,6 +3733,18 @@ test('a cold dirty repair completes from the rc.5 no-eventCount source shape', a
     if (five.kind !== 'ready') throw new Error('expected ready')
     assert.equal(five.items.length, 1)
     assert.equal(internals.index.occurrenceCount(), 5)
+    // No advertised count: the cold point repair proves the durable prefix and
+    // then replays, so the point scope owns ONE stat and TWO opens (proof + read).
+    // The point scope owns the whole cold repair: the snapshot stat, the prefix
+    // proof open, the replay open and the final same-instance currentness stat.
+    assert.deepEqual(pointCountersOf(internals.pointCounters), {
+      stat: 2,
+      open: 2,
+      observe: 0,
+      prefix: 1,
+      replayAttempted: 1,
+      replayCompleted: 1,
+    }, 'the no-eventCount cold repair must attribute the prefix proof to the point scope')
   } finally {
     releaseList()
     await service.dispose()
@@ -3833,7 +4240,7 @@ test('a stale first pass continues the full traversal and repairs the stale iden
   }
 })
 
-test('a normal live writer turn stays corpus-independent at 100/1000/10000 checkpoints', async (t) => {
+test('a normal live writer turn does not materialize checkpoints at 100/1000/10000 rows', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r803-scale-')
   const source = mutableSource('/repo/r803-scale', 'r803-scale')
@@ -3948,7 +4355,7 @@ test('a normal live writer turn stays corpus-independent at 100/1000/10000 check
     seed(1_000, 10_000)
     results['10000'] = await measure(10_000, 5)
     console.log('R8-03 SCALE', JSON.stringify({ sessions: 10_000, listCalls, occurrenceCount: internals.index.occurrenceCount(), results }))
-    assert.equal(listCalls, 0, 'the completeness path must not materialize checkpoints')
+    assert.equal(listCalls, 0, 'the completeness path must not materialize checkpoint rows in JavaScript')
     assert.equal(internals.index.occurrenceCount(), 5)
   } finally {
     internals.index.listSessions = realList
@@ -4580,6 +4987,7 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
       reconcilePending: Set<string>
       state: { kind: string }
       coverage: string
+      pointCounters: PointCountersLike
     }
     const service2 = ((service2Proxy as unknown as Record<symbol, unknown>)[symbols.original] ?? service2Proxy) as typeof service2Proxy
     const bufferedStarted = Date.now()
@@ -4646,6 +5054,15 @@ test('a real retained-index startup replay owns a pre-reset ordinary backlog wit
     assert.equal(first.kind, 'ready', JSON.stringify(first))
     if (first.kind !== 'ready') throw new Error('expected ready')
     assert.equal(first.items.length, 1)
+    // The pre-reset backlog is a LIVE point replay: it observes the official
+    // live source and completes a replay without any persistence read.
+    const point = pointCountersOf(service2.pointCounters)
+    assert.ok(point.observe >= 1, 'the point live replay must observe the official Session')
+    assert.ok(point.replayAttempted >= 1, 'the point live replay must attempt a real replay')
+    assert.ok(point.replayCompleted >= 1, 'the point replay terminal must be reported as completed')
+    assert.equal(point.stat, 0, 'a live point replay performs no persistence stat')
+    assert.equal(point.open, 0, 'a live point replay performs no persistence open')
+    assert.equal(point.prefix, 0, 'a live point replay performs no durable-prefix proof')
   } finally {
     releaseList()
     releasePoint()
@@ -4891,5 +5308,210 @@ test('unproven coverage never resets disposed-live accepted rows against a short
     query.observeSession = realObserve
     await service.dispose()
     await ctx.fiber.dispose()
+  }
+})
+
+test('a materialized empty cold Session and a real empty live Session settle a checkpoint and take the first accepted event', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'history-search-pr25-empty-settle', {
+    pluginManagerProfile: true,
+    withoutHostRuntime: true,
+  })
+  let runtime: { dispose(): Promise<void> } | undefined
+  let m3: Awaited<ReturnType<typeof createRemoteHostRuntime>> | undefined
+  const officialPersistence = host.ctx.sessionPersistence
+  const persistence = host.ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+  const query = host.ctx.sessionQuery as unknown as HistorySearchQueryLike
+  const coldId = 'history-pr25-cold-empty'
+  const liveId = 'history-pr25-live-empty'
+  const trackedIds = [coldId, liveId] as const
+  // Test-owned timing seams: every wrapper calls the ORIGINAL method on the
+  // original receiver and returns its value unchanged.
+  const statIds: string[] = []
+  const openIds: string[] = []
+  const observeIds: string[] = []
+  const realStat = persistence.stat
+  const realOpen = persistence.open
+  const realObserve = query.observeSession
+  try {
+    // 1. A REAL materialized header-only cold Session: the official write handle
+    //    creates it, `flush()` is the durability barrier that materializes it.
+    //    No append, no Agent seed, no hand-written JSONL.
+    const writer = await officialPersistence.create(testHeader(coldId, host.anchorDir))
+    try {
+      await writer.flush()
+    } finally {
+      await writer.close()
+    }
+    const coldSnapshot = await officialPersistence.stat(SessionId(coldId))
+    assert.ok(coldSnapshot !== undefined, 'the flushed header-only Session must be officially statable')
+    assert.notEqual(coldSnapshot.location, undefined, 'the materialized header-only Session must have a real location')
+    const coldRead = await officialPersistence.open(SessionId(coldId), 'read')
+    let coldHeader: unknown
+    try {
+      coldHeader = coldRead.header
+      assert.equal(coldRead.header.cwd, host.anchorDir)
+      assert.equal(Number(coldRead.inheritedEventCount), 0)
+      assert.deepEqual((await coldRead.read(0, 1)).events, [], 'a materialized empty Session has no official events')
+    } finally {
+      await coldRead.close()
+    }
+
+    // 2. A REAL registered zero-event live Session (official SessionStore, no
+    //    Agent seed and therefore no persistence writer).
+    const liveSession = host.ctx.sessions.create(SessionId(liveId), { meta: { cwd: host.anchorDir } })
+    assert.equal(host.ctx.sessions.get(SessionId(liveId)), liveSession, 'the live registry must hold this exact object')
+    const liveObservation = await host.ctx.sessionQuery.observeSession(SessionId(liveId), { projectionMode: 'none' })
+    let liveHeader: unknown
+    try {
+      liveHeader = liveObservation.header
+      assert.deepEqual([...liveObservation.events], [], 'the live Session really has no events')
+      assert.equal(Number(liveObservation.inheritedEventCount), 0)
+    } finally {
+      liveObservation[Symbol.dispose]()
+    }
+
+    // Record the real official calls from here on; the setup reads above are
+    // deliberately outside every measurement window.
+    persistence.stat = async (id, options) => {
+      statIds.push(String(id))
+      return realStat.call(persistence, id, options)
+    }
+    persistence.open = async (id, access, options) => {
+      openIds.push(String(id))
+      return realOpen.call(persistence, id, access, options)
+    }
+    query.observeSession = async (id, options) => {
+      observeIds.push(String(id))
+      return realObserve.call(query, id, options)
+    }
+    const scopedCalls = (ids: readonly string[]): { stat: number; open: number; observe: number } => ({
+      stat: statIds.filter(id => ids.includes(id)).length,
+      open: openIds.filter(id => ids.includes(id)).length,
+      observe: observeIds.filter(id => ids.includes(id)).length,
+    })
+
+    runtime = await host.ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
+    m3 = await createRemoteHostRuntime(host.ctx)
+    const peer = host.ctx.connection.browserPeer
+    const waitGateway = async (request: HistorySearchRequest): Promise<HistorySearchResponse> => {
+      const started = Date.now()
+      for (;;) {
+        const answer = await realSearch(host, peer, request)
+        if (answer.kind === 'ready' || answer.kind === 'unavailable') return answer
+        if (Date.now() - started > 15_000) throw new Error(`history readiness timeout (${answer.kind})`)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+    }
+    const readText = async (request: HistoryReadTextRequest): Promise<HistoryReadTextResponse> => (
+      parseHistoryReadTextResponse(await host.ctx.typertGateway.invoke({
+        namespace: PI_TUI_HISTORY_SEARCH_NAMESPACE,
+        method: 'readText',
+        args: { request },
+        peer,
+        signal: new AbortController().signal,
+      }))
+    )
+    const ready = await waitGateway({ scope: 'all', query: '', limit: 1 })
+    assert.equal(ready.kind, 'ready', JSON.stringify(ready))
+
+    const serviceProxy = host.ctx.reflect.get(PI_TUI_HISTORY_SEARCH_NAMESPACE) as unknown as {
+      index: {
+        checkpointOf(id: string): unknown
+        occurrenceCount(): number
+        revision: number
+      }
+      verifySources(): Promise<void>
+    }
+    const service = ((serviceProxy as unknown as Record<symbol, unknown>)[symbols.original] ?? serviceProxy) as typeof serviceProxy
+    const coldRow = service.index.checkpointOf(coldId)
+    assert.deepEqual(coldRow, {
+      sessionId: coldId,
+      headerCwd: host.anchorDir,
+      inheritedCut: 0,
+      nextSeq: 0,
+      effectiveCwd: host.anchorDir,
+      lastEventHash: null,
+      headerHash: sessionHeaderHash(coldHeader),
+      sourceState: 'persisted',
+      uncertainSources: 0,
+      dirty: false,
+    }, 'the materialized empty cold source must settle a real zero-event checkpoint')
+    assert.deepEqual(service.index.checkpointOf(liveId), {
+      sessionId: liveId,
+      headerCwd: host.anchorDir,
+      inheritedCut: 0,
+      nextSeq: 0,
+      effectiveCwd: host.anchorDir,
+      lastEventHash: null,
+      headerHash: sessionHeaderHash(liveHeader),
+      sourceState: 'live',
+      uncertainSources: 0,
+      dirty: false,
+    }, 'the real empty live source must settle a live zero-event checkpoint')
+    assert.equal(service.index.occurrenceCount(), 0, 'an empty source must create no accepted occurrence')
+    const revisionBeforePass = service.index.revision
+
+    // 3. An explicit production verification pass over the unchanged sources:
+    //    the settled zero-event checkpoints make the empty tail a no-read fact.
+    const beforePass = scopedCalls(trackedIds)
+    await service.verifySources()
+    assert.deepEqual(scopedCalls(trackedIds), beforePass,
+      'a stable zero-event checkpoint must not trigger another official stat/open/observe')
+    assert.equal(service.index.revision, revisionBeforePass, 'a no-read pass must not rewrite content')
+    assert.deepEqual(service.index.checkpointOf(coldId), coldRow)
+    assert.equal((await waitGateway({ scope: 'all', query: '', limit: 1 })).kind, 'ready')
+
+    // 4. The FIRST real accepted event of the zero-event live Session enters the
+    //    ordinary bounded drain (seq 0 at the settled checkpoint), not a repair.
+    const text = 'hsp-pr25-empty-live-first-event'
+    const message = createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'user', rpcId: 'rpc-pr25-empty-live-first' as never },
+    })
+    const beforeAppend = scopedCalls(trackedIds)
+    liveSession.append([['agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [message] }]])
+    const drainStarted = Date.now()
+    for (;;) {
+      const checkpoint = service.index.checkpointOf(liveId) as { nextSeq: number; dirty: boolean } | undefined
+      if (checkpoint?.nextSeq === 1 && checkpoint.dirty === false) break
+      if (Date.now() - drainStarted > 10_000) {
+        throw new Error(`the first accepted event did not settle: ${JSON.stringify({
+          checkpoint,
+          pending: scopedCalls(trackedIds),
+          state: (service as unknown as { state: unknown }).state,
+        })}`)
+      }
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.deepEqual(scopedCalls(trackedIds), beforeAppend,
+      'the first accepted event must drain from the settled checkpoint, not from a missing-checkpoint repair')
+
+    const hit = await waitGateway({ scope: 'session', sessionId: liveId, query: text, limit: 25 })
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+    const item = hit.items[0]!
+    assert.equal(item.sessionId, liveId)
+    assert.equal(item.preview, text)
+    assert.equal(item.contentSha256, sha256(text))
+    const chunk = await readText({
+      sessionId: item.sessionId,
+      messageId: item.messageId,
+      contentSha256: item.contentSha256,
+      offset: 0,
+      limit: 4096,
+    })
+    assert.equal(chunk.kind, 'ready', JSON.stringify(chunk))
+    if (chunk.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(chunk.chunk, text)
+    assert.equal(chunk.contentLength, text.length)
+  } finally {
+    persistence.stat = realStat
+    persistence.open = realOpen
+    query.observeSession = realObserve
+    await runtime?.dispose()
+    await m3?.dispose()
+    await host.dispose()
   }
 })

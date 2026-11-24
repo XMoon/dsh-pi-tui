@@ -269,6 +269,14 @@ interface HistorySearchPhaseCounters {
   replayCompleted: number
   replayElapsedMsTotal: number
   replayElapsedMsMax: number
+  /** Direct official persistence `stat` calls actually started in this scope. */
+  directPersistenceStatCalls: number
+  /** Direct official persistence `open` calls actually started in this scope. */
+  directPersistenceOpenCalls: number
+  /** Direct official `sessionQuery.observeSession` calls actually started in this scope. */
+  directSessionObserveCalls: number
+  /** Entries into `proveDurablePrefix` (a possible official `open`) in this scope. */
+  prefixProofAttempted: number
 }
 
 /** O(1) disposal-verification counters; no Session id, content or path is retained. */
@@ -521,6 +529,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     statElapsedMsTotal: 0,
     verifyElapsedMsTotal: 0,
   }
+  /**
+   * Service-lifetime aggregate of the point repairs' own official calls. It is
+   * a diagnostic scope, not a second phase: concurrent point tasks share it and
+   * it never proves any business fact.
+   */
+  private readonly pointCounters: HistorySearchPhaseCounters = this.emptyPhaseCounters()
+  /** Ended point repair tasks (success, failure or cancel); diagnostics only. */
+  private pointRepairsCompleted = 0
 
   constructor(ctx: Context, deps: PiTuiHistorySearchHostDeps) {
     super(ctx, PI_TUI_HISTORY_SEARCH_NAMESPACE)
@@ -685,6 +701,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       const index = this.index
       this.index = undefined
       index?.close()
+      // Every point flight has joined above; the periodic 1/128 cadence does not
+      // necessarily land on the last ended task, so emit the final aggregate
+      // once unless that exact count was already the emitted one.
+      if (this.pointRepairsCompleted > 0 && this.pointRepairsCompleted !== 1 && this.pointRepairsCompleted % 128 !== 0) {
+        this.logPointRepairs()
+      }
       this.diag.dispose()
     })()
     return this.disposal
@@ -1022,8 +1044,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     persistence: HistorySearchPersistenceLike,
     sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
+    counters: HistorySearchPhaseCounters,
   ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
+    counters.directPersistenceStatCalls += 1
     const snapshot = await persistence.stat(sessionId, { signal })
     signal.throwIfAborted()
     if (snapshot === undefined) return 'stale'
@@ -1040,7 +1064,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // unreadable source keeps the rows/incomplete, while a proven prefix
         // makes the full replay safe (that replay re-reads the complete source
         // and same-instance revision-proves the result).
-        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence, counters)
         if (proof !== 'proven') return 'stale'
       }
     }
@@ -1056,7 +1080,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       persistence,
       sessions,
       query,
-      this.emptyPhaseCounters(),
+      counters,
       { rebuild: true },
     )
   }
@@ -1079,20 +1103,24 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
       const live = sessions.get(sessionId)
       if (live !== undefined) {
-        await this.rebuildLiveSession(sessionId, persistence, sessions, query)
+        await this.rebuildLiveSession(sessionId, persistence, sessions, query, this.pointCounters)
         return
       }
       // A rebuild obligation is NOT a disposal prefix proof: read and replay
       // the complete official durable source, including accepted events beyond
       // the old checkpoint. A prefix proof would clear `dirty` while omitting
       // exactly those events.
-      await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
+      await this.rebuildFromPersistence(sessionId, persistence, sessions, query, this.pointCounters)
     } catch (error) {
       if (this.lifecycle.signal.aborted || this.disposed) return
       this.sourceFaulted = true
       this.markReconcileNeeded('source-read-failed')
       await this.markSessionDirty(sessionId)
       throw error
+    } finally {
+      // EVERY ended point task is counted (success, failure or cancel); the
+      // task outcome stays with the existing error owner.
+      this.recordEndedPointRepair()
     }
   }
 
@@ -1301,6 +1329,58 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.droppedAccepted.delete(sessionId)
   }
 
+  /**
+   * Settle ONE exact Session whose CURRENT authoritative replay just completed
+   * and whose witness the serial writer accepted.
+   *
+   * The source-specific caller owns every proof: the replay outcome, the
+   * same-instance currentness (cold) or exact live object (live) and the
+   * terminal fence. This helper only performs the terminal work those two
+   * callers share — complete the checkpoint (including a genuinely empty
+   * official source) and settle the held/dropped/memo/round obligations.
+   *
+   * It never decides that a source is empty on its own, never performs official
+   * I/O, never captures a second witness and must only be invoked from a
+   * `commitWitness` callback of `replayOfficialSession`/`rebuildLiveSession`.
+   */
+  private settleAuthoritativeReplay(
+    witness: HistoryCandidateWitness,
+    source: {
+      readonly header: HistorySearchSessionHeaderLike
+      readonly inheritedEventCount: number
+    } & (
+      | { readonly sourceState: 'live' }
+      | { readonly sourceState: 'persisted'; readonly record: OfficialSession }
+    ),
+  ): void {
+    const sessionId = witness.sessionId
+    if (witness.expected === undefined) {
+      // The completed replay committed no batch, so this official source really
+      // ends at seq 0 and no derived row exists yet. A nonempty successful
+      // replay always advances `witness.expected`, so this branch cannot erase
+      // a progress marker, and an EXISTING checkpoint (including an already
+      // written empty row) keeps its own hash/tail untouched.
+      const headerCwd = normalizeHistoryCwd(source.header.cwd)
+      this.writeBatch({
+        sessionId,
+        headerHash: sessionHeaderHash(source.header),
+        inheritedEventCount: source.inheritedEventCount,
+        headerCwd,
+        baseNextSeq: 0,
+        effectiveCwd: headerCwd,
+        sourceState: source.sourceState,
+        events: [],
+      }, witness)
+    }
+    this.settleHeldBatch(sessionId)
+    this.settleDroppedCoverage(sessionId)
+    if (source.sourceState === 'persisted') {
+      this.rememberVerifiedRevision(sessionId, source.record, witness.persistence)
+    }
+    this.reconcilePending.delete(sessionId)
+    this.settleRoundSession(sessionId)
+  }
+
   /** Re-add the ordered remainder without losing the exact byte/event counters. */
   private restorePendingSession(
     sessionId: string,
@@ -1462,6 +1542,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       replayCompleted: 0,
       replayElapsedMsTotal: 0,
       replayElapsedMsMax: 0,
+      directPersistenceStatCalls: 0,
+      directPersistenceOpenCalls: 0,
+      directSessionObserveCalls: 0,
+      prefixProofAttempted: 0,
     }
   }
 
@@ -1571,7 +1655,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
       counters.sessionsVisited += 1
       const outcome = await this.withFullSessionOwnership(sessionId, () =>
-        this.rebuildLiveSession(sessionId, persistence, sessions, query))
+        this.rebuildLiveSession(sessionId, persistence, sessions, query, counters))
       if (outcome === 'failed') return false
       if (outcome === 'complete') this.settleRoundSession(sessionId)
     }
@@ -1710,25 +1794,37 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         }
       }
       let outcome: ReplayOutcome
+      // The actual official read's own immutable Header/cut facts, captured
+      // BEFORE the observation/handle is disposed. They name the terminal
+      // metadata of an empty source; the roster record never substitutes them.
+      let terminalHeader: HistorySearchSessionHeaderLike
+      let terminalInheritedCount: number
       if (record.live) {
+        counters.directSessionObserveCalls += 1
         const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
         try {
-          const inherited = Number(observation.inheritedEventCount)
+          terminalHeader = observation.header
+          terminalInheritedCount = Number(observation.inheritedEventCount)
           const events = eventsOf(observation.events, sessionId)
-          outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, false)
+          outcome = await this.replayEventList(sessionId, terminalHeader, terminalInheritedCount, events, witness, false)
         } finally {
           observation[Symbol.dispose]()
         }
       } else {
+        counters.directPersistenceOpenCalls += 1
         const handle = await persistence.open(sessionId, 'read', { signal })
         try {
+          terminalHeader = handle.header
+          terminalInheritedCount = Number(handle.inheritedEventCount)
           outcome = await this.replayHandle(sessionId, handle, witness, record.eventCount)
         } finally {
           await handle.close()
         }
         // The same-instance revision must still name the SAME source after the
         // read; a missing/changed token keeps this round incomplete.
-        if (outcome === 'complete') outcome = await this.proveCurrentSource(sessionId, record, persistence)
+        if (outcome === 'complete') {
+          outcome = await this.proveCurrentSource(sessionId, record, persistence, counters)
+        }
       }
       if (outcome === 'complete') {
         // Terminal success is a candidate-fenced short commit: the held batch,
@@ -1736,12 +1832,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // only while THIS replay's expected checkpoint and live identity still
         // hold. A superseding same-ID candidate makes this stale and must never
         // clear the newer candidate's obligation.
+        const replayFacts = record.live
+          ? { header: terminalHeader, inheritedEventCount: terminalInheritedCount, sourceState: 'live' as const }
+          : { header: terminalHeader, inheritedEventCount: terminalInheritedCount, sourceState: 'persisted' as const, record }
         const terminal = await this.commitWitness(witness, () => {
-          this.settleHeldBatch(sessionId)
-          this.settleDroppedCoverage(sessionId)
-          this.rememberVerifiedRevision(sessionId, record, persistence)
-          this.reconcilePending.delete(sessionId)
-          this.settleRoundSession(sessionId)
+          this.settleAuthoritativeReplay(witness, replayFacts)
         })
         if (terminal === 'committed') {
           counters.replayCompleted += 1
@@ -1777,8 +1872,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessionId: string,
     record: OfficialSession,
     persistence: HistorySearchPersistenceLike,
+    counters: HistorySearchPhaseCounters,
   ): Promise<ReplayOutcome> {
     if (record.revision === undefined) return 'stale'
+    counters.directPersistenceStatCalls += 1
     const snapshot = await persistence.stat(sessionId, { signal: this.lifecycle.signal })
     this.lifecycle.signal.throwIfAborted()
     if (snapshot === undefined || snapshot.revision === undefined) return 'stale'
@@ -1945,8 +2042,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     persistence: HistorySearchPersistenceLike,
     sessions: HistorySearchSessionsLike,
     query: HistorySearchQueryLike,
+    counters: HistorySearchPhaseCounters,
   ): Promise<ReplayOutcome> {
     const signal = this.lifecycle.signal
+    counters.replayAttempted += 1
+    const replayStartedAt = performance.now()
     this.reconcilePending.add(sessionId)
     this.markReconcileNeeded('reconciling')
     // An ordinary pending batch is a currentness veto while it has no owner.
@@ -1957,6 +2057,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     if (this.pending.has(sessionId)) this.heldPending.add(sessionId)
     const witness = this.createWitness(sessionId, persistence, sessions, this.index?.checkpointOf(sessionId))
     try {
+      counters.directSessionObserveCalls += 1
       const observation = await query.observeSession(sessionId, { projectionMode: 'none', signal })
       try {
         const inherited = Number(observation.inheritedEventCount)
@@ -1974,11 +2075,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
           return outcome
         }
         const terminal = await this.commitWitness(witness, () => {
-          this.settleHeldBatch(sessionId)
-          this.settleDroppedCoverage(sessionId)
-          this.reconcilePending.delete(sessionId)
-          this.settleRoundSession(sessionId)
+          this.settleAuthoritativeReplay(witness, {
+            header: observation.header,
+            inheritedEventCount: inherited,
+            sourceState: 'live',
+          })
         })
+        if (terminal === 'committed') counters.replayCompleted += 1
         if (terminal === 'stale') this.scheduleSessionRepair(sessionId, 'rebuild')
         return terminal === 'committed' ? 'complete' : terminal
       } finally {
@@ -1986,6 +2089,9 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
     } finally {
       this.releaseWitness(witness)
+      const elapsed = elapsedMilliseconds(replayStartedAt)
+      counters.replayElapsedMsTotal += elapsed
+      counters.replayElapsedMsMax = Math.max(counters.replayElapsedMsMax, elapsed)
     }
   }
 
@@ -2171,7 +2277,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // source proves the claimed prefix. A short source is append lag, not a
       // rollback; truncating it into `ready` would silently drop accepted rows.
       this.markRoundInvalidating()
-      const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+      const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence, counters)
       signal.throwIfAborted()
       if (proof === 'insufficient' || proof === 'unreadable') {
         this.reconcilePending.add(sessionId)
@@ -2232,7 +2338,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // the live source, or fully replay the persisted source. The shared
       // watermark stays until the committed checkpoint passes it.
       this.markRoundInvalidating()
-      if (record.live) return this.rebuildLiveSession(sessionId, persistence, sessions, query)
+      if (record.live) return this.rebuildLiveSession(sessionId, persistence, sessions, query, counters)
       return this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
     }
     if (!record.live && record.eventCount !== undefined && record.eventCount < checkpoint.nextSeq) {
@@ -2427,10 +2533,13 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     sessionId: string,
     checkpoint: HistorySessionCheckpointRow,
     persistence: HistorySearchPersistenceLike,
+    counters: HistorySearchPhaseCounters,
   ): Promise<'proven' | 'insufficient' | 'rollback' | 'unreadable'> {
     const signal = this.lifecycle.signal
+    counters.prefixProofAttempted += 1
     let handle: HistorySearchReadHandleLike
     try {
+      counters.directPersistenceOpenCalls += 1
       handle = await persistence.open(sessionId, 'read', { signal })
     } catch (error) {
       if (this.disposed || this.lifecycle.signal.aborted) throw error
@@ -2481,13 +2590,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // or uncertain checkpoint has accepted events beyond that prefix, so a
         // disposal/repair must replay the complete official source instead of
         // settling `dirty=false` and publishing `ready` with missing history.
-        await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
+        await this.rebuildFromPersistence(sessionId, persistence, sessions, query, this.pointCounters)
         return
       }
       const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)
       try {
         const signal = this.lifecycle.signal
         counters.statCalls += 1
+        this.pointCounters.directPersistenceStatCalls += 1
         const statStartedAt = performance.now()
         let snapshot: HistorySearchPersistenceSnapshotLike | undefined
         try {
@@ -2515,7 +2625,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // rc.5 JSONL `stat()` does not always provide eventCount, so an absent
         // count is NOT proof that the live rows are durable. Prove the exact
         // prefix this checkpoint claims before it may become `persisted`.
-        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence)
+        const proof = await this.proveDurablePrefix(sessionId, checkpoint, persistence, this.pointCounters)
         if (proof === 'proven') counters.proofProven += 1
         else if (proof === 'insufficient') counters.proofInsufficient += 1
         else if (proof === 'rollback') counters.proofRollback += 1
@@ -2597,6 +2707,37 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       outcome,
       elapsedMs: elapsedMilliseconds(startedAt),
       sessionsVisited: counters.sessionsVisited,
+      replayAttempted: counters.replayAttempted,
+      replayCompleted: counters.replayCompleted,
+      replayElapsedMsTotal: roundMilliseconds(counters.replayElapsedMsTotal),
+      replayElapsedMsMax: roundMilliseconds(counters.replayElapsedMsMax),
+      directPersistenceStatCalls: counters.directPersistenceStatCalls,
+      directPersistenceOpenCalls: counters.directPersistenceOpenCalls,
+      directSessionObserveCalls: counters.directSessionObserveCalls,
+      prefixProofAttempted: counters.prefixProofAttempted,
+    })
+  }
+
+  /**
+   * Count ONE ended point repair task and emit the bounded service-lifetime
+   * aggregate on the fixed cadence. `completed` counts ended tasks, never a
+   * business success.
+   */
+  private recordEndedPointRepair(): void {
+    this.pointRepairsCompleted += 1
+    if (this.pointRepairsCompleted !== 1 && this.pointRepairsCompleted % 128 !== 0) return
+    this.logPointRepairs()
+  }
+
+  /** The service-lifetime point-repair aggregate; numbers only, never an id. */
+  private logPointRepairs(): void {
+    const counters = this.pointCounters
+    this.logDiagnostic('history-search.point-repairs', {
+      completed: this.pointRepairsCompleted,
+      directPersistenceStatCalls: counters.directPersistenceStatCalls,
+      directPersistenceOpenCalls: counters.directPersistenceOpenCalls,
+      directSessionObserveCalls: counters.directSessionObserveCalls,
+      prefixProofAttempted: counters.prefixProofAttempted,
       replayAttempted: counters.replayAttempted,
       replayCompleted: counters.replayCompleted,
       replayElapsedMsTotal: roundMilliseconds(counters.replayElapsedMsTotal),

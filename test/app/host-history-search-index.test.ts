@@ -229,16 +229,19 @@ test('a first-wins identity ignores a later same-message insert and a reset rebu
   }
 })
 
-test('deleting derived Sessions keeps only the authoritative ids', (t) => {
+test('deleting one derived Session removes its occurrences without touching other Sessions', (t) => {
   const index = HistorySearchIndex.open({ profileDir: profileDir(t) })
   try {
     seed(index, 's1', [occurrence('m1', 'one', 1000, '/repo/a')])
     seed(index, 's2', [occurrence('m2', 'two', 2000, '/repo/a')])
     seed(index, 's3', [occurrence('m3', 'three', 3000, '/repo/a')])
-    const removed = index.deleteSessionsExcept(new Set(['s1', 's3']))
-    assert.deepEqual(removed, ['s2'])
+    index.deleteSession('s2')
     assert.deepEqual(index.listSessions().map(row => row.sessionId), ['s1', 's3'])
+    assert.equal(index.checkpointOf('s2'), undefined)
     assert.equal(index.occurrence('s2', 'm2'), undefined)
+    assert.equal(index.occurrence('s1', 'm1')?.content, 'one', 'an exact-ID delete must not cascade into another Session')
+    assert.equal(index.occurrence('s3', 'm3')?.content, 'three', 'an exact-ID delete must not cascade into another Session')
+    assert.equal(index.occurrenceCount(), 2)
   } finally {
     index.close()
   }
