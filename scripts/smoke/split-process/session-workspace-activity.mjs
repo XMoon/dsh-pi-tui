@@ -18,7 +18,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
-import { lastSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { lastSurfaceStatus, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
 import { createDualSurfaceSceneTools } from './dual-surface-scene.mjs'
 
@@ -68,6 +68,32 @@ export async function runSessionWorkspaceActivity(context) {
   // The tree's initial cursor is the current Session; the Needs row is its
   // sibling, so select it through the REAL arrow keys before the read-only
   // Peek (the PR2 tree is Workspace-grouped, not a flat Needs section).
+  // ── Real carrier drop while the Workspace stays OPEN ──────────────────────
+  // A generation rollover must re-prove the membership in the SAME panel: the
+  // list and the Needs row are restored on the new Connection without closing
+  // or reopening the Browser, and the surface never falls back to the chat.
+  const generationBeforeDrop = lastSurfaceStatus(clientA)?.generationId
+  assert(typeof generationBeforeDrop === 'number', 'U-D Client A had no connected generation before the carrier drop')
+  clientA.signalBusiness('SIGUSR1')
+  await waitForSurfaceStatus(clientA,
+    record => record.transport === 'connected'
+      && typeof record.generationId === 'number'
+      && record.generationId !== generationBeforeDrop,
+    'U-D Client A reconnected on a new generation while the Workspace stayed open',
+    120_000)
+  const recoveryDeadline = Date.now() + 120_000
+  let recoveryFrame = await viewportText(clientA)
+  while (!(recoveryFrame.includes('Sessions ·') && recoveryFrame.includes('Needs attention')) && Date.now() < recoveryDeadline) {
+    await sleep(100)
+    recoveryFrame = await viewportText(clientA)
+  }
+  assert(recoveryFrame.includes('Sessions ·'),
+    `U-D the Workspace did not survive the carrier drop (no list header):\n${recoveryFrame}`)
+  assert(recoveryFrame.includes('Needs attention'),
+    `U-D the fresh membership did not re-prove the Needs row in the still-open Workspace:\n${recoveryFrame}`)
+  assert(recoveryFrame.includes(shortSessionId(sessionX)),
+    `U-D the fresh membership lost the Needs row's Session identity:\n${recoveryFrame}`)
+  trace('ud-workspace-carrier-recovery', { sessionX, sessionY, generationBeforeDrop, frame: recoveryFrame.split('\n') })
   await selectPaintedSessionRow(clientA, sessionX, 'U-D select the Needs row')
   trace('ud-workspace-needs', { sessionX, sessionY, frame: frame.split('\n') })
 
