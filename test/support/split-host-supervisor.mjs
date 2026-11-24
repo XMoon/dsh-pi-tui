@@ -6714,8 +6714,10 @@ async function handleStartIdentityWitness(message) {
     })
     const zombiePid = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('START_IDENTITY_WITNESS: the holder never published its zombie child')), 30_000)
-      createInterface({ input: holder.stdout }).once('line', line => {
+      const lines = createInterface({ input: holder.stdout })
+      lines.once('line', line => {
         clearTimeout(timer)
+        lines.close()
         const pid = Number(line.trim())
         if (!Number.isInteger(pid) || pid <= 0) reject(new Error('START_IDENTITY_WITNESS: the holder published no real PID'))
         else resolve(pid)

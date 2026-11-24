@@ -149,11 +149,14 @@ export function assertClientHostMatchesPublished(
   if (published.schema === 2) {
     const expected = published.hostKernelIdentity
     const actual = clientHost.hostKernelIdentity
-    if (expected === undefined || actual === undefined
-      || expected.pid !== actual.pid
-      || expected.bootUUID !== actual.bootUUID
-      || expected.processUUID !== actual.processUUID) {
-      throw new Error(`${label}: the Darwin Host kernel identity echo differs from the published identity`)
+    if (expected === undefined || actual === undefined) {
+      throw new Error(`${label}: the Darwin Host kernel identity echo is missing`)
+    }
+    const keys = new Set([...Object.keys(expected), ...Object.keys(actual)])
+    for (const key of keys) {
+      if (expected[key] !== actual[key]) {
+        throw new Error(`${label}: the Darwin Host kernel identity echo differs at ${key}`)
+      }
     }
     return
   }
@@ -211,6 +214,8 @@ export async function rawHttpRequest(
       method: options.method ?? 'GET',
       headers: options.headers,
       timeout: timeoutMs,
+      // No pooled client socket survives the observation.
+      agent: false,
     }, response => {
       const chunks: Buffer[] = []
       response.on('data', chunk => chunks.push(Buffer.from(chunk)))
