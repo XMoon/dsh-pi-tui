@@ -5340,6 +5340,12 @@ test('fullscreen Full: a master-ON standalone card still closes and reopens thro
   assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master stays ON')
   assert.ok(joined.includes('NUMERIC_SUMMARY_BODY'),
     'the unrelated numeric Context card keeps its master default')
+  view = vt.getViewport()
+  const closedHintRow = view[standaloneTitleRow()] ?? ''
+  assert.ok(closedHintRow.includes('click to expand'),
+    `the closed card advertises the actual click owner under Full master ON:\n${closedHintRow}`)
+  assert.ok(!closedHintRow.includes('ctrl+o to expand'),
+    `the card must not advertise a key that a negative choice defeats:\n${closedHintRow}`)
   // A second click (different cell: avoids the double-click word selection)
   // reopens it while the master is still ON.
   click(vt, 25, standaloneTitleRow())
@@ -5348,5 +5354,36 @@ test('fullscreen Full: a master-ON standalone card still closes and reopens thro
   assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
     `the second click reopens the standalone card under master ON:\n${joined}`)
   assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master still stays ON')
+  // Third click: park an explicit NEGATIVE choice while the master is ON.
+  click(vt, 3, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the negative choice closes the card again:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master is still ON')
+  // Turn the Full master OFF, then return to the REGULAR surface. The parked
+  // negative choice must not veto regular's sole operable keyboard owner: the
+  // FIRST Ctrl+O expansion opens this card, and the next Ctrl+O folds it.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'precondition: the Full master is OFF')
   app.setFullscreen(false)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `precondition: the negative choice leaves the card folded on regular:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'precondition: regular master OFF')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal(app.isTranscriptDetailExpanded(), true,
+    'the first regular expansion turns the master ON')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the FIRST regular expansion opens the card despite the parked negative choice:\n${joined}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the second press folds the master again')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the regular collapse folds the card again:\n${joined}`)
 })

@@ -21293,13 +21293,21 @@ export class TuiApp {
     if (isStandaloneCompactionDisclosure(message)) {
       if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
       const override = this.expandedOverride.get(message)
-      if (override !== undefined) return override
-      // Mouse-owned fullscreen surfaces (Focus, and Compact whose Ctrl+O owns
-      // the Work bulk rather than the generic master) start folded. Regular
-      // surfaces and fullscreen Full keep the transcript-detail master.
-      if (this.fullscreen !== undefined
-        && (isFocusDisplayPreset(this.displayState.preset) || this.displayState.preset === 'compact')) return false
-      return this.transcriptDetailExpanded
+      if (this.fullscreen !== undefined) {
+        // Fullscreen keeps the card's explicit positive OR negative choice;
+        // the Full master is only the bulk default beneath it. Focus/Compact
+        // have no generic master for this card and start folded.
+        if (override !== undefined) return override
+        return this.transcriptDetailExpanded
+          && this.displayState.preset !== 'compact'
+          && !isFocusDisplayPreset(this.displayState.preset)
+      }
+      // Regular has ONE operable keyboard master for this card. A negative
+      // choice parked by a fullscreen click is not an active veto here: the
+      // master expansion must open it on the first press (a positive choice,
+      // e.g. a real search dismissal, may still open it while the master is
+      // off). The existing collapse normalization clears the parked override.
+      return this.transcriptDetailExpanded || override === true
     }
     // A numeric compaction keeps the existing recent-turn Context rule.
     if (message.kind === 'compaction' && message.turn !== undefined) {
@@ -21372,7 +21380,6 @@ export class TuiApp {
           : insideFocusSecondary || insideOpenWorkRun
             ? (this.fullscreen !== undefined ? 'click' : undefined)
             : isStandaloneCompactionDisclosure(message) && this.fullscreen !== undefined
-              && isFocusDisplayPreset(this.displayState.preset)
               ? 'click'
               : this.ordinaryFoldHint()
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
