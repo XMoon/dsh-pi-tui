@@ -119,7 +119,6 @@ import {
   type AcpSessionReadRow,
 } from './local-acp-projections.ts'
 import {
-  acpCompactCancelReason,
   AcpHostCommandError,
   catalogUpdate,
   classifyCompactOutcome,
@@ -1115,9 +1114,6 @@ interface AcpOwnedFrame {
 }
 
 interface AcpOwnedCommand {
-  readonly claim: ViewClaim
-  readonly agent: LiveAgentViewIdentity
-  readonly session: object
   readonly kind: 'standalone' | 'compact'
   /** The ONE stable opaque ACP message id of this command's result text. */
   readonly messageId: string
@@ -1127,25 +1123,21 @@ interface AcpOwnedCommand {
    * and is always replaced/captured per operation.
    */
   readonly controller: AbortController
-  readonly executionSignal: AbortSignal
   /** This operation's unique ACP abort reason. */
   readonly cancelReason: Error
-  state: 'dispatching' | 'executing' | 'host-settled' | 'delivery-settled'
   /** True only while the official call is on the stack (sync prefix included). */
+  dispatching: boolean
   invoked: boolean
   cancelRequested: boolean
   abortScheduled: boolean
   deliveryClosed: boolean
   hostSettled: boolean
-  /** Resolves on the original official Promise settlement. */
-  readonly hostSettledPromise: PromiseWithResolvers<void>
   /** Resolves when delivery is closed and no further output should be awaited. */
   readonly deliveryAbort: PromiseWithResolvers<void>
   /** Resolves after this exact op released its claim slot. */
   readonly completion: PromiseWithResolvers<void>
   /** Own negotiated compaction frames, captured at enqueue time. */
   ownFrames: AcpOwnedFrame[]
-  settlement?: AcpCommandSettlement
   compactionId?: string
   startSeq?: number
   summarySeq?: number
@@ -2880,9 +2872,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.requestCommandCancel(claim, command)
       this.abandonCommandDelivery(command)
       // Closed delivery must not retain an already settled Host operation.
-      // Wait the ORIGINAL execution Promise, then let dispatch release the
-      // slot without waiting for a dead channel's output task.
-      await command.hostSettledPromise.promise
+      // Dispatch releases the slot only after the ORIGINAL execution Promise
+      // settles, so completion already carries that exact terminal.
       await command.completion.promise
     }
     // An unclaimed obligation may still execute. Try ONE exact removal on the
@@ -3254,21 +3245,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const controller = new AbortController()
     const op: AcpOwnedCommand = {
-      claim,
-      agent,
-      session,
       kind: route.kind,
       messageId: randomUUID(),
       controller,
-      executionSignal: controller.signal,
-      cancelReason: acpCompactCancelReason(),
-      state: 'dispatching',
+      cancelReason: new Error('local-acp-compact-cancel'),
+      dispatching: true,
       invoked: false,
       cancelRequested: false,
       abortScheduled: false,
       deliveryClosed: false,
       hostSettled: false,
-      hostSettledPromise: Promise.withResolvers<void>(),
       deliveryAbort: Promise.withResolvers<void>(),
       completion: Promise.withResolvers<void>(),
       ownFrames: [],
@@ -3277,7 +3263,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     claim.commandOperation = op
     const onAbort = (): void => {
-      op.deliveryClosed = true
       // This exact command request channel owns only its delivery wait. The
       // raw Host Promise remains the ownership terminal.
       this.abandonCommandDelivery(op)
@@ -3290,25 +3275,21 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (op.cancelRequested) throw promptError('LOCAL_ACP_PROMPT_ABORTED', 'the ACP command request was cancelled before dispatch', JSONRPC_INVALID_PARAMS)
       op.invoked = true
       official = route.kind === 'compact'
-        ? access.executeManualCompact(agent, session, op.executionSignal)
-        : access.executeStandaloneCommand(agent, session, route.line, op.executionSignal)
+        ? access.executeManualCompact(agent, session, controller.signal)
+        : access.executeStandaloneCommand(agent, session, route.line, controller.signal)
     } catch (error) {
       op.hostSettled = true
-      op.hostSettledPromise.resolve()
       this.settleCommandSlot(claim, op)
       throw this.mapHostCommandError(error)
     }
-    op.state = 'executing'
+    op.dispatching = false
     this.replayCommandCancel(claim, op)
     try {
       const settlement: AcpCommandSettlement = await official.then(
         value => ({ kind: 'resolved' as const, value }),
         error => ({ kind: 'rejected' as const, error }),
       )
-      op.settlement = settlement
       op.hostSettled = true
-      op.state = 'host-settled'
-      op.hostSettledPromise.resolve()
       const facts: AcpCompactObservedFacts = {
         ...op.compactionId === undefined ? {} : { compactionId: op.compactionId },
         ...op.startSeq === undefined ? {} : { startSeq: op.startSeq },
@@ -3332,7 +3313,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (!op.deliveryClosed && !requestSignal.aborted) {
         await this.deliverCommandOutcome(claim, op, outcome, sendUpdate)
       }
-      op.state = 'delivery-settled'
       if (outcome.kind === 'failure') throw this.commandOutcomeError(outcome)
       return { stopReason: outcome.kind === 'cancelled' ? 'cancelled' : 'end_turn' }
     } finally {
@@ -3968,7 +3948,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (typeof data?.compactionId !== 'string' || data.turn !== null || data.sourceCommandId !== undefined) return
       if (op.compactionId === undefined) {
         // Only the synchronous dispatch window may establish the identity.
-        if (op.state !== 'dispatching') return
+        if (!op.dispatching) return
         op.compactionId = data.compactionId
         op.startSeq = event.seq
         return
@@ -4712,7 +4692,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // the ACP compact controller is only an additional scoped intent. The
         // original operation Promise remains the terminal, so the exact lease
         // is not retired before it settles and no replacement Agent is used.
-        command.deliveryClosed = true
         claim.retiringTurn = undefined
         this.abandonCommandDelivery(command)
         this.requestCommandCancel(claim, command)
@@ -4938,7 +4917,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // Promise settles. EOF/Off must not retire scoped MCP or release the
         // claim first; the observer stays installed and the exact operation is
         // still cancellable after delivery closed.
-        command.deliveryClosed = true
         this.abandonCommandDelivery(command)
         this.requestCommandCancel(claim, command)
         runDetached('local acp: command disconnect', async () => {

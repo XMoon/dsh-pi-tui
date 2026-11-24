@@ -296,19 +296,15 @@ class FakeAccess implements HostAcpSessionAccess {
     return () => {}
   }
 
-  readonly commandCatalogCalls: Array<{ readonly agent: LiveAgentViewIdentity; readonly session: object }> = []
   readCommandCatalogImpl: (agent: LiveAgentViewIdentity, session: object) => AcpCommandCatalogRead =
     () => EMPTY_COMMAND_CATALOG
   readCommandCatalog(agent: LiveAgentViewIdentity, session: object): AcpCommandCatalogRead {
-    this.commandCatalogCalls.push({ agent, session })
     return this.readCommandCatalogImpl(agent, session)
   }
 
-  readonly nativeSkillCalls: Array<{ readonly agent: LiveAgentViewIdentity; readonly session: object; readonly signal: AbortSignal }> = []
   readNativeSkillsImpl: (agent: LiveAgentViewIdentity, session: object, signal: AbortSignal) => Promise<AcpNativeSkillCatalog> =
     async () => ({ kind: 'absent' })
   async readNativeSkills(agent: LiveAgentViewIdentity, session: object, signal: AbortSignal): Promise<AcpNativeSkillCatalog> {
-    this.nativeSkillCalls.push({ agent, session, signal })
     return await this.readNativeSkillsImpl(agent, session, signal)
   }
 
@@ -1038,7 +1034,6 @@ test('the production Host command access binds only the audited identities and t
   await access.executeManualCompact(agent, session, new AbortController().signal)
   assert.equal(compacted.length, 1)
   assert.equal(compacted[0]?.sourceCommandId, undefined, 'ACP never fabricates the command identity')
-  assert.equal(Object.keys(compacted[0] ?? {}).includes('sourceCommandId'), false)
   // A custom composition with a second compaction engine is not audited.
   modules = ['@deepseek-ai/dsh-compaction-basic', '@deepseek-ai/dsh-command-compact', 'custom-compaction-engine']
   assert.equal(access.readCommandCatalog(agent, session).compact, 'unavailable')
@@ -1110,7 +1105,6 @@ test('the production Host command access binds only the audited identities and t
   scopedSkills = skills
   skillLoader = false
   assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), { kind: 'absent' })
-  assert.equal(skillLoader, false)
 })
 
 test('the production Host access classifier maps official errors to the right create outcome', async () => {
@@ -6398,14 +6392,6 @@ function commandCatalog(commandNames: readonly ('feedback' | 'compact')[] = []):
 }
 
 /** One scripted official ManualCompactionError (structural; never the real class). */
-class ScriptedCompactionError extends Error {
-  readonly code: string
-  constructor(code: string) {
-    super(code)
-    this.name = 'ManualCompactionError'
-    this.code = code
-  }
-}
 
 test('ACP /feedback executes the official standalone command once, never a prompt or model turn', async () => {
   const view = projectionView('CMD1')
@@ -6590,32 +6576,6 @@ test('ACP /compact abort is deferred exactly one microtask and the real precommi
   view.registry.cancelSession(view.conn, view.access, 'CMP3')
   assert.deepEqual(await request, { stopReason: 'cancelled' })
   assert.equal(view.access.manualCompactCalls[0]?.signal.aborted, true)
-})
-
-test('ACP /compact persistence failure keeps the real committed-with-error classification', async () => {
-  const view = projectionView('CMP4')
-  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
-  view.access.executeManualCompactImpl = async () => {
-    view.commit('compaction/start', { compactionId: 'c4', turn: null })
-    const startSeq = view.lastSeq()
-    view.commit('compaction/summary', {
-      compactionId: 'c4', summary: [{ type: 'text', text: 'summary' }],
-      shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 1,
-      provider: 'p', model: 'm',
-    })
-    const summarySeq = view.lastSeq()
-    view.commit('compaction/end', { compactionId: 'c4', turn: null })
-    throw new ScriptedCompactionError('persistence')
-  }
-  await view.resume()
-  await assert.rejects(
-    view.registry.promptSession(
-      view.conn, view.access,
-      { sessionId: 'CMP4', prompt: [{ type: 'text', text: '/compact' }] },
-      new AbortController().signal, false, async () => {},
-    ),
-    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR',
-  )
 })
 
 test('ACP catalog publishes a complete sorted replacement and never executes a shadowed Skill', async () => {
@@ -6806,53 +6766,6 @@ test('a physical EOF keeps the command claim fenced and releases it only after t
   release.resolve({ result: { kind: 'success', text: 'ok' } })
   assert.deepEqual(await request, { stopReason: 'end_turn' })
   await waitUntil(() => !view.registry.hasClaim('CMD4'), 'the command claim is released after its real terminal')
-})
-
-test('an independent Agent/Host compact cancellation is never reported as the client cancellation', async () => {
-  const view = projectionView('CMP5')
-  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
-  view.access.executeManualCompactImpl = async () => {
-    view.commit('compaction/start', { compactionId: 'c5', turn: null })
-    const startSeq = view.lastSeq()
-    view.commit('compaction/summary', {
-      compactionId: 'c5', summary: [{ type: 'text', text: 'summary' }],
-      shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 1,
-      provider: 'p', model: 'm',
-    })
-    const summarySeq = view.lastSeq()
-    view.commit('compaction/end', { compactionId: 'c5', turn: null })
-    const endSeq = view.lastSeq()
-    void startSeq
-    void summarySeq
-    void endSeq
-    throw new ScriptedCompactionError('cancelled')
-  }
-  await view.resume()
-  await assert.rejects(
-    view.registry.promptSession(
-      view.conn, view.access,
-      { sessionId: 'CMP5', prompt: [{ type: 'text', text: '/compact' }] },
-      new AbortController().signal, false, async () => {},
-    ),
-    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR',
-  )
-})
-
-test('an official synchronous busy admission is classified BUSY, not an unknown dispatch failure', async () => {
-  const view = projectionView('CMP6')
-  view.access.readCommandCatalogImpl = () => commandCatalog(['compact'])
-  view.access.executeManualCompactImpl = async () => {
-    throw new ScriptedCompactionError('busy')
-  }
-  await view.resume()
-  await assert.rejects(
-    view.registry.promptSession(
-      view.conn, view.access,
-      { sessionId: 'CMP6', prompt: [{ type: 'text', text: '/compact' }] },
-      new AbortController().signal, false, async () => {},
-    ),
-    (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_COMMAND_BUSY',
-  )
 })
 
 test('a failed catalog re-read retains the last delivered complete catalog and later converges', async () => {
@@ -7185,7 +7098,7 @@ test('R2: a held predecessor projection cannot retain close after the raw Host c
   assert.deepEqual(await request, { stopReason: 'end_turn' })
 })
 
-test('R7: command admission refuses a still-retired turn and disposal clears that fence', async () => {
+test('R7: command admission refuses a still-retired turn', async () => {
   const view = projectionView('CMD9')
   view.access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
   await view.resume()

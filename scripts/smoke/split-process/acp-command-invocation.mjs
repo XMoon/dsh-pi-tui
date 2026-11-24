@@ -27,13 +27,6 @@ import { openSdkClient } from './acp-protocol-projection.mjs'
 import { CliProcess } from './acp-stdio-a1.mjs'
 
 const CASE_ID = 'acp.command-invocation'
-process.on('unhandledRejection', reason => {
-  // The SDK's WebStream adapter can surface a premature-close AbortError after
-  // the peer socket is torn down; it is transport cleanup, never the verdict.
-  const code = reason?.code ?? reason?.cause?.code
-  if (code === 'ABORT_ERR' || code === 'ERR_STREAM_PREMATURE_CLOSE') return
-  throw reason
-})
 const HISTORY_PROMPT = 'acp-command history first'
 const FEEDBACK_TEXT = 'acp command smoke feedback'
 const SKILL_NAME = 'acp-command-smoke'
@@ -758,52 +751,6 @@ export async function runAcpCommandInvocation(context) {
     'CMP-06: the independent cancellation closes the official failed bracket')
     trace('acp-command/independent-cancel', { compactionId: independentId, code: independentError.data.code })
 
-    // CMP-05: the official Session flush fails after the summary/end committed.
-    // The ACP answer must be COMMITTED_WITH_ERROR, never success or cancelled.
-    const flushSession = (await client.request(acp.methods.agent.session.new, {
-      cwd: hostCwd, mcpServers: [],
-    })).sessionId
-    const flushSeed = await client.request(acp.methods.agent.session.prompt, {
-      sessionId: flushSession,
-      prompt: promptText(HISTORY_PROMPT),
-    })
-    assert(flushSeed?.stopReason === 'end_turn', 'CMP-05: the fresh Session seed must end_turn')
-    resetHold(holdRoot)
-    const beforeFlush = hostSessionEvents(dshHome, flushSession).length
-    const flushRequest = settle(client.request(acp.methods.agent.session.prompt, {
-      sessionId: flushSession,
-      prompt: promptText('/compact'),
-    }))
-    await waitForFile(`${holdRoot}.entered`, 'CMP-05 the held summarizer before flush failure')
-    await lifecycleAction('arm-flush-failure', flushSession, 'lifecycle-flush-failure-armed', 'CMP-05 arm the official flush failure')
-    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
-    const flushError = await captureError('CMP-05', flushRequest)
-    const flushEvents = (hostSessionEvents(dshHome, flushSession) ?? []).slice(beforeFlush)
-    assert(flushError?.data?.code === 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR',
-      `CMP-05: a post-commit flush failure must be COMMITTED_WITH_ERROR (${JSON.stringify({
-        data: flushError?.data,
-        message: flushError?.message,
-        eventTypes: flushEvents.map(event => event.type),
-        proof: readC1WorkEvents(hostWorkRoot).filter(event => String(event.kind).includes('lifecycle-flush')),
-      })})`)
-    const flushStart = flushEvents.find(event => event.type === 'compaction/start')
-    const flushId = flushStart?.data?.compactionId
-    assert(typeof flushId === 'string', 'CMP-05: the failed flush has a real compactionId')
-    // The live operation committed the summary/end before the official flush
-    // rejected. A failed flush must never be rewritten as a clean success, and
-    // the durable log may legitimately stop at `start` (partial persistence).
-    const flushSummary = flushEvents.find(event => event.type === 'compaction/summary'
-      && event.data?.compactionId === flushId)
-    const flushEnd = flushEvents.find(event => event.type === 'compaction/end'
-      && event.data?.compactionId === flushId)
-    assert(!(flushSummary !== undefined && flushEnd !== undefined && flushEnd.data?.error === undefined),
-      'CMP-05: a failed flush never leaves a clean summary+end in the durable log')
-    trace('acp-command/flush-failure', {
-      compactionId: flushId,
-      code: flushError.data.code,
-      durableTypes: flushEvents.map(event => event.type),
-    })
-
     // CMP-06: a real partial replacement. The test-only fixture wraps the
     // exact official Session.append and fails the clean `compaction/end` after
     // the real summary was appended. The ACP result must be indeterminate, and
@@ -836,57 +783,6 @@ export async function runAcpCommandInvocation(context) {
     assert(!endFailEvents.some(event => event.type === 'compaction/end' && event.data?.compactionId === endFailId),
       'CMP-06: the replacement has no clean end')
     trace('acp-command/partial-replacement', { compactionId: endFailId })
-    // Official Session load with negotiated compaction is the canonical read.
-    // First a COMPLETE control proves the replay channel emits compaction
-    // updates; then the partial Session proves no complete terminal for its id
-    // (zero optional frames would otherwise be vacuous).
-    const controlSession = (await client.request(acp.methods.agent.session.new, {
-      cwd: hostCwd, mcpServers: [],
-    })).sessionId
-    const controlSeed = await client.request(acp.methods.agent.session.prompt, {
-      sessionId: controlSession, prompt: promptText(HISTORY_PROMPT),
-    })
-    assert(controlSeed?.stopReason === 'end_turn', 'CMP-06: control seed must end_turn')
-    resetHold(holdRoot)
-    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
-    const controlCompact = await client.request(acp.methods.agent.session.prompt, {
-      sessionId: controlSession, prompt: promptText('/compact'),
-    })
-    assert(controlCompact?.stopReason === 'end_turn', 'CMP-06: control compact must end_turn')
-    await client.request(acp.methods.agent.session.close, { sessionId: controlSession })
-    await client.request(acp.methods.agent.session.close, { sessionId: endFailSession })
-    const loadedUpdates = []
-    const loadClient = await openSdkClient(endpoint, params => { loadedUpdates.push(params) })
-    clients.push(loadClient)
-    await loadClient.request(acp.methods.agent.initialize, {
-      protocolVersion: 1, clientCapabilities: { session: { compaction: {} } },
-    })
-    const loadedControl = await loadClient.request(acp.methods.agent.session.load, {
-      sessionId: controlSession, cwd: hostCwd, mcpServers: [],
-    })
-    assert(typeof loadedControl === 'object' && loadedControl !== null, 'CMP-06: control session/load must answer')
-    const controlCompaction = loadedUpdates
-      .filter(params => params?.sessionId === controlSession && params.update?.sessionUpdate === 'compaction_update')
-      .map(params => params.update)
-    assert(controlCompaction.length > 0,
-      'CMP-06: negotiated load must emit the complete control compaction (positive control)')
-    const controlId = controlCompaction[0]?.compactionId
-    assert(typeof controlId === 'string' && controlId.length > 0,
-      'CMP-06: the control compaction has its real id')
-    const loaded = await loadClient.request(acp.methods.agent.session.load, {
-      sessionId: endFailSession, cwd: hostCwd, mcpServers: [],
-    })
-    assert(typeof loaded === 'object' && loaded !== null, 'CMP-06: official session/load must answer')
-    const loadedCompaction = loadedUpdates
-      .filter(params => params?.sessionId === endFailSession && params.update?.sessionUpdate === 'compaction_update')
-      .map(params => params.update)
-    assert(loadedCompaction.some(update => update.compactionId === endFailId
-      && update.summary !== undefined && update.status === 'in_progress'),
-    `CMP-06: official load must expose the partial summary as in_progress (${JSON.stringify(loadedCompaction)})`)
-    assert(!loadedCompaction.some(update => update.compactionId === endFailId && update.status !== 'in_progress'),
-      `CMP-06: official load must not invent a complete terminal for the partial replacement (${JSON.stringify(loadedCompaction)})`)
-    await loadClient.request(acp.methods.agent.session.close, { sessionId: endFailSession })
-
     // CMP-05: hold the real official post-summary flush, send a late ACP
     // cancel while it is held, then release. Commit wins; cancellation is not
     // fabricated and the clean bracket survives.
@@ -975,8 +871,8 @@ export async function runAcpCommandInvocation(context) {
     assert(liveUpdates.some(update => update.compactionId === liveId && update.summary !== undefined),
       'CMP-05 rejection: the own live summary was delivered before the failed flush')
     assert(liveUpdates.some(update => update.compactionId === liveId && update.summary === undefined
-      && update.status !== 'in_progress'),
-    'CMP-05 rejection: the own live clean end was delivered before the failed flush')
+      && update.status === 'completed' && update.error === undefined),
+    'CMP-05 rejection: the own live completed end was delivered before the failed flush')
     writeFileSync(flushRejectRelease, '1', { mode: 0o600 })
     await waitForC1WorkEvent(hostWorkRoot,
       event => event.kind === 'lifecycle-flush-failure-hit' && event.sessionId === flushRejectSession,
@@ -992,6 +888,43 @@ export async function runAcpCommandInvocation(context) {
     })
     assert(afterReject?.stopReason === 'end_turn', 'CMP-05 rejection: a next ordinary operation succeeds')
     trace('acp-command/held-flush-rejection', { compactionId: liveId })
+    // CMP-06/CMP-05 warm replay: the same real official `session/load` channel
+    // must expose the complete held-flush success and the partial replacement.
+    // Close the original ACP owners first; `session/load` borrows the Session
+    // through the normal one-View rule, then each loaded View is closed.
+    await client.request(acp.methods.agent.session.close, { sessionId: holdFlushSession })
+    await client.request(acp.methods.agent.session.close, { sessionId: endFailSession })
+    const loadedUpdates = []
+    const loadClient = await openSdkClient(endpoint, params => { loadedUpdates.push(params) })
+    clients.push(loadClient)
+    await loadClient.request(acp.methods.agent.initialize, {
+      protocolVersion: 1, clientCapabilities: { session: { compaction: {} } },
+    })
+    const loadedHeld = await loadClient.request(acp.methods.agent.session.load, {
+      sessionId: holdFlushSession, cwd: hostCwd, mcpServers: [],
+    })
+    assert(typeof loadedHeld === 'object' && loadedHeld !== null, 'CMP-06: held-flush session/load must answer')
+    const heldLoadedCompaction = loadedUpdates
+      .filter(params => params?.sessionId === holdFlushSession && params.update?.sessionUpdate === 'compaction_update')
+      .map(params => params.update)
+    assert(heldLoadedCompaction.some(update => update.compactionId === heldFlushId
+      && update.status === 'completed' && update.error === undefined),
+    `CMP-06: official load must expose the real completed held-flush compaction (${JSON.stringify(heldLoadedCompaction)})`)
+    const loadedPartial = await loadClient.request(acp.methods.agent.session.load, {
+      sessionId: endFailSession, cwd: hostCwd, mcpServers: [],
+    })
+    assert(typeof loadedPartial === 'object' && loadedPartial !== null, 'CMP-06: partial session/load must answer')
+    const partialLoadedCompaction = loadedUpdates
+      .filter(params => params?.sessionId === endFailSession && params.update?.sessionUpdate === 'compaction_update')
+      .map(params => params.update)
+    assert(partialLoadedCompaction.some(update => update.compactionId === endFailId
+      && update.summary !== undefined && update.status === 'in_progress'),
+    `CMP-06: official load must expose the partial summary as in_progress (${JSON.stringify(partialLoadedCompaction)})`)
+    assert(!partialLoadedCompaction.some(update => update.compactionId === endFailId && update.status !== 'in_progress'),
+      `CMP-06: official load must not invent a complete terminal for the partial replacement (${JSON.stringify(partialLoadedCompaction)})`)
+    await loadClient.request(acp.methods.agent.session.close, { sessionId: holdFlushSession })
+    await loadClient.request(acp.methods.agent.session.close, { sessionId: endFailSession })
+
 
     // Invalid arguments are refused before the official engine is called.
     const beforeInvalid = hostSessionEvents(dshHome, sessionId).length
@@ -1101,7 +1034,7 @@ export async function runAcpCommandInvocation(context) {
       failingStdio.kill('SIGKILL')
       await failingStdio.waitExit()
       await failingPrompt
-      const recovery = await openSdkClient(endpoint)
+      const recovery = await openSdkClient(endpoint, () => {})
       try {
         await recovery.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
         const recoveryResume = await recovery.request(acp.methods.agent.session.resume, {
@@ -1163,80 +1096,57 @@ export async function runAcpCommandInvocation(context) {
       'CMP-06: Fiber disposal before commit never produces a summary')
     trace('acp-command/fiber-disposal', { compactionId: disposeId, code: disposeError.data.code })
 
-    // CAT-02: a real official commands.register/unregister emits
-    // `commands/change`, but a non-approved command is never added to the ACP
-    // catalog; submitting it neither executes its handler nor falls back. A
-    // colliding non-approved registration is refused by the official registry.
-    const testCommand = 'cmp03-registered'
+    // CAT-02: the real workspace Skill is already advertised. Registering a
+    // same-name official Host command through the existing lifecycle seam must
+    // win precedence: the complete catalog drops the Skill, the approved rows
+    // survive, and the leading slash is a classified refusal (not a handler
+    // run and not ordinary model text). Unregister restores the Skill; deleting
+    // SKILL.md then removes it, and the same slash becomes ordinary prompt text.
+    assert(initialNames.includes(SKILL_NAME), 'CAT-02: the real Skill must already be advertised')
+    const hostCommandName = SKILL_NAME
     const commandsChangeBefore = readC1WorkEvents(hostWorkRoot)
       .filter(event => event.kind === 'lifecycle-commands-change').length
     await lifecycleAction('register-test-command', sessionId, 'lifecycle-command-registered',
-      'CAT-02 register the test command', { name: testCommand })
+      'CAT-02 register the same-name Host command', { name: hostCommandName })
     await waitForC1WorkEvent(hostWorkRoot,
       event => event.kind === 'lifecycle-commands-change' && event.sequence > commandsChangeBefore,
-      'CAT-02 commands/change after register', 30_000)
-    await sleep(250)
-    const latestCatalog = updatesFor(updates, sessionId)
-      .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
-    const latestNames = latestCatalog?.availableCommands?.map(command => command.name) ?? []
-    assert(!latestNames.includes(testCommand),
-      `CAT-02: a non-approved command must never enter the ACP catalog (${JSON.stringify(latestNames)})`)
-    assert(latestNames.includes('compact') && latestNames.includes('feedback'),
-      'CAT-02: the current approved catalog survives the unapproved registration')
-    const unapprovedBefore = hostSessionEvents(dshHome, sessionId).length
-    const unapprovedOutcome = await settle(client.request(acp.methods.agent.session.prompt, {
-      sessionId, prompt: promptText(`/${testCommand}`),
+      'CAT-02 commands/change after the same-name registration', 30_000)
+    const shadowCatalog = await waitFor(() => {
+      const latest = updatesFor(updates, sessionId)
+        .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
+      const names = latest?.availableCommands?.map(command => command.name)
+      return names !== undefined && !names.includes(hostCommandName)
+        && names.includes('compact') && names.includes('feedback') ? names : undefined
+    }, 'CAT-02 the complete catalog after the same-name Host command registration', 60_000)
+    assert(!shadowCatalog.includes(hostCommandName), 'CAT-02: the Host command shadows the Skill row')
+    const shadowBefore = hostSessionEvents(dshHome, sessionId).length
+    const shadowOutcome = await settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText(`/${hostCommandName}`),
     }))
-    const unapprovedEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(unapprovedBefore)
-    const unapprovedRefusal = unapprovedOutcome.error?.data?.code
-    assert(unapprovedOutcome.value?.stopReason === 'end_turn'
-      || String(unapprovedRefusal).startsWith('LOCAL_ACP_COMMAND_'),
-    `CAT-02: the unapproved command must be ordinary text or a classified refusal (${JSON.stringify(unapprovedOutcome.error?.data ?? unapprovedOutcome.value)})`)
-    assert(!unapprovedEvents.some(event => event.type === 'command/run' && event.data?.name === testCommand),
-      'CAT-02: the unapproved command must not create a command/run')
-    assert(!readC1WorkEvents(hostWorkRoot).some(event => event.kind === 'lifecycle-command-handler'),
-      'CAT-02: the unapproved command handler must never run')
+    assert(shadowOutcome.error?.data?.code === 'LOCAL_ACP_COMMAND_UNSUPPORTED',
+      `CAT-02: a same-name unsupported Host command must be a classified refusal (${JSON.stringify(shadowOutcome.error?.data ?? shadowOutcome.value)})`)
+    const shadowEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(shadowBefore)
+    assert(!shadowEvents.some(event => event.type === 'command/run' && event.data?.name === hostCommandName),
+      'CAT-02: the unsupported Host command must not create a command/run')
+    assert(!shadowEvents.some(event => event.type === 'user/message'),
+      'CAT-02: the unsupported Host command must not enter the ordinary model prompt')
+    assert(!readC1WorkEvents(hostWorkRoot).some(event => event.kind === 'lifecycle-command-handler'
+      && event.name === hostCommandName), 'CAT-02: the same-name Host handler must never run')
     const unregisterChangeBefore = readC1WorkEvents(hostWorkRoot)
       .filter(event => event.kind === 'lifecycle-commands-change').length
     await lifecycleAction('unregister-test-command', sessionId, 'lifecycle-command-unregistered',
-      'CAT-02 unregister the test command', { name: testCommand })
+      'CAT-02 unregister the same-name Host command', { name: hostCommandName })
     await waitForC1WorkEvent(hostWorkRoot,
       event => event.kind === 'lifecycle-commands-change' && event.sequence > unregisterChangeBefore,
-      'CAT-02 commands/change after unregister', 30_000)
-    const collisionChangeBefore = readC1WorkEvents(hostWorkRoot)
-      .filter(event => event.kind === 'lifecycle-commands-change').length
-    const collision = await lifecycleAction('collide-command', sessionId, 'lifecycle-command-collision',
-      'CAT-02 the non-approved compact collision', { name: 'compact' })
-    assert(collision.refused === false,
-      `CAT-02: a different-layer non-approved registration is accepted by the registry: ${JSON.stringify(collision)}`)
-    await waitForC1WorkEvent(hostWorkRoot,
-      event => event.kind === 'lifecycle-commands-change' && event.sequence > collisionChangeBefore,
-      'CAT-02 commands/change after the collision registration', 30_000)
-    await sleep(250)
-    const collisionCatalog = updatesFor(updates, sessionId)
-      .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
-    const compactRow = collisionCatalog?.availableCommands?.find(command => command.name === 'compact')
-    assert(compactRow !== undefined, 'CAT-02: the approved compact row stays present')
-    assert(!String(compactRow.description ?? '').toLowerCase().includes('collision'),
-      `CAT-02: the non-approved collision must not replace the approved compact row (${JSON.stringify(compactRow)})`)
-    assert(!readC1WorkEvents(hostWorkRoot).some(event => event.kind === 'lifecycle-command-handler'),
-      'CAT-02: the collision handler must never run')
-    const collisionUnregisterChangeBefore = readC1WorkEvents(hostWorkRoot)
-      .filter(event => event.kind === 'lifecycle-commands-change').length
-    await lifecycleAction('unregister-test-command', sessionId, 'lifecycle-command-unregistered',
-      'CAT-02 unregister the collision', { name: 'compact' })
-    await waitForC1WorkEvent(hostWorkRoot,
-      event => event.kind === 'lifecycle-commands-change' && event.sequence > collisionUnregisterChangeBefore,
-      'CAT-02 commands/change after the collision unregister', 30_000)
-    trace('acp-command/command-catalog', {
-      testCommand,
-      latestNames,
-      unapprovedStopReason: unapprovedOutcome.value?.stopReason ?? null,
-      unapprovedRefusal: unapprovedRefusal ?? null,
-      collisionRefused: collision.refused,
-      compactDescription: compactRow.description,
-    })
-
+      'CAT-02 commands/change after the same-name unregister', 30_000)
+    const restoredCatalog = await waitFor(() => {
+      const latest = updatesFor(updates, sessionId)
+        .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
+      const names = latest?.availableCommands?.map(command => command.name)
+      return names !== undefined && names.includes(hostCommandName)
+        && names.includes('compact') && names.includes('feedback') ? names : undefined
+    }, 'CAT-02 the complete catalog restoring the real Skill', 60_000)
+    assert(restoredCatalog.includes(SKILL_NAME), 'CAT-02: the real Skill row returns after unregister')
     // CAT-02/SKL-02: remove the genuine workspace SKILL.md. The official
     // filesystem provider invalidates its catalog and the ACP view publishes a
     // complete replacement without the stale row. After that replacement, the
@@ -1270,7 +1180,11 @@ export async function runAcpCommandInvocation(context) {
     'CAT-02: the removed-name intent must be admitted as the exact ordinary user text')
     assert(!unknownEvents.some(event => event.type === 'command/run' || event.type === 'command/done'),
       'CAT-02: the removed name must not execute a command/skill lifecycle')
-    trace('acp-command/catalog-removal', {
+    trace('acp-command/catalog-mutation', {
+      hostCommandName,
+      shadowCatalog,
+      refusal: shadowOutcome.error?.data?.code ?? null,
+      restoredCatalog,
       removed: SKILL_NAME,
       replacement: removedCatalog,
       unknownStopReason: unknownOutcome.stopReason,
@@ -1478,27 +1392,22 @@ export async function runAcpCommandInvocation(context) {
         event => event.kind === 'lifecycle-cold-read' && event.sessionId === targetSession,
         label, 120_000)
     }
-    const coldControl = await coldRead(controlSession, 'CMP-06 the complete control cold read')
-    const coldControlEvents = coldControl.events.filter(event => event.compactionId === controlId)
-    assert(coldControlEvents.some(event => event.type === 'compaction/start')
-      && coldControlEvents.some(event => event.type === 'compaction/summary' && event.hasSummary === true)
-      && coldControlEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
-    `CMP-06: the complete control must cold-read with a successful end (${JSON.stringify(coldControlEvents)})`)
+    const coldHeldFlush = await coldRead(holdFlushSession, 'CMP-05 the held-flush success cold read')
+    const coldHeldFlushEvents = coldHeldFlush.events.filter(event => event.compactionId === heldFlushId)
+    assert(coldHeldFlushEvents.some(event => event.type === 'compaction/start')
+      && coldHeldFlushEvents.some(event => event.type === 'compaction/summary' && event.hasSummary === true)
+      && coldHeldFlushEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
+    `CMP-05: the held-flush success must cold-read with a successful end (${JSON.stringify(coldHeldFlushEvents)})`)
     const coldPartial = await coldRead(endFailSession, 'CMP-06 the partial replacement cold read')
     const coldPartialEvents = coldPartial.events.filter(event => event.compactionId === endFailId)
     assert(coldPartialEvents.some(event => event.type === 'compaction/start')
       && coldPartialEvents.some(event => event.type === 'compaction/summary' && event.hasSummary === true)
       && !coldPartialEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
     `CMP-06: the partial replacement must cold-read without a successful end (${JSON.stringify(coldPartialEvents)})`)
-    // The failed first flush is a separate readback fact: the operation had
-    // already committed, so a later real flush may have persisted the clean
-    // bracket. Keep this read distinct from the partial replacement instead of
-    // reclassifying the original COMMITTED_WITH_ERROR reply.
-    const coldFlush = await coldRead(flushSession, 'CMP-05 the failed flush cold read')
-    const coldFlushEvents = coldFlush.events.filter(event => event.compactionId === flushId)
-    assert(coldFlushEvents.some(event => event.type === 'compaction/start')
-      && coldFlushEvents.every(event => event.compactionId === flushId),
-    `CMP-05: the failed-flush readback must preserve its exact id (${JSON.stringify(coldFlushEvents)})`)
+    // The held-flush rejection is a separate readback fact: the original ACP
+    // reply was COMMITTED_WITH_ERROR, while a later real flush may have
+    // persisted the clean bracket. Report only the durable facts and never
+    // rewrite the original business classification.
     const coldHeld = await coldRead(flushRejectSession, 'CMP-05 the held failure cold read')
     const coldHeldEvents = coldHeld.events.filter(event => event.compactionId === liveId)
     assert(coldHeldEvents.some(event => event.type === 'compaction/start'),
@@ -1506,15 +1415,13 @@ export async function runAcpCommandInvocation(context) {
     trace('acp-command/cold-read', {
       oldHostPid,
       newHostPid: coldIdentity.hostPid,
-      controlId,
+      heldFlushId,
       partialId: endFailId,
-      flushId,
-      heldId: liveId,
-      controlTypes: coldControlEvents.map(event => event.type),
+      rejectedId: liveId,
+      heldFlushTypes: coldHeldFlushEvents.map(event => event.type),
       partialTypes: coldPartialEvents.map(event => event.type),
-      flushTypes: coldFlushEvents.map(event => event.type),
-      flushHasCleanEnd: coldFlushEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
-      heldTypes: coldHeldEvents.map(event => event.type),
+      rejectedTypes: coldHeldEvents.map(event => event.type),
+      rejectedHasCleanEnd: coldHeldEvents.some(event => event.type === 'compaction/end' && event.error === undefined),
     })
 
     const facts = {

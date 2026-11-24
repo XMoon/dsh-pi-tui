@@ -2483,7 +2483,6 @@ export async function apply(ctx) {
     const flushFailureSessions = new Set()
     const flushSummarySeen = new Set()
     const flushHoldSessions = new Map()
-    let killAfterSummarySession
     const sessions = ctx.sessions
     const originalFlush = sessions.flush
     const lifecycleFlush = async function (...args) {
@@ -2523,11 +2522,6 @@ export async function apply(ctx) {
         record('lifecycle-flush-failure-armed', { sessionId: action.sessionId })
         return
       }
-      if (action.action === 'arm-kill-after-summary') {
-        killAfterSummarySession = String(action.sessionId)
-        record('lifecycle-kill-after-summary-armed', { sessionId: action.sessionId })
-        return
-      }
       if (action.action === 'arm-hold-flush') {
         flushHoldSessions.set(String(action.sessionId), String(action.release))
         record('lifecycle-flush-hold-armed', { sessionId: action.sessionId })
@@ -2553,8 +2547,7 @@ export async function apply(ctx) {
         record('lifecycle-end-failure-armed', { sessionId: action.sessionId })
         return
       }
-      if (action.action === 'register-test-command' || action.action === 'unregister-test-command'
-        || action.action === 'collide-command') {
+      if (action.action === 'register-test-command' || action.action === 'unregister-test-command') {
         const name = String(action.name)
         if (action.action === 'register-test-command') {
           if (!commandDisposers.has(name)) {
@@ -2583,23 +2576,6 @@ export async function apply(ctx) {
           record('lifecycle-command-unregistered', { sessionId: action.sessionId, name, removed: dispose !== undefined })
           return
         }
-        try {
-          const dispose = ctx.commands.register({
-            name,
-            description: 'collision must be refused',
-            handler: () => ({ kind: 'error', text: 'collision fallback must not run' }),
-          })
-          commandDisposers.set(name, dispose)
-          record('lifecycle-command-collision', { sessionId: action.sessionId, name, refused: false })
-        } catch (error) {
-          record('lifecycle-command-collision', {
-            sessionId: action.sessionId,
-            name,
-            refused: true,
-            message: error instanceof Error ? error.message : String(error),
-          })
-        }
-        return
       }
       if (action.action === 'cold-read') {
         // CMP-06 cold phase: the official logical-log read validates and
@@ -2673,14 +2649,7 @@ export async function apply(ctx) {
       const sessionId = String(session.id)
       if (event?.type === 'compaction/start') flushSummarySeen.delete(sessionId)
       if (event?.type === 'compaction/summary') flushSummarySeen.add(sessionId)
-      if (killAfterSummarySession !== sessionId || event?.type !== 'compaction/summary') return
-      killAfterSummarySession = undefined
-      record('lifecycle-kill-after-summary', {
-        sessionId,
-        compactionId: String(event.data?.compactionId ?? ''),
-      })
-      process.kill(process.pid, 'SIGKILL')
-    }), 'lifecycle-kill-after-summary')
+    }), 'lifecycle-flush-facts')
   }
   // PO-3B never negative: set the OFFICIAL durable approval policy of one
   // Session through the official service (the same seam the F8 case proves).

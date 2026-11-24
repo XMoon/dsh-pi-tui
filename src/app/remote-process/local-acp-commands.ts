@@ -115,15 +115,6 @@ export class AcpHostCommandError extends Error {
   }
 }
 
-/**
- * A NEW operation-specific compact abort reason. The View stores this exact
- * Error on one AcpOwnedCommand and uses its identity for that operation only;
- * a stale/foreign operation's cause can never match it.
- */
-export function acpCompactCancelReason(): Error {
-  return new Error('local-acp-compact-cancel')
-}
-
 /** The compact facts observed synchronously from the exact Session event stream. */
 export interface AcpCompactObservedFacts {
   readonly compactionId?: string

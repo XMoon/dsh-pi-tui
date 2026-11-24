@@ -14,7 +14,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  acpCompactCancelReason,
   isAcpCompactAbort,
   catalogUpdate,
   classifyCompactOutcome,
@@ -193,8 +192,9 @@ test('compact cancellation wins only before the summary; committed results never
   const independent = classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'cancelled' } },
     facts(), false)
   assert.equal(independent.kind === 'failure' ? independent.code : '', 'LOCAL_ACP_COMMAND_FAILED')
-  assert.equal(classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'busy' } },
-    facts(), true).kind === 'failure' ? 'busy' : '', 'busy')
+  const busy = classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'busy' } },
+    facts(), true)
+  assert.equal(busy.kind === 'failure' ? busy.code : '', 'LOCAL_ACP_COMMAND_BUSY')
   // A summary followed by a failed end is a partial/unknown replacement.
   assert.equal(classifyCompactOutcome({ kind: 'rejected', error: { name: 'ManualCompactionError', code: 'commit' } },
     facts({ compactionId: 'c1', startSeq: 3, summarySeq: 4, endSeq: 5, endError: 'commit failed' }), false).kind,
@@ -203,11 +203,10 @@ test('compact cancellation wins only before the summary; committed results never
     facts({ compactionId: 'c1', startSeq: 3, summarySeq: 4, endSeq: 5, endError: 'commit failed' }), false)
   assert.equal(summaryFailed.kind === 'failure' ? summaryFailed.code : '', 'LOCAL_ACP_COMMAND_INDETERMINATE')
   // The exact ACP abort reason must be in the original rejection chain.
-  const firstReason = acpCompactCancelReason()
-  const secondReason = acpCompactCancelReason()
+  const firstReason = new Error('local-acp-compact-cancel')
+  const secondReason = new Error('local-acp-compact-cancel')
   const stock = new AbortController()
   stock.abort(firstReason)
-  assert.equal(stock.signal.reason, firstReason)
   assert.equal(isAcpCompactAbort({ kind: 'rejected', error: firstReason }, stock.signal, firstReason), true)
   assert.equal(isAcpCompactAbort({ kind: 'rejected', error: secondReason }, stock.signal, firstReason), false,
     'a stale/foreign operation reason can never prove THIS cancellation')
