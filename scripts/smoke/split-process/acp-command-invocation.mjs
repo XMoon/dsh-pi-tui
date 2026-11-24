@@ -346,6 +346,8 @@ export async function runAcpCommandInvocation(context) {
     await tui.client.waitForScreen('Compacted', 'TUI-01 the official compaction row')
     const tuiFrame = (await tui.client.viewport()).join('\n')
     assert(/Compacted \d+ history item/.test(tuiFrame), `TUI-01: the Shared TUI transcript must show the official compaction (${JSON.stringify(tuiFrame.slice(-2000))})`)
+    assert((tuiFrame.match(/Compacted \d+ history item/g) ?? []).length === 1,
+      'TUI-01: the Shared TUI must paint ONE compaction card, not a duplicate')
     trace('acp-command/shared-tui', { sessionId })
 
     // LIFE-02: Close during a held official command closes delivery but waits
