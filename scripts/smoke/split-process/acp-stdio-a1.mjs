@@ -52,7 +52,7 @@ function sha256(bytes) {
 }
 
 /** One spawned public CLI command with its real stdout bytes and stderr text. */
-class CliProcess {
+export class CliProcess {
   constructor(context, args, envOverrides = {}, options = {}) {
     const { installation, base } = context
     const [node, entry] = installation.dshInvocation

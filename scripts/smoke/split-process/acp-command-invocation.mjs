@@ -13,16 +13,18 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import * as acp from '@agentclientprotocol/sdk'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
+import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { hostSessionEvents } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 import { openSdkClient } from './acp-protocol-projection.mjs'
+import { CliProcess } from './acp-stdio-a1.mjs'
 
 const CASE_ID = 'acp.command-invocation'
 process.on('unhandledRejection', reason => {
@@ -97,7 +99,7 @@ function catalogNames(params) {
  */
 export async function runAcpCommandInvocation(context) {
   const { EntryProcess, entries, base, dshHome, workDir, installation, trace } = context
-  const scene = createC1Scene(context)
+  const scene = createC1Scene(context, { scopedMcpB1: true })
   const hostCwd = realpathSync(workDir)
   const holdRoot = join(workDir, 'acp-command-compaction-hold')
   resetHold(holdRoot)
@@ -259,6 +261,14 @@ export async function runAcpCommandInvocation(context) {
       .join('')
     assert(feedbackText.includes('Feedback'), `CMD-06: the official feedback result text must reach the client (${JSON.stringify(feedbackText)})`)
 
+    // TUI-01: a REAL Shared TUI is attached to the same Host Session while
+    // ACP executes the command. The TUI transcript paints the official
+    // compaction row; ACP never injects a fake turn/message for it.
+    const tui = await scene.startC1Client('command A TUI', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+    await waitForSurfaceStatus(tui.client, record => record.sessionOpen === true
+      && record.openSessionId === sessionId && record.surfaceMounted === true && record.transport === 'connected',
+      'TUI-01 the Shared TUI opened the ACP Session')
+
     // CMP-01: the exact retained official engine commits a real manual
     // compaction. ACP must NOT fabricate command/run or sourceCommandId.
     // A real subagent can deliver its result after the parent's first
@@ -333,6 +343,10 @@ export async function runAcpCommandInvocation(context) {
       .map(update => update.content?.text ?? '')
       .join('')
     assert(/Compacted \d+ history items/.test(compactText), `CMD-08: the real result text must reach the client (${JSON.stringify(compactText)})`)
+    await tui.client.waitForScreen('Compacted', 'TUI-01 the official compaction row')
+    const tuiFrame = (await tui.client.viewport()).join('\n')
+    assert(/Compacted \d+ history item/.test(tuiFrame), `TUI-01: the Shared TUI transcript must show the official compaction (${JSON.stringify(tuiFrame.slice(-2000))})`)
+    trace('acp-command/shared-tui', { sessionId })
 
     // LIFE-02: Close during a held official command closes delivery but waits
     // for the original Promise. A second close is idempotent and a later
@@ -376,7 +390,74 @@ export async function runAcpCommandInvocation(context) {
     await client.request(acp.methods.agent.session.close, { sessionId: closeSessionId })
     trace('acp-command/close', { stopReason: closePromptResult.stopReason })
 
-    // CMP-06: an OFFICIAL independent Host cancellation (Agent.cancel with its
+    // LIFE-02: a real scoped MCP lease is fenced by the SAME command operation.
+    // Close during the precommit hold must cancel the command, settle the
+    // original Promise, and only then retire the exact MCP lease.
+    if (typeof scene.c1Work.scopedMcpServerPath !== 'string') {
+      throw new SplitSmokeAssertionError(`${CASE_ID}: the scoped MCP server fixture was not installed`)
+    }
+    const mcpRoot = join(workDir, 'acp-command-mcp')
+    mkdirSync(mcpRoot, { recursive: true, mode: 0o700 })
+    const mcpProof = join(mcpRoot, 'server-proof.jsonl')
+    rmSync(mcpProof, { force: true })
+    const mcpSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd,
+      mcpServers: [{
+        name: 'command-scope',
+        command: process.execPath,
+        args: [scene.c1Work.scopedMcpServerPath],
+        env: [
+          { name: 'B0_FIXTURE_PROOF', value: mcpProof },
+          { name: 'B0_SERVER_TAG', value: 'command-scope' },
+          { name: 'B0_HOLD_ARM', value: join(mcpRoot, 'hold-arm') },
+          { name: 'B0_HOLD_RELEASE', value: join(mcpRoot, 'hold-release') },
+          { name: 'B0_RUN_NONCE', value: `command-${String(process.pid)}` },
+        ],
+      }],
+    })).sessionId
+    const mcpEvents = () => existsSync(mcpProof)
+      ? readFileSync(mcpProof, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+        try { return [JSON.parse(line)] } catch { return [] }
+      })
+      : []
+    await waitFor(() => mcpEvents().some(event => event.kind === 'server-start') ? true : undefined,
+      'LIFE-02 the real scoped MCP server start')
+    const mcpSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: mcpSession,
+      prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(mcpSeed?.stopReason === 'end_turn', 'LIFE-02: the MCP Session seed must end_turn')
+    resetHold(holdRoot)
+    const mcpPrompt = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: mcpSession,
+      prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'LIFE-02 the held summarizer before MCP close')
+    let mcpPromptSettled = false
+    mcpPrompt.then(() => { mcpPromptSettled = true })
+    const mcpCloseAt = Date.now()
+    const mcpClose = await client.request(acp.methods.agent.session.close, { sessionId: mcpSession })
+    assert(mcpPromptSettled === true, 'LIFE-02: MCP close waits for the original command Promise')
+    assert(Object.keys(mcpClose).length === 0, 'LIFE-02: MCP close returns the empty close result')
+    const mcpPromptOutcome = await mcpPrompt
+    assert(mcpPromptOutcome.error === undefined && mcpPromptOutcome.value?.stopReason === 'cancelled',
+      `LIFE-02: the held MCP command settles cancelled (${JSON.stringify(mcpPromptOutcome.value)})`)
+    const mcpActiveStart = mcpEvents().filter(event => event.kind === 'server-start').at(-1)
+    assert(mcpActiveStart !== undefined, 'LIFE-02: the active MCP server start is observable')
+    await waitFor(() => mcpEvents().some(event => (event.kind === 'server-sigterm' || event.kind === 'server-stdin-closed')
+      && event.time >= mcpActiveStart.time) ? true : undefined, 'LIFE-02 the active MCP lease retirement')
+    const mcpExit = mcpEvents().find(event => (event.kind === 'server-sigterm' || event.kind === 'server-stdin-closed')
+      && event.time >= mcpActiveStart.time)
+    assert(typeof mcpExit?.time === 'number' && mcpExit.time >= mcpCloseAt,
+      `LIFE-02: the MCP lease retired only after the command terminal/close (${JSON.stringify({
+        closeAt: mcpCloseAt,
+        exit: mcpExit,
+        events: mcpEvents().map(event => ({ kind: event.kind, time: event.time })),
+      })})`)
+    trace('acp-command/mcp-lease', { sessionId: mcpSession, retirements: mcpEvents().filter(event => String(event.kind).startsWith('server-')).length })
+
+    // CMP-06: an OFFICIAL independent Host cancellation
+    // (Agent.cancel with its
     // own cause) while the summarizer is held must be a Host failure, never
     // the ACP client's `cancelled`, and must not fabricate a summary.
     resetHold(holdRoot)
@@ -489,6 +570,95 @@ export async function runAcpCommandInvocation(context) {
     assert(unknown?.stopReason === 'end_turn', 'CMD-11: an unknown slash remains a normal prompt')
     assert(commandEvents(hostSessionEvents(dshHome, sessionId), 'unknown').length === beforeUnknown,
       'CMD-11: an unknown slash creates no Host command lifecycle')
+
+    // The public `dsh --profile pi-tui acp stdio` bridge must carry the same
+    // real command wire, not just the direct UDS SDK probe.
+    const stdio = new CliProcess(context, ['--profile', 'pi-tui', 'acp', 'stdio'])
+    try {
+      const stdioInit = await stdio.initialize()
+      assert(stdioInit?.protocolVersion === acp.PROTOCOL_VERSION,
+        `STDIO-01: the public bridge must initialize (${JSON.stringify(stdioInit)})`)
+      const stdioCreated = await stdio.connection.agent.request(acp.methods.agent.session.new, {
+        cwd: hostCwd, mcpServers: [],
+      })
+      const stdioSession = stdioCreated.sessionId
+      assert(typeof stdioSession === 'string' && stdioSession.length > 0, 'STDIO-01: the public bridge must create a Session')
+      const stdioSeed = await stdio.connection.agent.request(acp.methods.agent.session.prompt, {
+        sessionId: stdioSession, prompt: promptText(HISTORY_PROMPT),
+      })
+      assert(stdioSeed?.stopReason === 'end_turn', 'STDIO-01: the stdio Session seed must end_turn')
+      const stdioFeedback = await stdio.connection.agent.request(acp.methods.agent.session.prompt, {
+        sessionId: stdioSession, prompt: promptText('/feedback stdio real wire'),
+      })
+      assert(stdioFeedback?.stopReason === 'end_turn', 'STDIO-01: public stdio /feedback must end_turn')
+      const stdioFeedbackEvents = hostSessionEvents(dshHome, stdioSession) ?? []
+      assert(stdioFeedbackEvents.some(event => event.type === 'feedback/record'),
+        'STDIO-01: public stdio /feedback must reach the official Host sink')
+      const stdioCompact = await stdio.connection.agent.request(acp.methods.agent.session.prompt, {
+        sessionId: stdioSession, prompt: promptText('/compact'),
+      })
+      assert(stdioCompact?.stopReason === 'end_turn', 'STDIO-01: public stdio /compact must end_turn')
+      const stdioCompactEvents = hostSessionEvents(dshHome, stdioSession) ?? []
+      assert(stdioCompactEvents.some(event => event.type === 'compaction/start'),
+        'STDIO-01: public stdio /compact must reach the official engine')
+      assert(stdioCompactEvents.some(event => event.type === 'compaction/summary'),
+        'STDIO-01: public stdio /compact must commit a real summary')
+      trace('acp-command/public-stdio', { sessionId: stdioSession })
+    } finally {
+      await stdio.close().catch(() => {})
+    }
+
+    // LIFE-04: a REAL public stdio transport dies after the compaction
+    // summary commits but before the client can consume the result. The Host
+    // must not crash or retain a dead delivery fence; a fresh direct client
+    // must resume the committed Session.
+    const failingStdio = new CliProcess(context, ['--profile', 'pi-tui', 'acp', 'stdio'])
+    let failingSession
+    try {
+      await failingStdio.initialize()
+      const failingCreated = await failingStdio.connection.agent.request(acp.methods.agent.session.new, {
+        cwd: hostCwd, mcpServers: [],
+      })
+      failingSession = failingCreated.sessionId
+      const failingSeed = await failingStdio.connection.agent.request(acp.methods.agent.session.prompt, {
+        sessionId: failingSession, prompt: promptText(HISTORY_PROMPT),
+      })
+      assert(failingSeed?.stopReason === 'end_turn', 'LIFE-04: the failing stdio seed must end_turn')
+      resetHold(holdRoot)
+      const beforeFailing = hostSessionEvents(dshHome, failingSession).length
+      const failingPrompt = settle(failingStdio.connection.agent.request(acp.methods.agent.session.prompt, {
+        sessionId: failingSession, prompt: promptText('/compact'),
+      }))
+      await waitForFile(`${holdRoot}.entered`, 'LIFE-04 the held summarizer before transport death')
+      writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+      await waitFor(() => hostSessionEvents(dshHome, failingSession)?.slice(beforeFailing)
+        .some(event => event.type === 'compaction/summary') ? true : undefined,
+      'LIFE-04 the committed summary before transport death')
+      failingStdio.kill('SIGKILL')
+      await failingStdio.waitExit()
+      await failingPrompt
+      const recovery = await openSdkClient(endpoint)
+      try {
+        await recovery.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+        const recoveryResume = await recovery.request(acp.methods.agent.session.resume, {
+          sessionId: failingSession, cwd: hostCwd,
+        })
+        assert(typeof recoveryResume === 'object' && recoveryResume !== null,
+          'LIFE-04: a fresh client must resume the committed Session after output transport death')
+      } finally {
+        await recovery.close().catch(() => {})
+      }
+      const failingEvents = (hostSessionEvents(dshHome, failingSession) ?? []).slice(beforeFailing)
+      assert(failingEvents.some(event => event.type === 'compaction/summary'),
+        'LIFE-04: the transport death never erases the committed compaction')
+      trace('acp-command/output-transport-failure', {
+        sessionId: failingSession,
+        promptError: (await failingPrompt).error?.data?.code,
+      })
+    } finally {
+      try { failingStdio.kill('SIGKILL') } catch { /* already dead */ }
+      await failingStdio.close().catch(() => {})
+    }
 
     // CMP-06/LIFE-03: dispose the LIVE Agent's own Cordis Fiber while the
     // summarizer is held. This is the official host-side disposal capability,
