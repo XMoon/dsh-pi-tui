@@ -38,6 +38,8 @@ export interface SubagentSettingsSnapshot {
   readonly saved: boolean
   readonly limits: SubagentSectionSnapshot<SubagentLimits>
   readonly selection: SubagentSectionSnapshot<SubagentModelSelection>
+  /** The CURRENT numeric candidate derived from the captured effective value and
+   *  this field's patch; never a second long-lived draft store. */
   readonly depthText: string
   readonly capacityText: string
   readonly enabled?: boolean
@@ -74,13 +76,14 @@ function readyCurrent<T extends object>(source: SectionRead<T>, live: SectionRea
 function hasPatch<T extends object>(patch: SectionPatch<T>): boolean {
   return Object.keys(patch).length !== 0
 }
+function ambiguous(status: SubagentSectionStatus | undefined): boolean {
+  return status?.kind === 'unverified' || status?.kind === 'outcome-unconfirmed'
+}
 
 export class SubagentSettingsController {
   private readonly deps: SubagentSettingsControllerDeps
   private limits: SectionState<SubagentLimits> = { source: { kind: 'unavailable', reason: 'Loading Host settings…' }, patch: {} }
   private selection: SectionState<SubagentModelSelection> = { source: { kind: 'unavailable', reason: 'Loading Host settings…' }, patch: {} }
-  private depthText = ''
-  private capacityText = ''
   private issues: Partial<Record<SubagentSettingsField, string>> = {}
   private loading = false
   private saving = false
@@ -108,7 +111,8 @@ export class SubagentSettingsController {
       dirty: this.dirty(), saved: this.saved,
       limits: this.sectionSnapshot(this.limits, limitsLive),
       selection: this.sectionSnapshot(this.selection, selectionLive),
-      depthText: this.depthText, capacityText: this.capacityText,
+      depthText: this.candidateText('maxDepth'),
+      capacityText: this.candidateText('maxActiveSubagents'),
       ...(selection.kind === 'ready' ? { enabled: patched(this.selection.patch.enabled, selection.effective.enabled, selection.inherited.enabled) } : {}),
       allowedModels: selection.kind === 'ready'
         ? patched(this.selection.patch.allowedModels, selection.effective.allowedModels, selection.inherited.allowedModels)
@@ -144,18 +148,29 @@ export class SubagentSettingsController {
     return true
   }
 
+  /**
+   * The owning field's REAL acceptance rule: `undefined` = accepted, otherwise
+   * the reason the text is refused. The page pre-validates with THIS method and
+   * `setNumber` independently refuses, so no invalid value can enter a patch.
+   */
+  numberIssue(field: 'maxDepth' | 'maxActiveSubagents', text: string): string | undefined {
+    if (text.trim() === '') return 'Value is required.'
+    const minimum = field === 'maxDepth' ? 0 : 1
+    const valid = /^\d+$/u.test(text.trim()) && Number.isSafeInteger(Number(text)) && Number(text) >= minimum
+    return valid ? undefined : `Enter a safe integer from ${minimum} to ${Number.MAX_SAFE_INTEGER}.`
+  }
+
+  /** Stage ONE field's plain numeric text. It NEVER stages an official Reset:
+   *  a blank/whitespace/invalid draft is refused with zero patch, while
+   *  `reset(field)` is the ONE explicit unset intent. */
   setNumber(field: 'maxDepth' | 'maxActiveSubagents', text: string): void {
+    if (this.numberIssue(field, text) !== undefined) return
     if (!this.mayEdit(field)) return
-    if (field === 'maxDepth') this.depthText = text
-    else this.capacityText = text
     const source = this.limits.source as Ready<SubagentLimits>
+    const value = Number(text)
     const patch = { ...this.limits.patch }
-    if (text.trim() === '') patch[field] = { kind: 'reset' }
-    else {
-      const value = Number(text)
-      if (value === source.effective[field] && this.numberValid(text, field)) delete patch[field]
-      else patch[field] = { kind: 'set', value }
-    }
+    if (value === source.effective[field]) delete patch[field]
+    else patch[field] = { kind: 'set', value }
     this.limits.patch = patch
     this.limits.status = undefined
     this.validate()
@@ -181,7 +196,10 @@ export class SubagentSettingsController {
     const routes = patched(this.selection.patch.allowedModels, source.effective.allowedModels, source.inherited.allowedModels)
     const present = routes.some(item => item.provider === route.provider && item.model === route.model)
     if (present && routes.length === 1 && patched(this.selection.patch.enabled, source.effective.enabled, source.inherited.enabled)) {
-      this.issues.allowedModels = 'Disable model selection before removing the last route.'
+      // A direct-operation refusal is not a candidate validity issue: the
+      // current (enabled + one route) candidate stays legal and another field's
+      // Save must not be blocked by a rejected removal attempt.
+      this.notice = 'Disable model selection before removing the last route.'
       this.changed()
       return
     }
@@ -200,8 +218,6 @@ export class SubagentSettingsController {
     // Reset is an explicit operation even when effective already matches base.
     if (field === 'maxDepth' || field === 'maxActiveSubagents') {
       this.limits.patch = { ...this.limits.patch, [field]: { kind: 'reset' } }
-      if (field === 'maxDepth') this.depthText = ''
-      else this.capacityText = ''
       this.limits.status = undefined
     } else {
       this.selection.patch = { ...this.selection.patch, [field]: { kind: 'reset' } }
@@ -209,6 +225,23 @@ export class SubagentSettingsController {
     }
     this.validate()
     this.changed()
+  }
+
+  /** Whether a new group Save is admitted: a REAL dirty field in a still-current
+   *  section, no business issue, and no settled ambiguous outcome. A definite
+   *  stale sibling never blocks a current dirty section; a settled unknown does
+   *  (the user must Refresh first). */
+  canSave(): boolean {
+    if (this.disposed || this.loading || this.saving || !this.dirty()) return false
+    if (Object.keys(this.issues).length !== 0) return false
+    if (ambiguous(this.limits.status) || ambiguous(this.selection.status)) return false
+    const limitsLive = this.deps.limits.read()
+    const selectionLive = this.deps.selection.read()
+    const limitsEligible = hasPatch(this.limits.patch) && this.limits.refreshRequired !== true
+      && readyCurrent(this.limits.source, limitsLive)
+    const selectionEligible = hasPatch(this.selection.patch) && this.selection.refreshRequired !== true
+      && readyCurrent(this.selection.source, selectionLive)
+    return limitsEligible || selectionEligible
   }
 
   /** A dirty refresh needs the page's explicit discard decision first. */
@@ -228,11 +261,10 @@ export class SubagentSettingsController {
       try {
         const results = await Promise.allSettled([this.deps.limits.refresh(), this.deps.selection.refresh()])
         if (this.disposed || token !== this.operation) return
-        this.limits = { source: this.deps.limits.read(), patch: {}, refreshRequired: results[0].status === 'rejected' }
-        this.selection = { source: this.deps.selection.read(), patch: {}, refreshRequired: results[1].status === 'rejected' }
         const failures = results.flatMap(result => result.status === 'rejected' ? [safeErrorMessage(result.reason)] : [])
+        this.limits = this.refreshedSection(this.limits, this.deps.limits.read(), results[0].status === 'rejected')
+        this.selection = this.refreshedSection(this.selection, this.deps.selection.read(), results[1].status === 'rejected')
         this.notice = failures.length === 0 ? undefined : `Refresh failed: ${failures.join('; ')}`
-        this.syncTexts()
         this.issues = {}
         this.deps.onAuthoritativeChange?.()
       } finally {
@@ -245,35 +277,39 @@ export class SubagentSettingsController {
     return true
   }
 
+  /**
+   * ONE section's post-refresh state. A SETTLED AMBIGUOUS outcome whose refresh
+   * could not produce a current authoritative read keeps its draft, status and
+   * reason: an unreadable Host is not proof that the write did not land. A
+   * definite/ordinary draft is cleared only by this explicit discard refresh.
+   */
+  private refreshedSection<T extends object>(state: SectionState<T>, fresh: SectionRead<T>, failed: boolean): SectionState<T> {
+    if (ambiguous(state.status) && (failed || fresh.kind !== 'ready')) {
+      return { source: state.source, patch: state.patch, status: state.status, refreshRequired: true }
+    }
+    return failed ? { source: fresh, patch: {}, refreshRequired: true } : { source: fresh, patch: {} }
+  }
+
   discard(): void {
     if (this.disposed || this.saving || this.loading) return
-    this.limits.patch = {}
-    this.selection.patch = {}
+    this.limits = { source: this.limits.source, patch: {} }
+    this.selection = { source: this.selection.source, patch: {} }
     this.issues = {}
     this.notice = undefined
     this.saved = false
-    this.syncTexts()
     this.changed()
   }
 
-  private syncTexts(): void {
-    this.depthText = this.limits.source.kind === 'ready' ? String(this.limits.source.effective.maxDepth) : ''
-    this.capacityText = this.limits.source.kind === 'ready' ? String(this.limits.source.effective.maxActiveSubagents) : ''
+  private candidateText(field: 'maxDepth' | 'maxActiveSubagents'): string {
+    if (this.limits.source.kind !== 'ready') return ''
+    const entry = this.limits.patch[field]
+    return entry === undefined ? String(this.limits.source.effective[field]) : entry.kind === 'reset' ? '' : String(entry.value)
   }
 
-  private numberValid(text: string, field: 'maxDepth' | 'maxActiveSubagents'): boolean {
-    return /^\d+$/u.test(text.trim()) && Number.isSafeInteger(Number(text)) && Number(text) >= (field === 'maxDepth' ? 0 : 1)
-  }
-
+  /** TRUE business validation only: the raw numeric draft is validated at
+   *  Stage time and never becomes long-lived controller state. */
   private validate(): boolean {
     const issues: Partial<Record<SubagentSettingsField, string>> = {}
-    if (this.limits.source.kind === 'ready') {
-      for (const [field, text] of [['maxDepth', this.depthText], ['maxActiveSubagents', this.capacityText]] as const) {
-        if (text.trim() !== '' && !this.numberValid(text, field)) {
-          issues[field] = `Enter a safe integer from ${field === 'maxDepth' ? '0' : '1'} to ${Number.MAX_SAFE_INTEGER}.`
-        }
-      }
-    }
     const source = this.selection.source
     if (source.kind === 'ready') {
       const enabled = patched(this.selection.patch.enabled, source.effective.enabled, source.inherited.enabled)
@@ -295,6 +331,10 @@ export class SubagentSettingsController {
     this.saved = false
     this.notice = undefined
     if (!this.validate()) { this.changed(); return }
+    // The controller independently refuses exactly what the page must not
+    // offer: an invalid, non-eligible or settled-ambiguous new Save. A
+    // definite stale sibling keeps a current dirty section committable.
+    if (!this.canSave()) { this.changed(); return }
     const limits = this.limits.source
     const selection = this.selection.source
     const limitsPatch = { ...this.limits.patch }
@@ -338,9 +378,12 @@ export class SubagentSettingsController {
           // descriptor still rejects the cross-Host case.
           const live = this.deps.selection.read()
           const firstLive = limitsDirty ? this.deps.limits.read() : undefined
-          const firstAuthorityChanged = limitsDirty && firstLive?.kind === 'ready'
-            && ((limits.kind === 'ready' && firstLive.generation !== limits.generation)
-              || (limits.kind !== 'ready' && live.kind === 'ready' && live.generation !== firstLive.generation))
+          // Only a CAPTURED Limits descriptor whose live generation changed is
+          // evidence of a replaced Host. A Limits descriptor that merely
+          // disappeared is a local section loss; Selection's own current
+          // generation remains the authority for its dispatch.
+          const firstAuthorityChanged = limitsDirty && limits.kind === 'ready'
+            && firstLive?.kind === 'ready' && firstLive.generation !== limits.generation
           if (live.kind !== 'ready' || live.generation !== selection.generation || firstAuthorityChanged) {
             this.selection.status = { kind: 'not-saved', text: 'Not saved · Host authority unavailable; refresh before retrying.' }
           } else {
@@ -407,7 +450,6 @@ export class SubagentSettingsController {
         state.patch = {}
         state.refreshRequired = false
         state.status = { kind: 'verified', text: 'Verified' }
-        if (state === this.limits) this.syncTexts()
       } else state.status = { kind: 'unverified', text: 'Unverified · current Host values differ; refresh to review.' }
     }
     this.changed()

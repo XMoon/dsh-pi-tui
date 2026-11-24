@@ -3613,7 +3613,7 @@ export class SettingsWorkspacePanel implements Component {
   ): { readonly label: string } | undefined {
     switch (specialist) {
       case 'subagent-settings':
-        return this.intents.createSubagentSettingsPage === undefined ? undefined : { label: 'Configure subagent settings…' }
+        return this.intents.createSubagentSettingsPage === undefined ? undefined : { label: 'Open…' }
       case 'web-settings':
         return this.intents.createWebSettingsPage === undefined ? undefined : { label: 'Configure Web…' }
       case 'footer-configurator':
@@ -4238,10 +4238,11 @@ export class SettingsWorkspacePanel implements Component {
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
-    // SUX-01/02: a numeric tenant is hosted inside the REAL Detail pane, so it
+    // SUX-01/02/03: a Detail tenant is hosted inside the REAL Detail pane, so it
     // must be entered only when that pane really grants a content row — a body
     // row that the pane header would consume is not enough.
-    if (row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings') {
+    if (row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings'
+      || row.specialist === 'subagent-settings') {
       const plan = planSettingsChrome(
         this.projectionWidth(),
         this.intents.rows(),
@@ -4427,24 +4428,27 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  // ── the numeric Detail tenants (Agent single value / Shell group) ───────────
+  // ── the Detail tenants (Agent single / Shell group / Subagent group) ───────
 
   /**
-   * Whether the ONE mounted specialist is one of the two numeric Detail
-   * TENANTS (the Agent single value or the Shell grouped fields). The authority
-   * is the real mounted slot plus its row id — never the selected-but-not-
-   * entered row, the category, the terminal width or the mere presence of a
-   * factory.
+   * Whether the ONE mounted specialist is one of the real Detail TENANTS (the
+   * Agent single value, the Shell grouped fields or the Subagent grouped
+   * fields). The authority is the real mounted slot plus its row id — never
+   * the selected-but-not-entered row, the category, the terminal width or the
+   * mere presence of a factory.
    */
   private detailTenantActive(): boolean {
     return this.specialistPage !== undefined
-      && (this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution')
+      && (this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution'
+        || this.specialistRow === 'subagent-settings')
   }
 
-  /** Whether this ROW's visible route is a hosted numeric Detail tenant. It is
-   *  the ENTRY-side question (both rows), while `singleAgentRow` below stays
-   *  the Agent-only presentation fact. */
+  /** Whether this ROW's visible route is a hosted Detail tenant. It is the
+   *  ENTRY-side question, while `singleAgentRow` below stays the Agent-only
+   *  presentation fact. Each tenant's own factory is its presence proof: the
+   *  Subagent tenant never depends on the numeric factory. */
   private detailTenantRow(row: SettingsWorkspaceRow | undefined): boolean {
+    if (row?.specialist === 'subagent-settings') return this.intents.createSubagentSettingsPage !== undefined
     if (this.intents.createHostNumericSettingsPage === undefined) return false
     return row?.specialist === 'agent-loop-settings' || row?.specialist === 'shell-execution-settings'
   }
@@ -6676,14 +6680,13 @@ export class SettingsWorkspacePanel implements Component {
         // Enter/Right. The Computer Use row belongs here: on the single-pane
         // (narrow/medium) frame there is no Detail pane, so the Detail's Manage
         // affordance does not exist and this click is the ONLY pointer route to
-        // the embedded page. SUX-01/02: the Agent loop and Shell execution rows
-        // are NO LONGER here — their explicit Change/Details/Open entry stays a
-        // separate gesture.
-        if (target.id === 'subagent-settings' || target.id === 'computer-use') {
+        // the embedded page. SUX-01/02/03: the Agent loop, Shell execution and
+        // Subagent rows are NO LONGER here — their explicit
+        // Change/Details/Open entry stays a separate gesture.
+        if (target.id === 'computer-use') {
           const row = this.selectedRow()
           const specialist = row?.specialist
-          if (row !== undefined
-            && (specialist === 'subagent-settings' || specialist === 'computer-use')) this.openSpecialist(row)
+          if (row !== undefined && specialist === 'computer-use') this.openSpecialist(row)
         }
         return
       }

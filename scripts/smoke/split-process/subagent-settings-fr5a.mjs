@@ -69,12 +69,18 @@ async function openSubagentSettings(client, label) {
   await sleep(180)
   await selectFrame(client, frame => /^> Subagent settings\b/mu.test(frame), `${label} Subagent row`)
   client.send('\r')
-  await waitForPattern(client, /Settings · Agent · Subagent settings[\s\S]*Limits · Ready[\s\S]*Model selection · Ready/u,
-    `${label} authoritative Subagent page`)
+  await waitForPattern(client, /Settings · Agent · Subagent settings[\s\S]*> Maximum depth[\s\S]*Model selection/u,
+    `${label} authoritative Subagent group`)
+}
+
+const BROWSE_LABEL = {
+  'Maximum recursion depth': 'Maximum depth',
+  'Subagent parallelism limit': 'Parallelism',
 }
 
 async function focusField(client, label, where) {
-  await selectFrame(client, frame => new RegExp(`^> ${label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'mu').test(frame), where, '\x1b[B', 6)
+  const visible = BROWSE_LABEL[label] ?? label
+  await selectFrame(client, frame => new RegExp(`^> ${visible.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'mu').test(frame), where, '\x1b[B', 6)
 }
 
 async function stageNumber(client, label, value, where) {
@@ -88,7 +94,7 @@ async function stageNumber(client, label, value, where) {
     await sleep(40)
   }
   client.send('\r')
-  const frame = await waitForPattern(client, /Limits: Unsaved/u, `${where} staged limit`)
+  const frame = await waitForPattern(client, /unsaved change/u, `${where} staged limit`)
   assert(frame.includes('Save [S]'), `${where}: the staged limit must paint Save`)
 }
 
@@ -96,7 +102,7 @@ async function stageEnabled(client, where) {
   await focusField(client, 'Enabled', `${where} Enabled`)
   client.send('\r')
   await waitForPattern(client, /> Enabled\s+On\b/u, `${where} staged Enabled`)
-  const frame = await waitForPattern(client, /Selection: Unsaved/u, `${where} staged selection`)
+  const frame = await waitForPattern(client, /unsaved changes/u, `${where} staged selection`)
   assert(frame.includes('Save [S]'), `${where}: Enabled must remain staged before Save`)
 }
 
@@ -109,8 +115,8 @@ async function closeClient(client, scene, label) {
   for (let attempt = 0; attempt < 14; attempt += 1) {
     const frame = await frameOf(client)
     if (!/Settings ·/u.test(frame)) break
-    if (/Discard unsaved changes\? y\/N/u.test(frame)) {
-      client.send('y')
+    if (/Discard and leave loses staged values\.|Leaving does not undo them\./u.test(frame)) {
+      client.send('d')
       await sleep(180)
     } else {
       client.send('\x1b')
@@ -183,7 +189,7 @@ export async function runSubagentSettingsFr5A(context) {
       'the writable Limits namespace reaches the actual Host USER profile patch')
     assert(profileUserConfig(installation.profileDir, SELECTION_NS) === undefined,
       'the home-overlay refusal creates no Selection USER override')
-    assert(bFrame.includes('home patch or command-line overlay'),
+    assert(bFrame.includes('is overridden by a home patch or command-line'),
       'the failed section names the official higher-layer refusal')
     trace('fr5a.remote-partial-save', { limitsVerified: true, selectionOutcomeUnconfirmed: true, profilePatch: true })
 

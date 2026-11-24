@@ -197,23 +197,30 @@ test('removing the last allowed route while enabled retains the route and dispat
   const h = await harness({ selection: ready(HOST_A, 82,
     { enabled: true, allowedModels: [ROUTE] }, { enabled: true, allowedModels: [] }) })
   h.controller.toggleRoute(ROUTE)
-  assert.match(h.controller.snapshot().issues.allowedModels ?? '', /Disable model selection/u)
+  assert.match(h.controller.snapshot().notice ?? '', /Disable model selection/u)
   assert.deepEqual(h.controller.snapshot().allowedModels, [ROUTE])
   assert.equal(h.controller.snapshot().dirty, false)
   assert.equal(h.limits.calls.length, 0)
   assert.equal(h.selection.calls.length, 0)
 })
 
-test('an invalid numeric limit blocks Save before either typed section dispatches', async () => {
+test('an invalid or blank numeric Stage is refused with zero patch and zero writes', async () => {
   const h = await harness()
-  h.controller.setNumber('maxActiveSubagents', '0')
-  const taskCount = h.tasks.length
+  h.controller.setNumber('maxDepth', '2')
+  const staged = structuredClone(h.controller.snapshot().limits.patch)
+  for (const invalid of ['', '   ', '-1', '1.5', '1e3', '12garbage', '999999999999999999999']) {
+    h.controller.setNumber('maxDepth', invalid)
+    assert.deepEqual(h.controller.snapshot().limits.patch, staged, `${JSON.stringify(invalid)} must not change the staged patch`)
+  }
+  assert.equal(h.controller.numberIssue('maxDepth', ''), 'Value is required.')
+  assert.match(h.controller.numberIssue('maxActiveSubagents', '0') ?? '', /safe integer from 1/u)
+  assert.equal(h.controller.canSave(), true, 'the prior legal stage stays committable')
   h.controller.save()
-  assert.equal(h.tasks.length, taskCount)
-  assert.equal(h.limits.calls.length, 0)
-  assert.equal(h.selection.calls.length, 0)
-  assert.match(h.controller.snapshot().issues.maxActiveSubagents ?? '', /safe integer/u)
-  assert.equal(h.controller.snapshot().dirty, true)
+  await latest(h)
+  assert.deepEqual(h.limits.calls[0], {
+    patch: { maxDepth: { kind: 'set', value: 2 } }, revision: 41, generation: HOST_A,
+  })
+  assert.equal(h.limits.calls.length, 1, 'the refused blank/invalid stages dispatched nothing')
 })
 
 test('Resetting the only allowed route while enabled blocks Save without a Host write', async () => {
@@ -273,12 +280,48 @@ test('a lost ACK after the edit landed keeps the draft and a later Save never au
   await latest(h)
   assert.equal(h.controller.snapshot().limits.status?.kind, 'outcome-unconfirmed')
   assert.equal(h.controller.snapshot().limits.dirty, true)
+  assert.equal(h.controller.canSave(), false, 'a settled unknown outcome refuses a new group Save')
   const observed = h.limits.read()
   assert.equal(observed.kind, 'ready')
   if (observed.kind === 'ready') assert.equal(observed.effective.maxDepth, 5)
   h.controller.save()
   await latest(h)
   assert.equal(h.limits.calls.length, 1)
+})
+
+test('a failed refresh keeps the settled ambiguous write, and a successful refresh clears it', async () => {
+  const h = await harness()
+  h.limits.plans.push({ outcome: { kind: 'outcome-unconfirmed', reason: 'reply lost' }, apply: true })
+  h.controller.setNumber('maxDepth', '5')
+  h.controller.save()
+  await latest(h)
+  h.limits.refresh = async () => { throw new Error('settings read lost') }
+  assert.equal(h.controller.refresh(true), true)
+  await latest(h, 'subagent settings refresh')
+  const failed = h.controller.snapshot()
+  assert.equal(failed.limits.status?.kind, 'outcome-unconfirmed', 'an unreadable refresh cannot clear an unproven write')
+  assert.equal(failed.limits.dirty, true, 'the retained intent stays visible')
+  assert.match(failed.notice ?? '', /Refresh failed/u)
+  assert.match(failed.limits.status?.text ?? '', /possibly saved/u)
+  assert.equal(failed.selection.status?.kind, undefined, 'the clean sibling is not marked ambiguous')
+
+  h.limits.refresh = async () => { h.limits.refreshCalls += 1 }
+  assert.equal(h.controller.refresh(true), true)
+  await latest(h, 'subagent settings refresh')
+  const recovered = h.controller.snapshot()
+  assert.equal(recovered.limits.status?.kind, undefined, 'a successful current read retires the old settlement')
+  assert.equal(recovered.limits.dirty, false)
+  assert.equal(recovered.dirty, false)
+})
+
+test('a definite stale section keeps a current sibling committable, while both stale offer no Save', async () => {
+  const h = await harness()
+  h.controller.setNumber('maxDepth', '2')
+  h.controller.toggleEnabled()
+  h.limits.state = ready(HOST_A, 42, { maxDepth: 1, maxActiveSubagents: 8 }, { maxDepth: 1, maxActiveSubagents: 8 })
+  assert.equal(h.controller.canSave(), true, 'the current Selection section keeps its own Save')
+  h.selection.state = ready(HOST_A, 83, { enabled: false, allowedModels: [ROUTE] }, { enabled: false, allowedModels: [ROUTE] })
+  assert.equal(h.controller.canSave(), false, 'two stale sections have no writable field to offer')
 })
 
 test('closing while Limits is held retires page publication and prevents the second section dispatch', async t => {

@@ -617,6 +617,13 @@ async function settingsKey(ui: UiHarness, data: string): Promise<void> {
   await ui.vt.waitForRender()
 }
 
+const SUBAGENT_BROWSE_LABEL: Readonly<Record<string, string>> = {
+  'Maximum recursion depth': 'Maximum depth',
+  'Subagent parallelism limit': 'Parallelism',
+  Enabled: 'Enabled',
+  'Allowed models': 'Allowed models',
+}
+
 async function openSubagentSettings(ui: UiHarness): Promise<void> {
   ui.invoke('settings')
   await ui.vt.waitForRender()
@@ -629,17 +636,21 @@ async function openSubagentSettings(ui: UiHarness): Promise<void> {
   await settingsKey(ui, '\r')
   await waitForFrame(
     () => ui.vt.getViewport().join('\n'),
-    frame => /Settings · Agent · Subagent settings/u.test(frame) && /Limits · Ready/u.test(frame) && /Model selection · Ready/u.test(frame),
+    frame => /Settings · Agent · Subagent settings/u.test(frame) && /> Maximum depth/u.test(frame) && /Model selection/u.test(frame),
     () => ui.vt.waitForRender(),
-    'the production Subagent page must finish its authoritative refresh',
+    'the production Subagent Detail tenant must finish its authoritative refresh',
   )
 }
 
 async function selectSubagentField(ui: UiHarness, label: string): Promise<void> {
-  for (let step = 0; step < 4 && !ui.vt.getViewport().some(line => line.includes(`> ${label}`)); step += 1) {
-    await settingsKey(ui, '\x1b[B')
+  const short = SUBAGENT_BROWSE_LABEL[label] ?? label
+  for (const direction of ['\x1b[B', '\x1b[A'] as const) {
+    for (let step = 0; step < 4 && !ui.vt.getViewport().some(line => line.includes(`> ${short}`)); step += 1) {
+      await settingsKey(ui, direction)
+    }
+    if (ui.vt.getViewport().some(line => line.includes(`> ${short}`))) break
   }
-  assert.ok(ui.vt.getViewport().some(line => line.includes(`> ${label}`)), `field ${label} must be selected:\n${ui.vt.getViewport().join('\n')}`)
+  assert.ok(ui.vt.getViewport().some(line => line.includes(`> ${short}`)), `field ${label} must be selected:\n${ui.vt.getViewport().join('\n')}`)
 }
 
 async function stageSubagentNumber(ui: UiHarness, label: string, value: string): Promise<void> {
@@ -649,6 +660,22 @@ async function stageSubagentNumber(ui: UiHarness, label: string, value: string):
   await settingsKey(ui, '\x15')
   await settingsKey(ui, value)
   await settingsKey(ui, '\r')
+  await ui.vt.waitForRender()
+}
+
+async function toggleSubagentEnabled(ui: UiHarness): Promise<void> {
+  await selectSubagentField(ui, 'Enabled')
+  await settingsKey(ui, '\r')
+  await ui.vt.waitForRender()
+}
+
+async function resetSubagentField(ui: UiHarness, label: string): Promise<void> {
+  await selectSubagentField(ui, label)
+  await settingsKey(ui, '?')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Reset to inherited…/u.test(frame),
+    () => ui.vt.waitForRender(), `the ${label} Advanced must paint its complete reset action`)
+  await clickPainted(ui, 'Reset to inherited…')
+  await ui.vt.waitForRender()
 }
 
 let lastUiPointerCell: { readonly row: number; readonly column: number; readonly at: number } | undefined
@@ -671,21 +698,6 @@ async function clickPainted(ui: UiHarness, text: string, rowHint?: number): Prom
   lastUiPointerCell = { row, column, at: Date.now() }
   ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
   if (row !== lines.length - 1) await ui.vt.waitForRender()
-  ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
-  await ui.vt.waitForRender()
-}
-
-async function clickSubagentFieldAction(ui: UiHarness, field: string, action: string): Promise<void> {
-  const lines = ui.vt.getViewport().map(stripTerminalSequences)
-  const fieldRow = lines.findIndex(line => line.includes(field))
-  assert.ok(fieldRow >= 0, `field row ${field} must be painted:\n${lines.join('\n')}`)
-  const detail = lines[fieldRow + 1]!
-  const actionColumn = detail.lastIndexOf(action)
-  assert.ok(actionColumn >= 0, `${action} must be painted beside ${field}: ${detail}`)
-  const row = fieldRow + 1
-  const column = visibleWidth(detail.slice(0, actionColumn))
-  ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
-  await ui.vt.waitForRender()
   ui.vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
   await ui.vt.waitForRender()
 }
@@ -730,7 +742,7 @@ test('Subagent settings Save persists both namespaces and only new top-level Ses
   const declaresRoutes = (agent: unknown): boolean => {
     const schema = ctx.tools.schemas(agent as never).find(candidate => candidate.name === 'subagent')
     const properties = (schema?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties
-    return properties?.provider !== undefined && properties.model !== undefined
+    return properties?.provider !== undefined && properties?.model !== undefined
   }
   const before = await createSession('subagent-settings-before')
   assert.deepEqual(sampledPolicy(before.agent), route)
@@ -741,8 +753,7 @@ test('Subagent settings Save persists both namespaces and only new top-level Ses
   await openSubagentSettings(ui)
   const limitsOpened = readySection(port.subagentLimits.read())
   const selectionOpened = readySection(port.subagentModelSelection.read())
-  await selectSubagentField(ui, 'Enabled')
-  await settingsKey(ui, '\r')
+  await toggleSubagentEnabled(ui)
   await stageSubagentNumber(ui, 'Maximum recursion depth', '0')
   await stageSubagentNumber(ui, 'Subagent parallelism limit', '2')
   assert.equal(recorder.calls.length, 0, 'staging through real keyboard input writes neither namespace')
@@ -772,12 +783,14 @@ test('Subagent settings Save persists both namespaces and only new top-level Ses
   assert.deepEqual(sampledPolicy(before.agent), route, 'the existing Session retains its durable policy')
   assert.equal(declaresRoutes(after.agent), true, 'the tool schema stays static in the current official preset')
 
-  await selectSubagentField(ui, 'Enabled')
-  await settingsKey(ui, '\r')
+  await toggleSubagentEnabled(ui)
   assert.equal(readySection(port.subagentModelSelection.read()).effective.enabled, false)
   await settingsKey(ui, 's')
   await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Selection: Verified/u.test(frame),
     () => ui.vt.waitForRender(), 'the re-enable Save must verify')
+  assert.deepEqual(recorder.calls.at(-1), {
+    ns: 'subagent-model-selection-settings', ops: [{ op: 'set', path: ['enabled'], value: true }], revision: selectionOpened.revision + 1,
+  })
   assert.deepEqual(readySection(port.subagentModelSelection.read()).effective, { enabled: true, allowedModels: route })
   const reEnabled = await createSession('subagent-settings-reenabled')
   assert.deepEqual(sampledPolicy(reEnabled.agent), route)
@@ -812,27 +825,29 @@ test('a Root pointer journey stages both namespaces, saves to Host, and discards
   await selectSettingsCategory(ui.vt, 'Agent')
   await settingsKey(ui, '\r')
   await clickPainted(ui, 'Subagent settings')
-  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits · Ready/u.test(frame) && /Model selection · Ready/u.test(frame),
-    () => ui.vt.waitForRender(), 'a painted Root row click opens the real embedded page')
+  assert.doesNotMatch(ui.vt.getViewport().join('\n'), /> Maximum depth/u, 'a row click only SELECTS')
+  await clickPainted(ui, 'Open…')
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Settings · Agent · Subagent settings/u.test(frame) && /> Maximum depth/u.test(frame),
+    () => ui.vt.waitForRender(), 'the painted Detail Open entry opens the real tenant')
 
-  // Pointer-open the numeric input, type its value, then use the painted Apply
-  // action. Reset is a separate operation on the sibling capacity field.
-  await clickPainted(ui, 'Maximum recursion depth')
+  // Pointer-open the numeric input, type its value, then use the painted Stage.
+  // Reset is a separate Advanced operation on the sibling capacity field.
+  await clickPainted(ui, 'Maximum depth')
+  await clickPainted(ui, 'Edit [Enter]', ui.vt.getViewport().length - 1)
   await settingsKey(ui, '\x15')
   await settingsKey(ui, '0')
-  await clickPainted(ui, 'Apply [Enter]')
-  await clickSubagentFieldAction(ui, 'Subagent parallelism limit', 'Reset')
-  await clickSubagentFieldAction(ui, 'Allowed models', 'Manage…')
+  await clickPainted(ui, 'Stage [Enter]', ui.vt.getViewport().length - 1)
+  await resetSubagentField(ui, 'Subagent parallelism limit')
+  await clickPainted(ui, 'Allowed models')
+  await clickPainted(ui, 'Manage [Enter]', ui.vt.getViewport().length - 1)
   await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Fast/u.test(frame),
     () => ui.vt.waitForRender(), 'the current provider directory is painted')
-  await clickPainted(ui, 'Search [/]', ui.vt.getViewport().length - 1)
-  await settingsKey(ui, 'fast')
-  await clickPainted(ui, 'Done [Enter]', ui.vt.getViewport().length - 1)
-  assert.match(ui.vt.getViewport().join('\n'), /Fast/u, 'pointer-opened Search filters the painted directory')
+  assert.match(ui.vt.getViewport().join('\n'), /Fast/u, 'the current provider directory is painted')
   await clickPainted(ui, 'Fast')
+  await clickPainted(ui, 'Remove route [Enter]', ui.vt.getViewport().length - 1)
   assert.equal(calls.length, 0, 'Root and directory clicks stage only; neither section mutates before Save')
-  await clickPainted(ui, 'Back [Esc]')
-  await clickPainted(ui, 'Save [S]')
+  await clickPainted(ui, 'Back [Esc]', ui.vt.getViewport().length - 1)
+  await clickPainted(ui, 'Save [S]', ui.vt.getViewport().length - 1)
   await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Verified/u.test(frame) && /Selection: Verified/u.test(frame),
     () => ui.vt.waitForRender(), 'the painted Root Save settles both official sections')
 
@@ -851,17 +866,18 @@ test('a Root pointer journey stages both namespaces, saves to Host, and discards
   assert.deepEqual(plane.userConfig('subagent-model-selection-settings'), { enabled: false, allowedModels: [] })
 
   // Pointer-only exit: a second numeric edit is kept dirty until Back opens the
-  // painted question, and only the explicit Discard returns to the Agent rows.
-  await clickPainted(ui, 'Maximum recursion depth')
+  // painted question, and only the explicit discard returns to the Agent rows.
+  await clickPainted(ui, 'Maximum depth')
+  await clickPainted(ui, 'Edit [Enter]', ui.vt.getViewport().length - 1)
   await settingsKey(ui, '\x15')
   await settingsKey(ui, '1')
-  await clickPainted(ui, 'Apply [Enter]')
-  await clickPainted(ui, 'Back [Esc]')
-  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Discard unsaved changes\? y\/N/u.test(frame),
+  await clickPainted(ui, 'Stage [Enter]', ui.vt.getViewport().length - 1)
+  await clickPainted(ui, 'Back [Esc]', ui.vt.getViewport().length - 1)
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Discard and leave loses staged values\./u.test(frame),
     () => ui.vt.waitForRender(), 'Back exposes the dirty decision')
-  await clickPainted(ui, 'Discard [Y]')
+  await clickPainted(ui, 'Discard and leave [D]', ui.vt.getViewport().length - 1)
   assert.match(ui.vt.getViewport().join('\n'), /Settings · Agent · Rows/u)
-  assert.equal(calls.length, 2, 'Discard does not issue another official mutation')
+  assert.equal(calls.length, 2, 'discard does not issue another official mutation')
   assert.deepEqual(plane.userConfig('subagent'), { maxDepth: 0, maxActiveSubagents: 8 })
 })
 
@@ -886,11 +902,10 @@ test('a Root pointer Save keeps an official partial result visible and lets the 
   life.defer(() => ui.dispose())
   await openSubagentSettings(ui)
 
-  await selectSubagentField(ui, 'Enabled')
-  await settingsKey(ui, '\r')
+  await toggleSubagentEnabled(ui)
   await stageSubagentNumber(ui, 'Maximum recursion depth', '0')
-  assert.equal(calls.length, 0, 'pointer Save remains the first Host mutation')
-  await clickPainted(ui, 'Save [S]')
+  assert.equal(calls.length, 0, 'the painted Save remains the first Host mutation')
+  await clickPainted(ui, 'Save [S]', ui.vt.getViewport().length - 1)
   await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Outcome unconfirmed/u.test(frame) && /Selection: Verified/u.test(frame),
     () => ui.vt.waitForRender(), 'the Root bar must show each official section result independently')
   assert.deepEqual(calls, [
@@ -903,15 +918,15 @@ test('a Root pointer Save keeps an official partial result visible and lets the 
   assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 4, maxActiveSubagents: 8 })
   assert.deepEqual(readySection(port.subagentModelSelection.read()).effective, { enabled: true, allowedModels: route })
 
-  await clickPainted(ui, 'Refresh [R]')
-  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Discard unsaved changes\? y\/N/u.test(frame),
+  await clickPainted(ui, 'Refresh [R]', ui.vt.getViewport().length - 1)
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Refresh discards unsaved edits\./u.test(frame),
     () => ui.vt.waitForRender(), 'Refresh from a partial Save requests explicit draft discard')
   // The second action is on the same cell; wait past PiTui's 500ms double-click window so it is a deliberate confirmation.
   await new Promise<void>(resolve => setTimeout(resolve, 550))
-  await clickPainted(ui, 'Discard [Y]')
-  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits · Ready/u.test(frame) && /Model selection · Ready/u.test(frame),
+  await clickPainted(ui, 'Refresh [R]', ui.vt.getViewport().length - 1)
+  await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Maximum depth\s+4/u.test(frame) && !/Outcome unconfirmed/u.test(frame),
     () => ui.vt.waitForRender(), 'the painted Refresh action re-reads both official sections')
-  await clickPainted(ui, 'Back [Esc]')
+  await clickPainted(ui, 'Back [Esc]', ui.vt.getViewport().length - 1)
   assert.match(ui.vt.getViewport().join('\n'), /Settings · Agent · Rows/u, 'Back exits to the Agent rows after refresh')
   assert.equal(calls.length, 2, 'discard and refresh never replay either official mutation')
   assert.equal(plane.userConfig('subagent'), undefined)
@@ -938,8 +953,7 @@ test('Subagent Reset sends official unset at the captured revision and verifies 
   await openSubagentSettings(ui)
   const opened = readySection(port.subagentModelSelection.read())
   assert.deepEqual(opened.overridden, { enabled: true, allowedModels: true })
-  await selectSubagentField(ui, 'Allowed models')
-  await settingsKey(ui, 'x')
+  await resetSubagentField(ui, 'Allowed models')
   assert.equal(calls.length, 0, 'Reset stages an operation rather than committing it')
   assert.deepEqual(readySection(port.subagentModelSelection.read()).effective.allowedModels, [{ provider: 'saved', model: 'unlisted' }])
   await settingsKey(ui, 's')
@@ -955,8 +969,7 @@ test('Subagent Reset sends official unset at the captured revision and verifies 
   assert.deepEqual(readySection(port.subagentLimits.read()).effective, { maxDepth: 5, maxActiveSubagents: 2 })
 
   const limitsOpened = readySection(port.subagentLimits.read())
-  await selectSubagentField(ui, 'Maximum recursion depth')
-  await settingsKey(ui, 'x')
+  await resetSubagentField(ui, 'Maximum recursion depth')
   await settingsKey(ui, 's')
   await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Verified/u.test(frame),
     () => ui.vt.waitForRender(), 'the limit Reset must verify through the same page')
@@ -967,9 +980,9 @@ test('Subagent Reset sends official unset at the captured revision and verifies 
 
   const countBeforeInvalid = calls.length
   await stageSubagentNumber(ui, 'Subagent parallelism limit', '0')
-  await settingsKey(ui, 's')
-  assert.match(ui.vt.getViewport().join('\n'), /safe integer from 1/u)
+  assert.match(ui.vt.getViewport().join('\n'), /Enter a safe integer from 1 to/u)
   assert.equal(calls.length, countBeforeInvalid, 'capacity zero cannot cross the official mutation boundary')
+  await settingsKey(ui, '\x1b')
   await stageSubagentNumber(ui, 'Subagent parallelism limit', String(Number.MAX_SAFE_INTEGER))
   await settingsKey(ui, 's')
   await waitForFrame(() => ui.vt.getViewport().join('\n'), frame => /Limits: Verified/u.test(frame),
@@ -1030,16 +1043,14 @@ test('a stale Limits namespace does not block a current Selection Save from the 
   await openSubagentSettings(ui)
   const openedSelection = readySection(port.subagentModelSelection.read())
   await stageSubagentNumber(ui, 'Maximum recursion depth', '2')
-  await selectSubagentField(ui, 'Enabled')
-  await settingsKey(ui, '\r')
-  assert.match(ui.vt.getViewport().join('\n'), /Limits: Unsaved/u)
-  assert.match(ui.vt.getViewport().join('\n'), /Selection: Unsaved/u)
+  await toggleSubagentEnabled(ui)
+  assert.match(ui.vt.getViewport().join('\n'), /2 unsaved changes · Limits 1 · Model selection 1/u)
 
   const newer = readySection(otherEditor.subagentLimits.read())
   assert.deepEqual(await otherEditor.subagentLimits.mutate({ maxDepth: { kind: 'set', value: 4 } }, newer.revision, newer.generation), { kind: 'accepted' })
   ui.app.requestRender()
   await waitForFrame(() => ui.vt.getViewport().join('\n'),
-    frame => /Limits · Last-known · read-only/u.test(frame) && /Selection: Unsaved/u.test(frame) && /Save \[S\]/u.test(frame),
+    frame => /Limits\s+Last-known · read-only/u.test(frame) && /Save \[S\]/u.test(frame),
     () => ui.vt.waitForRender(), 'a stale sibling must keep the current dirty namespace Save reachable')
   await settingsKey(ui, 's')
   await waitForFrame(() => ui.vt.getViewport().join('\n'),
@@ -1076,17 +1087,16 @@ test('a stale Limits namespace does not hide the current Selection Save from the
   await openSubagentSettings(ui)
   const openedSelection = readySection(port.subagentModelSelection.read())
   await stageSubagentNumber(ui, 'Maximum recursion depth', '2')
-  await clickPainted(ui, 'Enabled')
-  assert.match(ui.vt.getViewport().join('\n'), /Limits: Unsaved/u)
-  assert.match(ui.vt.getViewport().join('\n'), /Selection: Unsaved/u)
+  await toggleSubagentEnabled(ui)
+  assert.match(ui.vt.getViewport().join('\n'), /2 unsaved changes · Limits 1 · Model selection 1/u)
 
   const newer = readySection(otherEditor.subagentLimits.read())
   assert.deepEqual(await otherEditor.subagentLimits.mutate({ maxDepth: { kind: 'set', value: 4 } }, newer.revision, newer.generation), { kind: 'accepted' })
   ui.app.requestRender()
   await waitForFrame(() => ui.vt.getViewport().join('\n'),
-    frame => /Limits · Last-known · read-only/u.test(frame) && /Save \[S\]/u.test(frame),
+    frame => /Limits\s+Last-known · read-only/u.test(frame) && /Save \[S\]/u.test(frame),
     () => ui.vt.waitForRender(), 'the Root bar must keep the independently committable Save span')
-  await clickPainted(ui, 'Save [S]')
+  await clickPainted(ui, 'Save [S]', ui.vt.getViewport().length - 1)
   await waitForFrame(() => ui.vt.getViewport().join('\n'),
     frame => /Limits: Not saved/u.test(frame) && /Selection: Verified/u.test(frame),
     () => ui.vt.waitForRender(), 'the pointer Save must settle the current Selection namespace')
@@ -1125,7 +1135,7 @@ test('a Subagent profile write blocked by a temporary home overlay stays unverif
   assert.deepEqual(calls, [{ ns: 'subagent', ops: [{ op: 'set', path: ['maxDepth'], value: 0 }], revision: opened.revision }])
   assert.equal(readySection(port.subagentLimits.read()).effective.maxDepth, 4)
   assert.equal(plane.userConfig('subagent'), undefined, 'the ConfigEditor refusal did not create a profile override')
-  assert.match(ui.vt.getViewport().join('\n'), /home patch or command-line overlay/u)
+  assert.match(ui.vt.getViewport().join('\n'), /is overridden by a home patch or command-line/u)
   assert.doesNotMatch(ui.vt.getViewport().join('\n'), /Limits: Verified/u)
 })
 

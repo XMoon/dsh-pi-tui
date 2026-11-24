@@ -498,10 +498,19 @@ class FakeSpecialistPage implements EmbeddedSpecialistPage {
   grants: number[] = []
   focused = false
   disposed = false
+  private rowGrant = 4
   /** Lines this page paints (the root budgets them). */
   lines: string[] = ['SPECIALIST HEADER', '> alpha', '  beta', 'specialist hint']
   render(width: number): string[] {
-    return this.lines.map(line => line.slice(0, width))
+    // The root grants body rows PLUS the one physical bar; a real page's last
+    // line is its semantic hint. The fake follows that contract so the SAME
+    // class serves the full-width pages and the hosted Detail tenants.
+    const child: string[] = []
+    for (let index = 0; index < Math.max(0, this.rowGrant - 1); index += 1) {
+      child.push((this.lines[index] ?? '').slice(0, width))
+    }
+    child.push((this.lines[this.lines.length - 1] ?? '').slice(0, width))
+    return child
   }
   handleInput(data: string): void {
     this.inputs.push(data)
@@ -512,7 +521,10 @@ class FakeSpecialistPage implements EmbeddedSpecialistPage {
   }
   setMaxRows(rows: number): void {
     this.grants.push(rows)
+    this.rowGrant = Math.max(1, rows)
   }
+  /** The fake keeps no local draft, so a clean user leave is always allowed. */
+  requestParentLeave(): 'allow' { return 'allow' }
   invalidate(): void {}
   dispose(): void {
     this.disposed = true
@@ -3480,31 +3492,31 @@ test('a pointer gesture only resolves inside the painted page cells under the sa
   h.panel.handleInput('\r')
   const page = h.specialistPages[0]!
   const frame = plain(h).split('\n')
-  const paneHeaderRow = frame.findIndex(line => line.includes('[Subagent settings]'))
-  assert.ok(paneHeaderRow >= 0, `the specialist pane header is painted:\n${frame.join('\n')}`)
-  // The page's own FIRST body line paints one row below the pane header.
-  const bodyRow = paneHeaderRow + 1
-  h.panel.onCellPress(4, bodyRow)
-  h.panel.onCellClick(4, bodyRow)
+  const headerRow = frame.findIndex(line => line.includes('SPECIALIST HEADER'))
+  assert.ok(headerRow >= 0, `the hosted page body is painted inside the Detail pane:\n${frame.join('\n')}`)
+  assert.ok(frame.some(line => line.includes('[Details]')), 'the REAL Detail pane owns the hosted page')
+  const detailX = visibleWidth(frame[headerRow]!.slice(0, frame[headerRow]!.indexOf('SPECIALIST HEADER')))
+  h.panel.onCellPress(detailX, headerRow)
+  h.panel.onCellClick(detailX, headerRow)
   assert.deepEqual(page.presses.map(entry => entry.type), ['press', 'click'], 'a proven gesture reaches the page')
-  assert.deepEqual(page.presses.map(entry => [entry.x, entry.y]), [[4, 0], [4, 0]],
+  assert.deepEqual(page.presses.map(entry => [entry.x, entry.y]), [[0, 0], [0, 0]],
     'the cells are translated into the page LOCAL coordinates')
   // A gesture straddling a RESIZE (the root's own gesture boundary) is refused
   // instead of resolving against the old cells; the page keeps its own
   // last-painted fence for its internal state.
   page.presses.length = 0
-  h.panel.onCellPress(4, bodyRow)
+  h.panel.onCellPress(detailX, headerRow)
   h.resize(120, 30) // the live geometry moved BEFORE the repaint
-  h.panel.onCellClick(4, bodyRow)
+  h.panel.onCellClick(detailX, headerRow)
   assert.deepEqual(page.presses.map(entry => entry.type), ['press'], 'a release after a resize is refused')
   h.resize(120, 40)
   plain(h)
-  // A click outside the page box never reaches it.
+  // A click outside the Detail tenant never reaches it.
   page.presses.length = 0
   plain(h)
   h.panel.onCellPress(0, 2)
   h.panel.onCellClick(0, 2)
-  assert.deepEqual(page.presses, [], 'chrome cells never reach the embedded page')
+  assert.deepEqual(page.presses, [], 'chrome cells never reach the hosted page')
 })
 
 test('the specialist page mounts with one body row and is never built without a body', () => {
