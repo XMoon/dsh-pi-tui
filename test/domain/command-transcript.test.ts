@@ -393,6 +393,115 @@ test('a trailing command becomes bridged only when same-Turn continuation is evi
     'the root keeps the same owner object when the command reflows')
 })
 
+function toolResultAt(callId: string, text: string, seq: number, turn = 0, step = 0): SessionEvent {
+  return event('tool/result', {
+    turn, step,
+    message: {
+      id: MessageId(`res-${seq}`), role: 'tool', toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }], source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, seq)
+}
+
+test('a bridged control run never promotes a settled assistant to Process before turn/end', () => {
+  const folder = new TranscriptFolder()
+  const head: SessionEvent[] = [
+    event('turn/start', { turn: 1 }, 0),
+    userMessage('bridge prompt', 1, 1),
+    toolCall('read', 'bridge-c1', 2, 1, 0),
+    toolResultAt('bridge-c1', 'bridge result', 3, 1, 0),
+    event('step/end', { turn: 1, step: 0 }, 4),
+    assistantMessage('SETTLED_ASSISTANT', 5, 1, 0),
+    event('command/run', { commandId: CommandId('bridge-cmd'), name: 'model', args: 'switch', source: { kind: 'user' } }, 6),
+    event('command/done', { commandId: CommandId('bridge-cmd'), kind: 'success', text: 'switched' }, 7),
+    contextMessage('injected continuation', 8, 1),
+  ]
+  folder.apply(head)
+  const before = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+  assert.equal(before.filter(block => block.kind === 'message' && block.message.kind === 'assistant').length, 0,
+    'the settled latest-step assistant is held back before turn/end, even with a bridged command')
+  assert.equal(before.filter(block => block.kind === 'activity').length, 1, 'still exactly one summary')
+  const command = before.find(block => block.kind === 'message' && block.message.kind === 'command')
+  assert.ok(command !== undefined && command.kind === 'message')
+  assert.equal(command.containerPath, undefined, 'the bridged control row keeps no semantic ancestry')
+
+  // The SAME row becomes the one final only after the authoritative turn/end,
+  // and the command/context do not turn it into process evidence.
+  folder.apply([event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 9)])
+  const after = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+  const finals = after.filter(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.equal(finals.length, 1, 'the qualified final appears exactly once after turn/end')
+  assert.equal(finals[0]?.kind === 'message' ? finals[0].containerPath : undefined, undefined,
+    'the held-back final is emitted at the root, not as Thought process')
+})
+
+test('a real later Process row still confirms a settled assistant as intermediate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 1 }, 0),
+    userMessage('later process prompt', 1, 1),
+    toolCall('read', 'later-c1', 2, 1, 0),
+    toolResultAt('later-c1', 'first result', 3, 1, 0),
+    event('step/end', { turn: 1, step: 0 }, 4),
+    assistantMessage('INTERMEDIATE_ASSISTANT', 5, 1, 0),
+    event('command/run', { commandId: CommandId('later-cmd'), name: 'model', source: { kind: 'user' } }, 6),
+    event('command/done', { commandId: CommandId('later-cmd'), kind: 'success', text: 'switched' }, 7),
+    contextMessage('injected continuation', 8, 1),
+    toolCall('bash', 'later-c2', 9, 1, 1),
+    toolResultAt('later-c2', 'later result', 10, 1, 1),
+  ])
+  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+  const assistant = blocks.find(block => block.kind === 'message' && block.message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'message', 'a later Process row confirms the assistant as intermediate')
+  assert.ok(assistant.containerPath?.some(node => node.kind === 'focus-root'), 'the confirmed intermediate stays Thought process')
+})
+
+test('a settled assistant in a fail-open later region is held back until turn/end', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    toolCall('read', 'fence-a', 1, 0, 0),
+    toolResultAt('fence-a', 'A result', 2, 0, 0),
+    assistantMessage('A final', 3, 0, 1),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    event('turn/start', { turn: 1 }, 5),
+    userMessage('B prompt', 6, 1),
+    toolCall('read', 'fence-b1', 7, 1, 0),
+    toolResultAt('fence-b1', 'B1 result', 8, 1, 0),
+    event('step/end', { turn: 1, step: 0 }, 9),
+    // A late orphan result for the already-settled Turn A: a replay hard fence.
+    event('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('fence-late'), role: 'tool', toolCallId: ToolCallId('fence-late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('fence-late-c') },
+      },
+    }, 10),
+    toolCall('bash', 'fence-b2', 11, 1, 1),
+    toolResultAt('fence-b2', 'B2 result', 12, 1, 1),
+    event('step/end', { turn: 1, step: 1 }, 13),
+    assistantMessage('B_SETTLED_ASSISTANT', 14, 1, 1),
+  ])
+  for (const expanded of [new Set<number>(), new Set([1])]) {
+    const blocks = projectFocus(folder.messages(), folder.turnActivities(), expanded, true)
+    assert.equal(blocks.filter(block => block.kind === 'message' && block.message.kind === 'assistant'
+      && block.message.text === 'B_SETTLED_ASSISTANT').length, 0,
+    `the fail-open settled assistant is held back before turn/end (expanded=${expanded.size > 0})`)
+    assert.equal(blocks.filter(block => block.kind === 'activity' && block.activity.turn === 1).length, 1,
+      'the later region never mints a second summary')
+  }
+
+  folder.apply([event('turn/end', { turn: 1, reason: { kind: 'max-tokens' } }, 15)])
+  for (const expanded of [new Set<number>(), new Set([1])]) {
+    const blocks = projectFocus(folder.messages(), folder.turnActivities(), expanded, true)
+    const finals = blocks.filter(block => block.kind === 'message' && block.message.kind === 'assistant'
+      && block.message.text === 'B_SETTLED_ASSISTANT')
+    assert.equal(finals.length, 1, 'the qualified later-region final appears exactly once')
+    assert.equal(finals[0]?.kind === 'message' ? finals[0].truncated : undefined, true,
+      'the later-region final keeps the max-tokens truncation state')
+  }
+})
+
 test('two logical Turns with identical text and usage keep separate summaries', () => {
   const folder = new TranscriptFolder()
   folder.apply([
@@ -425,6 +534,55 @@ test('two logical Turns with identical text and usage keep separate summaries', 
     assert.equal(expanded.filter(block => block.kind === 'activity' && block.activity.turn === turn).length, 1,
       `expanding Turn ${turn} keeps exactly one summary`)
   }
+})
+
+test('a fused manual compaction inside a Turn is a control row with a same-turn continuation', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 1 }, 0),
+    userMessage('compact mid-turn', 1, 1),
+    toolCall('read', 'mid-a', 2, 1, 0),
+    toolResultAt('mid-a', 'A result', 3, 1, 0),
+    event('step/end', { turn: 1, step: 0 }, 4),
+    event('command/run', { commandId: CommandId('mid-cmd'), name: 'compact', source: { kind: 'user' } }, 5),
+    rawEvent('compaction/start', { compactionId: 'mid-cpt', sourceCommandId: CommandId('mid-cmd'), turn: null }, 6),
+    rawEvent('compaction/summary', {
+      compactionId: 'mid-cpt', sourceCommandId: CommandId('mid-cmd'),
+      summary: [{ type: 'text', text: 'MID_COMPACT_SUMMARY' }], shadowedSeqs: [5], shadowedTokenCount: 120,
+    }, 7),
+    rawEvent('compaction/end', { compactionId: 'mid-cpt' }, 8),
+    event('command/done', { commandId: CommandId('mid-cmd'), kind: 'success', sourceEventSeq: SessionSeq(7) }, 9),
+    toolCall('bash', 'mid-b', 10, 1, 1),
+    toolResultAt('mid-b', 'B result', 11, 1, 1),
+    event('step/end', { turn: 1, step: 1 }, 12),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 13),
+  ])
+  const messages = folder.messages()
+  const fused = messages.filter(message => message.kind === 'compaction' && message.sourceCommand !== undefined)
+  assert.equal(fused.length, 1, 'fixture: the manual compaction fused with its command')
+  const activities = folder.turnActivities()
+  for (const expanded of [new Set<number>(), new Set([1])]) {
+    const blocks = projectFocus(messages, activities, expanded, true)
+    assert.equal(blocks.filter(block => block.kind === 'activity').length, 1, 'one summary only')
+    // The folder fuses the command INTO the compaction card: the compaction
+    // message IS the one visible control row for the command/compaction pair.
+    const compaction = blocks.find(block => block.kind === 'message' && block.message === fused[0])
+    assert.ok(compaction !== undefined && compaction.kind === 'message', 'the fused compaction stays visible once')
+    assert.equal(compaction.containerPath, undefined, 'the bridged compaction control keeps no semantic Focus path')
+    assert.equal(blocks.filter(block => block.kind === 'message' && block.message === fused[0]).length, 1,
+      'the compaction row is emitted exactly once in every mode')
+  }
+  const collapsed = projectFocus(messages, activities, new Set(), true)
+  const summary = collapsed.find(block => block.kind === 'activity')
+  assert.equal(summary?.kind === 'activity' ? summary.actionStats.total : -1, 2,
+    'only the two real tools feed the whole-turn Action aggregate')
+  const expanded = projectFocus(messages, activities, new Set([1]), true)
+  const order = expanded.map(block => block.kind === 'message' ? block.message.kind : block.kind)
+  const compactionIndex = order.indexOf('compaction')
+  const workIndexes = order.map((entry, index) => entry === 'work' ? index : -1).filter(index => index >= 0)
+  assert.equal(workIndexes.length, 2, 'both same-turn Works are materialized')
+  assert.ok(compactionIndex > workIndexes[0]! && compactionIndex < workIndexes[1]!,
+    'the compaction keeps its raw position between the two Works')
 })
 
 test('a command is a control-class row and never Work/Activity/Action evidence', () => {
