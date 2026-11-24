@@ -1730,6 +1730,41 @@ test('TSP PR2: inspector-only data never invalidates a painted native action', a
   await waitUntil('the painted native details action is admitted', () => details(pane) !== undefined)
 })
 
+test('TSP PR2: a Search-result snapshot reports Search provenance', () => {
+  const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const presenter = new TspSessionBrowser({
+    surfaceId: 'session-browser-pr2-search',
+    render() {},
+    canInteract: () => true,
+    notify() {},
+    nativeScroll() {},
+    scrollSupported: false,
+    nativeKv: false,
+  })
+  const request: SessionBrowserPanelRequest = {
+    subject: { currentSessionId: 'session-current', currentCwd: '/workspace/project', isCurrent: () => true },
+    onQueryChange() {},
+    onResumeIntent() {},
+    onInspectorSelection: selection => { reports.push(selection) },
+    onClose() {},
+  }
+  const handle = presenter.presentation.open(request)
+  handle.setSnapshot({
+    listState: 'ready',
+    rows: [row('session-current'), row('session-other')],
+    query: 'needle',
+    resumePending: false,
+    searchState: 'ready',
+    searchResults: [{ row: row('session-other'), source: 'Content', snippet: 'hit' }],
+    hasMore: false,
+    listRevision: 1,
+  })
+  presenter.renderLayer()
+  assert.deepEqual(reports.at(-1), { sessionId: 'session-other', origin: 'search' },
+    'the native query layer, not an id guess, supplies Search provenance')
+  presenter.retire()
+})
+
 test('TSP PR2: suspend clears the reported target before hiding; the next resume re-reports it', () => {
   const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
   const presenter = new TspSessionBrowser({
