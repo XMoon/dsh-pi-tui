@@ -4100,6 +4100,101 @@ test('expanded Focus inserts the live Preparing call after every nested Work par
   assert.ok(preparingRow > toolRow, `the live call follows every durable Work part:\n${joined}`)
 })
 
+test('an expanded Focus live run after an unbridged trailing command stays standalone', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('trail-cmd-u1'), role: 'user',
+      content: [{ type: 'text', text: 'finish then report' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('trail-cmd-a'), name: 'read', arguments: '{}' }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('trail-cmd-ra'), role: 'tool', toolCallId: ToolCallId('trail-cmd-a'),
+        content: [{ type: 'text', text: 'first result' }], source: { kind: 'tool', callId: ToolCallId('trail-cmd-a') },
+      },
+    }, T0 + 3, 3),
+    eventAt('command/run', { commandId: 'trail-cmd-id', name: 'model', args: 'switch', source: { kind: 'user' } }, T0 + 4, 4),
+    eventAt('command/done', { commandId: 'trail-cmd-id', kind: 'success', text: 'switched' }, T0 + 5, 5),
+  ])
+  show(app, folder, [
+    { callId: 'trail-live', turn: 1, step: 1, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const headerRow = findFocusHeaderRow(view, false)
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${view.join('\n')}`)
+  click(vt, 3, headerRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(hasFocusHeader(joined, true), `the one root did not open:\n${joined}`)
+  const commandRow = findRow(view, '/model switch')
+  const preparingRow = findRow(view, 'Preparing Bash')
+  assert.ok(commandRow >= 0 && preparingRow > commandRow,
+    `the live run renders after the independent command boundary:\n${joined}`)
+
+  // The region does not reach the raw tail, so the live run is standalone: its
+  // row must carry NO Focus ancestry and a real click can never collapse the
+  // one root through it.
+  click(vt, 3, preparingRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1),
+    `an independent trailing boundary keeps the live run outside the root:\n${joined}`)
+  assert.ok(joined.includes('Preparing Bash'), 'the live run still renders exactly once')
+
+  // The semantic projection agrees: the inserted live block carries NO Focus
+  // ancestry after the independent boundary (the click test above alone would
+  // pass even if the path were wrong, because a preview row's hit is inert).
+  const internals = app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }
+  const previewBlocks = (): readonly { readonly turn?: number; readonly containerPath?: readonly { readonly kind: string }[] }[] =>
+    internals.transcriptBlocks(new Set([1])).filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.equal(previewBlocks().length, 1, 'the live run is inserted exactly once')
+  assert.equal(previewBlocks()[0]?.containerPath, undefined,
+    'an independent trailing boundary gives the live run no semantic Focus path')
+
+  // Once the SAME Turn's evidence resumes, the command bridges and the live
+  // call is admitted into the one root again.
+  applyMixed(folder, [
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('trail-cmd-b'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('trail-cmd-rb'), role: 'tool', toolCallId: ToolCallId('trail-cmd-b'),
+        content: [{ type: 'text', text: 'second result' }], source: { kind: 'tool', callId: ToolCallId('trail-cmd-b') },
+      },
+    }, T0 + 7, 7),
+  ])
+  show(app, folder, [
+    { callId: 'trail-live', turn: 1, step: 1, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  await vt.waitForRender()
+  const bridgedBlocks = internals.transcriptBlocks(new Set([1]))
+  const admittedPreview = bridgedBlocks.some(block => block.kind === 'streaming-tool-previews'
+    && block.turn === 1 && block.containerPath?.some(node => node.kind === 'focus-root') === true)
+  // A collapsed trailing Work owns the call in its Tool slot instead of a
+  // separate row; either admission is under the ONE root.
+  const admittedSlot = bridgedBlocks.some(block => block.kind === 'work'
+    && block.containerPath?.some(node => node.kind === 'focus-root') === true
+    && (block as { readonly preparingSummary?: unknown }).preparingSummary !== undefined)
+  assert.ok(admittedPreview || admittedSlot,
+    `resumed same-Turn evidence admits the live run under the one root :: ${JSON.stringify(bridgedBlocks.map(block => ({ kind: block.kind, path: 'containerPath' in block ? block.containerPath : undefined })))}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('expanded Focus starts a post-command Preparing row after the turnless command', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()

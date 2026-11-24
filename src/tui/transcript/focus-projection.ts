@@ -621,6 +621,36 @@ export function focusExpandedTailStructure(region: readonly TranscriptMessage[],
   return projectTranscriptStructure(region.slice(boundary))
 }
 
+/**
+ * The one still-open Turn that can own a live Preparing call at the RAW
+ * transcript tail, or `undefined` when the tail is an independent boundary
+ * (a turn-less command/window row, a fused manual-compaction control, a
+ * foreign Turn, or a completed Turn).
+ *
+ * PiTui and TSP use this ONE decision: only a trailing row of the SAME open
+ * Turn admits the live call as the root's child (or its trailing Work's); an
+ * independent trailing boundary keeps the call standalone AFTER it, with no
+ * fabricated Focus ancestry.
+ */
+export function focusLiveTailAttachTurn(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+): number | undefined {
+  const trailing = projectTranscriptStructure(messages).at(-1)
+  if (trailing === undefined) return undefined
+  if (trailing.kind === 'work') {
+    return activities.get(trailing.span.turn)?.completed === false ? trailing.span.turn : undefined
+  }
+  const lastMessage = trailing.kind === 'message'
+    ? trailing.message
+    : trailing.kind === 'context-cluster' ? trailing.cluster.members.at(-1) : undefined
+  if (lastMessage === undefined || !('turn' in lastMessage)) return undefined
+  // A manual compaction already correlated with its source command is a
+  // control row: the command boundary owns the live run placement.
+  if (lastMessage.kind === 'compaction' && lastMessage.sourceCommand !== undefined) return undefined
+  return activities.get(lastMessage.turn)?.completed === false ? lastMessage.turn : undefined
+}
+
 /** Rows that remain visible outside the collapsed Thought as persistent
  * input/context boundaries. The semantic class stays Context for injected
  * rows; this predicate only controls disclosure behavior. A SETTLED

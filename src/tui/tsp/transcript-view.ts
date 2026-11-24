@@ -50,7 +50,7 @@ import { resolveWorkLifetimes, type WorkLifetime } from '../transcript/activity-
 import { compactActionBody, compactActionPresentation, compactPreparingSummary, latestReasoningLine } from '../components/transcript/compact-process-preview.ts'
 import { focusStatusLabel } from '../components/transcript/focus-activity.ts'
 import { compactActionStatParts, formatCompactDuration, type CompactActionSource, type CompactActionStats } from '../transcript/process-summary.ts'
-import { projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { focusLiveTailAttachTurn, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import { summarizeWorkSpan } from '../transcript/work-summary.ts'
@@ -2731,8 +2731,8 @@ function focusPreparingPlacement(
   // caller's frame may show every root collapsed, but the Work/root ownership of
   // the raw tail is the same canonical region policy either way.
   const expandedBlocks = projectFocus(messages, activities, new Set(activities.keys()), true)
-  const structure = projectTranscriptStructure(messages)
-  const trailing = structure.at(-1)
+  const trailing = projectTranscriptStructure(messages).at(-1)
+  const attachTurn = focusLiveTailAttachTurn(messages, activities)
   const rootOfTurn = (turn: number): TranscriptMessage | undefined => {
     const projected = expandedBlocks.find(block => block.kind === 'activity' && block.activity.turn === turn)
     return projected?.kind === 'activity' ? projected.owner : undefined
@@ -2757,29 +2757,20 @@ function focusPreparingPlacement(
     // The exact trailing canonical Work owns the preview. Its owning root is the
     // ONE summary of that Turn, admitted only while the Turn is still open (a
     // completed / foreign preview never attaches to a historical root).
-    const tailTurn = trailing.span.turn
-    if (activities.get(tailTurn)?.completed === false) {
+    if (attachTurn !== undefined) {
       const projected = expandedBlocks.find(block => block.kind === 'work' && block.span.owner === trailing.span.owner)
       if (projected?.kind === 'work') {
-        turn = tailTurn
-        attachedRootOwner = rootOfTurn(tailTurn)
+        turn = attachTurn
+        attachedRootOwner = rootOfTurn(attachTurn)
         workOwner = attachedRootOwner === undefined ? undefined : trailing.span.owner
       }
     }
-  } else {
-    const lastMessage = trailing?.kind === 'message'
-      ? trailing.message
-      : trailing?.kind === 'context-cluster' ? trailing.cluster.members.at(-1) : undefined
-    if (lastMessage !== undefined
-      && 'turn' in lastMessage
-      && !(lastMessage.kind === 'compaction' && lastMessage.sourceCommand !== undefined)
-      && activities.get(lastMessage.turn)?.completed === false) {
-      // A root reaches the raw tail only when the trailing row belongs to that
-      // same open Turn; a turn-less command / hard boundary after the region
-      // takes the standalone route below instead of a fabricated Focus path.
-      turn = lastMessage.turn
-      attachedRootOwner = rootOfTurn(turn)
-    }
+  } else if (attachTurn !== undefined) {
+    // A root reaches the raw tail only when the trailing row belongs to that
+    // same open Turn; a turn-less command / hard boundary after the region
+    // takes the standalone route below instead of a fabricated Focus path.
+    turn = attachTurn
+    attachedRootOwner = rootOfTurn(attachTurn)
   }
   if (turn === undefined) {
     // The raw tail is an independent turn-less boundary. The still-open logical

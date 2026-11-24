@@ -359,7 +359,7 @@ import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
 import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
 import type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
-import { focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
+import { focusLiveTailAttachTurn, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
@@ -12746,11 +12746,18 @@ export class TuiApp {
         } else if (focusExpandedTurns.has(turn)) {
           const insertion = this.focusPreparingInsertionIndex(blocks, turn)
           if (insertion !== undefined) {
+            // §3.3: Focus ancestry only while the canonical RAW tail still
+            // belongs to this open Turn. An independent trailing boundary (a
+            // turn-less command/summary, a fused compaction control, a foreign
+            // or completed Turn) keeps the live run standalone AFTER it.
+            const containerPath = focusLiveTailAttachTurn(this.messages, this.turnActivities) === turn
+              ? [{ kind: 'focus-root' as const, turn }]
+              : undefined
             blocks.splice(insertion, 0, {
               kind: 'streaming-tool-previews',
               turn,
               previews,
-              containerPath: [{ kind: 'focus-root', turn }],
+              ...(containerPath === undefined ? {} : { containerPath }),
             })
           }
         }
