@@ -810,3 +810,59 @@ test('an explicit refresh re-opens the ONE Activity observation so unfinished di
   assert.equal(observations[0]!.disposed, 1, 'the explicit refresh disposes the unfinished observation')
   assert.equal(observations.length, 2, 'the refresh re-opens exactly ONE observation so failed discovery retries')
 })
+
+test('R17 an explicit refresh owns exactly ONE projection chain and an older chain cannot overwrite it', async (t) => {
+  const presentation = new PresentationProbe()
+  const listed = Array.from({ length: 45 }, (_, index) => row(`session-row-${String(index).padStart(2, '0')}`, { updatedAt: 1_000 - index }))
+  let listRows = listed
+  const calls: string[][] = []
+  const held: Array<() => void> = []
+  let holdNext = false
+  const read = reader({
+    list: async () => listRows,
+    projectionBatch: async (batch) => {
+      calls.push(batch.map(item => item.id))
+      const stale = holdNext
+      if (holdNext) {
+        holdNext = false
+        await new Promise<void>((resolve) => { held.push(resolve) })
+      }
+      return new Map(batch.map(item => [item.id, {
+        title: stale ? `STALE ${item.id}` : `Fresh ${item.id}`,
+      }]))
+    },
+  })
+  const { owner, diag } = ownerFor(presentation, read)
+  t.after(() => { owner.dispose(); diag.dispose() })
+  owner.open()
+  await waitUntil('the initial one-chain enrichment settles', () => calls.length === 2
+    && presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
+  calls.length = 0
+  // An UNCHANGED explicit refresh still re-reads metadata, with exactly ONE
+  // chain (a second simultaneous chain would double these calls).
+  owner.refresh()
+  await waitUntil('the unchanged refresh chain settles', () => calls.length === 2
+    && presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 2, 'an unchanged refresh runs exactly ONE projection chain')
+  calls.length = 0
+  // A changed refresh also runs exactly ONE chain (never one beside it).
+  listRows = [...listed, row('session-new', { updatedAt: 2_000 })]
+  owner.refresh()
+  await waitUntil('the changed refresh chain settles', () => calls.length === 2
+    && presentation.latest()?.rows.some(entry => entry.id === 'session-new' && entry.title === 'Fresh session-new') === true)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 2, 'a changed refresh runs exactly ONE projection chain')
+  calls.length = 0
+  // A held older chain is retired: its late result can never overwrite the
+  // newer accepted enrichment, and exactly one new chain starts.
+  holdNext = true
+  owner.refresh()
+  await waitUntil('the held refresh chain starts', () => calls.length === 1)
+  owner.refresh()
+  await waitUntil('the newer refresh chain settles', () => presentation.latest()?.rows[0]?.title === `Fresh ${listed[0]!.id}`)
+  held.splice(0).forEach(release => { release() })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(!presentation.latest()?.rows.some(entry => entry.title?.startsWith('STALE ') === true),
+    'a retired chain never writes its stale projection into the accepted roster')
+})

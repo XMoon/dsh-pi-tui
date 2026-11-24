@@ -580,16 +580,29 @@ interface ActivityRow {
  * explicit refresh/reopen, or a Connection change.
  */
 class DiscoveryReceipts {
-  private readonly byId = new Map<string, { readonly generation: RemoteConnectionGeneration; readonly witness: string }>()
+  private readonly byId = new Map<string, {
+    readonly generation: RemoteConnectionGeneration
+    readonly witness: string
+    /** The official list `running` value at record time: a status transition is
+     *  a relevant discovery invalidation too (it is scheduling evidence, never
+     *  an answerability fact). */
+    readonly running: boolean
+  }>()
 
-  matches(sessionId: string, generation: RemoteConnectionGeneration | undefined, witness: string): boolean {
+  matches(
+    sessionId: string,
+    generation: RemoteConnectionGeneration | undefined,
+    witness: string,
+    running: boolean,
+  ): boolean {
     if (generation === undefined) return false
     const receipt = this.byId.get(sessionId)
-    return receipt !== undefined && Object.is(receipt.generation, generation) && receipt.witness === witness
+    return receipt !== undefined && Object.is(receipt.generation, generation)
+      && receipt.witness === witness && receipt.running === running
   }
 
-  record(sessionId: string, generation: RemoteConnectionGeneration, witness: string): void {
-    this.byId.set(sessionId, { generation, witness })
+  record(sessionId: string, generation: RemoteConnectionGeneration, witness: string, running: boolean): void {
+    this.byId.set(sessionId, { generation, witness, running })
   }
 
   /** Drop one row's receipt: a relevant source revision change invalidates the
@@ -601,9 +614,9 @@ class DiscoveryReceipts {
 
   /** Drop receipts whose relevant source is no longer the current witness: a
    *  stale revision must not survive to (incorrectly) match a later revert. */
-  pruneStale(currentWitness: (sessionId: string) => string): void {
+  pruneStale(currentWitness: (sessionId: string) => string, currentRunning: (sessionId: string) => boolean): void {
     for (const [id, receipt] of [...this.byId]) {
-      if (receipt.witness !== currentWitness(id)) this.byId.delete(id)
+      if (receipt.witness !== currentWitness(id) || receipt.running !== currentRunning(id)) this.byId.delete(id)
     }
   }
 
@@ -729,7 +742,7 @@ class RemoteActivityObservation implements ActivityObservation {
     }
     this.rosterOrder = authorized
     this.receipts.prune(authorized)
-    this.receipts.pruneStale(id => this.witnessOf(id))
+    this.receipts.pruneStale(id => this.witnessOf(id), id => this.officialRunningOf(id))
     // The official running projection is published in the SAME roster frame.
     this.refreshRunningFromList()
     this.pruneQueues()
@@ -1099,6 +1112,12 @@ class RemoteActivityObservation implements ActivityObservation {
    *  targeted read on any generation; only the INITIAL generation treats the
    *  list itself as proof. */
   private listSaysRunning(sessionId: string): boolean {
+    return this.officialRunningOf(sessionId)
+  }
+
+  /** The official list row's `running` bit (the source a closed-window status
+   *  transition mutates). */
+  private officialRunningOf(sessionId: string): boolean {
     const listed = this.sessions.list.getSnapshot()
     if (listed.phase !== 'ready') return false
     return listed.byId[sessionId]?.running === true
@@ -1170,7 +1189,12 @@ class RemoteActivityObservation implements ActivityObservation {
   /** Whether the adapter already holds a valid successful negative discovery
    *  receipt for this row's CURRENT source revision and generation. */
   private discoveryReceiptHeld(row: ActivityRow): boolean {
-    return this.receipts.matches(row.sessionId, this.capturedGeneration, row.witness)
+    return this.receipts.matches(
+      row.sessionId,
+      this.capturedGeneration,
+      row.witness,
+      this.officialRunningOf(row.sessionId),
+    )
   }
 
   private pruneQueues(): void {
@@ -1237,7 +1261,7 @@ class RemoteActivityObservation implements ActivityObservation {
         const negative = this.isNegativeDiscovery(projection)
         row.discovery = { epoch, witness, negative }
         if (negative && row.witness === witness) {
-          this.receipts.record(sessionId, generation, witness)
+          this.receipts.record(sessionId, generation, witness, this.officialRunningOf(sessionId))
         }
         this.commitPair(row, epoch, pending, projection)
       } finally {
@@ -1280,7 +1304,7 @@ class RemoteActivityObservation implements ActivityObservation {
         const negative = this.isNegativeDiscovery(projection)
         row.discovery = { epoch, witness, negative }
         if (negative && row.witness === witness) {
-          this.receipts.record(sessionId, generation, witness)
+          this.receipts.record(sessionId, generation, witness, this.officialRunningOf(sessionId))
         }
         // An ordinary row that proved no active entry has NOT proven "no
         // pending": without a Gateway state sample the attention fact stays
@@ -1786,7 +1810,10 @@ export class RemoteSessionWorkspaceFacts implements SessionWorkspaceFactsPort {
     const listed = this.sessions.list.getSnapshot()
     if (listed.phase !== 'ready') return
     this.discoveryReceipts.prune(listed.ids.map(String))
-    this.discoveryReceipts.pruneStale(id => relevantWitnessOf(listed, id))
+    this.discoveryReceipts.pruneStale(
+      id => relevantWitnessOf(listed, id),
+      id => listed.byId[id]?.running === true,
+    )
   }
 
   /** Release the receipt invalidation subscriptions with the adapter. */

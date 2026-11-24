@@ -1580,3 +1580,36 @@ test('R15 a stale completion after removal/re-add records no receipt a later reo
     await waitFor(() => h.projectionCalls.length === 1, 'the stale incarnation left no trusted receipt')
   })
 })
+
+test('R18 an official running transition while the Browser is CLOSED invalidates the receipt, an unrelated sibling keeps it', async () => {
+  const listed = [row('a'), row('b')]
+  const listedRunning = { a: false, b: false }
+  const projections: Record<string, unknown> = {
+    a: { result: emptyQuestions },
+    b: { result: emptyQuestions },
+  }
+  const h = harness({
+    listed,
+    listedRunning,
+    projections: projections as never,
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    await waitFor(() => h.projectionCalls.length === 2, 'the cold open records both negative receipts')
+  })
+  h.projectionCalls.length = 0
+  // b's official row runs and returns to idle while the panel is closed; the
+  // relevant hint witness never changes. A status transition is a relevant
+  // discovery invalidation too, so its receipt must not survive.
+  listedRunning.b = true
+  h.notifyList()
+  listedRunning.b = false
+  h.notifyList()
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    await waitFor(() => h.projectionCalls.includes('b'), 'the status transitioned row is discovered again on reopen')
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.deepEqual([...h.projectionCalls].sort(), ['b'],
+      'the untouched sibling keeps its receipt across the other row status transition')
+  })
+})

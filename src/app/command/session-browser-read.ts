@@ -706,11 +706,18 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         const { changed } = acceptRoster(panel, listed as readonly SessionBrowserRow[])
         publish(panel)
         if (!isActive(panel)) return
-        // An explicit/pull refresh re-reads the accepted enrichment: the raw
-        // list may be unchanged while a metadata projection (a preset selected
-        // by another Client) moved. The push path relies on its own semantics.
-        startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
-        applyRosterChange(panel, changed)
+        if (changed) {
+          // A real roster delta owns its ONE enrichment chain (and its existing
+          // search policy): never start a second chain beside it.
+          applyRosterChange(panel, true)
+        } else {
+          // An unchanged explicit/pull refresh still re-reads the accepted
+          // metadata: the raw list can be unchanged while a projection (a
+          // preset selected by another Client) moved. It retires any unfinished
+          // older chain first, so exactly ONE writer owns this generation.
+          panel.projectionGeneration += 1
+          startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
+        }
         scheduleRefresh(panel)
       },
       onError: (error) => {
