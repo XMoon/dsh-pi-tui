@@ -682,7 +682,15 @@ export async function runReadAuthority(context) {
         record => record.phase === 'workspaces-frame' && record.type === 'baseline'
           && typeof record.seq === 'number' && typeof invalidated.seq === 'number'
           && record.seq > invalidated.seq,
-        'UA recovering fresh baseline after the real reconnect', 120_000)
+        'UA recovering fresh baseline after the real reconnect', 120_000).catch(async (error) => {
+        // A terminal failure is the other truthful outcome; surface its reason
+        // instead of the bare timeout.
+        const failed = await waitProbe(clientA, recoveringNonce,
+          record => record.phase === 'workspaces-failed', 'UA recovering terminal failure record', 2_000)
+          .catch(() => undefined)
+        throw new SplitSmokeAssertionError(
+          `${error instanceof Error ? error.message : String(error)}; terminal failure record: ${failed === undefined ? 'none' : JSON.stringify(failed)}`)
+      })
       const freshMember = (freshBaseline.items ?? []).find(item =>
         Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
       assert(freshMember !== undefined,
