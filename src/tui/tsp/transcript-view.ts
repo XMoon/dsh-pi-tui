@@ -50,7 +50,7 @@ import { resolveWorkLifetimes, type WorkLifetime } from '../transcript/activity-
 import { compactActionBody, compactActionPresentation, compactPreparingSummary, latestReasoningLine } from '../components/transcript/compact-process-preview.ts'
 import { focusStatusLabel } from '../components/transcript/focus-activity.ts'
 import { compactActionStatParts, formatCompactDuration, type CompactActionSource, type CompactActionStats } from '../transcript/process-summary.ts'
-import { projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { focusLiveTailPlacement, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import { summarizeWorkSpan } from '../transcript/work-summary.ts'
@@ -2413,6 +2413,21 @@ function focusDuration(activity: TurnActivity, options: TranscriptPresetViewOpti
   return duration === '0s' ? undefined : duration
 }
 
+/** The bounded one-line collapsed Action body the Focus root head paints (and
+ * the root stamp must follow): the SAME derivation for the head and the stamp,
+ * never a content hash. */
+function focusRootActionBody(
+  action: CompactActionSource | undefined,
+  options: TranscriptPresetViewOptions,
+): string | undefined {
+  if (action === undefined) return undefined
+  const body = compactActionBody(compactActionPresentation(action, {
+    ...(options.toolPresenter === undefined ? {} : { presenter: options.toolPresenter }),
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+  }))
+  return body === undefined ? undefined : sanitizedPhysicalLine(body)
+}
+
 function focusRootHead(slot: FocusSlot, options: TranscriptPresetViewOptions): Node {
   const phase = options.focusPhase ?? 'working'
   const duration = focusDuration(slot.activity, options)
@@ -2443,10 +2458,7 @@ function focusRootHead(slot: FocusSlot, options: TranscriptPresetViewOptions): N
       index: preview.index,
       ...(preview.name === undefined ? {} : { name: preview.name }),
     })))
-    const action = slot.action === undefined ? undefined : compactActionBody(compactActionPresentation(slot.action, {
-      ...(options.toolPresenter === undefined ? {} : { presenter: options.toolPresenter }),
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    }))
+    const action = focusRootActionBody(slot.action, options)
     if (preparing !== undefined || action !== undefined) {
       head.push(ui.text({
         key: 'action',
@@ -2558,6 +2570,7 @@ function focusMainBlocks(
   preparingByRootOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>,
   preparingByWorkOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>,
   standalonePreparing: readonly StreamingToolPreview[],
+  attachedPreparingRootOwner: TranscriptMessage | undefined,
   workLifetimes: ReadonlyMap<TranscriptMessage, WorkLifetime>,
 ): TranscriptMainBlockDescriptor[] {
   interface FocusRootSlot {
@@ -2624,14 +2637,24 @@ function focusMainBlocks(
       ))
     }
   }
+  // A root whose region does NOT reach the raw tail (an independent trailing
+  // control boundary sits after it) still owns the COLLAPSED summary Action
+  // slot, but opening the root must not pull the live run back inside a region
+  // the boundary already ended: it renders once as a standalone row at the end.
+  const deferredStandalone: StreamingToolPreview[] = []
   for (const slot of slotsByOwner.values()) {
     if (!slot.expanded || slot.preparing.length === 0 || rootsWithWorkPreparing.has(slot.owner)) continue
-    slot.children.push(...slot.preparing.map(preview => preparingDescriptor(preview, options.cwd, '')))
+    if (attachedPreparingRootOwner === slot.owner) {
+      slot.children.push(...slot.preparing.map(preview => preparingDescriptor(preview, options.cwd, '')))
+      continue
+    }
+    deferredStandalone.push(...slot.preparing)
   }
   const out = rows.map(row => 'draft' in row ? focusRootDescriptor(row, keys, options, prefix) : row)
   return [
     ...out,
     ...standalonePreparing.map(preview => preparingDescriptor(preview, options.cwd, prefix)),
+    ...deferredStandalone.map(preview => preparingDescriptor(preview, options.cwd, prefix)),
   ]
 }
 
@@ -2663,6 +2686,13 @@ function focusRootDescriptor(
   ]
   for (const preview of slot.preparing) stamp.push(...preparingStampOf(preview, options.cwd))
   for (const child of slot.children) stamp.push(...child.stamp)
+  // The collapsed Focus root head paints the Action aggregate and the latest
+  // hidden Action body on its OWN, even when no child is materialized: the root
+  // stamp must follow those exact bounded strings (a source/status change with
+  // an unchanged activity revision must still repaint the native root).
+  for (const part of compactActionStatParts(slot.actionStats)) stamp.push(sanitizedPhysicalLine(part))
+  const actionBody = focusRootActionBody(slot.action, options)
+  if (actionBody !== undefined) stamp.push(actionBody)
   // R13: the collapsed Focus root head paints its own Action through
   // `options.cwd`, and children need not be expanded for it to show — the
   // root stamp covers that root on its own.
@@ -2694,8 +2724,13 @@ function focusRootDescriptor(
   }
 }
 
-/** Preparing belongs either to the exact canonical trailing Work owner, to a
- * root-only post-Assistant run in the same final occurrence, or stays standalone. */
+/** Preparing belongs either to the exact canonical trailing Work owner, to the
+ * ONE open logical Turn whose region reaches the raw tail, or stays standalone.
+ * A Turn whose collapsed summary still owns the Action slot while an independent
+ * trailing control boundary sits outside its region is reported as a header-only
+ * root: `attachedPreparingRootOwner` is then absent so an EXPANDED root renders
+ * the live run standalone after that boundary instead of fabricating ancestry.
+ */
 function focusPreparingPlacement(
   messages: readonly TranscriptMessage[],
   blocks: readonly FocusProjectedBlock[],
@@ -2704,49 +2739,97 @@ function focusPreparingPlacement(
   readonly byRootOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>
   readonly byWorkOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>
   readonly standalone: readonly StreamingToolPreview[]
+  readonly attachedRootOwner: TranscriptMessage | undefined
 } {
   const groups = groupPreparingPreviews(options.preparingPreviews ?? [])
   if (groups.length === 0 || options.window?.hasNewer !== false) {
-    return { byRootOwner: new Map(), byWorkOwner: new Map(), standalone: [] }
+    return { byRootOwner: new Map(), byWorkOwner: new Map(), standalone: [], attachedRootOwner: undefined }
   }
   const activities = options.turnActivities ?? EMPTY_TURN_ACTIVITIES
+  // The EXPANDED projection proves the physical placement of the live run: the
+  // caller's frame may show every root collapsed, but the Work/root ownership of
+  // the raw tail is the same canonical region policy either way.
   const expandedBlocks = projectFocus(messages, activities, new Set(activities.keys()), true)
-  const structure = projectTranscriptStructure(messages)
-  const trailing = structure.at(-1)
-  let rootOwner: TranscriptMessage | undefined
-  let workOwner: TranscriptMessage | undefined
+  const trailing = projectTranscriptStructure(messages).at(-1)
+  const placement = focusLiveTailPlacement(messages, activities, expandedBlocks)
+  const placementTurn = placement === undefined || !('turn' in placement.rootOwner)
+    ? undefined
+    : placement.rootOwner.turn
+  const rootOfTurn = (turn: number): TranscriptMessage | undefined => {
+    const projected = expandedBlocks.find(block => block.kind === 'activity' && block.activity.turn === turn)
+    return projected?.kind === 'activity' ? projected.owner : undefined
+  }
+  const standalone = (): {
+    readonly byRootOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>
+    readonly byWorkOwner: ReadonlyMap<TranscriptMessage, readonly StreamingToolPreview[]>
+    readonly standalone: readonly StreamingToolPreview[]
+    readonly attachedRootOwner: TranscriptMessage | undefined
+  } => ({
+    byRootOwner: new Map(),
+    byWorkOwner: new Map(),
+    standalone: groups.flatMap(([, previews]) => previews),
+    attachedRootOwner: undefined,
+  })
+  const selectionFor = (turn: number): readonly StreamingToolPreview[] =>
+    groups.find(([groupTurn]) => groupTurn === turn)?.[1] ?? []
   let turn: number | undefined
+  let workOwner: TranscriptMessage | undefined
+  let attachedRootOwner: TranscriptMessage | undefined
   if (trailing?.kind === 'work') {
-    turn = trailing.span.turn
-    if (activities.get(turn)?.completed === false) {
-      const projected = expandedBlocks.findLast(block => block.kind === 'work' && block.span.owner === trailing.span.owner)
-      if (projected?.kind === 'work') {
-        rootOwner = projected.focusPresentationOwner
-        workOwner = rootOwner === undefined ? undefined : trailing.span.owner
+    // The EXACT projected trailing canonical Work owns the preview. A canonical
+    // Work in a later fail-open region was not materialized under the root and
+    // therefore never re-adopts a live call.
+    if (placement?.workOwner !== undefined && placement.workOwner === trailing.span.owner) {
+      turn = placementTurn
+      attachedRootOwner = placement.rootOwner
+      workOwner = placement.workOwner
+    }
+  } else if (placement !== undefined) {
+    // The projected PRIMARY region must actually reach the raw tail; a
+    // turn-less/replay/hard boundary or a later fail-open region of the same
+    // Turn takes the standalone route below.
+    turn = placementTurn
+    attachedRootOwner = placement.rootOwner
+  }
+  if (turn === undefined) {
+    // The raw tail is an independent turn-less boundary. The still-open logical
+    // Turn keeps its ONE collapsed Action slot; the expanded representation
+    // defers the preview standalone after that boundary (no attachment).
+    const openPreviewTurn = groups
+      .map(([groupTurn]) => groupTurn)
+      .filter(groupTurn => activities.get(groupTurn)?.completed === false)
+      .at(-1)
+    const rootOwner = openPreviewTurn === undefined ? undefined : rootOfTurn(openPreviewTurn)
+    const selected = openPreviewTurn === undefined ? [] : selectionFor(openPreviewTurn)
+    if (rootOwner === undefined || openPreviewTurn === undefined
+      || selected.length === 0
+      || !blocks.some(block => block.kind === 'activity' && block.owner === rootOwner)) {
+      return {
+        ...standalone(),
+        standalone: [
+          ...groups.filter(([groupTurn]) => groupTurn !== openPreviewTurn).flatMap(([, previews]) => previews),
+          ...selected,
+        ],
       }
     }
-  } else {
-    const lastMessage = trailing?.kind === 'message'
-      ? trailing.message
-      : trailing?.kind === 'context-cluster' ? trailing.cluster.members.at(-1) : undefined
-    if (lastMessage !== undefined
-      && 'turn' in lastMessage
-      && !(lastMessage.kind === 'compaction' && lastMessage.sourceCommand !== undefined)
-      && activities.get(lastMessage.turn)?.completed === false) {
-      turn = lastMessage.turn
-      const projected = expandedBlocks.findLast(block => block.kind === 'activity' && block.activity.turn === turn)
-      rootOwner = projected?.kind === 'activity' ? projected.owner : undefined
+    return {
+      byRootOwner: new Map([[rootOwner, selected]]),
+      byWorkOwner: new Map(),
+      standalone: groups.filter(([groupTurn]) => groupTurn !== openPreviewTurn).flatMap(([, previews]) => previews),
+      attachedRootOwner: undefined,
     }
   }
-  if (rootOwner === undefined || turn === undefined
-    || !blocks.some(block => block.kind === 'activity' && block.owner === rootOwner)) {
-    return { byRootOwner: new Map(), byWorkOwner: new Map(), standalone: groups.flatMap(([, previews]) => previews) }
+  if (attachedRootOwner === undefined
+    || !blocks.some(block => block.kind === 'activity' && block.owner === attachedRootOwner)) {
+    return standalone()
   }
-  const selected = groups.find(([groupTurn]) => groupTurn === turn)?.[1] ?? []
-  const byRootOwner = selected.length === 0 ? new Map() : new Map([[rootOwner, selected]])
-  const byWorkOwner = workOwner === undefined || selected.length === 0 ? new Map() : new Map([[workOwner, selected]])
-  const standalone = groups.filter(([groupTurn]) => groupTurn !== turn).flatMap(([, previews]) => previews)
-  return { byRootOwner, byWorkOwner, standalone }
+  const selected = selectionFor(turn)
+  return {
+    byRootOwner: selected.length === 0 ? new Map() : new Map([[attachedRootOwner, selected]]),
+    byWorkOwner: workOwner === undefined || selected.length === 0 ? new Map() : new Map([[workOwner, selected]]),
+    standalone: groups.filter(([groupTurn]) => groupTurn !== turn).flatMap(([, previews]) => previews),
+    attachedRootOwner,
+  }
 }
 
 /** The members whose current transcript body is actually materialized. */
@@ -3218,6 +3301,7 @@ export function describeTranscriptMainBlocksForPreset(
       preparing.byRootOwner,
       preparing.byWorkOwner,
       preparing.standalone,
+      preparing.attachedRootOwner,
       workLifetimes,
     )
   }

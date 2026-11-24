@@ -122,7 +122,7 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
-import { consecutiveTurnGroup, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
+import { focusMaterializedMessages, focusProjectionTurnOf, projectFocus, type FocusProjectedBlock } from '../transcript/focus-projection.ts'
 import { FocusTimingStore } from '../transcript/focus-timing.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
 import type { ToolPresenter } from '../transcript/tool-presentation.ts'
@@ -1497,6 +1497,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  close times only; no mirror stats authority or second window owner. */
   let lastWindowState: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   let lastTurnActivities: ReadonlyMap<number, TurnActivity> | undefined
+  /**
+   * The ONE derived collapsed-Focus visibility index of the CURRENT committed
+   * transcript publication. It is a disposable memo over the shared
+   * `projectFocus` result for search ancestry, never a second disclosure
+   * authority: it is rebuilt when the publication epoch or the authoritative
+   * activity map changes, so a row that mutates in place (or a late
+   * continuation that reflows a command) can never keep a stale verdict.
+   */
+  let collapsedFocusVisible: {
+    readonly publication: number
+    readonly activities: ReadonlyMap<number, TurnActivity>
+    readonly visible: ReadonlySet<TranscriptMessage>
+    readonly materialized: ReadonlySet<TranscriptMessage>
+  } | undefined
+  /** Increments on every committed transcript publication (a dropped stale
+   * frame does not count). The visibility memo above is keyed by it. */
+  let transcriptPublicationEpoch = 0
   /** The ONE renderer-local Focus Turn disclosure owner set. Separate
    *  occurrence node keys are derived from the projected owner object; the
    *  semantic open decision remains the turn number. */
@@ -3157,9 +3174,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // belong to BOTH ancestors, so the walk covers `span.parts` (not only direct
     // message parts) and the top-level cluster blocks.
     const structure = projectTranscriptStructure(lastMessages)
+    // In Focus, a canonical Work emitted raw by a fail-open region has no
+    // materialized header: it must not mint a temporary Work grant. Derive the
+    // materialized owners from the SAME expanded projection the mapper uses.
+    const focusMaterializedWorkOwners = options.displayState?.preset === 'focus'
+      && lastTurnActivities !== undefined
+      ? new Set<TranscriptMessage>()
+      : undefined
+    if (focusMaterializedWorkOwners !== undefined && lastTurnActivities !== undefined) {
+      for (const block of projectFocus(lastMessages, lastTurnActivities, new Set(lastTurnActivities.keys()), true)) {
+        if (block.kind === 'work') focusMaterializedWorkOwners.add(block.span.owner)
+      }
+    }
     for (const block of structure) {
       if (block.kind === 'work') {
         if (!workSpanContains(block.span, message)) continue
+        if (focusMaterializedWorkOwners !== undefined
+          && !focusMaterializedWorkOwners.has(block.span.owner)) continue
         workOwners.add(block.span.owner)
         continue
       }
@@ -3233,25 +3264,29 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (options.displayState?.preset !== 'focus') return false
     const activities = lastTurnActivities
     if (activities === undefined) return false
-    const turn = focusProjectionTurnOf(message)
-    if (turn === undefined) return false
-    // ONE turn's own group, never the whole loaded history: the probe asks about
-    // a single row, so projecting every other turn's Thought is pure waste (and
-    // it ran on every query keystroke). `consecutiveTurnGroup` is the SAME
-    // segmentation `projectFocus` walks, so the slice cannot disagree with it.
-    const start = lastMessages.indexOf(message)
-    if (start < 0) return false
-    let groupStart = start
-    while (groupStart > 0 && focusProjectionTurnOf(lastMessages[groupStart - 1]!) === turn) groupStart -= 1
-    const group = consecutiveTurnGroup(lastMessages, groupStart, turn)
-    const visible = new Set<TranscriptMessage>()
-    for (const block of projectFocus(group, activities, EMPTY_PROBE_TURNS, true)) {
-      if (block.kind === 'message') visible.add(block.message)
-      else if (block.kind === 'work') {
-        for (const part of block.span.parts) if (part.kind === 'message') visible.add(part.message)
+    // A turn-less control row is never hidden by a Thought root: it is
+    // standalone evidence (or a visible bridge member), so it needs no grant.
+    if (focusProjectionTurnOf(message) === undefined) return false
+    // ONE derived visibility index per committed publication: the SAME shared
+    // projection the mapper consumes, looked up in O(1) per query. A local
+    // per-row group slice would disagree with the region policy as soon as a
+    // command bridges two runs of one Turn.
+    let visibleIndex = collapsedFocusVisible
+    if (visibleIndex === undefined
+      || visibleIndex.publication !== transcriptPublicationEpoch
+      || visibleIndex.activities !== activities) {
+      const visible = new Set<TranscriptMessage>()
+      for (const block of projectFocus(lastMessages, activities, EMPTY_PROBE_TURNS, true)) {
+        if (block.kind === 'message') visible.add(block.message)
       }
+      // A hidden row is recoverable only when the ACTUAL expanded projection can
+      // materialize it; a suppressed pending/final row stays source-only and
+      // must not mint a temporary root grant.
+      const materialized = focusMaterializedMessages(lastMessages, activities)
+      visibleIndex = { publication: transcriptPublicationEpoch, activities, visible, materialized }
+      collapsedFocusVisible = visibleIndex
     }
-    return !visible.has(message)
+    return !visibleIndex.visible.has(message) && visibleIndex.materialized.has(message)
   }
   const EMPTY_PROBE_TURNS: ReadonlySet<number> = new Set()
 
@@ -3584,9 +3619,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         continue
       }
       if (block.kind === 'message') {
+        // Only SEMANTIC Thought descendants reset with the root: a persistent
+        // row that is merely physically nested below it (command, user,
+        // surfaced Context, attention diagnostic, committed answer) keeps its
+        // own disclosure. The projection's canonical `containerPath` — not the
+        // physical owner mark alone — is that ancestry.
         const rootOwner = block.focusPresentationOwner
         const turn = rootOwner === undefined ? undefined : focusRootTurnByOwner.get(rootOwner)
-        if (turn !== undefined) collectFocusInnerMessage(block.message, turn)
+        if (turn !== undefined && block.containerPath !== undefined) collectFocusInnerMessage(block.message, turn)
         continue
       }
       const key = `${scopePrefix}work-${scopeKeys.keyFor(block.span.owner)}`
@@ -4045,6 +4085,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the RETIRED source is dropped (it reads the old fold — its rows can
     // never lift the Loading state).
     if (retiredSource !== undefined && source === retiredSource) return
+    transcriptPublicationEpoch += 1
     // TSP-7 Welcome D: the eligibility travels with THIS commit only. A frame
     // the fence already rejected carries none, and an ABSENT argument is never
     // an invitation — it leaves the formal state alone (the initial state is

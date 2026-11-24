@@ -18,6 +18,11 @@
 
 - **Agent 并行工具调用改为在 Detail 内直接编辑**：`/settings → Agent` 的原 `Agent loop` 行更名为 `Parallel tool calls`（内部 id 与官方命名空间不变），行内直接显示当前有效值。选中行不会打开任何页面，`Enter` / 右方向键或正文的 `Change` 才进入同一 Detail 内的数字输入，**一次确认**即提交一次官方写入；`Details [?]` 或不输入直接按 `?` 可展开 effective/inherited/修订号与官方 unset 的高级信息。空值或非法值留在输入框并给出真实错误、零写入；与当前值相同的输入显示 `No changes` 而不是伪造成功；依赖宿主回读的 `Verified` / `Not saved` / `Unverified` / `Outcome unconfirmed` 与父级面板导航的脏草稿确认都会如实展示。Shell 执行的两字段页保持原有 Apply→Save 流程不变。
 
+### 修复
+
+- **一个 Turn 只显示一张 Focus 摘要**：进行中的回答里执行会话内命令（如 `/model`）或手动压缩时，Focus 不再出现两张内容相同的实时状态卡片；命令卡片仍按真实时间顺序单独显示一次，展开后保留命令前后的 Work 顺序与最终回答。
+
+
 ## [0.5.8] - 2026-11-22
 
 ### 新增

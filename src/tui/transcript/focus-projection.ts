@@ -1,14 +1,18 @@
 /**
  * Renderer-neutral Focus presentation projection.
  *
- * The Focus projection over one windowed transcript (plan §12/§33): a turn with
- * an initial prompt is grouped as `user(s) -> FocusActivity`; a turn with only
- * same-turn steers starts with `FocusActivity` and keeps those steers in
- * process order. A turn woken by injected-context keeps that LEADING prefix at
- * its original foundation position before the Thought. Collapsed turns HIDE
- * process rows (a committed pre-steer answer is the explicit exception) and
- * expanded turns restore raw chronology with the final assistant held back.
- * A foldable Context row (producer-declared Snapshot, a `tool-jobs` Notice, an
+ * The Focus projection over one windowed transcript (plan §12/§33): ONE logical
+ * turn owns ONE Thought summary. The turn's primary presentation region is its
+ * maximal run of eligible rows, bridged across a bounded run of standalone
+ * control rows (a command, or a source-command-correlated manual compaction)
+ * only when eligible same-turn evidence continues after that run. A turn with an
+ * initial prompt is grouped as `user(s) -> FocusActivity`; a turn with only
+ * same-turn steers starts with `FocusActivity` and keeps those steers in process
+ * order. A turn woken by injected-context keeps that LEADING prefix at its
+ * original foundation position before the Thought. Collapsed turns HIDE process
+ * rows (a committed pre-steer answer is the explicit exception) and expanded
+ * turns restore raw chronology with the final assistant held back. A foldable
+ * Context row (producer-declared Snapshot, a `tool-jobs` Notice, an
  * `agent-message` relay, a `subagent-settled` Notice, a
  * `repeat-tool-reminder` Notice or an image-bearing `ptc-mode` Context with
  * durable same-turn next-step evidence) follows the same rule unless it shares
@@ -27,12 +31,16 @@
 import {
   assistantCommittedBeforeSteer,
   assistantLatestStepOf,
-  assistantStepOf,
+  assistantStepIntermediateOf,
   assistantStepSettledOf,
 } from '../../domain/transcript/folder.ts'
-import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
+import { assistantForStep, eligibleFinalAssistant, type EligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
-import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
+import {
+  isPostTurnReplayEvidence,
+  isSurfacedContext,
+  isSurfacedInteractionTool,
+} from '../../domain/transcript/semantics.ts'
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
 import {
   isFoldableWorkContext,
@@ -105,14 +113,12 @@ export type FocusProjectedBlock =
     kind: 'activity'
     activity: TurnActivity
     /**
-     * The presentation OCCURRENCE identity of this Thought block: the first
-     * `TranscriptMessage` of the consecutive same-turn run it summarizes.
-     * A turn is NOT a sufficient identity — a turn-less window entry can
-     * split one turn into several runs, each with its own hidden rows, Action
-     * winner and component. This is the same stable occurrence-owner pattern
-     * the Work span and Context cluster already use; the SEMANTIC disclosure
-     * identity (Ctrl+O, click ownership, `focusExpandedTurns`,
-     * `containerPath`) stays the turn number.
+     * The ONE logical-Turn presentation owner: the first original eligible
+     * `TranscriptMessage` of the turn's primary region. It is the stable
+     * cache/native-section key for that turn's summary — never a command, a
+     * synthetic proxy or a per-occurrence fragment. A genuinely disjoint later
+     * region of the same turn fails open in place instead of minting a second
+     * root.
      */
     owner: TranscriptMessage
     /**
@@ -158,15 +164,101 @@ export type FocusProjectedBlock =
  * collapsed Focus reorder would otherwise lift it above the turn's held-back
  * final and invert the real chronology (`assistant final` → `Context
  * compacted`). Treating turn-less rows as BOUNDARIES makes the projection
- * agree with the fold: `process A -> Thought A`, `command -> standalone`,
- * `process B -> Thought B`. Both runs may still belong to one model turn (the
- * run-owner component cache supports that), and the semantic disclosure
- * identity stays the turn number.
+ * agree with the fold: the Turn keeps its ONE summary, the command stays a
+ * standalone control row (bridged only while eligible same-Turn evidence
+ * continues), and any later disjoint region fails open in raw order instead of
+ * minting a second Thought. All of those rows may belong to one model turn; the
+ * semantic disclosure identity stays the turn number.
  */
 export function focusProjectionTurnOf(message: TranscriptMessage): number | undefined {
   if (message.kind === 'command') return undefined
   if (message.kind === 'compaction' && message.sourceCommand !== undefined) return undefined
   return 'turn' in message ? message.turn : undefined
+}
+
+/**
+ * The settled latest-step Assistant that is still the PENDING final of an open
+ * Turn, or undefined when it has authoritative continuation evidence (the Fold's
+ * step/continuation fact), is committed, has display blocks, or is not settled.
+ */
+function focusPendingFinal(
+  rows: readonly TranscriptMessage[],
+  activity: TurnActivity | undefined,
+): TranscriptMessage | undefined {
+  if (activity === undefined || activity.completed) return undefined
+  const latestStep = assistantLatestStepOf(activity)
+  if (latestStep === undefined) return undefined
+  const latestAssistant = assistantForStep(rows, latestStep)
+  if (latestAssistant === undefined
+    || !assistantStepSettledOf(activity, latestAssistant)
+    || latestAssistant.displayBlocks !== undefined
+    || assistantCommittedBeforeSteer(activity, latestAssistant)
+    || assistantStepIntermediateOf(activity, latestAssistant)) return undefined
+  return latestAssistant
+}
+
+/** The turn's PRIMARY presentation region derived from the canonical raw
+ * window: the same `focusPrimaryRegion` the projection emits. Used by the live
+ * tail placement so a SUPPRESSED pending final still answers by region
+ * membership, never by its own identity. */
+function focusPrimaryRegionOfTurn(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+  turn: number,
+): { readonly members: readonly TranscriptMessage[]; readonly end: number } | undefined {
+  const activity = activities.get(turn)
+  const rows = focusRowsByTurn(messages).get(turn)
+  if (activity === undefined || rows === undefined) return undefined
+  const startMessage = messages.find(message =>
+    focusProjectionTurnOf(message) === turn && !isPostTurnReplayEvidence(message))
+  if (startMessage === undefined) return undefined
+  const start = messages.indexOf(startMessage)
+  if (start < 0) return undefined
+  return focusPrimaryRegion(messages, start, turn, eligibleFinalAssistant(activity, rows))
+}
+
+/** Every message the ACTUAL all-expanded Focus projection can materialize on
+ * the current preset: top-level rows plus members of a materialized Work span.
+ * A suppressed pending/final row is absent; a Work emitted raw by a fail-open
+ * region contributes no span. Search reveal/root grants use this so a
+ * nonrecoverable hidden row mints no ancestor. */
+export function focusMaterializedMessages(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+): ReadonlySet<TranscriptMessage> {
+  const out = new Set<TranscriptMessage>()
+  for (const block of projectFocus(messages, activities, new Set(activities.keys()), true)) {
+    if (block.kind === 'message') out.add(block.message)
+    else if (block.kind === 'work') {
+      for (const member of block.span.members) out.add(member)
+    }
+  }
+  return out
+}
+
+/**
+ * The row a turn's expanded Focus holds back / emits as its final, per turn:
+ * the qualified final once `turn/end` authoritatively qualifies it, otherwise
+ * the still-pending latest-step Assistant. One rows pass; consumers use it to
+ * recognize the final by IDENTITY instead of `assistant without containerPath`.
+ */
+export function focusHeldBackFinalByTurn(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+): ReadonlyMap<number, TranscriptMessage> {
+  const out = new Map<number, TranscriptMessage>()
+  for (const [turn, rows] of focusRowsByTurn(messages)) {
+    const activity = activities.get(turn)
+    if (activity === undefined) continue
+    const final = eligibleFinalAssistant(activity, rows)
+    if (final !== undefined) {
+      out.set(turn, final.message)
+      continue
+    }
+    const pending = focusPendingFinal(rows, activity)
+    if (pending !== undefined) out.set(turn, pending)
+  }
+  return out
 }
 
 /**
@@ -196,14 +288,108 @@ function focusActivityBlock(
 const EMPTY_ACTION_STATS: CompactActionStats = { total: 0, types: new Map() }
 
 /**
+ * Whether one turn-less row is a standalone control-plane row the shared region
+ * policy may bridge: a `kind:'command'` lifecycle, or a manual compaction card
+ * already fused with the exact command that owns it (`sourceCommand`). No other
+ * turn-less row is transparent — a window summary, a replay artifact and an
+ * unrelated compaction boundary all end the region.
+ */
+function isFocusBridgeControlRow(message: TranscriptMessage): boolean {
+  return message.kind === 'command'
+    || (message.kind === 'compaction' && message.sourceCommand !== undefined)
+}
+
+/**
+ * Every eligible row of each projection turn, in window order. Post-turn replay
+ * evidence is transcript evidence, NOT turn identity: it may neither open nor
+ * join a Focus root, so it is omitted here and emitted standalone. One linear
+ * pass; the final candidate and the bridge fences read these rows once.
+ */
+function focusRowsByTurn(messages: readonly TranscriptMessage[]): Map<number, TranscriptMessage[]> {
+  const byTurn = new Map<number, TranscriptMessage[]>()
+  for (const message of messages) {
+    const turn = focusProjectionTurnOf(message)
+    if (turn === undefined || isPostTurnReplayEvidence(message)) continue
+    const rows = byTurn.get(turn)
+    if (rows === undefined) byTurn.set(turn, [message])
+    else rows.push(message)
+  }
+  return byTurn
+}
+
+/** One logical Turn's primary presentation region: the raw member rows in
+ * order plus the window index just past the last consumed row. */
+interface FocusPrimaryRegion {
+  readonly members: TranscriptMessage[]
+  readonly end: number
+}
+
+/**
+ * Segment the primary presentation region of one logical Turn.
+ *
+ * The region starts at the turn's first eligible row and continues through its
+ * remaining eligible rows in raw order. A bounded, maximal run of standalone
+ * control rows is consumed INTO the region only when the same turn's eligible
+ * evidence resumes after that run and the run has not crossed the turn's
+ * qualified final. Otherwise the region ends there: the control rows and every
+ * later row of that turn render independently (a command at the window tail is
+ * simply not bridged yet). A different turn, any other turn-less boundary and a
+ * replay-marked row are hard fences; the bounded lookahead never scans the rest
+ * of the window per row, so the whole projection stays linear.
+ * @param messages - the windowed transcript.
+ * @param start - the region's first eligible row index.
+ * @param turn - the logical Turn being segmented.
+ * @param final - the Turn's qualified final, when it has one. A final that has
+ *   already appeared before a control run makes that run a hard chronology
+ *   fence (nothing may move across it).
+ */
+function focusPrimaryRegion(
+  messages: readonly TranscriptMessage[],
+  start: number,
+  turn: number,
+  final: EligibleFinalAssistant | undefined,
+): FocusPrimaryRegion {
+  const members: TranscriptMessage[] = [messages[start]!]
+  let sawFinal = final !== undefined && messages[start] === final.message
+  let index = start + 1
+  while (index < messages.length) {
+    const next = messages[index]!
+    const nextTurn = focusProjectionTurnOf(next)
+    if (nextTurn === turn) {
+      // Replay evidence never joins a root; it ends the region and stays
+      // visible at its own raw position.
+      if (isPostTurnReplayEvidence(next)) break
+      members.push(next)
+      if (final !== undefined && next === final.message) sawFinal = true
+      index += 1
+      continue
+    }
+    if (nextTurn !== undefined || !isFocusBridgeControlRow(next)) break
+    let runEnd = index
+    while (runEnd < messages.length) {
+      const candidate = messages[runEnd]!
+      if (focusProjectionTurnOf(candidate) !== undefined || !isFocusBridgeControlRow(candidate)) break
+      runEnd += 1
+    }
+    const continuation = messages[runEnd]
+    if (sawFinal
+      || continuation === undefined
+      || focusProjectionTurnOf(continuation) !== turn
+      || isPostTurnReplayEvidence(continuation)) break
+    for (let run = index; run < runEnd; run += 1) members.push(messages[run]!)
+    index = runEnd
+  }
+  return { members, end: index }
+}
+
+/**
  * One linear pass over the window: each turn's WHOLE-TURN action aggregate
- * (addendum v2 §18). Focus stats describe the turn, not the row run: a
- * turn-less entry can split one turn into separate consecutive runs
- * ({@link consecutiveTurnGroup}), and every Thought block of that turn must
- * still report the same turn-level number — never merely its own run's.
- * A search reveal / disclosure state cannot change it because none of them
- * participate here. O(n) once per projection, never a per-frame rescan of an
- * unchanged window.
+ * (addendum v2 §18). Focus stats describe the logical Turn, not its primary
+ * presentation region: bridged control rows and a fail-open later region change
+ * neither the aggregate nor its loaded-window scope, and the ONE summary always
+ * reports the same turn-level number. A search reveal / disclosure state cannot
+ * change it because none of them participate here. O(n) once per projection,
+ * never a per-frame rescan of an unchanged window.
  */
 function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<number, CompactActionStats> {
   const accumulators = new Map<number, CompactActionStatsAccumulator>()
@@ -241,71 +427,72 @@ export function projectFocus(
 ): FocusProjectedBlock[] {
   if (!focusMode) return messages.map(message => ({ kind: 'message', message }))
   const actionStatsByTurn = focusActionStatsByTurn(messages)
+  const rowsByTurn = focusRowsByTurn(messages)
+  const finalByTurn = new Map<number, EligibleFinalAssistant>()
+  const pendingByTurn = new Map<number, TranscriptMessage>()
+  for (const [turn, rows] of rowsByTurn) {
+    const final = eligibleFinalAssistant(activities.get(turn), rows)
+    if (final !== undefined) finalByTurn.set(turn, final)
+    const pending = focusPendingFinal(rows, activities.get(turn))
+    if (pending !== undefined) pendingByTurn.set(turn, pending)
+  }
   const out: FocusProjectedBlock[] = []
+  const rootedTurns = new Set<number>()
   let index = 0
   while (index < messages.length) {
     const message = messages[index]!
     const turn = focusProjectionTurnOf(message)
-    if (turn === undefined) {
-      // Window summaries, standalone command rows and other turn-less entries
-      // pass through as standalone blocks (a command acts as a Process-run
-      // boundary, so the surrounding Thought runs stay separate).
+    const activity = turn === undefined ? undefined : activities.get(turn)
+    if (turn === undefined || activity === undefined
+      || isPostTurnReplayEvidence(message) || rootedTurns.has(turn)) {
+      // Window summaries, standalone control rows, replay evidence and a
+      // genuinely disjoint later region of an already-summarized Turn pass
+      // through in raw order: a command no longer splits the Turn, and the
+      // later region fails open in place instead of minting a second summary.
+      // The SAME final/pending decision computed for the primary region still
+      // applies here: a settled not-yet-final Assistant is held back, and the
+      // qualified final keeps its truncation state.
+      if (!isPostTurnReplayEvidence(message) && turn !== undefined
+        && activity !== undefined && rootedTurns.has(turn)) {
+        if (pendingByTurn.get(turn) === message) {
+          index += 1
+          continue
+        }
+        const qualified = finalByTurn.get(turn)
+        if (qualified !== undefined && qualified.message === message) {
+          out.push(qualified.truncated
+            ? { kind: 'message', message, truncated: true }
+            : { kind: 'message', message })
+          index += 1
+          continue
+        }
+      }
       out.push({ kind: 'message', message })
       index += 1
       continue
     }
-    // One turn's consecutive message run.
-    const group = consecutiveTurnGroup(messages, index, turn)
-    index += group.length
-    const activity = activities.get(turn)
-    // A partial/legacy window without the authoritative activity cannot own a
-    // Thought. Keep every original row in chronology instead of hiding Process.
-    if (activity === undefined) {
-      for (const member of group) out.push({ kind: 'message', message: member })
-      continue
-    }
+    const final = finalByTurn.get(turn)
+    const region = focusPrimaryRegion(messages, index, turn, final)
+    index = region.end
+    rootedTurns.add(turn)
+    const members = region.members
+    // The ONE qualified final is emitted only by the region that really
+    // contains that exact row; a final beyond a hard fence belongs to its own
+    // fail-open region and is never dragged across it.
+    const regionFinal = final !== undefined && members.includes(final.message) ? final : undefined
     const actionStats = actionStatsByTurn.get(turn) ?? EMPTY_ACTION_STATS
     const expanded = expandedTurns.has(turn)
-    // The final assistant is decided ONCE from the exact last assistant
-    // row (shared by the expanded and collapsed branches — one semantic,
-    // never two drifting copies).
-    const final = eligibleFinalAssistant(activity, group)
+    const rootOwner = members[0]!
     const isCommittedAnswer = (member: TranscriptMessage): boolean =>
-      activity !== undefined && assistantCommittedBeforeSteer(activity, member)
-    // Before `turn/end`, a settled Assistant that still owns the structural
-    // latest step is not yet known to be the official final. Keep it out of
-    // expanded chronology instead of treating the missing final qualification
-    // as permission to render it as a normal process row. A later Tool or other
-    // process row confirms the Assistant as intermediate; open display blocks
-    // and pre-steer committed answers keep their existing semantics.
-    let latestAssistantIndex = -1
-    for (let memberIndex = group.length - 1; memberIndex >= 0; memberIndex -= 1) {
-      if (group[memberIndex]?.kind === 'assistant') {
-        latestAssistantIndex = memberIndex
-        break
-      }
-    }
-    const latestAssistant = latestAssistantIndex < 0 ? undefined : group[latestAssistantIndex]
-    const laterProcess = latestAssistantIndex < 0 ? false : group.slice(latestAssistantIndex + 1)
-      .some(member => member.kind !== 'user' && !isSurfacedContext(member))
-    const pendingFinalAssistant = !activity.completed
-      && latestAssistant?.kind === 'assistant'
-      && assistantStepOf(latestAssistant) === assistantLatestStepOf(activity)
-      && assistantStepSettledOf(activity, latestAssistant)
-      && latestAssistant.displayBlocks === undefined
-      && !isCommittedAnswer(latestAssistant)
-      && !laterProcess
-      ? latestAssistant
-      : undefined
+      assistantCommittedBeforeSteer(activity, member)
     if (expanded) {
-      const rootOwner = group[0]!
       // The open Thought reveals the FULL process in ORIGINAL order —
-      // compaction cards included at their chronological position — with
-      // the final assistant held back and appended LAST (a max-tokens
-      // turn's `max tokens reached` system row must never land after the
-      // final: the settled order is User → Thought → process → final).
-      // The THOUGHT-LEAD boundary precedes the Thought: rows before the
-      // turn's FIRST non-steer user (injected context) stay in place
+      // compaction cards and bridged control rows included at their
+      // chronological position — with the final assistant held back and
+      // appended LAST (a max-tokens turn's `max tokens reached` system row must
+      // never land after the final: the settled order is User → Thought →
+      // process → final). The THOUGHT-LEAD boundary precedes the Thought: rows
+      // before the turn's FIRST non-steer user (injected context) stay in place
       // and that initial user itself stays above the Thought; every later
       // user/steer or surfaced-context row returns to its chronological
       // position (plan: expanded chronology — the projection reorders, never
@@ -318,19 +505,30 @@ export function projectFocus(
       // initial prompt (plan: no adjacency guessing). Every revealed
       // ordinary process row carries the owner-turn collapse mark; committed
       // pre-steer answers, user rows, surfaced context, lead foundation rows,
-      // and the FINAL assistant stay unmarked (clicking them must not collapse
-      // the Thought — review P2).
-      const boundary = focusThoughtLeadBoundary(group)
-      for (const member of group.slice(0, boundary)) {
+      // a command and the FINAL assistant stay unmarked (clicking them must
+      // not collapse the Thought).
+      const boundary = focusThoughtLeadBoundary(members)
+      for (const member of members.slice(0, boundary)) {
         out.push({ kind: 'message', message: member })
       }
-      if (activity !== undefined) out.push(...focusActivityBlock(activity, group[0]!, actionStats, undefined))
+      out.push(...focusActivityBlock(activity, rootOwner, actionStats, undefined))
+      // Before `turn/end`, a settled Assistant that still owns the structural
+      // latest step is not yet known to be the official final. Keep it out of
+      // expanded chronology instead of treating the missing final qualification
+      // as permission to render it as a normal process row. The turn-wide
+      // decision above already excluded control rows, replay evidence and a
+      // real later Process; open display blocks and pre-steer committed answers
+      // keep their existing semantics.
+      const pendingFinalAssistant = pendingByTurn.get(turn)
       const emitTailRow = (member: TranscriptMessage): void => {
-        if (isFocusPersistentInputRow(member)) {
+        if (isFocusPersistentInputRow(member) || isFocusBridgeControlRow(member)) {
+          // A bridged command OR a source-command-fused manual compaction is a
+          // standalone control row: physically placed at its raw position under
+          // the root, but NEVER Thought-owned process.
           out.push({ kind: 'message', message: member, focusPresentationOwner: rootOwner })
           return
         }
-        if (final !== undefined && member === final.message) return
+        if (regionFinal !== undefined && member === regionFinal.message) return
         if (member === pendingFinalAssistant) return
         if (isCommittedAnswer(member)) {
           out.push({ kind: 'message', message: member, focusPresentationOwner: rootOwner })
@@ -344,13 +542,14 @@ export function projectFocus(
         })
       }
       // The tail consumes the SAME canonical segmentation as Compact/Full
-      // (`structure.ts`), computed over the UNFILTERED tail so the
-      // held-back final never changes raw adjacency. A canonical Work span is
-      // emitted as a nested container block (F6) and materialized by TuiApp
-      // according to the effective Work disclosure; the TuiApp cluster
-      // substitution consumes the same canonical cluster identity at its
-      // Focus-projected position.
-      for (const block of focusExpandedTailStructure(group, boundary)) {
+      // (`structure.ts`), computed over the UNFILTERED tail so the held-back
+      // final never changes raw adjacency. A canonical Work span is emitted as
+      // a nested container block (F6) and materialized by TuiApp according to
+      // the effective Work disclosure; the TuiApp cluster substitution consumes
+      // the same canonical cluster identity at its Focus-projected position.
+      // A bridged command keeps no container path: it is physically nested
+      // below the root for placement only, never Thought-owned process.
+      for (const block of focusExpandedTailStructure(members, boundary)) {
         if (block.kind === 'work') {
           out.push({ kind: 'work', span: block.span, focusOwnerTurn: turn, focusPresentationOwner: rootOwner })
         } else if (block.kind === 'context-cluster') {
@@ -359,75 +558,87 @@ export function projectFocus(
           emitTailRow(block.message)
         }
       }
-      if (final !== undefined) {
-        out.push(final.truncated ? { kind: 'message', message: final.message, truncated: true } : { kind: 'message', message: final.message })
+      if (regionFinal !== undefined) {
+        out.push(regionFinal.truncated
+          ? { kind: 'message', message: regionFinal.message, truncated: true }
+          : { kind: 'message', message: regionFinal.message })
       }
       continue
     }
     // Collapsed Focus summarizes persistent input/context rows before the
     // Thought in their raw relative order. Both human user/steer rows and
     // injected context marked `context:true` are persistent; all ordinary
-    // process rows stay hidden inside the Thought. An UNQUALIFIED MID-TURN
-    // `form:'notice'` is the visible exception (see
-    // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought as
-    // a post-thought row, never inside the hidden Action candidate set. A
-    // proven Working `tool-jobs` Notice, same-turn Agent relay or subagent
-    // settlement Notice is NOT an exception: it follows the Thought hidden
-    // set, and only when canonical Work actually owns it. A committed pre-steer
-    // answer is the other exception: from that exact raw boundary onward,
-    // preserve the persistent rows and answer in chronology
-    // so the answer cannot be swallowed by the Thought or move when the
-    // disclosure changes.
+    // process rows stay hidden inside the Thought. A bridged command (or
+    // source-command-correlated manual compaction) is a standalone control
+    // row: it stays visible in the same raw order, before the ONE summary,
+    // and never wins the Action slot. An UNQUALIFIED MID-TURN `form:'notice'`
+    // is the visible process-feedback exception (see
+    // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought,
+    // never inside the hidden Action candidate set. A proven Working
+    // `tool-jobs` Notice, same-turn Agent relay or subagent settlement Notice
+    // is NOT an exception: it follows the Thought hidden set, and only when
+    // canonical Work actually owns it. A committed pre-steer answer is the
+    // other exception: from that exact raw boundary onward, preserve the
+    // persistent rows and answer in chronology so the answer cannot be
+    // swallowed by the Thought or move when the disclosure changes.
     //
-    // The collapsed Action source (addendum v2 §19/§42) is selected
-    // from EXACTLY the rows this projection hides under the Thought root —
-    // the emit loops below record them — so a committed answer, the
-    // held-back final and every visible persistent boundary can never
+    // The collapsed Action source (addendum v2 §19/§42) is selected from
+    // EXACTLY the rows this projection hides under the Thought root — the emit
+    // loops below record them — so a committed answer, the held-back final,
+    // a bridged command and every visible persistent boundary can never
     // duplicate themselves in the Action slot.
-    const leadBoundary = focusThoughtLeadBoundary(group)
+    const leadBoundary = focusThoughtLeadBoundary(members)
     const foldableSnapshots: CollapsedFoldableSnapshotScope = {
-      clusterByMember: clusterAdjacentAmbientContext(group).byMember,
-      // Hiding a carried row is only sound when the SAME group's canonical
+      clusterByMember: clusterAdjacentAmbientContext(members).byMember,
+      // Hiding a carried row is only sound when the SAME region's canonical
       // structure gives it a real Work owner (a Process run). An activity
       // created by `turn/start` alone is NOT an owner: without any Process the
       // row has no recoverable Thought content and must fail open.
-      workByMember: workByMemberOf(projectTranscriptStructure(group)),
-      thoughtOwned: activity !== undefined,
+      workByMember: workByMemberOf(projectTranscriptStructure(members)),
+      thoughtOwned: true,
     }
-    const firstCommittedIndex = group.findIndex(isCommittedAnswer)
+    const firstCommittedIndex = members.findIndex(isCommittedAnswer)
     const hidden: TranscriptMessage[] = []
-    // Collect first, emit once: the pre-thought rows, the post-thought rows
-    // and the hidden Action candidates of one group.
+    // Collect first, emit once: the pre-thought rows, the post-thought rows,
+    // the standalone compaction cards and the hidden Action candidates of one
+    // primary region.
     const preThought: TranscriptMessage[] = []
     const postThought: TranscriptMessage[] = []
+    const preCommittedCompactions: TranscriptMessage[] = []
     if (firstCommittedIndex < 0) {
-      for (let index = 0; index < group.length; index += 1) {
-        const member = group[index]!
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, foldableSnapshots)
-        if (disposition === 'pre-thought' || disposition === 'post-thought') {
-          (disposition === 'pre-thought' ? preThought : postThought).push(member)
-        } else if (member.kind !== 'compaction' && member !== final?.message) {
-          hidden.push(member)
+      for (let memberIndex = 0; memberIndex < members.length; memberIndex += 1) {
+        const member = members[memberIndex]!
+        if (isFocusBridgeControlRow(member)) {
+          preThought.push(member)
+          continue
         }
-      }
-      out.push(...preThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
-      out.push(...focusActivityBlock(activity, group[0]!, actionStats, hidden))
-      out.push(...postThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
-      // Compaction cards keep their existing lifecycle in the collapsed
-      // view (plan §12.3 v1 — never hidden into the Thought).
-      for (const member of group) {
-        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+        // Compaction cards keep their existing lifecycle in the collapsed
+        // view (plan §12.3 v1 — never hidden into the Thought); a fused
+        // source-command card is a bridge control row handled above.
+        if (member.kind === 'compaction') {
+          preCommittedCompactions.push(member)
+          continue
+        }
+        if (regionFinal !== undefined && member === regionFinal.message) continue
+        const disposition = collapsedFocusRowDisposition(member, memberIndex, leadBoundary, foldableSnapshots)
+        if (disposition === 'hidden') hidden.push(member)
+        else (disposition === 'pre-thought' ? preThought : postThought).push(member)
       }
     } else {
-      const beforeCommitted = group.slice(0, firstCommittedIndex)
-      for (let index = 0; index < beforeCommitted.length; index += 1) {
-        const member = beforeCommitted[index]!
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, foldableSnapshots)
-        if (disposition === 'pre-thought' || disposition === 'post-thought') {
-          (disposition === 'pre-thought' ? preThought : postThought).push(member)
-        } else if (member.kind !== 'compaction') {
-          hidden.push(member)
+      const beforeCommitted = members.slice(0, firstCommittedIndex)
+      for (let memberIndex = 0; memberIndex < beforeCommitted.length; memberIndex += 1) {
+        const member = beforeCommitted[memberIndex]!
+        if (isFocusBridgeControlRow(member)) {
+          preThought.push(member)
+          continue
         }
+        if (member.kind === 'compaction') {
+          preCommittedCompactions.push(member)
+          continue
+        }
+        const disposition = collapsedFocusRowDisposition(member, memberIndex, leadBoundary, foldableSnapshots)
+        if (disposition === 'hidden') hidden.push(member)
+        else (disposition === 'pre-thought' ? preThought : postThought).push(member)
       }
       // The post-boundary emission is decided FIRST (pure) so the Action
       // selection sees the whole hidden scope before the Thought renders.
@@ -442,48 +653,121 @@ export function projectFocus(
         thoughtOwned: false,
       }
       const postCommitted: TranscriptMessage[] = []
-      for (let index = firstCommittedIndex; index < group.length; index += 1) {
-        const member = group[index]!
-        if (final !== undefined && member === final.message) continue
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, postCommittedFoldableSnapshots)
-        if (disposition !== 'hidden' || member.kind === 'compaction' || isCommittedAnswer(member)) {
+      for (let memberIndex = firstCommittedIndex; memberIndex < members.length; memberIndex += 1) {
+        const member = members[memberIndex]!
+        if (regionFinal !== undefined && member === regionFinal.message) continue
+        const disposition = collapsedFocusRowDisposition(member, memberIndex, leadBoundary, postCommittedFoldableSnapshots)
+        if (disposition !== 'hidden' || isFocusBridgeControlRow(member)
+          || member.kind === 'compaction' || isCommittedAnswer(member)) {
           postCommitted.push(member)
         } else {
           hidden.push(member)
         }
       }
       out.push(...preThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
-      out.push(...focusActivityBlock(activity, group[0]!, actionStats, hidden))
+      out.push(...focusActivityBlock(activity, rootOwner, actionStats, hidden))
       out.push(...postThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
-      for (const member of beforeCommitted) {
-        if (member.kind === 'compaction') out.push({ kind: 'message', message: member })
+      for (const member of preCommittedCompactions) {
+        out.push({ kind: 'message', message: member })
       }
       for (const member of postCommitted) {
         out.push({ kind: 'message', message: member })
       }
+      if (regionFinal !== undefined) {
+        out.push(regionFinal.truncated
+          ? { kind: 'message', message: regionFinal.message, truncated: true }
+          : { kind: 'message', message: regionFinal.message })
+      }
+      continue
+    }
+    out.push(...preThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
+    out.push(...focusActivityBlock(activity, rootOwner, actionStats, hidden))
+    out.push(...postThought.map(member => ({ kind: 'message', message: member }) as FocusProjectedBlock))
+    for (const member of preCommittedCompactions) {
+      out.push({ kind: 'message', message: member })
     }
     // The collapsed final: only after the authoritative turn/end.
-    if (final !== undefined) {
-      out.push(final.truncated ? { kind: 'message', message: final.message, truncated: true } : { kind: 'message', message: final.message })
+    if (regionFinal !== undefined) {
+      out.push(regionFinal.truncated
+        ? { kind: 'message', message: regionFinal.message, truncated: true }
+        : { kind: 'message', message: regionFinal.message })
     }
   }
   return out
 }
 
 /**
- * The canonical structural blocks the expanded Focus TAIL consumes: one turn
- * group from its Thought-lead boundary onward. The held-back final is included,
- * so cluster membership is computed from exactly the raw adjacency the window
- * would give. `projectFocus` emits a canonical Work span as a nested `work`
- * block (F6); this exported seam lets the convergence oracle compare
+ * The canonical structural blocks the expanded Focus TAIL consumes: one logical
+ * Turn's primary presentation region from its Thought-lead boundary onward
+ * (bridged control rows included at their raw positions). The held-back final is
+ * included, so cluster membership is computed from exactly the raw adjacency the
+ * window would give. `projectFocus` emits a canonical Work span as a nested
+ * `work` block (F6); this exported seam lets the convergence oracle compare
  * Work/cluster boundary IDENTITY (owner and member objects) instead of display
  * strings (plan §25).
- * @param group - one turn's consecutive raw messages.
- * @param boundary - the group's Thought-lead boundary ({@link focusThoughtLeadBoundary}).
- *   Passed in so one expanded group computes the boundary once.
+ * @param region - one logical Turn's primary region members, in raw order.
+ * @param boundary - the region's Thought-lead boundary
+ *   ({@link focusThoughtLeadBoundary}). Passed in so one expanded region
+ *   computes the boundary once.
  */
-export function focusExpandedTailStructure(group: readonly TranscriptMessage[], boundary: number): TranscriptStructureBlock[] {
-  return projectTranscriptStructure(group.slice(boundary))
+export function focusExpandedTailStructure(region: readonly TranscriptMessage[], boundary: number): TranscriptStructureBlock[] {
+  return projectTranscriptStructure(region.slice(boundary))
+}
+
+/**
+ * The projected live-call owner at the RAW transcript tail: the ONE root of the
+ * open Turn whose PRIMARY region actually reaches the tail, plus the exact
+ * canonical Work when that Work owns the call. `undefined` when the tail is an
+ * independent boundary (a turn-less command/window row, replay evidence, a
+ * foreign/completed Turn) or belongs to a later fail-open region of the same
+ * Turn.
+ *
+ * PiTui and TSP use this ONE placement. The authority is the ACTUAL expanded
+ * projection (the region's emitted rows/Work), never "the numeric turn of the
+ * canonical tail": a later disjoint region of the same open Turn is not the
+ * root's region, so its rows may not adopt the live call.
+ */
+export function focusLiveTailPlacement(
+  messages: readonly TranscriptMessage[],
+  activities: ReadonlyMap<number, TurnActivity>,
+  expandedBlocks?: readonly FocusProjectedBlock[],
+): { readonly rootOwner: TranscriptMessage; readonly workOwner?: TranscriptMessage } | undefined {
+  // The caller may already hold the all-expanded projection (TSP does): reuse
+  // the SAME derived blocks instead of re-projecting the window.
+  const expanded = expandedBlocks ?? projectFocus(messages, activities, new Set(activities.keys()), true)
+  const openActivityOf = (turn: number): Extract<FocusProjectedBlock, { kind: 'activity' }> | undefined => {
+    const block = expanded.find(candidate => candidate.kind === 'activity' && candidate.activity.turn === turn)
+    return block?.kind === 'activity' && !block.activity.completed ? block : undefined
+  }
+  // Use the CANONICAL RAW tail, not the last painted block: a pending final is
+  // hidden from the expanded view but is still a real raw conversation row.
+  const trailing = projectTranscriptStructure(messages).at(-1)
+  if (trailing === undefined) return undefined
+  const tailWork = trailing.kind === 'work' ? trailing.span : undefined
+  const tailMessage = trailing.kind === 'work'
+    ? undefined
+    : trailing.kind === 'message' ? trailing.message
+      : trailing.kind === 'context-cluster' ? trailing.cluster.members.at(-1) : undefined
+  const tailTurn = tailWork !== undefined
+    ? tailWork.turn
+    : tailMessage !== undefined && 'turn' in tailMessage ? tailMessage.turn : undefined
+  if (tailTurn === undefined) return undefined
+  const activity = openActivityOf(tailTurn)
+  if (activity === undefined) return undefined
+  if (tailWork !== undefined) {
+    // The EXACT canonical Work owns the call only when that Work was actually
+    // materialized by the primary region; a later-region Work is raw evidence.
+    const materialized = expanded.some(block => block.kind === 'work' && block.span.owner === tailWork.owner)
+    return materialized ? { rootOwner: activity.owner, workOwner: tailWork.owner } : undefined
+  }
+  if (tailMessage === undefined) return undefined
+  // Region membership is the authority even when the tail row is a SUPPRESSED
+  // pending final: a pending Assistant beyond a replay/disjoint fence is not
+  // part of the primary region, so it must not lend that root to the call.
+  const primary = focusPrimaryRegionOfTurn(messages, activities, tailTurn)
+  return primary !== undefined && primary.members.includes(tailMessage)
+    ? { rootOwner: activity.owner }
+    : undefined
 }
 
 /** Rows that remain visible outside the collapsed Thought as persistent
@@ -578,38 +862,6 @@ function collapsedFocusRowDisposition(
       || foldableSnapshots.workByMember.has(message))) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
-}
-
-/**
- * One turn's maximal run of CONSECUTIVE same-turn rows starting at `start`.
- * A turn-less entry (window summary) may SPLIT a turn into separate runs, and
- * the projection folds each run independently — this helper is shared by the
- * projection and the collapsed visibility predicate so their index and
- * `focusThoughtLeadBoundary` math can never diverge on a non-monotonic window.
- * @param messages - the transcript window.
- * @param start - the run's first index.
- * @param turn - the run's turn number.
- */
-/**
- * The consecutive rows of ONE Focus projection turn, starting at `start`.
- *
- * Exported so a caller that needs the Focus disposition of a SINGLE row can
- * project that turn's own group instead of the whole loaded history (the search
- * seat's ancestry probe). It is the SAME segmentation `projectFocus` walks, so
- * the slice and the full projection can never disagree.
- */
-export function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: number, turn: number): TranscriptMessage[] {
-  const group: TranscriptMessage[] = [messages[start]!]
-  let index = start + 1
-  while (index < messages.length) {
-    const next = messages[index]!
-    // `focusProjectionTurnOf` — never the raw `turn` — so a turn-less
-    // standalone row cannot join (or split) the run it merely sits in.
-    if (focusProjectionTurnOf(next) !== turn) break
-    group.push(next)
-    index += 1
-  }
-  return group
 }
 
 /** The Thought-lead boundary of one turn group: the prefix that stays above the

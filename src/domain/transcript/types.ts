@@ -456,6 +456,12 @@ export interface MutableTurnActivity {
    * OLDER confirmed step is ignored (the slot shows the latest
    * intermediate) and never resurrects a candidate (review finding). */
   confirmedSteps: Set<number>
+  /** Every Assistant step the Fold has authoritatively seen become
+   * INTERMEDIATE: a real tool/call or step boundary after its settlement, or
+   * a later output that confirmed its streaming candidate. This is the
+   * Pending-Final/Intermediate fact the Focus projection reads; presentation
+   * row kind/order is never this authority. */
+  intermediateAssistantSteps: Set<number>
   /** Every step whose output was AUTHORITATIVELY settled by an
    * assistant/message: a later text-delta for it is a replay artifact and
    * is ignored — it must never corrupt the settled preview (review

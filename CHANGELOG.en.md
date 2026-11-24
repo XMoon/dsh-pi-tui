@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The Agent parallel tool-call cap is now edited inline in the Detail pane.** `/settings → Agent`'s former `Agent loop` row is named `Parallel tool calls` (the internal id and the official namespace are unchanged) and shows the current effective value in the row itself. Selecting the row opens nothing; `Enter` / Right or the body's `Change` enters the raw numeric Input inside the SAME Detail, and **one confirmation** dispatches one official write. `Details [?]` (or a plain `?` without editing) reveals the effective/inherited facts, the revision and the official unset disclosure. Empty or invalid text stays in the Input with its real error and zero writes; a value equal to the current one reports `No changes` instead of a fabricated success; the Host-readback-backed `Verified` / `Not saved` / `Unverified` / `Outcome unconfirmed` states and the dirty-draft parent-navigation confirmation are reported as they really are. The two-field Shell execution page keeps its existing Apply → Save flow.
 
+### Fixed
+
+- **One Focus summary per turn.** Running a session command (such as `/model`) or a manual compaction in the middle of an active turn no longer paints two identical live Focus status cards; the command card stays visible once at its real chronological position, and expanding the turn keeps the original Work order and the final answer.
+
+
 ## [0.5.8] - 2026-11-22
 
 ### Added

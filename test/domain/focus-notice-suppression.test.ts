@@ -282,19 +282,23 @@ test('an UNQUALIFIED mid-turn notice before a committed answer keeps Thought -> 
     'expanded keeps the steer after the answer (raw order)')
 })
 
-// --- F8: turn-less split keeps the consecutive-run grouping ------------------
-test('a turn split by a turn-less row keeps the consecutive-run grouping (a notice starting its own run is opening foundation)', () => {
-  // A turn-less entry SPLITS turn 1 into two runs. The notice starts the second
-  // run, so its own lead boundary is the run start and the projection renders
-  // it as that run's opening foundation — BEFORE that run's Thought.
+// --- F8: a turn-less row is a hard fence, never a second run -----------------
+test('a turn-less split row is a hard fence: the later region fails open with no second Thought', () => {
+  // A turn-less window entry cannot BRIDGE the Turn (only a bounded control run
+  // followed by same-Turn evidence can). The Turn keeps its ONE summary at the
+  // first legitimate region; every later row — the notice and the Process after
+  // it — stays visible in raw order instead of fabricating a second Thought.
   const noticeRow = notice('Background job', 'after the split', 'tool-jobs')
   const messages = [user('opening'), thinking('before'), summary('… older'), noticeRow, thinking('after')]
-  assert.ok(collapsed(messages).includes(noticeRow), 'the projection renders the notice in its own run')
+  assert.ok(collapsed(messages).includes(noticeRow), 'the projection still renders the notice')
   assert.deepEqual(
     collapsedBlockOrder(messages),
-    ['user', '<Thought>', 'summary', 'Background job', '<Thought>'],
-    'the split-run notice opens its own run BEFORE that run\'s Thought (the turn-less summary stays standalone)',
+    ['user', '<Thought>', 'summary', 'Background job', 'thinking'],
+    'the later region fails open in raw order; no second Thought is minted',
   )
+  const expandedBlocks = projectFocus(messages, new Map([[TURN, liveActivity()]]), new Set([TURN]), true)
+  assert.equal(expandedBlocks.filter(block => block.kind === 'activity').length, 1,
+    'the hard fence never mints a second expanded summary')
 })
 
 // --- F6 + F9/F10: real-TUI search / Compact / Full controls -------------------

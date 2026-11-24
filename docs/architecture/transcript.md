@@ -137,12 +137,15 @@ projectTranscriptStructure()
   card still settles that card normally and leaves it fully legal evidence.
   Such a row stays in the transcript (Full preset, expanded Focus, Full search,
   diagnostic), but it is excluded from the settled turn's Process/Action
-  aggregates at THREE shared consumers: the Action classifier, Work-span
-  membership, and consecutive-read grouping (a synthesized group card would
-  otherwise launder the provenance back into an aggregate). A replay row is a
-  grouping BOUNDARY, so a late read can never merge with a legal one; the
-  stateful folder and the exported `groupConsecutiveReads` mirror share the
-  one `isGroupableRead` predicate.
+  aggregates at FOUR shared consumers: the Action classifier, Work-span
+  membership, consecutive-read grouping (a synthesized group card would
+  otherwise launder the provenance back into an aggregate) and Focus root
+  admission. It may neither OPEN nor JOIN the one logical-Turn Thought root:
+  a replay-marked row is a hard presentation fence, so it renders independently
+  at its raw position and a replay-only fragment mints no Thought at all. A
+  replay row is a grouping BOUNDARY, so a late read can never merge with a
+  legal one; the stateful folder and the exported `groupConsecutiveReads`
+  mirror share the one `isGroupableRead` predicate.
   **The fence requires an OWNING turn, and it covers only rows that carry
   one.** A `tool/call` card or an orphan `tool/result` materialized after its
   own turn's `turn/end` is replay evidence. The two producers whose events
@@ -181,13 +184,54 @@ projectTranscriptStructure()
   `descriptorIndex < turnStartIndex`) — so it owns no model turn to belong to,
   and it never joins a Work span, an Action or ActionStats. The parent's own
   genuine `tool/call name=subagent` is the delegation evidence.
-- **Focus occurrence identity ≠ Focus disclosure identity.** One turn can
-  materialize SEVERAL Thought runs (a turn-less window entry splits it), each
-  with its own hidden rows, Action winner and component. The presentation
-  occurrence identity is therefore the run's first `TranscriptMessage`
-  (`FocusProjectedBlock.owner`, the same owner pattern Work/cluster use),
-  while the SEMANTIC disclosure identity — Ctrl+O, click ownership,
-  `focusExpandedTurns`, `containerPath` — stays the turn number.
+- **One logical Turn owns one Focus summary; the owner is a row, the disclosure
+  identity is the Turn.** The Turn's primary presentation region is its maximal
+  raw run of eligible rows, bridged across a bounded, maximal run of standalone
+  control rows (a `kind:'command'` lifecycle, or a manual compaction already
+  fused with its source command) ONLY when eligible same-Turn evidence continues
+  after that run and the Turn's qualified final has not already appeared. A
+  different Turn, any other turn-less window entry and replay evidence are hard
+  fences; the first legitimate region emits the ONE Thought summary, and a later
+  disjoint region of the same Turn fails open in raw order instead of minting a
+  second summary. The presentation owner is that region's first original
+  eligible `TranscriptMessage` (`FocusProjectedBlock.owner`, the same owner
+  pattern Work/cluster use) — never a command, a synthetic proxy or a fragment
+  owner — and it keys the component cache and native section. The SEMANTIC
+  disclosure identity — Ctrl+O, click ownership, `focusExpandedTurns`,
+  `containerPath` — stays the turn number. A trailing command not yet bridged
+  stays a standalone tail row; when same-Turn continuation arrives it reflows
+  ahead of the one collapsed summary while the owner object stays stable. A
+  command retains NO semantic Focus ancestry: when expanded it is physically
+  nested below the root for placement only (`focusPresentationOwner`) and
+  carries no `containerPath`, and a search hit on it never needs a root reveal.
+- **Pending final and live-call placement are Fold facts, not row shapes.**
+  Before `turn/end`, the structural latest-step settled Assistant is held back
+  as the pending final unless the Folder recorded authoritative continuation
+  for that exact step (a real `tool/call` or a new step after its settlement,
+  or a later output that confirmed its streaming candidate). The settlement
+  and the formal call event share ONE pure order authority: the actual card's
+  step identity plus its proven start time relative to the first visible
+  Assistant text, never the optional display relocation or the raw row
+  position. A proven preceding same-step call does not confirm the text; an
+  unprovable or equal order keeps the historical observed-order compatibility
+  for the formal call, while a settlement never infers a following side it
+  cannot prove. Display reachability remains an independent invariant. A late
+  older-step
+  Assistant/Thinking, an orphan/result-only diagnostic, a retry diagnostic or
+  an independent control row never confirms it; display kind and physical order
+  are never the authority. After `turn/end` the qualified final classifier owns
+  the final, including the max-tokens truncation flag. The live Preparing call
+  is placed from the canonical RAW tail plus that exact held-back-final
+  identity: a materialized trailing Work owns it, a primary region that reaches
+  the raw tail admits it as the root's child, and an independent boundary or a
+  later fail-open region renders it exactly once standalone with no Focus
+  ancestry (a preview with no projected root also fails open standalone). A
+  suppressed pending final beyond the primary region is not that region's tail
+  and lends no root. Search reveal ancestry is derived only from containers the
+  actual projection materialized: a canonical Work emitted raw by a fail-open
+  region mints no Work grant and is never promoted into a manual disclosure; a
+  suppressed pending/final row is not recoverable and mints no reveal or root
+  promotion.
 
 Compact, Full and expanded Focus all materialize this structure:
 
@@ -612,6 +656,22 @@ class:
 
 - Collapsed Focus surfaces user/steer rows and causal Context in raw relative
   order before the Thought.
+- A bridged control row stays VISIBLE exactly once. Collapsed Focus keeps a
+  command (or a fused manual-compaction card) in raw order among the persistent
+  pre-Thought rows, before the one summary; expanded Focus keeps it at its exact
+  raw position, physically below the open root without Thought ancestry. It is
+  never hidden as Process, never an Action candidate and never a second summary.
+  A command at the window tail whose same-Turn continuation is not loaded yet
+  stays standalone after the summary (no synthetic ownership); a later
+  publication that evidences the continuation bridges it and reflows only the
+  collapsed placement.
+- The ONE live Preparing snapshot belongs to the current open logical Turn: its
+  collapsed summary owns the single Action slot even while a trailing command is
+  not bridged yet. In an expanded root the live call attaches to the exact
+  trailing canonical Work when that Work owns it; otherwise it may be inserted
+  as a root child only when that root's region really reaches the raw tail, and
+  it renders once as a standalone row after an independent trailing boundary.
+  A completed/foreign preview never updates a historical root.
 - An opening ambient burst (the initial user plus the immediately following
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the

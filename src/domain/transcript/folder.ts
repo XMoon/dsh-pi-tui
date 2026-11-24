@@ -193,6 +193,17 @@ export function assistantLatestStepOf(activity: TurnActivity): number | undefine
 
 /** Whether an Assistant crossed an admitted human-steer boundary and is
  * therefore a persistent conversation answer rather than Focus process. */
+/** Whether the exact Assistant row's step has authoritative continuation
+ * evidence in the Fold: a real tool/call or step boundary after its
+ * settlement, or a later output that confirmed its streaming candidate. The
+ * Focus projection holds a latest-step settled Assistant back as the pending
+ * final ONLY when this fact is absent; presentation row kind/order never
+ * answers that question. */
+export function assistantStepIntermediateOf(activity: TurnActivity, message: TranscriptMessage): boolean {
+  const step = assistantStepOf(message)
+  return step !== undefined && (activity as MutableTurnActivity).intermediateAssistantSteps.has(step)
+}
+
 export function assistantCommittedBeforeSteer(
   activity: TurnActivity,
   message: TranscriptMessage,
@@ -1083,6 +1094,7 @@ export class TranscriptFolder {
         tools: new Map(),
         thinkingTail: '',
         confirmedSteps: new Set(),
+        intermediateAssistantSteps: new Set(),
         settledSteps: new Set(),
         firstVisibleAssistantTimes: new Map(),
         committedAnswerSteps: new Set(),
@@ -1434,6 +1446,9 @@ export class TranscriptFolder {
       : text.slice(-TranscriptFolder.MESSAGE_TAIL_CAP)
     activity.messageConfirmedStep = candidate.step
     activity.confirmedSteps.add(candidate.step)
+    // The candidate is now authoritatively intermediate: a real later
+    // tool/call, step boundary or later output proved the turn continues.
+    activity.intermediateAssistantSteps.add(candidate.step)
     activity.messageCandidate = undefined
   }
 
@@ -3496,6 +3511,28 @@ export class TranscriptFolder {
   private isDeclaredToolCall(turn: number, step: number, callId: string): boolean {
     return this.declaredToolCallsByStep.get(stepKey(turn, step))?.has(callId) === true
   }
+  /** Whether this step's durable evidence owns a same-step ACTUAL tool call
+   * that the lane convergence places on the Assistant's FOLLOWING display side
+   * (text-then-call). A cold fold can observe the call event BEFORE the
+   * settlement; the existing lane relation is the display authority, and a
+   * conformant raw row needs no relation. A call on the preceding side, a
+   * requested-but-never-started call (no card) and an older-step call are not
+   * continuation. */
+  private assistantStepHasFollowingActualCall(turn: number, step: number): boolean {
+    const declared = this.declaredToolCallsByStep.get(stepKey(turn, step))
+    if (declared === undefined) return false
+    for (const callId of declared) {
+      if (!this.toolCardIndexOf.has(toolCallKey(turn, step, callId))) continue
+      // PURE order evidence: an actual card plus its proven start time on the
+      // following side of the visible Conversation. Display reachability
+      // (whether the lane row can be relocated across a boundary) is a separate
+      // invariant and must never decide causal qualification; an unprovable or
+      // equal order is not "following".
+      if (this.toolRowEvidence(turn, step, callId)?.position === 'after') return true
+    }
+    return false
+  }
+
 
   /** Whether a proven Tool row already sits on the physical side its evidence
    *  asks for (so it keeps its own slot and needs no relation). */
@@ -5018,6 +5055,16 @@ export class TranscriptFolder {
           }
         }
         this.usage.onStepStart(event.data.turn, event.data.step)
+        // A real NEW step after the latest settled Assistant proves that
+        // Assistant intermediate. This is step provenance, not a display-row
+        // guess; same-step retry/attempt fixes do not mark it.
+        const latestSettled = activity.lastAssistantStep
+        if (latestSettled !== undefined && event.data.step > latestSettled
+          && activity.settledSteps.has(latestSettled)
+          && !activity.intermediateAssistantSteps.has(latestSettled)) {
+          activity.intermediateAssistantSteps.add(latestSettled)
+          activity.revision += 1
+        }
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -5349,6 +5396,15 @@ export class TranscriptFolder {
         // (review finding).
         activity.settledSteps.add(event.data.step)
         const staleForFocus = event.data.step < priorLast
+        // The SAME durable facts can reach the Fold in either order: live text
+        // before the call, cold call before the settlement. The settlement's
+        // own convergence has now placed every ACTUAL same-step call on its
+        // proven side; a following call records the exact same text-then-call
+        // authority as the live call-first branch. Unprovable/equal/older-step
+        // orders and requested-only blocks stay unmarked.
+        if (!staleForFocus && this.assistantStepHasFollowingActualCall(event.data.turn, event.data.step)) {
+          activity.intermediateAssistantSteps.add(event.data.step)
+        }
         if (!staleForFocus) {
           // A message of a DIFFERENT step than the open candidate proves the
           // earlier step's output was intermediate: confirm it first (plan
@@ -5359,6 +5415,13 @@ export class TranscriptFolder {
         // last assistant step — the final-answer dedup depends on it
         // (review finding).
         activity.lastAssistantStep = Math.max(priorLast, event.data.step)
+        if (priorLast !== undefined && event.data.step > priorLast
+          && activity.settledSteps.has(priorLast)
+          && !activity.intermediateAssistantSteps.has(priorLast)) {
+          // A newer step's authoritative output proves the previous step
+          // intermediate; the latest step keeps its own decision.
+          activity.intermediateAssistantSteps.add(priorLast)
+        }
         if (staleForFocus) {
           // A stale durable settlement cannot reclaim candidate or final
           // ownership. It may still update the confirmed slot when that exact
@@ -5521,7 +5584,35 @@ export class TranscriptFolder {
               status: 'running',
             }
           }
-          this.confirmMessageCandidate(activity)
+          // A real tool/call proves the candidate intermediate ONLY when it is
+          // not a late event for an older step. A MATERIALLY PROVEN same-step
+          // call on the preceding side is not continuation even though its
+          // formal event arrives after the text settlement; an unproven/equal
+          // same-step order keeps the historical observed-order compatibility
+          // (the pure evidence proves neither side). A later-step call is
+          // continuation by step identity.
+          const provenPrecedingSameStepCall = (step: number): boolean =>
+            event.data.step === step
+            && this.toolRowEvidence(callTurn, event.data.step, key)?.position === 'before'
+          const candidate = activity.messageCandidate
+          if (candidate !== undefined) {
+            if (event.data.step > candidate.step
+              || (event.data.step === candidate.step && !provenPrecedingSameStepCall(candidate.step))) {
+              this.confirmMessageCandidate(activity)
+            }
+          } else {
+            const latest = activity.lastAssistantStep
+            if (latest !== undefined && event.data.step > latest
+              && activity.settledSteps.has(latest)
+              && !activity.intermediateAssistantSteps.has(latest)) {
+              activity.intermediateAssistantSteps.add(latest)
+            } else if (latest !== undefined && event.data.step === latest
+              && activity.settledSteps.has(latest)
+              && !provenPrecedingSameStepCall(latest)
+              && !activity.intermediateAssistantSteps.has(latest)) {
+              activity.intermediateAssistantSteps.add(latest)
+            }
+          }
           this.syncMessage(activity)
           activity.revision += 1
         }

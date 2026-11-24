@@ -4723,11 +4723,13 @@ test('collapsed Focus: the visible mid-turn notice never changes the turn-level 
   assert.equal(block?.action?.kind, 'retry')
 })
 
-test('Focus action stats stay turn-level when a turn-less entry splits the turn (v2 §18)', () => {
+test('Focus action stats stay turn-level across a hard turn-less summary fence (v2 §18)', () => {
   const readRow: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' }
   const retryRow: TranscriptMessage = { kind: 'system', turn: 1, text: 'llm retry 1 in 2s — x', origin: 'llm-retry' }
-  // A turn-less window summary SPLITS turn 1 into two consecutive runs: both
-  // Thought blocks must still report the WHOLE turn's aggregate.
+  // A turn-less window summary is a HARD fence (it is not a control bridge):
+  // the Turn keeps its ONE summary at the first legitimate region, and the
+  // later region fails open in raw place. The shared aggregate still describes
+  // the WHOLE logical turn, never only the summarised region.
   const messages: TranscriptMessage[] = [
     { kind: 'user', turn: 1, text: 'go' },
     readRow,
@@ -4739,11 +4741,14 @@ test('Focus action stats stay turn-level when a turn-less entry splits the turn 
   } as TurnActivity
   const blocks = projectFocus(messages, new Map([[1, activity]]), new Set(), true)
   const activityBlocks = blocks.filter((block): block is Extract<FocusProjectedBlock, { kind: 'activity' }> => block.kind === 'activity')
-  assert.equal(activityBlocks.length, 2, 'the turn-less entry splits the turn into two Thought runs')
-  for (const block of activityBlocks) {
-    assert.equal(block.actionStats.total, 2, 'every run reports the whole turn (read + retry), never only its own run')
-    assert.deepEqual([...block.actionStats.types.keys()].sort(), ['read', 'retry'])
-  }
+  assert.equal(activityBlocks.length, 1, 'a hard fence never mints a second Thought root')
+  assert.equal(activityBlocks[0]?.actionStats.total, 2, 'the one summary reports the whole turn (read + retry)')
+  assert.deepEqual([...(activityBlocks[0]?.actionStats.types.keys() ?? [])].sort(), ['read', 'retry'])
+  assert.deepEqual(
+    blocks.map(block => block.kind === 'activity' ? 'activity' : block.kind === 'message' ? block.message.kind : block.kind),
+    ['user', 'activity', 'summary', 'system'],
+    'the region beyond the hard fence fails open in raw order',
+  )
 })
 
 // ── Post-turn replay fence (late-replay provenance) ───────────────────────
@@ -4906,7 +4911,7 @@ test('a command crossing a later turn never pollutes either turn', () => {
   assert.deepEqual(workSpanToolNames(folder), [], 'the command joins no Work span')
 })
 
-test('a standalone command splits two Process runs of the SAME model turn', () => {
+test('a command inside one model turn bridges the Process runs into one Thought root', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
@@ -4936,19 +4941,27 @@ test('a standalone command splits two Process runs of the SAME model turn', () =
   ])
   const commandRow = folder.messages().find(message => message.kind === 'command')
   assert.ok(commandRow !== undefined, 'fixture: the command card exists')
-  const blocks = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
-  assert.deepEqual(blocks.map(block => block.kind === 'activity'
+  const messages = folder.messages()
+  const activities = folder.turnActivities()
+  const collapsed = projectFocus(messages, activities, new Set(), true)
+  assert.deepEqual(collapsed.map(block => block.kind === 'activity'
     ? `Thought(turn ${block.activity.turn})`
     : block.kind === 'message'
       ? (block.message === commandRow ? 'command' : block.message.kind)
       : block.kind),
-  ['Thought(turn 0)', 'command', 'Thought(turn 0)'],
-  'the command splits the run: Thought / standalone command / Thought')
-  // Both runs still describe the SAME whole turn (the §18 turn-level contract).
-  for (const block of blocks) {
-    if (block.kind !== 'activity') continue
-    assert.equal(block.actionStats.total, 2, 'each run reports the whole turn: 2 read actions')
-  }
+  ['command', 'Thought(turn 0)'],
+  'one logical Thought; the bridged command stays visible before the summary')
+  const summary = collapsed.find(block => block.kind === 'activity')
+  assert.ok(summary !== undefined && summary.kind === 'activity')
+  assert.equal(summary.actionStats.total, 2, 'the one summary reports the whole turn: 2 read actions')
+  assert.equal(summary.owner, messages[0], 'the root owner is the first eligible turn row, never the command')
+
+  const expanded = projectFocus(messages, activities, new Set([0]), true)
+  assert.deepEqual(expanded.map(block => block.kind), ['activity', 'work', 'message', 'work'],
+    'expanding restores the real A -> command -> B chronology under the one root')
+  const commandBlock = expanded.find(block => block.kind === 'message' && block.message === commandRow)
+  assert.ok(commandBlock !== undefined && commandBlock.kind === 'message')
+  assert.equal(commandBlock.containerPath, undefined, 'the command keeps no Thought ancestry')
   assert.deepEqual(workSpanToolNames(folder), ['read', 'read'], 'and the command joins NO Work span')
 })
 
@@ -5007,6 +5020,69 @@ test('late-replay provenance (B): a late read never merges with the legal read',
   const mirrored = groupConsecutiveReads(folder.messages())
   assert.equal(mirrored.filter(message => message.kind === 'tool').length, 2,
     'the exported mirror applies the same grouping boundary')
+})
+
+test('late-replay provenance (C): a late orphan result after a newer Turn stays standalone evidence', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool', toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 1002, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1003, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1004, 4),
+    eventAt('turn/start', { turn: 1 }, 1005, 5),
+    eventAt('user/message', {
+      id: MessageId('u-b'), role: 'user',
+      content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 1006, 6),
+    // A NEW orphan result for the already-settled turn A materializes while B
+    // runs: durable transcript evidence, never a second A summary/stats input.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('late-r'), role: 'tool', toolCallId: ToolCallId('late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('late-c') },
+      },
+    }, 6001, 7),
+  ])
+  const messages = folder.messages()
+  const late = messages.find(message => message.kind === 'tool' && message.result === 'late evidence')
+  assert.ok(late !== undefined && late.kind === 'tool', 'fixture: the late card materialized')
+  assert.equal(isPostTurnReplayEvidence(late), true, 'a newly materialized post-turn row is replay evidence')
+  assert.equal(isTranscriptWorkMember(late), false, 'replay evidence never joins a Work span')
+
+  const blocks = projectFocus(messages, folder.turnActivities(), new Set(), true)
+  const activities = blocks.filter((block): block is Extract<FocusProjectedBlock, { kind: 'activity' }> => block.kind === 'activity')
+  assert.deepEqual(activities.map(block => block.activity.turn), [0, 1],
+    'one summary per logical Turn, never an extra root for the late row')
+  assert.equal(activities[0]?.actionStats.total, 1, 'the late result adds no Action to the settled Turn')
+  assert.equal(activities[1]?.actionStats.total, 0, 'the newer Turn stays clean')
+  const lateIndex = blocks.findIndex(block => block.kind === 'message' && block.message === late)
+  const promptIndex = blocks.findIndex(block => block.kind === 'message'
+    && block.message.kind === 'user' && block.message.text === 'B prompt')
+  assert.ok(lateIndex > promptIndex, 'the late card stays visible at its raw position after B')
+  assert.equal(blocks.filter(block => block.kind === 'message' && block.message === late).length, 1,
+    'the late card renders exactly once')
+  const expanded = projectFocus(messages, folder.turnActivities(), new Set([0]), true)
+  assert.equal(expanded.filter(block => block.kind === 'activity' && block.activity.turn === 0).length, 1,
+    'expanding the settled Turn never mints a second A root for replay evidence')
+  assert.ok(expanded.some(block => block.kind === 'message' && block.message === late),
+    'the late card stays visible when the settled Thought opens')
+  assert.deepEqual(workSpanToolNames(folder), ['read'], 'no synthesized Work/Action aggregation includes the replay row')
+  const replayOnly = projectFocus([late], folder.turnActivities(), new Set(), true)
+  assert.equal(replayOnly.filter(block => block.kind === 'activity').length, 0,
+    'a replay-only fragment mints no Thought at all')
+  assert.equal(replayOnly.filter(block => block.kind === 'message' && block.message === late).length, 1,
+    'the replay-only fragment still renders once')
 })
 
 test('a hostile action subtype name stays on ONE Focus header row', () => {

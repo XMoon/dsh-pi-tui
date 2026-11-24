@@ -118,6 +118,10 @@ function provideHostPeripheralServices(ctx) {
 const BOUNDARY_TURN = 35
 const BOUNDARY_PATH = 'boundary-delivery.txt'
 const BOUNDARY_DESCRIPTION = 'pagination boundary sentinel'
+/** A non-boundary turn that carries the real mid-turn command fixture. */
+const COMMAND_TURN = 58
+const COMMAND_ID = 'presentation-mid-turn-command'
+const COMMAND_NAME = 'model'
 
 function appendTurn(session, turn, text, context = false) {
   session.append('turn/start', { turn })
@@ -139,6 +143,24 @@ function appendTurn(session, turn, text, context = false) {
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   session.append('step/start', { turn, step: 0 })
+  if (turn === COMMAND_TURN) {
+    // Real official command lifecycle INSIDE one model turn: DSH opens no model
+    // turn for a command, so this card is a turn-less control row between the
+    // turn's opening prompt and its own final answer. The fixture writes events,
+    // never production command execution, and adds no surface message (the
+    // 50-message pagination tuning and the boundary turn stay untouched).
+    session.append('command/run', {
+      commandId: COMMAND_ID,
+      name: COMMAND_NAME,
+      args: 'switch',
+      source: { kind: 'user' },
+    })
+    session.append('command/done', {
+      commandId: COMMAND_ID,
+      kind: 'success',
+      text: 'model switched',
+    })
+  }
   if (turn === BOUNDARY_TURN) {
     session.append('deliverables/presented', {
       turn,
@@ -425,6 +447,39 @@ async function main() {
       { path: 'second-boundary.txt', description: 'second boundary file' },
     ])
     assert.equal(finalProjection.messages.some(message => message.kind === 'deliverables'), false)
+    // The mid-turn command wakeup: the SAME official durable slice must yield
+    // ONE logical-Turn root (never a second Thought for the continued Process
+    // run) with the turn-less command visible once at its real position. This
+    // is asserted on BOTH reader paths, not merely as equality.
+    const focusProjection = projection => projection.focus
+    const commandSeqs = []
+    for (const [label, snapshot] of [['direct', directSnapshot], ['remote', remoteSnapshot]]) {
+      const projection = projectPresentationSnapshot(snapshot, { windowTurns: 100 })
+      const blocks = focusProjection(projection)
+      const roots = blocks.filter(block => block.kind === 'activity' && block.activity.turn === COMMAND_TURN)
+      assert.equal(roots.length, 1, `${label}: the mid-turn command Turn owns one Focus summary`)
+      assert.deepEqual(roots[0].actionStats, { total: 0, types: [] },
+        `${label}: the command never contributes an Action to the summary`)
+      const commands = blocks.filter(block => block.kind === 'message'
+        && block.message.kind === 'command'
+        && block.message.name === COMMAND_NAME)
+      assert.equal(commands.length, 1, `${label}: the mid-turn command renders exactly once`)
+      const commandIndex = blocks.findIndex(block => block.kind === 'message'
+        && block.message.kind === 'command'
+        && block.message.name === COMMAND_NAME)
+      const rootIndex = blocks.findIndex(block => block.kind === 'activity' && block.activity.turn === COMMAND_TURN)
+      assert.ok(commandIndex >= 0 && rootIndex >= 0 && commandIndex < rootIndex,
+        `${label}: the bridged command stays visible before the one collapsed summary`)
+      const runEvents = snapshot.durableEvents.filter(event => event.type === 'command/run'
+        && event.data?.commandId === COMMAND_ID)
+      assert.equal(runEvents.length, 1, `${label}: the command identity survived the reader path`)
+      assert.ok(snapshot.durableEvents.some(event => event.type === 'command/done'
+        && event.data?.commandId === COMMAND_ID && event.data?.kind === 'success'),
+        `${label}: the command settlement survived the reader path`)
+      commandSeqs.push(runEvents[0].seq)
+    }
+    assert.equal(commandSeqs[0], commandSeqs[1],
+      'both readers observe the SAME command lifecycle event')
     console.log(JSON.stringify({
       status: 'passed',
       comparable: true,
@@ -450,6 +505,9 @@ async function main() {
       readerHasClosingAssistant: remoteHasClosingAssistant,
       readerHasPreClosingDelivery: remoteHasPreClosingDelivery,
       completeLeadingTurnReproduced: completeLeadingTurn,
+      midTurnCommandTurn: COMMAND_TURN,
+      midTurnCommandSeqs: commandSeqs,
+      midTurnCommandRoots: 1,
     }))
   } finally {
     shadow?.dispose()

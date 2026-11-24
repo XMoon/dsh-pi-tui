@@ -251,19 +251,34 @@ test('Focus collapsed Preparing uses the Tool slot and temporarily overrides the
   app.stop()
 })
 
-test('Focus expanded places Preparing rows after the process tail and before the final assistant', async () => {
+test('a stale Preparing snapshot after turn/end never updates the settled Focus root', async () => {
   const { vt, app } = startApp()
   const folder = new TranscriptFolder()
   applyMixed(folder, [...runningTurn(0), ...settleEvents(0)])
   app.setFocusMode(true)
+  // A stale snapshot that reaches the app AFTER the turn settled: production
+  // clears it on `turn/end`, so this is projection-only evidence that must not
+  // resurrect live state on a historical root.
   show(app, folder, [
     { callId: 'p-bash', turn: 1, step: 0, index: 1, name: 'bash', argumentBytes: 0 },
     { callId: 'p-edit', turn: 1, step: 0, index: 0, name: 'edit', argumentBytes: 0 },
   ])
   app.setFullscreen(true)
   await vt.waitForRender()
-  const headerRow = findFocusHeaderRow(vt.getViewport(), false)
-  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${vt.getViewport().join('\n')}`)
+  const collapsed = vt.getViewport()
+  const collapsedJoined = collapsed.join('\n')
+  assert.ok(hasFocusHeader(collapsedJoined, false), `collapsed Thought missing:\n${collapsedJoined}`)
+  assert.ok(!/Action:\s+Preparing/.test(collapsedJoined),
+    `the settled Action slot never paints a stale live call:\n${collapsedJoined}`)
+  // The stale snapshot is ONE fail-open standalone evidence row per preview —
+  // never an aggregated Activity card and never a second summary.
+  assert.equal((collapsedJoined.match(/Preparing Edit/g) ?? []).length, 1,
+    `the edit preview renders exactly once:\n${collapsedJoined}`)
+  assert.equal((collapsedJoined.match(/Preparing Bash/g) ?? []).length, 1,
+    `the bash preview renders exactly once:\n${collapsedJoined}`)
+  assert.ok(!collapsedJoined.includes('Preparing Edit +1'), `no aggregated pending Activity summary:\n${collapsedJoined}`)
+  const headerRow = findFocusHeaderRow(collapsed, false)
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${collapsedJoined}`)
   click(vt, 3, headerRow + 1)
   await vt.waitForRender()
   app.expandAllWorkSpansForTest()
@@ -275,13 +290,10 @@ test('Focus expanded places Preparing rows after the process tail and before the
   const finalRow = findRow(view, 'The transcript folds events incrementally.')
   assert.ok(hasFocusHeader(joined, true), `expanded Thought missing:\n${joined}`)
   assert.ok(processRow >= 0 && preparingRow >= 0 && finalRow >= 0, `expanded ordering rows missing:\n${joined}`)
-  assert.ok(processRow < preparingRow && preparingRow < finalRow,
-    `the fail-open Preparing rows must sit at the process tail before the final:\n${joined}`)
-  // The ownerless pending run renders one FULL row per live preview (edit at
-  // index 0, bash at index 1) — never an aggregated `+N` Activity card.
+  assert.ok(preparingRow > finalRow,
+    `a stale fail-open row stays after the settled final, never inside the root history:\n${joined}`)
   assert.equal((joined.match(/Preparing Edit/g) ?? []).length, 1, `the edit preview renders once:\n${joined}`)
   assert.equal((joined.match(/Preparing Bash/g) ?? []).length, 1, `the bash preview renders once:\n${joined}`)
-  assert.ok(!joined.includes('+1'), `no aggregated pending Activity summary:\n${joined}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -4088,6 +4100,496 @@ test('expanded Focus inserts the live Preparing call after every nested Work par
   assert.ok(preparingRow > toolRow, `the live call follows every durable Work part:\n${joined}`)
 })
 
+test('a late older-step settlement never releases the latest pending final in the real TuiApp sink', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('older-step-u'), role: 'user',
+      content: [{ type: 'text', text: 'older-step prompt' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('step/start', { turn: 1, step: 2 }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('older-step-latest'), role: 'assistant', content: [{ type: 'text', text: 'LATEST_STEP_PENDING' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('step/end', { turn: 1, step: 2 }, T0 + 4, 4),
+    eventAt('command/run', { commandId: 'older-step-cmd', name: 'model', source: { kind: 'user' } }, T0 + 5, 5),
+    eventAt('command/done', { commandId: 'older-step-cmd', kind: 'success', text: 'switched' }, T0 + 6, 6),
+    // A late durable settlement for the OLDER step, appended after the command:
+    // the physical tail is not the structural latest step.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('older-step-evidence'), role: 'assistant', content: [{ type: 'text', text: 'OLDER_STEP_EVIDENCE' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 7, 7),
+  ])
+  show(app, folder)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('OLDER_STEP_EVIDENCE'), `the older-step evidence stays visible in the expanded sink:\n${joined}`)
+  assert.equal(joined.includes('LATEST_STEP_PENDING'), false,
+    'the real latest-step pending final is not painted before turn/end')
+
+  applyMixed(folder, [eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 8, 8)])
+  show(app, folder)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal((joined.match(/LATEST_STEP_PENDING/g) ?? []).length, 1,
+    `exactly one qualified final is painted after turn/end:\n${joined}`)
+  assert.equal((joined.match(/OLDER_STEP_EVIDENCE/g) ?? []).length, 1,
+    'the older-step evidence remains retained after the final')
+  app.stop()
+})
+
+test('a live Focus run stays after a trailing foreign replay fence', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('tail-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('tail-ar'), role: 'tool', toolCallId: ToolCallId('tail-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('tail-a') } },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('tail-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('tail-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('tail-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('tail-b1r'), role: 'tool', toolCallId: ToolCallId('tail-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('tail-b1') } },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    // The raw tail is a late orphan result of the settled Turn A: an independent
+    // hard fence, with NO Turn-1 continuation after it.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('tail-late'), role: 'tool', toolCallId: ToolCallId('tail-late-c'), content: [{ type: 'text', text: 'LATE_TAIL_REPLAY' }], source: { kind: 'tool', callId: ToolCallId('tail-late-c') } },
+    }, T0 + 10, 10),
+  ])
+  show(app, folder, [
+    { callId: 'tail-live', turn: 1, step: 1, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly text?: string; readonly turn?: number; readonly kind?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  // The late orphan card is the raw Turn-0 TOOL message; the Turn-0 assistant
+  // final is emitted at the end of its own collapsed Activity.
+  const replayIndex = blocks.findIndex(block => block.kind === 'message'
+    && block.message?.turn === 0 && block.message.kind === 'tool')
+  const previewIndex = blocks.findIndex(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.ok(replayIndex >= 0, 'the replay fence is visible')
+  assert.ok(previewIndex > replayIndex,
+    `the live call fails open AFTER the independent replay fence:\n${JSON.stringify({ replayIndex, previewIndex })}`)
+  assert.equal(blocks[previewIndex]?.containerPath, undefined, 'no Focus ancestry across the fence')
+  app.stop()
+})
+
+test('a hidden pending Assistant beyond a replay fence lends no root to a live run', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pend-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pend-ar'), role: 'tool', toolCallId: ToolCallId('pend-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('pend-a') } },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pend-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('pend-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('pend-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('pend-b1r'), role: 'tool', toolCallId: ToolCallId('pend-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('pend-b1') } },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('pend-late'), role: 'tool', toolCallId: ToolCallId('pend-late-c'), content: [{ type: 'text', text: 'LATE_PENDING_REPLAY' }], source: { kind: 'tool', callId: ToolCallId('pend-late-c') } },
+    }, T0 + 10, 10),
+    // The structural latest step settles in the DISJOINT secondary region; it
+    // is still the pending final, hidden, and its raw tail is NOT a member of
+    // the primary region that owns the Thought.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('pend-hidden'), role: 'assistant', content: [{ type: 'text', text: 'PENDING_SECONDARY' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+  ])
+  show(app, folder, [
+    { callId: 'pend-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  assert.equal(blocks.some(block => block.kind === 'message' && block.message?.text === 'PENDING_SECONDARY'), false,
+    'the pending final beyond the fence stays suppressed')
+  const preview = blocks.find(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.ok(preview !== undefined, 'the live call is present exactly once')
+  assert.equal(preview.containerPath, undefined,
+    'a suppressed pending beyond the fence never lends the primary root to the call')
+  app.stop()
+})
+
+test('an expanded Focus live run with no projected root fails open standalone', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [eventAt('turn/start', { turn: 1 }, T0, 0)])
+  show(app, folder, [
+    { callId: 'no-root-live', turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('Preparing Bash'),
+    `a preview with no projected root renders once standalone instead of being dropped:\n${joined}`)
+  app.stop()
+})
+
+test('a live Focus run after a replay fence inserts after the later visible assistant', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pp-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pp-ar'), role: 'tool', toolCallId: ToolCallId('pp-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('pp-a') } },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pp-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('pp-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('pp-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('pp-b1r'), role: 'tool', toolCallId: ToolCallId('pp-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('pp-b1') } },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    // A late orphan result for the settled Turn A: a replay hard fence.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('pp-late'), role: 'tool', toolCallId: ToolCallId('pp-late-c'), content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('pp-late-c') } },
+    }, T0 + 10, 10),
+    // B settles an intermediate Assistant in the disjoint region, then a real
+    // next step starts: the Assistant is now visible fail-open WITHOUT a path.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('pp-later'), role: 'assistant', content: [{ type: 'text', text: 'LATER_REGION_ASSISTANT' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+    eventAt('step/start', { turn: 1, step: 2 }, T0 + 12, 12),
+  ])
+  show(app, folder, [
+    { callId: 'pp-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  assert.ok(view.join('\n').includes('LATER_REGION_ASSISTANT'),
+    `the later-region intermediate assistant is visible fail-open:\n${view.join('\n')}`)
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const assistantIndex = blocks.findIndex(block => block.kind === 'message' && block.message?.text === 'LATER_REGION_ASSISTANT')
+  const previewIndex = blocks.findIndex(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.ok(assistantIndex >= 0 && previewIndex > assistantIndex,
+    `the live call is inserted AFTER the later raw assistant:\n${JSON.stringify({ assistantIndex, previewIndex })}`)
+  assert.equal(blocks[previewIndex]?.containerPath, undefined, 'the live call keeps no Focus ancestry after the fence')
+  assert.equal(blocks.filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1).length, 1,
+    'exactly one live preview row')
+  app.stop()
+})
+
+test('a result-only orphan diagnostic never releases the pending final in the real TuiApp sink', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('orphan-u'), role: 'user', content: [{ type: 'text', text: 'orphan prompt' }], source: { kind: 'user' } }, T0 + 1, 1),
+    eventAt('step/start', { turn: 1, step: 2 }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('orphan-latest'), role: 'assistant', content: [{ type: 'text', text: 'ORPHAN_PENDING_LATEST' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('step/end', { turn: 1, step: 2 }, T0 + 4, 4),
+    eventAt('command/run', { commandId: 'orphan-cmd', name: 'model', source: { kind: 'user' } }, T0 + 5, 5),
+    eventAt('command/done', { commandId: 'orphan-cmd', kind: 'success', text: 'switched' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('orphan-diag'), role: 'tool', toolCallId: ToolCallId('orphan-call'),
+        content: [{ type: 'text', text: 'ORPHAN_DIAGNOSTIC' }], source: { kind: 'tool', callId: ToolCallId('orphan-call') },
+      },
+    }, T0 + 7, 7),
+  ])
+  show(app, folder)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.equal(joined.includes('ORPHAN_PENDING_LATEST'), false,
+    'the result-only orphan never releases the latest pending final in the painted frame')
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly message?: { readonly result?: string }
+      readonly span?: { readonly members: readonly { readonly result?: string }[] }
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const retained = blocks.some(block => block.kind === 'message'
+    ? block.message?.result === 'ORPHAN_DIAGNOSTIC'
+    : block.span?.members.some(member => member.result === 'ORPHAN_DIAGNOSTIC') === true)
+  assert.equal(retained, true, 'the zero-call diagnostic stays retained in the expanded projection')
+
+  applyMixed(folder, [eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 8, 8)])
+  show(app, folder)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal((joined.match(/ORPHAN_PENDING_LATEST/g) ?? []).length, 1,
+    `exactly one qualified final is painted after turn/end:\n${joined}`)
+  app.stop()
+})
+
+test('a live Focus run never re-adopts an earlier Work across a replay fence', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('fence-a'), name: 'read', arguments: '{}' }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('fence-ar'), role: 'tool', toolCallId: ToolCallId('fence-a'),
+        content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('fence-a') },
+      },
+    }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('fence-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 4, 4),
+    eventAt('turn/start', { turn: 1 }, T0 + 5, 5),
+    eventAt('user/message', {
+      id: MessageId('fence-bu'), role: 'user',
+      content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('fence-b1'), name: 'read', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('fence-b1r'), role: 'tool', toolCallId: ToolCallId('fence-b1'),
+        content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b1') },
+      },
+    }, T0 + 8, 8),
+    eventAt('step/end', { turn: 1, step: 0 }, T0 + 9, 9),
+    // A late orphan result for the settled Turn A: a replay hard fence between
+    // the root's primary region and the later same-turn Work B2.
+    eventAt('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('fence-late'), role: 'tool', toolCallId: ToolCallId('fence-late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('fence-late-c') },
+      },
+    }, T0 + 10, 10),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('fence-b2'), name: 'bash', arguments: '{}' }, T0 + 11, 11),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('fence-b2r'), role: 'tool', toolCallId: ToolCallId('fence-b2'),
+        content: [{ type: 'text', text: 'B2 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b2') },
+      },
+    }, T0 + 12, 12),
+    eventAt('step/end', { turn: 1, step: 1 }, T0 + 13, 13),
+  ])
+  show(app, folder, [
+    { callId: 'fence-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly turn?: number; readonly result?: string }
+      readonly preparingSummary?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const works = blocks.filter(block => block.kind === 'work')
+  assert.equal(works.some(block => block.preparingSummary?.text?.includes('Preparing') === true), false,
+    'the earlier Work never re-adopts a live call across the replay fence')
+  const previewBlocks = blocks.filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.equal(previewBlocks.length, 1, 'the live run is inserted exactly once')
+  assert.equal(previewBlocks[0]?.containerPath, undefined,
+    'the later fail-open region gives the live run no Focus ancestry')
+  const previewIndex = blocks.findIndex(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  const b2Index = blocks.findIndex(block => block.kind === 'message' && block.message?.result === 'B2 result')
+  assert.ok(b2Index >= 0 && previewIndex > b2Index,
+    'the live run renders after the raw later-region evidence, never inside the earlier region')
+
+  // The same holds when the later fail-open region ends in a NON-Work same-turn
+  // row (a surfaced Context row): the numeric turn alone never admits the call.
+  applyMixed(folder, [
+    eventAt('user/message', {
+      id: MessageId('fence-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'late B context' }], source: { kind: 'agent-instructions' }, turn: 1,
+    }, T0 + 14, 14),
+  ])
+  show(app, folder, [
+    { callId: 'fence-live', turn: 1, step: 2, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  await vt.waitForRender()
+  const nonWorkBlocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly message?: { readonly turn?: number }
+      readonly preparingSummary?: { readonly text?: string }
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const nonWorkPreview = nonWorkBlocks.filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.equal(nonWorkPreview.length, 1, 'the live run is still inserted once')
+  assert.equal(nonWorkPreview[0]?.containerPath, undefined,
+    'a non-Work fail-open same-turn tail also keeps the live run standalone')
+  assert.equal(nonWorkBlocks.filter(block => block.kind === 'work')
+    .some(block => block.preparingSummary?.text?.includes('Preparing') === true), false,
+  'no earlier Work re-adopts the call across the replay fence')
+  app.stop()
+})
+
+test('an expanded Focus live run after an unbridged trailing command stays standalone', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('trail-cmd-u1'), role: 'user',
+      content: [{ type: 'text', text: 'finish then report' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('trail-cmd-a'), name: 'read', arguments: '{}' }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('trail-cmd-ra'), role: 'tool', toolCallId: ToolCallId('trail-cmd-a'),
+        content: [{ type: 'text', text: 'first result' }], source: { kind: 'tool', callId: ToolCallId('trail-cmd-a') },
+      },
+    }, T0 + 3, 3),
+    eventAt('command/run', { commandId: 'trail-cmd-id', name: 'model', args: 'switch', source: { kind: 'user' } }, T0 + 4, 4),
+    eventAt('command/done', { commandId: 'trail-cmd-id', kind: 'success', text: 'switched' }, T0 + 5, 5),
+  ])
+  show(app, folder, [
+    { callId: 'trail-live', turn: 1, step: 1, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const headerRow = findFocusHeaderRow(view, false)
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${view.join('\n')}`)
+  click(vt, 3, headerRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(hasFocusHeader(joined, true), `the one root did not open:\n${joined}`)
+  const commandRow = findRow(view, '/model switch')
+  const preparingRow = findRow(view, 'Preparing Bash')
+  assert.ok(commandRow >= 0 && preparingRow > commandRow,
+    `the live run renders after the independent command boundary:\n${joined}`)
+
+  // The region does not reach the raw tail, so the live run is standalone: its
+  // row must carry NO Focus ancestry and a real click can never collapse the
+  // one root through it.
+  click(vt, 3, preparingRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1),
+    `an independent trailing boundary keeps the live run outside the root:\n${joined}`)
+  assert.ok(joined.includes('Preparing Bash'), 'the live run still renders exactly once')
+
+  // The semantic projection agrees: the inserted live block carries NO Focus
+  // ancestry after the independent boundary (the click test above alone would
+  // pass even if the path were wrong, because a preview row's hit is inert).
+  const internals = app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly turn?: number
+      readonly containerPath?: readonly { readonly kind: string }[]
+    }[]
+  }
+  const previewBlocks = (): readonly { readonly turn?: number; readonly containerPath?: readonly { readonly kind: string }[] }[] =>
+    internals.transcriptBlocks(new Set([1])).filter(block => block.kind === 'streaming-tool-previews' && block.turn === 1)
+  assert.equal(previewBlocks().length, 1, 'the live run is inserted exactly once')
+  assert.equal(previewBlocks()[0]?.containerPath, undefined,
+    'an independent trailing boundary gives the live run no semantic Focus path')
+
+  // Once the SAME Turn's evidence resumes, the command bridges and the live
+  // call is admitted into the one root again.
+  applyMixed(folder, [
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('trail-cmd-b'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('trail-cmd-rb'), role: 'tool', toolCallId: ToolCallId('trail-cmd-b'),
+        content: [{ type: 'text', text: 'second result' }], source: { kind: 'tool', callId: ToolCallId('trail-cmd-b') },
+      },
+    }, T0 + 7, 7),
+  ])
+  show(app, folder, [
+    { callId: 'trail-live', turn: 1, step: 1, index: 0, name: 'bash', summary: 'pnpm test', argumentBytes: 3 },
+  ])
+  await vt.waitForRender()
+  const bridgedBlocks = internals.transcriptBlocks(new Set([1]))
+  const admittedPreview = bridgedBlocks.some(block => block.kind === 'streaming-tool-previews'
+    && block.turn === 1 && block.containerPath?.some(node => node.kind === 'focus-root') === true)
+  // A collapsed trailing Work owns the call in its Tool slot instead of a
+  // separate row; either admission is under the ONE root.
+  const admittedSlot = bridgedBlocks.some(block => block.kind === 'work'
+    && block.containerPath?.some(node => node.kind === 'focus-root') === true
+    && (block as { readonly preparingSummary?: unknown }).preparingSummary !== undefined)
+  assert.ok(admittedPreview || admittedSlot,
+    `resumed same-Turn evidence admits the live run under the one root :: ${JSON.stringify(bridgedBlocks.map(block => ({ kind: block.kind, path: 'containerPath' in block ? block.containerPath : undefined })))}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
 test('expanded Focus starts a post-command Preparing row after the turnless command', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()
@@ -4404,5 +4906,260 @@ test('a settled !! card keeps its accepted transcript position and never joins W
         `${preset}: expanding the aggregate must keep exactly one shell card B:\n${expanded}`)
     }
   }
+  app.stop()
+})
+
+test('one incremental live Turn publishes exactly one Focus summary across command, context and Preparing', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  const publish = async (previews?: readonly StreamingToolPreview[]): Promise<string> => {
+    show(app, folder, previews)
+    await vt.waitForRender()
+    return vt.getViewport().join('\n')
+  }
+  const expectOneSummary = (joined: string, phase: string): void => {
+    assert.equal(countFocusHeaders(joined), 1, `${phase}: exactly one Focus summary\n${joined}`)
+  }
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('inc-u1'), role: 'user',
+      content: [{ type: 'text', text: 'check the transcript' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'locating the transcript path…' } }, T0 + 2, 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'usage', usage: { inputTokens: 12_000, outputTokens: 3_000 } } }, T0 + 3, 3),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('inc-c1'), name: 'read',
+      arguments: JSON.stringify({ path: 'src/transcript.ts' }),
+    }, T0 + 4, 4),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 2_000, failure: { code: '529', message: 'overloaded' } }, T0 + 5, 5),
+  ])
+  let joined = await publish()
+  expectOneSummary(joined, 'running')
+  let header = vt.getViewport()[findFocusHeaderRow(vt.getViewport(), false)] ?? ''
+  assert.ok(header.includes('Working'), `the running header is missing:\n${header}`)
+  assert.ok(header.includes('15k tok'), `the authoritative token usage renders once:\n${header}`)
+  assert.ok(header.includes('2 actions'), `read + retry are the real actions:\n${header}`)
+  assert.ok(joined.includes('Action:  Retry 1 in 2s'),
+    `the latest hidden retry owns the Action slot:\n${joined}`)
+
+  // A mid-turn command lifecycle: the same logical Turn keeps ONE summary and
+  // the command card stays visible exactly once.
+  applyMixed(folder, [
+    eventAt('command/run', { commandId: 'inc-cmd', name: 'model', source: { kind: 'user' } }, T0 + 6, 6),
+    eventAt('command/done', { commandId: 'inc-cmd', kind: 'success', text: 'switched' }, T0 + 7, 7),
+  ])
+  joined = await publish()
+  expectOneSummary(joined, 'after the mid-turn command')
+  assert.equal((joined.match(/\/model/g) ?? []).length, 1, `the command renders exactly once:\n${joined}`)
+
+  // Context-only continuation of the SAME Turn.
+  applyMixed(folder, [
+    eventAt('user/message', {
+      id: MessageId('inc-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'docs/AGENTS.md' }], source: { kind: 'agent-instructions' },
+    }, T0 + 8, 8),
+  ])
+  joined = await publish()
+  expectOneSummary(joined, 'after the context injection')
+  assert.equal((joined.match(/Context injection/g) ?? []).length, 1,
+    `the context row surfaces exactly once:\n${joined}`)
+
+  // More live evidence: another retry plus one streaming tool call.
+  applyMixed(folder, [
+    eventAt('llm/retry', { turn: 1, step: 2, retry: 2, delayMs: 4_000, failure: { code: '529', message: 'overloaded again' } }, T0 + 9, 9),
+  ])
+  const preview: StreamingToolPreview = { callId: 'inc-live', turn: 1, step: 3, index: 0, name: 'bash', argumentBytes: 3 }
+  joined = await publish([preview])
+  expectOneSummary(joined, 'with live Preparing')
+  assert.ok(joined.includes('Preparing Bash'), `the one live preview owns the header Action slot:\n${joined}`)
+  assert.equal((joined.match(/Preparing/g) ?? []).length, 1, `exactly one bounded preview row:\n${joined}`)
+
+  // Settle: one terminal summary, the final answer once, no ghost row.
+  applyMixed(folder, [
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('inc-r1'), role: 'tool',
+        toolCallId: ToolCallId('inc-c1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('inc-c1') },
+      },
+    }, T0 + 10, 10),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('inc-a1'), role: 'assistant',
+        content: [{ type: 'text', text: 'The transcript folds events incrementally.' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 11, 11),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 12, 12),
+  ])
+  joined = await publish()
+  expectOneSummary(joined, 'settled')
+  header = vt.getViewport()[findFocusHeaderRow(vt.getViewport(), false)] ?? ''
+  assert.ok(header.includes('Turn complete'), `the settled header is missing:\n${header}`)
+  assert.equal((joined.match(/The transcript folds events incrementally\./g) ?? []).length, 1,
+    `the qualified final renders exactly once:\n${joined}`)
+  assert.equal((joined.match(/Preparing/g) ?? []).length, 0, `the live preview retires on settlement:\n${joined}`)
+  assert.equal((joined.match(/\/model/g) ?? []).length, 1, `the command stays exactly once:\n${joined}`)
+  app.stop()
+})
+
+/** One open Turn whose canonical Work A / Work B are split by a real mid-turn
+ * command with a long outcome (so the command card has its own fold). */
+function commandBridgeFolder(): TranscriptFolder {
+  const longOutcome = Array.from({ length: 12 }, (_, index) => `switched line ${index}`).join('\n')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('pointer-cmd-u1'), role: 'user',
+      content: [{ type: 'text', text: 'run both stages' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('pointer-cmd-a'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo stage-a' }),
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pointer-cmd-ra'), role: 'tool', toolCallId: ToolCallId('pointer-cmd-a'),
+        content: [{ type: 'text', text: 'stage-a result' }], source: { kind: 'tool', callId: ToolCallId('pointer-cmd-a') },
+      },
+    }, T0 + 3, 3),
+    eventAt('command/run', { commandId: 'pointer-cmd-mid', name: 'model', args: 'switch', source: { kind: 'user' } }, T0 + 4, 4),
+    eventAt('command/done', { commandId: 'pointer-cmd-mid', kind: 'success', text: longOutcome }, T0 + 5, 5),
+    eventAt('tool/call', {
+      turn: 1, step: 1, callId: ToolCallId('pointer-cmd-b'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo stage-b' }),
+    }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('pointer-cmd-rb'), role: 'tool', toolCallId: ToolCallId('pointer-cmd-b'),
+        content: [{ type: 'text', text: 'stage-b result' }], source: { kind: 'tool', callId: ToolCallId('pointer-cmd-b') },
+      },
+    }, T0 + 7, 7),
+  ])
+  return folder
+}
+
+test('fullscreen Focus pointer journey keeps the bridged command independent of the one open root', async () => {
+  const { vt, app } = startApp()
+  app.setFocusMode(true)
+  show(app, commandBridgeFolder())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const headerRow = findFocusHeaderRow(view, false)
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${view.join('\n')}`)
+  click(vt, 3, headerRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(hasFocusHeader(joined, true), `the one root did not open:\n${joined}`)
+  assert.ok(app.focusExpandedTurnsForTest().has(1))
+  assert.equal((joined.match(/Activity/g) ?? []).length, 2, `both canonical Works are nested:\n${joined}`)
+  assert.equal(countFocusHeaders(joined), 1, 'opening the root never duplicates the summary')
+
+  // Clicking the command toggles ONLY its own detail: the root and every Work
+  // disclosure stay untouched (the command keeps no container ancestry).
+  let commandRow = findRow(view, '/model switch')
+  assert.ok(commandRow >= 0, `the bridged command is visible inside the root:\n${joined}`)
+  assert.equal(joined.includes('switched line 11'), false, 'precondition: the command outcome is folded')
+  const worksBefore = app.expandedWorkOwnersForTest()
+  click(vt, 3, commandRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  // The expanded command body may scroll the header out of the viewport; the
+  // authoritative disclosure state and the nested Work headers prove the root
+  // is still open.
+  assert.ok(app.focusExpandedTurnsForTest().has(1), 'clicking the command must not collapse the root')
+  assert.ok(joined.includes('Activity'), `the open root still materializes its Works:\n${joined}`)
+  assert.deepEqual(app.expandedWorkOwnersForTest(), worksBefore, 'the command click never touches Work disclosure')
+  assert.ok(joined.includes('switched line 11'), `the command detail opens independently:\n${joined}`)
+
+  // Clicking it again closes only its own detail. The second click uses a
+  // different cell of the same head: the vendored client's multi-click
+  // selection gesture deliberately consumes a same-cell repeat, and this test
+  // is about the fold ownership, not that pre-existing selection policy.
+  commandRow = findRow(view, '/model switch')
+  assert.ok(commandRow >= 0)
+  click(vt, 30, commandRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1), 'the root stays open')
+  assert.equal(joined.includes('switched line 11'), false, 'the command detail closes independently')
+
+  // The blank spacer between Work A and the command is an inert boundary blank:
+  // it has no shared semantic container with the command row, so it can never
+  // become an accidental root/Work collapse.
+  commandRow = findRow(view, '/model switch')
+  assert.ok(commandRow > 0 && isBlankRow(view[commandRow - 1]), `a blank spacer precedes the command:\n${joined}`)
+  const worksBeforeBlank = app.expandedWorkOwnersForTest()
+  click(vt, 3, commandRow)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1), `the command-adjacent blank spacer is inert:\n${joined}`)
+  assert.ok(joined.includes('Activity'), 'the root keeps its Works after the inert spacer')
+  assert.deepEqual(app.expandedWorkOwnersForTest(), worksBeforeBlank, 'the spacer click never toggles a Work')
+
+  // A Work header still opens its own members; the command and root stay as is.
+  const activityRow = view.findIndex(line => /Activity/.test(line))
+  assert.ok(activityRow >= 0, `the first Work header is visible:\n${joined}`)
+  click(vt, 3, activityRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1), 'opening a Work never collapses the root')
+  assert.ok(joined.includes('stage-a result'), `the opened Work reveals its own member:\n${joined}`)
+  assert.ok(joined.includes('/model switch'), 'the command stays independently visible')
+
+  // The one root still closes through its own header.
+  const closeRow = findFocusHeaderRow(view, true)
+  if (closeRow < 0) {
+    app.scrollToTop()
+    await vt.waitForRender()
+    view = vt.getViewport()
+    joined = view.join('\n')
+  }
+  const scrolledCloseRow = closeRow >= 0 ? closeRow : findFocusHeaderRow(vt.getViewport(), true)
+  assert.ok(scrolledCloseRow >= 0, `the open root header is reachable:\n${joined}`)
+  click(vt, 3, scrolledCloseRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, `the one root closes through its header:\n${joined}`)
+  assert.ok(joined.includes('/model switch'), 'the command stays visible after the root closes')
+  assert.equal(countFocusHeaders(joined), 1, 'closing never duplicates the summary')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a terminal Turn error still paints exactly one bounded Focus summary', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('error-turn-u1'), role: 'user',
+      content: [{ type: 'text', text: 'the failing request' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'working before the failure' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('error-turn-c1'), name: 'bash', arguments: '{}' }, T0 + 3, 3),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 1_000, failure: { code: '529', message: 'overloaded' } }, T0 + 4, 4),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, T0 + 5, 5),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.equal(countFocusHeaders(joined), 1, `a failed Turn keeps exactly one summary:\n${joined}`)
+  assert.ok(/Failed/.test(joined), `the terminal reason is named:\n${joined}`)
+  assert.ok(joined.includes('Action:'), `the bounded Action slot remains:\n${joined}`)
   app.stop()
 })

@@ -27,6 +27,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { connect } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import type { TranscriptSearchMatch } from '../../src/domain/transcript/search.ts'
@@ -203,6 +204,61 @@ function seedFolder(): TranscriptFolder {
   return folder
 }
 
+/** One settled Focus Turn with a bridged mid-turn command, a second hidden
+ * Process run and a late replay row for that same settled Turn. */
+function focusCommandFolder(): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  const push = (type: string, data: Record<string, unknown>): void => {
+    events.push(ev(type, data, seq))
+    seq += 1
+  }
+  push('turn/start', { turn: 1 })
+  push('user/message', {
+    id: MessageId('fc-u1'), role: 'user',
+    content: [{ type: 'text', text: 'work the focus turn' }], source: { kind: 'user' },
+  })
+  push('tool/call', { turn: 1, step: 0, callId: ToolCallId('fc-a'), name: 'bash', arguments: JSON.stringify({ command: 'echo first' }) })
+  push('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('fc-r1'), role: 'tool', toolCallId: ToolCallId('fc-a'),
+      content: [{ type: 'text', text: 'first result' }], source: { kind: 'tool', callId: ToolCallId('fc-a') },
+    },
+  })
+  push('command/run', { commandId: CommandId('fc-cmd'), name: 'model', args: 'switch', source: { kind: 'user' } })
+  push('command/done', { commandId: CommandId('fc-cmd'), kind: 'success', text: 'FOCUS_COMMAND_DETAIL' })
+  push('tool/call', { turn: 1, step: 1, callId: ToolCallId('fc-b'), name: 'bash', arguments: JSON.stringify({ command: 'echo second' }) })
+  push('tool/result', {
+    turn: 1, step: 1,
+    message: {
+      id: MessageId('fc-rb'), role: 'tool', toolCallId: ToolCallId('fc-b'),
+      content: [{ type: 'text', text: 'FOLDED_PROCESS_B_BODY' }], source: { kind: 'tool', callId: ToolCallId('fc-b') },
+    },
+  })
+  push('assistant/message', {
+    turn: 1, step: 2,
+    message: {
+      id: MessageId('fc-final'), role: 'assistant',
+      content: [{ type: 'text', text: 'the focus answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  })
+  push('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  // A NEW orphan result for the already-settled Turn: replay evidence only.
+  push('tool/result', {
+    turn: 1, step: 7,
+    message: {
+      id: MessageId('fc-late'), role: 'tool', toolCallId: ToolCallId('fc-late'),
+      content: [{ type: 'text', text: 'LATE_FOCUS_EVIDENCE_BODY' }], source: { kind: 'tool', callId: ToolCallId('fc-late') },
+    },
+  })
+  folder.apply(events)
+  return folder
+}
+
 const SOURCE = { token: 'surface-source' }
 
 /** The narrow production-shaped binding over the REAL Folder. */
@@ -320,7 +376,7 @@ async function mountSearchPane(
   renderer.bindStatusReader({ snapshot: () => emptyStatusSnapshot() })
   // The ONE formal transcript commit: the REAL Folder's own messages.
   renderer.display.commitDisplaySubject({}, {}, undefined)
-  renderer.display.setTranscript(folder.messages(), undefined, { mode: 'latest', hasNewer: false }, [], undefined, SOURCE)
+  renderer.display.setTranscript(folder.messages(), folder.turnActivities(), { mode: 'latest', hasNewer: false }, [], undefined, SOURCE)
   await waitUntil('the mount painted its composer editor',
     () => wireNodes(pane).some(node => node.id === 'dock.quiet-composer.composer'))
   // The Search entry appears in the frame the INPUT BIND commits (the bind is
@@ -832,6 +888,54 @@ test('a VISIBLE prompt row hit opens NO Thought (the row never lived inside it)'
   // hidden process (the tool body) on top of it.
   assert.equal(h.texts().some(text => text.includes(INNER_ONLY)), false,
     `a visible-row hit never opens unrelated Process :: ${JSON.stringify(h.texts().slice(-5))}`)
+})
+
+test('Focus search: a command detail needs no root, a hidden Process does, late replay mints none', async (t) => {
+  const h = await mountSearchPane(t, { preset: 'focus', folder: focusCommandFolder() })
+  const summaryCount = (): number => (h.texts().join('\n').match(/Turn complete/g) ?? []).length
+  const search = async (query: string): Promise<void> => {
+    h.key(ALT_SHIFT_S)
+    await h.painted(() => h.cardPainted(), 'the card painted')
+    for (const ch of query) h.key(char(ch))
+    await h.painted(() => (h.queryField()?.text ?? '') === query, 'the query installed')
+    await h.painted(() => h.texts().some(text => /1\/1 targets/u.test(text)), 'one representative target')
+  }
+  const close = async (): Promise<void> => {
+    h.key(ESCAPE)
+    await h.painted(() => h.composerNode() !== undefined, 'the Composer restored')
+  }
+  assert.equal(summaryCount(), 1, 'precondition: one collapsed Focus summary')
+  assert.equal(h.texts().some(text => text.includes('FOLDED_PROCESS_B_BODY')), false,
+    'precondition: the second Process body is folded inside the Thought')
+
+  // (1) A command detail hit: the standalone control card reveals its own body,
+  // never the Thought's hidden Process.
+  await search('focus_command_detail')
+  h.key(ENTER)
+  await h.painted(() => h.texts().some(text => text.includes('FOCUS_COMMAND_DETAIL')), 'the command detail opened')
+  assert.equal(h.texts().some(text => text.includes('FOLDED_PROCESS_B_BODY')), false,
+    `a visible command target never opens the Thought root :: ${JSON.stringify(h.texts().slice(-6))}`)
+  assert.equal(summaryCount(), 1, 'the command hit keeps exactly one Focus summary')
+  await close()
+  assert.equal(h.texts().some(text => text.includes('FOLDED_PROCESS_B_BODY')), false,
+    'closing the search retracts the command grant')
+
+  // (2) Late replay evidence: its own card opens, no phantom Thought root.
+  await search('late_focus_evidence_body')
+  h.key(ENTER)
+  await h.painted(() => h.texts().some(text => text.includes('LATE_FOCUS_EVIDENCE_BODY')), 'the late evidence body opened')
+  assert.equal(h.texts().some(text => text.includes('FOLDED_PROCESS_B_BODY')), false,
+    'late replay evidence never opens the settled Turn Process')
+  assert.equal(summaryCount(), 1, 'late replay evidence mints no second Focus summary')
+  await close()
+
+  // (3) A hidden Process hit: the ONE logical root and its Work open for the
+  // current target only.
+  await search('folded_process_b_body')
+  h.key(ENTER)
+  await h.painted(() => h.texts().some(text => text.includes('FOLDED_PROCESS_B_BODY')),
+    `the hidden Process body opened through the one root :: ${JSON.stringify(h.texts().slice(-6))}`)
+  assert.equal(summaryCount(), 1, 'the Process reveal still paints exactly one summary')
 })
 
 test('a hit inside a NESTED PTC sub-call opens EVERY disclosure level of its ancestry', async (t) => {

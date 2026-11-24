@@ -417,7 +417,7 @@ test('a collapsed Activity never demands a Tool SVG blob, and expanding it uses 
   assert.equal(demanded, 0, 'opening the Work is NOT a Tool SVG disclosure: the tool card stays collapsed until its own toggle')
 })
 
-test('Focus materializes one native Thought root per occurrence and nests collapsed canonical Work', () => {
+test('Focus materializes one native Thought root per logical Turn and nests collapsed canonical Work', () => {
   const folder = twoWorkFolder()
   const messages = folder.messages()
   const activities = folder.turnActivities()
@@ -438,7 +438,7 @@ test('Focus materializes one native Thought root per occurrence and nests collap
   assert.ok(topLevelIds.every(id => id.startsWith('main.s1-')),
     `every Focus top-level row is scope-namespaced :: ${JSON.stringify(topLevelIds)}`)
   const roots = nodesOf(collapsed, 'section').filter(node => node.parent === 'main')
-  assert.equal(roots.length, 1, 'one consecutive turn occurrence paints one top-level Thought section')
+  assert.equal(roots.length, 1, 'one logical Turn paints one top-level Thought section')
   assert.equal(roots[0]!.props['collapsible'], true)
   assert.equal(roots[0]!.props['collapsed'], true, 'Focus roots start collapsed')
   assert.equal(nodesOf(collapsed, 'section').length, 1, 'there is no parallel top-level Action disclosure')
@@ -459,7 +459,7 @@ test('Focus materializes one native Thought root per occurrence and nests collap
   }, keys)
   const expandedRoots = nodesOf(expanded, 'section').filter(node => node.parent === 'main')
   const workSections = nodesOf(expanded, 'section').filter(node => node.parent === expandedRoots[0]!.id)
-  assert.equal(expandedRoots.length, 1, 'opening reuses the same root occurrence')
+  assert.equal(expandedRoots.length, 1, 'opening reuses the same logical-Turn root')
   assert.equal(expandedRoots[0]!.id, roots[0]!.id, 'the root node identity is stable')
   assert.equal(expandedRoots[0]!.props['collapsed'], false)
   assert.equal(workSections.length, 2, 'the canonical two Work spans are nested under the root')
@@ -468,7 +468,7 @@ test('Focus materializes one native Thought root per occurrence and nests collap
   assert.equal(nodesOf(expanded, 'tool').length, 0, 'opening only the root does not materialize hidden Work members')
 })
 
-test('same-turn Focus occurrences split by a session command share expansion without merging roots', () => {
+test('one logical Focus root nests both Works while the mid-turn command stays physically ordered', () => {
   const folder = apply([
     ev('turn/start', { turn: 1 }, 0),
     userMessage(1, 'user-1', 'inspect both stages'),
@@ -485,28 +485,48 @@ test('same-turn Focus occurrences split by a session command share expansion wit
   ])
   const messages = folder.messages()
   const keys = new TranscriptNodeKeys()
-  const collapsed = flatten(messages, {
-    preset: 'focus', scopePrefix: 's1-', turnActivities: folder.turnActivities(), window: LATEST_WINDOW,
-  }, keys)
+  const base = {
+    preset: 'focus' as const,
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    window: LATEST_WINDOW,
+  }
+  const collapsed = flatten(messages, base, keys)
   const roots = nodesOf(collapsed, 'section').filter(node => node.parent === 'main')
-  assert.equal(roots.length, 2, 'the turnless command splits two distinct Thought occurrences')
-  assert.notEqual(roots[0]!.id, roots[1]!.id, 'occurrence ids use distinct message owners')
-  assert.ok(collapsed.some(node => node.parent === 'main' && descendantText(collapsed, node.id).includes('session healthy')),
-    'the turnless command remains a standalone row between the roots')
+  assert.equal(roots.length, 1, 'one logical Turn paints exactly one native Thought root')
+  assert.equal(roots[0]!.props['collapsible'], true)
+  assert.equal(roots[0]!.props['collapsed'], true, 'the root starts collapsed')
+  assert.equal(nodesOf(collapsed, 'tool').length, 0, 'collapsed Focus materializes no hidden Work tool')
+  const collapsedCommand = collapsed.filter(node => node.kind === 'card'
+    && descendantText(collapsed, node.id).includes('session healthy'))
+  assert.equal(collapsedCommand.length, 1, 'the bridged command stays one visible control card')
+  assert.equal(collapsedCommand[0]!.parent, 'main', 'while collapsed the command is a top-level sibling of the root')
+  assert.equal(nodesOf(collapsed, 'section').length, 1, 'no second Thought root / parallel Action disclosure')
 
-  const expanded = flatten(messages, {
-    preset: 'focus', scopePrefix: 's1-', turnActivities: folder.turnActivities(), window: LATEST_WINDOW,
-    expandedFocusTurns: new Set([1]),
-  }, keys)
+  const expanded = flatten(messages, { ...base, expandedFocusTurns: new Set([1]) }, keys)
   const expandedRoots = nodesOf(expanded, 'section').filter(node => node.parent === 'main')
-  assert.deepEqual(expandedRoots.map(node => node.id), roots.map(node => node.id), 'both occurrence node identities stay stable')
-  assert.ok(expandedRoots.every(node => node.props['collapsed'] === false),
-    'one Turn disclosure choice opens both occurrence roots')
+  assert.equal(expandedRoots.length, 1, 'opening reuses the one root')
+  assert.equal(expandedRoots[0]!.id, roots[0]!.id, 'the root node identity is stable')
+  assert.equal(expandedRoots[0]!.props['collapsed'], false)
+  const workSections = nodesOf(expanded, 'section').filter(node => node.parent === expandedRoots[0]!.id)
+  assert.equal(workSections.length, 2, 'the two canonical Work spans nest under the one root')
+  assert.deepEqual(new Set(workSections.map(node => node.id)).size, 2)
+  const commandCard = expanded.filter(node => node.kind === 'card'
+    && descendantText(expanded, node.id).includes('session healthy'))
+  assert.equal(commandCard.length, 1, 'the command card renders exactly once when the root is open')
+  assert.equal(commandCard[0]!.parent, expandedRoots[0]!.id,
+    'the command is physically nested below the root for placement only')
+  // The command is NOT claimed by either Work span: its parent is the root.
+  assert.ok(workSections.every(section => commandCard[0]!.id !== section.id
+    && !commandCard[0]!.id.startsWith(`${section.id}.`)), 'the command keeps no semantic Work ancestry')
+  const order = [workSections[0]!.id, commandCard[0]!.id, workSections[1]!.id].map(id => expanded.findIndex(node => node.id === id))
+  assert.ok(order[0]! < order[1]! && order[1]! < order[2]!,
+    `the command keeps its exact A -> command -> B position under the root: ${order.join(',')}`)
   assert.equal(nodesOf(expanded, 'tool').length, 0, 'the inner Work owners remain independently collapsed')
-  const finals = expanded.filter(node => node.parent === 'main' && descendantText(expanded, node.id).includes('one final answer'))
+  const finals = expanded.filter(node => node.parent === 'main'
+    && descendantText(expanded, node.id).includes('one final answer'))
   assert.equal(finals.length, 1, 'the qualified final remains one top-level Assistant card')
-  assert.ok(!finals[0]!.id.startsWith(`${expandedRoots[0]!.id}.`) && !finals[0]!.id.startsWith(`${expandedRoots[1]!.id}.`),
-    'the final is not absorbed by either occurrence')
+  assert.ok(!finals[0]!.id.startsWith(`${expandedRoots[0]!.id}.`), 'the final is not absorbed by the root')
 })
 
 test('Focus image demand follows the materialized root and Work members', () => {
@@ -590,6 +610,221 @@ test('Focus renders a live Preparing only in the latest window selected from the
     const historyNodes = flatten(history.messages, { ...base, expandedFocusTurns, window: { mode: 'history', hasNewer: history.hasNewer } })
     assert.ok(!historyNodes.some(node => textOf(node).includes('Preparing') || node.id.includes('preparing-window-live-bash')),
       'the actual history window never materializes the live preview, including standalone rows')
+  }
+})
+
+test('a Focus live Preparing after a replay fence follows the later visible assistant', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 0 }, 0),
+    ev('tool/call', { turn: 0, step: 0, callId: ToolCallId('pp-a'), name: 'read', arguments: '{}' }, 1),
+    ev('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('pp-ar'), role: 'tool', toolCallId: ToolCallId('pp-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('pp-a') } },
+    }, 2),
+    ev('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pp-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    ev('turn/start', { turn: 1 }, 5),
+    ev('user/message', {
+      id: MessageId('pp-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 6),
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('pp-b1'), name: 'read', arguments: '{}' }, 7),
+    ev('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('pp-b1r'), role: 'tool', toolCallId: ToolCallId('pp-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('pp-b1') } },
+    }, 8),
+    ev('step/end', { turn: 1, step: 0 }, 9),
+    ev('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('pp-late'), role: 'tool', toolCallId: ToolCallId('pp-late-c'), content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('pp-late-c') } },
+    }, 10),
+    ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('pp-later'), role: 'assistant', content: [{ type: 'text', text: 'LATER_REGION_ASSISTANT' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 11),
+    ev('step/start', { turn: 1, step: 2 }, 12),
+  ])
+  const preview: StreamingToolPreview = { callId: 'pp-live', turn: 1, step: 2, index: 0, name: 'bash', argumentBytes: 12 }
+  const nodes = flatten(folder.messages(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: [preview],
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  })
+  const assistantNode = nodes.find(node => textOf(node).includes('LATER_REGION_ASSISTANT'))
+  const preparing = nodes.filter(node => node.kind === 'row' && node.id.includes('preparing-pp-live'))
+  assert.equal(preparing.length, 1, 'exactly one live Preparing row')
+  assert.equal(preparing[0]?.parent, 'main',
+    'the later fail-open region keeps the live Preparing standalone, never under the earlier root')
+  assert.ok(assistantNode !== undefined && nodes.indexOf(preparing[0]!) > nodes.indexOf(assistantNode),
+    'the live row follows the later visible assistant')
+  assert.equal(nodesOf(nodes, 'section').filter(node => node.parent === 'main').length, 2,
+    'one root per logical Turn; no third root')
+})
+
+test('a TSP Focus live Preparing stays after a trailing foreign replay fence', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 0 }, 0),
+    ev('tool/call', { turn: 0, step: 0, callId: ToolCallId('tail-a'), name: 'read', arguments: '{}' }, 1),
+    ev('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('tail-ar'), role: 'tool', toolCallId: ToolCallId('tail-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('tail-a') } },
+    }, 2),
+    ev('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('tail-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    ev('turn/start', { turn: 1 }, 5),
+    ev('user/message', {
+      id: MessageId('tail-u'), role: 'user', content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 6),
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('tail-b1'), name: 'read', arguments: '{}' }, 7),
+    ev('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('tail-b1r'), role: 'tool', toolCallId: ToolCallId('tail-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('tail-b1') } },
+    }, 8),
+    ev('step/end', { turn: 1, step: 0 }, 9),
+    ev('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('tail-late'), role: 'tool', toolCallId: ToolCallId('tail-late-c'), content: [{ type: 'text', text: 'LATE_REPLAY_TAIL' }], source: { kind: 'tool', callId: ToolCallId('tail-late-c') } },
+    }, 10),
+  ])
+  const preview: StreamingToolPreview = { callId: 'tail-live', turn: 1, step: 1, index: 0, name: 'bash', argumentBytes: 12 }
+  const nodes = flatten(folder.messages(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: [preview],
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  })
+  const replayNode = nodes.find(node => textOf(node).includes('LATE_REPLAY_TAIL'))
+  const preparing = nodes.filter(node => node.kind === 'row' && node.id.includes('preparing-tail-live'))
+  assert.equal(preparing.length, 1, 'exactly one live Preparing row')
+  assert.equal(preparing[0]?.parent, 'main', 'the independent replay fence keeps the live row standalone')
+  assert.ok(replayNode !== undefined && nodes.indexOf(preparing[0]!) > nodes.indexOf(replayNode),
+    'the live row follows the raw replay fence')
+})
+
+test('the TSP Focus sink never releases the latest pending final for a late older-step row', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'older-step-user', 'older-step prompt'),
+    ev('step/start', { turn: 1, step: 2 }, 2),
+    ev('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('older-step-latest'), role: 'assistant', content: [{ type: 'text', text: 'LATEST_STEP_PENDING' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('step/end', { turn: 1, step: 2 }, 4),
+    ev('command/run', { commandId: CommandId('older-step-cmd'), name: 'model', source: { kind: 'user' } }, 5),
+    ev('command/done', { commandId: CommandId('older-step-cmd'), kind: 'success', text: 'switched' }, 6),
+    ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('older-step-evidence'), role: 'assistant', content: [{ type: 'text', text: 'OLDER_STEP_EVIDENCE' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 7),
+  ])
+  const options = {
+    preset: 'focus' as const,
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  }
+  const before = flatten(folder.messages(), options)
+  assert.equal(nodesOf(before, 'section').filter(node => node.parent === 'main').length, 1,
+    'the late older-step row mints no second root')
+  assert.equal(before.filter(node => textOf(node).includes('LATEST_STEP_PENDING')).length, 0,
+    'the structural latest-step pending final is not painted before turn/end')
+  assert.equal(before.filter(node => textOf(node).includes('OLDER_STEP_EVIDENCE')).length, 1,
+    'the older-step evidence is retained in the expanded native tree')
+
+  folder.apply([ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 8)])
+  const after = flatten(folder.messages(), options)
+  assert.equal(after.filter(node => textOf(node).includes('LATEST_STEP_PENDING')).length, 1,
+    'exactly one qualified final is painted after turn/end')
+  assert.equal(after.filter(node => textOf(node).includes('OLDER_STEP_EVIDENCE')).length, 1,
+    'the older-step evidence stays retained after the final')
+})
+
+test('a Focus live Preparing never re-adopts an earlier Work across a replay fence', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 0 }, 0),
+    ev('tool/call', { turn: 0, step: 0, callId: ToolCallId('fence-a'), name: 'read', arguments: '{}' }, 1),
+    ev('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('fence-ar'), role: 'tool', toolCallId: ToolCallId('fence-a'),
+        content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('fence-a') },
+      },
+    }, 2),
+    ev('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('fence-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3),
+    ev('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    ev('turn/start', { turn: 1 }, 5),
+    ev('user/message', {
+      id: MessageId('fence-bu'), role: 'user',
+      content: [{ type: 'text', text: 'B prompt' }], source: { kind: 'user' },
+    }, 6),
+    ev('tool/call', { turn: 1, step: 0, callId: ToolCallId('fence-b1'), name: 'read', arguments: '{}' }, 7),
+    ev('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('fence-b1r'), role: 'tool', toolCallId: ToolCallId('fence-b1'),
+        content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b1') },
+      },
+    }, 8),
+    ev('step/end', { turn: 1, step: 0 }, 9),
+    ev('tool/result', {
+      turn: 0, step: 9,
+      message: {
+        id: MessageId('fence-late'), role: 'tool', toolCallId: ToolCallId('fence-late-c'),
+        content: [{ type: 'text', text: 'late evidence' }], source: { kind: 'tool', callId: ToolCallId('fence-late-c') },
+      },
+    }, 10),
+    ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('fence-b2'), name: 'bash', arguments: '{}' }, 11),
+    ev('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('fence-b2r'), role: 'tool', toolCallId: ToolCallId('fence-b2'),
+        content: [{ type: 'text', text: 'B2 result' }], source: { kind: 'tool', callId: ToolCallId('fence-b2') },
+      },
+    }, 12),
+    ev('step/end', { turn: 1, step: 1 }, 13),
+    // A non-Work same-turn row after the replay fence: the canonical tail is a
+    // Context row the root's primary region never contained.
+    ev('user/message', {
+      id: MessageId('fence-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'late B context' }],
+      source: { kind: 'agent-instructions' }, turn: 1,
+    }, 14),
+  ])
+  const preview: StreamingToolPreview = { callId: 'fence-live', turn: 1, step: 2, index: 0, name: 'bash', argumentBytes: 12 }
+  const nodes = flatten(folder.messages(), {
+    preset: 'focus',
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    preparingPreviews: [preview],
+    expandedFocusTurns: new Set([1]),
+    window: LATEST_WINDOW,
+  })
+  const roots = nodesOf(nodes, 'section').filter(node => node.parent === 'main')
+  assert.equal(roots.length, 2, 'one root per logical Turn; the later region mints no third root')
+  const preparing = nodes.filter(node => node.kind === 'row' && node.id.includes('preparing-fence-live'))
+  assert.equal(preparing.length, 1, 'the live run renders exactly once')
+  assert.equal(preparing[0]?.parent, 'main',
+    'the later fail-open region forces the expanded live run standalone, never a child of the earlier root')
+  assert.equal(roots.some(root => preparing[0]!.id.startsWith(`${root.id}.`)), false,
+    'the live run is not a descendant of any earlier root')
+  for (const root of roots) {
+    assert.ok(!descendantText(nodes, root.id).includes('Preparing'),
+      `no earlier root/Work slot paints the live run (${root.id})`)
   }
 })
 
@@ -916,4 +1151,78 @@ test('the collapsed Action line keeps the running PTC sub-call suffix and drops 
   const settledHeader = descendantText(settledNodes, nodesOf(settledNodes, 'section')[0]!.id)
   assert.ok(!/running/u.test(settledHeader), `the settled child drops the suffix: ${settledHeader}`)
   assert.ok(settledHeader.includes('Action:'), `the durable Action remains after settlement: ${settledHeader}`)
+})
+
+test('a trailing command keeps the one collapsed Action slot and defers the live run standalone', () => {
+  const folder = apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'live-trailing-user', 'inspect and run'),
+    reasoningMessage(2, 'live-trailing-think', 'working on it', undefined, 0),
+    toolCall(3, 'live-trailing-call', 'read', {}, 0),
+    ev('command/run', { commandId: CommandId('live-trailing-cmd'), name: 'status', source: { kind: 'user' } }, 4),
+    ev('command/done', { commandId: CommandId('live-trailing-cmd'), kind: 'success', text: 'session healthy' }, 5),
+  ])
+  const preview: StreamingToolPreview = {
+    callId: 'live-trailing-preparing', turn: 1, step: 1, index: 0, name: 'bash', argumentBytes: 12,
+  }
+  const base = {
+    preset: 'focus' as const,
+    scopePrefix: 's1-',
+    turnActivities: folder.turnActivities(),
+    window: LATEST_WINDOW,
+    preparingPreviews: [preview],
+  }
+  const messages = folder.messages()
+  assert.equal(folder.turnActivities().get(1)?.completed, false, 'fixture: the Turn is still open')
+  assert.equal(projectTranscriptStructure(messages).at(-1)?.kind, 'message',
+    'fixture: the raw tail is the independent command boundary')
+
+  // Collapsed: the ONE summary owns the bounded Preparing Action slot; the
+  // command stays visible and NO duplicate standalone row is appended.
+  const collapsed = flatten(messages, base)
+  assert.equal(nodesOf(collapsed, 'section').length, 1, 'one logical Focus root')
+  const collapsedRoot = nodesOf(collapsed, 'section')[0]!
+  assert.ok(descendantText(collapsed, collapsedRoot.id).includes('Action: Preparing Bash'),
+    `the collapsed summary owns the live Action slot: ${descendantText(collapsed, collapsedRoot.id)}`)
+  assert.equal(collapsed.filter(node => node.id.includes('preparing-live-trailing')).length, 0,
+    'the collapsed frame paints no duplicate standalone Preparing row')
+  assert.ok(collapsed.some(node => node.parent === 'main' && descendantText(collapsed, node.id).includes('session healthy')),
+    'the trailing command stays visible while collapsed')
+
+  // Expanded: the live run belongs OUTSIDE the command boundary, so it renders
+  // once as a standalone row after it instead of becoming root/Work ancestry.
+  const expanded = flatten(messages, { ...base, expandedFocusTurns: new Set([1]) })
+  const expandedRoot = nodesOf(expanded, 'section').find(node => node.parent === 'main')!
+  assert.equal(expandedRoot.props['collapsed'], false)
+  const commandIndex = expanded.findIndex(node => descendantText(expanded, node.id).includes('session healthy'))
+  const preparingRows = nodesOf(expanded, 'row').filter(node => node.id.includes('preparing-live-trailing'))
+  assert.equal(preparingRows.length, 1, `exactly one standalone Preparing row: ${JSON.stringify(expanded.map(node => node.id))}`)
+  const preparingIndex = expanded.findIndex(node => node.id === preparingRows[0]!.id)
+  assert.ok(preparingIndex > commandIndex, 'the live run stays after the independent command boundary')
+  assert.equal(preparingRows[0]!.parent, 'main', 'the deferred live run carries no fabricated Focus ancestry')
+  assert.equal(nodesOf(expanded, 'section').filter(node => node.parent === expandedRoot.id
+    && descendantText(expanded, node.id).includes('Preparing')).length, 0,
+  'no nested Work/section adopts the deferred live run')
+
+  // A same-Turn continuation evidences the bridge: the command moves ahead of
+  // the summary and the live run attaches to the now trailing canonical Work.
+  folder.apply([
+    toolCall(6, 'live-trailing-call-b', 'bash', { command: 'echo continue' }, 1),
+    toolResult(7, 'live-trailing-call-b', 'continued', 1),
+  ])
+  const bridgedMessages = folder.messages()
+  const bridged = flatten(bridgedMessages, { ...base, expandedFocusTurns: new Set([1]) })
+  const bridgedRoot = nodesOf(bridged, 'section').find(node => node.parent === 'main')!
+  assert.equal(nodesOf(bridged, 'section').filter(node => node.parent === 'main').length, 1,
+    'the continuation still paints exactly one logical root')
+  const bridgedWorks = nodesOf(bridged, 'section').filter(node => node.parent === bridgedRoot.id)
+  assert.equal(bridgedWorks.length, 2, 'the bridged command splits the canonical Work spans')
+  assert.equal(nodesOf(bridged, 'row').filter(node => textOf(node).includes('Preparing')).length, 0,
+    'the collapsed frame never materializes a standalone Preparing row')
+  assert.ok(descendantText(bridged, bridgedWorks[1]!.id).includes('Action: Preparing Bash'),
+    'the new trailing canonical Work head owns the live summary')
+  assert.ok(!descendantText(bridged, bridgedWorks[0]!.id).includes('Preparing'),
+    'the released earlier Work never re-adopts the live run')
+  assert.equal(bridged.filter(node => node.id.includes('preparing-live-trailing')).length, 0,
+    'no duplicate standalone Preparing survives the bridge')
 })

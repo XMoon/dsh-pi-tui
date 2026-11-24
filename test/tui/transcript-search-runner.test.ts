@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { getCapabilities, setCapabilities, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
@@ -289,6 +290,243 @@ test('runner search: Ctrl+F routes View hits and Tab switches the retained query
   await fixture.settleRender()
   assert.deepEqual(fixture.app.renderedViewSearchStatus(), { currentIndex: 1, count: 3 })
   assert.equal(fullSearchCalls, callsAfterSwitch, 'View Next never calls the Full Folder authority')
+})
+
+test('runner Focus search: command detail needs no root reveal, hidden Process does, late evidence never mints one', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('focus-search-user'), role: 'user',
+      content: [{ type: 'text', text: 'search the focus transcript' }],
+      source: { kind: 'user' },
+    }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('fs-a'), name: 'read', arguments: JSON.stringify({ path: 'A_MARKER.ts' }) }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('fs-ra'), role: 'tool', toolCallId: ToolCallId('fs-a'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('fs-a') },
+      },
+    }, 3),
+    event('command/run', { commandId: CommandId('fs-cmd'), name: 'model', args: 'switch', source: { kind: 'user' } }, 4),
+    event('command/done', { commandId: CommandId('fs-cmd'), kind: 'success', text: 'COMMAND_DETAIL_MARKER' }, 5),
+    event('tool/call', { turn: 0, step: 1, callId: ToolCallId('fs-b'), name: 'bash', arguments: JSON.stringify({ command: 'PROCESS_B_MARKER' }) }, 6),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('fs-rb'), role: 'tool', toolCallId: ToolCallId('fs-b'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('fs-b') },
+      },
+    }, 7),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: {
+        id: MessageId('fs-final'), role: 'assistant',
+        content: [{ type: 'text', text: 'the final answer' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 8),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+    // A newly materialized post-turn row: transcript evidence, never a Turn.
+    event('tool/result', {
+      turn: 0, step: 7,
+      message: {
+        id: MessageId('fs-late'), role: 'tool', toolCallId: ToolCallId('fs-late'),
+        content: [{ type: 'text', text: 'LATE_EVIDENCE_MARKER' }], source: { kind: 'tool', callId: ToolCallId('fs-late') },
+      },
+    }, 10),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'unused', events)
+  const { app } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'precondition: the logical Turn starts collapsed')
+
+  const search = async (query: string): Promise<TranscriptMessage | undefined> => {
+    app.closeTranscriptSearch()
+    app.startTranscriptSearch('full')
+    await fixture.settleRender()
+    typeQuery(fixture, query)
+    await fixture.settleRender()
+    return app.transcriptSearchPresentationForTest()?.message
+  }
+
+  // (1) A command detail hit: the standalone control card is already visible,
+  // so the search must NOT open the Thought root. A dismiss promotes only a
+  // reveal that really existed, so the empty manual set proves the absence.
+  const commandTarget = await search('COMMAND_DETAIL_MARKER')
+  assert.equal(commandTarget?.kind, 'command', 'the command detail is the search target')
+  assert.ok(commandTarget !== undefined && mountedSearchSelection(app, commandTarget) !== undefined,
+    'the visible command target is materialized')
+  assert.ok(fixture.vt.getViewport().map(stripTerminalSequences).some(line => line.includes('COMMAND_DETAIL_MARKER')),
+    `the command detail is painted:\n${fixture.vt.getViewport().join('\n')}`)
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'a visible command target never opened (or promoted) a Focus root')
+
+  // (2) Late replay evidence is visible on its own: finding it must never mint
+  // a phantom Thought root.
+  const lateTarget = await search('LATE_EVIDENCE_MARKER')
+  assert.equal(lateTarget?.kind, 'tool', 'the late standalone card is the search target')
+  assert.ok(lateTarget !== undefined && mountedSearchSelection(app, lateTarget) !== undefined,
+    'the late evidence row is materialized on its own')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no phantom root survives the dismissal')
+
+  // (3) A hidden Process-B hit: the ONE logical root opens temporarily, the
+  // member becomes a real mounted row, and an ordinary dismiss promotes that
+  // necessary path instead of collapsing it under the still-current match.
+  const processTarget = await search('PROCESS_B_MARKER')
+  assert.equal(processTarget?.kind, 'tool')
+  assert.ok(processTarget !== undefined && mountedSearchSelection(app, processTarget) !== undefined,
+    'the revealed Process row is materialized in the transcript')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.ok(app.focusExpandedTurnsForTest().has(0), 'the dismiss promotes the necessary Focus root')
+  assert.ok(fixture.vt.getViewport().map(stripTerminalSequences).some(line => line.includes('PROCESS_B_MARKER')),
+    `the promoted root keeps the target row materialized after dismiss:\n${fixture.vt.getViewport().join('\n')}`)
+
+  // (4) The user's own manual grant survives a later search and dismissal.
+  const promptTarget = await search('search the focus transcript')
+  assert.equal(promptTarget?.kind, 'user', 'the visible prompt is the search target')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.ok(app.focusExpandedTurnsForTest().has(0), 'a manual grant is never revoked by a search dismissal')
+})
+
+test('runner Focus search: a fail-open Work member never promotes a phantom Work', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('sr-a'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('sr-ar'), role: 'tool', toolCallId: ToolCallId('sr-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('sr-a') } },
+    }, 2),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('sr-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    event('turn/start', { turn: 1 }, 5),
+    event('user/message', {
+      id: MessageId('sr-u'), role: 'user', content: [{ type: 'text', text: 'search the fence' }], source: { kind: 'user' },
+    }, 6),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('sr-b1'), name: 'read', arguments: '{}' }, 7),
+    event('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('sr-b1r'), role: 'tool', toolCallId: ToolCallId('sr-b1'), content: [{ type: 'text', text: 'B1_HIDDEN_MARKER' }], source: { kind: 'tool', callId: ToolCallId('sr-b1') } },
+    }, 8),
+    event('step/end', { turn: 1, step: 0 }, 9),
+    // A late orphan result for the settled Turn 0: the replay hard fence.
+    event('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('sr-late'), role: 'tool', toolCallId: ToolCallId('sr-late-c'), content: [{ type: 'text', text: 'LATE_A_MARKER' }], source: { kind: 'tool', callId: ToolCallId('sr-late-c') } },
+    }, 10),
+    event('tool/call', { turn: 1, step: 1, callId: ToolCallId('sr-b2'), name: 'bash', arguments: '{}' }, 11),
+    event('tool/result', {
+      turn: 1, step: 1,
+      message: { id: MessageId('sr-b2r'), role: 'tool', toolCallId: ToolCallId('sr-b2'), content: [{ type: 'text', text: 'B2_VISIBLE_MARKER' }], source: { kind: 'tool', callId: ToolCallId('sr-b2') } },
+    }, 12),
+    event('step/end', { turn: 1, step: 1 }, 13),
+    event('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('sr-final'), role: 'assistant', content: [{ type: 'text', text: 'the fence final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 14),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 15),
+  ]
+  const fixture = await mountSearchRunner(t, 2, [], 'unused', events)
+  const { app } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  const search = async (query: string): Promise<TranscriptMessage | undefined> => {
+    app.closeTranscriptSearch()
+    app.startTranscriptSearch('full')
+    await fixture.settleRender()
+    typeQuery(fixture, query)
+    await fixture.settleRender()
+    return app.transcriptSearchPresentationForTest()?.message
+  }
+
+  // B2 is raw fail-open evidence: finding it needs no root/Work grant, and an
+  // ordinary dismiss must not promote a phantom Work span.
+  const b2 = await search('B2_VISIBLE_MARKER')
+  assert.ok(b2 !== undefined && b2.kind === 'tool', 'the fail-open B2 row is the target')
+  assert.ok(mountedSearchSelection(app, b2) !== undefined, 'the visible B2 row is materialized')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'a visible fail-open row never opens the root')
+  assert.equal(app.expandedWorkOwnersForTest().has(b2), false,
+    'no phantom Work owner is promoted for the fail-open span')
+
+  // B1 is hidden inside the real primary Work: its reveal opens the root and
+  // promotes the ACTUAL Work owner.
+  const b1 = await search('B1_HIDDEN_MARKER')
+  assert.ok(b1 !== undefined && b1.kind === 'tool', 'the hidden B1 row is the target')
+  assert.ok(mountedSearchSelection(app, b1) !== undefined, 'the hidden B1 row is materialized after reveal')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.ok(app.expandedWorkOwnersForTest().has(b1), 'the real hidden Work is promoted on dismiss')
+})
+
+test('runner Focus search: a suppressed pending final stays source-only and promotes no root', async (t) => {
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('ps-a'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('ps-ar'), role: 'tool', toolCallId: ToolCallId('ps-a'), content: [{ type: 'text', text: 'A result' }], source: { kind: 'tool', callId: ToolCallId('ps-a') } },
+    }, 2),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('ps-af'), role: 'assistant', content: [{ type: 'text', text: 'A final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+    event('turn/start', { turn: 1 }, 5),
+    event('user/message', {
+      id: MessageId('ps-u'), role: 'user', content: [{ type: 'text', text: 'search the pending' }], source: { kind: 'user' },
+    }, 6),
+    event('tool/call', { turn: 1, step: 0, callId: ToolCallId('ps-b1'), name: 'read', arguments: '{}' }, 7),
+    event('tool/result', {
+      turn: 1, step: 0,
+      message: { id: MessageId('ps-b1r'), role: 'tool', toolCallId: ToolCallId('ps-b1'), content: [{ type: 'text', text: 'B1 result' }], source: { kind: 'tool', callId: ToolCallId('ps-b1') } },
+    }, 8),
+    event('step/end', { turn: 1, step: 0 }, 9),
+    event('tool/result', {
+      turn: 0, step: 9,
+      message: { id: MessageId('ps-late'), role: 'tool', toolCallId: ToolCallId('ps-late-c'), content: [{ type: 'text', text: 'LATE_REPLAY' }], source: { kind: 'tool', callId: ToolCallId('ps-late-c') } },
+    }, 10),
+    // The latest-step settled Assistant is the PENDING final and lies beyond
+    // the replay fence: the projection suppresses it, so opening the root could
+    // not reveal it.
+    event('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('ps-pending'), role: 'assistant', content: [{ type: 'text', text: 'PENDING_SOURCE_ONLY' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 11),
+  ]
+  const fixture = await mountSearchRunner(t, 2, [], 'unused', events)
+  const { app } = fixture
+  app.setFocusMode(true)
+  await fixture.settleRender()
+  app.closeTranscriptSearch()
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  typeQuery(fixture, 'PENDING_SOURCE_ONLY')
+  await fixture.settleRender()
+  const target = app.transcriptSearchPresentationForTest()?.message
+  assert.ok(target !== undefined && target.kind === 'assistant', 'the pending final is a source match')
+  assert.equal(mountedSearchSelection(app, target), undefined,
+    'the suppressed pending row is not materialized')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'a nonrecoverable pending match never promotes a Thought root')
 })
 
 test('runner search: a same-window query re-windows zero times and rebuilds at most once', async (t) => {
