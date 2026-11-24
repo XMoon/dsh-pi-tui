@@ -1035,6 +1035,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
 
   /** Whether this exact round may still publish a completion. */
   private roundSourceCurrent(round: HistoryCoverageRound): boolean {
+    if (this.requiredServicesMissing()) return false
     if (this.coverageRound !== round) return false
     if (!this.sameCoverageBasis(round.basis, this.currentCoverageBasis())) return false
     if (round.proofAuthority !== undefined && !round.proofAuthority.isCurrent()) return false
@@ -2196,6 +2197,10 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     // for a stale one, but still detect a live replacement that landed during
     // the drain. An ACTIVE round with prior `proven` coverage is not settled.
     if (this.coverageRound === undefined && this.coverage === 'proven') {
+      if (this.requiredServicesMissing()) {
+        this.enterServiceGap()
+        return false
+      }
       for (const sessionId of this.replacedOfficialIdentities(official, sessions)) {
         this.reconcilePending.add(sessionId)
         this.markReconcileNeeded('reconciling')
@@ -2864,6 +2869,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // drain must still retire the just-proved epoch. An ACTIVE round with
       // prior `proven` coverage is not settled; it must reach finish below.
       if (this.coverageRound === undefined) {
+        if (this.requiredServicesMissing()) {
+          this.enterServiceGap()
+          outcome = 'unavailable'
+          return
+        }
         if (this.coverage !== 'proven') {
           this.invalidateCoverageBinding()
           outcome = 'incomplete'

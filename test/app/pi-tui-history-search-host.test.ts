@@ -6399,6 +6399,31 @@ test('a temporary missing-service gap preserves accepted input and recovers thro
       new AbortController().signal,
     )
     assert.equal(afterQueryGap.kind, 'ready')
+
+    // Query-only disappearance DURING an awaited full pass: the round must not
+    // publish ready from its already-captured query object.
+    const originalList = replacementPersistence.list
+    let releaseList: () => void = () => {}
+    const listGate = new Promise<void>(resolve => { releaseList = resolve })
+    let listStarted: () => void = () => {}
+    const listStartedSignal = new Promise<void>(resolve => { listStarted = resolve })
+    replacementPersistence.list = async (options) => {
+      listStarted()
+      await listGate
+      return originalList(options)
+    }
+    const duringPass = (service as unknown as { verifySources(): Promise<void> }).verifySources()
+    await listStartedSignal
+    queryCurrent = undefined
+    releaseList()
+    await duringPass
+    const midPassGap = await service.search({ scope: 'all', query: 'mutable', limit: 5 }, new AbortController().signal)
+    assert.equal(midPassGap.kind, 'unavailable', JSON.stringify(midPassGap))
+    if (midPassGap.kind === 'unavailable') assert.equal(midPassGap.reason, 'service-missing')
+    replacementPersistence.list = originalList
+    queryCurrent = firstQuery
+    await verifyFullPass(service)
+    await waitDirectReady(service)
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()
