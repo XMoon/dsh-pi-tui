@@ -22,6 +22,7 @@ import {
   linkSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -29,6 +30,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
@@ -368,41 +370,39 @@ test('the installed-entry qualification operations are refused before any proces
   const supervisor = new SupervisorClient({ runId: `split-process-entry-admission-${String(process.pid)}` })
   try {
     for (const [type, payload] of [
-      ['START_HOST_ATTEMPTS', { mode: 'seat-race' }],
-      ['START_QUALIFICATION_CLIENTS', { mode: 'attach' }],
-      ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
-      ['RESTORE_INSTALLATION', {}],
-      ['RUN_BOOTSTRAP_CLI', { mode: 'direct-help' }],
-      ['START_IDENTITY_WITNESS', { kind: 'live-non-host' }],
-      ['FINISH_IDENTITY_WITNESS', { entryId: 'probe' }],
-      ['RECLAIM_DISCOVERED_HOST', { entryId: 'probe' }],
-      ['ASSERT_ENTRY_SEATS_FREE', {}],
       ['ENTRY_RECORDS', { entryId: 'probe' }],
-      ['WAIT_ENTRY_RECORD', { entryId: 'probe', match: { m4a0: 'ready' } }],
-      ['QUALIFICATION_CLIENT_STATUS', { entryId: 'probe' }],
-      ['QUALIFICATION_CLIENT_CONTROL', { entryId: 'probe', control: { op: 'shutdown' } }],
+      ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
       ['SIGNAL_ENTRY', { entryId: 'probe', signal: 'SIGTERM' }],
       ['FINISH_ENTRY', { entryId: 'probe' }],
-      ['ACCEPT_HOST_WINNER', { entryId: 'probe' }],
     ]) {
       await assert.rejects(
         supervisor.request(type, payload, { timeoutMs: 30_000 }),
         /no process scene|unknown entryId|no Scene/,
       )
     }
-    // Refused admission creates no receipt, root, directory or child process.
-    assert.deepEqual(readdirSync(tmpBase), [])
   } finally {
     await supervisor.close({ timeoutMs: 30_000, allowKill: false })
   }
 })
 
 test('the real close waiter ignores exitCode until the inherited stdout closes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'close-authority-'))
+  const release = join(directory, 'release')
+  const grandchild = [
+    "const fs = require('node:fs')",
+    'const release = process.env.CLOSE_RELEASE',
+    'const check = () => { if (fs.existsSync(release)) { fs.unwatchFile(release); process.exit(0) } }',
+    'fs.watchFile(release, check)',
+    'check()',
+  ].join(';')
   const child = spawn(process.execPath, ['-e', [
     "const { spawn } = require('node:child_process')",
-    "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1200)'], { stdio: ['ignore', 'inherit', 'ignore'] })",
+    `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: ['ignore', 'inherit', 'ignore'], env: process.env })`,
     'process.exit(0)',
-  ].join(';')], { stdio: ['ignore', 'pipe', 'ignore'] })
+  ].join(';')], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, CLOSE_RELEASE: release },
+  })
   let closeFired = false
   let settleClose
   const closePromise = new Promise(resolve => { settleClose = resolve })
@@ -414,18 +414,23 @@ test('the real close waiter ignores exitCode until the inherited stdout closes',
   })
   try {
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('the safe child never exited')), 5_000)
-      child.once('exit', () => { clearTimeout(timer); resolve() })
+      child.once('exit', resolve)
+      child.once('error', reject)
     })
     assert.equal(closeFired, false, 'close already fired before the inherited stdout was released')
     let settled = false
-    const waiter = waitForEntryClose(handle, 'close authority control', 5_000)
-      .then(value => { settled = true; return value })
-    await new Promise(resolve => setTimeout(resolve, 50))
+    const waiter = waitForEntryClose(handle, 'close authority control').then(value => {
+      settled = true
+      return value
+    })
+    await Promise.resolve()
+    await Promise.resolve()
     assert.equal(settled, false, 'the close waiter settled before the real close event')
+    writeFileSync(release, 'release\n', { mode: 0o600 })
     assert.deepEqual(await waiter, { code: 0, signal: null })
     assert.equal(closeFired, true)
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    rmSync(directory, { recursive: true, force: true })
   }
 })

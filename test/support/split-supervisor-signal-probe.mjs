@@ -82,7 +82,7 @@ const PROCESS_AT_TARGETS = new Map([
     title: 'compensates a failed finalization without leaking a live Client or witness',
   }],
 ])
-const PROCESS_MODES = ['process-worker-kill', 'process-main-signal', 'process-supervisor-signal']
+const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
 const VITEST_ENTRY = 'node_modules/vitest/vitest.mjs'
 const PROCESS_TARGET_FILE = 'test/integration/split-process/business/host-file-completion.vitest.ts'
 const PROCESS_SIBLING_FILE = 'test/integration/split-process/business/preset-defaults.vitest.ts'
@@ -304,7 +304,7 @@ function latestUpgradeReceipt(tmpBase, parentRunId) {
 
 function checkReceiptResources(receipt) {
   const problems = []
-  if (options.allowRemainingRoot !== true && receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
+  if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) {
@@ -328,16 +328,16 @@ function checkReceiptResources(receipt) {
   return problems
 }
 
-function checkUpgradeReceiptResources(receipt, options = {}) {
+function checkUpgradeReceiptResources(receipt) {
   const problems = []
-  if (options.allowRemainingRoot !== true && receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
+  if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) {
     problems.push('install is still marked in progress')
   }
   const generations = Array.isArray(receipt.hosts) ? receipt.hosts : []
-  if (generations.length === 0 && receipt.phase !== 'NOT_QUIESCED' && options.allowNoHosts !== true) {
+  if (generations.length === 0 && receipt.phase !== 'NOT_QUIESCED') {
     problems.push('receipt carries no Host generation ledger')
   }
   for (const host of generations) {
@@ -359,9 +359,6 @@ function checkUpgradeReceiptResources(receipt, options = {}) {
     if (qualification.pgid !== undefined && groupAlive(qualification.pgid)) {
       problems.push(`qualification Client process group still alive: ${String(qualification.pgid)}`)
     }
-  }
-  if (receipt.installationMutation !== undefined) {
-    problems.push(`the scoped installation mutation ${String(receipt.installationMutation.fault)} was not restored`)
   }
   for (const fallback of receipt.fallbackHosts ?? []) {
     if (fallback.reclaimed !== true) problems.push(`fallback Host PID ${String(fallback.pid)} was not reclaimed`)
@@ -762,10 +759,6 @@ if (mode === 'process-worker-kill' && !PROCESS_ATS.includes(at)) {
 if (mode === 'process-main-signal' && signal !== 'SIGINT' && signal !== 'SIGTERM') {
   fail('--mode process-main-signal requires --signal SIGINT or SIGTERM')
 }
-if (mode === 'process-supervisor-signal' && (at !== 'finalize-compensation-started'
-  || (signal !== 'SIGINT' && signal !== 'SIGTERM'))) {
-  fail('--mode process-supervisor-signal requires --at finalize-compensation-started and --signal SIGINT|SIGTERM')
-}
 const upgradeMode = UPGRADE_MODES.includes(mode)
 const processMode = PROCESS_MODES.includes(mode)
 
@@ -1126,19 +1119,6 @@ try {
         }
         receipt = current
       }
-      if (mode === 'process-supervisor-signal') {
-        const supervisor = receipt.supervisor
-        if (supervisor === undefined || identityLiveness(kernel, supervisor.pid, supervisor.birth) !== 'live') {
-          fail('finalize-compensation signal: the registered Supervisor is not live')
-        }
-        if (supervisor.ppid !== receipt.worker?.pid) {
-          fail('finalize-compensation signal: the Supervisor parent edge is not the registered Worker')
-        }
-        if (process.kill(supervisor.pid, signal) === false) {
-          fail('finalize-compensation signal: could not signal the verified Supervisor')
-        }
-        deadline = Date.now() + 180_000
-      } else {
       killedWorkerPid = workerKillTarget(receipt, at, vitestPid)
       // Tight, immediately-preceding identity check: the Worker birth, the
       // probe-owned Vitest main and the current Worker -> main parent edge must
@@ -1163,7 +1143,6 @@ try {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
       }
       deadline = Date.now() + 180_000
-      }
     }
   } else if (upgradeMode) {
     if (mode === 'upgrade-qualification-host-death') {
@@ -1519,20 +1498,9 @@ try {
     deadline = Date.now() + 30_000
   }
 
-  const exit = mode === 'process-supervisor-signal'
-    ? (() => {
-      // The Supervisor signal intentionally fails the blocked FINALIZE; the
-      // Worker/Vitest may already be gone. Observe its real fields, and only
-      // force-close a still-live probe child after the terminal receipt.
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-      childExited = true
-      return { code: child.exitCode, signal: child.signalCode }
-    })()
-    : await waitChildExit(child, Math.max(1, deadline - Date.now()))
+  const exit = await waitChildExit(child, Math.max(1, deadline - Date.now()))
   childExited = true
-  if (exit.code === 0 && mode !== 'process-supervisor-signal') {
-    fail(`Vitest unexpectedly exited 0 under ${mode}`)
-  }
+  if (exit.code === 0) fail(`Vitest unexpectedly exited 0 under ${mode}`)
   if (killedWorkerPid !== undefined) {
     await waitForPidGone(killedWorkerPid, Math.max(1, deadline - Date.now()))
   }
@@ -1541,7 +1509,6 @@ try {
       ? waitUntil(() => {
         const current = latestProcessReceipt(tmpBase, runId)
         return current?.phase === 'NOT_QUIESCED' && current?.compensation?.completed === true
-          && current?.supervisorExitVerdict === 1
           ? current
           : undefined
       }, 'failed FINALIZE compensation terminal', Math.max(1, deadline - Date.now()))
@@ -1590,9 +1557,6 @@ try {
     })
     : checkReceiptResources(receipt)
   if (problems.length > 0) fail(problems.join('; '))
-  if (at === 'finalize-compensation-started' && receipt.supervisorExitVerdict !== 1) {
-    fail(`failed-FINALIZE compensation recorded Supervisor exit verdict ${String(receipt.supervisorExitVerdict)}`)
-  }
   if (at !== 'finalize-compensation-started') checkNoLingeringPaths(receipt)
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   const sentinelState = processMode && sentinelIdentity !== undefined

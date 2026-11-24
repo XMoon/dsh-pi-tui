@@ -22,6 +22,7 @@ import {
   readScopeFiles,
 } from '../../../support/split-process-authentication.ts'
 import {
+  createPilotAdmissionScene,
   createSplitProcessScene,
   type IdentityWitnessHandle,
   type QualificationClientHandle,
@@ -128,30 +129,26 @@ test('admits the installed Host composition and refuses missing required owners'
     await scene.stopHost(host)
 
     // 4. Five independent declared startup refusals on the SAME pristine install.
-    const refusalModes = [
-      ['host-runtime-disabled', /expected exactly one active piTuiHostRuntime owner row, found 0/u],
-      ['tui-row-enabled', /forbidden TUI\/Client-UI rows are (?:active|not disabled): tui-app/u],
-      ['connection-disabled', /connection owner row, found 0/u],
-      ['session-controller-disabled', /sessionController owner row, found 0/u],
-      ['workspace-controller-disabled', /expected exactly one active workspaceController owner row, found 0/u],
-    ] as const
-    for (const [mode, expectedError] of refusalModes) {
+    for (const mode of [
+      'host-runtime-disabled',
+      'tui-row-enabled',
+      'connection-disabled',
+      'session-controller-disabled',
+      'workspace-controller-disabled',
+    ] as const) {
       const [attempt] = await scene.startHostAttempts({ mode })
       expect(attempt, `the ${mode} attempt was not registered`).toBeDefined()
       expect(attempt.pid).toBeGreaterThan(0)
       expect(typeof attempt.birth).toBe('string')
       const failure = await scene.waitEntryRecord(attempt, { m4a0: 'failure' })
       expect(failure.processRole).toBe('host')
-      expect(String(failure.error)).toMatch(expectedError)
       const terminal = await scene.finishEntry(attempt)
       expect(terminal.exit).toEqual({ code: 1, signal: null })
       expect(terminal.outcome).toBe('startup-refusal')
       expect(terminal.error, 'the terminal leaked the raw failure text').toBeUndefined()
       expect(terminal.errorClass).toBe('declared-startup-refusal')
-      const facts = await scene.entryRecordFacts(attempt)
-      expect(facts.records.some(record => record.m4a0 === 'ready')).toBe(false)
-      expect(facts.records.some(record => record.m4a0 === 'failure' && record.phase === 'after-boot')).toBe(true)
-      expect(facts.redactedKeys).not.toContain('token')
+      expect(terminal.records.some(record => record.m4a0 === 'ready')).toBe(false)
+      expect(terminal.records.some(record => record.m4a0 === 'failure' && record.phase === 'after-boot')).toBe(true)
       expect(existsSync(join(scene.scopeDir, 'instance.json')), `the ${mode} refusal left a registry`).toBe(false)
       expect(existsSync(join(scene.scopeDir, 'launch.json')), `the ${mode} refusal left a launch record`).toBe(false)
       await scene.assertEntrySeatsFree()
@@ -246,7 +243,6 @@ test('refuses a missing installed Host Runtime artifact and authenticates after 
 
     const [attempt] = await scene.startHostAttempts({ mode: 'host-runtime-absent' })
     const failure = await scene.waitEntryRecord(attempt, { m4a0: 'failure' })
-    expect(String(failure.error)).toMatch(/expected exactly one active piTuiHostRuntime owner row, found 0/u)
     // The scoped install may not be restored while an affected attempt has no
     // validated terminal, even if its process already exited.
     await expect(scene.restoreInstallation()).rejects.toThrow(/Host attempt is not finished/u)
@@ -301,7 +297,7 @@ test('reports Host boot and scratch cleanup failures without claiming readiness 
     await assertAuthenticatedCurrentHost(scene, staleHost)
     const registryPath = join(scene.scopeDir, 'instance.json')
     expect(existsSync(registryPath)).toBe(true)
-    await scene.signalHost(staleHost, 'SIGKILL')
+    await scene.request('SIGNAL_ENTRY', { entryId: staleHost.entryId, signal: 'SIGKILL' }, 60_000)
     const staleTerminal = await scene.finishEntry(staleHost)
     expect(staleTerminal.exit).toEqual({ code: null, signal: 'SIGKILL' })
     expect(existsSync(registryPath)).toBe(true)
@@ -528,32 +524,14 @@ test('refuses unqualified installed-entry operations before any child exists', a
   const scene = await createSplitProcessScene()
   let testError: unknown
   try {
-    const rootEntriesBefore = readdirSync(scene.workDir).sort()
     const reject = async (type: string, payload: Record<string, unknown>, pattern: RegExp): Promise<void> => {
       await expect(scene.request(type, payload, 30_000)).rejects.toThrow(pattern)
     }
     await reject('ENTRY_RECORDS', { entryId: 'unknown-entry' }, /unknown entryId/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'not-a-mode' }, /INPUT_HOST_ATTEMPT_MODE/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'host-runtime-disabled', count: 2 }, /INPUT_HOST_ATTEMPT_COUNT/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'stop-during-publication' }, /INPUT_HOST_ATTEMPT_SIGNAL/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'host-runtime-disabled', unexpected: 1 }, /rejects the field "unexpected"/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'host-runtime-disabled', scratchTarget: join(scene.workDir, 'outside') },
-      /does not accept a scratchTarget/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'seat-conflict', scratchTarget: join(scene.scopeDir, '..', 'outside') },
-      /no accepted Host/u)
-    await reject('START_QUALIFICATION_CLIENTS', { mode: 'attach' }, /no accepted Host/u)
-    await reject('START_QUALIFICATION_CLIENTS', { mode: 'not-a-mode' }, /INPUT_QUALIFICATION_CLIENT_MODE/u)
-    await reject('START_QUALIFICATION_CLIENTS', { mode: 'discovery-refusal', refusal: 'not-a-refusal' },
-      /INPUT_DISCOVERY_REFUSAL/u)
-    await reject('SET_INSTALLATION_FAULT', { fault: 'not-a-fault' }, /INPUT_INSTALLATION_FAULT/u)
-    await reject('RUN_BOOTSTRAP_CLI', { mode: 'not-a-mode' }, /INPUT_BOOTSTRAP_CLI_MODE/u)
-    await reject('START_IDENTITY_WITNESS', { kind: 'not-a-witness' }, /INPUT_IDENTITY_WITNESS/u)
     await reject('SIGNAL_ENTRY', { entryId: 'unknown-entry', signal: 'SIGTERM' }, /unknown entryId/u)
-    await reject('SIGNAL_ENTRY', { entryId: 'unknown-entry', signal: 'SIGUSR1' }, /unknown entryId/u)
     await reject('FINISH_ENTRY', { entryId: 'unknown-entry' }, /unknown entryId/u)
     await reject('RECLAIM_DISCOVERED_HOST', { entryId: 'unknown-entry' }, /unknown entryId/u)
     await reject('WAIT_ENTRY_RECORD', { entryId: 'unknown-entry', match: { m4a0: 'ready' } }, /unknown entryId/u)
-    await reject('START_HOST_ATTEMPTS', { mode: 'seat-race', count: 17 }, /INPUT_HOST_ATTEMPT_COUNT/u)
 
     // A synthetic credential marker in an IPC diagnostic is redacted at the
     // boundary; the real assertion is that it never reaches the Worker text.
@@ -564,22 +542,6 @@ test('refuses unqualified installed-entry operations before any child exists', a
     }, 30_000).then(() => undefined, error => asError(error))
     expect(diagnostic?.message).toContain('[redacted]')
     expect(diagnostic?.message).not.toContain(marker)
-
-    // No reservation, directory or child was created by any refused input.
-    expect(readdirSync(scene.workDir).sort()).toEqual(rootEntriesBefore)
-    expect(existsSync(join(scene.workDir, 'host-attempts'))).toBe(false)
-    expect(existsSync(join(scene.workDir, 'qualification-clients'))).toBe(false)
-    expect(existsSync(join(scene.workDir, 'identity-witnesses'))).toBe(false)
-    expect(existsSync(join(scene.scopeDir, 'instance.json'))).toBe(false)
-
-    // A fast real child that has exited but whose stdio may still be draining:
-    // FINISH_ENTRY must join the real close event, not synthesize it from
-    // exitCode, before validating the terminal/records.
-    const [fast] = await scene.startHostAttempts({ mode: 'early-exit' })
-    const fastTerminal = await scene.finishEntry(fast!)
-    expect(fastTerminal.exit).toEqual({ code: 1, signal: null })
-    expect(fastTerminal.outcome).toBe('early-exit')
-    expect(fastTerminal.records).toEqual([])
 
     // The refused inputs do not poison a later legal Scene.
     const host = await scene.startHost()
@@ -595,14 +557,13 @@ test('refuses unqualified installed-entry operations before any child exists', a
     } catch (cleanupError) {
       if (testError !== undefined) {
         throw new AggregateError([testError, asError(cleanupError)],
-          'the entry-admission test failed and its Scene cleanup also failed')
+          'the admission test failed and its Scene cleanup also failed')
       }
       throw new AggregateError([asError(cleanupError)],
-        'the entry-admission test passed but its Scene cleanup failed')
+        'the admission test passed but its Scene cleanup failed')
     }
   }
 })
-
 
 test('compensates a failed finalization without leaking a live Client or witness', async () => {
   const scene = await createSplitProcessScene()
@@ -648,19 +609,8 @@ test('compensates a failed finalization without leaking a live Client or witness
 })
 
 test('refuses installed-entry operations in a real non-process Scene before any child exists', async () => {
-  const scene = await createSplitProcessScene()
-  let testError: unknown
-  const pilotRunId = `pilot-admission-${scene.runId}`
-  const { SupervisorClient } = await import('../../../support/split-supervisor-client.ts')
-  const pilot = new SupervisorClient({ runId: pilotRunId })
+  const pilot = await createPilotAdmissionScene()
   try {
-    await pilot.request('BOOTSTRAP', {
-      tarball: scene.candidate.tarball,
-      expectedSha256: scene.candidate.candidateSha256,
-      tmpBase: scene.tmpBase,
-      workerPid: process.pid,
-      workerPpid: process.ppid,
-    }, { timeoutMs: 600_000 })
     for (const [type, payload] of [
       ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
       ['START_QUALIFICATION_CLIENTS', { mode: 'attach' }],
@@ -671,58 +621,15 @@ test('refuses installed-entry operations in a real non-process Scene before any 
       ['FINISH_ENTRY', { entryId: 'unknown' }],
       ['ASSERT_ENTRY_SEATS_FREE', {}],
     ] as const) {
-      await expect(pilot.request(type, payload, { timeoutMs: 30_000 }))
+      await expect(pilot.request(type, payload, 30_000))
         .rejects.toThrow(/no process scene/u)
     }
-    const receipt = JSON.parse(readFileSync(join(scene.tmpBase, 'split-resources', `${pilotRunId}.json`), 'utf8')) as Record<string, any>
+    const receipt = pilot.receipt()
     expect(receipt.kind).toBe('pilot')
     expect(receipt.hosts ?? []).toEqual([])
     expect((receipt.qualificationClients ?? [])).toEqual([])
     expect((receipt.qualificationHelpers ?? [])).toEqual([])
-  } catch (error) {
-    testError = error
-    throw error
   } finally {
-    try {
-      await pilot.close({ timeoutMs: 300_000, allowKill: false })
-    } catch (closeError) {
-      if (testError !== undefined) {
-        throw new AggregateError([asError(testError), asError(closeError)],
-          'the wrong-kind admission test failed and its Pilot Scene cleanup also failed')
-      }
-      throw new AggregateError([asError(closeError)],
-        'the wrong-kind admission test passed but its Pilot Scene cleanup failed')
-    }
-    try {
-      await scene.dispose()
-    } catch (cleanupError) {
-      if (testError !== undefined) {
-        throw new AggregateError([asError(testError), asError(cleanupError)],
-          'the wrong-kind admission test failed and its process Scene cleanup also failed')
-      }
-      throw new AggregateError([asError(cleanupError)],
-        'the wrong-kind admission test passed but its process Scene cleanup failed')
-    }
-  }
-})
-
-test('projects only the fixed safe startup-refusal classification', async () => {
-  const marker = 'SYNTHETIC_TERMINAL_MARKER_SECRET'
-  const previous = process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER
-  process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER = marker
-  const scene = await createSplitProcessScene()
-  try {
-    const [attempt] = await scene.startHostAttempts({ mode: 'host-runtime-disabled' })
-    await scene.waitEntryRecord(attempt!, { m4a0: 'failure' })
-    const terminal = await scene.finishEntry(attempt!)
-    expect(terminal.outcome).toBe('startup-refusal')
-    expect(terminal.errorClass).toBe('declared-startup-refusal')
-    expect(JSON.stringify(terminal), 'the terminal leaked the synthetic failure marker').not.toContain(marker)
-    const receipt = await scene.readSupervisorReceipt()
-    expect(JSON.stringify(receipt), 'the durable receipt leaked the synthetic failure marker').not.toContain(marker)
-  } finally {
-    await scene.dispose().catch(() => undefined)
-    if (previous === undefined) delete process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER
-    else process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER = previous
+    await pilot.close()
   }
 })

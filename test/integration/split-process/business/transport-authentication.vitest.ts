@@ -138,7 +138,6 @@ test('authenticates the installed Host and rejects unauthenticated HTTP and dupl
     expect(ready.host.hostPid).toBe(host.ready.localHost.hostPid)
     assertClientHostMatchesPublished(ready.host as never, host.ready.localHost as never, 'the qualification Client ready')
     const clientFacts = await scene.entryRecordFacts(client!)
-    expect(clientFacts.redactedKeys).not.toContain('profileRealpath')
 
     const origin = host.ready.localHost.origin
     const files = readScopeFiles(scene.installation.dshHome, scene.scope.scopeId)

@@ -153,16 +153,6 @@ let nativeRuntime
 /** The one-shot native cleanup of this run (idempotent across FINALIZE/disconnect). */
 let nativeCleanupPromise
 
-/** Commit the ONE Supervisor exit verdict to the receipt, then exit. */
-function exitSupervisor(code, reason) {
-  writeReceipt({
-    phase: receipt?.phase ?? 'NOT_QUIESCED',
-    supervisorExitVerdict: code,
-    supervisorExitReason: reason,
-  })
-  process.exit(code)
-}
-
 // Register every parent-death / message / signal handler before loading the
 // heavy profile and fixture modules. A fork can deliver `disconnect` while the
 // module graph is still evaluating; an event registered after that point is not
@@ -201,8 +191,8 @@ process.on('disconnect', () => {
     ? cleanupPromise
     : closeLifecycle('worker-ipc-disconnect')
   void settle.then(
-    result => { exitSupervisor(result.clean && !preserveRoot ? 0 : 1, 'worker-ipc-disconnect') },
-    () => { exitSupervisor(1, 'worker-ipc-disconnect-failed') },
+    result => { process.exit(result.clean && !preserveRoot ? 0 : 1) },
+    () => { process.exit(1) },
   )
 })
 
@@ -213,8 +203,8 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       ? cleanupPromise
       : closeLifecycle(`supervisor-${signal}`)
     void settle.then(
-      result => { exitSupervisor(result.clean && !preserveRoot ? 0 : 1, `supervisor-${signal}`) },
-      () => { exitSupervisor(1, `supervisor-${signal}-failed`) },
+      result => { process.exit(result.clean && !preserveRoot ? 0 : 1) },
+      () => { process.exit(1) },
     )
   })
 }
@@ -225,7 +215,7 @@ process.on('uncaughtException', error => {
   const settle = cleanupPromise !== undefined
     ? cleanupPromise
     : closeLifecycle('uncaught-exception')
-  void settle.then(() => exitSupervisor(1, 'uncaught-exception'), () => exitSupervisor(1, 'uncaught-exception-failed'))
+  void settle.then(() => process.exit(1), () => process.exit(1))
 })
 
 // Keep the IPC channel and message loop alive until FINALIZE or disconnect.
@@ -844,7 +834,7 @@ async function waitForQualificationRecord(handle, predicate, label, timeoutMs) {
     if (record !== undefined) return record
     const failure = handle.records.find(value => value?.m4a0 === 'failure' || value?.m4a0 === 'control-failure' || value?.m4a0 === 'control-error')
     if (failure !== undefined) {
-      throw new Error(`${label}: the qualification Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
+      throw new Error(`${label}: the qualification Client reported ${String(failure.m4a0)} (code=${String(failure.code ?? 'none')}, phase=${String(failure.phase ?? 'none')})`)
     }
     if (handle.spawnError !== undefined) throw new Error(`${label}: qualification Client spawn failed (${boundedError(handle.spawnError)})`)
     if (handle.exited) throw new Error(`${label}: qualification Client exited before the record`)
@@ -1012,7 +1002,7 @@ async function waitForProcessClientRecord(handle, predicate, label, timeoutMs) {
     if (record !== undefined) return record
     const failure = records.find(value => value?.m4a0 === 'failure' || value?.m4a0 === 'control-failure')
     if (failure !== undefined) {
-      throw new Error(`${label}: the Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
+      throw new Error(`${label}: the Client reported ${String(failure.m4a0)} (code=${String(failure.code ?? 'none')}, phase=${String(failure.phase ?? 'none')})`)
     }
     if (handle.exited) throw new Error(`${label}: the Client exited before the record`)
     if (lifecycleClosed) throw new Error(`${label}: the Supervisor lifecycle closed while the record was awaited`)
@@ -1783,10 +1773,10 @@ async function cleanup(reason, options = {}) {
       }
       for (const handle of [...hosts].reverse()) {
         try {
-          // A leader that is already exiting is not a live target: let its real
-          // close settle first (a bare exitCode/ownership read is a torn state).
-          if (!handle.exited && handle.closePromise !== undefined) {
-            await Promise.race([handle.closePromise, sleep(1_000)])
+          // A leader whose OS process already exited is not a live target: its
+          // registered close must settle before the group/seat audit.
+          if (!handle.exited && (handle.child.exitCode !== null || handle.child.signalCode !== null)) {
+            await waitForHostClose(handle, `${reason}: pending close`, KILL_GRACE_MS)
           }
           if (handle.exited) {
             await waitForGroupGone(hostPgid(handle), 15_000)
@@ -1832,9 +1822,12 @@ async function cleanup(reason, options = {}) {
           }
         }
         await reclaimClientFallbackHosts(`cleanup:${reason}:post-host`)
-        // The installed-copy mutation is restored only after every affected
-        // Host/Client/helper/fallback is terminal, so no live consumer observes
-        // a half-restored install.
+        await assertSceneHostSeatFree(`cleanup:${reason}`)
+        if (scene.kind === 'process') {
+          await assertClientSeatFree(scene.installation, processScope.scopeId, `cleanup:${reason}`)
+        }
+        // Both seats are terminal before the scoped input is restored, so no
+        // live consumer and no owner of the seat observes a half-restored copy.
         if (scene.kind === 'process' && processInstallationMutation !== undefined && clean) {
           try {
             await restoreInstallationMutation({ compensating: true })
@@ -1861,10 +1854,6 @@ async function cleanup(reason, options = {}) {
               detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 300),
             })
           }
-        }
-        await assertSceneHostSeatFree(`cleanup:${reason}`)
-        if (scene.kind === 'process') {
-          await assertClientSeatFree(scene.installation, processScope.scopeId, `cleanup:${reason}`)
         }
         const compensation = options.failure === undefined ? undefined : {
           attempted: true,
@@ -4918,6 +4907,13 @@ async function auditProcessClientLedger(reason) {
 }
 
 async function handleFinalize(message) {
+  if (scene?.kind === 'process') {
+    const liveClient = qualificationClients.some(handle => handle.kind === 'qualification-client' && !handle.exited)
+    const liveHelper = qualificationHelpers.some(handle => !handle.exited)
+    if (liveClient || liveHelper || processInstallationMutation !== undefined || processBootstrapCliPatch !== undefined) {
+      throw new Error('FINALIZE: live Process state requires compensation before Host stop')
+    }
+  }
   let hostStopError
   // The one-shot qualification Client must already be gone on the normal path;
   // a still-live one is reclaimed so FINALIZE never leaks, then fails closed.
@@ -5320,7 +5316,7 @@ function publicEntryFacts(handle) {
     exitCode: handle.exitResult?.code ?? null,
     exitSignal: handle.exitResult?.signal ?? null,
     finished: handle.finished === true,
-    terminal: handle.terminal === undefined ? null : sanitizeEntryRecord(handle.terminal).value,
+    terminal: handle.terminal === undefined ? null : sanitizeEntryRecord(handle.terminal),
     recordCount: handle.records?.length ?? 0,
   }
 }
@@ -5343,16 +5339,13 @@ function syncQualificationHelpersReceipt() {
 }
 
 function sanitizeEntryRecord(record) {
-  const redactedKeys = new Set()
   const walk = (value, depth) => {
     if (value === null || value === undefined) return value
     if (typeof value === 'string') {
       if (typeof scene?.installation?.profileDir === 'string' && value.includes(scene.installation.profileDir)) {
-        redactedKeys.add('profilePath')
         return '[scene-path]'
       }
       const redacted = redactText(value)
-      if (redacted !== value) redactedKeys.add('secret-text')
       return redacted.length > 2_000 ? `${redacted.slice(0, 2_000)}…` : redacted
     }
     if (typeof value !== 'object') return value
@@ -5360,29 +5353,22 @@ function sanitizeEntryRecord(record) {
     if (Array.isArray(value)) return value.slice(0, 200).map(item => walk(item, depth + 1))
     const result = {}
     for (const [key, item] of Object.entries(value)) {
-      if (ENTRY_REDACTED_KEYS.has(key)) {
-        redactedKeys.add(key)
-        continue
-      }
+      if (ENTRY_REDACTED_KEYS.has(key)) continue
       result[key] = walk(item, depth + 1)
     }
     if (value.m4a0 === 'failure' && 'error' in result) {
-      result.error = 'declared-startup-refusal'
-      redactedKeys.add('failureError')
+      // The raw failure text is private Supervisor evidence. Only the one
+      // stable business conflict code is a Worker-visible fact.
+      if (result.error === 'HOST_ALREADY_OWNED') result.error = 'HOST_ALREADY_OWNED'
+      else delete result.error
     }
     return result
   }
-  return { value: walk(record, 0), redactedKeys: [...redactedKeys] }
+  return walk(record, 0)
 }
 
 function entryRecordsOf(handle) {
-  const redactedKeys = new Set()
-  const records = []
-  for (const record of handle.records ?? []) {
-    const sanitized = sanitizeEntryRecord(record)
-    for (const key of sanitized.redactedKeys) redactedKeys.add(key)
-    records.push(sanitized.value)
-  }
+  const records = (handle.records ?? []).map(record => sanitizeEntryRecord(record))
   const stderrMarkers = entryStderrMarkers(handle)
   return {
     entryId: handle.entryId,
@@ -5393,7 +5379,6 @@ function entryRecordsOf(handle) {
     exitSignal: handle.exitResult?.signal ?? null,
     stderrMarkers,
     stderrBytes: (handle.stderrText ?? '').length,
-    redactedKeys: [...redactedKeys],
     records,
   }
 }
@@ -5463,7 +5448,7 @@ async function waitForEntryRecord(handle, match, label, timeoutMs) {
           if (activeHost === undefined) registerProcessFallbackHost(handle, record.host, `${label} discovered Host`)
         }
       }
-      return sanitizeEntryRecord(record).value
+      return sanitizeEntryRecord(record)
     }
     const control = (handle.records ?? []).find(value => value?.m4a0 === 'control-failure' || value?.m4a0 === 'control-error')
     if (control !== undefined) {
@@ -5471,7 +5456,7 @@ async function waitForEntryRecord(handle, match, label, timeoutMs) {
     }
     const failure = (handle.records ?? []).find(value => value?.m4a0 === 'failure')
     if (failure !== undefined && !recordMatches(failure, match)) {
-      throw new Error(`${label}: the entry failed before the awaited record (${String(failure.code ?? failure.error ?? 'failure')})`)
+      throw new Error(`${label}: the entry failed before the awaited record (code=${String(failure.code ?? 'none')}, phase=${String(failure.phase ?? 'none')})`)
     }
     if (handle.spawnError !== undefined) throw new Error(`${label}: the entry spawn failed (${boundedError(handle.spawnError)})`)
     if (handle.exited) throw new Error(`${label}: the entry exited before the awaited record`)
@@ -5742,7 +5727,7 @@ async function handleStartHostAttempts(message) {
         exitCode: code,
         exitSignal: signalValue,
         recordCount: records.length,
-        recordTail: records.slice(-4).map(record => sanitizeEntryRecord(record).value),
+        recordTail: records.slice(-4).map(record => sanitizeEntryRecord(record)),
         stderrMarkers: entryStderrMarkers(handle),
         stderrEvidence: writeEntryStderrEvidence(attemptDir, stderr.text, 'host-attempt'),
       })
@@ -6023,7 +6008,7 @@ async function handleStartQualificationClients(message) {
         exitCode: code,
         exitSignal: signalValue,
         recordCount: records.length,
-        recordTail: records.slice(-4).map(record => sanitizeEntryRecord(record).value),
+        recordTail: records.slice(-4).map(record => sanitizeEntryRecord(record)),
         stderrMarkers: entryStderrMarkers(handle),
         stderrEvidence: writeEntryStderrEvidence(clientDir, stderr.text, 'qualification-client'),
       })
@@ -6270,24 +6255,20 @@ async function validateHostAttemptTerminal(handle, exit) {
   expect(ready === undefined, 'a refused Host startup emitted Ready')
   expect(failure !== undefined, 'a refused Host startup reported no official failure record')
   expect(failure.services?.piTuiHostReady !== true, 'a refused Host startup published piTuiHostReady')
-  const syntheticMarker = process.env.SPLIT_PROCESS_SYNTHETIC_FAILURE_MARKER
-  if (syntheticMarker !== undefined && syntheticMarker !== '' && failure !== undefined) {
-    failure.error = `${String(failure.error ?? '')} ${syntheticMarker}`
-  }
   const errorText = String(failure.error ?? '')
   if (mode === 'host-runtime-disabled') {
-    expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), `unexpected error ${errorText}`)
+    expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
   } else if (mode === 'tui-row-enabled') {
-    expect(/forbidden TUI\/Client-UI rows are (?:active|not disabled): tui-app/u.test(errorText), `unexpected error ${errorText}`)
+    expect(/forbidden TUI\/Client-UI rows are (?:active|not disabled): tui-app/u.test(errorText), 'the real product failure did not match its declared startup class')
   } else if (mode === 'connection-disabled') {
-    expect(/connection owner row, found 0/u.test(errorText), `unexpected error ${errorText}`)
+    expect(/connection owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
   } else if (mode === 'session-controller-disabled') {
-    expect(/sessionController owner row, found 0/u.test(errorText), `unexpected error ${errorText}`)
+    expect(/sessionController owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
   } else if (mode === 'workspace-controller-disabled') {
-    expect(/expected exactly one active workspaceController owner row, found 0/u.test(errorText), `unexpected error ${errorText}`)
+    expect(/expected exactly one active workspaceController owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
     expect(failure.services?.workspaceController !== true, 'the refused Host reported a live workspaceController service')
   } else if (mode === 'host-runtime-absent') {
-    expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), `unexpected error ${errorText}`)
+    expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
     const markers = entryStderrMarkers(handle)
     expect(markers.loaderImportFailed && markers.moduleNotFound,
       'the real Loader module-absence markers are missing from the Host stderr')
@@ -6556,6 +6537,28 @@ async function handleWaitEntryRecord(message) {
 const BOOTSTRAP_CLI_MODES = new Set(['inherited-host-role', 'direct-help'])
 const IDENTITY_WITNESS_KINDS = new Set(['live-non-host', 'linux-zombie'])
 
+/** Mutation admission: no live Client/helper/fallback may consume the target. */
+function assertNoLiveMutationConsumers({ allowStableHost, label }) {
+  if (!allowStableHost && activeHost !== undefined) {
+    throw new Error(`${label}: a live Host still consumes the installed copy`)
+  }
+  if (hosts.some(handle => handle.mode !== undefined && !handle.exited)) {
+    throw new Error(`${label}: a Host attempt is still live`)
+  }
+  if (processClients.some(client => !client.closed)) {
+    throw new Error(`${label}: a process Client is still live`)
+  }
+  if (qualificationClients.some(client => !client.exited)) {
+    throw new Error(`${label}: a qualification Client is still live`)
+  }
+  if (qualificationHelpers.some(helper => !helper.exited)) {
+    throw new Error(`${label}: a qualification helper is still live`)
+  }
+  if (fallbackHosts.some(record => record.reclaimed !== true)) {
+    throw new Error(`${label}: a discovered Host fallback is still live`)
+  }
+}
+
 function installedChunk(prefix) {
   const packageRoot = realpathSync(scene.installation.profilePackage)
   const file = readdirSync(join(packageRoot, 'dist')).find(name => name.startsWith(prefix) && name.endsWith('.mjs'))
@@ -6667,10 +6670,13 @@ async function handleRunBootstrapCli(message) {
   }
   const installation = scene.installation
   const profilePatchPath = join(installation.profileDir, 'cordis.patch.yml')
-  const previousProfilePatch = existsSync(profilePatchPath) ? { bytes: readFileSync(profilePatchPath), mode: statSync(profilePatchPath).mode & 0o777 } : undefined
-  processBootstrapCliPatch = { path: profilePatchPath, previous: previousProfilePatch }
-  try {
-    if (mode === 'inherited-host-role') {
+  let response
+  if (mode === 'inherited-host-role') {
+    const previous = existsSync(profilePatchPath)
+      ? { bytes: readFileSync(profilePatchPath), mode: statSync(profilePatchPath).mode & 0o777 }
+      : undefined
+    processBootstrapCliPatch = { path: profilePatchPath, previous }
+    try {
       writeFileSync(profilePatchPath, '- id: tui-app\n  disabled: true\n', { mode: 0o600 })
       const env = { ...installation.env, DSH_PI_TUI_ROLE: 'host' }
       delete env.DSH_PI_TUI_HOST_ENTRY
@@ -6683,37 +6689,27 @@ async function handleRunBootstrapCli(message) {
       if (!markers.requiredTuiSurfaceMissing) {
         throw new Error('RUN_BOOTSTRAP_CLI: the real CLI never reported the missing required TUI surface')
       }
-      return {
-        mode,
-        entryId: handle.entryId,
-        exit: handle.terminal.exit,
-        markers,
-        profilePatchRestored: true,
+      response = { mode, entryId: handle.entryId, exit: handle.terminal.exit, markers }
+    } finally {
+      const liveCli = qualificationHelpers.some(handle => handle.kind === 'bootstrap-cli' && !handle.exited)
+      if (!liveCli && processBootstrapCliPatch !== undefined) {
+        const patch = processBootstrapCliPatch
+        if (patch.previous === undefined) rmSync(patch.path, { force: true })
+        else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
+        processBootstrapCliPatch = undefined
+      } else if (liveCli) {
+        appendNote('bootstrap-cli-patch-restore-deferred', { path: profilePatchPath })
       }
     }
+  } else {
     const handle = await runTrackedOnce(installation.dshInvocation, ['--profile', 'pi-tui', '--help'],
       installation.profileDir, installation.env, 'installed Direct help', 180_000)
     if (handle.terminal.exit.code !== 0 || handle.terminal.exit.signal !== null) {
       throw new Error(`RUN_BOOTSTRAP_CLI: the Direct --help positive exited ${JSON.stringify(handle.terminal.exit)}`)
     }
-    return {
-      mode,
-      entryId: handle.entryId,
-      exit: handle.terminal.exit,
-      markers: handle.terminal.markers,
-      profilePatchRestored: true,
-    }
-  } finally {
-    const liveCli = qualificationHelpers.some(handle => handle.kind === 'bootstrap-cli' && !handle.exited)
-    if (!liveCli && processBootstrapCliPatch !== undefined) {
-      const patch = processBootstrapCliPatch
-      if (patch.previous === undefined) rmSync(patch.path, { force: true })
-      else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
-      processBootstrapCliPatch = undefined
-    } else if (liveCli) {
-      appendNote('bootstrap-cli-patch-restore-deferred', { path: profilePatchPath })
-    }
+    response = { mode, entryId: handle.entryId, exit: handle.terminal.exit, markers: handle.terminal.markers }
   }
+  return { ...response, profilePatchRestored: processBootstrapCliPatch === undefined }
 }
 
 function assertPristineInstalledCopy(label) {
@@ -6771,12 +6767,7 @@ async function handleSetInstallationFault(message) {
     startedAt: now(),
   }
   if (fault === 'host-runtime-absent') {
-    if (activeHost !== undefined) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live Host')
-    if (hosts.some(handle => !handle.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires every Host attempt to be terminal')
-    if (processClients.some(client => !client.closed)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live process Client')
-    if (qualificationClients.some(client => !client.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live qualification Client')
-    if (qualificationHelpers.some(helper => !helper.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live qualification helper')
-    if (fallbackHosts.some(record => record.reclaimed !== true)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live discovered Host')
+    assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-runtime-absent' })
     const artifact = join(packageRoot, 'dist', 'host-runtime.mjs')
     const absent = `${artifact}.artifact-absent`
     const packageScopeBarrier = join(installation.dshHome, 'package.json')
@@ -6861,13 +6852,7 @@ async function handleSetInstallationFault(message) {
     }
   }
   if (fault === 'host-bootstrap-absent') {
-    if (activeHost !== undefined) throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires no live Host')
-    if (hosts.some(handle => !handle.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires every Host attempt to be terminal')
-    if (processClients.some(client => !client.closed) || qualificationClients.some(client => !client.exited)
-      || qualificationHelpers.some(helper => !helper.exited)
-      || fallbackHosts.some(record => record.reclaimed !== true)) {
-      throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires no live Client, helper or discovered Host')
-    }
+    assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-bootstrap-absent' })
     const chunkPath = installedChunk('host-bootstrap-')
     const absent = `${chunkPath}.absent`
     const mutation = {
@@ -6904,18 +6889,7 @@ async function handleSetInstallationFault(message) {
   }
   // client-bootstrap-drift: a stable live Host and no other qualification Client.
   requireReadyHost('SET_INSTALLATION_FAULT client-bootstrap-drift')
-  if (qualificationClients.some(client => !client.exited)) {
-    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live qualification Client')
-  }
-  if (qualificationHelpers.some(helper => !helper.exited)) {
-    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live qualification helper')
-  }
-  if (processClients.some(client => !client.closed)) {
-    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live process Client')
-  }
-  if (fallbackHosts.some(record => record.reclaimed !== true)) {
-    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live discovered Host')
-  }
+  assertNoLiveMutationConsumers({ allowStableHost: true, label: 'SET_INSTALLATION_FAULT client-bootstrap-drift' })
   const chunkPath = installedChunk('client-bootstrap-')
   const canonicalChunk = realpathSync(chunkPath)
   if (canonicalChunk !== chunkPath) {
@@ -7556,17 +7530,17 @@ async function dispatch(message) {
           })
           if (requestId !== undefined) fail(requestId, 'SUPERVISOR_FINALIZE_FAILED', error)
           if (process.connected) process.disconnect()
-          setTimeout(() => exitSupervisor(1, 'failed-finalize'), 10)
+          setTimeout(() => process.exit(1), 10)
           break
         }
         if (requestId !== undefined) {
           send({ type: 'RESPONSE', requestId, ok: true, payload: { cleaned: true } }, () => {
             if (process.connected) process.disconnect()
-            setTimeout(() => exitSupervisor(0, 'finalized'), 10)
+            setTimeout(() => process.exit(0), 10)
           })
         } else {
           if (process.connected) process.disconnect()
-          setTimeout(() => exitSupervisor(0, 'finalized'), 10)
+          setTimeout(() => process.exit(0), 10)
         }
         break
       }

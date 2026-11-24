@@ -306,7 +306,7 @@ test('recovers a stale Host through authenticated discovery and rejects its reti
     expect(oldScratch).toHaveLength(1)
 
     // A real SIGKILL leaves the authentic stale registry behind.
-    await scene.signalHost(host, 'SIGKILL')
+    await scene.request('SIGNAL_ENTRY', { entryId: host.entryId, signal: 'SIGKILL' }, 60_000)
     const crashed = await scene.finishEntry(host)
     expect(crashed.exit).toEqual({ code: null, signal: 'SIGKILL' })
     expect(existsSync(oldFiles.registryPath)).toBe(true)
@@ -403,7 +403,7 @@ test.runIf(process.platform === 'linux')('treats a same-birth Linux zombie as de
     const host = await scene.startHost()
     await assertAuthenticatedHost(scene, host)
     const files = readScopeFiles(scene.installation.dshHome, scene.scope.scopeId)
-    await scene.signalHost(host, 'SIGKILL')
+    await scene.request('SIGNAL_ENTRY', { entryId: host.entryId, signal: 'SIGKILL' }, 60_000)
     const crashed = await scene.finishEntry(host)
     expect(crashed.exit).toEqual({ code: null, signal: 'SIGKILL' })
 

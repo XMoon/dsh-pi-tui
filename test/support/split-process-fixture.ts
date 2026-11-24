@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -267,7 +267,6 @@ export interface EntryRecordFacts {
   exitSignal: string | null
   stderrMarkers: EntryStderrMarkers
   stderrBytes: number
-  redactedKeys: string[]
   records: EntryRecord[]
 }
 
@@ -368,7 +367,6 @@ export interface SplitProcessScene {
     },
   ): Promise<void>
   signalEntry(handle: EntryQualificationHandle, signal: EntrySignal): Promise<void>
-  signalHost(host: SplitProcessHostHandle, signal: EntrySignal): Promise<void>
   finishEntry(handle: EntryQualificationHandle | SplitProcessHostHandle): Promise<EntryTerminalFacts>
   acceptHostWinner(handle: HostAttemptHandle): Promise<SplitProcessHostHandle>
   runBootstrapCli(mode: 'inherited-host-role' | 'direct-help'): Promise<BootstrapCliFacts>
@@ -777,7 +775,6 @@ class ProcessScene implements SplitProcessScene {
       exitSignal: payload.exitSignal === null || payload.exitSignal === undefined ? null : String(payload.exitSignal),
       stderrMarkers: payload.stderrMarkers as EntryStderrMarkers,
       stderrBytes: Number(payload.stderrBytes),
-      redactedKeys: (payload.redactedKeys ?? []) as string[],
       records: (payload.records ?? []) as EntryRecord[],
     }
   }
@@ -820,10 +817,6 @@ class ProcessScene implements SplitProcessScene {
 
   async signalEntry(handle: EntryQualificationHandle, signal: EntrySignal): Promise<void> {
     await this.request('SIGNAL_ENTRY', { entryId: handle.entryId, signal }, 60_000)
-  }
-
-  async signalHost(host: SplitProcessHostHandle, signal: EntrySignal): Promise<void> {
-    await this.request('SIGNAL_ENTRY', { entryId: host.entryId, signal }, 60_000)
   }
 
   async finishEntry(handle: EntryQualificationHandle | SplitProcessHostHandle): Promise<EntryTerminalFacts> {
@@ -894,16 +887,16 @@ class ProcessScene implements SplitProcessScene {
     const parentRel = relative(this.workDir, parent)
     assert(parentRel !== '..' && !parentRel.startsWith(`..${sep}`),
       `${handle.label}: the ${name} barrier parent escapes the Scene root`)
-    // lstat, never existsSync: a dangling symlink is a real final-path object
-    // that must fail closed, not be followed by the release write.
-    let existing
+    // wx is the final-path decision: an existing file or dangling symlink
+    // fails closed and is never followed.
     try {
-      existing = lstatSync(path)
+      writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`${handle.label}: the ${name} barrier already exists`)
+      }
+      throw error
     }
-    assert(existing === undefined, `${handle.label}: the ${name} barrier already exists`)
-    writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
   }
 
   async hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>> {
@@ -1253,6 +1246,36 @@ async function createScene(): Promise<ProcessScene> {
  * unique Supervisor receipt and a unique Scene root under the run's private
  * base.
  */
+/**
+ * The smallest real non-Process admission probe: ONE Pilot bootstrap (the
+ * already-installed candidate), send the new Process IPC, then close. It does
+ * not create a Process Scene or a second installation.
+ */
+export async function createPilotAdmissionScene(): Promise<{
+  runId: string
+  request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
+  close(): Promise<void>
+  receipt(): Record<string, any>
+}> {
+  const tmpBase = requireAbsoluteDirectory('SPLIT_VITEST_TMP_BASE')
+  const candidate = profileModule.inspectImmutableSplitCandidate(requireCandidateTarball())
+  const runId = `pilot-admission-${randomUUID()}`
+  const supervisor = new SupervisorClient({ runId })
+  await supervisor.request('BOOTSTRAP', {
+    tarball: candidate.tarball,
+    expectedSha256: candidate.candidateSha256,
+    tmpBase,
+    workerPid: process.pid,
+    workerPpid: process.ppid,
+  }, { timeoutMs: 1_200_000 })
+  return {
+    runId,
+    request: (type, payload, timeoutMs = 30_000) => supervisor.request(type, payload, { timeoutMs }) as Promise<Record<string, any>>,
+    close: async () => { await supervisor.close({ timeoutMs: 300_000, allowKill: false }) },
+    receipt: () => JSON.parse(readFileSync(join(tmpBase, 'split-resources', `${runId}.json`), 'utf8')) as Record<string, any>,
+  }
+}
+
 export async function createSplitProcessScene(): Promise<SplitProcessScene> {
   return await createScene()
 }
