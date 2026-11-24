@@ -2174,6 +2174,45 @@ test('an ambiguous leave never wears the definite discard label and keeps its bo
   h.page.dispose()
 })
 
+test('a scrolled optional detail never leaves an actionable question answer', async () => {
+  const h = await startedNumeric({ unconfirmed: true })
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.handleInput('s')
+  await h.drain()
+  h.page.setMaxRows(5) // body 4: the necessary copy and the accept fit together
+  h.page.handleInput(ESC)
+  let frame = h.page.render(44)
+  let plain = frame.map(strip).join('\n')
+  assert.match(plain, /Leaving does not undo it\./u, 'the necessary copy is complete')
+  const acceptRow = numericRowIndex(frame, 'Leave anyway…')
+  assert.ok(acceptRow >= 0, `the body answer is painted:\n${frame.join('\n')}`)
+  assert.match(strip(frame.at(-1) ?? ''), /Leave anyway \[D\] · Keep \[Esc\]/u)
+  // One scroll row puts the necessary copy out of view while the accept row
+  // stays inside the viewport: the action must become an inert blank there.
+  h.page.handleInput(DOWN)
+  frame = h.page.render(44)
+  plain = frame.map(strip).join('\n')
+  assert.match(plain, /The Host may have applied this change\./u, 'the detail/prelude is still readable')
+  assert.doesNotMatch(plain, /Leave anyway…/u, 'the scrolled-out copy suppresses the action word itself')
+  assert.equal(strip(frame.at(-1) ?? '').replace(/\s+$/u, ''), 'Keep [Esc]', 'the bar drops its accept with the copy')
+  const oldAcceptRow = acceptRow
+  assert.notEqual(h.page.handleMouse(mouse('press', 0, oldAcceptRow, 44, frame.length))?.handled, true,
+    'the reserved blank row is not an actionable target')
+  h.page.handleInput('d')
+  await h.drain()
+  assert.deepEqual(h.actions, [], 'no hidden answer while the copy is scrolled away')
+  assert.equal(h.writes.length, 1, 'the uncertain write is never retried')
+  // HOME restores the complete copy and the genuine fresh answer.
+  h.page.handleInput(HOME)
+  frame = h.page.render(44)
+  const freshRow = numericRowIndex(frame, 'Leave anyway…')
+  assert.ok(freshRow >= 0, `the action returns with the copy:\n${frame.join('\n')}`)
+  clickNumericRow(h.page, frame, freshRow, 44, 'Leave anyway…')
+  assert.deepEqual(h.actions, ['done'])
+  assert.equal(h.writes.length, 1)
+  h.page.dispose()
+})
+
 test('a refused grouped Save is read-only until Refresh, and its local Discard stays a real body action', async () => {
   const h = await startedNumeric({ reject: true })
   stageNumeric(h.page, 80, '\x15', '45000')
