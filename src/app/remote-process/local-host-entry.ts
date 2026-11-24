@@ -1296,6 +1296,13 @@ export function createHostAcpSessionAccess(
       if (workingDirectory.get(session) !== cwd || !hasNativeSkillLoader(agent, agentPresets)) {
         throw new AcpHostCommandError('stale', 'the native Skill scope changed during the catalog read')
       }
+      // The snapshot is accepted only while the exact retained service still
+      // resolves to the same registry authority. A replacement that happens
+      // across the await cannot be smuggled in behind a stale snapshot.
+      const currentRegistry = readSkillRegistry(agent, agentPresets, skills)
+      if (currentRegistry !== registry) {
+        throw new AcpHostCommandError('stale', 'the native Skill registry changed during the catalog read')
+      }
       if (observed.complete !== true) {
         throw new AcpHostCommandError('unavailable', 'the native Skill catalog is incomplete')
       }
