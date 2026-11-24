@@ -496,6 +496,27 @@ export async function runReadAuthority(context) {
           && Array.isArray(fact.continuedQuestionCallIds)
           && !fact.continuedQuestionCallIds.includes(callId)
       }, 'UA queued reply suppresses the continued candidate', 20_000)
+      // A REAL source change (the queued reply) must invalidate the adapter's
+      // successful-negative discovery receipt: a NEW observation over the same
+      // adapter must re-discover X. If the stale receipt were reused, X would
+      // stay non-candidate and get no projections read at all.
+      {
+        const receiptNonce = signalProbe(clientA, { op: 'activity', windowMs: 2_500 })
+        const receiptResult = await waitProbe(clientA, receiptNonce,
+          record => record.phase === 'activity-result', 'UA receipt-invalidation activity', 60_000)
+        const snap = (receiptResult.snapshots ?? []).find(record =>
+          (record.facts ?? []).some(entry => entry.sessionId === sessionX
+            && entry.attention !== 'question'))
+        assert(snap !== undefined,
+          `UA the queued reply never reached the incremental observation: ${JSON.stringify(receiptResult.counters)}`)
+        assert((receiptResult.counters?.projections ?? 0) >= 1,
+          `UA the changed source row was not re-discovered (stale receipt reused): ${JSON.stringify(receiptResult.counters)}`)
+        trace('ua-05b-receipt', {
+          sessionX,
+          counters: receiptResult.counters,
+          snapshotRevision: snap.revision,
+        })
+      }
       const suppressedFact = factOf(suppressed, sessionX, 'UA queued suppression fact')
       assert(suppressedFact.attention !== 'question' && suppressedFact.attention !== 'plan-review',
         `UA a queued reply still reported attention ${JSON.stringify(suppressedFact.attention)}`)
