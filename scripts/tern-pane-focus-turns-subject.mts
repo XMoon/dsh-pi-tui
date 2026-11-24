@@ -511,10 +511,23 @@ try {
             compactionId: 'focus-standalone-compaction',
             turn: null,
           })
+          // The FAILURE's first line is the bounded collapsed preview and is
+          // also what the dock echo repeats; the diagnostic BODY marker lives
+          // only in the summary text, so neither the collapsed head nor the
+          // dock notification can satisfy the "detail is open" assertion.
+          originalAppend.call(this, 'compaction/summary', {
+            compactionId: 'focus-standalone-compaction',
+            summary: [{
+              type: 'text',
+              text: 'Standalone maintenance diagnostics\nSTANDALONE-DETAIL-MARKER the maintenance summary body stays independently operable.',
+            }],
+            shadowedSeqs: [0],
+            shadowedTokenCount: 10,
+          })
           originalAppend.call(this, 'compaction/end', {
             compactionId: 'focus-standalone-compaction',
             turn: null,
-            error: 'STANDALONE-DETAIL-MARKER The idle maintenance transaction between the two real turns failed; its detail stays independently operable.',
+            error: 'Idle maintenance transaction failed',
           })
           note({ kind: 'standalone.injected', startTime: (start as { readonly time?: unknown }).time })
         }, 100)

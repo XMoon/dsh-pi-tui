@@ -536,6 +536,15 @@ function isFoldableMessageDisclosure(message: TranscriptMessage): boolean {
     || message.kind === 'command'
 }
 
+/** A compaction card WITHOUT an admitted numeric model turn: real standalone
+ * control evidence whose disclosure is owned by the CARD itself. It must never
+ * read a Thought/Work root action or follow the numeric Context route (the
+ * fold's placement anchor is not semantic ownership). Numeric compaction keeps
+ * the existing recent-turn Context rule. */
+function isStandaloneCompactionDisclosure(message: TranscriptMessage): boolean {
+  return message.kind === 'compaction' && transcriptTurnOf(message) === undefined
+}
+
 /** Whether a generic foldable message is a Thought-owned Focus secondary.
  * Surfaced context is persistent input/context, not process revealed by the
  * Thought, so root auto-reveal and secondary cleanup must exclude it. */
@@ -17800,6 +17809,19 @@ export class TuiApp {
       } else {
         this.expandedOverride.set(message, true)
       }
+    } else if (isStandaloneCompactionDisclosure(message)) {
+      // The standalone card's surface default can be ON (fullscreen Full's
+      // master) or OFF (mouse-owned fullscreen Focus/Compact), so its click
+      // must flip the EFFECTIVE state. Writing `true` first would be a no-op
+      // under a bulk-ON master, and deleting a negative override would let the
+      // master reopen it — exactly the unclosable-card failure.
+      const expanded = this.effectiveMessageExpanded(message, this.expandBoundary(), this.userExpandBoundary())
+      if (expanded) {
+        this.expandedOverride.set(message, false)
+        if (revokesSearchReveal) this.suppressSearchReveal()
+      } else {
+        this.expandedOverride.set(message, true)
+      }
     } else if (this.expandedOverride.get(message) === true) {
       this.expandedOverride.delete(message)
       if (revokesSearchReveal) this.suppressSearchReveal()
@@ -21263,20 +21285,25 @@ export class TuiApp {
     }
     // A compaction row WITHOUT an admitted numeric turn is standalone control
     // evidence (a real upstream `turn: null` transaction, or an unprovable
-    // fragment): like a command card it owns its disclosure outside the Focus
-    // turn boundary. A numeric compaction keeps the existing recent-turn rule.
-    if (message.kind === 'compaction') {
-      const turn = transcriptTurnOf(message)
-      if (turn === undefined) {
-        if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) {
-          return this.expandedOverride.get(message) === true
-            || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
-        }
-        return this.transcriptDetailExpanded
-          || this.expandedOverride.get(message) === true
-          || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
-      }
-      return turn >= boundary
+    // fragment). Its per-card owner must agree with the card's actual click
+    // action: a granted search reveal first (a new navigation re-opens), then
+    // the explicit card choice INCLUDING false, then the surface default. The
+    // negative choice is what lets a click close the card while a bulk master
+    // stays ON; a bare OR of the master would make the card unclosable.
+    if (isStandaloneCompactionDisclosure(message)) {
+      if (!ignoreSearch && this.forcesMessageExpandedTemporarily(message)) return true
+      const override = this.expandedOverride.get(message)
+      if (override !== undefined) return override
+      // Mouse-owned fullscreen surfaces (Focus, and Compact whose Ctrl+O owns
+      // the Work bulk rather than the generic master) start folded. Regular
+      // surfaces and fullscreen Full keep the transcript-detail master.
+      if (this.fullscreen !== undefined
+        && (isFocusDisplayPreset(this.displayState.preset) || this.displayState.preset === 'compact')) return false
+      return this.transcriptDetailExpanded
+    }
+    // A numeric compaction keeps the existing recent-turn Context rule.
+    if (message.kind === 'compaction' && message.turn !== undefined) {
+      return message.turn >= boundary
         || this.expandedOverride.get(message) === true
         || (!ignoreSearch && this.forcesMessageExpandedTemporarily(message))
     }
@@ -21344,7 +21371,10 @@ export class TuiApp {
           ? undefined
           : insideFocusSecondary || insideOpenWorkRun
             ? (this.fullscreen !== undefined ? 'click' : undefined)
-            : this.ordinaryFoldHint()
+            : isStandaloneCompactionDisclosure(message) && this.fullscreen !== undefined
+              && isFocusDisplayPreset(this.displayState.preset)
+              ? 'click'
+              : this.ordinaryFoldHint()
     // The FULL-REVEAL flag for tool bodies (large diffs): true for the
     // per-card override AND for any REGULAR expanded root (the surface
     // contract — no mouse, so a capped diff would be unreadable); fullscreen

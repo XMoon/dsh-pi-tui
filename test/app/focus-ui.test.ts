@@ -5168,8 +5168,10 @@ test('a terminal Turn error still paints exactly one bounded Focus summary', asy
 // PR2 C02: standalone compaction stays independent of the Focus root
 // ---------------------------------------------------------------------------
 
-test('a standalone compaction after a final renders once, keeps two real roots, and opens its own detail', async () => {
-  const { vt, app } = startApp({ preset: 'focus' })
+/** PR2 R1-01 fixture: two REAL Turns + one numeric in-turn Context compaction
+ *  + one REAL standalone (`turn: null`) compaction between them. The body-only
+ *  markers prove a collapsed card cannot satisfy a visible-body assertion. */
+function standaloneCompactionFolder(): TranscriptFolder {
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, T0, 0),
@@ -5188,8 +5190,8 @@ test('a standalone compaction after a final renders once, keeps two real roots, 
         content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pr2-c1') },
       },
     }, T0 + 5_000, 3),
-    // A NUMERIC in-turn automatic compaction stays a normal Context card of
-    // its real turn (never a standalone fence and never a second root).
+    // A NUMERIC in-turn automatic compaction stays a normal Context card of its
+    // real turn (never a standalone fence and never a second root).
     eventAt('compaction/start', { compactionId: 'pr2-numeric', turn: 1 }, T0 + 6_000, 4),
     eventAt('compaction/summary', {
       compactionId: 'pr2-numeric', summary: [{ type: 'text', text: 'NUMERIC_SUMMARY_BODY' }],
@@ -5238,38 +5240,113 @@ test('a standalone compaction after a final renders once, keeps two real roots, 
     }, T0 + 18_000, 16),
     eventAt('turn/end', { turn: 2, reason: { kind: 'completed' } }, T0 + 19_000, 17),
   ])
-  const messages = folder.messages()
-  const standalone = messages.find(message => message.kind === 'compaction' && message.text === 'STANDALONE_SUMMARY_BODY')
-  const numeric = messages.find(message => message.kind === 'compaction' && message.text === 'NUMERIC_SUMMARY_BODY')
-  assert.ok(standalone !== undefined && standalone.kind === 'compaction')
-  assert.ok(numeric !== undefined && numeric.kind === 'compaction' && numeric.turn === 1)
+  return folder
+}
+
+test('fullscreen Focus: the standalone compaction owns its real click action and never a root key', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'focus' },
+  })
+  app.start()
+  startedApps.add(app)
+  t.after(() => app.dispose())
+  const folder = standaloneCompactionFolder()
+  app.setFullscreen(true)
   show(app, folder)
   await vt.waitForRender()
-  const view = vt.getViewport().join('\n')
-  assert.equal(countFocusHeaders(view), 2, 'only the two REAL turns own a Focus root')
-  assert.equal(countFocusHeaders(view, true), 0, 'both real roots start collapsed')
-  assert.equal((view.match(/Context compacted/gu) ?? []).length, 2, 'both compaction cards render once')
-  assert.ok(!view.includes('STANDALONE_SUMMARY_BODY'), 'the standalone card starts folded')
-  assert.ok(!view.includes('NUMERIC_SUMMARY_BODY'), 'the numeric card starts folded')
-  assert.ok(view.indexOf('first final answer') < view.lastIndexOf('Context compacted'),
-    'the standalone card keeps its real position after the closed turn final')
+  let view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.equal(countFocusHeaders(joined), 2, 'only the two REAL turns own a Focus root')
+  assert.equal(countFocusHeaders(joined, true), 0, 'both real roots start collapsed')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'), 'the standalone card starts folded')
+  assert.ok(!joined.includes('NUMERIC_SUMMARY_BODY'), 'the numeric card starts folded')
+  const cardRows = view.map((line, index) => line.includes('Context compacted') ? index : -1)
+    .filter(index => index >= 0)
+  assert.equal(cardRows.length, 2, 'both compaction cards render once')
+  const cardLine = view[(cardRows.at(-1) ?? -1) + 1] ?? ''
+  assert.ok(cardLine.includes('click to expand'),
+    `the card advertises its actual mouse action:\n${cardLine}`)
+  assert.ok(!cardLine.includes('ctrl+o to expand'),
+    `the card must not advertise a root key that cannot open it:\n${cardLine}`)
+  const standaloneTitleRow = (): number => {
+    const rows = vt.getViewport()
+      .map((line, index) => line.includes('Context compacted') ? index : -1)
+      .filter(index => index >= 0)
+    return (rows.at(-1) ?? 0) + 1
+  }
 
-  // The standalone card's OWN disclosure opens without opening a Thought root:
-  // the detail toggle is independent of root ownership.
-  app.setTranscriptSearchTarget({
-    query: 'STANDALONE_SUMMARY_BODY',
-    match: { id: -1, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
-    message: standalone,
+  // A real pointer click flips the visible card state; the Focus roots stay
+  // untouched in both directions.
+  click(vt, 10, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the standalone body opens through its own card click:\n${joined}`)
+  assert.equal(countFocusHeaders(joined), 2, 'opening the card mints no Focus root')
+  assert.equal(countFocusHeaders(joined, true), 0, 'opening the card never opens a Thought root')
+  // A different cell: Pi's double-click word-selection window must not turn
+  // the pair into a text selection instead of two card toggles.
+  click(vt, 25, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the second click closes the card again:\n${joined}`)
+  assert.equal(countFocusHeaders(joined, true), 0, 'closing the card never touches a Thought root')
+
+  // Fullscreen Focus Ctrl+O owns the Thought roots, not this card.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `root Ctrl+O must not open the standalone card:\n${joined}`)
+  app.setFullscreen(false)
+})
+
+test('fullscreen Full: a master-ON standalone card still closes and reopens through its own click', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
   })
+  app.start()
+  startedApps.add(app)
+  t.after(() => app.dispose())
+  const folder = standaloneCompactionFolder()
+  app.setFullscreen(true)
+  show(app, folder)
   await vt.waitForRender()
-  const revealed = vt.getViewport().join('\n')
-  assert.ok(revealed.includes('STANDALONE_SUMMARY_BODY'), `the card detail opens independently:\n${revealed}`)
-  assert.equal(countFocusHeaders(revealed), 2, 'no ghost root appears for the standalone card')
-  assert.equal(countFocusHeaders(revealed, true), 0, 'opening the card detail never opens a Thought root')
-  app.setTranscriptSearchTarget(undefined)
+  vt.sendInput('\x0f')
   await vt.waitForRender()
-  const restored = vt.getViewport().join('\n')
-  assert.ok(!restored.includes('STANDALONE_SUMMARY_BODY'), 'clearing the search reveal restores the folded card')
-  assert.equal(countFocusHeaders(restored), 2, 'the two real roots remain')
-  app.stop()
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'precondition: the Full master is ON')
+  let view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the master-ON default opens the standalone card:\n${joined}`)
+  assert.ok(joined.includes('NUMERIC_SUMMARY_BODY'),
+    `the master-ON default expands the numeric control card too:\n${joined}`)
+  const standaloneTitleRow = (): number => {
+    const rows = vt.getViewport()
+      .map((line, index) => line.includes('Context compacted') ? index : -1)
+      .filter(index => index >= 0)
+    return (rows.at(-1) ?? 0) + 1
+  }
+  // Under a bulk-ON default the first click must CLOSE the card instead of
+  // writing a no-op `true` that leaves the OR-expression (and the card) open.
+  click(vt, 3, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(!joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the first click closes the standalone card under master ON:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master stays ON')
+  assert.ok(joined.includes('NUMERIC_SUMMARY_BODY'),
+    'the unrelated numeric Context card keeps its master default')
+  // A second click (different cell: avoids the double-click word selection)
+  // reopens it while the master is still ON.
+  click(vt, 25, standaloneTitleRow())
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.ok(joined.includes('STANDALONE_SUMMARY_BODY'),
+    `the second click reopens the standalone card under master ON:\n${joined}`)
+  assert.equal(app.isTranscriptDetailExpanded(), true, 'the bulk master still stays ON')
+  app.setFullscreen(false)
 })
