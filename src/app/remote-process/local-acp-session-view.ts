@@ -3766,6 +3766,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         ))
         return await flight.settled.promise
       }
+      // LAST authority read is behind us. Recheck cancellation/closed
+      // immediately adjacent to dispatch, after the catalog read.
+      if (flight.deliveryClosed || flight.cancelRequested) {
+        flight.settleAdmission()
+        this.completePrompt(claim, flight, { stopReason: 'cancelled' })
+        return await flight.settled.promise
+      }
     }
 
     try {

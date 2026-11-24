@@ -7084,26 +7084,75 @@ test('R5: a cancel that lands after the Skill preflight helper returns is caught
   view.access.readNativeSkillsImpl = async () => ({
     kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy.' }],
   })
-  let catalogReads = 0
-  view.access.readCommandCatalogImpl = () => {
-    catalogReads += 1
-    // The third read is the final synchronous admission check. Reenter cancel
-    // here, after the Skill helper has returned but before dispatch.
-    if (catalogReads >= 3) view.registry.cancelSession(view.conn, view.access, 'SKL5')
-    return commandCatalog([])
-  }
   await view.resume()
   for (let attempt = 0; attempt < 100 && view.catalogNotifications.length === 0; attempt += 1) {
     await new Promise(resolveWait => setTimeout(resolveWait, 5))
   }
   assert.equal(view.catalogNotifications.length, 1, 'the Skill catalog is delivered before the prompt')
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  let catalogReads = 0
+  view.access.readCommandCatalogImpl = () => {
+    catalogReads += 1
+    // Invocation-time reads only: 1 route, 2 helper re-read, 3 outer final
+    // read. Reenter cancel at the LAST read, after the helper returned.
+    if (catalogReads === 3) view.registry.cancelSession(view.conn, view.access, 'SKL5')
+    return commandCatalog([])
+  }
   const result = await view.registry.promptSession(
     view.conn, view.access,
     { sessionId: 'SKL5', prompt: [{ type: 'text', text: '/deploy now' }] },
     new AbortController().signal, false, async () => {},
   )
   assert.deepEqual(result, { stopReason: 'cancelled' })
+  assert.equal(catalogReads, 3, 'the test actually reached the final post-read admission guard')
   assert.equal(view.access.promptCalls.length, 0, 'the revoked Skill never reached the official prompt')
+  const claim = (view.registry as unknown as { claims: Map<string, { unclaimedHostObligation?: object }> }).claims.get('SKL5')
+  assert.equal(claim?.unclaimedHostObligation, undefined, 'no unclaimed Host obligation was planted')
+})
+
+test('R5: a definite Skill no-dispatch failure racing Close rejects the request and closes', async () => {
+  const view = projectionView('SKLCLOSE')
+  view.access.readCommandCatalogImpl = () => commandCatalog([])
+  view.access.readNativeSkillsImpl = async () => ({
+    kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy.' }],
+  })
+  await view.resume()
+  for (let attempt = 0; attempt < 100 && view.catalogNotifications.length === 0; attempt += 1) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 5))
+  }
+  assert.equal(view.catalogNotifications.length, 1, 'the Skill catalog is delivered before the race')
+  await new Promise(resolveWait => setImmediate(resolveWait))
+  const closeDone = deferred<Record<string, never>>()
+  let invocationReads = 0
+  view.access.readCommandCatalogImpl = () => {
+    invocationReads += 1
+    if (invocationReads >= 2) {
+      queueMicrotask(() => {
+        void view.registry.closeSession(view.conn, view.access, 'SKLCLOSE').then(
+          value => closeDone.resolve(value),
+          error => closeDone.reject(error),
+        )
+      })
+      throw new Error('controlled final Skill read failure')
+    }
+    return commandCatalog([])
+  }
+  const request = view.registry.promptSession(
+    view.conn, view.access,
+    { sessionId: 'SKLCLOSE', prompt: [{ type: 'text', text: '/deploy close race' }] },
+    new AbortController().signal, false, async () => {},
+  )
+  const [requestResult, closeResult] = await Promise.allSettled([request, closeDone.promise])
+  assert.equal(closeResult.status, 'fulfilled')
+  assert.deepEqual(closeResult.status === 'fulfilled' ? closeResult.value : undefined, {})
+  assert.equal(requestResult.status, 'rejected')
+  assert.equal(requestResult.status === 'rejected' && requestResult.reason instanceof LocalAcpViewError
+    ? requestResult.reason.code : '', 'LOCAL_ACP_COMMAND_UNAVAILABLE')
+  assert.equal(view.access.promptCalls.length, 0, 'no official prompt was invoked')
+  assert.equal(view.access.cancelledTurns.length, 0, 'Close did not fabricate a foreign turn cancellation')
+  assert.equal(view.registry.hasClaim('SKLCLOSE'), false)
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'SKLCLOSE'), {},
+    'Close is idempotent after the definite no-dispatch terminal')
 })
 
 test('R2: a held predecessor projection cannot retain close after the raw Host command settled', async () => {

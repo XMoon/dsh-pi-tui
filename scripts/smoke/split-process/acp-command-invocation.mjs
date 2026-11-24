@@ -707,6 +707,68 @@ export async function runAcpCommandInvocation(context) {
     'CMP-05: the clean end survived the late cancel')
     trace('acp-command/held-flush', { compactionId: heldFlushId })
 
+    // CMP-05 rejection leg: hold the official flush AND arm its post-release
+    // failure on a fresh exact Session. A late cancel while held must not
+    // settle, must refuse overlap, and after release must classify
+    // COMMITTED_WITH_ERROR from the real failed flush.
+    const flushRejectSession = (await client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd, mcpServers: [],
+    })).sessionId
+    const flushRejectSeed = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: flushRejectSession, prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(flushRejectSeed?.stopReason === 'end_turn', 'CMP-05 rejection: seed must end_turn')
+    const flushRejectRelease = join(workDir, 'acp-command-flush-reject-release')
+    rmSync(flushRejectRelease, { force: true })
+    resetHold(holdRoot)
+    const beforeFlushReject = hostSessionEvents(dshHome, flushRejectSession).length
+    const flushRejectRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: flushRejectSession, prompt: promptText('/compact'),
+    }))
+    let flushRejectSettled = false
+    void flushRejectRequest.then(() => { flushRejectSettled = true })
+    await waitForFile(`${holdRoot}.entered`, 'CMP-05 rejection: summarizer entered')
+    await lifecycleAction('arm-flush-failure', flushRejectSession, 'lifecycle-flush-failure-armed', 'CMP-05 rejection: arm flush failure')
+    await lifecycleAction('arm-hold-flush', flushRejectSession, 'lifecycle-flush-hold-armed', 'CMP-05 rejection: arm held flush', { release: flushRejectRelease })
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-flush-held' && event.sessionId === flushRejectSession,
+      'CMP-05 rejection: real flush held', 120_000)
+    await client.notify(acp.methods.agent.session.cancel, { sessionId: flushRejectSession })
+    await new Promise(resolveWait => setTimeout(resolveWait, 50))
+    assert(flushRejectSettled === false, 'CMP-05 rejection: no answer while flush held')
+    const overlap = await captureError('CMP-05 rejection overlap', settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId: flushRejectSession, prompt: promptText('/compact'),
+    })))
+    assert(overlap?.data?.code === 'LOCAL_ACP_PROMPT_IN_FLIGHT',
+      `CMP-05 rejection: overlap must be refused without a new operation (${JSON.stringify(overlap?.data)})`)
+    const liveUpdates = updates
+      .filter(params => params?.sessionId === flushRejectSession && params.update?.sessionUpdate === 'compaction_update')
+      .map(params => params.update)
+    const liveStart = liveUpdates.find(update => update.status === 'in_progress' && update.summary === undefined)
+    const liveId = liveStart?.compactionId
+    assert(typeof liveId === 'string', 'CMP-05 rejection: real own start update observed while held')
+    assert(liveUpdates.some(update => update.compactionId === liveId && update.summary !== undefined),
+      'CMP-05 rejection: the own live summary was delivered before the failed flush')
+    assert(liveUpdates.some(update => update.compactionId === liveId && update.summary === undefined
+      && update.status !== 'in_progress'),
+    'CMP-05 rejection: the own live clean end was delivered before the failed flush')
+    writeFileSync(flushRejectRelease, '1', { mode: 0o600 })
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-flush-failure-hit' && event.sessionId === flushRejectSession,
+      'CMP-05 rejection: injected flush failure hit', 120_000)
+    const flushRejectError = await captureError('CMP-05 rejection', flushRejectRequest)
+    assert(flushRejectError?.data?.code === 'LOCAL_ACP_COMMAND_COMMITTED_WITH_ERROR',
+      `CMP-05 rejection: failed flush after summary/end is COMMITTED_WITH_ERROR, not cancelled (${JSON.stringify(flushRejectError?.data)})`)
+    const flushRejectAfter = (hostSessionEvents(dshHome, flushRejectSession) ?? []).slice(beforeFlushReject)
+    assert(flushRejectAfter.filter(event => event.type === 'compaction/start').length === 1,
+      'CMP-05 rejection: no duplicate commit/retry bracket')
+    const afterReject = await client.request(acp.methods.agent.session.prompt, {
+      sessionId: flushRejectSession, prompt: promptText(HISTORY_PROMPT),
+    })
+    assert(afterReject?.stopReason === 'end_turn', 'CMP-05 rejection: a next ordinary operation succeeds')
+    trace('acp-command/held-flush-rejection', { compactionId: liveId })
+
     // Invalid arguments are refused before the official engine is called.
     const beforeInvalid = hostSessionEvents(dshHome, sessionId).length
     let invalidError
