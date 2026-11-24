@@ -193,7 +193,10 @@ export async function runSubagentSettingsFr5A(context) {
       'the writable Limits namespace reaches the actual Host USER profile patch')
     assert(profileUserConfig(installation.profileDir, SELECTION_NS) === undefined,
       'the home-overlay refusal creates no Selection USER override')
-    assert(bFrame.includes('is overridden by a home patch or command-line'),
+    // The packed Split Detail pane wraps the official reason into several
+    // physical lines; normalize only whitespace so the same sentence is still
+    // proven without depending on one terminal width.
+    assert(bFrame.replace(/\s+/gu, ' ').includes('is overridden by a home patch or command-line overlay'),
       'the failed section names the official higher-layer refusal')
     trace('fr5a.remote-partial-save', { limitsVerified: true, selectionOutcomeUnconfirmed: true, profilePatch: true })
 
