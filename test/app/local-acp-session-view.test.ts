@@ -1062,9 +1062,29 @@ test('the production Host command access binds only the audited identities and t
   skillsSnapshot = { ...skillsSnapshot, complete: false }
   await assert.rejects(access.readNativeSkills(agent, session, new AbortController().signal), (error: unknown) =>
     (error as { code?: string }).code === 'unavailable')
+  // The standard composition mounts tool-skill against the global skills
+  // service; when the retained scope publishes no scoped service that global
+  // registry is the effective authority.
   scopedSkills = undefined
-  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), { kind: 'absent' },
-    'a global registry is never adopted when the retained scope has no Skill service')
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), {
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'deploy', description: 'Deploy the app.' }],
+  }, 'the official global registry is used when the retained loader has no scoped service')
+  // A real scoped registry wins and is not unioned with the global one.
+  scopedSkills = {
+    async snapshot() {
+      return {
+        complete: true,
+        skills: [{ name: 'scoped-only', description: 'Scoped only.', invocation: { userInvocable: true } }],
+      }
+    },
+  }
+  assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), {
+    kind: 'available',
+    cwd: '/w',
+    skills: [{ kind: 'skill', name: 'scoped-only', description: 'Scoped only.' }],
+  }, 'the scoped registry is the exact authority when it exists')
   scopedSkills = skills
   skillLoader = false
   assert.deepEqual(await access.readNativeSkills(agent, session, new AbortController().signal), { kind: 'absent' })

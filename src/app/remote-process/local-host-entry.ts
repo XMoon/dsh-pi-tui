@@ -838,19 +838,27 @@ function hasNativeSkillLoader(agent: LiveAgentViewIdentity, presets: AgentPreset
   return retainedModules(agent, presets)?.includes('@deepseek-ai/dsh-tool-skill') === true
 }
 
-/** Resolve ONLY the exact retained Skill registry; never the global fallback. */
+/**
+ * Resolve the registry the exact retained loader actually consumes. The
+ * standard composition mounts `tool-skill` against the global `skills`
+ * service (there is no scoped isolate), while a custom composition may
+ * publish an Agent-scoped registry. Prefer the scoped registry when it
+ * exists; otherwise the official global service is the effective registry.
+ * A missing/unusable registry is absent, never a third authority.
+ */
 function readSkillRegistry(
   agent: LiveAgentViewIdentity,
   presets: AgentPresetRegistryLike,
+  global: SkillRegistryLike | undefined,
 ): SkillRegistryLike | undefined {
   if (!hasContext(agent)) return undefined
   let scoped: unknown
   try {
     scoped = presets.serviceFor(agent, 'skills')
   } catch {
-    return undefined
+    scoped = undefined
   }
-  const registry = scoped as SkillRegistryLike | undefined
+  const registry = (scoped as SkillRegistryLike | undefined) ?? global
   return registry !== undefined && typeof registry.snapshot === 'function' ? registry : undefined
 }
 
@@ -928,6 +936,7 @@ export function createHostAcpSessionAccess(
   const commands = context.reflect.get('commands') as CommandRuntimeLike | undefined
   const agentPresets = context.reflect.get('agentPresets') as AgentPresetRegistryLike | undefined
   const workingDirectory = context.reflect.get('workingDirectory') as WorkingDirectoryLike | undefined
+  const skills = context.reflect.get('skills') as SkillRegistryLike | undefined
   // The official canonical-history/title read plane is REQUIRED for a truthful
   // load/list advertisement: without it the listener advertises neither.
   const sessionQuery = context.reflect.get('sessionQuery') as SessionQueryReadLike | undefined
@@ -1254,7 +1263,7 @@ export function createHostAcpSessionAccess(
         return { kind: 'absent' }
       }
       if (workingDirectory === undefined) return { kind: 'absent' }
-      const registry = readSkillRegistry(agent, agentPresets)
+      const registry = readSkillRegistry(agent, agentPresets, skills)
       if (registry === undefined) return { kind: 'absent' }
       const cwd = workingDirectory.get(session)
       if (typeof cwd !== 'string' || cwd.length === 0 || !cwd.startsWith('/')) {
