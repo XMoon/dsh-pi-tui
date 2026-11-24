@@ -2932,6 +2932,102 @@ test('ordinary overflow keeps its coverage across a later burst and a short cold
   }
 })
 
+test('a coverage watermark survives a replay whose final currentness proof failed', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r4f-')
+  const source = mutableSource('/repo/r4f', 'r4f')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const persistence = deps.sessionPersistence()
+  const internals = service as unknown as {
+    index: { occurrenceCount(): number; checkpointOf(id: string): { nextSeq: number } | undefined }
+    pendingEventCount: number
+    heldPending: Set<string>
+    droppedAccepted: Map<string, number>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 15_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `r4f-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-r4f-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const settleRepairs = async (): Promise<void> => {
+    for (;;) {
+      const flights = [...internals.sessionRepairFlights.values()].map(entry => entry.promise)
+      if (flights.length === 0) return
+      await Promise.allSettled(flights)
+    }
+  }
+  const realStat = persistence.stat
+  let statCalls = 0
+  try {
+    await waitDirectReady(service)
+    // The official source is complete, but the accepted burst is also delivered
+    // and then evicted by the ordinary overflow.
+    const burst: unknown[] = []
+    for (let seq = 3; seq <= 4099; seq += 1) burst.push(inbox(seq, `r4f burst ${String(seq)}`))
+    source.events.push(...burst as never[])
+    source.revision += 1
+    source.live = false
+    // The repair's own record stat passes; the FINAL proof stat reports a
+    // different revision, so currentness fails after the full replay committed.
+    persistence.stat = async (id, options) => {
+      const snapshot = await realStat.call(persistence, id, options)
+      if (String(id) === 'r4f' && snapshot !== undefined) {
+        statCalls += 1
+        if (statCalls === 2 && typeof snapshot.revision === 'number') {
+          return { ...snapshot, revision: snapshot.revision + 1 }
+        }
+      }
+      return snapshot
+    }
+    for (const event of burst) deliver(event)
+    assert.equal(internals.pendingEventCount, 0)
+    assert.equal(internals.droppedAccepted.get('r4f'), 4099)
+    await settleRepairs()
+    // The full replay committed 3..4099 into SQLite, but its final same-instance
+    // currentness proof failed. The watermark must NOT be cleared by checkpoint
+    // coverage alone; only a later successful proof may settle it.
+    assert.equal(internals.droppedAccepted.get('r4f'), 4099)
+    assert.equal(internals.index.checkpointOf('r4f')?.nextSeq, 4100)
+    const unproven = await waitDirectSettled(service)
+    assert.equal(unproven.kind, 'incomplete', JSON.stringify(unproven))
+    if (unproven.kind !== 'incomplete') throw new Error('expected incomplete')
+    assert.equal(unproven.reason, 'resource-limit')
+
+    // Restore the authentic source; a later complete replay proves currentness.
+    persistence.stat = realStat
+    await internals.verifySources()
+    await waitDirectReady(service)
+    assert.equal(internals.droppedAccepted.size, 0)
+    const hit = await service.search({ scope: 'all', query: 'r4f burst 4099', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    persistence.stat = realStat
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
 test('a held accepted batch vetoes a temporary official roster deletion', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r302-')

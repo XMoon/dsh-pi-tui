@@ -1245,6 +1245,20 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.heldPending.delete(sessionId)
   }
 
+  /**
+   * Cover an evicted accepted tail ONLY after a complete replay has passed its
+   * final same-instance currentness proof. The checkpoint coverage check remains
+   * necessary (a short source can complete without reaching the watermark), but
+   * it is never sufficient by itself.
+   */
+  private settleDroppedCoverage(sessionId: string): void {
+    const lastSeq = this.droppedAccepted.get(sessionId)
+    if (lastSeq === undefined) return
+    const checkpoint = this.index?.checkpointOf(sessionId)
+    if (checkpoint === undefined || checkpoint.nextSeq <= lastSeq) return
+    this.droppedAccepted.delete(sessionId)
+  }
+
   /** Re-add the ordered remainder without losing the exact byte/event counters. */
   private restorePendingSession(
     sessionId: string,
@@ -1639,6 +1653,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
       if (outcome === 'complete') {
         this.settleHeldBatch(sessionId)
+        this.settleDroppedCoverage(sessionId)
         this.reconcilePending.delete(sessionId)
         counters.replayCompleted += 1
       } else {
@@ -1848,6 +1863,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, true)
         if (outcome === 'complete') {
           this.settleHeldBatch(sessionId)
+          this.settleDroppedCoverage(sessionId)
           this.reconcilePending.delete(sessionId)
         } else {
           await this.markSessionDirty(sessionId)
@@ -2471,13 +2487,12 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       this.state = { kind: 'incomplete', reason: 'source-read-failed' }
       return
     }
-    // Drop a watermark only once the committed checkpoint has passed it; the
-    // evicted accepted facts are then covered by the official replay.
-    for (const [sessionId, lastSeq] of this.droppedAccepted) {
-      const checkpoint = this.index.checkpointOf(sessionId)
-      if (checkpoint !== undefined && checkpoint.nextSeq > lastSeq) this.droppedAccepted.delete(sessionId)
-    }
     if (this.droppedAccepted.size > 0) {
+      // A committed SQLite checkpoint is not, by itself, proof that the
+      // official source is current: a live batch commit can advance it while
+      // the final source proof is still pending or has failed. The obligation
+      // is cleared only by settleDroppedCoverage() after a successful complete
+      // replay with its final same-instance currentness proof.
       this.state = { kind: 'incomplete', reason: 'resource-limit' }
       return
     }
