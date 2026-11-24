@@ -682,13 +682,19 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 `<window>` is one of `bootstrap-install`, `host-spawned-before-ack`,
 `client-reserved-before-spawn`, `client-opened-before-ack`, `clients-ready`,
 `fallback-host-ready`, `host-contenders-spawned`,
-`qualification-client-spawned` and `host-artifact-absent-started`. Each
-installed-entry window binds one exact business test and only holds after the
-Supervisor registered the real live child identities. `host-contenders-spawned`
+`qualification-client-spawned`, `host-artifact-absent-started`,
+`identity-witness-spawned` (Linux only) and `finalize-compensation-started`.
+Each installed-entry window binds one exact business test and only holds after
+the Supervisor registered the real live child identities. `host-contenders-spawned`
 is the batch of concurrent Host contenders, `qualification-client-spawned` a
-registered live qualification Client against the authenticated Host, and
+registered live qualification Client against the authenticated Host,
 `host-artifact-absent-started` a committed scoped installed-copy mutation with a
-live Host attempt. The probe passes only with the terminal `ABORTED_CLEAN`
+live Host attempt, `identity-witness-spawned` the Linux holder registration
+window before its zombie child identity exists, and
+`finalize-compensation-started` the joined compensation of an intentionally
+failed FINALIZE while a registered Client/helper is still live. The last window
+expects the compensated `NOT_QUIESCED` receipt and a retained diagnostic root;
+an unrun window is `NOT_RUN`, never a pass. The probe passes only with the terminal `ABORTED_CLEAN`
 receipt, the exact Host seat free, the registered kernel identities gone or
 provably reused, and — for `clients-ready` — a separate real sibling Scene
 already live at its authenticated checkpoint when the target is signalled,

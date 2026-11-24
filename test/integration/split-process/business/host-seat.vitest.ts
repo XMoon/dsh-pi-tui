@@ -367,6 +367,10 @@ test('recovers a stale Host through authenticated discovery and rejects its reti
     expect(attachedExit.exit).toEqual({ code: 0, signal: null })
     assertPublishedHostIdentityLive(discovered as never, 'the discovered Host before Client exit')
 
+    // The discovered fallback Host is still live even though the original
+    // accepted Host is gone: installed-copy mutation admission must refuse it.
+    await expect(scene.setInstallationFault('host-runtime-absent'))
+      .rejects.toThrow(/discovered Host|Host attempt/u)
     const reclaimed = await scene.reclaimDiscoveredHost(client!)
     expect(reclaimed.pid).toBe(discovered.hostPid)
     expect(reclaimed.reclaimed).toBe(true)

@@ -103,6 +103,8 @@ let processClientSequence = 0
  */
 let processNativeOperation
 let qualificationClientSequence = 0
+/** The one in-flight bootstrap-CLI profile patch obligation, if any. */
+let processBootstrapCliPatch
 let receiptPath
 let receipt
 /** Once the terminal phase is recorded, a late handler may not rewrite it. */
@@ -180,23 +182,25 @@ process.on('disconnect', () => {
     process.exit(0)
     return
   }
-  if (preserveRoot) {
-    process.exit(1)
-    return
-  }
-  void closeLifecycle('worker-ipc-disconnect').then(
-    result => { process.exit(result.clean ? 0 : 1) },
+  // preserveRoot only decides whether the diagnostic directory survives. It
+  // never permits leaving an in-flight compensation (or a not-yet-started one)
+  // without joining its real terminal.
+  const settle = cleanupPromise !== undefined
+    ? cleanupPromise
+    : closeLifecycle('worker-ipc-disconnect')
+  void settle.then(
+    result => { process.exit(result.clean && !preserveRoot ? 0 : 1) },
     () => { process.exit(1) },
   )
 })
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    if (preserveRoot) {
-      process.exit(1)
-      return
-    }
-    void closeLifecycle(`supervisor-${signal}`).then(
+    lifecycleClosed = true
+    const settle = cleanupPromise !== undefined
+      ? cleanupPromise
+      : closeLifecycle(`supervisor-${signal}`)
+    void settle.then(
       result => { process.exit(result.clean ? 0 : 1) },
       () => { process.exit(1) },
     )
@@ -205,11 +209,11 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 
 process.on('uncaughtException', error => {
   writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(error) })
-  if (preserveRoot) {
-    process.exit(1)
-    return
-  }
-  void closeLifecycle('uncaught-exception').then(() => process.exit(1), () => process.exit(1))
+  lifecycleClosed = true
+  const settle = cleanupPromise !== undefined
+    ? cleanupPromise
+    : closeLifecycle('uncaught-exception')
+  void settle.then(() => process.exit(1), () => process.exit(1))
 })
 
 // Keep the IPC channel and message loop alive until FINALIZE or disconnect.
@@ -338,9 +342,8 @@ function appendNote(event, detail = {}) {
 
 function writeReceipt(update) {
   if (receiptPath === undefined) return
-  if (receiptTerminal && update.phase !== undefined && update.phase !== receipt.phase) {
-    const { phase: _latePhase, ...fields } = update
-    update = fields
+  if (receiptTerminal) {
+    if (update.phase === undefined || update.phase !== receipt.phase) return
   }
   receipt = { ...receipt, ...update, updatedAt: now() }
   // Publish one complete snapshot: the sibling Scene, the external probe and
@@ -1044,11 +1047,15 @@ function assertHostIdentityMatchesKernel(hostFacts, hostPid, label) {
  * Worker death releases it. After release the handler always fails: no probe
  * mode may return a PASS by itself.
  */
-async function processProbeHold(point, detail) {
+async function processProbeHold(point, detail, options = {}) {
   if (process.env.SPLIT_VITEST_PROCESS_PROBE_POINT !== point) return
   appendNote('process-probe-hold', { point, ...detail })
   writeReceipt({ phase: `PROCESS_PROBE_${point.toUpperCase().replaceAll('-', '_')}_HOLD` })
   await waitForWorkerKillBarrier()
+  if (options.continueAfterKill === true) {
+    appendNote('process-probe-continued', { point })
+    return
+  }
   throw new Error(`the worker was killed at the ${point} probe point`)
 }
 
@@ -1445,18 +1452,24 @@ async function assertSceneHostSeatFree(reason) {
 }
 
 /** Test-only fault injection: simulate an abrupt old-Host crash in one window. */
+async function waitForHostClose(handle, label, timeoutMs) {
+  if (handle.closePromise === undefined) {
+    // A spawn that produced no PID has no close event; its failure is committed
+    // by the spawn-error path, never invented here.
+    throw new Error(`${label}: the Host has no registered close event`)
+  }
+  return await waitForEntryClose(handle, label, timeoutMs)
+}
+
 async function crashHost(handle, reason) {
   if (handle.exited) return
   if (scene?.kind === 'process') killProcessHost(handle, 'SIGKILL', `crashHost:${reason}`)
   else killOwnedHost(handle, 'SIGKILL')
   try {
-    await waitForChildClose(handle.child, KILL_GRACE_MS)
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason}`, KILL_GRACE_MS)
   } catch (error) {
-    throw new Error(`Host ${String(handle.child.pid)} did not die after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`Host ${String(handle.child.pid)} did not close after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
   }
-  handle.exited = true
-  handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
-  handle.closedAt = now()
   await assertHostGroupGone(handle, reason)
   if (activeHost === handle) activeHost = undefined
   syncHostReceipt()
@@ -1474,18 +1487,15 @@ async function terminateHost(handle, reason) {
   }
   kill('SIGTERM')
   try {
-    await waitForChildClose(handle.child, TERM_GRACE_MS)
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason}`, TERM_GRACE_MS)
   } catch {
     kill('SIGKILL')
     try {
-      await waitForChildClose(handle.child, KILL_GRACE_MS)
+      await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason} SIGKILL`, KILL_GRACE_MS)
     } catch (error) {
-      throw new Error(`Host ${String(handle.child.pid)} did not exit after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+      throw new Error(`Host ${String(handle.child.pid)} did not close after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  handle.exited = true
-  handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
-  handle.closedAt = now()
   await assertHostGroupGone(handle, reason)
   syncHostReceipt()
   return handle.exitResult
@@ -1503,10 +1513,7 @@ async function officialStopHost(handle = activeHost) {
   }
   try {
     handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
-    const result = await waitForChildClose(handle.child, HOST_SHUTDOWN_GRACE_MS)
-    handle.exited = true
-    handle.exitResult = result
-    handle.closedAt = now()
+    const result = await waitForHostClose(handle, 'STOP_HOST', HOST_SHUTDOWN_GRACE_MS)
     await assertHostGroupGone(handle, 'STOP_HOST')
     if (activeHost === handle) activeHost = undefined
     syncHostReceipt()
@@ -1635,6 +1642,7 @@ function assertLifecycleOpen(label) {
  */
 async function closeLifecycle(reason) {
   lifecycleClosed = true
+  if (cleanupPromise !== undefined) return await cleanupPromise
   await Promise.race([queue.catch(() => undefined), sleep(5_000)])
   return await cleanup(reason)
 }
@@ -1660,6 +1668,16 @@ async function cleanup(reason, options = {}) {
       phase: 'CLEANUP_STARTED',
       notes: [...(receipt?.notes ?? []), { event: 'cleanup-started', detail: { reason }, at: now() }],
     })
+    if (options.failure !== undefined && scene?.kind === 'process') {
+      const liveClients = qualificationClients.filter(handle => !handle.exited).map(handle => ({
+        entryId: handle.entryId, pid: handle.child.pid, birth: handle.birth,
+      }))
+      const liveHelpers = qualificationHelpers.filter(handle => !handle.exited).map(handle => ({
+        entryId: handle.entryId, pid: handle.child.pid, birth: handle.birth,
+      }))
+      appendNote('finalize-compensation-started', { liveClients, liveHelpers, reason })
+      await processProbeHold('finalize-compensation-started', { liveClients, liveHelpers }, { continueAfterKill: true })
+    }
     try {
       // The one-shot qualification Client is a Supervisor-owned process group:
       // reclaim it BEFORE the Host generations and before the scene root.
@@ -1774,7 +1792,7 @@ async function cleanup(reason, options = {}) {
         // The installed-copy mutation is restored only after every affected
         // Host/Client/helper/fallback is terminal, so no live consumer observes
         // a half-restored install.
-        if (scene.kind === 'process' && processInstallationMutation !== undefined) {
+        if (scene.kind === 'process' && processInstallationMutation !== undefined && clean) {
           try {
             await restoreInstallationMutation({ compensating: true })
           } catch (error) {
@@ -1783,6 +1801,21 @@ async function cleanup(reason, options = {}) {
               fault: processInstallationMutation?.fault ?? null,
               reason: boundedError(error),
               detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 400),
+            })
+          }
+        }
+        if (processBootstrapCliPatch !== undefined && clean) {
+          const patch = processBootstrapCliPatch
+          try {
+            if (patch.previous === undefined) rmSync(patch.path, { force: true })
+            else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
+            processBootstrapCliPatch = undefined
+          } catch (error) {
+            clean = false
+            appendNote('bootstrap-cli-patch-restore-failed', {
+              path: patch.path,
+              reason: boundedError(error),
+              detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 300),
             })
           }
         }
@@ -1819,6 +1852,7 @@ async function cleanup(reason, options = {}) {
             sceneRootRemoved: scene === undefined ? undefined : !existsSync(scene.workDir),
           },
         })
+        receiptTerminal = true
         return { clean: true, compensation }
       }
       installInProgress = false
@@ -3636,7 +3670,8 @@ async function handleStartHost(message) {
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: true,
   })
-  const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
+  let settleClose
+  const closePromise = new Promise(resolve => { settleClose = resolve })
   const records = []
   let stderr = ''
   createInterface({ input: child.stdout }).on('line', line => {
@@ -3695,6 +3730,7 @@ async function handleStartHost(message) {
     handle.exited = true
     handle.exitResult = { code, signal }
     handle.closedAt = now()
+    settleClose({ code, signal })
     syncHostReceipt()
   })
   appendNote('host-spawned', {
@@ -3742,7 +3778,7 @@ async function handleStartHost(message) {
     ready = await waitForHostRecord(handle, record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
       `${hostLabel} Host ready`, HOST_READY_TIMEOUT_MS)
   } catch (error) {
-    if (handle.spawnError !== undefined) {
+    if (handle.spawnError !== undefined && child.pid === undefined) {
       handle.exited = true
       handle.exitResult = { code: null, signal: null }
       handle.closedAt = now()
@@ -4839,6 +4875,16 @@ async function auditProcessClientLedger(reason) {
 }
 
 async function handleFinalize(message) {
+  if (scene?.kind === 'process') {
+    const unfinishedClient = qualificationClients.some(handle => handle.kind === 'qualification-client'
+      && (handle.finished !== true || !handle.exited))
+    const unfinishedHelper = qualificationHelpers.some(handle => handle.finished !== true || !handle.exited)
+    const unresolvedAttempt = hosts.some(handle => handle.mode !== undefined
+      && handle.finished !== true && handle.acceptedHost !== true)
+    if (unfinishedClient || unfinishedHelper || unresolvedAttempt || processInstallationMutation !== undefined) {
+      throw new Error('FINALIZE: live or unfinished Process qualification state requires compensation')
+    }
+  }
   let hostStopError
   // The one-shot qualification Client must already be gone on the normal path;
   // a still-live one is reclaimed so FINALIZE never leaks, then fails closed.
@@ -5632,7 +5678,8 @@ async function handleStartHostAttempts(message) {
       if (stderr.text.length < 64_000) stderr.text += chunk
     })
     const entryId = `host-attempt-${String(generation)}-${String(child.pid)}-${String(Date.now())}`
-    const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
+    let settleClose
+    const closePromise = new Promise(resolve => { settleClose = resolve })
     const handle = {
       entryId,
       hostId: entryId,
@@ -5676,6 +5723,7 @@ async function handleStartHostAttempts(message) {
       handle.exited = true
       handle.exitResult = { code, signal: signalValue }
       handle.closedAt = now()
+      settleClose({ code, signal: signalValue })
       appendNote('host-attempt-closed', {
         entryId,
         pid: child.pid ?? null,
@@ -5915,7 +5963,8 @@ async function handleStartQualificationClients(message) {
       if (stderr.text.length < 64_000) stderr.text += chunk
     })
     const entryId = `qualification-${mode}-${String(sequence)}-${String(child.pid)}-${String(Date.now())}`
-    const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
+    let settleClose
+    const closePromise = new Promise(resolve => { settleClose = resolve })
     const handle = {
       entryId,
       clientId: entryId,
@@ -5955,6 +6004,7 @@ async function handleStartQualificationClients(message) {
       handle.exited = true
       handle.exitResult = { code, signal: signalValue }
       handle.closedAt = now()
+      settleClose({ code, signal: signalValue })
       appendNote('qualification-client-closed', {
         entryId,
         label: handle.label,
@@ -6235,7 +6285,8 @@ async function validateHostAttemptTerminal(handle, exit) {
   return {
     outcome: 'startup-refusal',
     mode,
-    error: errorText,
+    errorClass: 'declared-startup-refusal',
+    code: failure.code ?? null,
     phase: failure.phase ?? null,
     cleanupCompleted: cleanupCompleted.length,
     stderrMarkers: entryStderrMarkers(handle),
@@ -6516,7 +6567,8 @@ function registerHelperHandle({ entryId, kind, label, child, dir, extra = {} }) 
       if (stderr.text.length < 64_000) stderr.text += chunk
     })
   }
-  const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
+  let settleClose
+  const closePromise = new Promise(resolve => { settleClose = resolve })
   const handle = {
     entryId,
     kind,
@@ -6547,6 +6599,7 @@ function registerHelperHandle({ entryId, kind, label, child, dir, extra = {} }) 
     handle.exited = true
     handle.exitResult = { code, signal: signalValue }
     handle.closedAt = now()
+    settleClose({ code, signal: signalValue })
     syncQualificationHelpersReceipt()
   })
   syncQualificationHelpersReceipt()
@@ -6596,6 +6649,7 @@ async function handleRunBootstrapCli(message) {
   const installation = scene.installation
   const profilePatchPath = join(installation.profileDir, 'cordis.patch.yml')
   const previousProfilePatch = existsSync(profilePatchPath) ? { bytes: readFileSync(profilePatchPath), mode: statSync(profilePatchPath).mode & 0o777 } : undefined
+  processBootstrapCliPatch = { path: profilePatchPath, previous: previousProfilePatch }
   try {
     if (mode === 'inherited-host-role') {
       writeFileSync(profilePatchPath, '- id: tui-app\n  disabled: true\n', { mode: 0o600 })
@@ -6631,8 +6685,15 @@ async function handleRunBootstrapCli(message) {
       profilePatchRestored: true,
     }
   } finally {
-    if (previousProfilePatch === undefined) rmSync(profilePatchPath, { force: true })
-    else writeFileSync(profilePatchPath, previousProfilePatch.bytes, { mode: previousProfilePatch.mode })
+    const liveCli = qualificationHelpers.some(handle => handle.kind === 'bootstrap-cli' && !handle.exited)
+    if (!liveCli && processBootstrapCliPatch !== undefined) {
+      const patch = processBootstrapCliPatch
+      if (patch.previous === undefined) rmSync(patch.path, { force: true })
+      else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
+      processBootstrapCliPatch = undefined
+    } else if (liveCli) {
+      appendNote('bootstrap-cli-patch-restore-deferred', { path: profilePatchPath })
+    }
   }
 }
 
@@ -6692,8 +6753,11 @@ async function handleSetInstallationFault(message) {
   }
   if (fault === 'host-runtime-absent') {
     if (activeHost !== undefined) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live Host')
+    if (hosts.some(handle => !handle.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires every Host attempt to be terminal')
     if (processClients.some(client => !client.closed)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live process Client')
     if (qualificationClients.some(client => !client.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live qualification Client')
+    if (qualificationHelpers.some(helper => !helper.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live qualification helper')
+    if (fallbackHosts.some(record => record.reclaimed !== true)) throw new Error('SET_INSTALLATION_FAULT: the Host Runtime artifact mutation requires no live discovered Host')
     const artifact = join(packageRoot, 'dist', 'host-runtime.mjs')
     const absent = `${artifact}.artifact-absent`
     const packageScopeBarrier = join(installation.dshHome, 'package.json')
@@ -6779,8 +6843,11 @@ async function handleSetInstallationFault(message) {
   }
   if (fault === 'host-bootstrap-absent') {
     if (activeHost !== undefined) throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires no live Host')
-    if (processClients.some(client => !client.closed) || qualificationClients.some(client => !client.exited)) {
-      throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires no live Client')
+    if (hosts.some(handle => !handle.exited)) throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires every Host attempt to be terminal')
+    if (processClients.some(client => !client.closed) || qualificationClients.some(client => !client.exited)
+      || qualificationHelpers.some(helper => !helper.exited)
+      || fallbackHosts.some(record => record.reclaimed !== true)) {
+      throw new Error('SET_INSTALLATION_FAULT: the Host bootstrap mutation requires no live Client, helper or discovered Host')
     }
     const chunkPath = installedChunk('host-bootstrap-')
     const absent = `${chunkPath}.absent`
@@ -6820,6 +6887,15 @@ async function handleSetInstallationFault(message) {
   requireReadyHost('SET_INSTALLATION_FAULT client-bootstrap-drift')
   if (qualificationClients.some(client => !client.exited)) {
     throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live qualification Client')
+  }
+  if (qualificationHelpers.some(helper => !helper.exited)) {
+    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live qualification helper')
+  }
+  if (processClients.some(client => !client.closed)) {
+    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live process Client')
+  }
+  if (fallbackHosts.some(record => record.reclaimed !== true)) {
+    throw new Error('SET_INSTALLATION_FAULT: the bootstrap drift requires no live discovered Host')
   }
   const chunkPath = installedChunk('client-bootstrap-')
   const canonicalChunk = realpathSync(chunkPath)
@@ -6907,8 +6983,17 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
   if (qualificationHelpers.some(handle => !handle.exited)) {
     throw new Error('RESTORE_INSTALLATION: a qualification helper is still live')
   }
+  if (processClients.some(handle => !handle.closed)) {
+    throw new Error('RESTORE_INSTALLATION: a process Client is not closed')
+  }
   if (fallbackHosts.some(record => record.reclaimed !== true)) {
     throw new Error('RESTORE_INSTALLATION: a discovered fallback Host is still unreclaimed')
+  }
+  if (compensating) {
+    for (const handle of hosts) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
+    for (const handle of qualificationClients) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
+    for (const handle of qualificationHelpers) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
+    for (const handle of processClients) await assertHostGroupGone(handle, 'RESTORE_INSTALLATION compensation')
   }
   await mutation.restore()
   const restored = installedPackageFacts(scene.installation.profilePackage,

@@ -8,7 +8,7 @@
  * and its exact kernel identity.
  */
 
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { expect, test } from 'vitest'
@@ -146,6 +146,8 @@ test('admits the installed Host composition and refuses missing required owners'
       const terminal = await scene.finishEntry(attempt)
       expect(terminal.exit).toEqual({ code: 1, signal: null })
       expect(terminal.outcome).toBe('startup-refusal')
+      expect(terminal.error, 'the terminal leaked the raw failure text').toBeUndefined()
+      expect(terminal.errorClass).toBe('declared-startup-refusal')
       const facts = await scene.entryRecordFacts(attempt)
       expect(facts.records.some(record => record.m4a0 === 'ready')).toBe(false)
       expect(facts.records.some(record => record.m4a0 === 'failure' && record.phase === 'after-boot')).toBe(true)
@@ -386,6 +388,23 @@ test('honors stop signals across Host publication and initial liveness observati
       const beforeSignal = await scene.entryRecordFacts(publication)
       expect(beforeSignal.records.some(record => record.m4a0 === 'ready')).toBe(false)
 
+      // A live, not-yet-accepted Host attempt is still a real consumer: the
+      // installed-copy mutation admission must refuse it.
+      const artifact = join(scene.installation.entries.host, '..', 'host-runtime.mjs')
+      const artifactBefore = readFileSync(artifact)
+      await expect(scene.setInstallationFault('host-runtime-absent'))
+        .rejects.toThrow(/Host attempt must be terminal|Host attempt to be terminal|Host attempt/u)
+      expect(readFileSync(artifact).equals(artifactBefore)).toBe(true)
+
+      // A dangling symlink at a preallocated barrier path must not be followed
+      // into creating an outside file.
+      const outsideBarrierTarget = join(scene.tmpBase, `outside-barrier-${stopSignal}`)
+      const stopBarrierPath = publication.barriers.stop
+      symlinkSync(outsideBarrierTarget, stopBarrierPath)
+      expect(() => scene.releaseBarrier(publication, 'stop')).toThrow(/already exists/u)
+      expect(existsSync(outsideBarrierTarget), 'the barrier release followed a dangling symlink').toBe(false)
+      rmSync(stopBarrierPath)
+
       const anotherSignal = stopSignal === 'SIGTERM' ? 'SIGINT' : 'SIGTERM'
       await expect(scene.request('SIGNAL_ENTRY', { entryId: publication.entryId, signal: anotherSignal }))
         .rejects.toThrow(/declared/u)
@@ -589,19 +608,24 @@ test('compensates a failed finalization without leaking a live Client or witness
   const scene = await createSplitProcessScene()
   let client: QualificationClientHandle | undefined
   let witness: IdentityWitnessHandle | undefined
+  let finalizeRequested = false
   try {
-    const host = await scene.startHost()
+    await scene.startHost()
     await scene.setInstallationFault('client-bootstrap-drift')
     ;[client] = await scene.startQualificationClients({ mode: 'client-bootstrap-drift' })
     await scene.waitEntryRecord(client!, { m4a0: 'ready' })
     witness = await scene.startIdentityWitness('live-non-host')
-    // The Host is killed first so dispose cannot spend its bounded stop budget;
-    // the live qualification Client and witness are the unfinished entries that
-    // make ordinary FINALIZE fail.
-    await scene.signalHost(host, 'SIGKILL')
 
-    const failure = await scene.dispose().then(() => undefined, error => asError(error))
-    expect(failure, 'a finalization with unfinished qualification entries must fail').toBeDefined()
+    // The Host is still Ready, the drifted Client is connected, the witness is
+    // live and the mutation is registered: FINALIZE must refuse and hand the
+    // whole Scene to the joined compensation path.
+    finalizeRequested = true
+    const failure = await scene.request('FINALIZE', { clientsClosed: false }, 240_000)
+      .then(() => undefined, error => asError(error))
+    expect(failure, 'a finalization with live qualification state must fail').toBeDefined()
+    const exit = await scene.waitSupervisorExit()
+    expect(exit.code, 'a failed FINALIZE must exit nonzero').not.toBe(0)
+
     const receipt = await scene.readSupervisorReceipt()
     expect(receipt.phase).toBe('NOT_QUIESCED')
     expect(receipt.compensation?.attempted, 'failed FINALIZE did not run compensation').toBe(true)
@@ -616,14 +640,12 @@ test('compensates a failed finalization without leaking a live Client or witness
     expect(clientFacts?.exited, 'the qualification Client was not reclaimed').toBe(true)
     expect(witnessFacts?.exited, 'the identity witness was not reclaimed').toBe(true)
     assertKernelBirthTerminal(client!.pid, client!.birth ?? undefined, 'the abandoned qualification Client')
-    assertKernelBirthTerminal(witness!.pid, witness!.birth ?? undefined, 'the abandoned identity witness')
+    assertKernelBirthTerminal(witness!.pid, witness!.birth, 'the abandoned identity witness')
     expect(existsSync(scene.workDir), 'the failed-finalization evidence root was removed').toBe(true)
   } finally {
-    await scene.dispose().catch(() => undefined)
-    rmSync(scene.workDir, { recursive: true, force: true })
+    if (!finalizeRequested) await scene.dispose().catch(() => undefined)
   }
 })
-
 
 test('refuses installed-entry operations in a real non-process Scene before any child exists', async () => {
   const scene = await createSplitProcessScene()

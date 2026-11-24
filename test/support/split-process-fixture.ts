@@ -331,6 +331,8 @@ export interface SplitProcessScene {
   readonly scopeDir: string
   /** The private external run base this Scene was created under. */
   readonly tmpBase: string
+  /** Await the ONE Supervisor process exit (for an intentional failed FINALIZE). */
+  waitSupervisorExit(timeoutMs?: number): Promise<{ code: number | null; signal: NodeJS.Signals | null }>
   /** The durable receipt, readable after the Supervisor exits (including failure). */
   readSupervisorReceipt(): Promise<SupervisorReceipt>
   /** Bounded typed Supervisor IPC, for boundary negatives on a real Scene. */
@@ -672,6 +674,10 @@ class ProcessScene implements SplitProcessScene {
     return this.#tmpBase
   }
 
+  async waitSupervisorExit(timeoutMs = 60_000): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+    return await this.#supervisor.waitExit(timeoutMs)
+  }
+
   /** The durable receipt of THIS Scene, readable after the Supervisor exits. */
   async readSupervisorReceipt(): Promise<SupervisorReceipt> {
     const own = this.#ownReceipt()
@@ -888,10 +894,16 @@ class ProcessScene implements SplitProcessScene {
     const parentRel = relative(this.workDir, parent)
     assert(parentRel !== '..' && !parentRel.startsWith(`..${sep}`),
       `${handle.label}: the ${name} barrier parent escapes the Scene root`)
-    const existing = existsSync(path) ? lstatSync(path) : undefined
-    assert(existing === undefined || (existing.isFile() && !existing.isSymbolicLink()),
-      `${handle.label}: the ${name} barrier is not a plain owned file`)
-    writeFileSync(path, 'release\n', { mode: 0o600 })
+    // lstat, never existsSync: a dangling symlink is a real final-path object
+    // that must fail closed, not be followed by the release write.
+    let existing
+    try {
+      existing = lstatSync(path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    assert(existing === undefined, `${handle.label}: the ${name} barrier already exists`)
+    writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
   }
 
   async hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>> {

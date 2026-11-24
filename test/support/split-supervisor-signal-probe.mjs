@@ -53,6 +53,7 @@ const PROCESS_ATS = [
   'qualification-client-spawned',
   'host-artifact-absent-started',
   'identity-witness-spawned',
+  'finalize-compensation-started',
 ]
 /**
  * The three installed-entry windows bind ONE exact business test so the probe
@@ -75,6 +76,10 @@ const PROCESS_AT_TARGETS = new Map([
   ['identity-witness-spawned', {
     file: 'test/integration/split-process/business/host-seat.vitest.ts',
     title: 'treats a same-birth Linux zombie as dead and never as a signal target',
+  }],
+  ['finalize-compensation-started', {
+    file: 'test/integration/split-process/business/host-bootstrap.vitest.ts',
+    title: 'compensates a failed finalization without leaking a live Client or witness',
   }],
 ])
 const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
@@ -299,7 +304,7 @@ function latestUpgradeReceipt(tmpBase, parentRunId) {
 
 function checkReceiptResources(receipt) {
   const problems = []
-  if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
+  if (options.allowRemainingRoot !== true && receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) {
@@ -516,7 +521,7 @@ function installerProcessRunning(receipt) {
     && /\b(?:pnpm|npm|install)\b/u.test(row.command))
 }
 
-function checkProcessReceiptResources(receipt, kernel) {
+function checkProcessReceiptResources(receipt, kernel, options = {}) {
   const problems = []
   if (!Number.isInteger(receipt.worker?.ppid) || receipt.worker.ppid <= 0) {
     problems.push('the receipt Worker has no real PPID')
@@ -526,7 +531,7 @@ function checkProcessReceiptResources(receipt, kernel) {
   } else if (receipt.worker?.pid !== undefined && receipt.supervisor.ppid !== receipt.worker.pid) {
     problems.push('the receipt Supervisor PPID is not the Scene Worker')
   }
-  if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
+  if (options.allowRemainingRoot !== true && receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) problems.push('install is still marked in progress')
@@ -1007,6 +1012,16 @@ try {
         if (mode === 'process-worker-kill' && at === 'clients-ready') {
           siblingSnapshot = await waitProcessSiblingCheckpoint(tmpBase, siblingRunId, kernel, receipt)
         }
+      } else if (at === 'finalize-compensation-started') {
+        receipt = await waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          if (processNote(current, 'process-probe-hold', at) === undefined) return undefined
+          const note = processNote(current, 'finalize-compensation-started')
+          const live = [...(note?.detail?.liveClients ?? []), ...(note?.detail?.liveHelpers ?? [])]
+          if (live.length === 0) return undefined
+          return live.every(entry => identityLiveness(kernel, entry.pid, entry.birth) === 'live')
+            ? current : undefined
+        }, 'a failed-FINALIZE compensation holding a live registered entry', 900_000)
       } else if (at === 'fallback-host-ready') {
         receipt = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
@@ -1493,7 +1508,14 @@ try {
     await waitForPidGone(killedWorkerPid, Math.max(1, deadline - Date.now()))
   }
   const receipt = processMode
-    ? await waitProcessTerminal(tmpBase, runId, Math.max(1, deadline - Date.now()))
+    ? await (at === 'finalize-compensation-started'
+      ? waitUntil(() => {
+        const current = latestProcessReceipt(tmpBase, runId)
+        return current?.phase === 'NOT_QUIESCED' && current?.compensation?.completed === true
+          ? current
+          : undefined
+      }, 'failed FINALIZE compensation terminal', Math.max(1, deadline - Date.now()))
+      : waitProcessTerminal(tmpBase, runId, Math.max(1, deadline - Date.now())))
     : await waitUntil(() => {
       const current = latestReceipt(tmpBase, runId)
       return current?.phase === 'ABORTED_CLEAN' ? current : undefined
@@ -1533,10 +1555,12 @@ try {
   }
   await sleep(Math.min(300, Math.max(1, deadline - Date.now())))
   const problems = processMode
-    ? checkProcessReceiptResources(receipt, kernel)
+    ? checkProcessReceiptResources(receipt, kernel, {
+      allowRemainingRoot: at === 'finalize-compensation-started',
+    })
     : checkReceiptResources(receipt)
   if (problems.length > 0) fail(problems.join('; '))
-  checkNoLingeringPaths(receipt)
+  if (at !== 'finalize-compensation-started') checkNoLingeringPaths(receipt)
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   const sentinelState = processMode && sentinelIdentity !== undefined
     ? identityLiveness(kernel, sentinelIdentity.pid, sentinelIdentity.birth)
