@@ -1622,20 +1622,28 @@ or the current Ctrl+R/↑↓ contract owned by
 | Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
 | Official corpus roster | ONE `sessionPersistence.list` snapshot merged with the Host `sessions` live registry; a same-id live/persisted Header must pass the official `assertSessionHeadersCompatible` check, and the live Header is the visible one |
 | Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v1.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
-| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list |
+| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round |
 | Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
-| Verification/read boundary | the single Host maintenance owner runs the 30 s full-corpus roster check and per-Session official repairs OUTSIDE the serial index writer; Owner `search`/`readText` wait only for accepted short index commits, never for a background `list`/`open`/`stat`/`observeSession` Promise |
+| Destructive round | before the first known destructive publication of a full round (deletion, rebuild or marker rewrite), the round establishes an `incomplete` barrier and holds it through every required deletion, accepted-payload/repair settlement and per-ID terminal commit. Read-only discovery preserves the prior `ready` epoch; the round-local deletion cut and its cut-bound witness fence derived deletion |
+| Full/point ownership | one full-inventory round and independent exact-ID repairs share ONE per-ID single-flight claim: a repair requested while the full round owns that id is coalesced and handed off after the full candidate settles. The terminal `commitWitness` is the second, non-substitutable fence |
+| Verification/read boundary | the single Host maintenance owner runs the 30 s full-corpus roster check and per-Session official repairs OUTSIDE the serial index writer; Owner `search`/`readText` wait only for accepted short index commits, never for a background `list`/`open`/`stat`/`observeSession` Promise. The writer completeness check uses an index-owned SQL existence probe, never a full checkpoint materialization |
 | Remote surface | the private `piTuiHistorySearch` namespace with exactly two Owner-only unary methods: `search` (three scopes, keyset cursor, bounded preview + immutable content hash) and `readText` (exact original text chunks by content hash) |
 | Direct | unchanged: the Direct Host never mounts this index and keeps its existing Client-local input history |
 
 The Host actively prewarms the complete index without blocking Host readiness;
 the first import answers `loading` until every official Session, every buffered
-live event and the error verdict have settled. The 30 s roster check and the
-per-Session official repairs are single-flight maintenance work: they may make
-the index `incomplete` while a destructive repair is committed, but they never
-hold the Owner read barrier. An already verified epoch stays readable during a
-read-only background check; a keyset cursor becomes stale only when committed
-content actually changes.
+live event and the error verdict have settled, and it answers `incomplete`
+rather than `ready` if the first full round was partial or failed. Coverage is
+a round-local proof: a successful point repair of one Session never proves an
+unvisited or unsettled ID; a later complete full round may establish it. The
+30 s roster check and the per-Session official repairs are single-flight
+maintenance work: they may make the index `incomplete` while a destructive
+round is committed, but they never hold the Owner read barrier. An already
+verified epoch stays readable during a read-only background check; a keyset
+cursor becomes stale only when committed content actually changes. An
+unresolved accepted-coverage obligation is fail-closed: it is settled only by a
+current authoritative replay, never by a timeout, repeated roster absence or an
+equal checkpoint alone.
 
 The search is a literal Unicode lower-case substring match over the first
 accepted text. `all` addresses every accessible Session of the authenticated
