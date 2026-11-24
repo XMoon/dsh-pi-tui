@@ -668,6 +668,17 @@ function stageNumeric(page: HostNumericSettingsPage<NumericShellSettings>, width
   page.render(width)
 }
 
+function scrollGroupedUntil(page: HostNumericSettingsPage<NumericShellSettings>, width: number, needle: string, limit = 60): string[] {
+  let frame = page.render(width)
+  let plain = frame.map(strip).join('\n')
+  for (let step = 0; step < limit && !plain.includes(needle); step += 1) {
+    page.handleInput(DOWN)
+    frame = page.render(width)
+    plain = frame.map(strip).join('\n')
+  }
+  return frame
+}
+
 const UP = '\x1b[A'
 const TAB = '\t'
 const SHIFT_TAB = '\x1b[Z'
@@ -998,16 +1009,10 @@ test('the grouped local Discard stays and the Refresh question keeps the draft u
   h.page.dispose()
 })
 
-test('the grouped main actions are admitted only through their really painted span', async () => {
+test('the grouped Save is admitted only through its really painted span', async () => {
   const h = await startedNumeric()
-  h.page.setMaxRows(20)
-  h.page.handleInput(ENTER)
-  h.page.render(14) // the wide-enough Input still fits its complete segments at 14? no
-  h.page.handleInput('\x15')
-  for (const character of '45000') h.page.handleInput(character)
-  h.page.render(80)
-  h.page.handleInput(ENTER)
-  assert.deepEqual(h.writes, [], 'the stage needs a painted Stage span')
+  stageNumeric(h.page, 80, '\x15', '45000')
+  assert.equal(h.writes.length, 0, 'the stage is local')
 
   // 14 cells cannot host `Save [S] · Back [Esc]`: Save is dropped WHOLE and its
   // shortcut is inert; Back remains the only complete action.
@@ -1027,7 +1032,8 @@ test('the grouped main actions are admitted only through their really painted sp
 })
 
 test('a pending grouped save blocks the exit and never repaints a closed page', async () => {
-  const h = await startedNumeric({ holdMutation: true })
+  let renders = 0
+  const h = await startedNumeric({ holdMutation: true, onRender: () => { renders += 1 } })
   h.page.handleInput(ENTER)
   h.page.render(80)
   h.page.handleInput('\x15')
@@ -1042,9 +1048,15 @@ test('a pending grouped save blocks the exit and never repaints a closed page', 
   assert.match(h.page.render(80).map(strip).join('\n'), /Saving…/u)
   assert.match(h.page.render(80).map(strip).join('\n'), /Dispatched writes continue\./u)
   h.page.dispose()
+  const rendersAtRetirement = renders
   h.releaseMutation()
   await h.drain()
   assert.deepEqual(h.actions, [], 'the disposed page stays closed')
+  assert.equal(h.writes.length, 1, 'the admitted batch is still dispatched exactly once')
+  assert.deepEqual(h.writes[0]?.patch, { timeoutMs: { kind: 'set', value: 45_000 } })
+  assert.equal(h.effective().timeoutMs, 45_000, 'the owned write still settles the real effective sink')
+  assert.equal(renders, rendersAtRetirement, 'the retired page never publishes a late frame')
+  assert.equal(h.page.render(80).map(strip).join('').trim(), '', 'the retired page paints nothing')
 })
 
 test('a stale grouped pointer press cannot open an editor on a newer painted frame', async () => {
@@ -1217,10 +1229,18 @@ test('44x8 keeps the second field, its Reset and the dirty leave actions reachab
   assert.match(plain, /64000 bytes/u, 'its canonical value and unit stay whole')
   h.page.handleInput('?')
   frame = h.page.render(44)
+  assert.doesNotMatch(frame.map(strip).join('\n'), /Reset to inherited…/u,
+    'the reset action is not published before its facts are read')
   h.page.handleInput(END)
   frame = h.page.render(44)
-  plain = frame.map(strip).join('\n')
-  assert.match(plain, /Reset to inherited…/u)
+  assert.doesNotMatch(frame.map(strip).join('\n'), /Reset to inherited…/u,
+    'jumping to the tail never authorizes the reset')
+  h.page.handleInput('x')
+  frame = h.page.render(44)
+  assert.doesNotMatch(frame.map(strip).join('\n'), /Reset staged/u, 'an unread receipt stages nothing')
+  h.page.handleInput(HOME)
+  frame = scrollGroupedUntil(h.page, 44, 'Reset to inherited…')
+  assert.match(frame.map(strip).join('\n'), /Reset to inherited…/u, 'the sequential read reaches the action')
   h.page.handleInput('x')
   frame = h.page.render(44)
   plain = frame.map(strip).join('\n')
@@ -1912,11 +1932,17 @@ test('44x8 paints the SECOND field and its complete Reset target stages THAT fie
   let frame = h.page.render(44)
   assert.ok(numericRowIndex(frame, 'Output cap per stream') >= 0, `the second field is reachable at 44x8:\n${frame.join('\n')}`)
   h.page.handleInput('?')
-  h.page.render(44)
-  h.page.handleInput(END) // scroll the short disclosure to its explicit Reset
   frame = h.page.render(44)
+  assert.doesNotMatch(frame.map(strip).join('\n'), /Reset to inherited…/u,
+    'the reset action is not published before its facts are read')
+  h.page.handleInput(END)
+  frame = h.page.render(44)
+  assert.doesNotMatch(frame.map(strip).join('\n'), /Reset to inherited…/u,
+    'jumping to the tail never authorizes the reset')
+  h.page.handleInput(HOME)
+  frame = scrollGroupedUntil(h.page, 44, 'Reset to inherited…')
   const resetRow = numericRowIndex(frame, 'Reset to inherited…')
-  assert.ok(resetRow >= 0, `the complete reset action is reachable:\n${frame.join('\n')}`)
+  assert.ok(resetRow >= 0, `the sequential read reaches the action:\n${frame.join('\n')}`)
   clickNumericRow(h.page, frame, resetRow, 44, 'Reset to inherited…')
   frame = h.page.render(44)
   const plain = frame.map(strip).join('\n')
@@ -2014,36 +2040,41 @@ test('a grouped leave question publishes Save only when its necessary copy is co
 test('the grouped canonical fact splits before it clips, and an unshowable value admits no Stage', async () => {
   const h = await startedNumeric()
   h.page.setMaxRows(20)
+  h.page.handleInput(DOWN) // the output-cap field (bytes)
   h.page.handleInput(ENTER)
-  h.page.render(80)
+  h.page.render(44)
   h.page.handleInput('\x15')
-  for (const character of '1234567890123456789012345') h.page.handleInput(character)
+  for (const character of '1.2345678901234567e+300') h.page.handleInput(character)
+  // 34 cells: the raw editor itself shows the whole 23-cell number, so no
+  // second canonical fact is required.
   let frame = h.page.render(34)
   let plain = frame.map(strip).join('\n')
-  assert.match(plain, /Value sends/u, 'the canonical label never shares a clipped line')
-  assert.match(plain, /^\s+1\.2345678901234568e\+24 ms\s*$/mu, 'the complete canonical value is on its own line')
+  assert.doesNotMatch(plain, /Value sends/u, 'a fully visible raw number is its own proof')
   assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
-  h.page.handleInput(ENTER)
-  plain = h.page.render(80).map(strip).join('\n')
-  assert.match(plain, /1\.2345678901234568e\+24 ms/u)
-  assert.deepEqual(h.writes, [])
-  // Re-open the editor and shrink the grant until the value cannot be whole.
-  h.page.handleInput(ENTER)
-  h.page.render(80)
-  h.page.handleInput('\x15')
-  for (const character of '1234567890123456789012345') h.page.handleInput(character)
-  frame = h.page.render(26)
+  // 29 cells: the raw window clips, so the canonical fact appears whole, with
+  // no ellipsis.
+  frame = h.page.render(29)
   plain = frame.map(strip).join('\n')
-  assert.match(plain, /Value sends/u)
+  assert.ok(plain.includes('1.2345678901234567e+300 bytes'), 'the 29-cell line carries the whole canonical value')
+  assert.doesNotMatch(plain, /…/u, 'no ellipsis on a complete canonical fact')
+  assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
+  // 28 cells: the FACT cannot be whole while the Stage bar still fits; no Stage.
+  frame = h.page.render(28)
+  plain = frame.map(strip).join('\n')
+  assert.doesNotMatch(plain, /1\.2345678901234567e\+300 bytes/u)
   assert.match(plain, /…/u, 'the clipped value is visibly not the whole number')
   assert.doesNotMatch(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
   h.page.handleInput(ENTER)
-  assert.match(strip(h.page.render(26).at(-1) ?? ''), /Cancel \[Esc\]/u, 'the refused Stage keeps the editor')
-  // A sufficient grant returns the Stage; the draft is untouched.
-  frame = h.page.render(40)
+  frame = h.page.render(28)
+  assert.match(frame.map(strip).join('\n'), /Value: .*e\+300/u, 'the denied Stage keeps the raw Input (scrolled in its window)')
+  assert.match(strip(frame.at(-1) ?? ''), /Cancel \[Esc\]/u)
+  // A sufficient grant returns the Stage; the draft was untouched.
+  frame = h.page.render(30)
   assert.match(strip(frame.at(-1) ?? ''), /Stage \[Enter\]/u)
   h.page.handleInput(ENTER)
-  assert.match(h.page.render(80).map(strip).join('\n'), /1\.2345678901234568e\+24 ms/u)
+  plain = h.page.render(80).map(strip).join('\n')
+  assert.match(plain, /1\.2345678901234567e\+300 bytes/u)
+  assert.deepEqual(h.writes, [])
   h.page.dispose()
 })
 
@@ -2072,7 +2103,9 @@ test('an unconfirmed grouped outcome keeps the captured row truthful and offers 
   assert.match(plain, /Leaving does not undo it\./u)
   assert.match(plain, /Leave anyway \[D\]/u)
   assert.match(plain, /Requested Command timeout \(ms\)\s+45000 ms/u)
-  assert.match(plain, /Last confirmed\s+60000 ms/u)
+  assert.match(plain, /Last confirmed Command timeout \(ms\)\s+60000 ms/u)
+  assert.match(plain, /Last confirmed Output cap per stream \(bytes\)\s+64000 bytes/u,
+    'both captured caps are disclosed, not only the dirty field')
   h.page.handleInput(LEFT) // Keep
   assert.match(h.page.render(80).map(strip).join('\n'), /Outcome unconfirmed/u)
   // Refresh requires the explicit question, then re-reads the served row.
@@ -2099,6 +2132,30 @@ test('an unconfirmed grouped outcome keeps the captured row truthful and offers 
   await h.drain()
   assert.equal(h.writes.length, 2)
   assert.deepEqual(h.writes[1]?.patch, { timeoutMs: { kind: 'set', value: 5000 } })
+  h.page.dispose()
+})
+
+test('an ambiguous leave never wears the definite discard label and keeps its body answer', async () => {
+  const h = await startedNumeric({ unconfirmed: true })
+  stageNumeric(h.page, 80, '\x15', '45000')
+  h.page.handleInput('s')
+  await h.drain()
+  h.page.setMaxRows(20)
+  h.page.handleInput(ESC)
+  let frame = h.page.render(26)
+  const bar = strip(frame.at(-1) ?? '')
+  assert.doesNotMatch(bar, /Discard/u, 'an unknown outcome must never be labelled as an ordinary discard')
+  assert.match(bar, /Keep \[Esc\]/u)
+  assert.match(frame.map(strip).join('\n'), /Leave anyway…/u, 'the complete real answer stays in the body')
+  h.page.handleInput(LEFT) // Keep
+  assert.match(h.page.render(26).map(strip).join('\n'), /Status\s+Outcome unconfirmed/u)
+  h.page.handleInput(ESC)
+  frame = h.page.render(26)
+  const row = numericRowIndex(frame, 'Leave anyway…')
+  assert.ok(row >= 0, `the body answer is painted:\n${frame.join('\n')}`)
+  clickNumericRow(h.page, frame, row, 26, 'Leave anyway…')
+  assert.deepEqual(h.actions, ['done'])
+  assert.equal(h.writes.length, 1, 'leaving never retries the uncertain write')
   h.page.dispose()
 })
 

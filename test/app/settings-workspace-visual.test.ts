@@ -4093,7 +4093,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   // A parent ROW/category click is the SAME one leave gate (never a silent drop).
   await clickPainted(h, 'Visual tools')
   assert.match(h.view(), /Discard and leave loses staged values\./u, 'a parent row click opens the leave question')
-  await key(h, '\x1b') // Keep the parent-leave question: the draft survives
+  await clickPainted(h, 'Keep [Esc]', true) // pointer Keep: the draft survives
   await h.vt.waitForRender()
   assert.match(h.view(), /Settings · Tools · Shell execution/u)
 
@@ -4121,14 +4121,14 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await stageShellField(h, 'Command timeout (ms)', '45000')
   await key(h, '\x1b')
   await h.vt.waitForRender()
-  await key(h, 's')
+  await clickPainted(h, 'Save [S]', true) // pointer Save from the leave question
   await settle(h, 12)
   assert.equal(h.shellExecutionBatches().length, 1)
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save and the question stay in the same group')
   await stageShellField(h, 'Command timeout (ms)', '44000')
   await key(h, '\x1b')
   await h.vt.waitForRender()
-  await key(h, 'd')
+  await clickPainted(h, 'Discard and leave [D]', true) // pointer Discard from the question
   await settle(h, 8)
   assert.match(h.view(), /Settings · Tools · Rows/u, 'Discard and leave returns to the Rows level')
   assert.equal(h.shellExecutionBatches().length, 1, 'leaving never writes again')
@@ -4141,7 +4141,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await clickPainted(h, 'Models')
   await h.vt.waitForRender()
   assert.match(h.view(), /Discard and leave loses staged values\./u, 'a category click is the same leave gate')
-  await key(h, 's')
+  await clickPainted(h, 'Save [S]', true) // pointer Save on the leave question
   await settle(h, 12)
   assert.equal(h.shellExecutionBatches().length, 2)
   assert.match(h.view(), /Settings · Tools · Shell execution/u, 'Save keeps the page and does NOT follow the captured category')
@@ -4149,7 +4149,7 @@ test('the Root Shell group guards parent navigation, local Discard, Refresh and 
   await stageShellField(h, 'Command timeout (ms)', '43000')
   await clickPainted(h, 'Models')
   await h.vt.waitForRender()
-  await key(h, 'd')
+  await clickPainted(h, 'Discard and leave [D]', true) // pointer Discard
   await settle(h, 8)
   assert.match(h.view(), /Settings · Categories/u, 'Discard and leave reaches the captured category destination')
   assert.match(h.view(), /> Models/u, 'the captured category is really selected')
@@ -4282,7 +4282,9 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
   assert.match(h.view(), /1 unsaved change/u, 'Keep preserves the draft at 44x8')
 
   // 200/100/44 x 2: NO body row -> only the tenant's own Back is admitted;
-  // every hidden action and the local Tab are inert, and the draft survives.
+  // every hidden action, both Tab directions and the real recovery keys are
+  // inert, no Host read happens, and the exact field draft survives.
+  const refreshesBeforeZero = h.shellExecutionRefreshes()
   for (const zeroWidth of [200, 100, 44] as const) {
     h.vt.resize(zeroWidth, 2)
     await h.vt.waitForRender()
@@ -4291,23 +4293,33 @@ test('the Root Shell group stays reachable and safe at the frozen short and zero
       `${zeroWidth}x2 paints only the page's own Back: ${JSON.stringify(h.rowsPlain().at(-1))}`)
     const before = h.view()
     await key(h, '\t')
+    await key(h, '\x1b[Z')
     await key(h, 's')
+    await key(h, 'r')
+    await key(h, 'd')
     await key(h, 'x')
     await key(h, '?')
     await key(h, '\r')
     await key(h, '\x1b[B')
     await settle(h, 6)
     assert.equal(h.shellExecutionAttempts(), 0, `${zeroWidth}x2: no hidden action may write`)
+    assert.equal(h.shellExecutionRefreshes(), refreshesBeforeZero, `${zeroWidth}x2: no hidden action may read the Host`)
     assert.equal(h.view(), before, `${zeroWidth}x2: no hidden frame change happened`)
   }
-  // Restoring the grant paints the same draft and a FRESH action.
+  // Restoring the grant paints the SAME selected second field, the untouched
+  // timeout, and a fresh Save of exactly the output-cap draft.
   h.vt.resize(200, 50)
   await h.vt.waitForRender()
   await settle(h, 6)
-  assert.match(h.view(), /Command timeout \(ms\)\s+128000|\d+ unsaved change/u, 'the draft survives the grant loss')
+  assert.match(h.view(), /> Output cap per stream \(bytes\)/u, 'the second field is still the selected one')
+  assert.match(h.view(), /Command timeout \(ms\)\s+60000 ms/u, 'the timeout was never part of this draft')
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u, 'the exact staged cap survives')
+  assert.equal(h.shellExecutionRefreshes(), refreshesBeforeZero, 'no grant loss ever refreshed the Host')
   await clickPainted(h, 'Save [S]', true)
   await settle(h, 12)
   assert.equal(h.shellExecutionAttempts(), 1, 'the restored grant admits a fresh Save')
+  assert.deepEqual(h.shellExecutionBatches()[0]?.patch, { maxOutputBytes: { kind: 'set', value: 128_000 } },
+    'the fresh Save sends exactly the output-cap set, never the timeout')
   h.dispose()
 })
 
@@ -4475,6 +4487,30 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
   await settle(h, 12)
   assert.equal(h.shellExecutionAttempts(), 1)
   assert.equal(h.shellExecutionBatches().length, 1)
+  // The REAL 44x8 grant: the settlement status is not scrolled away by the
+  // selected-field reveal, both caps stay reachable, and the hidden `?` never
+  // opens an Advanced disclosure in the read-only state.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  await settle(h, 6)
+  assert.match(h.view(), /Status\s+Outcome unconfirmed/u, 'the 44x8 frame keeps the settlement status')
+  assert.match(h.view(), /Last-known · Host model-tool executor/u)
+  // The hidden `?` never opens Advanced in the read-only settlement state.
+  const readOnlyUnknown = h.view()
+  await key(h, '?')
+  await settle(h, 4)
+  assert.equal(h.view(), readOnlyUnknown, 'the grouped read-only state never opens Advanced')
+  assert.doesNotMatch(h.view(), /Effective\s+\d+/u)
+  // The wheel reaches the selected field and its last-confirmed cap; HOME
+  // returns to the truthful settlement status.
+  for (let step = 0; step < 20 && !/Last confirmed:|> Command timeout|Output cap per stream/u.test(h.view()); step += 1) {
+    wheel(h, 4, 20, true)
+    await settle(h, 2)
+  }
+  assert.match(h.view(), /Last confirmed:|Command timeout/u, 'the selected field stays reachable at 44x8')
+  await key(h, '\x1b[H')
+  await settle(h, 4)
+  assert.match(h.view(), /Status\s+Outcome unconfirmed/u, 'the settlement status is reachable again')
   h.vt.resize(160, 14)
   await h.vt.waitForRender()
   await settle(h, 6)
@@ -4493,7 +4529,9 @@ test('the Root Shell group keeps an unconfirmed outcome out of the current-row s
   assert.match(h.view(), /Leaving does not undo it\./u)
   assert.match(h.view(), /Leave anyway \[D\]/u)
   assert.match(h.view(), /Requested Command timeout \(ms\)\s+45000 ms/u)
-  assert.match(h.view(), /Last confirmed\s+60000 ms/u)
+  assert.match(h.view(), /Last confirmed Command timeout \(ms\)\s+60000 ms/u)
+  assert.match(h.view(), /Last confirmed Output cap per stream \(bytes\)\s+64000 bytes/u,
+    'both captured caps are disclosed, not only the dirty field')
   await key(h, '\x1b') // Keep
   await h.vt.waitForRender()
   // Refresh requires the explicit question, then re-reads the served row.
@@ -4568,6 +4606,43 @@ test('the real Root Shell short grant completes the whole pointer journey', asyn
   await clickPainted(h, 'Back [Esc]', true)
   await settle(h, 4)
   assert.match(h.view(), /Settings · Tools · Rows/u, 'the pointer journey exits to Rows')
+  h.dispose()
+})
+
+test('the Shell short group leaves on its compact pointer actions and closes by pointer', async () => {
+  const h = setup({
+    columns: 44,
+    rows: 20,
+    shellExecution: { executor: 'bash', timeoutMs: 60_000, maxOutputBytes: 64_000 },
+  })
+  await openShellGroup(h, 'enter')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  await key(h, '\x15')
+  for (const character of '128000') await key(h, character)
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  // Pointer Keep retains the group and the exact draft.
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Keep [Esc]', true)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Output cap per stream \(bytes\)\s+128000 bytes/u, 'Keep retains the exact selected draft')
+  // Pointer Discard and leave really retires the group to Rows, no write.
+  await key(h, '\x1b')
+  await h.vt.waitForRender()
+  await clickPainted(h, 'Discard and leave [D]', true)
+  await settle(h, 8)
+  assert.match(h.view(), /Settings · Tools · Rows/u, 'the compact Discard really leaves the group')
+  assert.equal(h.shellExecutionAttempts(), 0, 'the short leave never writes')
+  // Rows -> Categories -> Close through the painted Back/Close spans.
+  await clickPainted(h, 'Back [Esc]', true)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Categories/u, 'the painted Rows Back reaches Categories')
+  await clickPainted(h, 'Close [Esc]', true)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · /u, 'the painted Categories Close closes Settings')
   h.dispose()
 })
 
