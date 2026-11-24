@@ -25,6 +25,7 @@ import { SubagentSettingsPage } from '../../src/tui/panels/subagent-settings-pag
 
 const ENTER = '\r'
 const ESC = '\x1b'
+const LEFT = '\x1b[D'
 const DOWN = '\x1b[B'
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;]*m/gu, '')
 
@@ -971,6 +972,121 @@ test('the single-value Reset confirmation requires the risk copy to be painted f
   assert.match(scrolled, /Confirm \[Enter\]/u, 'Confirm appears only after the whole copy was read')
   page.handleInput(ENTER)
   assert.deepEqual(writes, [{ maxParallelToolCalls: { kind: 'reset' } }])
+  page.dispose()
+})
+
+test('the single-value page treats Left as its own Back and ? as the disclosure toggle', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  let dones = 0
+  const controller = (): HostNumericSettingsController<NumericLoopSettings> => new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision: 1, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async () => ({ kind: 'accepted' }),
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller: controller(),
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => { dones += 1 },
+  })
+  page.setMaxRows(10)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const plain = (): string => page.render(80).map(strip).join('\n')
+  // `?` opens Advanced, `?` closes it again (the SAME key is the toggle).
+  page.handleInput('?')
+  assert.match(plain(), /Effective\s+10/u)
+  page.handleInput('?')
+  assert.match(plain(), /Current value\s+10/u, 'the second ? closes the disclosure')
+  assert.doesNotMatch(plain(), /Effective\s+10/u)
+  // Left in the clean Detail is the same Back as Esc.
+  page.handleInput(LEFT)
+  assert.equal(dones, 1, 'Left on the clean Detail walks back')
+  // Left in Advanced closes the disclosure before it walks back.
+  page.handleInput('?')
+  assert.match(plain(), /Effective\s+10/u)
+  page.handleInput(LEFT)
+  assert.match(plain(), /Current value\s+10/u, 'Left in Advanced returns to the clean Detail')
+  assert.equal(dones, 1, 'the first Left never left the page')
+  page.handleInput(LEFT)
+  assert.equal(dones, 2, 'the next Left walks back')
+  // Input still owns Left as a cursor move, never as Back.
+  page.handleInput(ENTER)
+  page.render(80)
+  assert.match(plain(), /Value: 10/u)
+  page.handleInput(LEFT)
+  page.render(80)
+  assert.equal(dones, 2, 'Left inside the raw Input never leaves the page')
+  page.dispose()
+})
+
+test('a dropped Confirm segment is never keyboard-admitted for either main action', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  const writes: SectionPatch<NumericLoopSettings>[] = []
+  const controller = (): HostNumericSettingsController<NumericLoopSettings> => new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision: 1, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async patch => { writes.push(patch); return { kind: 'accepted' } },
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller: controller(),
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => {},
+  })
+  // 22 cells cannot host `Confirm [Enter] · Cancel [Esc]`: the Confirm segment is
+  // dropped WHOLE, so neither main action may be reached from the keyboard.
+  page.setMaxRows(20)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  page.handleInput(ENTER) // the raw Input
+  page.render(22)
+  page.handleInput('\x15')
+  page.handleInput('4')
+  page.render(22)
+  const inputFrame = page.render(22).map(strip).join('\n')
+  assert.doesNotMatch(inputFrame, /Confirm \[Enter\]/u, 'the dropped Confirm is not painted')
+  page.handleInput(ENTER)
+  assert.deepEqual(writes, [], 'a dropped Confirm is never keyboard-admitted')
+  // The disclosure's reset Confirm has the same admission.
+  page.handleInput(ESC) // Cancel the Input
+  page.render(22)
+  page.handleInput('?')
+  page.render(22)
+  page.handleInput('x')
+  const question = page.render(22).map(strip).join('\n')
+  assert.match(question, /decides the value\./u, 'the whole risk copy fits this grant')
+  assert.doesNotMatch(question, /Confirm \[Enter\]/u, 'the Confirm segment is dropped at 22 cells')
+  page.handleInput(ENTER)
+  assert.deepEqual(writes, [], 'the reset can never be confirmed through a dropped span')
   page.dispose()
 })
 

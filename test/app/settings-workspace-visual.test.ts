@@ -2747,6 +2747,61 @@ test('the real Root Agent Detail tenant is entered explicitly and edits the cap 
   h.dispose()
 })
 
+test('a wrapped reset risk statement still has to be painted before Confirm exists', async () => {
+  const h = setup({ columns: 44, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r') // the tenant's raw Input
+  await key(h, '\x1b') // Cancel -> the clean Detail
+  await settle(h, 6)
+  await key(h, '?') // Advanced
+  await settle(h, 6)
+  await key(h, 'x') // the guarded reset confirmation
+  await settle(h, 6)
+  const first = h.view()
+  // The 44-cell risk copy wraps, so the last statement is NOT on screen yet.
+  assert.doesNotMatch(first, /The Host readback decides the value\./u,
+    `the wrapped risk copy cannot fit the first frame:\n${first}`)
+  assert.doesNotMatch(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u,
+    'Confirm does not exist while a risk statement is unread')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.deepEqual(h.agentLoopWrites(), [], 'Enter cannot confirm an unread risk statement')
+  // Read the rest of the copy, then Confirm becomes real and dispatches once.
+  for (let step = 0; step < 6; step += 1) {
+    if (/Confirm \[Enter\]/u.test(h.rowsPlain().at(-1) ?? '')) break
+    await key(h, '\x1b[B')
+    await settle(h, 4)
+  }
+  assert.match(h.view(), /The Host readback decides the value\./u, 'the last statement is reachable')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'Confirm appears only after the whole copy')
+  await key(h, '\r')
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'reset' }])
+  h.dispose()
+})
+
+test('the mounted tenant leaves the visible parent rail to its own wheel owner', async () => {
+  const h = setup({ columns: 200, rows: 8, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await settle(h, 6)
+  assert.match(h.view(), /Settings · Agent · Parallel tool calls/u, 'the tenant is mounted')
+  // At 200x8 the 10-category rail has 3 content rows and its selected item sits
+  // in a window that can still move: a wheel over the RAIL must scroll it.
+  assert.doesNotMatch(h.view(), /^ {2}Host\b/mu, 'the rail does not start on Host')
+  wheel(h, 4, 5, false)
+  await settle(h, 6)
+  assert.match(h.view(), /^ {2}Host\b/mu, 'the wheel over the visible Categories pane scrolls the rail')
+  assert.match(h.view(), /Current value\s+10/u, 'the tenant body keeps its own state')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u, 'the tenant bar is untouched')
+  assert.deepEqual(h.agentLoopWrites(), [], 'scrolling a parent pane never writes')
+  h.dispose()
+})
+
 test('the Agent tenant proves no-op, invalid text and Cancel never reach the Host', async () => {
   const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 3, inherited: 2 } })
   await h.open('Agent')
@@ -3032,6 +3087,39 @@ test('a narrow frame makes the clean tenant Tab inert and re-entry builds a FRES
   await settle(h, 6)
   assert.match(h.view(), /Value:\s*10/u, 'the fresh page re-captures the current value')
   assert.deepEqual(h.agentLoopWrites(), [], 'the whole navigation journey wrote nothing')
+  h.dispose()
+})
+
+test('a Host generation replacement invalidates the captured Agent read before Confirm', async () => {
+  const h = setup({ columns: 160, rows: 44, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })
+  await h.open('Agent')
+  await key(h, '\r')
+  await highlightRow(h, 'Parallel tool calls')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '6')
+  // A replacement Host generation keeps the SAME revision and value: only the
+  // generation identity can prove the captured read is stale.
+  h.replaceAgentLoopGeneration()
+  await key(h, '\r')
+  await settle(h, 8)
+  assert.deepEqual(h.agentLoopWrites(), [], 'a replaced generation never dispatches')
+  assert.match(h.view(), /Host settings changed or are unavailable; cancel and refresh\./u,
+    'the real currentness refusal is painted')
+  assert.match(h.view(), /Value:\s*6/u, 'the raw text is retained')
+  await key(h, '\u001b')
+  await settle(h, 6)
+  assert.match(h.view(), /Last-known/u, 'the replaced read is labelled last-known')
+  await clickPainted(h, 'Refresh [R]', true)
+  await settle(h, 10)
+  assert.match(h.view(), /Change \[Enter\]/u, 'the explicit Refresh makes the new generation current')
+  await key(h, '\r')
+  await key(h, '\x15')
+  await key(h, '7')
+  await clickPainted(h, 'Confirm [Enter]', true)
+  await settle(h, 12)
+  assert.deepEqual(h.agentLoopWrites(), [{ field: 'maxParallelToolCalls', op: 'set', value: 7 }],
+    'a new explicit Change writes against the NEW generation')
   h.dispose()
 })
 
@@ -11411,6 +11499,32 @@ test('the single-value Agent tenant keeps its geometry, input and Esc across the
         assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} ${theme}: row ${index} fits the width`)
       }
       h.dispose()
+
+      // The Shell execution page keeps its staged form under the same frozen
+      // sizes (the shared numeric renderer's other consumer).
+      const shell = setup({
+        columns,
+        rows,
+        doc: { theme },
+        shellExecution: { executor: 'pwsh', timeoutMs: 120_000, maxOutputBytes: 64_000, inheritedMaxOutputBytes: 32_000 },
+      })
+      await shell.open('Tools')
+      await key(shell, '\r')
+      await highlightRow(shell, 'Shell execution')
+      await key(shell, '\r')
+      await settle(shell)
+      const shellFrame = shell.view()
+      assert.match(shellFrame, /Settings · Tools · Shell execution/u, `${columns}x${rows} ${theme}: shell page identity`)
+      assert.match(shellFrame, /Windows/u, `${columns}x${rows} ${theme}: the Host executor identity`)
+      assert.match(shell.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows} ${theme}: shell Esc affordance`)
+      await key(shell, 'x')
+      await settle(shell)
+      assert.match(shell.view(), /Save \[S\]/u, `${columns}x${rows} ${theme}: shell Save affordance`)
+      await key(shell, '\x1b')
+      await settle(shell)
+      await key(shell, 'y')
+      await settle(shell)
+      shell.dispose()
     }
   }
 
@@ -11473,7 +11587,14 @@ test('a resize between the tenant press and its release revokes every physical g
   await h.vt.waitForRender()
   h.vt.resize(80, 24)
   await h.vt.waitForRender()
-  release(h, barRow, barCol)
+  // Release on the NEW frame's own Confirm cells: only the stale revision/box
+  // identity can refuse this, so the fence itself is what is under test (the
+  // old coordinates would also miss the 24-row viewport for an unrelated
+  // reason).
+  const resizedRow = h.rowsPlain().length - 1
+  const resizedCol = cellIndexOf(h, resizedRow, 'Confirm [Enter]')
+  assert.ok(resizedRow !== barRow || resizedCol !== barCol, 'the resize really moved the Confirm cells')
+  release(h, resizedRow, resizedCol)
   await settle(h, 8)
   assert.deepEqual(h.agentLoopWrites(), [], 'a straddling resize gesture never writes')
   assert.match(h.view(), /Value:\s*6/u, 'the raw Input survives the resize')

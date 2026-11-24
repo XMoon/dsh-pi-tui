@@ -458,6 +458,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     if (this.disposed || this.question === undefined || this.question.kind !== 'reset') return
     const snapshot = this.controller.snapshot()
     if (snapshot.saving) return
+    // The keyboard Confirm needs BOTH receipts: the whole risk copy read AND the
+    // complete Confirm span really painted in this frame (a dropped segment can
+    // never be activated by a shortcut).
+    if (!this.paintedConfirm) return
     if (!this.resetRiskRead()) return
     if (!this.editable(snapshot)) { this.changed(); return }
     const key = this.fields[0]?.key
@@ -483,16 +487,20 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
 
   /** Whether every necessary reset risk line has been painted in THIS question
    *  instance, width and body grant (a shorter frame re-arms the receipt). */
-  private resetRiskRead(): boolean {
+  /** Whether every necessary reset risk STATEMENT was painted inside this
+   *  question instance at THIS width/grant. It is keyed by the logical statement
+   *  (never by a wrapped physical line), so a sentence that wraps on a narrow
+   *  frame still has to be fully read before Confirm exists. */
+  private resetRiskRead(width: number = this.paint?.width ?? 0): boolean {
     if (this.question?.kind !== 'reset') return false
-    if (this.riskSignature !== this.riskSignatureFor()) return false
-    for (let index = 0; index < RESET_RISK.length; index += 1) {
-      if (!this.riskSeen.has(index)) return false
+    if (this.riskSignature !== this.riskSignatureFor(width)) return false
+    for (let statement = 0; statement < RESET_RISK.length; statement += 1) {
+      if (!this.riskSeen.has(statement)) return false
     }
     return true
   }
-  private riskSignatureFor(): string {
-    return `${this.questionIdentity() ?? ''}|${this.paint?.width ?? 0}|${this.rowGrant}`
+  private riskSignatureFor(width: number): string {
+    return `${this.questionIdentity() ?? ''}|${width}|${this.rowGrant}`
   }
 
   handleInput(data: string): void {
@@ -560,6 +568,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     }
     if (this.advanced) {
       if (this.singleScrollKey(data)) { this.scrollSingle(data); return }
+      // `?` and Left close the disclosure exactly like Esc (its own Back).
+      if (data === DETAILS_KEY || matchesKey(data, 'left')) { this.back(); return }
       if (matchesKey(data, KEYS.reset) && this.editable(snapshot)) { this.openQuestion('reset'); return }
       if (matchesKey(data, KEYS.refresh)) { this.refresh(); return }
       return
@@ -568,6 +578,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       if (this.editable(snapshot)) this.beginSingleInput()
       return
     }
+    if (matchesKey(data, 'left')) { this.back(); return }
     if (data === DETAILS_KEY) { this.openAdvanced(); return }
     if (matchesKey(data, KEYS.refresh)) { this.refresh(); return }
     if (this.singleScrollKey(data)) this.scrollSingle(data)
@@ -758,15 +769,17 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     this.paintedQuestion = undefined
     this.paintedConfirm = false
     let content: ContentLine[]
-    let risk: readonly number[] = []
+    let mustSee: readonly number[] = []
+    let risk: readonly { readonly line: number; readonly statement: number }[] = []
     if (this.question !== undefined) {
       const question = this.singleQuestionLines(width, snapshot)
       content = question.lines
+      mustSee = question.mustSee
       risk = question.risk
     } else if (this.numberInput !== undefined) {
       const built = this.singleInputLines(width, snapshot)
       content = built.lines
-      risk = built.critical
+      mustSee = built.critical
     } else if (this.advanced) {
       content = this.singleAdvancedLines(width, snapshot)
     } else {
@@ -788,18 +801,20 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     // READ receipt because its risk copy is legitimately scrollable on a short
     // frame.
     if (this.question?.kind === 'reset') {
-      if (this.riskSignature !== this.riskSignatureFor()) {
-        this.riskSignature = this.riskSignatureFor()
+      const signature = this.riskSignatureFor(width)
+      if (this.riskSignature !== signature) {
+        this.riskSignature = signature
         this.riskSeen.clear()
       }
       for (const lineIndex of visible) {
-        const position = risk.indexOf(lineIndex)
-        if (position >= 0) this.riskSeen.add(position)
+        for (const entry of risk) {
+          if (entry.line === lineIndex) this.riskSeen.add(entry.statement)
+        }
       }
     }
     const complete = this.question?.kind === 'reset'
-      ? this.resetRiskRead()
-      : risk.every(lineIndex => visible.has(lineIndex))
+      ? this.resetRiskRead(width)
+      : mustSee.every(lineIndex => visible.has(lineIndex))
     if (this.question !== undefined && complete) this.paintedQuestion = this.questionIdentity()
     while (lines.length < bodyRows) lines.push(fit('', width))
     lines.push(this.renderSingleBar(snapshot, width, complete, maxOffset > 0))
@@ -915,35 +930,41 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     return lines
   }
 
-  private singleQuestionLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): { lines: ContentLine[]; risk: readonly number[] } {
+  private singleQuestionLines(
+    width: number,
+    snapshot: HostNumericSettingsSnapshot<T>,
+  ): { lines: ContentLine[]; mustSee: readonly number[]; risk: readonly { readonly line: number; readonly statement: number }[] } {
     const question = this.question!
     if (question.kind === 'reset') {
       const lines: ContentLine[] = []
       lines.push({ text: this.singleRow('Current', this.singleValue(snapshot), color.text) })
       lines.push({ text: this.singleRow('Inherited', this.singleInherited(snapshot), color.textDim) })
-      const risk: number[] = []
-      for (const line of RESET_RISK) {
-        for (const wrapped of this.singleNote(line, width)) {
-          risk.push(lines.length)
+      // Every PHYSICAL wrapped line of a statement carries its statement index:
+      // reading the wrapped fragments of the first two statements can never
+      // satisfy the third one.
+      const risk: { line: number; statement: number }[] = []
+      RESET_RISK.forEach((statement, index) => {
+        for (const wrapped of this.singleNote(statement, width)) {
+          risk.push({ line: lines.length, statement: index })
           lines.push(wrapped)
         }
-      }
-      return { lines, risk }
+      })
+      return { lines, mustSee: [], risk }
     }
     const facts = question.kind === 'refresh'
       ? REFRESH_QUESTION
       : this.ambiguous(snapshot) ? AMBIGUOUS_LEAVE : DEFINITE_LEAVE
     const lines: ContentLine[] = []
-    const risk: number[] = []
+    const mustSee: number[] = []
     for (const fact of facts) {
       for (const wrapped of this.singleNote(fact, width, color.warning)) {
-        risk.push(lines.length)
+        mustSee.push(lines.length)
         lines.push(wrapped)
       }
     }
     const requested = this.singleRequested(snapshot)
     if (requested !== undefined) lines.push({ text: this.singleRow('Requested', requested, color.text) })
-    return { lines, risk }
+    return { lines, mustSee, risk: [] }
   }
 
   private renderSingleBar(snapshot: HostNumericSettingsSnapshot<T>, width: number, complete: boolean, scrollable: boolean): string {
@@ -1003,7 +1024,13 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       ]
     }
     const layout = layoutActionBarRow(segments, width)
-    if (layout.truncated) return fit(color.textMuted(layout.text), width)
+    if (layout.truncated) {
+      // Not even one segment fits WHOLE: the row is an inert truncated hint, so
+      // no action (least of all a main Confirm) may stay keyboard-admitted.
+      this.paintedConfirm = false
+      this.barSpans = []
+      return fit(color.textMuted(layout.text), width)
+    }
     const painted: string[] = []
     const spans: { id: string; action: BarAction; startCol: number; endCol: number }[] = []
     for (const span of layout.spans) {

@@ -4489,7 +4489,15 @@ export class SettingsWorkspacePanel implements Component {
       if (this.disposed) return
       if (this.specialistPage !== instance || this.specialistRow !== 'agent-loop') return
       if (this.categoryId !== sourceCategory || this.rowId !== sourceRow) return
-      if (!this.legalLeaveTarget(target)) return
+      if (!this.legalLeaveTarget(target)) {
+        // The destination vanished while the question was open. The user already
+        // discarded, so the ONE safe disposition is the source level itself: the
+        // vanished target is refused (never applied, never requeued, never
+        // redirected to a same-named owner).
+        this.closeSpecialist()
+        this.leaveDetailTo('rows')
+        return
+      }
       // The child already committed its question state and revoked its grants:
       // this is the ONE retirement of the SAME instance before the transaction.
       this.closeSpecialist()
@@ -6147,38 +6155,42 @@ export class SettingsWorkspacePanel implements Component {
       if (this.detailTenantActive()) {
         // SUX-01: the tenant's BODY gestures are delivered through the cell
         // press/click handlers with the BOX-sized event its painted grant uses.
-        // This screen-level handler owes it only the wheel; re-delivering the
-        // terminal-sized press/click here would retire the child's admitted
-        // body press between its press and its release. The parent panes below
-        // keep their own wheel owner.
-        if (box === undefined || !inside || event.type !== 'wheel') return undefined
-        if (this.specialistPage.grantAwaitingPaint?.() === true) return { handled: true }
+        // This screen-level handler owes it only the wheel INSIDE its painted
+        // body: re-delivering the terminal-sized press/click here would retire
+        // the child's admitted body press between its press and its release.
+        if (box !== undefined && inside) {
+          if (event.type !== 'wheel') return undefined
+          if (this.specialistPage.grantAwaitingPaint?.() === true) return { handled: true }
+          const result = this.specialistPage.handleMouse?.({
+            ...event,
+            x: event.x - box.x,
+            y: event.y - box.top,
+            screenX: event.screenX - box.x,
+            screenY: event.screenY - box.top,
+            width: box.width,
+            height: box.rows,
+          })
+          this.intents.requestRender()
+          return result
+        }
+        // Outside the tenant body the visible parent Categories/Rows keep their
+        // OWN wheel owner below (a hidden pane still owns nothing).
+      } else {
+        if (box === undefined || !inside) return undefined
+        // A wheel may only scroll a body whose current grant really painted.
+        if (this.specialistPage.grantAwaitingPaint?.() === true) {
+          return event.type === 'wheel' ? { handled: true } : undefined
+        }
         const result = this.specialistPage.handleMouse?.({
           ...event,
           x: event.x - box.x,
           y: event.y - box.top,
           screenX: event.screenX - box.x,
           screenY: event.screenY - box.top,
-          width: box.width,
-          height: box.rows,
         })
         this.intents.requestRender()
         return result
       }
-      if (box === undefined || !inside) return undefined
-      // A wheel may only scroll a body whose current grant really painted.
-      if (this.specialistPage.grantAwaitingPaint?.() === true) {
-        return event.type === 'wheel' ? { handled: true } : undefined
-      }
-      const result = this.specialistPage.handleMouse?.({
-        ...event,
-        x: event.x - box.x,
-        y: event.y - box.top,
-        screenX: event.screenX - box.x,
-        screenY: event.screenY - box.top,
-      })
-      this.intents.requestRender()
-      return result
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
