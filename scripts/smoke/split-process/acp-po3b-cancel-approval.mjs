@@ -177,9 +177,18 @@ async function openAcpClient(scopeDir) {
   }
 }
 
-function sendRequest(client, id, method, params) {
+async function sendRequest(client, id, method, params) {
   client.send({ jsonrpc: '2.0', id, method, params })
-  return client.next(120_000)
+  for (;;) {
+    const message = await client.next(120_000)
+    // Standard notifications never stand in for the control response.
+    if (message?.method === 'session/update') {
+      if (message.params?.update?.sessionUpdate === 'available_commands_update') continue
+      continue
+    }
+    if (message?.id === id && (message.result !== undefined || message.error !== undefined)) return message
+    assert(false, `PO-3B: unexpected message while awaiting control response ${String(id)}: ${JSON.stringify(message).slice(0, 300)}`)
+  }
 }
 
 /** Read this connection's messages until the response for `id` arrives. */
