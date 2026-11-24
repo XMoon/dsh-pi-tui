@@ -1038,16 +1038,14 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       }
       const live = sessions.get(sessionId)
       if (live !== undefined) {
-        const outcome = await this.rebuildLiveSession(sessionId, persistence, sessions, query)
-        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+        await this.rebuildLiveSession(sessionId, persistence, sessions, query)
         return
       }
       // A rebuild obligation is NOT a disposal prefix proof: read and replay
       // the complete official durable source, including accepted events beyond
       // the old checkpoint. A prefix proof would clear `dirty` while omitting
       // exactly those events.
-      const outcome = await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
-      if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+      await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
     } catch (error) {
       if (this.lifecycle.signal.aborted || this.disposed) return
       this.sourceFaulted = true
@@ -1652,13 +1650,29 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         if (outcome === 'complete') outcome = await this.proveCurrentSource(sessionId, record, persistence)
       }
       if (outcome === 'complete') {
-        this.settleHeldBatch(sessionId)
-        this.settleDroppedCoverage(sessionId)
-        this.reconcilePending.delete(sessionId)
-        counters.replayCompleted += 1
-      } else {
-        await this.markSessionDirty(sessionId)
+        // Terminal success is a candidate-fenced short commit: the held batch,
+        // evicted coverage, verified revision and repair barrier settle together
+        // only while THIS replay's expected checkpoint and live identity still
+        // hold. A superseding same-ID candidate makes this stale and must never
+        // clear the newer candidate's obligation.
+        const terminal = await this.commitWitness(witness, () => {
+          this.settleHeldBatch(sessionId)
+          this.settleDroppedCoverage(sessionId)
+          this.rememberVerifiedRevision(sessionId, record, persistence)
+          this.reconcilePending.delete(sessionId)
+        })
+        if (terminal === 'committed') {
+          counters.replayCompleted += 1
+          return 'complete'
+        }
+        if (terminal === 'stale') {
+          // A newer same-ID candidate/write superseded this terminal. Keep its
+          // obligation and re-arm a coalesced repair; never settle by id.
+          this.scheduleSessionRepair(sessionId, 'rebuild')
+        }
+        return terminal
       }
+      await this.markSessionDirty(sessionId)
       return outcome
     } finally {
       this.releaseWitness(witness)
@@ -1687,7 +1701,6 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     this.lifecycle.signal.throwIfAborted()
     if (snapshot === undefined || snapshot.revision === undefined) return 'stale'
     if (snapshot.revision !== record.revision) return 'stale'
-    this.rememberVerifiedRevision(sessionId, record, persistence)
     return 'complete'
   }
 
@@ -1861,14 +1874,17 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         const inherited = Number(observation.inheritedEventCount)
         const events = eventsOf(observation.events, sessionId)
         const outcome = await this.replayEventList(sessionId, observation.header, inherited, events, witness, true)
-        if (outcome === 'complete') {
+        if (outcome !== 'complete') {
+          await this.markSessionDirty(sessionId)
+          return outcome
+        }
+        const terminal = await this.commitWitness(witness, () => {
           this.settleHeldBatch(sessionId)
           this.settleDroppedCoverage(sessionId)
           this.reconcilePending.delete(sessionId)
-        } else {
-          await this.markSessionDirty(sessionId)
-        }
-        return outcome
+        })
+        if (terminal === 'stale') this.scheduleSessionRepair(sessionId, 'rebuild')
+        return terminal === 'committed' ? 'complete' : terminal
       } finally {
         observation[Symbol.dispose]()
       }
@@ -2318,8 +2334,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
         // or uncertain checkpoint has accepted events beyond that prefix, so a
         // disposal/repair must replay the complete official source instead of
         // settling `dirty=false` and publishing `ready` with missing history.
-        const outcome = await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
-        if (outcome === 'complete') this.reconcilePending.delete(sessionId)
+        await this.rebuildFromPersistence(sessionId, persistence, sessions, query)
         return
       }
       const witness = this.createWitness(sessionId, persistence, sessions, checkpoint)

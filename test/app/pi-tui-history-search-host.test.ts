@@ -3028,6 +3028,150 @@ test('a coverage watermark survives a replay whose final currentness proof faile
   }
 })
 
+test('a superseding same-ID write cannot let a stale replay settle a newer coverage obligation', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-r4t-')
+  const source = mutableSource('/repo/r4t', 'r4t')
+  source.live = true
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const persistence = deps.sessionPersistence()
+  const internals = service as unknown as {
+    index: {
+      occurrenceCount(): number
+      checkpointOf(id: string): {
+        headerHash: string
+        inheritedCut: number
+        headerCwd: string | null
+        nextSeq: number
+        effectiveCwd: string | null
+        sourceState: 'persisted' | 'live'
+      } | undefined
+    }
+    writeBatch(input: {
+      sessionId: string
+      headerHash: string
+      inheritedEventCount: number
+      headerCwd: string | null
+      baseNextSeq: number
+      effectiveCwd: string | null
+      sourceState: 'persisted' | 'live'
+      events: readonly unknown[]
+    }): unknown
+    droppedAccepted: Map<string, number>
+    sessionRepairFlights: Map<string, { promise: Promise<void> }>
+    verifySources(): Promise<void>
+  }
+  const inbox = (seq: number, text: string) => ({
+    type: 'agent/inbox/spliced',
+    seq,
+    time: 16_000 + seq,
+    data: {
+      target: 'next-turn',
+      start: seq,
+      inserted: [{
+        id: `r4t-${String(seq)}`,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user', rpcId: `rpc-r4t-${String(seq)}` },
+      }],
+    },
+  })
+  const deliver = (event: unknown): void => {
+    ;(service as unknown as { observeLiveEvent(session: unknown, event: unknown): void })
+      .observeLiveEvent(liveSessionOf(source), event)
+  }
+  const realStat = persistence.stat
+  let statCalls = 0
+  let proofEntered!: () => void
+  let releaseProof!: () => void
+  const proofGate = new Promise<void>(resolve => { releaseProof = resolve })
+  const proofReached = new Promise<void>(resolve => { proofEntered = resolve })
+  let followUpEntered!: () => void
+  let releaseFollowUp!: () => void
+  const followUpGate = new Promise<void>(resolve => { releaseFollowUp = resolve })
+  const followUpReached = new Promise<void>(resolve => { followUpEntered = resolve })
+  try {
+    await waitDirectReady(service)
+    // Prepare a source with one extra durable event beyond the replay A will
+    // read. A's snapshot deliberately advertises 4100 events/durable while the
+    // full source already holds seq 4100 for the superseding candidate.
+    const burst: unknown[] = []
+    for (let seq = 3; seq <= 4099; seq += 1) burst.push(inbox(seq, `r4t burst ${String(seq)}`))
+    const extra = inbox(4100, 'r4t superseding 4100')
+    source.events.push(...burst as never[], extra)
+    source.eventCount = 4100
+    source.durableEventCount = 4100
+    source.revision += 1
+    source.live = false
+    persistence.stat = async (id, options) => {
+      const snapshot = await realStat.call(persistence, id, options)
+      if (String(id) === 'r4t') {
+        statCalls += 1
+        if (statCalls === 2) {
+          proofEntered()
+          await proofGate
+        } else if (statCalls === 3) {
+          followUpEntered()
+          await followUpGate
+        }
+      }
+      return snapshot
+    }
+    // The ordinary overflow records W1=4099 and starts cold replay A.
+    for (const event of burst) deliver(event)
+    assert.equal(internals.droppedAccepted.get('r4t'), 4099)
+    await proofReached
+    const replayCheckpoint = internals.index.checkpointOf('r4t')
+    assert.ok(replayCheckpoint !== undefined)
+    assert.equal(replayCheckpoint.nextSeq, 4100)
+    // A superseding same-ID candidate writes seq 4100 and records a NEWER
+    // obligation W2=4100 before A's final currentness result is consumed.
+    internals.writeBatch({
+      sessionId: 'r4t',
+      headerHash: replayCheckpoint.headerHash,
+      inheritedEventCount: replayCheckpoint.inheritedCut,
+      headerCwd: replayCheckpoint.headerCwd,
+      baseNextSeq: replayCheckpoint.nextSeq,
+      effectiveCwd: replayCheckpoint.effectiveCwd,
+      sourceState: replayCheckpoint.sourceState,
+      events: [extra],
+    })
+    internals.droppedAccepted.set('r4t', 4100)
+    assert.equal(internals.index.checkpointOf('r4t')?.nextSeq, 4101)
+    const aFlight = internals.sessionRepairFlights.get('r4t')?.promise
+    releaseProof()
+    if (aFlight !== undefined) await aFlight
+    await followUpReached
+    // A's stale terminal must not clear the newer watermark/barrier before B's
+    // final proof. The follow-up B is held at its record stat.
+    assert.equal(internals.droppedAccepted.get('r4t'), 4100)
+    const blocked = await waitDirectSettled(service)
+    assert.equal(blocked.kind, 'incomplete', JSON.stringify(blocked))
+    if (blocked.kind !== 'incomplete') throw new Error('expected incomplete')
+    assert.ok(blocked.reason === 'resource-limit' || blocked.reason === 'reconciling', JSON.stringify(blocked))
+
+    // B now sees the complete durable source and proves it; only then ready.
+    source.eventCount = undefined
+    source.durableEventCount = undefined
+    releaseFollowUp()
+    await internals.verifySources()
+    await waitDirectReady(service)
+    assert.equal(internals.droppedAccepted.size, 0)
+    const hit = await service.search({ scope: 'all', query: 'r4t superseding 4100', limit: 25 }, new AbortController().signal)
+    assert.equal(hit.kind, 'ready', JSON.stringify(hit))
+    if (hit.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(hit.items.length, 1)
+  } finally {
+    releaseProof()
+    releaseFollowUp()
+    persistence.stat = realStat
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
 test('a held accepted batch vetoes a temporary official roster deletion', async (t) => {
   const life = testLifecycle(t)
   const profileDir = life.tempDir('dsh-history-search-r302-')
