@@ -2374,19 +2374,34 @@ test('an invalidated zero-event live candidate commits no empty row and the coal
   let secondHeld!: () => void
   const secondReached = new Promise<void>(resolve => { secondHeld = resolve })
   // The FIRST observation belongs to the bootstrap's cold live replay and is
-  // read-then-held, so its release returns the exact zero-event snapshot. The
-  // SECOND belongs to the coalesced repair and holds the intermediate state.
+  // read-then-held, so its release must return the exact zero-event snapshot it
+  // read. The SECOND belongs to the coalesced repair and holds the intermediate
+  // state. The mutable fixture exposes its LIVE event array, so a held reference
+  // would silently observe later source mutations and the released candidate
+  // would fail at an ordinary batch fence instead of the empty terminal fence.
+  // An official observation is a detached snapshot, so the seam hands the
+  // candidate exactly the events it actually read.
+  let firstObservedLength = -1
+  let firstReleasedLength = -1
   query.observeSession = async (id, options) => {
     observeCalls += 1
     const observation = await realObserve.call(query, id, options)
+    const snapshot = {
+      header: observation.header,
+      inheritedEventCount: observation.inheritedEventCount,
+      events: [...observation.events],
+      [Symbol.dispose]: () => observation[Symbol.dispose](),
+    }
     if (observeCalls === 1) {
+      firstObservedLength = snapshot.events.length
       firstHeld()
       await firstGate
+      firstReleasedLength = snapshot.events.length
     } else if (observeCalls === 2) {
       secondHeld()
       await secondGate
     }
-    return observation
+    return snapshot
   }
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
@@ -2395,8 +2410,17 @@ test('an invalidated zero-event live candidate commits no empty row and the coal
     pending: Map<string, unknown>
     reconcilePending: Set<string>
   }
+  // Every latch below is bounded: a candidate that never re-observes must FAIL
+  // this case with diagnostics instead of hanging the suite.
+  const withinWindow = async (reached: Promise<void>, windowMs = 5_000): Promise<boolean> => (
+    Promise.race([
+      reached.then(() => true),
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), windowMs)),
+    ])
+  )
   try {
-    await firstReached
+    assert.equal(await withinWindow(firstReached, 10_000), true,
+      'the bootstrap zero-event observation must be reached')
     assert.equal(internals.index.checkpointOf('empty-live-stale'), undefined)
 
     // The official source accepts its FIRST event while the zero-event
@@ -2423,12 +2447,22 @@ test('an invalidated zero-event live candidate commits no empty row and the coal
       .observeLiveEvent(liveSessionOf(source), accepted)
     assert.equal(internals.pending.has('empty-live-stale'), true)
 
+    // The candidate read a genuinely EMPTY official observation, the current
+    // source has moved on, and the released snapshot is still empty: only the
+    // empty terminal fence can reject this candidate (no batch fence runs).
+    assert.equal(firstObservedLength, 0, 'the held observation really read zero official events')
+    assert.equal(source.events.length, 1, 'the current official source has the new event')
+
     releaseFirst()
-    await secondReached
+    const repairSeen = await withinWindow(secondReached, 2_000)
+    assert.equal(firstReleasedLength, 0, 'the released candidate must replay the snapshot it read, not the mutated source')
     // The stale candidate settled NOTHING: no empty row, no released accepted
-    // coverage, and the round keeps the Session outstanding.
+    // coverage, and the round keeps the Session outstanding. This must be the
+    // FIRST failure of a bypassed empty-terminal fence — no batch fence runs for
+    // a zero-event replay, so the empty commit is the only remaining gate.
     assert.equal(internals.index.checkpointOf('empty-live-stale'), undefined,
       'an invalidated zero-event candidate must never publish an empty checkpoint')
+    assert.equal(repairSeen, true, 'the coalesced repair must re-observe the current official source')
     assert.equal(internals.index.occurrenceCount(), 0)
     assert.equal(internals.reconcilePending.has('empty-live-stale'), true)
     // The first pass is still the owner, so the truthful intermediate answer is
