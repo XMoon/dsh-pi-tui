@@ -982,6 +982,24 @@ export async function runHostHistorySearch(context) {
       event => event.type === 'agent/inbox/spliced' && event.data?.target === 'next-step'
         && Array.isArray(event.data.inserted) && event.data.inserted.some(message => message?.id === steerProof.itemId),
       'W02e official steer state')
+    // W02d's fork child is now a COLD source after the Host restart: prove its
+    // own accepted row survives and the inherited parent prefix remains cut.
+    const coldForkOwn = assertReady(await searchSettled(queueClient, requestPath, {
+      scope: 'session', sessionId: forkSession, query: childPromptText, limit: 25,
+    }, 'host history search W02e cold fork own'), 'W02e cold fork own')
+    assert(coldForkOwn.items.length === 1 && coldForkOwn.items[0].preview === childPromptText,
+      `W02e: cold fork own row is not exactly one: ${JSON.stringify(coldForkOwn.items)}`)
+    const coldForkInherited = assertReady(await searchSettled(queueClient, requestPath, {
+      scope: 'session', sessionId: forkSession, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02e cold fork inherited cut'), 'W02e cold fork inherited cut')
+    assert(coldForkInherited.items.length === 0,
+      `W02e: cold fork inherited prefix leaked ${String(coldForkInherited.items.length)} rows`)
+    const coldForkParent = assertReady(await searchSettled(queueClient, requestPath, {
+      scope: 'session', sessionId: cwdSession, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02e cold fork parent'), 'W02e cold fork parent')
+    assert(coldForkParent.items.length === 3,
+      `W02e: cold fork changed the parent count: ${JSON.stringify(coldForkParent.items)}`)
+
     const steerAnswer = assertReady(await searchSettled(queueClient, requestPath, {
       scope: 'session', sessionId: queueSession, query: 'hsp-queue-steer', limit: 25,
     }, 'host history search W02e queue steer'), 'W02e queue steer')
@@ -1038,6 +1056,8 @@ export async function runHostHistorySearch(context) {
       fourthHostOpens: Number(countersD.directPersistenceOpenCalls),
       cwdChange: true,
       forkChild: true,
+      coldForkOwnRows: 1,
+      coldForkInheritedRows: 0,
       queueEditRemove: true,
       queueSteer: true,
       keysetPages: true,
