@@ -780,14 +780,12 @@ field `unset`, then shows the Host's CURRENT readback; neither USER-field
 deletion nor `overridden=false` is a success criterion.
 
 - `Shell execution` edits the two numeric caps (`timeoutMs`, `maxOutputBytes`) of
-  the Host-served model-tool executor row in ONE mutation. The bound row follows
-  official dsh-web: `pwsh-sandbox` is preferred when both `bash-sandbox` and
-  `pwsh-sandbox` are served, otherwise the single served row is used, and no
-  served row is `Unavailable`; the Client OS is never used to guess it. A stale
-  captured generation/revision or a same-revision switch to the other served row
-  refuses the write. The caps affect the NEXT shell execution; a running
-  subprocess keeps its current timeout. This is not the `!`/`!!` user-shell
-  sandbox policy.
+  the Host-served model-tool executor row in ONE mutation. The executor-row
+  selection, currentness and single-batch write authority are owned by
+  [host-client.md](./host-client.md#agent-loop-shell-execution-and-session-log-settings-authority);
+  this page only paints and edits the two caps of that already-bound row. The
+  caps affect the NEXT shell execution; a running subprocess keeps its current
+  timeout. This is not the `!`/`!!` user-shell sandbox policy.
 - `Parallel tool calls` edits only `agent-loop.maxParallelToolCalls`. The next
   Agent step samples the saved budget immediately before executing its next
   non-empty tool batch; tool calls already dispatched are never rewritten. The

@@ -26,6 +26,8 @@ import { SubagentSettingsPage } from '../../src/tui/panels/subagent-settings-pag
 const ENTER = '\r'
 const ESC = '\x1b'
 const LEFT = '\x1b[D'
+const HOME = '\x1b[H'
+const END = '\x1b[F'
 const DOWN = '\x1b[B'
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;]*m/gu, '')
 
@@ -1087,6 +1089,69 @@ test('a dropped Confirm segment is never keyboard-admitted for either main actio
   assert.doesNotMatch(question, /Confirm \[Enter\]/u, 'the Confirm segment is dropped at 22 cells')
   page.handleInput(ENTER)
   assert.deepEqual(writes, [], 'the reset can never be confirmed through a dropped span')
+  page.dispose()
+})
+
+test('a jumped-past reset risk fragment is never treated as read', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  const writes: SectionPatch<NumericLoopSettings>[] = []
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision: 1, effective: { maxParallelToolCalls: 10 },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async patch => { writes.push(patch); return { kind: 'accepted' } },
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { void task() },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => {},
+  })
+  // TWO body rows at 44 cells: the wrapped risk sentence is split, so a jump to
+  // its tail can paint one fragment while its first fragment stays unseen.
+  page.setMaxRows(3)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const frame = (): string => page.render(44).map(strip).join('\n')
+  page.handleInput('?')
+  frame()
+  page.handleInput('x')
+  assert.doesNotMatch(frame(), /Confirm \[Enter\]/u, 'the copy is not read on the first frame')
+  // End jumps to the tail, then Home/Down re-show earlier lines: the sentence's
+  // FIRST fragment was never painted, so Confirm must stay absent.
+  page.handleInput(END)
+  assert.doesNotMatch(frame(), /Confirm \[Enter\]/u, 'the jumped-to tail alone proves nothing')
+  page.handleInput(HOME)
+  frame()
+  page.handleInput(DOWN)
+  const jumped = frame()
+  assert.doesNotMatch(jumped, /Confirm \[Enter\]/u, 'a skipped first fragment still blocks Confirm')
+  page.handleInput(ENTER)
+  assert.deepEqual(writes, [], 'Enter cannot confirm a risk copy that was never fully painted')
+  // Walking the copy from the top paints every fragment in order.
+  page.handleInput(HOME)
+  frame()
+  for (let step = 0; step < 8; step += 1) {
+    page.handleInput(DOWN)
+    frame()
+  }
+  assert.match(frame(), /decides the value\./u)
+  assert.match(frame(), /Confirm \[Enter\]/u, 'Confirm appears only after every fragment was painted')
+  page.handleInput(ENTER)
+  assert.deepEqual(writes, [{ maxParallelToolCalls: { kind: 'reset' } }])
   page.dispose()
 })
 

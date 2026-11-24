@@ -178,6 +178,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   /** The painted admission for the state's ONE confirm action. */
   private paintedConfirm = false
   private riskSeen = new Set<number>()
+  /** The reset confirmation's risk fragments projected by the LAST render. */
+  private riskLines: readonly { readonly line: number }[] = []
   private riskSignature: string | undefined
 
   constructor(intents: HostNumericSettingsPageIntents<T>) {
@@ -487,17 +489,13 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
 
   /** Whether every necessary reset risk line has been painted in THIS question
    *  instance, width and body grant (a shorter frame re-arms the receipt). */
-  /** Whether every necessary reset risk STATEMENT was painted inside this
-   *  question instance at THIS width/grant. It is keyed by the logical statement
-   *  (never by a wrapped physical line), so a sentence that wraps on a narrow
-   *  frame still has to be fully read before Confirm exists. */
-  private resetRiskRead(width: number = this.paint?.width ?? 0): boolean {
+  /** Whether every necessary reset risk FRAGMENT was painted inside this
+   *  question instance at THIS width/grant. A wrapped sentence contributes one
+   *  entry per physical line, so seeing only its tail can never satisfy it. */
+  private resetRiskRead(width: number = this.paint?.width ?? 0, risk: readonly { readonly line: number }[] = this.riskLines): boolean {
     if (this.question?.kind !== 'reset') return false
     if (this.riskSignature !== this.riskSignatureFor(width)) return false
-    for (let statement = 0; statement < RESET_RISK.length; statement += 1) {
-      if (!this.riskSeen.has(statement)) return false
-    }
-    return true
+    return risk.every(entry => this.riskSeen.has(entry.line))
   }
   private riskSignatureFor(width: number): string {
     return `${this.questionIdentity() ?? ''}|${width}|${this.rowGrant}`
@@ -806,14 +804,16 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
         this.riskSignature = signature
         this.riskSeen.clear()
       }
-      for (const lineIndex of visible) {
-        for (const entry of risk) {
-          if (entry.line === lineIndex) this.riskSeen.add(entry.statement)
-        }
-      }
+      // One entry per PHYSICAL fragment: a wrapped sentence only becomes
+      // satisfied once every fragment was really painted, so jumping to the
+      // tail can never prove the whole copy was read.
+      this.riskLines = risk
+      for (const lineIndex of visible) this.riskSeen.add(lineIndex)
+    } else {
+      this.riskLines = []
     }
     const complete = this.question?.kind === 'reset'
-      ? this.resetRiskRead(width)
+      ? this.resetRiskRead(width, risk)
       : mustSee.every(lineIndex => visible.has(lineIndex))
     if (this.question !== undefined && complete) this.paintedQuestion = this.questionIdentity()
     while (lines.length < bodyRows) lines.push(fit('', width))
