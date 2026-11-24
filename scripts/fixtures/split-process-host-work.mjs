@@ -1590,6 +1590,20 @@ class C1Model extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
+      const turnHold = process.env.C1_TURN_HOLD
+      if (typeof turnHold === 'string' && turnHold !== '' && existsSync(turnHold)) {
+        appendFileSync(`${turnHold}.entered`, `${String(process.pid)}\n`, { mode: 0o600 })
+        const deadline = Date.now() + 30_000
+        while (!existsSync(`${turnHold}.release`)) {
+          if (options.signal?.aborted === true) {
+            throw options.signal.reason instanceof Error
+              ? options.signal.reason
+              : new Error('acp-command turn hold aborted')
+          }
+          if (Date.now() > deadline) throw new Error('acp-command turn hold timed out')
+          await new Promise(resolveWait => setTimeout(resolveWait, 25))
+        }
+      }
       const answer = `acp command answer ${token} ${'acp command long context '.repeat(6_000)}`
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: answer }

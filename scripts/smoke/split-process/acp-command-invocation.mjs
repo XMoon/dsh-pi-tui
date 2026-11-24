@@ -133,6 +133,7 @@ export async function runAcpCommandInvocation(context) {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
       C1_COMPACT_HOLD: holdRoot,
       C1_LIFECYCLE_CONTROL: lifecycleControl,
+      C1_TURN_HOLD: join(workDir, 'acp-command-turn-hold'),
     })
     host = started.host
     const hostWorkRoot = started.workRoot
@@ -349,6 +350,57 @@ export async function runAcpCommandInvocation(context) {
     assert((tuiFrame.match(/Compacted \d+ history item/g) ?? []).length === 1,
       'TUI-01: the Shared TUI must paint ONE compaction card, not a duplicate')
     trace('acp-command/shared-tui', { sessionId })
+
+    // CMP-02 consecutive: the first successful operation's history is not
+    // reclaimed. The second operation enters its own summarizer and is
+    // cancelled through the standard ACP channel; it must not commit.
+    resetHold(holdRoot)
+    const secondBefore = hostSessionEvents(dshHome, sessionId).length
+    const secondRequest = settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText('/compact'),
+    }))
+    await waitForFile(`${holdRoot}.entered`, 'CMP-02 the consecutive summarizer')
+    await client.notify(acp.methods.agent.session.cancel, { sessionId })
+    writeFileSync(`${holdRoot}.release`, '1', { mode: 0o600 })
+    const secondOutcome = await secondRequest
+    assert(secondOutcome.value?.stopReason === 'cancelled',
+      `CMP-02: the consecutive cancel must settle cancelled (${JSON.stringify(secondOutcome.error?.data ?? secondOutcome.value)})`)
+    const secondEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(secondBefore)
+    const secondStart = secondEvents.find(event => event.type === 'compaction/start')
+    const secondId = secondStart?.data?.compactionId
+    assert(typeof secondId === 'string' && secondId !== id, 'CMP-02: the consecutive operation has a NEW real id')
+    assert(!secondEvents.some(event => event.type === 'compaction/summary' && event.data?.compactionId === secondId),
+      'CMP-02: the cancelled consecutive operation never commits its own summary')
+    trace('acp-command/consecutive-cancel', { firstId: id, secondId })
+
+    // CMP-02 busy: a REAL foreign Shared-TUI turn keeps the same Agent in a
+    // turn. ACP /compact must receive the official maintenance BUSY refusal,
+    // create no bracket and leave the foreign turn untouched.
+    const turnHold = join(workDir, 'acp-command-turn-hold')
+    rmSync(`${turnHold}.entered`, { force: true })
+    rmSync(`${turnHold}.release`, { force: true })
+    writeFileSync(turnHold, '1', { mode: 0o600 })
+    const busyBefore = hostSessionEvents(dshHome, sessionId).length
+    tui.client.send('hold the foreign turn\r')
+    await waitForHostSessionEventAfter(dshHome, sessionId, busyBefore,
+      event => event.type === 'user/message'
+        && String(event.data?.content?.[0]?.text ?? '').includes('hold the foreign turn'),
+      'CMP-02 the foreign TUI turn entered the Host')
+    await waitForFile(`${turnHold}.entered`, 'CMP-02 the foreign turn is held')
+    const busy = await captureError('CMP-02 busy', settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText('/compact'),
+    })))
+    assert(busy?.data?.code === 'LOCAL_ACP_COMMAND_BUSY',
+      `CMP-02: a real foreign turn must produce official BUSY (${JSON.stringify(busy?.data)})`)
+    const busyEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(busyBefore)
+    assert(!busyEvents.some(event => event.type === 'compaction/start'),
+      'CMP-02: a busy refusal creates no compaction bracket')
+    writeFileSync(`${turnHold}.release`, '1', { mode: 0o600 })
+    await waitForHostSessionEventAfter(dshHome, sessionId, busyBefore,
+      event => event.type === 'turn/end',
+      'CMP-02: the foreign turn completes after the busy refusal')
+    rmSync(turnHold, { force: true })
+    trace('acp-command/busy', { code: busy.data.code })
 
     // LIFE-02: Close during a held official command closes delivery but waits
     // for the original Promise. A second close is idempotent and a later
