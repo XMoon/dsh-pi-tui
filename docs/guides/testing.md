@@ -625,6 +625,55 @@ domain: systemd needs an isolated Linux user manager, launchd a real macOS
 `NOT_VERIFIED`, never a skipped pass. An empty project run exits non-zero with
 no tests; that empty result is a truthful `NOT_READY`, never an Upgrade PASS.
 
+### Split-process business Project
+
+`mise exec -- pnpm test:split:process` selects only the `split-process-business`
+Vitest project: two business anchors of the installed Split Host/Client path
+(one packed candidate, real Hosts, real PTY Clients). It is opt-in and is not
+part of `mise run test`, `mise run check` or `verify:release`. The package
+script always passes `--project`; invoking this config without one runs every
+configured project and is not an entry point.
+
+It requires two private inputs:
+
+- `SPLIT_VITEST_TMP_BASE`: an existing absolute canonical directory outside this
+  checkout, owned by the current user, mode 0700. Each run uses its own writable
+  root under it, and the Supervisor removes only the root it created;
+- `SPLIT_VITEST_CANDIDATE_TGZ`: one explicit absolute `.tgz` path that is
+  already canonical, a regular single-hard-linked file owned by the current
+  user with no write bits (0444), outside the checkout, and built from this
+  checkout's exact `@deepseek-ai/dsh-agent` pin. The Supervisor re-reads the
+  real bytes and SHA256 before a Scene root, install or Host exists; a changed
+  or replaced input is `INPUT_CANDIDATE_CHANGED`.
+
+The project runs its two files with two workers and real file parallelism. An
+explicit `SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes both files report a
+`parallel-ready` checkpoint and prove that the other real Scene's Host and
+Client kernel identities are live at the same time; select both files together
+and use a fresh private run root per round.
+
+`SPLIT_VITEST_PROCESS_PROBE_POINT` arms the fixed checkpoints the external
+probe uses; `SPLIT_VITEST_PROCESS_FAILURE_POINT` arms the three failure
+controls. A normal run sets neither. The external probe owns every
+kill/main-signal proof:
+
+```sh
+mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-worker-kill --at <window>
+mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-main-signal --signal SIGTERM
+```
+
+`<window>` is one of `bootstrap-install`, `host-spawned-before-ack`,
+`client-reserved-before-spawn`, `client-opened-before-ack`, `clients-ready` and
+`fallback-host-ready`. The probe passes only with the terminal `ABORTED_CLEAN`
+receipt, the exact Host seat free, the registered kernel identities gone or
+provably reused, and — for `clients-ready` — a separate real sibling Scene
+that continues its own business path and finalizes. A checkpoint reached
+without an external signal fails; an unrun window is `NOT_RUN`, never a pass.
+
+This Project is not the release full lane. `smoke:split-process` and
+`smoke:macos-split` remain the separate distribution-boundary lanes described
+above.
+
 ### Isolated single-file and probe runs
 
 Prefer a repository-owned lane; it already owns and removes its disposable

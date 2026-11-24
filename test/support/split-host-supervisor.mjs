@@ -12,17 +12,21 @@
  * `disconnect` event triggers the ONE bounded cleanup path (TERM -> KILL, then
  * the owned scene root removal).
  *
- * Two scene kinds share this ONE supervisor wire:
+ * Three scene kinds share this ONE supervisor wire:
  *   - `pilot`: the existing BOOTSTRAP/START_HOST/STOP_HOST behaviour with its
  *     one-Host-per-scene restriction unchanged.
  *   - `upgrade`: BOOTSTRAP_UPGRADE installs the old profile and owns sequential
  *     Host generations. At most ONE Host is active; a next generation may be
  *     created only after the previous generation's official stop and whole
  *     process-group disappearance are proven.
+ *   - `process`: BOOTSTRAP_PROCESS installs ONE immutable single-package
+ *     profile and this process also OWNS every real tui-test Client of the
+ *     Scene. The Worker only drives bounded typed operations over IPC; it never
+ *     holds a native terminal handle.
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -80,9 +84,24 @@ let activeQualificationClient
 const qualificationClients = []
 /** Detached Hosts a Scene Client's discovery fallback started, reclaimed by this Supervisor. */
 const fallbackHosts = []
+/** Process-scene native Clients this Supervisor owns; the Worker never holds one. */
+const processClients = []
+/** The immutable candidate a process Scene installed. */
+let processCandidate
+/** The read-only installed scope of a process Scene, proved before any Host. */
+let processScope
+let processClientSequence = 0
+/**
+ * The ONE native terminal operation in flight. It is registered synchronously
+ * before its first await so the closing fence can wait for the REAL settlement
+ * instead of removing a root a live native operation still owns.
+ */
+let processNativeOperation
 let qualificationClientSequence = 0
 let receiptPath
 let receipt
+/** Once the terminal phase is recorded, a late handler may not rewrite it. */
+let receiptTerminal = false
 let installInProgress = false
 let cleanupPromise
 let finalized = false
@@ -93,6 +112,8 @@ let lifecycleClosed = false
 let queue = Promise.resolve()
 let workerKillBarrierResolve
 let inspectSplitCandidate
+let inspectImmutableSplitCandidate
+let assertImmutableSplitCandidateUnchanged
 let createSplitSmokeProfile
 let writeC1WorkFixture
 let createTestTempDir
@@ -109,6 +130,12 @@ let safeIdentity
 let assertIdentityKept
 let seatIsFree
 let readKernelProcess
+let sameKernelProcess
+let inspectInstalledProfileScope
+let createSplitTerminal
+let readOfficialClientRecords
+let waitForTerminalExit
+let openTuiSessions
 let EXPECTED_PACKAGE_NAME
 let hostStatusSequence = 0
 /** The ONE native managed-service bridge state, or undefined for default/pilot scenes. */
@@ -190,8 +217,13 @@ const modulesReady = Promise.all([
   import('../../scripts/lib/split-upgrade-support.mjs'),
   import('../../scripts/lib/dsh-smoke-harness.mjs'),
   import('../../src/runtime/native-process/identity.ts'),
-]).then(([profile, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness, nativeIdentity]) => {
+  import('../../src/app/remote-process/local-scope.ts'),
+  import('./split-process-client.ts'),
+  import('@microsoft/tui-test'),
+]).then(([profile, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness, nativeIdentity, localScope, processClient, tuiTest]) => {
   inspectSplitCandidate = profile.inspectSplitCandidate
+  inspectImmutableSplitCandidate = profile.inspectImmutableSplitCandidate
+  assertImmutableSplitCandidateUnchanged = profile.assertImmutableSplitCandidateUnchanged
   createSplitSmokeProfile = profile.createSplitSmokeProfile
   writeC1WorkFixture = fixtures.writeC1WorkFixture
   createTestTempDir = tempLifecycle.createTestTempDir
@@ -209,6 +241,12 @@ const modulesReady = Promise.all([
   runDsh = smokeHarness.runDsh
   readJson = smokeHarness.readJson
   readKernelProcess = nativeIdentity.readKernelProcess
+  sameKernelProcess = nativeIdentity.sameKernelProcess
+  inspectInstalledProfileScope = localScope.inspectInstalledProfileScope
+  createSplitTerminal = processClient.createSplitTerminal
+  readOfficialClientRecords = processClient.readOfficialClientRecords
+  waitForTerminalExit = processClient.waitForTerminalExit
+  openTuiSessions = tuiTest.sessions
 })
 
 function validateTmpBase(raw) {
@@ -252,6 +290,13 @@ async function waitForWorkerKillBarrier() {
   })
 }
 
+/** A classified input refusal this process can carry into its receipt. */
+function codedInputError(code, message) {
+  const error = new Error(`INPUT_UNQUALIFIED: ${code} (INVALID_TEST_INPUT, not a product regression): ${message}`)
+  error.code = code
+  return error
+}
+
 function boundedError(error) {
   const name = error instanceof Error ? error.name : 'Error'
   const code = error !== null && typeof error === 'object' && 'code' in error ? String(error.code) : undefined
@@ -279,8 +324,27 @@ function appendNote(event, detail = {}) {
 
 function writeReceipt(update) {
   if (receiptPath === undefined) return
+  if (receiptTerminal && update.phase !== undefined && update.phase !== receipt.phase) {
+    const { phase: _latePhase, ...fields } = update
+    update = fields
+  }
   receipt = { ...receipt, ...update, updatedAt: now() }
-  writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 })
+  // Publish one complete snapshot: the sibling Scene, the external probe and
+  // the Worker all read this file while the owner keeps writing it.
+  const temporary = `${receiptPath}.${String(process.pid)}.tmp`
+  writeFileSync(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temporary, receiptPath)
+}
+
+/** The serialized kernel birth of the real Worker that owns this Scene. */
+function workerKernelBirth(pid) {
+  if (typeof readKernelProcess !== 'function' || !Number.isInteger(pid) || pid <= 0) return undefined
+  try {
+    const observation = readKernelProcess(pid)
+    return observation.kind === 'alive' ? serializeKernelIdentity(observation.identity) : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function initReceipt(tmpBase, worker, extra = {}) {
@@ -289,8 +353,13 @@ function initReceipt(tmpBase, worker, extra = {}) {
   receipt = {
     schemaVersion: 1,
     runId: RUN_ID,
-    supervisor: { pid: process.pid, pgrp: getPgrp() ?? process.pid, startedAt: SUPERVISOR_STARTED_AT },
-    worker: { pid: worker.pid, ppid: worker.ppid },
+    supervisor: {
+      pid: process.pid,
+      pgrp: getPgrp() ?? process.pid,
+      birth: workerKernelBirth(process.pid),
+      startedAt: SUPERVISOR_STARTED_AT,
+    },
+    worker: { pid: worker.pid, ppid: worker.ppid, birth: workerKernelBirth(worker.pid) },
     phase: 'STARTED',
     sceneRoot: undefined,
     candidate: undefined,
@@ -458,6 +527,15 @@ function hostSeatDescriptor(scopeId) {
   throw new Error(`no Host seat descriptor is implemented for ${process.platform}`)
 }
 
+/**
+ * The serialized kernel birth captured when this generation was spawned. It is
+ * a durable fact: re-reading after the child exits would erase the evidence the
+ * external probe and the receipt ledger need.
+ */
+function hostKernelBirth(handle) {
+  return handle.birth
+}
+
 function publicHostFacts(handle) {
   const scopeId = handle.ready?.localHost?.scopeId
   return {
@@ -466,6 +544,7 @@ function publicHostFacts(handle) {
     generation: handle.generation,
     source: handle.source,
     pid: handle.child.pid ?? null,
+    birth: hostKernelBirth(handle),
     pgid: hostPgid(handle),
     businessPid: handle.businessPid ?? null,
     scopeId: scopeId ?? null,
@@ -593,7 +672,228 @@ async function waitForQualificationRecord(handle, predicate, label, timeoutMs) {
   }
 }
 
-/** The whole command line of one live process, or undefined when unreadable. */
+// ── process Scene: immutable input, native Client ownership, closing fence ──
+// The Supervisor is the ONLY owner of a process Scene's native tui-test handle.
+// A Worker receives typed facts and bounded operations; it never runs a native
+// terminal call, so a Worker SIGKILL can never strand a PTY session in a dead
+// process.
+
+function requireProcessScene(label) {
+  if (scene?.kind !== 'process' || scene.installation === undefined) {
+    throw new Error(`${label}: no process scene`)
+  }
+  return scene
+}
+
+/** Re-read the frozen installed package and refuse a payload/build change. */
+function assertProcessInstalledFacts(label) {
+  requireProcessScene(label)
+  if (processCandidate === undefined) throw new Error(`${label}: the process candidate is not recorded`)
+  const facts = installedPackageFacts(
+    scene.installation.profilePackage,
+    processCandidate.manifest?.version,
+    processCandidate.targetDshVersion,
+    label,
+  )
+  if (facts.payloadHash !== scene.installFacts.payloadHash || facts.buildId !== scene.installFacts.buildId) {
+    throw codedInputError('INPUT_CANDIDATE_CHANGED', `${label}: the installed package payload changed after its installation`)
+  }
+  if (processScope === undefined || facts.buildId !== processScope.buildId) {
+    throw codedInputError('INPUT_CANDIDATE_CHANGED', `${label}: the installed build identity changed after its installation`)
+  }
+  return facts
+}
+
+/** One Client's real OS ownership facts, captured from the kernel. */
+function captureProcessClientIdentity(pid, label, { expectedEntry, scratch }) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the official record carries no real business PID`)
+  }
+  const snapshot = nativeProcessSnapshot(pid)
+  if (snapshot === null) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} has no readable kernel identity`)
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && snapshot.uid !== uid) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} is not owned by this user`)
+  }
+  const entry = realpathSync(expectedEntry)
+  if (!snapshot.command.includes(entry)) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} does not run the installed Client entry`)
+  }
+  if (processEnvironmentValue(pid, 'SPLIT_PROCESS_SCRATCH') !== scratch) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} does not carry this Client's scratch`)
+  }
+  if (processEnvironmentValue(pid, 'DSH_HOME') !== scene.installation.dshHome) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} does not carry this Scene's DSH home`)
+  }
+  const observation = readKernelProcess(pid)
+  if (observation.kind !== 'alive') {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: business PID ${String(pid)} disappeared while its identity was captured`)
+  }
+  return { identity: observation.identity, uid: snapshot.uid, command: snapshot.command, birth: snapshot.birth }
+}
+
+function publicProcessClientFacts(handle) {
+  return {
+    kind: 'process',
+    clientId: handle.clientId,
+    label: handle.label,
+    sessionId: handle.sessionId,
+    hostId: handle.hostId,
+    generation: handle.generation,
+    cwd: handle.cwd,
+    home: handle.home,
+    scratch: handle.scratch,
+    recordFile: handle.recordFile,
+    expectedEntry: handle.expectedEntry,
+    shellPid: handle.shellPid,
+    shellBirth: handle.shellIdentity?.birth,
+    businessPids: handle.businessPids,
+    businessIdentities: handle.businessIdentities.map(value => ({
+      pid: value.identity.pid,
+      birth: value.birth,
+      uid: value.uid,
+    })),
+    readyHost: handle.readyHost,
+    reservedAt: handle.reservedAt,
+    openedAt: handle.openedAt,
+    readyAt: handle.readyAt,
+    exited: handle.exited,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    closedAt: handle.closedAt,
+  }
+}
+
+function syncProcessClientsReceipt() {
+  writeReceipt({
+    processClients: processClients.map(publicProcessClientFacts),
+    processNativeOperation,
+  })
+}
+
+function processClientById(clientId, label) {
+  const handle = processClients.find(client => client.clientId === clientId)
+  if (handle === undefined) throw new Error(`${label}: unknown clientId ${String(clientId)}`)
+  return handle
+}
+
+/**
+ * Register the ONE native operation synchronously, BEFORE its first await.
+ * The closing fence waits on this fact; it never deletes a root a live native
+ * operation still owns.
+ */
+async function withProcessNativeOperation(description, clientId, body) {
+  if (processNativeOperation !== undefined) {
+    throw new Error(`NATIVE_OPERATION_IN_FLIGHT: ${description} cannot start while ${processNativeOperation.description} is unsettled`)
+  }
+  const operation = { description, clientId, startedAt: now() }
+  processNativeOperation = operation
+  writeReceipt({ processNativeOperation: operation })
+  try {
+    return await body()
+  } finally {
+    if (processNativeOperation === operation) processNativeOperation = undefined
+    writeReceipt({ processNativeOperation: processNativeOperation ?? undefined })
+  }
+}
+
+/** Await the real settlement of the in-flight native operation, bounded. */
+async function settlePendingProcessNativeOperation(reason) {
+  const operation = processNativeOperation
+  if (operation === undefined) return
+  appendNote('process-native-operation-pending', {
+    description: operation.description,
+    clientId: operation.clientId,
+    startedAt: operation.startedAt,
+  })
+  writeReceipt({})
+  const started = Date.now()
+  while (processNativeOperation === operation && Date.now() - started < 120_000) await sleep(50)
+  if (processNativeOperation === operation) {
+    throw new Error(`${reason}: the native operation ${operation.description} did not settle within 120000ms; the Scene is NOT_QUIESCED`)
+  }
+}
+
+/**
+ * Read the official Client ledger while the Client is still producing it. A
+ * torn tail is not durable yet; a malformed COMPLETE line still fails.
+ */
+async function waitForProcessClientRecord(handle, predicate, label, timeoutMs) {
+  const started = Date.now()
+  for (;;) {
+    const records = readOfficialClientRecords(handle.recordFile, label, { allowIncompleteTail: true })
+    const record = records.find(predicate)
+    if (record !== undefined) return record
+    const failure = records.find(value => value?.m4a0 === 'failure' || value?.m4a0 === 'control-failure')
+    if (failure !== undefined) {
+      throw new Error(`${label}: the Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
+    }
+    if (handle.exited) throw new Error(`${label}: the Client exited before the record`)
+    if (Date.now() - started >= timeoutMs) throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
+    await sleep(25)
+  }
+}
+
+/** The exact installed Host identity facts a Client ready record must match. */
+function assertProcessHostRecord(handle, record, label) {
+  const host = record.host
+  if (host === undefined || host === null) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the record carries no authenticated Host facts`)
+  }
+  if (host.scopeId !== processScope.scopeId) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the record names another Host scope`)
+  }
+  if (host.buildId !== handle.expectedBuildId) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the record names Host build ${String(host.buildId)}, not the installed ${String(handle.expectedBuildId)}`)
+  }
+  if (!Number.isInteger(host.hostPid) || host.hostPid <= 0) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the record carries no real Host PID`)
+  }
+  return host
+}
+
+function assertHostIdentityMatchesKernel(hostFacts, hostPid, label) {
+  if (hostFacts.hostPid !== hostPid) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the authenticated Host PID ${String(hostFacts.hostPid)} is not the Scene's Host ${String(hostPid)}`)
+  }
+  const expected = readHostStarttime(hostPid)
+  if (expected === undefined) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Scene Host has no readable kernel birth`)
+  }
+  if (hostFacts.schema === 1 && hostFacts.hostStarttime !== expected) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the authenticated Host birth is not the live kernel birth`)
+  }
+  if (hostFacts.schema === 2) {
+    const observation = readKernelProcess(hostPid)
+    if (observation.kind !== 'alive') {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Scene Host kernel identity is unreadable`)
+    }
+    const kernel = hostFacts.hostKernelIdentity
+    if (kernel === undefined || kernel.uniqueId !== observation.identity.uniqueId || kernel.pid !== hostPid) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the authenticated Host kernel identity is not the live kernel identity`)
+    }
+  }
+}
+
+/**
+ * The only probe-window hold inside this Supervisor. The durable checkpoint is
+ * written BEFORE the hold; the hold is bounded (120s) and only an external
+ * Worker death releases it. After release the handler always fails: no probe
+ * mode may return a PASS by itself.
+ */
+async function processProbeHold(point, detail) {
+  if (process.env.SPLIT_VITEST_PROCESS_PROBE_POINT !== point) return
+  appendNote('process-probe-hold', { point, ...detail })
+  writeReceipt({ phase: `PROCESS_PROBE_${point.toUpperCase().replaceAll('-', '_')}_HOLD` })
+  await waitForWorkerKillBarrier()
+  throw new Error(`the worker was killed at the ${point} probe point`)
+}
+
+/**
+ * The whole command line of one live process, or undefined when unreadable.
+ */
 function processCommandLine(pid) {
   if (process.platform === 'linux') {
     try {
@@ -689,6 +989,11 @@ function clientScratchOrigins() {
   for (const qualification of qualificationClients) {
     origins.set(qualification.scratch, `qualification-client:${String(qualification.child.pid)}`)
   }
+  for (const client of receipt?.processClients ?? []) {
+    if (typeof client.scratch === 'string' && client.scratch !== '') {
+      origins.set(client.scratch, `split-process-client:${String(client.label)}`)
+    }
+  }
   return origins
 }
 
@@ -706,7 +1011,11 @@ async function reclaimFallbackHost(pid, origin, scratch, reason) {
   if (starttime === undefined) {
     throw new Error(`${reason}: the fallback Host candidate ${String(pid)} has no readable OS starttime`)
   }
-  const record = {
+  // A process Scene registers a discovery fallback while it is still live, so
+  // the terminal reclaim must UPDATE that durable fact instead of appending a
+  // second, contradictory ledger row.
+  const existing = fallbackHosts.find(entry => entry.pid === pid && entry.starttime === starttime && entry.reclaimed !== true)
+  const record = existing ?? {
     pid,
     pgid: pid,
     starttime,
@@ -740,7 +1049,8 @@ async function reclaimFallbackHost(pid, origin, scratch, reason) {
   }
   record.reclaimed = true
   record.exitObserved = 'group-gone'
-  fallbackHosts.push(record)
+  record.reclaimedAt = now()
+  if (existing === undefined) fallbackHosts.push(record)
   syncFallbackHostsReceipt()
   appendNote('fallback-host-reclaimed', { pid, pgid: pid, starttime, origin, scratch })
   return record
@@ -752,7 +1062,7 @@ async function reclaimFallbackHost(pid, origin, scratch, reason) {
  * registered Client is unknown ownership: fail closed, never report clean.
  */
 async function reclaimClientFallbackHosts(reason) {
-  if (scene?.kind !== 'upgrade') return []
+  if (scene?.kind !== 'upgrade' && scene?.kind !== 'process') return []
   const reclaimed = []
   const pass = async () => {
     const origins = clientScratchOrigins()
@@ -802,9 +1112,13 @@ function latestHostScopeId() {
  * exited. A still-live fallback Host would hold it; this is the terminal proof.
  */
 async function assertSceneHostSeatFree(reason) {
-  if (hosts.length === 0) return
+  // A process Scene knows its installed scope BEFORE any Host is ready, so a
+  // before-Ready crash (or a discovery fallback Host) still audits the exact
+  // kernel seat it claimed.
+  const processSeatScopeId = scene?.kind === 'process' ? processScope?.scopeId : undefined
+  if (hosts.length === 0 && processSeatScopeId === undefined) return
   if (hosts.some(handle => !handle.exited)) return
-  const scopeId = latestHostScopeId()
+  const scopeId = latestHostScopeId() ?? processSeatScopeId
   if (scopeId === undefined) {
     // A Host killed before its ready record never published a scope identity
     // (the Pilot host-spawned-before-ack barrier). Its own process group is
@@ -1032,6 +1346,16 @@ async function cleanup(reason) {
   if (cleanupPromise !== undefined) return await cleanupPromise
   cleanupPromise = (async () => {
     let clean = true
+    // A synchronous real installer may still be running inside a bootstrap
+    // handler. Removing its root or reporting a terminal phase while it writes
+    // would be a false quiescence; wait for the real settlement first.
+    if (installInProgress) {
+      const installStarted = Date.now()
+      while (installInProgress && Date.now() - installStarted < 600_000) await sleep(100)
+      if (installInProgress) {
+        throw new Error(`${reason}: the profile install did not settle within 600000ms; the Scene is NOT_QUIESCED`)
+      }
+    }
     writeReceipt({
       phase: 'CLEANUP_STARTED',
       notes: [...(receipt?.notes ?? []), { event: 'cleanup-started', detail: { reason }, at: now() }],
@@ -1040,6 +1364,21 @@ async function cleanup(reason) {
       // The one-shot qualification Client is a Supervisor-owned process group:
       // reclaim it BEFORE the Host generations and before the scene root.
       await terminateQualificationClient(reason)
+      // A process Scene's native Clients are owned by THIS process. Let the ONE
+      // in-flight native operation reach its real settlement first, then close
+      // every handle; a root is never removed while a native call still owns it.
+      if (scene?.kind === 'process') {
+        await settlePendingProcessNativeOperation(`cleanup:${reason}`)
+        for (const handle of [...processClients].reverse()) {
+          if (handle.closed) continue
+          try {
+            await reclaimProcessClient(handle, `cleanup:${reason}`)
+          } catch (error) {
+            clean = false
+            appendNote('process-client-reclaim-failed', { clientId: handle.clientId, reason: boundedError(error) })
+          }
+        }
+      }
       // A Scene Client's production discovery fallback can start a detached
       // Host this Supervisor never created. Audit and reclaim it before any
       // terminal quiescence claim or root removal. A native Scene skips this
@@ -1079,6 +1418,17 @@ async function cleanup(reason) {
         } else {
           auditClientLedger(`cleanup:${reason}`)
         }
+        if (scene.kind === 'process') {
+          try {
+            await auditProcessClientLedger(`cleanup:${reason}`)
+          } catch (error) {
+            clean = false
+            appendNote('process-client-audit-failed', {
+              reason: boundedError(error),
+              detail: (error instanceof Error ? error.message : String(error)).slice(0, 400),
+            })
+          }
+        }
         await reclaimClientFallbackHosts(`cleanup:${reason}:post-host`)
         await assertSceneHostSeatFree(`cleanup:${reason}`)
         if (!clean) {
@@ -1090,6 +1440,7 @@ async function cleanup(reason) {
       writeReceipt({
         phase: clean ? 'ABORTED_CLEAN' : 'NOT_QUIESCED',
         cleanup: {
+          ...(receipt?.cleanup ?? {}),
           reason,
           completedAt: now(),
           hostsExited: hosts.every(handle => handle.exited),
@@ -1097,9 +1448,11 @@ async function cleanup(reason) {
         },
         install: { ...(receipt?.install ?? {}), inProgress: false },
       })
+      receiptTerminal = true
     } catch (error) {
       clean = false
-      writeReceipt({ phase: 'NOT_QUIESCED', cleanup: { reason, errorName: boundedError(error), completedAt: now() } })
+      writeReceipt({ phase: 'NOT_QUIESCED', cleanup: { ...(receipt?.cleanup ?? {}), reason, errorName: boundedError(error), completedAt: now() } })
+      receiptTerminal = true
     }
     return { clean }
   })()
@@ -1964,6 +2317,163 @@ async function handleBootstrap(message) {
   }
 }
 
+/**
+ * Bootstrap the ONE immutable single-package process Scene.
+ *
+ * The Worker's preflight facts are NOT trusted: this process re-reads the real
+ * candidate bytes, the exact DSH pin and the SHA256 before it creates a root,
+ * installs anything or starts a Host. The install uses the existing bundled
+ * single-package provisioning, and the read-only product scope authority
+ * publishes the exact scope/seat BEFORE the first Host can exist.
+ */
+async function handleBootstrapProcess(message) {
+  await modulesReady
+  if (scene !== undefined) throw new Error('BOOTSTRAP_PROCESS: scene already exists')
+  if (!Number.isInteger(message.workerPid) || message.workerPid <= 0
+    || !Number.isInteger(message.workerPpid) || message.workerPpid <= 0) {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_PROCESS requires real workerPid and workerPpid')
+  }
+  if (typeof message.sceneId !== 'string' || message.sceneId === '') {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_PROCESS requires a sceneId')
+  }
+  if (typeof message.expectedSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(message.expectedSha256)) {
+    throw new Error('INPUT_UNQUALIFIED: BOOTSTRAP_PROCESS requires the expected candidate SHA256')
+  }
+  const tmpBase = validateTmpBase(message.tmpBase)
+  initReceipt(tmpBase, { pid: message.workerPid, ppid: message.workerPpid }, {
+    kind: 'process',
+    sceneId: message.sceneId,
+    parentRunId: typeof message.parentRunId === 'string' && message.parentRunId !== '' ? message.parentRunId : undefined,
+    installation: undefined,
+    scope: undefined,
+    installFacts: undefined,
+    processClients: [],
+    processNativeOperation: undefined,
+  })
+  let root
+  let installation
+  let scope
+  let installFacts
+  try {
+    processCandidate = inspectImmutableSplitCandidate(message.tarball)
+    if (processCandidate.candidateSha256 !== message.expectedSha256) {
+      throw codedInputError('INPUT_CANDIDATE_CHANGED',
+        'the Supervisor re-read different candidate bytes than the Worker preflight')
+    }
+    // The run root is the ONE directory this Supervisor will later remove; its
+    // name makes the provenance of a retained root unmistakable.
+    assertLifecycleOpen('BOOTSTRAP_PROCESS before the Scene root')
+    root = createTestTempDir('dsh-split-process-foundation.', tmpBase)
+    scene = { kind: 'process', workDir: root }
+    installInProgress = true
+    appendNote('bootstrap-root-created', { sceneRoot: root })
+    writeReceipt({
+      phase: 'PROCESS_BOOTSTRAP_ROOT_CREATED',
+      sceneRoot: root,
+      candidate: {
+        tarball: processCandidate.tarball,
+        sha256: processCandidate.candidateSha256,
+        version: processCandidate.manifest?.version,
+        manifestPin: processCandidate.manifestPin,
+        dshVersion: processCandidate.targetDshVersion,
+        stat: processCandidate.stat,
+      },
+      install: { inProgress: true, completed: false, startedAt: now(), completedAt: undefined },
+    })
+    // A synchronous real installer runs here. The external bootstrap-install
+    // probe window is this durable in-progress receipt plus the real installer
+    // process tree; no artificial delay is inserted.
+    installation = createSplitSmokeProfile({
+      tarball: processCandidate.tarball,
+      targetDshVersion: processCandidate.targetDshVersion,
+      workDir: root,
+      clientPlatformProvisioning: 'bundled',
+    })
+    assertImmutableSplitCandidateUnchanged(processCandidate)
+    if (process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'after-profile-install') {
+      // Negative control: the real installation completed and the Supervisor
+      // must fail closed BEFORE any Host exists, then remove its own root.
+      throw new Error('SPLIT_VITEST_INTENTIONAL_FAILURE: setup failed after the profile install')
+    }
+    installFacts = installedPackageFacts(
+      installation.profilePackage,
+      processCandidate.manifest?.version,
+      processCandidate.targetDshVersion,
+      'process profile',
+    )
+    scope = inspectInstalledProfileScope({
+      dshHome: installation.dshHome,
+      profileDir: installation.profileDir,
+      packageRoot: installFacts.packageRoot,
+      dshVersion: processCandidate.targetDshVersion,
+    })
+    if (scope.buildId !== installFacts.buildId) {
+      throw new Error('the read-only installed scope does not name the installed package build')
+    }
+    processScope = scope
+    scene = { kind: 'process', workDir: root, installation, installFacts, scope }
+    installInProgress = false
+    writeReceipt({
+      phase: 'INSTALL_COMPLETE',
+      install: { inProgress: false, completed: true, startedAt: receipt.install?.startedAt, completedAt: now() },
+      installation: {
+        ...publicInstallation(installation),
+        profilePackage: installation.profilePackage,
+        clientPlatformProvisioning: installation.clientPlatformProvisioning,
+      },
+      scope: {
+        scopeId: scope.scopeId,
+        buildId: scope.buildId,
+        bundleVersion: scope.bundleVersion,
+        dshVersion: scope.dshVersion,
+        hostSeat: hostSeatDescriptor(scope.scopeId),
+      },
+      installFacts,
+    })
+  } catch (error) {
+    installInProgress = false
+    let cleanupError
+    if (root !== undefined) {
+      try {
+        rmSync(root, { recursive: true, force: true })
+        scene = undefined
+      } catch (removeError) {
+        cleanupError = boundedError(removeError)
+      }
+    }
+    writeReceipt({
+      phase: cleanupError === undefined ? 'ABORTED_CLEAN' : 'NOT_QUIESCED',
+      errorName: boundedError(error),
+      cleanupError,
+      install: { inProgress: false, completed: false, failedAt: now() },
+    })
+    throw error
+  }
+  if (disconnected || process.connected !== true) {
+    await cleanup('worker-disconnected-during-bootstrap')
+    return undefined
+  }
+  writeReceipt({ phase: 'SCENE_READY' })
+  return {
+    workDir: root,
+    candidate: {
+      tarball: processCandidate.tarball,
+      candidateSha256: processCandidate.candidateSha256,
+      version: processCandidate.manifest?.version,
+      manifestPin: processCandidate.manifestPin,
+      targetDshVersion: processCandidate.targetDshVersion,
+    },
+    installation: publicInstallation(installation),
+    scope: {
+      scopeId: scope.scopeId,
+      buildId: scope.buildId,
+      bundleVersion: scope.bundleVersion,
+      dshVersion: scope.dshVersion,
+      hostSeat: hostSeatDescriptor(scope.scopeId),
+    },
+  }
+}
+
 async function handleBootstrapUpgrade(message) {
   await modulesReady
   if (scene !== undefined) throw new Error('BOOTSTRAP_UPGRADE: scene already exists')
@@ -2596,7 +3106,49 @@ async function handleStartHost(message) {
   let entryRealpath
   let buildId
   let expectedVersion
-  if (scene.kind === 'upgrade') {
+  let expectedScopeId
+  let workRoot
+  let env
+  if (scene.kind === 'process') {
+    if (message.scenario !== undefined) {
+      throw new Error('START_HOST: a process scene starts the installed Host with no scenario')
+    }
+    if (message.extraEnv !== undefined) {
+      throw new Error('START_HOST: a process scene does not accept arbitrary extra environment')
+    }
+    // A next generation is allowed only after the previous one is provably
+    // stopped: clean exit code/signal, whole group gone, exact kernel seat free.
+    for (const previous of hosts) {
+      if (!previous.exited) throw new Error('START_HOST: the previous Host generation has not stopped')
+      if (previous.exitResult?.code !== 0 || previous.exitResult?.signal !== null) {
+        throw new Error(`START_HOST: the previous Host generation exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
+      }
+      await assertHostGroupGone(previous, 'START_HOST: previous generation')
+    }
+    await assertSceneHostSeatFree('START_HOST: previous generation')
+    const facts = assertProcessInstalledFacts('START_HOST')
+    if (processScope === undefined) throw new Error('START_HOST: the process scope is not recorded')
+    entry = facts.entries.host
+    entryRealpath = realpathSync(entry)
+    buildId = facts.buildId
+    expectedVersion = facts.version
+    expectedScopeId = processScope.scopeId
+    const generationLabel = String(hosts.length + 1)
+    workRoot = join(scene.workDir, `host-${generationLabel}`)
+    mkdirSync(workRoot, { recursive: true, mode: 0o700 })
+    const hostScratch = join(scene.workDir, `host-scratch-${generationLabel}`)
+    mkdirSync(hostScratch, { recursive: true, mode: 0o700 })
+    // The curated install environment already carries the offline LLM patch;
+    // this Scene passes no workload scenario, no C1 variables and no arbitrary
+    // extra environment.
+    env = {
+      ...scene.installation.base.env,
+      DSH_PI_TUI_ENTRY_RECORDS: '1',
+      SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
+      SPLIT_PROCESS_PROFILE: 'pi-tui',
+      SPLIT_PROCESS_SCRATCH: hostScratch,
+    }
+  } else if (scene.kind === 'upgrade') {
     source = message.source ?? 'profile'
     if (source !== 'profile' && source !== 'side-old') {
       throw new Error(`START_HOST: upgrade scenes only start profile or side-old Hosts, got ${String(source)}`)
@@ -2626,23 +3178,26 @@ async function handleStartHost(message) {
     entryRealpath = realpathSync(entry)
   }
 
-  const workRoot = join(scene.workDir, `c1-${message.scenario}-${String(hosts.length + 1)}`)
-  mkdirSync(workRoot, { recursive: true, mode: 0o700 })
-  const env = {
-    ...scene.installation.base.env,
-    SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.patchPath,
-    C1_SCENARIO: message.scenario,
-    C1_WORK_ROOT: workRoot,
-    ...(scene.kind === 'upgrade' && message.scenario === 'long-turn'
-      ? { C1_HOLD_LONG_TURN: join(workRoot, 'long-turn.release') }
-      : {}),
-    DSH_PI_TUI_ENTRY_RECORDS: '1',
-    SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
-    SPLIT_PROCESS_PROFILE: 'pi-tui',
-    SPLIT_PROCESS_SCRATCH: join(scene.workDir, `host-scratch-${message.scenario}-${String(hosts.length + 1)}`),
-    ...(message.extraEnv ?? {}),
+  if (env === undefined) {
+    workRoot = join(scene.workDir, `c1-${message.scenario}-${String(hosts.length + 1)}`)
+    mkdirSync(workRoot, { recursive: true, mode: 0o700 })
+    env = {
+      ...scene.installation.base.env,
+      SPLIT_PROCESS_EXTRA_PATCH: scene.c1Work.patchPath,
+      C1_SCENARIO: message.scenario,
+      C1_WORK_ROOT: workRoot,
+      ...(scene.kind === 'upgrade' && message.scenario === 'long-turn'
+        ? { C1_HOLD_LONG_TURN: join(workRoot, 'long-turn.release') }
+        : {}),
+      DSH_PI_TUI_ENTRY_RECORDS: '1',
+      SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
+      SPLIT_PROCESS_PROFILE: 'pi-tui',
+      SPLIT_PROCESS_SCRATCH: join(scene.workDir, `host-scratch-${message.scenario}-${String(hosts.length + 1)}`),
+      ...(message.extraEnv ?? {}),
+    }
+    mkdirSync(env.SPLIT_PROCESS_SCRATCH, { recursive: true, mode: 0o700 })
   }
-  mkdirSync(env.SPLIT_PROCESS_SCRATCH, { recursive: true, mode: 0o700 })
+  const hostLabel = message.scenario ?? 'split-process'
   // Same lifecycle gate as the qualification Client: a queued/in-flight
   // START_HOST must never create a detached Host after cleanup took over.
   assertLifecycleOpen('START_HOST')
@@ -2678,10 +3233,19 @@ async function handleStartHost(message) {
     entryRealpath,
     buildId,
     expectedVersion,
+    expectedScopeId,
     ready: undefined,
     businessPid: null,
     startedAt: now(),
     starttime: readHostStarttime(child.pid),
+    birth: (() => {
+      try {
+        const observation = readKernelProcess(child.pid)
+        return observation.kind === 'alive' ? serializeKernelIdentity(observation.identity) : undefined
+      } catch {
+        return undefined
+      }
+    })(),
     closedAt: undefined,
     exited: false,
     exitResult: undefined,
@@ -2713,6 +3277,21 @@ async function handleStartHost(message) {
   syncHostReceipt()
   writeReceipt({ phase: 'HOST_SPAWNED' })
   progress(message.requestId, 'HOST_SPAWNED', { hostId, generation, pid: child.pid ?? null, workRoot })
+  if (scene.kind === 'process') {
+    // The durable checkpoint (host PID/birth/group and, once known, the seat)
+    // is written BEFORE this bounded hold; only an external Worker death
+    // releases it and the handler always fails afterwards.
+    await processProbeHold('host-spawned-before-ack', {
+      hostId,
+      generation,
+      hostPid: child.pid ?? null,
+      hostBirth: handle.starttime,
+      scopeId: expectedScopeId,
+      seat: hostSeatDescriptor(expectedScopeId),
+      workerPid: receipt.worker?.pid,
+      workerPpid: receipt.worker?.ppid,
+    })
+  }
   if (process.env.SPLIT_VITEST_WORKER_KILL_POINT === 'host-spawned-before-ack'
     || (process.env.SPLIT_VITEST_UPGRADE_KILL_POINT === 'new-host-spawned-before-ack' && generation === 2)) {
     appendNote('host-spawned-before-ack-barrier', {
@@ -2730,7 +3309,7 @@ async function handleStartHost(message) {
   let ready
   try {
     ready = await waitForHostRecord(handle, record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
-      `${message.scenario} Host ready`, HOST_READY_TIMEOUT_MS)
+      `${hostLabel} Host ready`, HOST_READY_TIMEOUT_MS)
   } catch (error) {
     if (handle.spawnError !== undefined) {
       handle.exited = true
@@ -2743,13 +3322,33 @@ async function handleStartHost(message) {
   }
   if (ready.m4a0 === 'failure') {
     await terminateHost(handle, 'Host reported startup failure').catch(() => undefined)
-    throw new Error(`${message.scenario} Host boot failed: ${JSON.stringify({
+    throw new Error(`${hostLabel} Host boot failed: ${JSON.stringify({
       code: ready.code,
       error: ready.error,
       phase: ready.phase,
     })}${stderr === '' ? '' : ' (Host stderr present)'}`)
   }
-  if (scene.kind === 'upgrade' && ready.localHost?.buildId !== handle.buildId) {
+  if (scene.kind === 'process') {
+    const localHost = ready.localHost
+    if (localHost === undefined || localHost === null) {
+      await terminateHost(handle, 'Host published no identity').catch(() => undefined)
+      throw new Error('START_HOST: the process Host published no authenticated identity')
+    }
+    if (localHost.buildId !== handle.buildId) {
+      await terminateHost(handle, 'Host build identity mismatch').catch(() => undefined)
+      throw new Error(`START_HOST: Host published buildId ${String(localHost.buildId)} but the installed package is ${String(handle.buildId)}`)
+    }
+    if (localHost.scopeId !== expectedScopeId) {
+      await terminateHost(handle, 'Host scope identity mismatch').catch(() => undefined)
+      throw new Error('START_HOST: Host published a scope different from the installed profile scope')
+    }
+    try {
+      assertHostIdentityMatchesKernel(localHost, child.pid, 'START_HOST')
+    } catch (error) {
+      await terminateHost(handle, 'Host kernel identity mismatch').catch(() => undefined)
+      throw error
+    }
+  } else if (scene.kind === 'upgrade' && ready.localHost?.buildId !== handle.buildId) {
     await terminateHost(handle, 'Host build identity mismatch').catch(() => undefined)
     throw new Error(`START_HOST: Host published buildId ${String(ready.localHost?.buildId)} but the installed ${source} package is ${String(handle.buildId)}`)
   }
@@ -2764,6 +3363,7 @@ async function handleStartHost(message) {
     workRoot,
     source,
     buildId: handle.buildId,
+    scopeId: expectedScopeId,
     pgid: hostPgid(handle),
     entryRealpath: handle.entryRealpath,
   }
@@ -3086,6 +3686,665 @@ async function handleUpgradeProbeSideNewClientHostFoundation(message) {
   }
 }
 
+// ── process Scene: typed Client requests over the ONE IPC wire ────────────
+
+/** One canonical directory strictly inside the Scene root. */
+function requireProcessSceneDirectory(raw, name) {
+  if (typeof raw !== 'string' || raw === '' || !isAbsolute(raw)) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT requires an absolute ${name} directory`)
+  }
+  let real
+  try {
+    real = realpathSync(raw)
+  } catch (error) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${name} does not exist (${boundedError(error)})`)
+  }
+  if (real !== raw) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${name} must be a canonical path (${real})`)
+  }
+  if (!statSync(real).isDirectory()) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${name} is not a directory`)
+  }
+  const rel = relative(scene.workDir, real)
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${name} must be inside the Scene root`)
+  }
+  return real
+}
+
+function requireProcessDimension(value, name, fallback, maximum) {
+  if (value === undefined) return fallback
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT ${name} must be a positive integer <= ${String(maximum)}`)
+  }
+  return value
+}
+
+/** The real tui-test shell identity: uid + kernel birth, no guessed `ps` text. */
+function captureShellIdentity(pid, label) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: tui-test returned no real shell PID`)
+  }
+  const observation = readKernelProcess(pid)
+  if (observation.kind !== 'alive') {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the tui-test shell PID ${String(pid)} has no readable kernel identity`)
+  }
+  const uid = observation.identity.platform === 'darwin' ? observation.identity.uid : readLinuxProcessUid(pid)
+  if (typeof process.getuid === 'function' && uid !== process.getuid()) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the tui-test shell PID ${String(pid)} is not owned by this user`)
+  }
+  return { identity: observation.identity, uid, birth: serializeKernelIdentity(observation.identity) }
+}
+
+/** gone | reused | alive | unknown for one captured kernel identity. */
+function processIdentityState(identity) {
+  let observation
+  try {
+    observation = readKernelProcess(identity.pid)
+  } catch {
+    return 'unknown'
+  }
+  if (observation.kind === 'unknown') return 'unknown'
+  if (observation.kind === 'gone') return 'gone'
+  return sameKernelProcess(identity, observation) === 'same' ? 'alive' : 'reused'
+}
+
+/** Bounded proof that one captured identity no longer names this run. */
+async function waitForProcessIdentityTerminal(identity, reason, timeoutMs = 10_000) {
+  const started = Date.now()
+  for (;;) {
+    const state = processIdentityState(identity)
+    if (state === 'gone' || state === 'reused') return state
+    if (state === 'unknown') {
+      throw new Error(`${reason}: the kernel state of PID ${String(identity.pid)} is unverifiable`)
+    }
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${reason}: PID ${String(identity.pid)} is still the process this run captured`)
+    }
+    await sleep(50)
+  }
+}
+
+/**
+ * The common terminal-resource proof of one process Client: its exact native
+ * session is gone and every captured shell/business identity is gone or a
+ * provably different PID. A live identity, or an unverifiable one, fails.
+ */
+async function assertProcessClientQuiesced(handle, reason) {
+  const openSessions = new Set(await openTuiSessions())
+  if (openSessions.has(handle.sessionId)) {
+    throw new Error(`${reason}: ${handle.label} left its native TUI session open`)
+  }
+  if (handle.shellIdentity !== undefined) {
+    await waitForProcessIdentityTerminal(handle.shellIdentity.identity, `${reason}: ${handle.label} shell`)
+  }
+  for (const value of handle.businessIdentities) {
+    await waitForProcessIdentityTerminal(value.identity, `${reason}: ${handle.label} business`)
+  }
+}
+
+/** Register the real fallback Host one Client's product discovery started. */
+function registerProcessFallbackHost(handle, hostFacts, label) {
+  const pid = hostFacts.hostPid
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host carries no real PID`)
+  }
+  if (hostFacts.scopeId !== processScope.scopeId) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host names another scope`)
+  }
+  if (hostFacts.buildId !== handle.expectedBuildId) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host runs another build`)
+  }
+  const snapshot = nativeProcessSnapshot(pid)
+  if (snapshot === null) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host PID ${String(pid)} has no readable identity`)
+  }
+  if (!snapshot.command.includes('local-host.mjs') || !snapshot.command.includes(scene.workDir)) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host does not run this Scene's Host entry`)
+  }
+  if (processEnvironmentValue(pid, 'SPLIT_PROCESS_SCRATCH') !== handle.scratch) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host does not carry this Client's scratch`)
+  }
+  // `starttime` keeps the SAME OS representation the shared fallback reclaim
+  // reads, so the registered row is updated in place instead of duplicated;
+  // `birth` carries the precise kernel identity the external probe compares.
+  const starttime = readHostStarttime(pid)
+  if (starttime === undefined) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host PID ${String(pid)} has no readable OS birth`)
+  }
+  const record = {
+    pid,
+    pgid: pid,
+    starttime,
+    birth: snapshot.birth,
+    origin: 'product-discovery-fallback',
+    scratch: handle.scratch,
+    clientId: handle.clientId,
+    label: handle.label,
+    scopeId: hostFacts.scopeId,
+    instanceId: hostFacts.instanceId,
+    buildId: hostFacts.buildId,
+    uid: snapshot.uid,
+    detectedAt: now(),
+    reclaimed: false,
+    exitObserved: undefined,
+  }
+  fallbackHosts.push(record)
+  syncFallbackHostsReceipt()
+  appendNote('process-fallback-host-registered', {
+    pid,
+    birth: snapshot.birth,
+    clientId: handle.clientId,
+    scopeId: hostFacts.scopeId,
+    instanceId: hostFacts.instanceId,
+  })
+  return record
+}
+
+async function handleStartProcessClient(message) {
+  requireProcessScene('START_PROCESS_CLIENT')
+  assertLifecycleOpen('START_PROCESS_CLIENT')
+  const label = message.label
+  if (typeof label !== 'string' || label === '') {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT requires a non-empty label')
+  }
+  if (processClients.some(client => client.label === label)) {
+    throw new Error(`START_PROCESS_CLIENT: the Client label ${label} is already registered in this Scene`)
+  }
+  const cwd = requireProcessSceneDirectory(message.cwd, 'cwd')
+  const home = requireProcessSceneDirectory(message.home, 'home')
+  const cols = requireProcessDimension(message.cols, 'cols', 140, 400)
+  const rows = requireProcessDimension(message.rows, 'rows', 40, 200)
+  if (message.sessionId !== undefined && (typeof message.sessionId !== 'string' || message.sessionId === '')) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT sessionId must be non-empty when set')
+  }
+  const fallbackProbe = process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'fallback-host-ready'
+  const host = activeHost
+  if (fallbackProbe) {
+    if (host !== undefined || hosts.length > 0) {
+      throw new Error('START_PROCESS_CLIENT: the fallback-host-ready probe must run without an explicit Host')
+    }
+  } else {
+    if (host === undefined) throw new Error('START_PROCESS_CLIENT: no ready Host exists in this Scene')
+    if (host.exited || host.child.exitCode !== null || host.child.signalCode !== null
+      || !pidAlive(host.child.pid) || !processGroupAlive(hostPgid(host))) {
+      throw new Error('START_PROCESS_CLIENT: the Scene Host is not alive')
+    }
+    if (host.ready === undefined) throw new Error('START_PROCESS_CLIENT: the Scene Host is not ready')
+    if (host.ready.localHost?.scopeId !== processScope?.scopeId) {
+      throw new Error('START_PROCESS_CLIENT: the ready Host is not this Scene scope')
+    }
+  }
+  const facts = assertProcessInstalledFacts('START_PROCESS_CLIENT')
+  const sequence = ++processClientSequence
+  const clientDir = join(scene.workDir, 'process-clients', `${label}-${String(sequence)}`)
+  mkdirSync(clientDir, { recursive: true, mode: 0o700 })
+  const scratch = join(clientDir, 'scratch')
+  mkdirSync(scratch, { recursive: true, mode: 0o700 })
+  const recordFile = join(clientDir, 'records.jsonl')
+  writeFileSync(recordFile, '', { mode: 0o600, flag: 'wx' })
+  const splitTerminal = createSplitTerminal({
+    prefix: 'split-process',
+    traceDirectory: join(scene.workDir, 'trace'),
+    artifactsDirectory: join(scene.workDir, 'artifacts'),
+  })
+  const clientId = `split-process-client-${String(sequence)}-${Date.now().toString(36)}`
+  // The reservation is durable BEFORE the native handle exists, so a Worker
+  // death in any startup window is still owned by this process.
+  const handle = {
+    clientId,
+    label,
+    sessionId: splitTerminal.sessionId,
+    terminal: splitTerminal.terminal,
+    recordFile,
+    scratch,
+    clientDir,
+    cwd,
+    home,
+    hostId: host?.hostId ?? null,
+    generation: host?.generation ?? null,
+    expectedEntry: facts.entries.client,
+    expectedBuildId: facts.buildId,
+    shellPid: null,
+    shellIdentity: undefined,
+    businessPids: [],
+    businessIdentities: [],
+    readyHost: undefined,
+    reservedAt: now(),
+    openedAt: undefined,
+    readyAt: undefined,
+    exited: false,
+    exitResult: undefined,
+    closedAt: undefined,
+    closed: false,
+  }
+  processClients.push(handle)
+  appendNote('process-client-reserved', {
+    clientId,
+    label,
+    sessionId: handle.sessionId,
+    hostId: handle.hostId,
+    generation: handle.generation,
+    cwd,
+    home,
+    scratch,
+    recordFile,
+    expectedEntry: handle.expectedEntry,
+    expectedBuildId: handle.expectedBuildId,
+  })
+  syncProcessClientsReceipt()
+  writeReceipt({ phase: 'PROCESS_CLIENT_RESERVED' })
+  await processProbeHold('client-reserved-before-spawn', {
+    clientId,
+    label,
+    sessionId: handle.sessionId,
+    hostId: handle.hostId,
+    hostPid: host?.child.pid ?? null,
+    hostBirth: host?.starttime ?? null,
+    scopeId: processScope?.scopeId,
+    workerPid: receipt.worker?.pid,
+    workerPpid: receipt.worker?.ppid,
+  })
+  // No await may interleave between this gate and the ONE native spawn.
+  assertLifecycleOpen('START_PROCESS_CLIENT before spawn')
+  const env = {
+    ...scene.installation.base.env,
+    HOME: home,
+    DSH_PI_TUI_ENTRY_RECORDS: '1',
+    SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
+    SPLIT_PROCESS_PROFILE: 'pi-tui',
+    SPLIT_PROCESS_CLIENT_MODE: 'surface',
+    SPLIT_PROCESS_SCRATCH: scratch,
+    SPLIT_PROCESS_CLIENT_RECORD_FILE: recordFile,
+    ...(message.sessionId === undefined ? {} : { SPLIT_PROCESS_CLIENT_SESSION: message.sessionId }),
+  }
+  let opened
+  try {
+    opened = await withProcessNativeOperation('client-run', clientId, () => splitTerminal.terminal.run(
+      process.execPath,
+      [facts.entries.client],
+      { cwd, cols, rows, waitReady: false, env },
+    ))
+  } catch (error) {
+    // The native run may have failed before returning. Its handle is still
+    // owned here; close it and prove the terminal state before rethrowing.
+    let cleanupError
+    try {
+      await withProcessNativeOperation('client-run-reclaim', clientId, () => splitTerminal.terminal.closeQuiet())
+      await assertProcessClientQuiesced(handle, 'START_PROCESS_CLIENT run failure')
+    } catch (failure) {
+      cleanupError = failure
+    }
+    handle.exited = true
+    handle.exitResult = handle.exitResult ?? { code: null, signal: null }
+    handle.closed = true
+    handle.closedAt = now()
+    syncProcessClientsReceipt()
+    if (cleanupError !== undefined) {
+      throw new AggregateError([error, cleanupError], `${label}: the native run failed and its Client cleanup also failed`)
+    }
+    throw error
+  }
+  if (lifecycleClosed || disconnected) {
+    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle').catch(() => undefined)
+    throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed while the native run was in flight')
+  }
+  if (opened.session !== handle.sessionId) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the native session identity changed at run()`)
+  }
+  handle.openedAt = now()
+  handle.shellPid = Number.isInteger(opened.shell_pid) ? opened.shell_pid : null
+  handle.shellIdentity = captureShellIdentity(handle.shellPid, `${label} shell`)
+  syncProcessClientsReceipt()
+  writeReceipt({ phase: 'PROCESS_CLIENT_OPENED' })
+  // The real shell/session identity is already registered and durable here;
+  // the Worker still has no ACK.
+  await processProbeHold('client-opened-before-ack', {
+    clientId,
+    label,
+    sessionId: handle.sessionId,
+    shellPid: handle.shellPid,
+    shellBirth: handle.shellIdentity.birth,
+    hostId: handle.hostId,
+    hostPid: host?.child.pid ?? null,
+    workerPid: receipt.worker?.pid,
+    workerPpid: receipt.worker?.ppid,
+  })
+  const started = await waitForProcessClientRecord(
+    handle,
+    record => record.m4a0 === 'client-started',
+    `${label} official client-started record`,
+    120_000,
+  )
+  if (lifecycleClosed || disconnected) {
+    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle').catch(() => undefined)
+    throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed before the Client was authenticated')
+  }
+  const business = captureProcessClientIdentity(started.pid, `${label} client-started`, {
+    expectedEntry: facts.entries.client,
+    scratch,
+  })
+  handle.businessPids = [started.pid]
+  handle.businessIdentities = [business]
+  syncProcessClientsReceipt()
+  const authenticated = await waitForProcessClientRecord(
+    handle,
+    record => record.m4a0 === 'host-authenticated',
+    `${label} official host-authenticated record`,
+    120_000,
+  )
+  const authenticatedHost = assertProcessHostRecord(handle, authenticated, `${label} host-authenticated`)
+  assertHostIdentityMatchesKernel(authenticatedHost, authenticatedHost.hostPid, `${label} host-authenticated`)
+  if (fallbackProbe) {
+    registerProcessFallbackHost(handle, authenticatedHost, `${label} host-authenticated`)
+  } else if (authenticatedHost.hostPid !== host.child.pid) {
+    // A normal anchor must never be silently rebound to a discovery fallback.
+    registerProcessFallbackHost(handle, authenticatedHost, `${label} unexpected fallback`)
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Client authenticated a Host other than this Scene's ready Host`)
+  }
+  if (lifecycleClosed || disconnected) {
+    await reclaimProcessClient(handle, 'START_PROCESS_CLIENT after a closed lifecycle').catch(() => undefined)
+    throw new Error('START_PROCESS_CLIENT: the Supervisor lifecycle closed before the Client was ready')
+  }
+  const ready = await waitForProcessClientRecord(
+    handle,
+    record => record.m4a0 === 'ready',
+    `${label} official ready record`,
+    120_000,
+  )
+  if (ready.pid !== started.pid) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready record names another business PID`)
+  }
+  if (ready.transport !== 'connected' || ready.surfaceMounted !== true) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready record is not a connected mounted surface (${JSON.stringify({
+      transport: ready.transport,
+      surfaceMounted: ready.surfaceMounted,
+    })})`)
+  }
+  if (message.sessionId === undefined) {
+    if (ready.sessionOpen !== false) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: a sessionless Client reported an open Session`)
+    }
+  } else if (ready.sessionOpen !== true || ready.openSessionId !== message.sessionId) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Client did not open the requested Session`)
+  }
+  const readyHost = assertProcessHostRecord(handle, ready, `${label} ready`)
+  assertHostIdentityMatchesKernel(readyHost, readyHost.hostPid, `${label} ready`)
+  if (fallbackProbe) {
+    if (readyHost.instanceId !== authenticatedHost.instanceId || readyHost.hostPid !== authenticatedHost.hostPid) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready Host is not the Host the Client authenticated`)
+    }
+  } else if (readyHost.hostPid !== host.child.pid) {
+    throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready Host is not this Scene's ready Host`)
+  }
+  handle.readyHost = {
+    hostPid: readyHost.hostPid,
+    instanceId: readyHost.instanceId,
+    scopeId: readyHost.scopeId,
+    buildId: readyHost.buildId,
+    transport: ready.transport,
+    surfaceMounted: ready.surfaceMounted,
+    sessionOpen: ready.sessionOpen,
+    openSessionId: ready.openSessionId,
+    generationId: ready.generationId,
+    shellPid: handle.shellPid,
+    businessPid: started.pid,
+  }
+  handle.readyAt = now()
+  syncProcessClientsReceipt()
+  writeReceipt({ phase: 'PROCESS_CLIENT_READY' })
+  await processProbeHold('fallback-host-ready', {
+    clientId,
+    label,
+    sessionId: handle.sessionId,
+    hostPid: readyHost.hostPid,
+    hostInstanceId: readyHost.instanceId,
+    scopeId: processScope.scopeId,
+    fallbackHosts: fallbackHosts.map(value => ({ pid: value.pid, birth: value.starttime, reclaimed: value.reclaimed })),
+    workerPid: receipt.worker?.pid,
+    workerPpid: receipt.worker?.ppid,
+  })
+  return {
+    clientId,
+    label,
+    sessionId: handle.sessionId,
+    recordFile,
+    cwd,
+    home,
+    cols,
+    rows,
+    shellPid: handle.shellPid,
+    businessPids: handle.businessPids,
+    ready: handle.readyHost,
+  }
+}
+
+function requireProcessClientRequest(message, label) {
+  requireProcessScene(label)
+  assertLifecycleOpen(label)
+  const handle = processClientById(message.clientId, label)
+  if (handle.closed) throw new Error(`${label}: the Client ${handle.label} is already closed`)
+  return handle
+}
+
+async function handleProcessClientInput(message) {
+  const handle = requireProcessClientRequest(message, 'PROCESS_CLIENT_INPUT')
+  const input = message.input
+  if (input === null || typeof input !== 'object') {
+    throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT requires an input object')
+  }
+  let body
+  if (input.type === 'type') {
+    if (typeof input.text !== 'string') {
+      throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT type requires text')
+    }
+    body = () => handle.terminal.type(input.text)
+  } else if (input.type === 'press') {
+    if (!Array.isArray(input.keys) || input.keys.length === 0
+      || input.keys.some(key => typeof key !== 'string' || key === '')) {
+      throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT press requires a non-empty key list')
+    }
+    body = () => handle.terminal.press(...input.keys)
+  } else if (input.type === 'submit') {
+    if (input.text !== undefined && typeof input.text !== 'string') {
+      throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT submit text must be a string')
+    }
+    body = () => (input.text === undefined ? handle.terminal.submit() : handle.terminal.submit(input.text))
+  } else {
+    throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT type must be one of type/press/submit')
+  }
+  await withProcessNativeOperation(`client-${String(input.type)}`, handle.clientId, body)
+  return { ok: true }
+}
+
+async function handleProcessClientText(message) {
+  const handle = requireProcessClientRequest(message, 'PROCESS_CLIENT_TEXT')
+  // The CURRENT visible screen is the only observable; scrollback is never a
+  // substitute for what the surface paints now.
+  const text = await withProcessNativeOperation('client-text', handle.clientId, () => handle.terminal.text({ full: false }))
+  return { text }
+}
+
+async function handleProcessClientState(message) {
+  requireProcessScene('PROCESS_CLIENT_STATE')
+  assertLifecycleOpen('PROCESS_CLIENT_STATE')
+  const handle = processClientById(message.clientId, 'PROCESS_CLIENT_STATE')
+  if (handle.closed) {
+    // The terminal fact of a closed Client is its recorded exit; the native
+    // handle is gone and must never be touched again.
+    return {
+      clientId: handle.clientId,
+      label: handle.label,
+      sessionId: handle.sessionId,
+      shellPid: handle.shellPid,
+      businessPids: handle.businessPids,
+      exited: true,
+      exitCode: handle.exitResult?.code ?? null,
+      exitSignal: handle.exitResult?.signal ?? null,
+      sessionListed: new Set(await openTuiSessions()).has(handle.sessionId),
+      shellState: handle.shellIdentity === undefined ? 'unknown' : processIdentityState(handle.shellIdentity.identity),
+      businessStates: handle.businessIdentities.map(value => ({
+        pid: value.identity.pid,
+        state: processIdentityState(value.identity),
+      })),
+    }
+  }
+  const state = await withProcessNativeOperation('client-state', handle.clientId, () => handle.terminal.state())
+  const openSessions = new Set(await openTuiSessions())
+  if (state.exited !== null && !handle.exited) {
+    handle.exited = true
+    handle.exitResult = { code: state.exited, signal: state.exit_signal ?? null }
+    handle.closedAt = handle.closedAt ?? now()
+    syncProcessClientsReceipt()
+  }
+  return {
+    clientId: handle.clientId,
+    label: handle.label,
+    sessionId: handle.sessionId,
+    shellPid: handle.shellPid,
+    businessPids: handle.businessPids,
+    exited: state.exited !== null,
+    exitCode: state.exited,
+    exitSignal: state.exit_signal ?? null,
+    sessionListed: openSessions.has(handle.sessionId),
+    shellState: handle.shellIdentity === undefined ? 'unknown' : processIdentityState(handle.shellIdentity.identity),
+    businessStates: handle.businessIdentities.map(value => ({
+      pid: value.identity.pid,
+      state: processIdentityState(value.identity),
+    })),
+    cols: state.cols,
+    rows: state.rows,
+  }
+}
+
+async function handleCloseProcessClient(message) {
+  requireProcessScene('CLOSE_PROCESS_CLIENT')
+  assertLifecycleOpen('CLOSE_PROCESS_CLIENT')
+  const handle = processClientById(message.clientId, 'CLOSE_PROCESS_CLIENT')
+  if (handle.closed) {
+    return {
+      clientId: handle.clientId,
+      exitCode: handle.exitResult?.code ?? null,
+      exitSignal: handle.exitResult?.signal ?? null,
+      closedAt: handle.closedAt,
+    }
+  }
+  let failure
+  let exit
+  try {
+    exit = await withProcessNativeOperation('client-close', handle.clientId, () => waitForTerminalExit(handle.terminal, handle.label, 120_000))
+    if (exit.code !== 0 || exit.signal !== null) {
+      throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} exited ${JSON.stringify(exit)}; the normal path requires code 0 and no signal`)
+    }
+  } catch (error) {
+    failure = error
+  }
+  try {
+    await withProcessNativeOperation('client-close-native', handle.clientId, () => handle.terminal.closeQuiet())
+  } catch (error) {
+    failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close and native teardown both failed`)
+  }
+  try {
+    await assertProcessClientQuiesced(handle, 'CLOSE_PROCESS_CLIENT')
+  } catch (error) {
+    failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close did not reach a quiescent terminal state`)
+  }
+  handle.exited = true
+  handle.exitResult = exit ?? handle.exitResult
+  handle.closed = true
+  handle.closedAt = now()
+  syncProcessClientsReceipt()
+  if (failure !== undefined) {
+    writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(failure) })
+    throw failure
+  }
+  writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
+  return {
+    clientId: handle.clientId,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    closedAt: handle.closedAt,
+  }
+}
+
+/** Reclaim one process Client after a Worker death or a failed close. */
+async function reclaimProcessClient(handle, reason) {
+  if (handle.closed || handle.reclaiming) return
+  handle.reclaiming = true
+  // A handler that already entered a native call owns the settlement; close
+  // only after that operation really returned. Never race a second native call.
+  const started = Date.now()
+  while (processNativeOperation !== undefined && Date.now() - started < 120_000) await sleep(50)
+  let failure
+  if (processNativeOperation !== undefined) {
+    failure = new Error(`${reason}: a native operation is still unsettled after 120000ms`)
+  } else {
+    try {
+      await withProcessNativeOperation('client-reclaim', handle.clientId, () => handle.terminal.closeQuiet())
+    } catch (error) {
+      failure = error
+    }
+  }
+  try {
+    await assertProcessClientQuiesced(handle, reason)
+  } catch (error) {
+    failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} reclaim failed`)
+  }
+  handle.exited = true
+  handle.exitResult = handle.exitResult ?? { code: null, signal: null }
+  handle.closed = true
+  handle.closedAt = now()
+  syncProcessClientsReceipt()
+  if (failure !== undefined) throw failure
+}
+
+/**
+ * The terminal audit shared by normal finalization and abnormal reclaim: every
+ * process Client's exact native session is gone, every captured identity is
+ * gone or reused, the official ledger parses completely, and no live
+ * unregistered business PID remains. It never decides business PASS.
+ */
+async function auditProcessClientLedger(reason) {
+  if (scene?.kind !== 'process') return
+  const problems = []
+  const openSessions = new Set(await openTuiSessions())
+  for (const handle of processClients) {
+    if (!handle.closed) problems.push(`${handle.label}: the Client is not closed`)
+    if (openSessions.has(handle.sessionId)) problems.push(`${handle.label}: its native TUI session is still open`)
+    try {
+      const records = readOfficialClientRecords(handle.recordFile, handle.label)
+      const started = records.find(record => record?.m4a0 === 'client-started')
+      // A Client killed before its record sink wrote anything never published a
+      // business identity; only a Client that DID reach ready must have one.
+      if (started === undefined && handle.readyAt !== undefined) {
+        problems.push(`${handle.label}: the official ledger carries no client-started record`)
+      }
+      const registered = new Set(handle.businessIdentities.map(value => value.identity.pid))
+      for (const record of records) {
+        if (record?.m4a0 !== 'client-started' && record?.m4a0 !== 'ready') continue
+        if (!Number.isInteger(record.pid) || record.pid <= 0) {
+          problems.push(`${handle.label}: an official record carries no real business PID`)
+          continue
+        }
+        if (!registered.has(record.pid) && pidAlive(record.pid)) {
+          problems.push(`${handle.label}: live unreported business PID ${String(record.pid)} cannot be proven dead or foreign`)
+        }
+      }
+    } catch (error) {
+      problems.push(`${handle.label}: ${boundedError(error)}`)
+    }
+    if (handle.shellIdentity !== undefined) {
+      const state = processIdentityState(handle.shellIdentity.identity)
+      if (state === 'alive' || state === 'unknown') problems.push(`${handle.label}: its shell PID ${String(handle.shellIdentity.identity.pid)} is ${state}`)
+    }
+    for (const value of handle.businessIdentities) {
+      const state = processIdentityState(value.identity)
+      if (state === 'alive' || state === 'unknown') problems.push(`${handle.label}: its business PID ${String(value.identity.pid)} is ${state}`)
+    }
+  }
+  if (problems.length > 0) throw new Error(`${reason}: process Client ledger audit failed: ${problems.join('; ')}`)
+}
+
 async function handleFinalize(message) {
   let hostStopError
   // The one-shot qualification Client must already be gone on the normal path;
@@ -3101,6 +4360,25 @@ async function handleFinalize(message) {
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
       hostStopError = hostStopError ?? new Error(
         `FINALIZE: qualification Client PID ${String(handle.child.pid)} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
+    }
+  }
+  // Process Clients are Supervisor-owned native sessions. A Client the Worker
+  // did not close is compensated here AND reported as a failed finalization:
+  // forgetting a close is never a silent success.
+  for (const handle of processClients) {
+    if (handle.closed) continue
+    try {
+      await reclaimProcessClient(handle, 'FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
+    hostStopError = hostStopError ?? new Error(
+      `FINALIZE: the process Client ${handle.label} was not closed by the Worker`)
+  }
+  for (const handle of processClients) {
+    if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+      hostStopError = hostStopError ?? new Error(
+        `FINALIZE: process Client ${handle.label} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
     }
   }
   // Native leftover Clients/shells are reclaimed BEFORE any Host stop, using
@@ -3147,6 +4425,7 @@ async function handleFinalize(message) {
   } else {
     auditClientLedger('FINALIZE')
   }
+  if (scene?.kind === 'process') await auditProcessClientLedger('FINALIZE')
   if (hostStopError !== undefined) throw hostStopError
   for (const handle of hosts) {
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
@@ -3159,7 +4438,8 @@ async function handleFinalize(message) {
     await cleanupSceneRoot('FINALIZE')
   }
   finalized = true
-  writeReceipt({ phase: 'FINALIZED', cleanup: { completedAt: now() } })
+  writeReceipt({ phase: 'FINALIZED', cleanup: { ...(receipt?.cleanup ?? {}), completedAt: now() } })
+  receiptTerminal = true
 }
 
 
@@ -3175,6 +4455,9 @@ function captureNativeReportIdentities({ shellPid, businessPids, scratch }) {
 
 async function handleReport(message) {
   const detail = message.detail === undefined ? undefined : message.detail
+  if (message.event === 'client-started' && scene?.kind === 'process') {
+    throw new Error('REPORT client-started: the Supervisor owns every process Client identity; a Worker report cannot register one')
+  }
   if (message.event === 'client-started' && detail !== undefined) {
     if (receipt.clients?.some(client => client.label === detail.label)) {
       throw new Error(`REPORT client-started: the Client label ${String(detail.label)} is already registered`)
@@ -3290,8 +4573,38 @@ async function dispatch(message) {
         if (requestId !== undefined) reply(requestId, payload)
         break
       }
+      case 'BOOTSTRAP_PROCESS': {
+        const payload = await handleBootstrapProcess(message)
+        if (payload !== undefined && requestId !== undefined) reply(requestId, payload)
+        break
+      }
       case 'START_HOST': {
         const payload = await handleStartHost(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'START_PROCESS_CLIENT': {
+        const payload = await handleStartProcessClient(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PROCESS_CLIENT_INPUT': {
+        const payload = await handleProcessClientInput(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PROCESS_CLIENT_TEXT': {
+        const payload = await handleProcessClientText(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PROCESS_CLIENT_STATE': {
+        const payload = await handleProcessClientState(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'CLOSE_PROCESS_CLIENT': {
+        const payload = await handleCloseProcessClient(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }
@@ -3357,7 +4670,19 @@ async function dispatch(message) {
           await handleFinalize(message)
         } catch (error) {
           preserveRoot = true
-          writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(error) })
+          const detail = error instanceof Error ? error.message : String(error)
+          writeReceipt({
+            phase: 'NOT_QUIESCED',
+            errorName: boundedError(error),
+            errorDetail: detail.slice(0, 600),
+            cleanup: {
+              ...(receipt.cleanup ?? {}),
+              reason: 'FINALIZE',
+              failedAt: now(),
+              hostsExited: hosts.every(handle => handle.exited),
+              sceneRootRemoved: false,
+            },
+          })
           if (requestId !== undefined) fail(requestId, 'SUPERVISOR_FINALIZE_FAILED', error)
           process.disconnect()
           setTimeout(() => process.exit(1), 10)
