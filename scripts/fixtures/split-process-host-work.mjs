@@ -70,6 +70,9 @@ const SCENARIOS = new Set([
   // G-ACP2-PR3A commands: one plain, large assistant answer per prompt with no
   // tool/subagent side effects, so an explicit `/compact` is deterministic.
   'acp-command',
+  // G-ACP2-PR3B session policy: the ordinary scripted provider plus the
+  // lifecycle action file that can hold or reject one official Team flush.
+  'acp-session-config',
   // G-ACP2 transient streaming: the ONLY scripted provider whose deltas and
   // durable block agree. Its first delta is held so a case can prove the ACP
   // chunk precedes the durable append, and one prompt selects a deliberately
@@ -357,6 +360,9 @@ function recordPromptFacts(options) {
     referencedSessions: allText.includes('## Referenced sessions'),
     canonicalSessionUri: allText.includes('dsh-session:'),
     // M6 PR-C C4: the model-facing TUI prompt-section facts (the parity sink).
+    // G-ACP2-PR3B: the ORDINARY provider request carries the official plan
+    // policy section while the committed mode is plan (not a TUI label).
+    planPolicy: systemText.includes('You are in plan mode'),
     focusSection: systemText.includes('# Focus mode'),
     progressSection: systemText.includes('# Progress updates:'),
     userText: textOf(userText).slice(-400),
@@ -2449,6 +2455,24 @@ class C1Model extends LlmAdapter {
       return
     }
 
+    if (this.scenario === 'acp-session-config') {
+      // One real official `exit_plan_mode` call: the review question is a real
+      // `user-questions/request` the ACP View projects as a standard Form; the
+      // approved target is committed by the SAME accepted in-turn pre-step.
+      if (userText.includes('PR3B_EXIT_PLAN') && !this.toolIssued.has(`pr3b-exit-plan:${sessionId}`)) {
+        this.toolIssued.add(`pr3b-exit-plan:${sessionId}`)
+        yield* this.toolCall('exit_plan_mode', `pr3b-exit-plan-${sessionId}`, {
+          plan: '# ACP session-config smoke plan\n\n1. Leave plan mode through the official review.\n2. Continue the ordinary turn.',
+        })
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `pr3b answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `pr3b answer ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
     throw new Error(`m4-c1-host-work: unsupported scenario ${JSON.stringify(this.scenario)}`)
   }
 }
@@ -2483,6 +2507,15 @@ export async function apply(ctx) {
     const flushFailureSessions = new Set()
     const flushSummarySeen = new Set()
     const flushHoldSessions = new Map()
+    // G-ACP2-PR3B: hold or reject the official `sessions.flush` that follows a
+    // committed `team/mode` append for one exact Session. The action files are
+    // smoke-owned; this row invokes only the official flush.
+    const teamModeSeen = new Set()
+    const teamFlushFailures = new Set()
+    const teamFlushHolds = new Map()
+    ctx.effect(() => ctx.on('session/event', (session, event) => {
+      if (event.type === 'team/mode') teamModeSeen.add(String(session.id))
+    }), 'lifecycle-team-mode-observer')
     const sessions = ctx.sessions
     const originalFlush = sessions.flush
     const lifecycleFlush = async function (...args) {
@@ -2506,6 +2539,25 @@ export async function apply(ctx) {
         record('lifecycle-flush-failure-hit', { sessionId })
         throw new Error('m4-c1-host-work: injected official Session flush failure')
       }
+      const teamHoldRelease = teamFlushHolds.get(sessionId)
+      if (teamHoldRelease !== undefined && teamModeSeen.has(sessionId)) {
+        teamFlushHolds.delete(sessionId)
+        // Keep `teamModeSeen` so a failure armed for the SAME released flush
+        // still observes the committed team/mode append; the failure branch
+        // consumes the marker.
+        record('lifecycle-team-flush-held', { sessionId, release: teamHoldRelease })
+        const deadline = Date.now() + 30_000
+        while (!existsSync(teamHoldRelease)) {
+          if (Date.now() > deadline) throw new Error('m4-c1-host-work: held Team flush timed out')
+          await new Promise(resolveWait => setTimeout(resolveWait, 25))
+        }
+      }
+      if (teamFlushFailures.has(sessionId) && teamModeSeen.has(sessionId)) {
+        teamFlushFailures.delete(sessionId)
+        teamModeSeen.delete(sessionId)
+        record('lifecycle-team-flush-failure-hit', { sessionId })
+        throw new Error('m4-c1-host-work: injected official Team flush failure')
+      }
       return await originalFlush.apply(this, args)
     }
     sessions.flush = lifecycleFlush
@@ -2516,6 +2568,16 @@ export async function apply(ctx) {
     }, 'lifecycle-flush-restore')
     const runAction = async action => {
       const agent = action.sessionId === undefined ? undefined : ctx.agents.get(action.sessionId)
+      if (action.action === 'arm-team-flush-hold') {
+        teamFlushHolds.set(String(action.sessionId), String(action.release))
+        record('lifecycle-team-flush-hold-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'arm-team-flush-failure') {
+        teamFlushFailures.add(String(action.sessionId))
+        record('lifecycle-team-flush-failure-armed', { sessionId: action.sessionId })
+        return
+      }
       if (action.action === 'arm-flush-failure') {
         flushFailureSessions.add(String(action.sessionId))
         flushSummarySeen.delete(String(action.sessionId))

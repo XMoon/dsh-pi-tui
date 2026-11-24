@@ -81,7 +81,7 @@ function deadline(promise, label, ms = 180_000) {
 }
 
 /** One official ACP SDK client over the real local socket. */
-export async function openSdkClient(endpoint, onUpdate) {
+export async function openSdkClient(endpoint, onUpdate, onElicitation) {
   let socket
   if (endpoint.dir !== undefined) {
     const dirFd = openSync(endpoint.dir, 'r')
@@ -105,6 +105,9 @@ export async function openSdkClient(endpoint, onUpdate) {
   const socketClosed = new Promise(resolve => socket.once('close', resolve))
   const app = acp.client({ name: CASE_ID })
   app.onNotification(acp.methods.client.session.update, ({ params }) => { onUpdate(params) })
+  if (onElicitation !== undefined) {
+    app.onRequest(acp.methods.client.elicitation.create, async ({ params }) => await onElicitation(params))
+  }
   const connection = app.connect(acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket)))
   // A peer-side EOF is a normal scene teardown; keep the SDK's closed promise
   // observed so it can never become an uncaught rejection after a failure.

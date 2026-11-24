@@ -221,7 +221,11 @@ profile's independent `autoStart` preference enables it (see below).
   `session/new`/`session/resume` inputs, not an HTTP/SSE capability. It does NOT
   advertise the optional `sessionCapabilities.options` capability: the standard
   config-option response/notification fields below are ordinary ACP v1 fields
-  and do not require that negotiation.
+  and do not require that negotiation. Session modes are advertised per Session
+  through the standard `modes` response field; there is no separate mode
+  capability. A boolean config row (the root Agent Team option) is offered and
+  writable only to a client that declared
+  `clientCapabilities.session.configOptions.boolean` at `initialize`.
   Inline image PROMPT capability is advertised only on that connection when the
   Host's boot-frozen Attachment Store and exact configured default model route
   explicitly declare image support; unknown services, route metadata or
@@ -450,23 +454,73 @@ profile's independent `autoStart` preference enables it (see below).
     or a TUI projection. A current route or explicit effort that the live
     catalog no longer advertises is presented as a non-submittable
     `Current (unavailable)` placeholder so the selector still shows the truth.
-    `session/new` and `session/resume` may include the complete optional
-    `configOptions` after the View attached; a genuine model-catalog
-    unavailability omits only that optional display and keeps the committed
-    Session/View success, logging one fixed
-    `LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE` code. A stale, closed or foreign View
-    identity during that read is a lifecycle failure and propagates instead of
-    falsely confirming an attachment. `session/set_config_option`
-    is admitted only on the exact current View claim with no unsettled prompt
-    flight, and only when the exact Agent's true idle phase can be taken through
-    the official `runMaintenance`; all catalog and LLM-capability reads happen
-    before that maintenance window. The write is ONLY the official Session
-    `model/selection` through `AgentModel.select`; it never saves or changes the
-    profile default, and the TUI's own `/model` / `Save as Default` behavior is
-    untouched. A committed `model/selection` from any client produces one full
-    `config_option_update` on the current View's connection only; a closed,
-    detached or replaced View receives none. There is no general `mode`/`config`
-    namespace and no client-supplied setup options.
+    The write is ONLY the official Session `model/selection` through
+    `AgentModel.select`; it never saves or changes the profile default, and the
+    TUI's own `/model` / `Save as Default` behavior is untouched.
+  - **Session collaboration mode and Agent Team configuration.** The same
+    attached View exposes the standard `modes`/`current_mode_update` and the
+    complete fixed-order config lists. The two collaboration modes are the
+    fixed wire ids `default` and `plan`; their ONE authority is the exact
+    retained official PlanModeController resolved through
+    `agentPresets.serviceFor(agent,'planMode')` and matched by instance against
+    the installed class. A Session without that retained service advertises no
+    mode list and no `mode` row; a different-shaped/non-official service is
+    never projected. `active` is the committed mode; a pending target selection
+    is NEVER `currentModeId`, and a pending selection refuses a new mode write.
+    The legacy `modes`/`session/set_mode` pair and the `mode` select row are
+    two projections of the same committed state. `session/new`,
+    `session/resume` and `session/load` return the legacy list; only a
+    connection that actually received it may call `session/set_mode` or receive
+    `current_mode_update` (a connection that did not must re-attach), while the
+    `mode` config row remains writable on the same authority.
+    The root-only Agent Team boolean is a `type:'boolean'` row with the stable
+    id `agent_team` and no reserved category; it exists only when the client
+    negotiated `clientCapabilities.session.configOptions.boolean` AND the
+    exact Session owns the official readable `agentTeam.enabled` projection
+    through the real root Agent Team authority. A child Session carries no Team
+    row and cannot write it; a task-board failure does not negate a valid
+    boolean. No permission preset, sandbox policy, TUI picker state or profile
+    default is ever projected as a mode/config.
+    `session/new`, `session/resume`, `session/load` and a post-write reply all
+    compose the SAME cut: the model options are read first with their provider
+    I/O outside any maintenance window, then one synchronous exact policy
+    snapshot supplies both the legacy mode list and the `mode`/`agent_team`
+    rows. The fixed row order is `model`, optional `thought_level`, optional
+    `mode`, optional `agent_team`. A genuine model-catalog unavailability omits
+    only the complete config list (never a partial one) and keeps the committed
+    Session/View success and the legacy mode list; a policy read that is merely
+    unreadable is an unavailable capability, not an absent row, so an initial
+    display may be omitted and writes stay refused until a real read succeeds.
+    An attached View receives one full `config_option_update` after every
+    committed config-policy invalidation (`model/selection`, `plan/mode`,
+    `team/mode`, `team/task`, `agent-preset/selected` and the existing
+    `tools/change` composition invalidation) on its ONE ordered notification
+    chain; rapid invalidations coalesce to the newest real read, and a failed
+    read keeps the previously delivered list. A committed mode change also
+    delivers `current_mode_update` to a mode-announced connection; that update
+    never depends on the model catalog succeeding. Neither notification is
+    backed by a client-side cache, an event payload or a second authority.
+    `session/set_mode` and `session/set_config_option` for `mode`/`agent_team`
+    are admitted only on the exact current View claim, only while this View owns
+    no prompt/command/policy/retiring-turn/unclaimed/close/MCP obligation, and
+    only through ONE session policy write slot; a prompt, command, model
+    commit/preflight or Skill revalidation may not start while that slot is
+    owned, and a second policy write is refused. The write enters the exact
+    Agent's official `runMaintenance`, re-checks the exact identity, the open
+    turn, the retained service identity and the read baseline, then invokes the
+    official setter exactly once. Only a synchronous `committed`/`noop` mode
+    result with an immediately readable `active` target and no pending
+    selection is a success; a queued/cancelled mode result, a throw after the
+    call, a Team `setEnabled` rejection or a mismatching readback is
+    `LOCAL_ACP_CONFIG_WRITE_INDETERMINATE`, whose real state is re-read for the
+    notification fact and never retried or rolled back. A Team selection always
+    calls the official `setEnabled` even for the same value; its own flush is
+    the durability terminal. `close`, EOF/Off/disposal never cancel an admitted
+    policy write: the exact claim stays fenced until that ORIGINAL call settles,
+    and the View is released only afterwards. The complete post-write reply is
+    read back; if the model catalog or full policy cut cannot be confirmed the
+    call fails with `LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE` while preserving the
+    real Host commit (the client cannot claim either success or no-write).
   - **Agent-scoped stdio MCP declarations.** `session/new` and `session/resume`
     accept the standard ACP v1 `mcpServers` list only for the stdio transport;
     `initialize` keeps `mcpCapabilities.http=false` and `sse=false`, and every

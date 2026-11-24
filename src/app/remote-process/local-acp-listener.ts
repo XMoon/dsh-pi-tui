@@ -40,6 +40,7 @@ import {
   type AgentConnection,
   type AgentContext,
   type SessionConfigOption,
+  type SessionModeState,
 } from '@agentclientprotocol/sdk'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { type LocalScope } from './local-scope.ts'
@@ -47,7 +48,8 @@ import { runDetached } from '../../runtime/process/tasks.ts'
 import {
   AcpSessionViewRegistry,
   LocalAcpViewError,
-  type AcpConfigOptionsNotifier,
+  type AcpConfigUpdate,
+  type AcpConfigUpdateNotifier,
   type AcpElicitationRequester,
   type AcpImageLimits,
   type AcpProjectionNotifier,
@@ -60,6 +62,7 @@ import {
   selectSessionPage,
   type AcpNegotiatedCapabilities,
 } from './local-acp-projections.ts'
+import { invalidPolicyOption, modeOfWireId } from './local-acp-session-policy.ts'
 
 /** The ACP agent identity this front door advertises (never a copied brand). */
 const AGENT_NAME = 'dsh-pi-tui'
@@ -770,6 +773,7 @@ function buildAgentApp(
         compaction: params.clientCapabilities?.session?.compaction != null,
         subagents: params.clientCapabilities?.subagents != null,
         notices: params.clientCapabilities?.session?.notices != null,
+        booleanConfigOptions: params.clientCapabilities?.session?.configOptions?.boolean != null,
       }
       if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
@@ -857,38 +861,52 @@ function buildAgentApp(
       JSONRPC_INVALID_PARAMS,
     )
     /**
-     * Read the optional config options of the EXACT View just attached by this
-     * new/resume call. ONLY a real model-catalog unavailability may omit the
-     * optional display; a stale, closed or foreign View identity is a lifecycle
-     * failure and must propagate through the normal JSON-RPC error boundary
-     * instead of falsely confirming an attachment that no longer exists.
+     * Read the initial complete config state of the EXACT View just attached by
+     * this new/resume/load call. The optional model catalog omits only the
+     * complete config list (never a partial one) while the legacy mode list
+     * still comes from the SAME policy cut. A stale/closed View identity is a
+     * lifecycle failure and propagates instead of falsely confirming attach.
      */
-    const readConfigOptionsOrLog = async (
+    const readConfigStateOrLog = async (
       sessionId: string,
       view: ConnectionViewState,
-    ): Promise<SessionConfigOption[] | undefined> => {
+    ): Promise<{ modes?: SessionModeState; configOptions?: SessionConfigOption[] }> => {
       try {
-        return await views.modelOptions(view, access, sessionId)
-      } catch (error) {
-        // Only the exact typed catalog-unavailable class may take the optional
-        // display fallback. Unexpected Host/projection errors must fail through
-        // the normal JSON-RPC boundary instead of becoming a false success.
-        if (!(error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MODEL_UNAVAILABLE')) {
-          throw error
+        const snapshot = await views.sessionConfigState(view, access, sessionId)
+        if (snapshot.configOptions === undefined) {
+          context.diag.warn('local-acp.model-catalog-unavailable', {
+            code: 'LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE',
+            reason: 'LOCAL_ACP_MODEL_UNAVAILABLE',
+          })
         }
-        context.diag.warn('local-acp.model-catalog-unavailable', {
-          code: 'LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE',
-          reason: error.code,
-        })
-        return undefined
+        return {
+          ...(snapshot.modes === undefined ? {} : { modes: snapshot.modes }),
+          ...(snapshot.configOptions === undefined ? {} : { configOptions: [...snapshot.configOptions] }),
+        }
+      } catch (error) {
+        // A still-moving config cut cannot prove one initial snapshot. It is an
+        // optional-display omission, never a fabricated empty config; a real
+        // lifecycle failure keeps its typed error and propagates.
+        if (error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE') {
+          context.diag.warn('local-acp.config-readback-unavailable', { code: error.code })
+          return {}
+        }
+        throw error
       }
     }
-    /** The transient notification sink of ONE connection's attached View. */
-    const configNotifierFor = (client: AgentContext): AcpConfigOptionsNotifier =>
-      async (sessionId, configOptions) => {
+    /** The transient config notification sink of ONE connection's attached View. */
+    const configNotifierFor = (client: AgentContext): AcpConfigUpdateNotifier =>
+      async (sessionId: string, update: AcpConfigUpdate) => {
+        if (update.kind === 'mode') {
+          await client.notify(methods.client.session.update, {
+            sessionId,
+            update: { sessionUpdate: 'current_mode_update', currentModeId: update.currentModeId },
+          })
+          return
+        }
         await client.notify(methods.client.session.update, {
           sessionId,
-          update: { sessionUpdate: 'config_option_update', configOptions: [...configOptions] },
+          update: { sessionUpdate: 'config_option_update', configOptions: [...update.configOptions] },
         })
       }
     /**
@@ -930,7 +948,7 @@ function buildAgentApp(
       }
     /** The per-connection transient channels an attached View may use. */
     const viewChannelsFor = (client: AgentContext): AcpViewChannels => ({
-      notifyConfigOptions: configNotifierFor(client),
+      notifyConfigUpdate: configNotifierFor(client),
       notifyProjection: projectionNotifierFor(client),
       capabilities: state.capabilities,
       ...state.elicitationForm ? { requestElicitation: requestElicitationFor(client) } : {},
@@ -942,8 +960,8 @@ function buildAgentApp(
         requireInitialized()
         view = createSessionViewSlot(slots, views)
         const result = await views.newSession(view, access, params, viewChannelsFor(client), signal)
-        const configOptions = await readConfigOptionsOrLog(result.sessionId, view)
-        return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
+        const config = await readConfigStateOrLog(result.sessionId, view)
+        return { ...result, ...config }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -967,8 +985,8 @@ function buildAgentApp(
         }
         view = createSessionViewSlot(slots, views)
         const result = await views.resumeSession(view, access, params, viewChannelsFor(client), signal)
-        const configOptions = await readConfigOptionsOrLog(params.sessionId, view)
-        return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
+        const config = await readConfigStateOrLog(params.sessionId, view)
+        return { ...result, ...config }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1002,8 +1020,8 @@ function buildAgentApp(
         }
         view = createSessionViewSlot(slots, views)
         const result = await views.loadSession(view, access, params, viewChannelsFor(client), signal)
-        const configOptions = await readConfigOptionsOrLog(params.sessionId, view)
-        return { ...result, ...(configOptions === undefined ? {} : { configOptions }) }
+        const config = await readConfigStateOrLog(params.sessionId, view)
+        return { ...result, ...config }
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1103,16 +1121,39 @@ function buildAgentApp(
         state.pendingRequests -= 1
       }
     })
-    // Host Session model subset: standard typed handler (the SDK parses the
-    // request against the pinned v1 schema); the View applies the exact-claim,
-    // View-idle and Agent-idle admission before any Session write.
+    // Standard ACP v1 session mode: the legacy `modes` list admitted at attach
+    // is the delivery eligibility fact; the View applies the exact-claim and
+    // official-maintenance admission before any Session write.
+    app.onRequest(methods.agent.session.setMode, async ({ params, signal }) => {
+      beginRequest('control')
+      try {
+        requireInitialized()
+        // The standard mode vocabulary is validated as an ordinary shape
+        // refusal, independent of claim ownership: an unknown id must never
+        // become method-not-found or a Host side effect.
+        if (modeOfWireId(params.modeId) === undefined) {
+          const invalid = invalidPolicyOption('the requested session mode is not selectable')
+          throw new LocalAcpViewError(invalid.code, invalid.message, invalid.rpcCode)
+        }
+        const view = routeOwnedView(slots, views, params.sessionId)
+        if (view === undefined) throw notOwned()
+        return await views.setMode(view, access, params.sessionId, params.modeId, signal)
+      } catch (error) {
+        throw asRequestError(error)
+      } finally {
+        endRequest('control')
+      }
+    })
+    // Session config-option subset: standard typed handler (the SDK parses the
+    // request against the pinned v1 schema); the View routes mode/Team to the
+    // official policy and model/thought_level to the existing model service.
     app.onRequest(methods.agent.session.setConfigOption, async ({ params, signal }) => {
       beginRequest('control')
       try {
         requireInitialized()
         const view = routeOwnedView(slots, views, params.sessionId)
         if (view === undefined) throw notOwned()
-        const configOptions = await views.setModelOption(view, access, params, signal)
+        const configOptions = await views.setConfigOption(view, access, params, signal)
         return { configOptions }
       } catch (error) {
         throw asRequestError(error)
@@ -1127,6 +1168,7 @@ function buildAgentApp(
     app.onRequest(methods.agent.session.resume, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.close, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.prompt, acceptAnyParams, rejectSessionOperation)
+    app.onRequest(methods.agent.session.setMode, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.setConfigOption, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.load, acceptAnyParams, rejectSessionOperation)
     app.onRequest(methods.agent.session.list, acceptAnyParams, rejectSessionOperation)
@@ -1164,7 +1206,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     closed: false,
     imageEnabled: false,
     elicitationForm: false,
-    capabilities: { plan: false, compaction: false, subagents: false, notices: false },
+    capabilities: { plan: false, compaction: false, subagents: false, notices: false, booleanConfigOptions: false },
     inputBounds: TEXT_ONLY_BOUNDS,
     maxOutputFrameBytes: deriveImageOutputBounds(context.sessionAccess?.imageLimits()) ?? MAX_OUTPUT_FRAME_BYTES,
     ...(viewRoster === undefined ? {} : { views: viewRoster }),

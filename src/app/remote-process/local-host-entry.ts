@@ -120,6 +120,15 @@ import {
   type AcpModelSelection,
 } from './local-acp-model-selection.ts'
 import {
+  AcpSessionPolicyService,
+  stalePolicy,
+  type AcpAgentTeamService,
+  type AcpPlanModeService,
+  type AcpSessionPolicyAgent,
+  type AcpSessionPolicyRequest,
+  type AcpSessionPolicyState,
+} from './local-acp-session-policy.ts'
+import {
   AcpScopedMcpError,
   mountAcpScopedMcp,
   retireAcpScopedMcp,
@@ -333,6 +342,12 @@ interface OfficialDshModules {
    * ACP compact capability is unavailable, never replaced by a root engine.
    */
   readonly compactionEngineClass?: Function
+  /**
+   * The official PlanModeController class, resolved from the SAME installation
+   * anchor. Optional: without it the ACP collaboration mode is unavailable,
+   * never replaced by a differently-shaped service.
+   */
+  readonly planModeClass?: Function
 }
 
 /** Resolve one published DSH subpath from the installation anchor supplied by the launcher. */
@@ -353,9 +368,19 @@ async function loadOfficialDsh(anchor: string): Promise<OfficialDshModules> {
     // The optional compact capability is absent when its public official
     // implementation cannot be resolved from this anchor.
   }
+  let planModeClass: Function | undefined
+  try {
+    const planMode = await importResolved('@deepseek-ai/dsh-plan-mode')
+    const candidate = planMode.PlanModeController ?? planMode.default
+    if (typeof candidate === 'function') planModeClass = candidate
+  } catch {
+    // The optional collaboration-mode capability is absent when its public
+    // official implementation cannot be resolved from this anchor.
+  }
   return {
     parseCommand: commands.parseCommand as OfficialDshModules['parseCommand'],
     ...(compactionEngineClass === undefined ? {} : { compactionEngineClass }),
+    ...(planModeClass === undefined ? {} : { planModeClass }),
     runProfile: profileBoot.runProfile as OfficialDshModules['runProfile'],
     loadLayeredEnv: appBoot.loadLayeredEnv as OfficialDshModules['loadLayeredEnv'],
     resolveDshHome: homePaths.resolveDshHome as OfficialDshModules['resolveDshHome'],
@@ -780,7 +805,15 @@ interface AgentPresetInspectionLike {
 
 interface AgentPresetRegistryLike {
   inspectCompositions(ctx?: object): readonly AgentPresetInspectionLike[]
-  serviceFor(agent: { readonly ctx: object }, name: 'compaction' | 'skills'): unknown
+  serviceFor(agent: { readonly ctx: object }, name: 'compaction' | 'skills' | 'planMode'): unknown
+}
+
+/** The official root-only Agent Team write seam (structural). */
+interface AgentTeamServiceLike extends AcpAgentTeamService {}
+
+/** The official subagent registry root resolver (structural). */
+interface SubagentRegistryLike {
+  rootOf(agent: object): object
 }
 
 interface WorkingDirectoryLike {
@@ -956,6 +989,7 @@ export function createHostAcpSessionAccess(
   context: import('@deepseek-ai/cordis').Context,
   parseCommand?: (line: string) => { readonly name: string; readonly rawInput: string } | undefined,
   compactionEngineClass?: Function,
+  planModeClass?: Function,
 ): HostAcpSessionAccess {
   const workspaceController = context.reflect.get('workspaceController') as WorkspaceControllerLike | undefined
   const sessionController = context.reflect.get('sessionController') as SessionControllerLike | undefined
@@ -1010,6 +1044,59 @@ export function createHostAcpSessionAccess(
     },
     currentAgent: sessionId => agents.get(sessionId) as unknown as AcpModelAgent | undefined,
     currentSession: sessionId => sessions.get(sessionId),
+  })
+  // The exact official policy authorities are resolved PER CALL: a retained
+  // PlanModeController by instance identity and the root Team service by the
+  // real subagent registry. Neither is cached as a second authority.
+  const agentTeams = context.reflect.get('agentTeams') as AgentTeamServiceLike | undefined
+  const subagents = context.reflect.get('subagents') as SubagentRegistryLike | undefined
+  const policyService = new AcpSessionPolicyService({
+    currentAgent: sessionId => agents.get(sessionId),
+    currentSession: sessionId => sessions.get(sessionId),
+    planMode: agent => {
+      if (planModeClass === undefined || agentPresets === undefined || !hasContext(agent as LiveAgentViewIdentity)) {
+        return undefined
+      }
+      let service: unknown
+      try {
+        service = agentPresets.serviceFor(agent as { readonly ctx: object }, 'planMode')
+      } catch {
+        throw new Error('local host entry: the retained plan-mode service could not be resolved')
+      }
+      if (service === undefined) return undefined
+      try {
+        if (!(service instanceof planModeClass)) return undefined
+      } catch {
+        return undefined
+      }
+      const candidate = service as { get?: unknown; set?: unknown }
+      if (typeof candidate.get !== 'function' || typeof candidate.set !== 'function') return undefined
+      return service as AcpPlanModeService
+    },
+    team: agent => {
+      if (agentTeams === undefined || subagents === undefined || sessionProjections === undefined) return undefined
+      let root: object
+      try {
+        root = subagents.rootOf(agent)
+      } catch {
+        throw new Error('local host entry: the Agent Team root could not be resolved')
+      }
+      if (root !== agent) return undefined
+      return agentTeams
+    },
+    teamEnabled: session => {
+      const value = projectionValueOf(sessionProjections, session, 'agentTeam')
+      if (value === undefined) return undefined
+      if (value === null || typeof value !== 'object') {
+        throw new Error('local host entry: the official Agent Team projection is malformed')
+      }
+      const enabled = (value as { readonly enabled?: unknown }).enabled
+      if (typeof enabled !== 'boolean') {
+        throw new Error('local host entry: the official Agent Team projection carries no boolean')
+      }
+      return enabled
+    },
+    noOpenTurn: session => agents.turnBoundaryOf(session).openTurnStartSeq === null,
   })
   return {
     async createWorkspace(path: string): Promise<AcpCreateWorkspaceOutcome> {
@@ -1109,6 +1196,22 @@ export function createHostAcpSessionAccess(
     modelOptions: async (agent, session) => await modelService.readOptions(agent as unknown as AcpModelAgent, session),
     selectModelOnly: async (agent, session, request, signal, stillCurrent) =>
       await modelService.selectSessionOnly(agent as unknown as AcpModelAgent, session, request, signal, stillCurrent),
+    // Session policy capability: the ONLY mode/Team surface the ACP View can
+    // reach. The retained official service identity and the exact Agent/Session
+    // are re-resolved per call; a missing service is absence, a failed read is
+    // unavailable.
+    readSessionPolicy: (agent, session): AcpSessionPolicyState => {
+      if (agents.get(agent.id) !== agent || sessions.get(agent.id) !== session || agent.session !== session) {
+        throw stalePolicy()
+      }
+      return policyService.read(agent as unknown as AcpSessionPolicyAgent)
+    },
+    selectSessionPolicy: async (agent, session, request: AcpSessionPolicyRequest, signal, stillCurrent) => {
+      if (agents.get(agent.id) !== agent || sessions.get(agent.id) !== session || agent.session !== session) {
+        throw stalePolicy()
+      }
+      return await policyService.select(agent as unknown as AcpSessionPolicyAgent, request, signal, stillCurrent)
+    },
     imageLimits: () => attachments?.imageLimits,
     // The ONE official Host Attachment Store reads and verifies the committed
     // image; the View never sees a Host path, a second store or an unverified
@@ -1426,6 +1529,9 @@ export function createHostAcpSessionAccess(
         // a tool-list authority.
         context.on('tools/change', () => {
           listener.onSkillCatalogInvalidated()
+          // A recomposition can add/remove the retained PlanMode/Team
+          // authority: re-read it instead of trusting the projected rows.
+          listener.onPolicyAvailabilityInvalidated()
         }),
         // The transient provisional output of one emitting Agent. It is the
         // SAME official frame the Direct TUI consumes; here it is correlated to
@@ -2350,7 +2456,12 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // The official Workspace/Session/Agent registries stay the sole authority;
       // only their callable methods are forwarded. A failure to read them is a
       // Host composition failure (the readiness audit already required them).
-      const sessionAccess = createHostAcpSessionAccess(handle.ctx, dsh.parseCommand, dsh.compactionEngineClass)
+      const sessionAccess = createHostAcpSessionAccess(
+        handle.ctx,
+        dsh.parseCommand,
+        dsh.compactionEngineClass,
+        dsh.planModeClass,
+      )
       acpController = createAcpController({ scope, maxConnections, diag: createEntryDiag('host'), sessionAccess })
       scratchOwner.acpController = acpController
       // Register the entry-owned controller as the root Host `piTuiAcpOwner`

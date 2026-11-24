@@ -540,10 +540,11 @@ export async function runAcpV1ConformanceB3(context) {
       'B3-06: the active View did not produce its own Host answer')
     await assertSameHost(hostIdentity, 'B3-06 Host after close/new')
 
-    // B3-07: unadvertised methods fail without Side effects. session/list is
-    // registered fail-closed; session/load, set_mode and an unknown method are
-    // owned by the SDK dispatcher. Record the actual wire codes rather than
-    // upgrading a protocol SHOULD into a new Host taxonomy.
+    // B3-07: unadvertised methods fail without Side effects. session/list serves
+    // the authorized roster; session/load stays fail-closed for an already
+    // attached Session; the standard set_mode method is registered and an
+    // unknown mode id is a stable invalid-option refusal (never method-not-found
+    // or a Host write), while unknown RPC methods stay method-not-found.
     const optional = await RawAcpClient.open(acpEndpoint)
     rawClients.push(optional)
     const optionalInit = await optional.request(1, 'initialize', { protocolVersion: 1, clientCapabilities: {} })
@@ -561,7 +562,9 @@ export async function runAcpV1ConformanceB3(context) {
       && (loaded.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED' || loaded.error?.data?.code === 'LOCAL_ACP_VIEW_BUSY'),
     `B3-07: a foreign-attached Session must never get a second View: ${JSON.stringify(loaded)}`)
     const setMode = await optional.request(4, 'session/set_mode', { sessionId: sessionB, modeId: 'x' })
-    assert(setMode.error?.code === -32601, `B3-07: session/set_mode must be method-not-found: ${JSON.stringify(setMode)}`)
+    assert(setMode.error?.code === -32602
+      && setMode.error?.data?.code === 'LOCAL_ACP_CONFIG_INVALID_OPTION',
+    `B3-07: an unknown mode id must be a stable invalid-option refusal with no side effect: ${JSON.stringify(setMode)}`)
     const removed = await optional.request(5, 'session/delete', { sessionId: sessionB })
     assert(removed.error?.code === -32601, `B3-07: session/delete must be method-not-found: ${JSON.stringify(removed)}`)
     const unknownMethod = await optional.request(6, '_/b3-method', {})

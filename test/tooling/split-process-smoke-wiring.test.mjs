@@ -582,6 +582,7 @@ test('every registry entry declares a conservative platform list and the audited
     // official ACP/services on both platforms; its packed-candidate Darwin
     // selected run passed.
     'acp.command-invocation',
+    'acp.session-config',
   ]
   const cases = listSelectableCases()
   for (const entry of cases) {
