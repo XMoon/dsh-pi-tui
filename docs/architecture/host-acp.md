@@ -775,7 +775,10 @@ any other name is unsupported for this contract and never falls through to a
 same-name Skill or ordinary model prompt. Native human-invocable Skills are
 advertised only when the exact retained composition mounts the official
 tool-skill loader and the official registry returns a complete snapshot; the
-catalog never contains a Skill body, path or definition identity.
+catalog never contains a Skill body, path or definition identity. A failed
+retained-composition or scoped-service read is unavailable, never converted
+into absence, a global fallback or a different service. Reserved command names
+never appear as reachable Skill rows when their approved command is missing.
 
 `/feedback` must be one text block and is submitted exactly once through the
 official command runtime. Its original execution Promise is the terminal: a
@@ -790,10 +793,16 @@ request identity go through the existing `SessionController.prompt`/inbox
 ownership, and the official pre-step loader decides the current invocation
 policy. An advertised Skill is revalidated after an asynchronous preflight;
 close/cancel/EOF/dispose abort only that read, and a pre-dispatch stale/miss is
-refused without inserting a message or planting an unclaimed obligation.
+refused without inserting a message or planting an unclaimed obligation. Final
+admission is synchronous: cancellation, Close, catalog epoch, exact claim and
+Host-command shadow are rechecked immediately before the ordinary prompt call,
+so no callback can slip between the preflight's last await and the insertion.
 
 `/compact` uses the exact retained official `compaction` service selected from
-the Agent's audited composition. It is NOT executed through a command wrapper:
+the Agent's audited composition. The composition must be one of the generated
+official preset identities and contain the audited compaction modules; an
+ambiguous custom composition or an unreadable service is unavailable rather
+than a guessed engine. It is NOT executed through a command wrapper:
 the View never fabricates `command/run`, `command/done` or `sourceCommandId`,
 and never takes the root/global compaction service. The original
 `compactNow` Promise is the execution terminal; `compaction/start`,
@@ -804,11 +813,14 @@ completion; `compaction/end` does not prove the checkpoint/flush succeeded.
 
 Cancellation records intent synchronously and makes the actual compact abort
 decision in one deferred microtask after the synchronous official publication
-stack. The decision re-checks this exact operation and its own observed summary
-and aborts only its captured controller. A commit that already won the race is
-never reported as cancelled. A standalone command is never aborted after
-dispatch. A real official busy refusal stays busy, an independent Agent/Host
-cancellation stays a Host failure, a committed operation with a persistence
+stack. An intent arriving while the official call is still on the stack is
+replayed once the call returns; only the captured operation's own abort reason
+may turn the rejection into `cancelled`, as proven through the original
+rejection chain, so an independent Agent/Host cancellation that won first stays
+a Host failure. A commit that already won the race is never reported as
+cancelled. A summary followed by a missing or error end is indeterminate, not
+proven committed. A standalone command is never aborted after dispatch. A real
+official busy refusal stays busy, a committed operation with a persistence
 failure is reported as committed-with-error, and an unprovable outcome is
 indeterminate. No automatic retry occurs.
 
@@ -816,12 +828,15 @@ An attached View owns at most one prompt flight or one command operation. The
 operation stays owned by its exact claim until the original official Promise
 settles; Close, physical EOF, runtime Off, Agent disposal and the listener
 teardown close delivery but never turn an unsettled command into a released
-claim or retire the scoped MCP lease early. Only the real terminal (or an
-explicitly classified pre-dispatch refusal) allows the claim and its lease to
-be released. The command result is one standard `agent_message_chunk` (when the
-official result supplies text) followed by the request's `end_turn`; omission
-of the catalog or the compaction capability never changes the command's real
-business outcome. Standard JSON-RPC errors use the fixed `LOCAL_ACP_COMMAND_*`
+claim or retire the scoped MCP lease early. A dead delivery wait is abandoned
+separately: once the raw Host terminal is real, a held result or predecessor
+notification cannot retain the claim forever. The command result is one
+standard `agent_message_chunk` (when the official result supplies text) followed
+by the request's `end_turn`; every own negotiated compaction frame already
+queued for this operation is delivered (or fails as output failure) before the
+result or cancellation/error reply, using the existing bounded projection tail
+and no second queue. Omission of the catalog or the compaction capability never
+changes the command's real business outcome. Standard JSON-RPC errors use the fixed `LOCAL_ACP_COMMAND_*`
 codes; no private ACP RPC, field or second command queue exists.
 
 ### `session/list`
