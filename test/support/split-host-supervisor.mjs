@@ -3625,6 +3625,7 @@ async function handleStartHost(message) {
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: true,
   })
+  const closePromise = new Promise(resolve => child.once('close', (code, signalValue) => resolve({ code, signal: signalValue })))
   const records = []
   let stderr = ''
   createInterface({ input: child.stdout }).on('line', line => {
@@ -3664,6 +3665,7 @@ async function handleStartHost(message) {
         return undefined
       }
     })(),
+    closePromise,
     closedAt: undefined,
     exited: false,
     exitResult: undefined,

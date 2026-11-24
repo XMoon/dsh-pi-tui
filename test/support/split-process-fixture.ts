@@ -1200,7 +1200,7 @@ class ProcessScene implements SplitProcessScene {
     }
     if (errors.length > 0) {
       throw new AggregateError(errors,
-        `split-process Scene cleanup failed with ${String(errors.length)} error(s); evidence root: ${this.workDir}`)
+        `split-process Scene cleanup failed with ${String(errors.length)} error(s): ${errors.map(error => error.message).join(' | ')}; evidence root: ${this.workDir}`)
     }
   }
 }
