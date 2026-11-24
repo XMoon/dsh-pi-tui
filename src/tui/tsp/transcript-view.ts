@@ -2751,7 +2751,7 @@ function focusPreparingPlacement(
   // the raw tail is the same canonical region policy either way.
   const expandedBlocks = projectFocus(messages, activities, new Set(activities.keys()), true)
   const trailing = projectTranscriptStructure(messages).at(-1)
-  const placement = focusLiveTailPlacement(messages, activities)
+  const placement = focusLiveTailPlacement(messages, activities, expandedBlocks)
   const placementTurn = placement === undefined || !('turn' in placement.rootOwner)
     ? undefined
     : placement.rootOwner.turn
