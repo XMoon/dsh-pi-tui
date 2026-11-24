@@ -1163,6 +1163,119 @@ export async function runAcpCommandInvocation(context) {
       'CMP-06: Fiber disposal before commit never produces a summary')
     trace('acp-command/fiber-disposal', { compactionId: disposeId, code: disposeError.data.code })
 
+    // CAT-02: a real official commands.register/unregister emits
+    // `commands/change`, but a non-approved command is never added to the ACP
+    // catalog; submitting it neither executes its handler nor falls back. A
+    // colliding non-approved registration is refused by the official registry.
+    const testCommand = 'cmp03-registered'
+    const commandsChangeBefore = readC1WorkEvents(hostWorkRoot)
+      .filter(event => event.kind === 'lifecycle-commands-change').length
+    await lifecycleAction('register-test-command', sessionId, 'lifecycle-command-registered',
+      'CAT-02 register the test command', { name: testCommand })
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-commands-change' && event.sequence > commandsChangeBefore,
+      'CAT-02 commands/change after register', 30_000)
+    await sleep(250)
+    const latestCatalog = updatesFor(updates, sessionId)
+      .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
+    const latestNames = latestCatalog?.availableCommands?.map(command => command.name) ?? []
+    assert(!latestNames.includes(testCommand),
+      `CAT-02: a non-approved command must never enter the ACP catalog (${JSON.stringify(latestNames)})`)
+    assert(latestNames.includes('compact') && latestNames.includes('feedback'),
+      'CAT-02: the current approved catalog survives the unapproved registration')
+    const unapprovedBefore = hostSessionEvents(dshHome, sessionId).length
+    const unapprovedOutcome = await settle(client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText(`/${testCommand}`),
+    }))
+    const unapprovedEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(unapprovedBefore)
+    const unapprovedRefusal = unapprovedOutcome.error?.data?.code
+    assert(unapprovedOutcome.value?.stopReason === 'end_turn'
+      || String(unapprovedRefusal).startsWith('LOCAL_ACP_COMMAND_'),
+    `CAT-02: the unapproved command must be ordinary text or a classified refusal (${JSON.stringify(unapprovedOutcome.error?.data ?? unapprovedOutcome.value)})`)
+    assert(!unapprovedEvents.some(event => event.type === 'command/run' && event.data?.name === testCommand),
+      'CAT-02: the unapproved command must not create a command/run')
+    assert(!readC1WorkEvents(hostWorkRoot).some(event => event.kind === 'lifecycle-command-handler'),
+      'CAT-02: the unapproved command handler must never run')
+    const unregisterChangeBefore = readC1WorkEvents(hostWorkRoot)
+      .filter(event => event.kind === 'lifecycle-commands-change').length
+    await lifecycleAction('unregister-test-command', sessionId, 'lifecycle-command-unregistered',
+      'CAT-02 unregister the test command', { name: testCommand })
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-commands-change' && event.sequence > unregisterChangeBefore,
+      'CAT-02 commands/change after unregister', 30_000)
+    const collisionChangeBefore = readC1WorkEvents(hostWorkRoot)
+      .filter(event => event.kind === 'lifecycle-commands-change').length
+    const collision = await lifecycleAction('collide-command', sessionId, 'lifecycle-command-collision',
+      'CAT-02 the non-approved compact collision', { name: 'compact' })
+    assert(collision.refused === false,
+      `CAT-02: a different-layer non-approved registration is accepted by the registry: ${JSON.stringify(collision)}`)
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-commands-change' && event.sequence > collisionChangeBefore,
+      'CAT-02 commands/change after the collision registration', 30_000)
+    await sleep(250)
+    const collisionCatalog = updatesFor(updates, sessionId)
+      .filter(update => update?.sessionUpdate === 'available_commands_update').at(-1)
+    const compactRow = collisionCatalog?.availableCommands?.find(command => command.name === 'compact')
+    assert(compactRow !== undefined, 'CAT-02: the approved compact row stays present')
+    assert(!String(compactRow.description ?? '').toLowerCase().includes('collision'),
+      `CAT-02: the non-approved collision must not replace the approved compact row (${JSON.stringify(compactRow)})`)
+    assert(!readC1WorkEvents(hostWorkRoot).some(event => event.kind === 'lifecycle-command-handler'),
+      'CAT-02: the collision handler must never run')
+    const collisionUnregisterChangeBefore = readC1WorkEvents(hostWorkRoot)
+      .filter(event => event.kind === 'lifecycle-commands-change').length
+    await lifecycleAction('unregister-test-command', sessionId, 'lifecycle-command-unregistered',
+      'CAT-02 unregister the collision', { name: 'compact' })
+    await waitForC1WorkEvent(hostWorkRoot,
+      event => event.kind === 'lifecycle-commands-change' && event.sequence > collisionUnregisterChangeBefore,
+      'CAT-02 commands/change after the collision unregister', 30_000)
+    trace('acp-command/command-catalog', {
+      testCommand,
+      latestNames,
+      unapprovedStopReason: unapprovedOutcome.value?.stopReason ?? null,
+      unapprovedRefusal: unapprovedRefusal ?? null,
+      collisionRefused: collision.refused,
+      compactDescription: compactRow.description,
+    })
+
+    // CAT-02/SKL-02: remove the genuine workspace SKILL.md. The official
+    // filesystem provider invalidates its catalog and the ACP view publishes a
+    // complete replacement without the stale row. After that replacement, the
+    // previously advertised name is no longer a live intent: the unknown slash
+    // is admitted as ordinary prompt text, never a command/skill execution.
+    const afterCatalogRemoval = updates.length
+    rmSync(skillDir, { recursive: true, force: true })
+    const removedCatalog = await waitFor(() => {
+      const rows = updates.slice(afterCatalogRemoval)
+        .filter(params => params?.sessionId === sessionId
+          && params.update?.sessionUpdate === 'available_commands_update')
+        .map(params => params.update.availableCommands.map(command => command.name))
+      const replaced = rows.find(names => !names.includes(SKILL_NAME)
+        && names.includes('compact') && names.includes('feedback'))
+      return replaced === undefined ? undefined : replaced
+    }, 'CAT-02 the complete catalog after the real Skill removal', 60_000)
+    assert(!removedCatalog.includes(SKILL_NAME),
+      `CAT-02: the replacement catalog must not retain the removed Skill (${JSON.stringify(removedCatalog)})`)
+    assert([...removedCatalog].sort().join('\u0000') === removedCatalog.join('\u0000'),
+      'CAT-02: the replacement catalog is a complete stable-sorted list')
+    const unknownSlash = `/${SKILL_NAME} after the real removal`
+    const unknownBefore = hostSessionEvents(dshHome, sessionId).length
+    const unknownOutcome = await client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText(unknownSlash),
+    })
+    assert(unknownOutcome?.stopReason === 'end_turn',
+      `CAT-02: an unknown slash after the removal must be ordinary text (${JSON.stringify(unknownOutcome)})`)
+    const unknownEvents = (hostSessionEvents(dshHome, sessionId) ?? []).slice(unknownBefore)
+    assert(unknownEvents.some(event => event.type === 'user/message'
+      && String(event.data?.content?.[0]?.text ?? '').includes(unknownSlash)),
+    'CAT-02: the removed-name intent must be admitted as the exact ordinary user text')
+    assert(!unknownEvents.some(event => event.type === 'command/run' || event.type === 'command/done'),
+      'CAT-02: the removed name must not execute a command/skill lifecycle')
+    trace('acp-command/catalog-removal', {
+      removed: SKILL_NAME,
+      replacement: removedCatalog,
+      unknownStopReason: unknownOutcome.stopReason,
+    })
+
     // LIFE-03: Off→On while a real /compact is held at the official
     // post-summary flush. Off closes ACP delivery, but the exact command claim
     // and its scoped MCP lease stay fenced until the raw execution Promise

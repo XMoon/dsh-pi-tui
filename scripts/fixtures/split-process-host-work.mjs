@@ -2474,6 +2474,12 @@ export async function apply(ctx) {
   const lifecycleControl = process.env.C1_LIFECYCLE_CONTROL
   if (typeof lifecycleControl === 'string' && lifecycleControl !== '') {
     const actions = new Set()
+    const commandDisposers = new Map()
+    let commandsChangeSequence = 0
+    ctx.on('commands/change', () => {
+      commandsChangeSequence += 1
+      record('lifecycle-commands-change', { sequence: commandsChangeSequence })
+    })
     const flushFailureSessions = new Set()
     const flushSummarySeen = new Set()
     const flushHoldSessions = new Map()
@@ -2545,6 +2551,54 @@ export async function apply(ctx) {
           record('lifecycle-end-failure-restored', { restored: owned })
         }, 'lifecycle-end-failure-restore')
         record('lifecycle-end-failure-armed', { sessionId: action.sessionId })
+        return
+      }
+      if (action.action === 'register-test-command' || action.action === 'unregister-test-command'
+        || action.action === 'collide-command') {
+        const name = String(action.name)
+        if (action.action === 'register-test-command') {
+          if (!commandDisposers.has(name)) {
+            commandDisposers.set(name, ctx.commands.register({
+              name,
+              description: 'TEST-ONLY dynamic catalog command',
+              handler: invocation => {
+                record('lifecycle-command-handler', {
+                  name,
+                  sessionId: String(invocation.agent.session.id),
+                  commandId: String(invocation.commandId),
+                })
+                return { kind: 'success', text: `registered command ${name} ran` }
+              },
+            }))
+          }
+          record('lifecycle-command-registered', { sessionId: action.sessionId, name })
+          return
+        }
+        if (action.action === 'unregister-test-command') {
+          const dispose = commandDisposers.get(name)
+          if (dispose !== undefined) {
+            dispose()
+            commandDisposers.delete(name)
+          }
+          record('lifecycle-command-unregistered', { sessionId: action.sessionId, name, removed: dispose !== undefined })
+          return
+        }
+        try {
+          const dispose = ctx.commands.register({
+            name,
+            description: 'collision must be refused',
+            handler: () => ({ kind: 'error', text: 'collision fallback must not run' }),
+          })
+          commandDisposers.set(name, dispose)
+          record('lifecycle-command-collision', { sessionId: action.sessionId, name, refused: false })
+        } catch (error) {
+          record('lifecycle-command-collision', {
+            sessionId: action.sessionId,
+            name,
+            refused: true,
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
         return
       }
       if (action.action === 'cold-read') {
