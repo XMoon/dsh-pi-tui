@@ -544,6 +544,10 @@ interface ActivityRow {
   running: boolean | undefined
   /** Whether `running` currently has a current-generation proof. */
   runningProven: boolean
+  /** The last observed OFFICIAL list running bit. Recovery scheduling is keyed
+   *  on a genuine transition of this value, never on every unrelated list
+   *  publication while the positive stays unchanged. */
+  listRunning: boolean
   /** Which authority proved it. */
   runningSource: RunningSource | undefined
   attention: SessionActivityFact['attention']
@@ -872,6 +876,7 @@ class RemoteActivityObservation implements ActivityObservation {
       row.running = entry.running
       row.runningProven = true
       row.runningSource = 'list'
+      row.listRunning = entry.running
     }
   }
 
@@ -922,11 +927,18 @@ class RemoteActivityObservation implements ActivityObservation {
         continue
       }
       // The list may carry a fresh positive running fact for a row this
-      // generation has not proven (e.g. after a reconnect). It is a scheduling
-      // trigger only: the targeted read proves it, never the replayed row.
-      if (!row.runningProven && entry?.running === true && this.rowIsCandidate(row)) {
-        this.scheduleAfterRelevantChange(row)
-        scheduled = true
+      // generation has not proven (e.g. after a reconnect). Only a genuine
+      // TRANSITION of the official bit schedules the targeted read: an unrelated
+      // publication while the same positive stays unproven must not re-dirty a
+      // queued/inflight recovery read. It is scheduling evidence only — the
+      // current exact state/status proves the fact, never the replayed row.
+      const listRunning = entry?.running === true
+      if (listRunning !== row.listRunning) {
+        row.listRunning = listRunning
+        if (listRunning && !row.runningProven && this.rowIsCandidate(row)) {
+          this.scheduleAfterRelevantChange(row)
+          scheduled = true
+        }
       }
     }
     if (changed) {
@@ -1004,6 +1016,10 @@ class RemoteActivityObservation implements ActivityObservation {
       row.runningProven = false
       row.runningSource = undefined
       row.witness = this.witnessOf(row.sessionId)
+      // The generation adoption schedules from the CURRENT list truth: record it
+      // as the transition baseline so the next unrelated publication cannot
+      // re-dirty the same unproven positive.
+      row.listRunning = this.officialRunningOf(row.sessionId)
       row.exactProjection = undefined
       row.reuseProjection = false
       row.discovery = undefined
@@ -1062,6 +1078,7 @@ class RemoteActivityObservation implements ActivityObservation {
       pendingKinds: undefined,
       continuedQuestionCallIds: undefined,
       witness: this.witnessOf(sessionId),
+      listRunning: this.officialRunningOf(sessionId),
       exactProjection: undefined,
       reuseProjection: false,
       discovery: undefined,
@@ -1210,6 +1227,9 @@ class RemoteActivityObservation implements ActivityObservation {
   /** The fixed dispatch tier of one candidate (see `priorityTiers`). */
   private priorityTierOf(row: ActivityRow): 0 | 1 | 2 {
     if (this.priorityIds.has(row.sessionId)) return 0
+    // A discovery that proved a REAL active entry and is being promoted to the
+    // exact pair is an actual candidate immediately, even before the pair paints.
+    if (row.promote || (row.reuseProjection && row.exactProjection?.epoch === row.epoch)) return 0
     if (row.running === true) return 0
     if (row.attention === 'question' || row.attention === 'approval' || row.attention === 'plan-review') return 0
     if (row.sessionId === this.currentSessionId) return 1

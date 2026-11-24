@@ -1678,12 +1678,57 @@ test('R20 the priority tiers keep a late current row ahead of hinted candidates 
     observation.setRoster(listed, 1, 'current-late')
     // The current row is LAST in the roster but tier 1; the hinted rows are
     // tier 2. The first actual priority dispatch must be the current row.
-    await waitFor(() => h.stateCalls.length >= 1, 'the first priority dispatch starts')
+    // All priority reads are HELD: the fixed capacity is three, and the reserved
+    // discovery slot must still start the ordinary row while they are blocked.
+    await waitFor(() => h.stateCalls.length === 3, 'the three priority candidates are dispatched first')
     assert.equal(h.stateCalls[0], 'current-late',
       'a late current row precedes the hinted candidates in the fixed dispatch tiers')
+    await waitFor(() => h.projectionCalls.includes('plain'), 'the reserved discovery lane stays live while every priority read is held')
     release()
-    await waitFor(() => h.projectionCalls.includes('plain'), 'the reserved discovery lane stays live')
     await flushTurns()
     release()
+  })
+})
+
+test('R21 an unrelated list publication never re-dirties a held recovery read (a real transition still does)', async () => {
+  const listed = [row('x'), row('z')]
+  const listedRunning: Record<string, boolean> = { x: false, z: false }
+  const states: Record<string, unknown> = { x: { failure: { code: 'gateway/internal' } } }
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const h = harness({
+    listed,
+    listedRunning,
+    states: states as never,
+    projections: { x: { result: emptyQuestions }, z: { result: emptyQuestions } } as never,
+    stateGate: async () => { await gate },
+  })
+  await withObservation(h, async (observation) => {
+    observation.setRoster(listed, 1, undefined)
+    // A replacement generation adopts with the latest-known positive bit: the
+    // targeted recovery read is scheduled ONCE (state held in flight).
+    listedRunning.x = true
+    h.setGeneration('gen-2')
+    await waitFor(() => h.stateCalls.includes('x'), 'the recovery read starts once')
+    const xBefore = h.stateCalls.filter(id => id === 'x').length
+    // Unrelated session churn: z's title/updatedAt changes, X's own sources and
+    // its positive bit are unchanged.
+    listed[1] = row('z', { updatedAt: 9, title: 'Renamed elsewhere' })
+    h.notifyList()
+    await flushTurns()
+    release()
+    await waitFor(() => h.projectionCalls.filter(id => id === 'x').length >= 1, 'the held recovery pair completes')
+    await flushTurns()
+    assert.equal(h.stateCalls.filter(id => id === 'x').length, xBefore,
+      'an unrelated notification while the same unproven positive is held never adds a second pair')
+    // Positive control: a REAL false→true transition schedules a fresh read.
+    const afterFirst = h.stateCalls.filter(id => id === 'x').length
+    listedRunning.x = false
+    h.notifyList()
+    listedRunning.x = true
+    states.x = { result: { running: true, pendingInput: [] } }
+    h.notifyList()
+    await waitFor(() => h.stateCalls.filter(id => id === 'x').length > afterFirst,
+      'a genuine positive transition still schedules the targeted recovery read')
   })
 })
