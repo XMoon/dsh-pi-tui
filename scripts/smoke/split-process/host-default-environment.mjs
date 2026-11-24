@@ -46,7 +46,7 @@ import {
 } from 'node:fs'
 import { userInfo } from 'node:os'
 import { basename, join } from 'node:path'
-import * as xterm from '@xterm/headless'
+import xterm from '@xterm/headless'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 
 import { alive, saveFile, restoreFile, waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
