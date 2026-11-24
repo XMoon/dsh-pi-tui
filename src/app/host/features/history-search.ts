@@ -1541,19 +1541,21 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       // A checkpoint read from disk belongs to a PREVIOUS process. Its revision
       // is not comparable here and a tail hash alone cannot prove the prefix,
       // so cold start always rebuilds from the official source.
-      const outcome = await this.withFullSessionOwnership(sessionId, () =>
-        this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true }))
-      // A failed source/write aborts coverage. A stale/pending handoff is an
-      // ordinary accepted-work obligation owned by the point repair; keep
-      // traversing the remaining authoritative IDs.
-      if (outcome === 'failed') return false
-      if (outcome === 'complete') this.settleRoundSession(sessionId)
-      // The pending live batch is a SHORT commit: it must use the ONE serial
-      // writer and settle before the cold pass continues.
-      const drained = await this.enqueueWrite(() => {
-        this.drainPendingSession(sessionId)
+      // The pending live batch is a SHORT commit. Drain it INSIDE the full
+      // per-ID ownership: a requiredHandoff repair starts on release and must
+      // observe the post-drain checkpoint, not race the coldStart's ordinary
+      // commit. A failed source/write aborts coverage; a stale/pending handoff
+      // is an ordinary accepted-work obligation owned by the point repair.
+      let drained: WriteReceipt = 'committed'
+      const outcome = await this.withFullSessionOwnership(sessionId, async () => {
+        const replayOutcome = await this.replayOfficialSession(sessionId, record, persistence, sessions, query, counters, { rebuild: true, requiredHandoff: true })
+        drained = await this.enqueueWrite(() => {
+          this.drainPendingSession(sessionId)
+        })
+        return replayOutcome
       })
-      if (drained !== 'committed') return false
+      if (outcome === 'failed' || drained !== 'committed') return false
+      if (outcome === 'complete') this.settleRoundSession(sessionId)
       await yieldEventLoop()
     }
     if (this.coverageRound !== undefined) this.coverageRound.traversed = true

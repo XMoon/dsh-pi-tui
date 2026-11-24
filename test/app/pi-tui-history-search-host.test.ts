@@ -4118,19 +4118,20 @@ test('a bounded startup burst completes the round on the final drain', async (t)
   source.live = true
   const { deps } = mutableDeps(source)
   const persistence = deps.sessionPersistence()
+  const query = deps.sessionQuery()
   const realList = persistence.list
   let listEntered!: () => void
   const listReached = new Promise<void>(resolve => { listEntered = resolve })
   let releaseList!: () => void
   const listGate = new Promise<void>(resolve => { releaseList = resolve })
-  const ctx = new Context()
-  const service = directService(ctx, deps, profileDir)
-  const internals = service as unknown as {
-    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
-    observeLiveEvent(session: unknown, event: unknown): void
+  // The cold start calls list() synchronously while the service is still being
+  // constructed, so this gate MUST be installed before directService().
+  persistence.list = async () => {
+    listEntered()
+    await listGate
+    return realList.call(persistence)
   }
-  const query = deps.sessionQuery()
-  const realObserve = query.observeSession.bind(query)
+  const realObserve = query.observeSession
   let burstDelivered = false
   const deliverBurst = (): void => {
     if (burstDelivered) return
@@ -4156,18 +4157,19 @@ test('a bounded startup burst completes the round on the final drain', async (t)
     }
   }
   query.observeSession = async (id, options) => {
-    const observation = await realObserve(id, options)
+    const observation = await realObserve.call(query, id, options)
     // The timer fires after the replay's synchronous short writes/terminal and
     // before the round can finish across the startup yield.
     if (!burstDelivered && String(id) === 'r9-burst') setTimeout(deliverBurst, 0)
     return observation
   }
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const internals = service as unknown as {
+    index: { checkpointOf(id: string): { nextSeq: number } | undefined }
+    observeLiveEvent(session: unknown, event: unknown): void
+  }
   try {
-    persistence.list = async () => {
-      listEntered()
-      await listGate
-      return realList.call(persistence)
-    }
     await listReached
     releaseList()
     const readyStarted = Date.now()
@@ -4193,6 +4195,7 @@ test('a bounded startup burst completes the round on the final drain', async (t)
   } finally {
     releaseList()
     persistence.list = realList
+    query.observeSession = realObserve
     await service.dispose()
     await ctx.fiber.dispose()
   }
@@ -4252,16 +4255,44 @@ test('a required initial replay invalidated by ordinary pending is handed to the
 
   const { deps } = mutableDeps(source)
   const persistence = deps.sessionPersistence()
+  const query = deps.sessionQuery()
+  const realObserve = query.observeSession
+  let pointEntered!: () => void
+  const pointReached = new Promise<void>(resolve => { pointEntered = resolve })
+  let releasePoint!: () => void
+  const pointGate = new Promise<void>(resolve => { releasePoint = resolve })
+  let pointGated = false
+  query.observeSession = async (id, options) => {
+    if (!pointGated && String(id) === 'r10-a') {
+      pointGated = true
+      pointEntered()
+      await pointGate
+    }
+    return realObserve.call(query, id, options)
+  }
+  // The cold start calls list() synchronously while the service is still being
+  // constructed, so this gate MUST be installed before directService().
   const realList = persistence.list
   let listEntered!: () => void
   const listReached = new Promise<void>(resolve => { listEntered = resolve })
   let releaseList!: () => void
   const listGate = new Promise<void>(resolve => { releaseList = resolve })
+  persistence.list = async () => {
+    listEntered()
+    await listGate
+    return realList.call(persistence)
+  }
   const ctx = new Context()
   const service = directService(ctx, deps, profileDir)
   const internals = service as unknown as {
     index: { checkpointOf(id: string): { nextSeq: number } | undefined }
     observeLiveEvent(session: unknown, event: unknown): void
+    pending: Map<string, unknown>
+    sessionRepairFlights: Map<string, unknown>
+    rebuildRequests: Set<string>
+    reconcilePending: Set<string>
+    state: { kind: string }
+    coverage: string
   }
   const deliver = (seq: number, text: string): void => {
     const event = {
@@ -4283,17 +4314,37 @@ test('a required initial replay invalidated by ordinary pending is handed to the
     internals.observeLiveEvent(liveSessionOf(source), event)
   }
   try {
-    persistence.list = async () => {
-      listEntered()
-      await listGate
-      return realList.call(persistence)
-    }
     await listReached
     // Ordinary accepted work arrives BEFORE the required initial reset against
     // the retained clean prior-incarnation checkpoint.
     deliver(3, 'r10-a new three')
     deliver(4, 'r10-a new four')
     releaseList()
+    // The point repair's authoritative observation is held AFTER the coldStart's
+    // ordinary drain settles. The point must therefore capture the post-drain
+    // checkpoint, not race the drain with an older candidate.
+    const pointSeen = await Promise.race([
+      pointReached.then(() => true),
+      // Bounded failure window; the gate itself is the authoritative signal.
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5_000)),
+    ])
+    assert.equal(pointSeen, true, JSON.stringify({
+      pointGated,
+      checkpoint: internals.index.checkpointOf('r10-a'),
+      pending: internals.pending.size,
+      flights: [...internals.sessionRepairFlights.keys()],
+      rebuilds: [...internals.rebuildRequests],
+      reconcile: [...internals.reconcilePending],
+      state: internals.state,
+      coverage: internals.coverage,
+    }))
+    const boundaryStarted = Date.now()
+    while ((internals.index.checkpointOf('r10-a')?.nextSeq !== 5 || internals.pending.size !== 0) && Date.now() - boundaryStarted < 3_000) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(internals.index.checkpointOf('r10-a')?.nextSeq, 5)
+    assert.equal(internals.pending.size, 0)
+    releasePoint()
     const readyStarted = Date.now()
     let ready = false
     while (Date.now() - readyStarted < 3_000) {
@@ -4320,7 +4371,9 @@ test('a required initial replay invalidated by ordinary pending is handed to the
     assert.equal(four.items.length, 1)
   } finally {
     releaseList()
+    releasePoint()
     persistence.list = realList
+    query.observeSession = realObserve
     await service.dispose()
     await ctx.fiber.dispose()
   }
