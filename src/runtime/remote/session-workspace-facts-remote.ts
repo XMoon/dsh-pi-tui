@@ -1477,12 +1477,14 @@ class RemoteWorkspaceFactsHandle implements WorkspaceFactsHandle {
         if (!Object.is(current, this.capturedGeneration)) {
           this.capturedGeneration = current
           this.noteInvalidation('replaced')
-          yield* this.drainInvalidations()
-          // The item in flight belongs to the REPLACED stream generation; the
-          // new Connection generation must open with its own fresh baseline.
+          // The new Connection generation must open with its own fresh
+          // baseline. The item in hand may BE that baseline (a replacement does
+          // not always deliver one stale item first), so it is processed after
+          // the invalidation — never dropped. A stale DELTA of the replaced
+          // physical generation is already skipped above by its aborted signal.
           acceptedGeneration = undefined
-          continue
         }
+        yield* this.drainInvalidations()
         const frame = workspaceFrameOf(item.value)
         if (item.generation !== acceptedGeneration) {
           // A new PHYSICAL generation must open with exactly one fresh

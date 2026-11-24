@@ -183,6 +183,44 @@ export async function runReadAuthority(context) {
       assert((read.rows ?? []).every(row => row.origin !== 'subagent' && row.origin === undefined),
         'UA the two-Client scene unexpectedly listed a subagent child')
       assertNoHostWrite(sessionX, writesBefore, 'UA read of X')
+
+      // ── PR1: the ONE per-open INCREMENTAL Activity observation over the SAME
+      //    real generated Client wire. It must publish the official running
+      //    projection with the roster, discover X's real pending question
+      //    without a Gateway state sample per row, promote it to an exact pair,
+      //    and NEVER take an all-roster sample.
+      const activityNonce = signalProbe(clientA, { op: 'activity', windowMs: 6_000 })
+      const activity = await waitProbe(clientA, activityNonce,
+        record => record.phase === 'activity-result', 'UA activity observation result', 60_000)
+      const counters = activity.counters ?? {}
+      assert(typeof counters.state === 'number' && counters.state >= 1,
+        `UA the observation never sampled the current Session: ${JSON.stringify(counters)}`)
+      assert(typeof counters.projections === 'number' && counters.projections >= 1,
+        `UA the observation never discovered an ordinary row: ${JSON.stringify(counters)}`)
+      assert(counters.peak <= 4,
+        `UA the observation exceeded the fixed actual unary capacity: ${JSON.stringify(counters)}`)
+      assert(counters.state <= 4,
+        `UA the observation sampled the whole roster instead of the current/candidate rows: ${JSON.stringify(counters)}`)
+      assert(counters.projections <= activity.rows + 1,
+        `UA the observation issued more projections than roster rows: ${JSON.stringify(counters)}`)
+      const activitySnapshots = Array.isArray(activity.snapshots) ? activity.snapshots : []
+      assert(activitySnapshots.length >= 1, 'UA the observation published no snapshot')
+      const rosterSnapshot = activitySnapshots[activitySnapshots.length - 1]
+      assert((rosterSnapshot.facts ?? []).length >= 2,
+        `UA the observation did not publish one fact per authorized row: ${JSON.stringify(rosterSnapshot.facts)}`)
+      const xFacts = activitySnapshots
+        .map(snapshot => (snapshot.facts ?? []).find(fact => fact.sessionId === sessionX))
+        .filter(fact => fact !== undefined)
+      assert(xFacts.some(fact => fact.attention === 'question' && fact.attentionSourceState === 'known'),
+        `UA the incremental observation never discovered X's real pending question: ${JSON.stringify(xFacts)}`)
+      const xQuestionFact = xFacts.find(fact => fact.attention === 'question')
+      assert(xQuestionFact.running === true,
+        `UA the observation's running fact for X was ${JSON.stringify(xQuestionFact.running)}`)
+      assert(typeof rosterSnapshot.rosterRevision === 'number'
+        && typeof rosterSnapshot.revision === 'number',
+      'UA the observation snapshot carries no separate roster/activity revisions')
+      assertNoHostWrite(sessionX, writesBefore, 'UA incremental activity observation of X')
+
       // Re-read AFTER the sample: no retained reference and no second owner.
       const readAgain = await readFacts(clientA, 'UA A read after the first sample')
       assert((rowOf(readAgain, sessionX, 'UA X row (second read)').retainedBy?.tuiMainView ?? 0) === 0,
@@ -603,6 +641,24 @@ export async function runReadAuthority(context) {
         'UA workspaces stream ended', 150_000)
       assert((hostSessionEvents(dshHome, sessionY) ?? []).length >= createIndex,
         'UA the Host Session log lost events during the Workspace observation')
+      // ── PR1: the Browser's RECOVERING Workspace follow over the SAME
+      //    official reconnecting Gateway stream. A REAL mux rollover must
+      //    invalidate the current membership and deliver a FRESH baseline in
+      //    the SAME logical handle.
+      const recoveringNonce = signalProbe(clientA,
+        { op: 'workspaces', mode: 'recovering', windowMs: 120_000, maxFrames: 64 })
+      await waitProbe(clientA, recoveringNonce, record => record.phase === 'workspaces-open',
+        'UA recovering Workspace stream opened', 30_000)
+      const recoveringBaseline = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'baseline',
+        'UA recovering Workspace baseline', 30_000)
+      assert(Array.isArray(recoveringBaseline.items) && recoveringBaseline.items.length >= 1,
+        'UA the recovering Workspace baseline was empty')
+      const recoveringMember = recoveringBaseline.items.find(item =>
+        Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
+      assert(recoveringMember !== undefined,
+        `UA the recovering baseline lost the current Workspace membership: ${JSON.stringify(recoveringBaseline.items)}`)
+
       // A REAL mux rollover: the next read runs on the NEW generation.
       const beforeReconnect = lastSurfaceStatus(clientA)
       assert(beforeReconnect?.transport === 'connected' && typeof beforeReconnect.generationId === 'number',
@@ -614,6 +670,24 @@ export async function runReadAuthority(context) {
           && record.generationId !== beforeReconnect.generationId,
         'UA Client A reconnected on a new generation',
         120_000)
+      // The recovering handle invalidated the old generation's membership and
+      // consumed a FRESH baseline from the new one — same logical handle, no
+      // duplicate stream, no retry of the failed generation.
+      const invalidated = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'invalidated',
+        'UA recovering membership invalidated on the real carrier loss', 120_000)
+      const freshBaseline = await waitProbe(clientA, recoveringNonce,
+        record => record.phase === 'workspaces-frame' && record.type === 'baseline'
+          && typeof record.seq === 'number' && typeof invalidated.seq === 'number'
+          && record.seq > invalidated.seq,
+        'UA recovering fresh baseline after the real reconnect', 120_000)
+      const freshMember = (freshBaseline.items ?? []).find(item =>
+        Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionY))
+      assert(freshMember !== undefined,
+        `UA the fresh recovering baseline lost the current Workspace membership: ${JSON.stringify(freshBaseline.items)}`)
+      await waitProbe(clientA, recoveringNonce, record => record.phase === 'workspaces-ended',
+        'UA recovering Workspace stream ended', 150_000)
+
       const afterReconnect = await readFacts(clientA, 'UA A read after the real reconnect')
       assert(afterReconnect.phase === 'facts', `UA the post-reconnect read failed: ${JSON.stringify(afterReconnect)}`)
       assert(afterReconnect.generationId === reconnected.generationId,

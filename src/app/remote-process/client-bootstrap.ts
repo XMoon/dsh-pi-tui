@@ -1364,24 +1364,28 @@ async function startSurfaceLocalClient(
             emit({ phase: 'workspaces-open', mode, windowMs, maxFrames })
             try {
               let frames = 0
+              // A monotone frame sequence lets one case address "the fresh
+              // baseline AFTER the invalidation" without guessing.
+              let frameSeq = 0
               for await (const frame of handle) {
                 frames += 1
+                frameSeq += 1
                 switch (frame.type) {
                   case 'invalidated':
-                    emit({ phase: 'workspaces-frame', type: frame.type, reason: frame.reason })
+                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, reason: frame.reason })
                     break
                   case 'baseline':
                   case 'replace':
-                    emit({ phase: 'workspaces-frame', type: frame.type, items: frame.items })
+                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, items: frame.items })
                     break
                   case 'upsert':
-                    emit({ phase: 'workspaces-frame', type: frame.type, workspace: frame.workspace })
+                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspace: frame.workspace })
                     break
                   case 'remove':
-                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceId: frame.workspaceId })
+                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceId: frame.workspaceId })
                     break
                   case 'order':
-                    emit({ phase: 'workspaces-frame', type: frame.type, workspaceIds: frame.workspaceIds })
+                    emit({ phase: 'workspaces-frame', seq: frameSeq, type: frame.type, workspaceIds: frame.workspaceIds })
                     break
                 }
                 if (frames >= maxFrames) break

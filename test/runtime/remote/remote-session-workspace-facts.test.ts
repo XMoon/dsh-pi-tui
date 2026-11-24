@@ -833,15 +833,20 @@ test('UA-11 an already-aborted signal never opens an observation', () => {
 /** Drive ONE structural `$stream` lifecycle the way the official supervisor
  *  does: the scripted physical generations, then a live wait until the handle
  *  is disposed (a real logical stream never ends on its own). */
-function scriptedWorkspaceStream(script: (options: {
-  readonly carrierFailed?: (error: Error) => void
-}) => readonly { readonly generation: number; readonly frame: RemoteWorkspaceFollowFrameLike }[]): {
+function scriptedWorkspaceStream(
+  script: (options: {
+    readonly carrierFailed?: (error: Error) => void
+  }) => readonly { readonly generation: number; readonly frame: RemoteWorkspaceFollowFrameLike }[],
+  onItem?: (generation: number) => void,
+  options: { readonly emitCarrierFailure?: boolean } = {},
+): {
   readonly source: RemoteSessionWorkspaceFactsSource['workspaceStream']
   readonly accepted: number[]
   readonly lastOptions: () => Parameters<RemoteSessionWorkspaceFactsSource['workspaceStream']['stream']>[0] | undefined
   readonly carrierFailures: Error[]
   readonly disposed: () => number
 } {
+  const emitCarrierFailures = options.emitCarrierFailure !== false
   const accepted: number[] = []
   const carrierFailures: Error[] = []
   let lastOptions: Parameters<RemoteSessionWorkspaceFactsSource['workspaceStream']['stream']>[0] | undefined
@@ -854,7 +859,9 @@ function scriptedWorkspaceStream(script: (options: {
       const iterator = (async function* (): AsyncGenerator<RemoteStreamItemLike<RemoteWorkspaceFollowFrameLike>> {
         let acceptedGeneration: number | undefined
         for (const item of script(options)) {
-          if (item.generation !== acceptedGeneration && options.carrierFailed !== undefined && accepted.length > 0 && item.generation > 1) {
+          onItem?.(item.generation)
+          const emitCarrierFailure = options.carrierFailed !== undefined && emitCarrierFailures
+          if (item.generation !== acceptedGeneration && emitCarrierFailure && accepted.length > 0 && item.generation > 1) {
             const error = new TestRemoteStreamCarrierError('api gateway: Remote stream WebSocket closed')
             carrierFailures.push(error)
             options.carrierFailed(error)
@@ -1077,4 +1084,45 @@ test('UA-11 a measured none row leaves the active recheck set; a running row kee
     t.mock.timers.tick(ACTIVITY_RECHECK_MS)
     await waitFor(() => runningHarness.stateCalls.length === 2, 'the active row keeps ONE bounded recheck')
   })
+})
+
+test('UA-12 a recovering follow adopts a Connection replacement and keeps the new generation baseline instead of dropping it', async () => {
+  let h!: ReturnType<typeof harness>
+  const stream = scriptedWorkspaceStream(
+    () => [
+      { generation: 1, frame: { type: 'baseline', value: { items: [workspaceView('old')] } } },
+      { generation: 2, frame: { type: 'baseline', value: { items: [workspaceView('new')] } } },
+      { generation: 2, frame: { type: 'upsert', workspace: workspaceView('extra') } },
+    ],
+    (() => {
+      let replaced = false
+      return (generation: number) => {
+        // A real Connection generation replacement lands right before the new
+        // physical generation's first item: that item IS the fresh baseline and
+        // must be accepted, not skipped as a stale old-generation frame.
+        if (generation !== 2 || replaced) return
+        replaced = true
+        h.setGeneration('gen-2')
+      }
+    })(),
+    { emitCarrierFailure: false },
+  )
+  h = harness({ workspaceStream: stream.source })
+  const handle = h.facts.followWorkspaces(undefined, 'recovering')
+  const iterator = handle[Symbol.asyncIterator]()
+  const frames: WorkspaceFactsFrame[] = []
+  for (let index = 0; index < 4; index += 1) {
+    const next = await iterator.next()
+    assert.equal(next.done, false)
+    frames.push(next.value)
+  }
+  handle.dispose()
+  await iterator.next()
+  assert.deepEqual(frames, [
+    { type: 'baseline', items: [{ workspaceId: 'old', path: '/host/old', title: 'Workspace old', sessionIds: [] }] },
+    { type: 'invalidated', reason: 'replaced' },
+    { type: 'baseline', items: [{ workspaceId: 'new', path: '/host/new', title: 'Workspace new', sessionIds: [] }] },
+    { type: 'upsert', workspace: { workspaceId: 'extra', path: '/host/extra', title: 'Workspace extra', sessionIds: [] } },
+  ])
+  assert.deepEqual(stream.accepted, [1, 2], 'both physical generations accept their own baseline')
 })
