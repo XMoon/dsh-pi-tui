@@ -76,6 +76,9 @@ export interface HostNumericSettingsSnapshot<T extends object> {
    *  per-field markers project THIS list; display text is never the authority. */
   readonly dirtyFields: readonly (keyof T & string)[]
   readonly issues: Readonly<Partial<Record<keyof T & string, string>>>
+  /** The Host settlement invalidated this capture: every edit/Save must wait
+   *  for an explicit refresh (a refused/unknown write is never retried blindly). */
+  readonly refreshRequired: boolean
   readonly status?: HostNumericSettingsStatus
   readonly notice?: string
 }
@@ -140,6 +143,7 @@ export class HostNumericSettingsController<T extends object> {
       resetFields: this.resetFields(),
       dirtyFields: this.dirtyFields(),
       issues: Object.fromEntries(this.issues) as Readonly<Partial<Record<keyof T & string, string>>>,
+      refreshRequired: this.state.refreshRequired === true,
       ...(this.state.status === undefined ? {} : { status: this.state.status }),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
     }

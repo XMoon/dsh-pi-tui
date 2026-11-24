@@ -60,6 +60,8 @@ interface BodyTarget {
     | { readonly kind: 'details' }
     | { readonly kind: 'edit' }
     | { readonly kind: 'refresh' }
+    | { readonly kind: 'discard' }
+    | { readonly kind: 'accept' }
   readonly startCol: number
   readonly endCol: number
 }
@@ -155,12 +157,15 @@ function statusInk(kind: string | undefined, text: string): string {
 /** The semantic action a painted BODY affordance really is (the bar's own
  *  spans are registered by the bar loop). Field selection and the Input caret
  *  are not business actions. */
-function bodyActionOf(kind: 'field' | 'reset' | 'input' | 'details' | 'edit' | 'refresh'): BarAction | undefined {
+function bodyActionOf(kind: 'field' | 'reset' | 'input' | 'details' | 'edit' | 'refresh' | 'discard' | 'accept'): BarAction | undefined {
   switch (kind) {
     case 'reset': return 'reset'
     case 'details': return 'details'
     case 'edit': return 'edit'
     case 'refresh': return 'refresh'
+    case 'discard': return 'discard'
+    // The question's ONE accept target is registered separately once its
+    // necessary copy is really complete.
     default: return undefined
   }
 }
@@ -205,6 +210,12 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   /** The grouped browse's necessary dirty facts were painted this frame. */
   private paintedSaveFacts = false
   private riskSeen = new Set<number>()
+  /** The grouped Advanced's necessary facts that were really painted in THIS
+   *  disclosure instance (field identity + staging/unset copy). A width, field
+   *  or authority change invalidates the receipt. */
+  private advancedSeen = new Set<number>()
+  private advancedSignature: string | undefined
+  private advancedFactLines: readonly number[] = []
   /** The reset confirmation's risk fragments projected by the LAST render. */
   private riskLines: readonly { readonly line: number }[] = []
   private riskSignature: string | undefined
@@ -310,10 +321,11 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private changed(): void { this.revoke(); this.intents.requestRender() }
 
   private editable(snapshot: HostNumericSettingsSnapshot<T>): boolean {
-    return !snapshot.loading && !snapshot.saving && snapshot.current && snapshot.source.kind === 'ready'
+    return !snapshot.loading && !snapshot.saving && !snapshot.refreshRequired
+      && snapshot.current && snapshot.source.kind === 'ready'
   }
   private canSave(snapshot: HostNumericSettingsSnapshot<T>): boolean {
-    return snapshot.dirty && !snapshot.saving && !snapshot.loading && snapshot.current && snapshot.source.kind === 'ready'
+    return snapshot.dirty && this.editable(snapshot)
   }
   private openQuestion(kind: QuestionKind, leave?: () => void): void {
     this.question = { instance: ++this.nextQuestion, kind, ...(leave === undefined ? {} : { leave }) }
@@ -497,6 +509,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       this.advanced = false
       this.fieldError = undefined
       this.feedback = staged.dirty ? undefined : 'no-changes'
+      // The staged field (and its Current) is the fact that must stay in view;
+      // at a short grant the reveal is what publishes the dirty receipt.
+      if (!this.single) { this.revealSelection = true; this.formOffset = 0 }
       this.revoke()
       if (!this.single) return
       if (!staged.dirty) return
@@ -518,6 +533,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private stageGroupReset(): void {
     if (this.disposed || this.handoff !== 0 || this.numberInput !== undefined || this.question !== undefined) return
     if (!this.advanced || !this.paintedActions.has('reset')) return
+    // The selected identity and the staging/unset explanation must have been
+    // really painted in THIS disclosure instance; a bare shortcut is not proof.
+    if (this.advancedFactLines.length === 0 || !this.advancedFactLines.every(line => this.advancedSeen.has(line))) return
     const snapshot = this.controller.snapshot()
     if (snapshot.saving || !this.editable(snapshot)) return
     const key = this.fields[this.fieldIndex]?.key
@@ -569,6 +587,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     if (question === undefined && !this.paintedSaveFacts) return
     this.question = undefined
     this.feedback = undefined
+    // The settlement confirmation is the priority after a dispatch: show the
+    // status/heading from the top instead of keeping a field reveal.
+    this.formOffset = 0
+    this.revealSelection = false
     const handoff = ++this.handoff
     try {
       this.controller.save()
@@ -734,7 +756,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     if (matchesKey(data, 'left')) { this.back(); return }
     if (data === DETAILS_KEY) { this.openAdvanced(); return }
     if (matchesKey(data, KEYS.save)) { this.saveGroup(); return }
-    if (matchesKey(data, KEYS.discard) && snapshot.dirty && !this.ambiguous(snapshot)) { this.openQuestion('discard'); return }
+    if (matchesKey(data, KEYS.discard) && snapshot.dirty && !this.ambiguous(snapshot)
+      && this.paintedActions.has('discard')) { this.openQuestion('discard'); return }
     if (matchesKey(data, KEYS.refresh)) { this.refresh(); return }
     if (this.scrollKey(data)) this.scrollTenant(data)
   }
@@ -831,7 +854,14 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     return { handled: true }
   }
   private activateTarget(target: Target, event: TuiMouseEvent): void {
-    if (this.question !== undefined || this.controller.snapshot().saving) return
+    const snapshot = this.controller.snapshot()
+    if (snapshot.saving) return
+    if (this.question !== undefined) {
+      // ONLY the current question's explicitly painted accept target answers;
+      // no background field/bar/row action is reachable from a question body.
+      if (target.action.kind === 'accept') this.discard()
+      return
+    }
     switch (target.action.kind) {
       case 'field':
         // Agent: the ONE field; a body click opens its Input (single mode).
@@ -848,8 +878,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
         break
       case 'input': this.numberInput?.input.handleMouse({ ...event, type: 'press', y: 0, height: 1 }); this.changed(); break
       case 'details': this.openAdvanced(); break
-      case 'edit': if (this.editable(this.controller.snapshot())) this.activateField(this.fields[this.fieldIndex]!.key); break
+      case 'edit': if (this.editable(snapshot)) this.activateField(this.fields[this.fieldIndex]!.key); break
       case 'refresh': this.refresh(); break
+      case 'discard': if (snapshot.dirty && !this.ambiguous(snapshot)) this.openQuestion('discard'); break
     }
   }
 
@@ -874,7 +905,12 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     let content: ContentLine[]
     let mustSee: readonly number[] = []
     let risk: readonly { readonly line: number; readonly statement: number }[] = []
-    let saveFacts: { readonly count?: number; readonly dirty: readonly (readonly number[])[] } = { dirty: [] }
+    let saveFacts: {
+      readonly count?: number
+      readonly dirty: readonly { readonly lines: readonly number[]; readonly complete: boolean }[]
+    } = { dirty: [] }
+    let inputAdmissible = true
+    let advancedFacts: readonly number[] = []
     if (this.question !== undefined) {
       const question = this.questionLines(width, snapshot)
       content = question.lines
@@ -884,8 +920,15 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       const built = this.inputLines(width, snapshot)
       content = built.lines
       mustSee = built.critical
+      inputAdmissible = built.admissible
     } else if (this.advanced) {
-      content = this.single ? this.singleAdvancedLines(width, snapshot) : this.groupAdvancedLines(width, snapshot)
+      if (this.single) {
+        content = this.singleAdvancedLines(width, snapshot)
+      } else {
+        const built = this.groupAdvancedLines(width, snapshot)
+        content = built.lines
+        advancedFacts = built.facts
+      }
     } else if (this.single) {
       content = this.singleCleanLines(width, snapshot)
     } else {
@@ -908,12 +951,14 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     }
     this.formOffset = offset
     const visible = new Set<number>()
+    let acceptPainted = false
     for (let index = 0; index < bodyRows; index += 1) {
       const line = content[offset + index]
       lines.push(fit(line?.text ?? '', width))
       visible.add(offset + index)
       for (const target of line?.targets ?? []) {
         targets.push({ ...target, row: index })
+        if (target.action.kind === 'accept') acceptPainted = true
         const action = bodyActionOf(target.action.kind)
         if (action !== undefined) this.paintedActions.add(action)
       }
@@ -937,14 +982,37 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     } else {
       this.riskLines = []
     }
-    const complete = this.question?.kind === 'reset'
+    const complete = (this.question?.kind === 'reset'
       ? this.resetRiskRead(width, risk)
-      : mustSee.every(lineIndex => visible.has(lineIndex))
+      : mustSee.every(lineIndex => visible.has(lineIndex))) && inputAdmissible
     if (this.question !== undefined && complete) this.paintedQuestion = this.questionIdentity()
+    // A question's ONE accept target is admitted only once its necessary copy
+    // was really painted in THIS instance: a scrolled/insufficient grant
+    // publishes no hidden answer.
+    if (this.question !== undefined && complete && acceptPainted) {
+      this.paintedActions.add(this.question.kind === 'refresh'
+        ? 'refresh-confirm' : this.question.kind === 'discard' ? 'discard' : 'leave')
+    }
     // The grouped Save needs a REAL staged fact on screen, not only its bar
-    // span: the dirty count, or at least one complete staged field block.
+    // span: the dirty count, or at least one COMPLETE staged field block.
     this.paintedSaveFacts = (saveFacts.count !== undefined && visible.has(saveFacts.count))
-      || saveFacts.dirty.some(block => block.length > 0 && block.every(lineIndex => visible.has(lineIndex)))
+      || saveFacts.dirty.some(block => block.complete && block.lines.length > 0
+        && block.lines.every(lineIndex => visible.has(lineIndex)))
+    // The grouped Advanced's necessary staging facts are a READ receipt: they
+    // must have been really painted in this disclosure instance (width/field/
+    // authority changes invalidate it).
+    if (!this.single && this.advanced) {
+      const signature = `${this.fieldIndex}|${width}|${this.authorityIdentity(snapshot)}|${advancedFacts.join(',')}`
+      if (this.advancedSignature !== signature) {
+        this.advancedSignature = signature
+        this.advancedSeen.clear()
+      }
+      this.advancedFactLines = advancedFacts
+      for (const lineIndex of visible) this.advancedSeen.add(lineIndex)
+    } else if (this.advancedFactLines.length > 0) {
+      this.advancedFactLines = []
+      this.advancedSeen.clear()
+    }
     while (lines.length < bodyRows) lines.push(fit('', width))
     lines.push(this.renderTenantBar(snapshot, width, complete, maxOffset > 0))
     this.awaitingPaint = false
@@ -972,9 +1040,55 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   private note(text: string, width: number, tone: (text: string) => string = color.textDim): ContentLine[] {
     return wrapTextWithAnsi(sanitizedPhysicalLine(text), Math.max(1, width)).map(line => ({ text: tone(line) }))
   }
-  private bodyAction(label: string, action: 'edit' | 'details' | 'refresh', width: number): ContentLine {
+  /**
+   * Compose ONE labelled fact against the REAL row width. The complete label
+   * wraps when needed; a value that cannot fit WHOLE on its own line is
+   * REPAIRED to `complete: false` and must never count as a readable fact for
+   * an action admission (Stage/Save).
+   */
+  private fact(
+    label: string,
+    value: string,
+    width: number,
+    ink: (text: string) => string = color.text,
+    pad = 0,
+  ): { lines: ContentLine[]; complete: boolean } {
+    const text = sanitizedPhysicalLine(value)
+    const valueWidth = visibleWidth(text)
+    const gap = Math.max(2, pad - visibleWidth(label))
+    if (visibleWidth(label) + gap + valueWidth <= width) {
+      return { lines: [{ text: color.textDim(label) + ' '.repeat(gap) + ink(text) }], complete: true }
+    }
+    const lines: ContentLine[] = wrapTextWithAnsi(sanitizedPhysicalLine(label), Math.max(1, width))
+      .map(line => ({ text: color.textDim(line) }))
+    if (valueWidth <= width) lines.push({ text: `  ${ink(text)}` })
+    else lines.push({ text: `  ${ink(truncateToWidth(text, Math.max(1, width - 2), '…', false))}` })
+    return { lines, complete: valueWidth <= width }
+  }
+  /** A labelled prose fact: one line when the whole sentence fits, otherwise a
+   *  wrapped label/value pair whose every physical fragment is complete. */
+  private proseFact(label: string, value: string, width: number, pad = 0): ContentLine[] {
+    const gap = Math.max(2, pad - visibleWidth(label))
+    if (visibleWidth(label) + gap + visibleWidth(sanitizedPhysicalLine(value)) <= width) {
+      return [{ text: color.textDim(label) + ' '.repeat(gap) + color.textDim(sanitizedPhysicalLine(value)) }]
+    }
+    return this.prose(label, value, width)
+  }
+  /** A prose fact (comparison/scope/help): every physical fragment is complete. */
+  private prose(label: string, value: string, width: number): ContentLine[] {
+    const lines: ContentLine[] = [{ text: color.textDim(label) }]
+    for (const line of wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, width - 2))) {
+      lines.push({ text: `  ${color.textDim(line)}` })
+    }
+    return lines
+  }
+  private bodyAction(label: string, action: 'edit' | 'details' | 'refresh' | 'discard', width: number): ContentLine {
     if (visibleWidth(label) > width) return { text: color.primary(label) }
     return { text: color.primary(label), targets: [{ id: action, action: { kind: action }, startCol: 0, endCol: visibleWidth(label) }] }
+  }
+  private acceptAction(label: string, width: number): ContentLine {
+    if (visibleWidth(label) > width) return { text: color.primary(label) }
+    return { text: color.primary(label), targets: [{ id: 'accept', action: { kind: 'accept' }, startCol: 0, endCol: visibleWidth(label) }] }
   }
   private unitSuffix(field: HostNumericSettingsField<T>): string {
     return field.unit === undefined ? '' : ` ${field.unit}`
@@ -1039,14 +1153,18 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   }
 
   /** The grouped browse: one row per field (label + its real candidate), the
-   *  served Current for a staged field, the dirty count and the authority
-   *  notes. Every field row SELECTS only; the editor needs its explicit Edit. */
+   *  served Current (or Last confirmed) for a staged field, the dirty count and
+   *  the authority notes. Every field row SELECTS only; the editor needs its
+   *  explicit Edit. */
   private groupBrowseLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): {
     lines: ContentLine[]
-    saveFacts: { readonly count?: number; readonly dirty: readonly (readonly number[])[] }
+    saveFacts: {
+      readonly count?: number
+      readonly dirty: readonly { readonly lines: readonly number[]; readonly complete: boolean }[]
+    }
   } {
     const lines: ContentLine[] = []
-    const dirtyBlocks: number[][] = []
+    const dirtyBlocks: { lines: number[]; complete: boolean }[] = []
     let countLine: number | undefined
     const source = snapshot.source
     const editable = this.editable(snapshot)
@@ -1056,7 +1174,20 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     }
     const rowWidth = Math.min(width, 64)
     const copyWidth = Math.min(width, 72)
-    lines.push(...this.note(this.intents.spec.sourceHeading(source), copyWidth))
+    const stale = !snapshot.current
+    // A captured row is NOT a current readback once currentness is lost: the
+    // heading names the captured executor as last-known, never as today's row.
+    const heading = sanitizedPhysicalLine(this.intents.spec.sourceHeading(source))
+    lines.push(...this.note(stale ? `Last-known · ${heading}` : heading, copyWidth, stale ? color.warning : color.textDim))
+    const status = snapshot.status
+    // Settlement state owns the FIRST readable rows: a short grant must not
+    // hide "Verified / Unverified / Not saved / Outcome unconfirmed" behind prose.
+    if (status !== undefined) {
+      lines.push({ text: this.row('Status', statusWord(status.kind, snapshot), word => statusInk(status.kind, word)) })
+      if (status.kind !== 'verified' && status.kind !== 'saving') lines.push(...this.note(status.text, copyWidth, color.textDim))
+    } else if (this.feedback === 'no-changes') {
+      lines.push({ text: this.row('Status', 'No changes', color.textDim) })
+    }
     for (const [index, field] of this.fields.entries()) {
       const selected = index === this.fieldIndex
       const staged = snapshot.dirtyFields.includes(field.key)
@@ -1072,29 +1203,58 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
         ? 'Unknown'
         : reset ? 'Reset staged'
           : `${candidate ?? String(source.effective[field.key])}${unit}`
+      const valueWidth = visibleWidth(value)
       const blockStart = lines.length
+      let blockComplete = valueWidth <= rowWidth
       const marker = selected ? '> ' : '  '
-      const paintedLabel = selected ? color.textStrong(sanitizedPhysicalLine(field.label)) : color.text(sanitizedPhysicalLine(field.label))
-      const targets: BodyTarget[] = [{
+      const labelLines = wrapTextWithAnsi(sanitizedPhysicalLine(field.label), Math.max(1, rowWidth))
+      const target: BodyTarget = {
         id: `field:${field.key}`,
         action: { kind: 'field', field: field.key },
         startCol: 0,
-        endCol: width,
-      }]
-      const inline = visibleWidth(marker) + visibleWidth(field.label) + 2 + visibleWidth(value) <= rowWidth
-      if (inline) {
-        const gap = Math.max(2, rowWidth - visibleWidth(marker) - visibleWidth(field.label) - visibleWidth(value))
-        lines.push({ text: `${marker}${paintedLabel}${' '.repeat(gap)}${color.text(sanitizedPhysicalLine(value))}`, field: field.key, targets })
+        endCol: rowWidth,
+      }
+      if (labelLines.length === 1 && visibleWidth(marker) + visibleWidth(field.label) + 2 + valueWidth <= rowWidth) {
+        const gap = Math.max(2, rowWidth - visibleWidth(marker) - visibleWidth(field.label) - valueWidth)
+        const label = selected ? color.textStrong(field.label) : color.text(field.label)
+        lines.push({ text: `${marker}${sanitizedPhysicalLine(label)}${' '.repeat(gap)}${color.text(sanitizedPhysicalLine(value))}`, field: field.key, targets: [target] })
       } else {
         // A label and its canonical value that cannot share ONE line keep the
-        // complete label and the value on two lines instead of a fake column.
-        lines.push({ text: `${marker}${paintedLabel}`, field: field.key, targets })
-        lines.push({ text: `  ${color.text(sanitizedPhysicalLine(value))}`, field: field.key })
+        // COMPLETE label (wrapped, never cut mid-word) and the value on its own
+        // line; a value wider than the row is marked incomplete.
+        labelLines.forEach((line, lineIndex) => {
+          const label = lineIndex === 0
+            ? `${marker}${selected ? color.textStrong(line) : color.text(line)}`
+            : `  ${color.text(line)}`
+          lines.push({ text: label, field: field.key, ...(lineIndex === 0 ? { targets: [target] } : {}) })
+        })
+        lines.push({
+          text: `  ${valueWidth <= rowWidth ? color.text(value) : color.text(truncateToWidth(value, Math.max(1, rowWidth - 2), '…', false))}`,
+          field: field.key,
+        })
       }
       if (staged) {
-        lines.push({ text: color.textDim(`  Current: ${this.fieldValue(snapshot, field)}${unit} · Unsaved`), field: field.key })
+        const prefix = `${stale ? 'Last confirmed' : 'Current'}: `
+        const current = `${this.fieldValue(snapshot, field)}${unit}`
+        const suffix = ' · Unsaved'
+        const currentWidth = 2 + visibleWidth(prefix) + visibleWidth(current)
+        if (currentWidth + visibleWidth(suffix) <= rowWidth) {
+          lines.push({ text: `  ${color.textDim(prefix + current + suffix)}`, field: field.key })
+        } else if (currentWidth <= rowWidth) {
+          lines.push({ text: `  ${color.textDim(prefix + current)}`, field: field.key })
+          lines.push({ text: color.textDim('  · Unsaved'), field: field.key })
+        } else {
+          lines.push({ text: `  ${color.textDim(prefix.trimEnd())}`, field: field.key })
+          const valueComplete = 2 + visibleWidth(current) <= rowWidth
+          lines.push({
+            text: `  ${valueComplete ? color.textDim(current) : color.textDim(truncateToWidth(current, Math.max(1, rowWidth - 2), '…', false))}`,
+            field: field.key,
+          })
+          lines.push({ text: color.textDim('  · Unsaved'), field: field.key })
+          blockComplete = false
+        }
       }
-      if (staged) dirtyBlocks.push(lines.slice(blockStart).map((_, offset) => blockStart + offset))
+      if (staged) dirtyBlocks.push({ lines: lines.slice(blockStart).map((_, offset) => blockStart + offset), complete: blockComplete })
     }
     if (snapshot.dirty) {
       const count = snapshot.dirtyFields.length
@@ -1102,67 +1262,69 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       lines.push({ text: color.text(`${count} unsaved change${count === 1 ? '' : 's'} · ${this.title}`) })
     }
     lines.push(...this.note('Changes are staged until Save.', copyWidth))
-    // State and reason come BEFORE the explanatory prose: on a short grant the
-    // truth about the draft/write must not scroll away behind help text.
-    const status = snapshot.status
-    if (status !== undefined) {
-      lines.push({ text: this.row('Status', statusWord(status.kind, snapshot), word => statusInk(status.kind, word)) })
-      if (status.kind !== 'verified' && status.kind !== 'saving') {
-        lines.push(...this.note(status.text, copyWidth, color.textDim))
-      }
-    } else if (this.feedback === 'no-changes') {
-      lines.push({ text: this.row('Status', 'No changes', color.textDim) })
+    // The REAL body routes sit with the draft facts, before the explanatory
+    // prose: a short or refused grant must not bury its local Discard.
+    if (editable) {
+      lines.push(this.bodyAction('Edit…', 'edit', width))
+      lines.push(this.bodyAction('Details…', 'details', width))
     }
+    if (snapshot.dirty && !this.ambiguous(snapshot)) lines.push(this.bodyAction('Discard…', 'discard', width))
+    if (editable) lines.push(this.bodyAction('Refresh…', 'refresh', width))
     if (source.kind !== 'ready') lines.push(...this.note(source.reason, copyWidth, color.error))
-    else if (!snapshot.current) lines.push(...this.note('Last-known · the Host has newer state; refresh to review.', copyWidth))
     if (this.waitNotice && snapshot.saving) lines.push(...this.note('Dispatched writes continue.', copyWidth))
     if (snapshot.notice !== undefined) lines.push(...this.note(snapshot.notice, copyWidth, color.error))
     if (this.intents.spec.effect !== undefined) lines.push(...this.note(this.intents.spec.effect, copyWidth))
     for (const help of this.intents.spec.help) lines.push(...this.note(help, copyWidth))
-    if (editable) {
-      lines.push(this.bodyAction('Edit…', 'edit', width))
-      lines.push(this.bodyAction('Details…', 'details', width))
-      lines.push(this.bodyAction('Refresh…', 'refresh', width))
-    }
     return {
       lines,
       saveFacts: { ...(countLine === undefined ? {} : { count: countLine }), dirty: dirtyBlocks },
     }
   }
 
-  private inputLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): { lines: ContentLine[]; critical: readonly number[] } {
+  private inputLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): {
+    lines: ContentLine[]
+    critical: readonly number[]
+    admissible: boolean
+  } {
     const lines: ContentLine[] = []
     const active = this.numberInput!
     const field = this.fields.find(candidate => candidate.key === active.field)!
     const unit = this.unitSuffix(field)
     const copyWidth = this.single ? width : Math.min(width, 72)
-    if (!this.single) lines.push({ text: color.textDim(`Edit ${sanitizedPhysicalLine(field.label)}`) })
-    lines.push({ text: this.row('Current value', `${this.fieldValue(snapshot, field)}${unit}`) })
+    if (!this.single) lines.push(...this.note(`Edit ${field.label}`, width, color.textDim))
+    lines.push(...this.fact('Current value', `${this.fieldValue(snapshot, field)}${unit}`, width).lines)
     const inputRow = lines.length
     lines.push({ text: active.input.render(width)[0] ?? '', targets: [{ id: 'input', action: { kind: 'input' }, startCol: 0, endCol: width }] })
     const critical = [inputRow]
+    let admissible = true
     const raw = active.input.getValue()
     if (raw.trim() !== '') {
       const canonical = this.controller.numberIssue(active.field as keyof T & string, raw) === undefined ? String(Number(raw)) : undefined
       if (canonical !== undefined && canonical !== raw.trim()) {
-        critical.push(lines.length)
-        lines.push({ text: this.row('Value sends', `${canonical}${unit}`, color.text) })
+        // The canonical numeric fact is admissible only when its COMPLETE value
+        // (and unit) really fits the row: a clipped canonical line can never
+        // stand as proof of the number that will be sent.
+        const sent = this.fact('Value sends', `${canonical}${unit}`, width)
+        const sentStart = lines.length
+        for (const line of sent.lines) lines.push(line)
+        critical.push(...sent.lines.map((_, offset) => sentStart + offset))
+        admissible = sent.complete
       }
     }
     if (this.fieldError !== undefined) lines.push(...this.note(this.fieldError, copyWidth, color.error))
     if (this.intents.spec.effect !== undefined) lines.push(...this.note(this.intents.spec.effect, copyWidth))
     if (this.single && this.intents.spec.dispatched !== undefined) lines.push(...this.note(this.intents.spec.dispatched, copyWidth))
-    return { lines, critical }
+    return { lines, critical, admissible }
   }
 
   private singleAdvancedLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): ContentLine[] {
     const lines: ContentLine[] = []
     const pad = 14
-    lines.push({ text: this.row('Effective', this.singleValue(snapshot), color.text, pad) })
-    lines.push({ text: this.row('Inherited', this.singleInherited(snapshot), color.textDim, pad) })
-    lines.push({ text: this.row('Comparison', this.singleComparison(snapshot), color.textDim, pad) })
-    if (snapshot.source.kind === 'ready') lines.push({ text: this.row('Revision', String(snapshot.source.revision), color.textDim, pad) })
-    if (this.intents.spec.scope !== undefined) lines.push({ text: this.row('Scope', this.intents.spec.scope, color.textDim, pad) })
+    lines.push(...this.fact('Effective', this.singleValue(snapshot), width, color.text, pad).lines)
+    lines.push(...this.fact('Inherited', this.singleInherited(snapshot), width, color.textDim, pad).lines)
+    lines.push(...this.fact('Comparison', this.singleComparison(snapshot), width, color.textDim, pad).lines)
+    if (snapshot.source.kind === 'ready') lines.push(...this.fact('Revision', String(snapshot.source.revision), width, color.textDim, pad).lines)
+    if (this.intents.spec.scope !== undefined) lines.push(...this.proseFact('Scope', this.intents.spec.scope, width, pad))
     if (this.intents.spec.effect !== undefined) lines.push(...this.note(this.intents.spec.effect, width))
     lines.push(...this.note(RESET_RISK[0], width))
     lines.push(...this.note(RESET_RISK[1], width))
@@ -1181,29 +1343,44 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
   }
 
   /** The grouped Advanced disclosure of the SELECTED field: its served facts,
-   *  the Host row identity and the ONE explicit reset-staging action. */
-  private groupAdvancedLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): ContentLine[] {
+   *  the Host row identity and the ONE explicit reset-staging action. It also
+   *  returns the physical lines that prove the selected identity and the
+   *  unset semantics for the reset READ receipt. */
+  private groupAdvancedLines(width: number, snapshot: HostNumericSettingsSnapshot<T>): {
+    lines: ContentLine[]
+    facts: readonly number[]
+  } {
     const field = this.fields[this.fieldIndex]!
     const source = snapshot.source
     const lines: ContentLine[] = []
+    const facts: number[] = []
     const unit = this.unitSuffix(field)
     const pad = 12
     const rowWidth = Math.min(width, 64)
     const copyWidth = Math.min(width, 72)
-    lines.push(...this.note(this.intents.spec.sourceHeading(source), copyWidth))
+    const stale = !snapshot.current
+    const heading = sanitizedPhysicalLine(this.intents.spec.sourceHeading(source))
+    lines.push(...this.note(stale ? `Last-known · ${heading}` : heading, copyWidth, stale ? color.warning : color.textDim))
+    facts.push(lines.length)
     lines.push({ text: color.textStrong(sanitizedPhysicalLine(field.label)) })
-    lines.push({ text: this.row('Effective', `${this.fieldValue(snapshot, field)}${unit}`, color.text, pad) })
-    lines.push({ text: this.row('Inherited', `${this.fieldInherited(snapshot, field)}${unit}`, color.textDim, pad) })
-    lines.push({ text: this.row('Comparison', this.fieldComparison(snapshot, field), color.textDim, pad) })
-    if (source.kind === 'ready') lines.push({ text: this.row('Revision', String(source.revision), color.textDim, pad) })
-    if (this.intents.spec.scope !== undefined) lines.push({ text: this.row('Scope', this.intents.spec.scope, color.textDim, pad) })
+    // The staging/unset explanation stands BEFORE the served facts: a short
+    // grant must be able to read WHICH field and HOW it resets before it can
+    // reach the action.
+    const resetCopy = this.note('Reset stages the official unset.', copyWidth)
+    let next = lines.length
+    for (const _line of resetCopy) { facts.push(next); next += 1 }
+    lines.push(...resetCopy)
+    lines.push(...this.note('Changes are staged until Save.', copyWidth))
+    lines.push(...this.fact('Effective', `${this.fieldValue(snapshot, field)}${unit}`, rowWidth, color.text, pad).lines)
+    lines.push(...this.fact('Inherited', `${this.fieldInherited(snapshot, field)}${unit}`, rowWidth, color.textDim, pad).lines)
+    lines.push(...this.fact('Comparison', this.fieldComparison(snapshot, field), rowWidth, color.textDim, pad).lines)
+    if (source.kind === 'ready') lines.push(...this.fact('Revision', String(source.revision), rowWidth, color.textDim, pad).lines)
+    if (this.intents.spec.scope !== undefined) lines.push(...this.proseFact('Scope', this.intents.spec.scope, copyWidth, pad))
     if (snapshot.dirtyFields.includes(field.key)) {
       const requested = this.fieldRequested(snapshot, field)
-      if (requested !== undefined) lines.push({ text: this.row('Staged', `${requested}${requested === 'official unset' ? '' : unit}`, color.text, pad) })
+      if (requested !== undefined) lines.push(...this.fact('Staged', `${requested}${requested === 'official unset' ? '' : unit}`, rowWidth, color.text, pad).lines)
     }
     if (this.intents.spec.effect !== undefined) lines.push(...this.note(this.intents.spec.effect, copyWidth))
-    lines.push(...this.note('Changes are staged until Save.', copyWidth))
-    lines.push(...this.note('Reset stages the official unset.', copyWidth))
     lines.push(...this.note('The USER patch may retain the inherited value.', copyWidth))
     lines.push(...this.note('The Host readback decides the value.', copyWidth))
     if (this.editable(snapshot) && visibleWidth('Reset to inherited…') <= rowWidth) {
@@ -1213,12 +1390,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       })
     } else if (source.kind !== 'ready') {
       lines.push(...this.note(source.reason, copyWidth, color.error))
-    } else if (!snapshot.current) {
-      lines.push(...this.note('Last-known · the Host has newer state; refresh to review.', copyWidth))
     }
     if (this.fieldError !== undefined) lines.push(...this.note(this.fieldError, copyWidth, color.error))
     if (snapshot.notice !== undefined) lines.push(...this.note(snapshot.notice, copyWidth, color.error))
-    return lines
+    return { lines, facts }
   }
 
   private questionLines(
@@ -1228,8 +1403,8 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     const question = this.question!
     if (question.kind === 'reset') {
       const lines: ContentLine[] = []
-      lines.push({ text: this.row('Current', this.singleValue(snapshot), color.text) })
-      lines.push({ text: this.row('Inherited', this.singleInherited(snapshot), color.textDim) })
+      lines.push(...this.fact('Current', this.singleValue(snapshot), width, color.text).lines)
+      lines.push(...this.fact('Inherited', this.singleInherited(snapshot), width, color.textDim).lines)
       // Every PHYSICAL wrapped line of a statement carries its statement index:
       // reading the wrapped fragments of the first two statements can never
       // satisfy the third one.
@@ -1269,7 +1444,30 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     if (this.single) {
       const requested = this.singleRequested(snapshot)
       if (requested !== undefined) lines.push({ text: this.row('Requested', requested, color.text) })
+      return { lines, mustSee, risk: [] }
     }
+    // The grouped question's necessary copy and its ONE accept action must fit
+    // the REAL grant together: a scrolled copy could otherwise leave a visible
+    // answer whose receipt is no longer complete.
+    const bodyRows = Math.max(0, this.rowGrant - 1)
+    const detail: ContentLine[] = []
+    if (this.ambiguous(snapshot)) {
+      const rowWidth = Math.min(width, 64)
+      const unitOf = (field: HostNumericSettingsField<T>): string => this.unitSuffix(field)
+      for (const field of this.fields) {
+        if (!snapshot.dirtyFields.includes(field.key)) continue
+        const requested = this.fieldRequested(snapshot, field)
+        detail.push(...this.fact(`Requested ${field.label}`, requested === 'official unset' ? 'official unset' : `${requested ?? ''}${unitOf(field)}`, rowWidth, color.text).lines)
+        detail.push(...this.fact('Last confirmed', `${this.fieldValue(snapshot, field)}${unitOf(field)}`, rowWidth, color.textDim).lines)
+      }
+    }
+    const acceptWord = question.kind === 'refresh'
+      ? 'Refresh…'
+      : question.kind === 'discard' ? 'Discard…' : this.ambiguous(snapshot) ? 'Leave anyway…' : 'Discard and leave…'
+    if (lines.length + 1 + detail.length <= bodyRows) {
+      lines.push(this.acceptAction(acceptWord, width))
+    }
+    lines.push(...detail)
     return { lines, mustSee, risk: [] }
   }
 
@@ -1307,7 +1505,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       } else {
         const word = this.ambiguous(snapshot) ? 'Leave anyway [D]' : 'Discard and leave [D]'
         segments = [
-          ...(this.single ? [] : this.canSave(snapshot) ? [{ text: `Save [${KEYS.save.toUpperCase()}]`, priority: 950, action: 'save' as const }] : []),
+          ...(this.single ? [] : painted && this.canSave(snapshot)
+            ? [{ text: `Save [${KEYS.save.toUpperCase()}]`, short: 'Save', priority: 950, action: 'save' as const }]
+            : []),
           ...(painted ? [{ text: word, ...(this.single ? {} : { short: 'Discard [D]' }), priority: 900, action: 'leave' as const }] : []),
           { text: 'Keep [Esc]', priority: 1000, escape: true },
         ]
@@ -1337,9 +1537,10 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
           { text: 'Back [Esc]', priority: 1000, escape: true },
         ]
       }
-    } else if (snapshot.dirty && this.canSave(snapshot)) {
-      // Grouped dirty browse: Save is the main action; the secondary routes
-      // drop WHOLE, and the body keeps Edit…/Details…/Refresh… reachable.
+    } else if (snapshot.dirty && this.canSave(snapshot) && this.paintedSaveFacts) {
+      // Grouped dirty browse: Save is published only while ITS OWN dirty facts
+      // are really on screen; the secondary routes drop WHOLE and the body
+      // keeps Edit…/Details…/Discard…/Refresh… reachable.
       segments = [
         { text: `Save [${KEYS.save.toUpperCase()}]`, priority: 900, action: 'save' },
         { text: 'Edit [Enter]', priority: 800, action: 'edit' },

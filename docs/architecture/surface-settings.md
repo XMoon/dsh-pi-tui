@@ -795,7 +795,11 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   selected field's Advanced disclosure.
 - **ONE Save, ONE batch.** The grouped Save is admitted only while the patch is
   current, valid, non-pending and its dirty facts (the count, or one complete
-  staged field block) and the Save span were really painted. It dispatches the
+  staged field block) and the Save span were really painted: the bar publishes
+  NO Save span while those facts are scrolled out. The canonical `Value sends`
+  fact is laid out without clipping (`fact`/`prose` split at the real width);
+  a value that cannot be shown WHOLE admits no Stage span or Enter at all, and
+  a sufficient grant returns it with the raw Input and prior patch intact. It dispatches the
   whole set/reset patch as ONE revision-checked official mutation on the
   captured executor row, keeps the group and its field selection, and paints
   the Host readback as `Verified`. Empty/whitespace/invalid Input keeps the raw
@@ -806,7 +810,8 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   effective/inherited/comparison/revision/scope, the Host executor identity and
   the reset semantics. `Reset to inherited…` (or `x` there) stages the official
   `unset` of THAT field and returns to the browse: no second confirmation and
-  no write. A reset is a real dirty intent even when the effective value equals
+  no write, and the action is admitted only after the selected identity and the
+  staging/unset explanation were really painted in THIS disclosure instance. A reset is a real dirty intent even when the effective value equals
   the inherited one, and `Reset staged` is never painted as the inherited
   value. A later legal Stage of another field keeps it; staging the same value
   of the reset field removes only that field's intent. The Host readback decides
@@ -814,28 +819,42 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   success criterion.
 - **Dirty navigation.** A dirty Back and a dirty parent row/category/pane click
   are the SAME one leave gate: the page opens
-  `Save [S] · Discard and leave [D] · Keep [Esc]` (compact `Discard [D]` when the
-  width needs it). `Save` saves and STAYS, `Keep` retains the group/field/draft,
-  and `Discard and leave` clears the local patch before re-proving the captured
-  destination. A plain `Discard` in the browse opens `Discard unsaved changes?`
-  and stays; `Refresh` asks before it discards the draft and re-reads. The raw
-  Input, the Advanced disclosure and a pending/unknown write refuse every parent
-  route outright. Unknown outcomes offer only `Leave anyway [D] · Keep [Esc]`;
-  leaving does not undo a possibly applied Host write.
+  `Save [S] · Discard and leave [D] · Keep [Esc]`, compacting the WHOLE segments
+  first (`Save · Discard [D] · Keep [Esc]`) so a normal medium child bar keeps
+  all three complete actions. If the third action still drops, the complete
+  `Discard and leave…` is a REAL body action beside the necessary copy; a grant
+  that cannot show that copy together with its answer admits only `Keep`.
+  `Save` saves and STAYS (it never chases the captured parent destination),
+  `Keep` retains the group/field/draft, and `Discard and leave` clears the local
+  patch before re-proving the captured destination. A plain local `Discard` is
+  a body action too (`Discard…`) and stays; `Refresh` asks before it discards
+  the draft and re-reads. The raw Input, the Advanced disclosure and a
+  pending/unknown write refuse every parent route outright. Unknown outcomes
+  offer only `Leave anyway… · Keep [Esc]` (plus the requested/last-confirmed
+  facts); leaving does not undo a possibly applied Host write.
 - **Bar-only and short grants.** A grant that paints no body row admits only the
   page's own Back/Keep/Cancel/Wait, and the Root never takes the grouped Tab for
   a parent focus move. A short body keeps the selected field's value/unit, its
   served `Current`, the real state/dirty count and complete actions before the
   secondary prose; an action whose complete span does not fit is dropped WHOLE
-  and its shortcut key stays inert until a repaint admits it.
+  and its shortcut key stays inert until a repaint admits it. The bar and the
+  body use ONE admission contract: a displayed action always means what its
+  handler does. A question publishes its accept only while its necessary copy
+  is complete in that frame; a browse Save disappears with its dirty facts; the
+  local Discard keeps a real body affordance.
 - **Authority and status.** Effective/inherited/revision/generation and the
   executor identity stay owned by the ConfigPort and the per-open controller;
   the page paints the same `Verified` / `No changes` / `Not saved` /
   `Unverified` / `Outcome unconfirmed` vocabulary and the `Last-known`/read-only
-  states as the single route. A superseded capture or a replaced served executor
-  row refuses the edit until an explicit Refresh, and an accepted write whose
-  readback serves a DIFFERENT executor row is `Unverified` even when the caps
-  look identical.
+  states as the single route. A superseded, refused or replaced capture paints
+  its heading as `Last-known · …` and a staged field's served value as
+  `Last confirmed: …` (never `Current:`); the settlement state is the FIRST
+  readable body row, so a short grant cannot hide it behind prose. The read-only
+  state still offers its real local `Discard…` body action (a definite refusal
+  is safe to abandon) while an ambiguous outcome offers none. A refresh re-reads
+  the served row, clears the draft and requires a NEW explicit Edit/Stage/Save;
+  it never replays the lost intent. An accepted write whose readback serves a
+  DIFFERENT executor row is `Unverified` even when the caps look identical.
 
 Numeric validation follows the owning field: the Agent field requires a safe
 positive integer (`Number.isSafeInteger(n) && n>=1`), while the Shell fields

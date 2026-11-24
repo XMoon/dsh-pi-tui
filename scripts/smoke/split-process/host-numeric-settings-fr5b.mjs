@@ -88,6 +88,33 @@ function profileUserConfig(profileDir, namespace) {
   return rows.filter(row => row?.id === namespace && row.config !== undefined).at(-1)?.config
 }
 
+/** The official Shell USER row must be EXACTLY this pair (both caps) after a
+ *  stage: validating only one field cannot prove the other stayed untouched. */
+function assertShellCaps(profileDir, expected, label) {
+  const rows = parseYaml(readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8')) ?? []
+  const config = profileUserConfig(profileDir, SHELL_NS) ?? {}
+  const actual = { timeoutMs: config.timeoutMs, maxOutputBytes: config.maxOutputBytes }
+  assert(JSON.stringify(actual) === JSON.stringify(expected),
+    `${label}: the official shell caps must stay exactly ${JSON.stringify(expected)}, got ${JSON.stringify(actual)} (rows=${JSON.stringify(rows)})`)
+}
+
+/** Leave a DIRTY Shell group through its real painted receipt, then prove the
+ *  group retired to Rows. A timeout throws with the last frame instead of
+ *  letting the generic close path hide a stuck question. */
+async function leaveDirtyShellGroup(client, label) {
+  client.send('\x1b')
+  const question = await waitForPattern(client, /Save keeps you here\.|Host may have applied this change\./u,
+    `${label} leave question`)
+  assert(/Discard (?:and leave )?\[D\]/u.test(question),
+    `${label} must paint the complete discard-and-leave receipt: ${JSON.stringify(question)}`)
+  client.send('d')
+  await waitForPattern(client, /Settings · Tools · Rows/u, `${label} group retired to Rows`)
+  client.send('\x1b')
+  await sleep(160)
+  client.send('\x1b')
+  await sleep(160)
+}
+
 async function closeClient(client, scene, label) {
   // The numeric tenants' leave questions are the ONLY discardable states: the
   // dirty-leave question paints `Save keeps you here.` and the local discard
@@ -297,6 +324,8 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r')
     await waitForPattern(clientA, /Settings · Tools · Shell execution/u, 'FR5-B Shell group A')
     await waitForPattern(clientA, /Host model-tool executor · POSIX Bash/u, 'FR5-B active executor A')
+    const shellSeeded = profileUserConfig(installation.profileDir, SHELL_NS) ?? {}
+    const seededCaps = { timeoutMs: shellSeeded.timeoutMs, maxOutputBytes: shellSeeded.maxOutputBytes }
     const shellOpenedFrame = await frameOf(clientA)
     assert(/Command timeout \(ms\)\s+60000 ms/u.test(shellOpenedFrame)
       && /Output cap per stream \(bytes\)\s+64000 bytes/u.test(shellOpenedFrame),
@@ -329,8 +358,7 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(/Command timeout \(ms\)\s+90000 ms/u.test(bStagedFrame)
       && /Current: 60000 ms · Unsaved/u.test(bStagedFrame),
     `B must paint its candidate beside the served Current: ${JSON.stringify(bStagedFrame)}`)
-    assert(profileUserConfig(installation.profileDir, SHELL_NS)?.timeoutMs !== 90_000,
-      'staging in B never writes the profile before Save')
+    assertShellCaps(installation.profileDir, seededCaps, 'B local stage')
 
     await selectFrame(clientA, frame => selectedRow(frame, 'Command timeout (ms)'), 'FR5-B Shell timeout field A')
     clientA.send('\r')
@@ -356,8 +384,7 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(/Command timeout \(ms\)\s+45000 ms/u.test(shellStagedFrame)
       && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(shellStagedFrame),
     `the Shell group must paint both staged caps: ${JSON.stringify(shellStagedFrame)}`)
-    assert(profileUserConfig(installation.profileDir, SHELL_NS)?.timeoutMs !== 45_000,
-      'both local stages leave the persisted profile untouched')
+    assertShellCaps(installation.profileDir, seededCaps, 'A local stages')
     await saveAndVerify(clientA, 'FR5-B Shell verified A', /Status\s+Verified/u)
     const shellPatch = profileUserConfig(installation.profileDir, SHELL_NS)
     assert(shellPatch?.timeoutMs === 45_000 && shellPatch?.maxOutputBytes === 128_000,
@@ -372,25 +399,23 @@ export async function runHostNumericSettingsFr5B(context) {
     // Last-known read-only page (no Save painted). Both are refusals; neither
     // may write.
     clientB.send('s')
-    await waitForPattern(clientB, /Not saved|refresh to review|Last-known/u,
+    // ONE explicit Save attempt; its OWN refusal receipt must arrive (the Host
+    // CAS or the landed Last-known page). The explicit retry is not used to
+    // fish for a refusal.
+    const bAfterSaveAttempt = await waitForPattern(clientB, /Not saved|refresh to review|Last-known/u,
       'FR5-B stale Client B refusal', 30_000)
-    await sleep(400)
-    const bAfterSaveAttempt = await frameOf(clientB)
     assert(!/Verified/u.test(bAfterSaveAttempt), 'the stale Client never claims a verified write')
-    if (/Save \[S\]/u.test(bAfterSaveAttempt)) {
-      // The notification had not landed yet: a second explicit attempt meets
-      // the captured revision fence and reports Not saved.
-      clientB.send('s')
-      const bRetry = await waitForPattern(clientB, /Not saved|refresh to review/u,
-        'FR5-B stale Client B CAS refusal', 20_000)
-      assert(/Not saved|refresh to review/u.test(bRetry), 'the stale intent is named as not saved')
-    }
-    assert(profileUserConfig(installation.profileDir, SHELL_NS)?.timeoutMs === 45_000,
-      'Client B cannot replace the committed shell timeout')
+    assert(/Command timeout \(ms\)\s+90000 ms/u.test(bAfterSaveAttempt)
+      && /Current: 60000 ms · Unsaved/u.test(bAfterSaveAttempt),
+    `the stale Client retains its requested value and the served Current: ${JSON.stringify(bAfterSaveAttempt)}`)
+    assertShellCaps(installation.profileDir, { timeoutMs: 45_000, maxOutputBytes: 128_000 },
+      'Client B stale Save')
     trace('fr5b.shell-two-client', { bothCapsOneSave: true, staleRefused: true, profileKept: true })
 
     // A's explicit Reset of the SECOND field: the official unset is only STAGED
     // until the group Save, then the Host readback decides the value.
+    const shellCommitted = profileUserConfig(installation.profileDir, SHELL_NS) ?? {}
+    const committedCaps = { timeoutMs: shellCommitted.timeoutMs, maxOutputBytes: shellCommitted.maxOutputBytes }
     await selectFrame(clientA, frame => selectedRow(frame, 'Output cap per stream (bytes)'), 'FR5-B Shell reset field A')
     clientA.send('?')
     const shellAdvanced = await waitForPattern(clientA, /Reset to inherited…/u, 'FR5-B Shell Advanced A')
@@ -406,8 +431,7 @@ export async function runHostNumericSettingsFr5B(context) {
       `the official unset is staged on the selected field: ${JSON.stringify(shellResetStaged)}`)
     assert(/1 unsaved change/u.test(shellResetStaged),
       'the staged reset is a real dirty intent')
-    assert(profileUserConfig(installation.profileDir, SHELL_NS)?.maxOutputBytes === 128_000,
-      'staging the reset never writes the official unset before Save')
+    assertShellCaps(installation.profileDir, committedCaps, 'A staged reset (both caps)')
     await saveAndVerify(clientA, 'FR5-B Shell reset verified A', /Status\s+Verified/u)
     const shellAfterReset = await frameOf(clientA)
     assert(new RegExp(`Output cap per stream \\(bytes\\)\\s+${inheritedCap} bytes`, 'u').test(shellAfterReset),
@@ -417,11 +441,22 @@ export async function runHostNumericSettingsFr5B(context) {
       `the sibling timeout stays at its saved value after the reset: ${JSON.stringify(resetPatch)}`)
     assert(resetPatch?.maxOutputBytes === undefined || resetPatch?.maxOutputBytes === inheritedCap,
       `the official unset leaves no USER cap or the inherited value, never another number: ${JSON.stringify(resetPatch)}`)
-    trace('fr5b.shell-grouped-reset', { resetStaged: true, readbackDecides: true, siblingKept: true, inheritedCap })
+    // Back to Rows: the ROW must read the authoritative Host caps, not the
+    // page's last painted draft.
+    clientA.send('\x1b')
+    const shellRows = await waitForPattern(clientA, /Settings · Tools · Rows/u, 'FR5-B Shell back to Rows')
+    assert(/Timeout 45000 ms/u.test(shellRows),
+      `the Rows summary reads the authoritative committed timeout: ${JSON.stringify(shellRows)}`)
+    assert(!/Output cap/u.test(shellRows) || new RegExp(`Output cap ${inheritedCap} bytes`, 'u').test(shellRows),
+      `the Rows summary reads the authoritative inherited cap: ${JSON.stringify(shellRows)}`)
+    trace('fr5b.shell-grouped-reset', { resetStaged: true, readbackDecides: true, siblingKept: true, inheritedCap, rowsReadback: true })
 
     await scene.assertHostIdentityKept(host, identity, 'FR5-B settings writes')
     await closeClient(clientA, scene, 'FR5-B Client A')
     clientA = undefined
+    // B still holds its refused draft: leave through the REAL painted receipt,
+    // prove the group retired to Rows, and only then close Settings normally.
+    await leaveDirtyShellGroup(clientB, 'FR5-B Client B')
     await closeClient(clientB, scene, 'FR5-B Client B')
     clientB = undefined
     await scene.stopC1Host(host)
