@@ -5078,6 +5078,11 @@ test('late-replay provenance (C): a late orphan result after a newer Turn stays 
   assert.ok(expanded.some(block => block.kind === 'message' && block.message === late),
     'the late card stays visible when the settled Thought opens')
   assert.deepEqual(workSpanToolNames(folder), ['read'], 'no synthesized Work/Action aggregation includes the replay row')
+  const replayOnly = projectFocus([late], folder.turnActivities(), new Set(), true)
+  assert.equal(replayOnly.filter(block => block.kind === 'activity').length, 0,
+    'a replay-only fragment mints no Thought at all')
+  assert.equal(replayOnly.filter(block => block.kind === 'message' && block.message === late).length, 1,
+    'the replay-only fragment still renders once')
 })
 
 test('a hostile action subtype name stays on ONE Focus header row', () => {

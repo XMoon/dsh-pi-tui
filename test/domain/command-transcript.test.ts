@@ -393,6 +393,40 @@ test('a trailing command becomes bridged only when same-Turn continuation is evi
     'the root keeps the same owner object when the command reflows')
 })
 
+test('two logical Turns with identical text and usage keep separate summaries', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    userMessage('same prompt', 1, 0),
+    toolCall('read', 'identical-a', 2, 0, 0),
+    toolResult('identical-a', 'same result', 3),
+    assistantMessage('same answer', 4, 0),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+    event('turn/start', { turn: 1 }, 6),
+    userMessage('same prompt', 7, 1),
+    toolCall('read', 'identical-b', 8, 1, 0),
+    toolResult('identical-b', 'same result', 9),
+    assistantMessage('same answer', 10, 1, 1),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 11),
+  ])
+  const messages = folder.messages()
+  const activities = folder.turnActivities()
+  const collapsed = projectFocus(messages, activities, new Set(), true)
+  const summaries = collapsed.filter(block => block.kind === 'activity')
+  assert.deepEqual(summaries.map(block => block.kind === 'activity' ? block.activity.turn : -1), [0, 1],
+    'identical text/tokens never merge two logical Turns')
+  assert.notStrictEqual(summaries[0]?.kind === 'activity' ? summaries[0].owner : undefined,
+    summaries[1]?.kind === 'activity' ? summaries[1].owner : undefined,
+    'each Turn owns a distinct presentation root object')
+  assert.equal(summaries[0]?.kind === 'activity' ? summaries[0].actionStats.total : -1, 1)
+  assert.equal(summaries[1]?.kind === 'activity' ? summaries[1].actionStats.total : -1, 1)
+  for (const turn of [0, 1]) {
+    const expanded = projectFocus(messages, activities, new Set([turn]), true)
+    assert.equal(expanded.filter(block => block.kind === 'activity' && block.activity.turn === turn).length, 1,
+      `expanding Turn ${turn} keeps exactly one summary`)
+  }
+})
+
 test('a command is a control-class row and never Work/Activity/Action evidence', () => {
   const folder = new TranscriptFolder()
   folder.apply([

@@ -4516,3 +4516,160 @@ test('one incremental live Turn publishes exactly one Focus summary across comma
   assert.equal((joined.match(/\/model/g) ?? []).length, 1, `the command stays exactly once:\n${joined}`)
   app.stop()
 })
+
+/** One open Turn whose canonical Work A / Work B are split by a real mid-turn
+ * command with a long outcome (so the command card has its own fold). */
+function commandBridgeFolder(): TranscriptFolder {
+  const longOutcome = Array.from({ length: 12 }, (_, index) => `switched line ${index}`).join('\n')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('pointer-cmd-u1'), role: 'user',
+      content: [{ type: 'text', text: 'run both stages' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('tool/call', {
+      turn: 1, step: 0, callId: ToolCallId('pointer-cmd-a'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo stage-a' }),
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('pointer-cmd-ra'), role: 'tool', toolCallId: ToolCallId('pointer-cmd-a'),
+        content: [{ type: 'text', text: 'stage-a result' }], source: { kind: 'tool', callId: ToolCallId('pointer-cmd-a') },
+      },
+    }, T0 + 3, 3),
+    eventAt('command/run', { commandId: 'pointer-cmd-mid', name: 'model', args: 'switch', source: { kind: 'user' } }, T0 + 4, 4),
+    eventAt('command/done', { commandId: 'pointer-cmd-mid', kind: 'success', text: longOutcome }, T0 + 5, 5),
+    eventAt('tool/call', {
+      turn: 1, step: 1, callId: ToolCallId('pointer-cmd-b'), name: 'bash',
+      arguments: JSON.stringify({ command: 'echo stage-b' }),
+    }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('pointer-cmd-rb'), role: 'tool', toolCallId: ToolCallId('pointer-cmd-b'),
+        content: [{ type: 'text', text: 'stage-b result' }], source: { kind: 'tool', callId: ToolCallId('pointer-cmd-b') },
+      },
+    }, T0 + 7, 7),
+  ])
+  return folder
+}
+
+test('fullscreen Focus pointer journey keeps the bridged command independent of the one open root', async () => {
+  const { vt, app } = startApp()
+  app.setFocusMode(true)
+  show(app, commandBridgeFolder())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const headerRow = findFocusHeaderRow(view, false)
+  assert.ok(headerRow >= 0, `collapsed Thought missing:\n${view.join('\n')}`)
+  click(vt, 3, headerRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  let joined = view.join('\n')
+  assert.ok(hasFocusHeader(joined, true), `the one root did not open:\n${joined}`)
+  assert.ok(app.focusExpandedTurnsForTest().has(1))
+  assert.equal((joined.match(/Activity/g) ?? []).length, 2, `both canonical Works are nested:\n${joined}`)
+  assert.equal(countFocusHeaders(joined), 1, 'opening the root never duplicates the summary')
+
+  // Clicking the command toggles ONLY its own detail: the root and every Work
+  // disclosure stay untouched (the command keeps no container ancestry).
+  let commandRow = findRow(view, '/model switch')
+  assert.ok(commandRow >= 0, `the bridged command is visible inside the root:\n${joined}`)
+  assert.equal(joined.includes('switched line 11'), false, 'precondition: the command outcome is folded')
+  const worksBefore = app.expandedWorkOwnersForTest()
+  click(vt, 3, commandRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  // The expanded command body may scroll the header out of the viewport; the
+  // authoritative disclosure state and the nested Work headers prove the root
+  // is still open.
+  assert.ok(app.focusExpandedTurnsForTest().has(1), 'clicking the command must not collapse the root')
+  assert.ok(joined.includes('Activity'), `the open root still materializes its Works:\n${joined}`)
+  assert.deepEqual(app.expandedWorkOwnersForTest(), worksBefore, 'the command click never touches Work disclosure')
+  assert.ok(joined.includes('switched line 11'), `the command detail opens independently:\n${joined}`)
+
+  // Clicking it again closes only its own detail. The second click uses a
+  // different cell of the same head: the vendored client's multi-click
+  // selection gesture deliberately consumes a same-cell repeat, and this test
+  // is about the fold ownership, not that pre-existing selection policy.
+  commandRow = findRow(view, '/model switch')
+  assert.ok(commandRow >= 0)
+  click(vt, 30, commandRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1), 'the root stays open')
+  assert.equal(joined.includes('switched line 11'), false, 'the command detail closes independently')
+
+  // The blank spacer between Work A and the command is an inert boundary blank:
+  // it has no shared semantic container with the command row, so it can never
+  // become an accidental root/Work collapse.
+  commandRow = findRow(view, '/model switch')
+  assert.ok(commandRow > 0 && isBlankRow(view[commandRow - 1]), `a blank spacer precedes the command:\n${joined}`)
+  const worksBeforeBlank = app.expandedWorkOwnersForTest()
+  click(vt, 3, commandRow)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1), `the command-adjacent blank spacer is inert:\n${joined}`)
+  assert.ok(joined.includes('Activity'), 'the root keeps its Works after the inert spacer')
+  assert.deepEqual(app.expandedWorkOwnersForTest(), worksBeforeBlank, 'the spacer click never toggles a Work')
+
+  // A Work header still opens its own members; the command and root stay as is.
+  const activityRow = view.findIndex(line => /Activity/.test(line))
+  assert.ok(activityRow >= 0, `the first Work header is visible:\n${joined}`)
+  click(vt, 3, activityRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.ok(app.focusExpandedTurnsForTest().has(1), 'opening a Work never collapses the root')
+  assert.ok(joined.includes('stage-a result'), `the opened Work reveals its own member:\n${joined}`)
+  assert.ok(joined.includes('/model switch'), 'the command stays independently visible')
+
+  // The one root still closes through its own header.
+  const closeRow = findFocusHeaderRow(view, true)
+  if (closeRow < 0) {
+    app.scrollToTop()
+    await vt.waitForRender()
+    view = vt.getViewport()
+    joined = view.join('\n')
+  }
+  const scrolledCloseRow = closeRow >= 0 ? closeRow : findFocusHeaderRow(vt.getViewport(), true)
+  assert.ok(scrolledCloseRow >= 0, `the open root header is reachable:\n${joined}`)
+  click(vt, 3, scrolledCloseRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  joined = view.join('\n')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, `the one root closes through its header:\n${joined}`)
+  assert.ok(joined.includes('/model switch'), 'the command stays visible after the root closes')
+  assert.equal(countFocusHeaders(joined), 1, 'closing never duplicates the summary')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a terminal Turn error still paints exactly one bounded Focus summary', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('error-turn-u1'), role: 'user',
+      content: [{ type: 'text', text: 'the failing request' }], source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'working before the failure' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('error-turn-c1'), name: 'bash', arguments: '{}' }, T0 + 3, 3),
+    eventAt('llm/retry', { turn: 1, step: 1, retry: 1, delayMs: 1_000, failure: { code: '529', message: 'overloaded' } }, T0 + 4, 4),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'E', message: 'boom' } } }, T0 + 5, 5),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const joined = vt.getViewport().join('\n')
+  assert.equal(countFocusHeaders(joined), 1, `a failed Turn keeps exactly one summary:\n${joined}`)
+  assert.ok(/Failed/.test(joined), `the terminal reason is named:\n${joined}`)
+  assert.ok(joined.includes('Action:'), `the bounded Action slot remains:\n${joined}`)
+  app.stop()
+})

@@ -29,9 +29,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { connect as sdkConnect } from '@stencil-hq/tern'
 import type { Session } from '@stencil-hq/tern'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createSurfaceRuntime, type SurfaceRendererMount } from '../../src/app/surface/runtime.ts'
+import type { DisplayState } from '../../src/domain/display/preset.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { StatsFolder } from '../../src/domain/status/stats.ts'
@@ -77,6 +79,60 @@ function seedTurns(folder: TranscriptFolder, marker: string, tag: string): void 
   folder.apply(events)
 }
 
+/** One settled Focus Turn with a mid-turn command between two canonical Works
+ * plus a late post-turn replay row: the composed binding must reveal exactly
+ * the node that really hides each target. */
+function seedFocusCommandTurn(folder: TranscriptFolder): void {
+  const events: SessionEvent[] = []
+  let seq = 0
+  const push = (type: string, data: Record<string, unknown>): void => {
+    events.push(ev(type, data, seq))
+    seq += 1
+  }
+  push('turn/start', { turn: 1 })
+  push('user/message', {
+    id: MessageId('surface-focus-u1'), role: 'user',
+    content: [{ type: 'text', text: 'run both focused stages' }], source: { kind: 'user' },
+  })
+  push('tool/call', { turn: 1, step: 0, callId: ToolCallId('surface-focus-a'), name: 'bash', arguments: JSON.stringify({ command: 'echo stage-a' }) })
+  push('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('surface-focus-ra'), role: 'tool', toolCallId: ToolCallId('surface-focus-a'),
+      content: [{ type: 'text', text: 'stage-a result' }], source: { kind: 'tool', callId: ToolCallId('surface-focus-a') },
+    },
+  })
+  push('command/run', { commandId: CommandId('surface-focus-cmd'), name: 'model', args: 'switch', source: { kind: 'user' } })
+  push('command/done', { commandId: CommandId('surface-focus-cmd'), kind: 'success', text: 'switched\nCOMMAND_DETAIL_MARKER' })
+  push('tool/call', { turn: 1, step: 1, callId: ToolCallId('surface-focus-b'), name: 'bash', arguments: JSON.stringify({ command: 'echo stage-b' }) })
+  push('tool/result', {
+    turn: 1, step: 1,
+    message: {
+      id: MessageId('surface-focus-rb'), role: 'tool', toolCallId: ToolCallId('surface-focus-b'),
+      content: [{ type: 'text', text: 'PROCESS_B_RESULT_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-focus-b') },
+    },
+  })
+  push('assistant/message', {
+    turn: 1, step: 2,
+    message: {
+      id: MessageId('surface-focus-final'), role: 'assistant',
+      content: [{ type: 'text', text: 'the focused answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [],
+  })
+  push('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  // A newly materialized post-turn row: transcript evidence, never a Turn.
+  push('tool/result', {
+    turn: 1, step: 7,
+    message: {
+      id: MessageId('surface-focus-late'), role: 'tool', toolCallId: ToolCallId('surface-focus-late'),
+      content: [{ type: 'text', text: 'LATE_EVIDENCE_MARKER' }], source: { kind: 'tool', callId: ToolCallId('surface-focus-late') },
+    },
+  })
+  folder.apply(events)
+}
+
 interface SurfaceHarness {
   readonly pane: TspPane
   readonly surface: ReturnType<typeof createSurfaceRuntime<never>>
@@ -100,6 +156,10 @@ interface SurfaceHarness {
 
 async function mountSurface(life: { after(fn: () => unknown): void }, options: {
   readonly remote?: boolean
+  /** The REAL presentation preset this mount commits (Focus cases need it). */
+  readonly preset?: DisplayState['preset']
+  /** A custom seed for the composed main Folder (defaults to `seedTurns`). */
+  readonly seed?: (folder: TranscriptFolder) => void
 } = {}): Promise<SurfaceHarness> {
   const pane = installTspPane({ composerActions: true, transcriptSearch: true })
   life.after(() => pane.restore())
@@ -108,7 +168,8 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
   const session: Session = connected
 
   let mainFolder = new TranscriptFolder()
-  seedTurns(mainFolder, MAIN_MARKER, 'main')
+  if (options.seed === undefined) seedTurns(mainFolder, MAIN_MARKER, 'main')
+  else options.seed(mainFolder)
   let statsFolder = new StatsFolder()
   let controller: TranscriptWindowController = new WindowController({ windowTurns: 20, stepTurns: 10 })
   let childFolder: TranscriptFolder | undefined
@@ -123,7 +184,7 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
         copyVisual: async () => true,
         requestExit: () => {},
         onFatal: (error) => { throw new Error(`the mount routed a fatal: ${String(error)}`) },
-        displayState: { preset: 'full' },
+        displayState: { preset: options.preset ?? 'full' },
       })
       mountedRenderer.bindStatusReader(statusReader)
       mountedRenderer.bindImages(imageBinding)
@@ -218,7 +279,7 @@ async function mountSurface(life: { after(fn: () => unknown): void }, options: {
     renderer: rendererMount,
     workspaceRoot: '/tmp',
     iconStyle: 'emoji',
-    displayState: { preset: 'full' },
+    displayState: { preset: options.preset ?? 'full' },
     historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
     readImage: () => Promise.reject(new Error('not exercised')),
     imageScope: () => undefined,
@@ -522,4 +583,51 @@ test('the renderer opens the card against the composed binding and searches the 
   const snapshot = h.binding().snapshot(MAIN_MARKER.toLowerCase())
   assert.equal(snapshot?.matches.length, 1,
     `the composed binding sees the seeded answer :: ${JSON.stringify({ texts: h.texts().slice(-8), matches: snapshot?.matches.length })}`)
+})
+
+test('the composed Focus binding reveals only what each semantic hit really hides', async (t) => {
+  const ENTER = '\r'
+  const BACKSPACE = '\u007f'
+  const h = await mountSurface(t, { preset: 'focus', seed: seedFocusCommandTurn })
+  // The harness's initial publish can precede the renderer mount; repaint once
+  // so the REAL composed subject paints its transcript before the search.
+  h.surface.repaint()
+  await settle()
+  const painted = (needle: string): boolean => h.texts().some(text => text.includes(needle))
+  const summaryCount = (): number => (h.texts().join('\n').match(/Turn complete/g) ?? []).length
+
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false, 'precondition: the hidden Process body is folded')
+  assert.equal(painted('COMMAND_DETAIL_MARKER'), false, 'precondition: the command detail is folded')
+  assert.equal(summaryCount(), 1, 'precondition: one collapsed Focus summary')
+
+  await h.key(ALT_SHIFT_S)
+  await waitUntil('the search card painted', () => h.texts().some(text => text.includes('Session Search')))
+  let queryLength = 0
+  const query = async (next: string): Promise<void> => {
+    for (let index = 0; index < queryLength; index += 1) await h.key(BACKSPACE)
+    await waitUntil('the query clears', () => h.texts().some(text => /0 targets/u.test(text)))
+    for (const char of next) await h.key(char)
+    await waitUntil(`the ${next} target settles`, () => h.texts().some(text => /1\/1 targets/u.test(text)))
+    await h.key(ENTER)
+    queryLength = next.length
+  }
+
+  // (1) A command-detail hit opens the command card alone: the Thought stays
+  // collapsed (its hidden Process body never appears) and no second summary.
+  await query('command_detail_marker')
+  await waitUntil('the command detail opens', () => painted('COMMAND_DETAIL_MARKER'))
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false, 'a command hit never opens the collapsed Thought')
+  assert.equal(summaryCount(), 1, 'a command hit never mints a second summary')
+
+  // (2) A hidden Process hit opens the ONE root and its canonical Work.
+  await query('process_b_result_marker')
+  await waitUntil('the hidden Process body opens through the one root', () => painted('PROCESS_B_RESULT_MARKER'))
+  assert.equal(summaryCount(), 1, 'the Process reveal paints exactly one summary')
+
+  // (3) Late replay evidence opens its own card and never mints a root.
+  await query('late_evidence_marker')
+  await waitUntil('the late replay body opens', () => painted('LATE_EVIDENCE_MARKER'))
+  assert.equal(painted('PROCESS_B_RESULT_MARKER'), false,
+    'late standalone evidence never opens the settled Turn Process')
+  assert.equal(summaryCount(), 1, 'late replay evidence mints no phantom summary')
 })
