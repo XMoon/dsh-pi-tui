@@ -4143,6 +4143,55 @@ test('a late older-step settlement never releases the latest pending final in th
   app.stop()
 })
 
+test('a result-only orphan diagnostic never releases the pending final in the real TuiApp sink', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('orphan-u'), role: 'user', content: [{ type: 'text', text: 'orphan prompt' }], source: { kind: 'user' } }, T0 + 1, 1),
+    eventAt('step/start', { turn: 1, step: 2 }, T0 + 2, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('orphan-latest'), role: 'assistant', content: [{ type: 'text', text: 'ORPHAN_PENDING_LATEST' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 3, 3),
+    eventAt('step/end', { turn: 1, step: 2 }, T0 + 4, 4),
+    eventAt('command/run', { commandId: 'orphan-cmd', name: 'model', source: { kind: 'user' } }, T0 + 5, 5),
+    eventAt('command/done', { commandId: 'orphan-cmd', kind: 'success', text: 'switched' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('orphan-diag'), role: 'tool', toolCallId: ToolCallId('orphan-call'),
+        content: [{ type: 'text', text: 'ORPHAN_DIAGNOSTIC' }], source: { kind: 'tool', callId: ToolCallId('orphan-call') },
+      },
+    }, T0 + 7, 7),
+  ])
+  show(app, folder)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  let joined = vt.getViewport().join('\n')
+  assert.equal(joined.includes('ORPHAN_PENDING_LATEST'), false,
+    'the result-only orphan never releases the latest pending final in the painted frame')
+  const blocks = (app as unknown as {
+    transcriptBlocks(expanded: ReadonlySet<number>): readonly {
+      readonly kind: string
+      readonly message?: { readonly result?: string }
+      readonly span?: { readonly members: readonly { readonly result?: string }[] }
+    }[]
+  }).transcriptBlocks(new Set([1]))
+  const retained = blocks.some(block => block.kind === 'message'
+    ? block.message?.result === 'ORPHAN_DIAGNOSTIC'
+    : block.span?.members.some(member => member.result === 'ORPHAN_DIAGNOSTIC') === true)
+  assert.equal(retained, true, 'the zero-call diagnostic stays retained in the expanded projection')
+
+  applyMixed(folder, [eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 8, 8)])
+  show(app, folder)
+  await vt.waitForRender()
+  joined = vt.getViewport().join('\n')
+  assert.equal((joined.match(/ORPHAN_PENDING_LATEST/g) ?? []).length, 1,
+    `exactly one qualified final is painted after turn/end:\n${joined}`)
+  app.stop()
+})
+
 test('a live Focus run never re-adopts an earlier Work across a replay fence', async () => {
   const { vt, app } = startApp({ preset: 'focus' })
   const folder = new TranscriptFolder()

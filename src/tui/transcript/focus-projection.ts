@@ -37,6 +37,7 @@ import {
 import { assistantForStep, eligibleFinalAssistant, type EligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import {
+  classifyTranscriptMessage,
   isPostTurnReplayEvidence,
   isSurfacedContext,
   isSurfacedInteractionTool,
@@ -373,8 +374,14 @@ export function projectFocus(
     // system rows, control/replay/foreign rows already excluded) releases the
     // candidate.
     const laterProcess = rows.slice(latestIndex + 1).some(member =>
+      // Only genuine continuation evidence releases the candidate. A
+      // newly-materialized orphan/result-only Tool diagnostic (explicit
+      // zero-call provenance) or an attention diagnostic never confirms a
+      // later model step; the Fold's own semantic classifier owns that line.
       member.kind !== 'user' && member.kind !== 'assistant'
-      && !isSurfacedContext(member) && !isFocusBridgeControlRow(member))
+      && !isSurfacedContext(member) && !isFocusBridgeControlRow(member)
+      && classifyTranscriptMessage(member).class !== 'attention'
+      && !(member.kind === 'tool' && member.callCount === 0))
     if (!laterProcess) pendingByTurn.set(turn, latestAssistant)
   }
   const out: FocusProjectedBlock[] = []

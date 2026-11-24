@@ -475,6 +475,58 @@ test('a late older-step assistant never releases the real latest pending final',
   }
 })
 
+test('a result-only orphan diagnostic after a bridged command never releases the latest pending final', () => {
+  const folder = new TranscriptFolder()
+  let seq = 0
+  const events: SessionEvent[] = []
+  events.push(
+    event('turn/start', { turn: 1 }, seq++),
+    userMessage('orphan prompt', seq++, 1),
+    event('step/start', { turn: 1, step: 2 }, seq++),
+    assistantMessage('ORPHAN_PENDING_LATEST', seq++, 1, 2),
+    event('step/end', { turn: 1, step: 2 }, seq++),
+    event('command/run', { commandId: CommandId('orphan-cmd'), name: 'model', source: { kind: 'user' } }, seq++),
+    event('command/done', { commandId: CommandId('orphan-cmd'), kind: 'success', text: 'switched' }, seq++),
+    // A result-only orphan for an OLDER step with no preceding tool/call: explicit
+    // zero-call diagnostic evidence, never a new model step.
+    event('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('orphan-diag'), role: 'tool', toolCallId: ToolCallId('orphan-call'),
+        content: [{ type: 'text', text: 'ORPHAN_DIAGNOSTIC' }], source: { kind: 'tool', callId: ToolCallId('orphan-call') },
+      },
+    }, seq++),
+  )
+  folder.apply(events)
+  const messages = folder.messages()
+  const orphan = messages.find(message => message.kind === 'tool' && message.result === 'ORPHAN_DIAGNOSTIC')
+  assert.ok(orphan !== undefined && orphan.kind === 'tool', 'fixture: the orphan diagnostic materialized')
+  assert.equal(orphan.callCount, 0, 'fixture: explicit zero-call provenance')
+  const activity = folder.turnActivities().get(1)
+  assert.ok(activity !== undefined)
+  assert.equal(assistantLatestStepOf(activity), 2, 'the structural latest step stays 2')
+
+  const projectedRows = (blocks: ReturnType<typeof projectFocus>): TranscriptMessage[] =>
+    blocks.flatMap(block => block.kind === 'work'
+      ? [...block.span.members]
+      : block.kind === 'message' ? [block.message] : [])
+  const before = projectFocus(messages, folder.turnActivities(), new Set([1]), true)
+  assert.equal(projectedRows(before).filter(message => message.kind === 'assistant'
+    && message.text === 'ORPHAN_PENDING_LATEST').length, 0,
+  'the real latest-step pending final stays held back before turn/end')
+  assert.equal(projectedRows(before).filter(message => message === orphan).length, 1,
+    'the zero-call diagnostic stays retained exactly once')
+  assert.equal(before.filter(block => block.kind === 'activity').length, 1, 'one summary only')
+
+  folder.apply([event('turn/end', { turn: 1, reason: { kind: 'completed' } }, seq++)])
+  const after = projectFocus(folder.messages(), folder.turnActivities(), new Set([1]), true)
+  assert.equal(projectedRows(after).filter(message => message.kind === 'assistant'
+    && message.text === 'ORPHAN_PENDING_LATEST').length, 1,
+  'exactly one qualified final appears after turn/end')
+  assert.equal(projectedRows(after).filter(message => message === orphan).length, 1,
+    'the orphan diagnostic stays retained after the final')
+})
+
 test('a bridged control run never promotes a settled assistant to Process before turn/end', () => {
   const folder = new TranscriptFolder()
   const head: SessionEvent[] = [
