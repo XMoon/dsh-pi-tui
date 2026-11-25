@@ -441,8 +441,8 @@ export async function runAcpV1ConformanceB3(context) {
     assert(mainCaps?.promptCapabilities?.audio === false && mainCaps?.promptCapabilities?.embeddedContext === false,
       'B3-04: audio/embeddedContext prompt capabilities must be false')
     assert(typeof mainCaps?.promptCapabilities?.image === 'boolean', 'B3-04: image prompt capability must be an explicit boolean')
-    assert(mainCaps?.mcpCapabilities?.http === false && mainCaps?.mcpCapabilities?.sse === false,
-      'B3-04: MCP HTTP/SSE capabilities must be false')
+    assert(mainCaps?.mcpCapabilities?.http === true && mainCaps?.mcpCapabilities?.sse === false,
+      'B3-04: HTTP MCP must be advertised and Legacy SSE must be false')
     assert(mainCaps?.mcpCapabilities?.acp !== true, 'B3-04: unstable ACP MCP transport must not be advertised')
     assert(mainCaps?.fs === undefined && mainCaps?.terminal === undefined,
       'B3-04: Agent capabilities must not expose client fs/terminal capabilities')

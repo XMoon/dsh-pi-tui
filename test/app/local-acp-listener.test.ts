@@ -376,7 +376,11 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
         protocolVersion: number
         agentInfo: { name: string; version: string }
         authMethods: unknown[]
-        agentCapabilities: { loadSession: boolean; sessionCapabilities: Record<string, unknown> }
+        agentCapabilities: {
+          loadSession: boolean
+          mcpCapabilities: { http: boolean; sse: boolean }
+          sessionCapabilities: Record<string, unknown>
+        }
       }
     }
     assert.equal(response.id, 1)
@@ -385,6 +389,8 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
     assert.equal(response.result?.agentInfo.version, '9.9.9-test')
     assert.deepEqual(response.result?.authMethods, [])
     assert.equal(response.result?.agentCapabilities.loadSession, false)
+    assert.deepEqual(response.result?.agentCapabilities.mcpCapabilities, { http: false, sse: false },
+      'a listener with no Host Session View must not advertise HTTP MCP')
     assert.deepEqual(response.result?.agentCapabilities.sessionCapabilities, {},
       'a listener with no Host Session View must not advertise resume/close')
   } finally {
@@ -2143,7 +2149,7 @@ test('session/new carries the authoritative created session id in JSON-RPC error
   }
 })
 
-test('session/new passes the standard stdio MCP declarations to the View and returns the Host Session id', async t => {
+test('session/new advertises HTTP MCP only with a View and forwards stdio+HTTP declarations unchanged', async t => {
   const { scope } = newScope(t)
   const mounted: Array<{ readonly servers: readonly unknown[] }> = []
   const { access } = makeFakeAccess({
@@ -2157,8 +2163,19 @@ test('session/new passes the standard stdio MCP declarations to the View and ret
   const client = await RawClient.open(listener.socketPath)
   try {
     initialize(client, 1)
-    await client.next()
-    const mcpServers = [{ name: 'mcp one', command: '/bin/true', args: [], env: [{ name: 'SAFE', value: 'value' }] }]
+    const initialized = (await client.next()) as {
+      result?: { agentCapabilities?: { mcpCapabilities?: { http?: boolean; sse?: boolean } } }
+    }
+    assert.deepEqual(initialized.result?.agentCapabilities?.mcpCapabilities, { http: true, sse: false })
+    const mcpServers = [
+      { name: 'mcp one', command: '/bin/true', args: [], env: [{ name: 'SAFE', value: 'value' }] },
+      {
+        name: 'http-one',
+        type: 'http',
+        url: 'http://127.0.0.1:8765/mcp',
+        headers: [{ name: 'Authorization', value: 'Bearer value' }],
+      },
+    ]
     client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host', mcpServers } })
     const response = (await client.next()) as { result?: { sessionId?: string }; error?: unknown }
     assert.equal(typeof response.result?.sessionId, 'string', JSON.stringify(response))

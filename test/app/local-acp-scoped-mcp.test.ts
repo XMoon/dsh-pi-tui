@@ -2,11 +2,12 @@
  * Host-only Agent-scoped MCP lease contracts.
  *
  * These cases run the REAL official `@deepseek-ai/dsh-mcp-client` plugin on a
- * real `@deepseek-ai/dsh-tools` registry scoped to one test Agent and a real
- * stdio MCP child process. The failure classes owned here are the standard ACP
- * stdio declaration boundary, exact Agent-tool namespace collisions,
- * reverse-order rollback of a partially mounted request, and the official
- * Fiber closure readback that retires a lease only after Agent quiescence.
+ * real `@deepseek-ai/dsh-tools` registry scoped to one test Agent, a real stdio
+ * MCP child process and a real loopback Streamable HTTP endpoint. The failure
+ * classes owned here are the standard ACP declaration boundary, exact
+ * Agent-tool namespace collisions, reverse-order rollback of a partially
+ * mounted request, the HTTP-only cwd boundary, and the official Fiber closure
+ * readback that retires a lease only after Agent quiescence.
  *
  * This file is NOT a production ACP request/Close wire proof; the View,
  * Listener and packaged Split lanes own those contracts.
@@ -16,6 +17,7 @@
 
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
@@ -34,6 +36,28 @@ import {
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const SERVER_PATH = fileURLToPath(new URL('../../scripts/fixtures/scoped-mcp-b0-server.mjs', import.meta.url))
+
+interface ScopedMcpHttpFixture {
+  readonly url: string
+  readonly failListUrl: string
+  readonly holdStartupUrl: string
+  readonly events: Array<Record<string, unknown>>
+  readonly requests: Array<Record<string, unknown>>
+  readonly sse: Array<{ openedAt: number; closedAt?: number }>
+  waitForEvent(predicate: (event: Record<string, unknown>) => boolean, label: string, timeoutMs?: number): Promise<Record<string, unknown>>
+  releaseHold(): void
+  resetHold(): void
+  close(): Promise<void>
+}
+
+const { startScopedMcpHttpServer } = await import(
+  new URL('../../scripts/fixtures/scoped-mcp-http-server.mjs', import.meta.url).href
+) as {
+  startScopedMcpHttpServer(options?: {
+    tag?: string
+    expectedHeaders?: Record<string, string>
+  }): Promise<ScopedMcpHttpFixture>
+}
 
 /** The official tool registry with the one stub service its constructor needs. */
 function createToolHost(): Context {
@@ -188,14 +212,14 @@ async function waitForGone(pid: number, timeoutMs = 8_000): Promise<boolean> {
   return !alive(pid)
 }
 
-function setup(t: Parameters<typeof testLifecycle>[0]): {
+function setup(t: Parameters<typeof testLifecycle>[0], options: { readonly cwd?: string } = {}): {
   readonly root: Context
   readonly agent: TestAgent
   readonly temp: ReturnType<typeof testLifecycle>
 } {
   const temp = testLifecycle(t)
   const root = createToolHost()
-  const cwd = temp.tempDir('local-acp-mcp-cwd-')
+  const cwd = options.cwd ?? temp.tempDir('local-acp-mcp-cwd-')
   const agent = new TestAgent(root, 'agent-a', cwd)
   temp.defer(() => agent.dispose())
   return { root, agent, temp }
@@ -212,9 +236,12 @@ test('the standard ACP stdio declaration parser normalizes names and keeps envir
     ],
   }])
   assert.equal(parsed.length, 1)
-  assert.match(parsed[0].serverName, /^my_server_[0-9a-f]{8}$/u)
-  assert.equal(parsed[0].command, process.execPath)
-  const env = parsed[0].env as Record<string, unknown>
+  const declaration = parsed[0]
+  assert.equal(declaration.transport, 'stdio')
+  if (declaration.transport !== 'stdio') throw new Error('expected one stdio declaration')
+  assert.match(declaration.serverName, /^my_server_[0-9a-f]{8}$/u)
+  assert.equal(declaration.command, process.execPath)
+  const env = declaration.env as Record<string, unknown>
   assert.equal(Object.getPrototypeOf(env), null)
   assert.equal(Object.hasOwn(env, '__proto__'), true)
   assert.equal(env.PLAIN, 'value')
@@ -225,8 +252,21 @@ test('the declaration parser rejects capacity, transport, command, argument, env
     ['capacity', Array.from({ length: MAX_ACP_MCP_SERVERS + 1 }, (_, index) => ({
       name: `s${String(index)}`, command: '/bin/true', args: [], env: [],
     }))],
-    ['http transport', [{ name: 's', type: 'http', url: 'https://example.test', headers: [] }]],
     ['sse transport', [{ name: 's', type: 'sse', url: 'https://example.test', headers: [] }]],
+    ['explicit stdio transport', [{ name: 's', type: 'stdio', command: '/bin/true', args: [], env: [] }]],
+    ['non-http url', [{ name: 's', type: 'http', url: 'ftp://example.test/mcp', headers: [] }]],
+    ['relative url', [{ name: 's', type: 'http', url: '/mcp', headers: [] }]],
+    ['invalid url', [{ name: 's', type: 'http', url: 'http://', headers: [] }]],
+    ['missing url', [{ name: 's', type: 'http', headers: [] }]],
+    ['missing headers', [{ name: 's', type: 'http', url: 'https://example.test/mcp' }]],
+    ['header entry shape', [{ name: 's', type: 'http', url: 'https://example.test/mcp', headers: [{ name: 'A' }] }]],
+    ['header name', [{ name: 's', type: 'http', url: 'https://example.test/mcp', headers: [{ name: 'Bad Header', value: 'x' }] }]],
+    ['header value', [{ name: 's', type: 'http', url: 'https://example.test/mcp', headers: [{ name: 'X-Test', value: 'x\r\ny' }] }]],
+    ['duplicate header name', [{ name: 's', type: 'http', url: 'https://example.test/mcp', headers: [{ name: 'X-Test', value: '1' }, { name: 'x-test', value: '2' }] }]],
+    ['mixed duplicate normalized name', [
+      { name: 'same', command: '/bin/true', args: [], env: [] },
+      { name: 'same', type: 'http', url: 'https://example.test/mcp', headers: [] },
+    ]],
     ['acp transport', [{ name: 's', type: 'acp', serverId: 'x' }]],
     ['relative command', [{ name: 's', command: 'bin/true', args: [], env: [] }]],
     ['command NUL', [{ name: 's', command: '/bin/tr\u0000ue', args: [], env: [] }]],
@@ -253,6 +293,101 @@ test('the declaration parser rejects capacity, transport, command, argument, env
     assert.ok(error instanceof AcpScopedMcpError)
     assert.equal(error.message.includes(secret), false)
   }
+})
+
+test('the standard ACP HTTP declaration parser preserves URL and headers as data and keeps mixed request order', () => {
+  const parsed = parseAcpMcpServers([
+    { name: 'stdio one', command: process.execPath, args: [], env: [] },
+    {
+      name: 'http one',
+      type: 'http',
+      url: 'http://127.0.0.1:8765/mcp?tenant=a',
+      headers: [
+        { name: 'Authorization', value: 'Bearer sentinel' },
+        { name: 'X-API-Key', value: 'key sentinel' },
+        { name: '__proto__', value: 'data' },
+      ],
+    },
+    { name: 'https one', type: 'http', url: 'https://example.test/mcp', headers: [] },
+  ])
+  assert.deepEqual(parsed.map(entry => entry.transport), ['stdio', 'streamable-http', 'streamable-http'])
+  const http = parsed[1]
+  assert.equal(http.transport, 'streamable-http')
+  if (http.transport !== 'streamable-http') throw new Error('expected one HTTP declaration')
+  assert.match(http.serverName, /^http_one_[0-9a-f]{8}$/u)
+  assert.equal(http.url, 'http://127.0.0.1:8765/mcp?tenant=a')
+  const headers = http.headers as Record<string, unknown>
+  assert.equal(Object.getPrototypeOf(headers), null)
+  assert.equal(headers.Authorization, 'Bearer sentinel')
+  assert.equal(headers['X-API-Key'], 'key sentinel')
+  assert.equal(Object.hasOwn(headers, '__proto__'), true)
+  assert.equal(headers.__proto__, 'data')
+})
+
+test('an HTTP-only scoped MCP server mounts without a filesystem Session cwd and retires with confirmed Fiber closure', async t => {
+  const missingCwd = join(testLifecycle(t).tempDir('local-acp-http-missing-'), 'does-not-exist')
+  const { agent, temp } = setup(t, { cwd: missingCwd })
+  temp.defer(() => agent.markIdle())
+  const server = await startScopedMcpHttpServer({
+    tag: 'ownerhttp',
+    expectedHeaders: { Authorization: 'Bearer owner-sentinel', 'X-API-Key': 'owner-key' },
+  })
+  temp.defer(() => server.close())
+  const lease = await mountAcpScopedMcp({
+    agent,
+    session: agent.session,
+    servers: [{
+      name: 'httpscope',
+      type: 'http',
+      url: server.url,
+      headers: [
+        { name: 'Authorization', value: 'Bearer owner-sentinel' },
+        { name: 'X-API-Key', value: 'owner-key' },
+      ],
+    }],
+    tools: agent.ctx.tools,
+    stillCurrent: () => 'current',
+  })
+  temp.defer(() => retireAcpScopedMcp(lease))
+  assert.deepEqual(toolsOf(agent).filter(name => name.startsWith('mcp__httpscope__')).sort(), [
+    'mcp__httpscope__echo',
+    'mcp__httpscope__fail',
+    'mcp__httpscope__hold',
+  ])
+  const status = McpClient.connectionStatusOf(lease.fibers[0])?.current()
+  assert.equal(status?.state, 'connected')
+  assert.equal(status?.toolCount, 3)
+  const request = await server.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list', 'HTTP tools/list')
+  assert.deepEqual((request.headerMatches as Record<string, boolean>), { Authorization: true, 'X-API-Key': true })
+  await server.waitForEvent(event => event.kind === 'sse-open', 'HTTP GET stream open')
+  await retireAcpScopedMcp(lease)
+  assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__httpscope__')), false)
+  const closure = McpClient.connectionStatusOf(lease.fibers[0])?.closure()
+  assert.equal(closure?.closeConfirmed, true)
+  assert.equal(closure?.cleanupError, undefined)
+  await server.waitForEvent(event => event.kind === 'sse-close', 'HTTP GET stream close')
+})
+
+test('a mixed stdio+HTTP request with a missing stdio cwd fails before the HTTP endpoint receives any request', async t => {
+  const missingCwd = join(testLifecycle(t).tempDir('local-acp-mixed-missing-'), 'does-not-exist')
+  const { agent, temp } = setup(t, { cwd: missingCwd })
+  const server = await startScopedMcpHttpServer({ tag: 'mixedcwd' })
+  temp.defer(() => server.close())
+  await assert.rejects(
+    mountAcpScopedMcp({
+      agent,
+      session: agent.session,
+      servers: [
+        { name: 'stdio-one', command: process.execPath, args: [SERVER_PATH], env: [] },
+        { name: 'http-one', type: 'http', url: server.url, headers: [] },
+      ],
+      tools: agent.ctx.tools,
+      stillCurrent: () => 'current',
+    }),
+    (error: unknown) => error instanceof AcpScopedMcpError && error.code === 'START_FAILED',
+  )
+  assert.equal(server.requests.length, 0)
+  assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__')), false)
 })
 
 test('a real stdio MCP server mounts on the exact Agent and retires only after quiescence with confirmed Fiber closure', async t => {

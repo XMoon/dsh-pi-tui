@@ -27,6 +27,7 @@ import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostAssistantHasText, hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
+import { startScopedMcpHttpServer } from '../../fixtures/scoped-mcp-http-server.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
 const CASE_ID = 'acp.scoped-mcp-b1'
@@ -202,6 +203,7 @@ export async function runAcpScopedMcpB1(context) {
 
   const peers = []
   const acpClients = []
+  const httpFixtures = []
   const serverPids = new Set()
   let host
   let hostIdentity
@@ -309,6 +311,32 @@ export async function runAcpScopedMcpB1(context) {
       ...Object.entries(extraEnv).map(([name, value]) => ({ name, value })),
     ],
   })
+  const httpHeaders = () => [
+    { name: 'Authorization', value: `Bearer ${runNonce}` },
+    { name: 'X-API-Key', value: `b1-http-key-${runNonce}` },
+  ]
+  const httpDeclaration = (name, url) => ({ name, type: 'http', url, headers: httpHeaders() })
+  const startHttpFixture = async label => {
+    const fixture = await startScopedMcpHttpServer({
+      tag: `b1http-${label}`,
+      expectedHeaders: {
+        Authorization: `Bearer ${runNonce}`,
+        'X-API-Key': `b1-http-key-${runNonce}`,
+      },
+    })
+    httpFixtures.push(fixture)
+    return fixture
+  }
+  const waitToolNamesAbsent = async (sessionId, names, label, timeoutMs = 60_000) => {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const probe = await control('probe', { sessionId })
+      if (probe.ok === true && Array.isArray(probe.toolNames) && names.every(name => !probe.toolNames.includes(name))) return probe
+      await sleep(50)
+    }
+    throw new SplitSmokeAssertionError(`${CASE_ID}: timed out waiting for MCP tool absence (${label})`)
+  }
+
   const openAcp = async label => {
     const client = await openSdkClient(acpEndpoint)
     acpClients.push(client)
@@ -380,8 +408,8 @@ export async function runAcpScopedMcpB1(context) {
     assert(initialProbe.ok === true && initialProbe.agentCount >= 2, `Q01: real Host counts: ${JSON.stringify(initialProbe)}`)
 
     const { client: acpNew, initialized: initNew } = await openAcp('Q02')
-    assert(initNew.agentCapabilities?.mcpCapabilities?.http === false && initNew.agentCapabilities?.mcpCapabilities?.sse === false,
-      `Q02: initialize must advertise http/sse false: ${JSON.stringify(initNew.agentCapabilities)}`)
+    assert(initNew.agentCapabilities?.mcpCapabilities?.http === true && initNew.agentCapabilities?.mcpCapabilities?.sse === false,
+      `Q02: initialize must advertise HTTP and keep Legacy SSE false: ${JSON.stringify(initNew.agentCapabilities)}`)
     assert(initNew.agentCapabilities?.sessionCapabilities?.resume !== undefined
       && initNew.agentCapabilities?.sessionCapabilities?.close !== undefined, 'Q02: resume/close capabilities must be advertised')
     // G-ACP2-PR2: canonical history/roster reads are advertised when bound.
@@ -510,9 +538,14 @@ export async function runAcpScopedMcpB1(context) {
       'Q07 relative command',
     )
     await expectRequestError(
-      acpInvalid.client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [{ name: 'bad', type: 'http', url: 'https://example.test', headers: [] }] }),
+      acpInvalid.client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [{ name: 'bad', type: 'http', url: 'ftp://example.test/mcp', headers: [] }] }),
       'LOCAL_ACP_MCP_INVALID_DECLARATION',
-      'Q07 HTTP transport',
+      'Q07 invalid HTTP transport',
+    )
+    await expectRequestError(
+      acpInvalid.client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [{ name: 'legacy', type: 'sse', url: 'https://example.test/mcp', headers: [] }] }),
+      'LOCAL_ACP_MCP_INVALID_DECLARATION',
+      'Q07 Legacy SSE transport',
     )
     await expectRequestError(
       acpInvalid.client.request(acp.methods.agent.session.new, {
@@ -654,6 +687,206 @@ export async function runAcpScopedMcpB1(context) {
     await closeAcp(acpOn.client)
     await closeAcp(acpOff.client)
 
+    // ── H1: a real HTTP-only session/new mounts the standard Streamable HTTP
+    //     endpoint, keeps the configured headers, opens a real GET stream, runs
+    //     a real model tool call and retires the Fiber/stream at close.
+    const httpH1 = await startHttpFixture('h1')
+    const acpH1 = await openAcp('H1 http new')
+    const httpNew = await acpH1.client.request(acp.methods.agent.session.new, {
+      cwd: hostCwd,
+      mcpServers: [httpDeclaration('b1scope', httpH1.url)],
+    })
+    const httpSession = httpNew?.sessionId
+    assert(typeof httpSession === 'string' && httpSession.length > 0 && httpSession !== sessionA && httpSession !== sessionB,
+      `H1: HTTP session/new must return a distinct Session id: ${JSON.stringify(httpNew)}`)
+    const beforeHttpEcho = eventsOf(httpSession).length
+    const httpEcho = await acpH1.client.request(acp.methods.agent.session.prompt, {
+      sessionId: httpSession,
+      prompt: [{ type: 'text', text: `B1_ECHO_A ${digestOf(`http-${runNonce}`).slice(0, 16)}` }],
+    })
+    assert(httpEcho?.stopReason === 'end_turn', `H1: HTTP prompt must end_turn: ${JSON.stringify(httpEcho)}`)
+    await waitForTurnEnd(httpSession, beforeHttpEcho, 'H1 HTTP turn/end')
+    const httpEvents = sessionEventsAfter(httpSession, beforeHttpEcho)
+    const httpEchoCall = findToolCall(httpEvents, ECHO_TOOL)
+    assert(httpEchoCall !== undefined, 'H1: the HTTP Session Agent must see mcp__b1scope__echo')
+    const httpEchoResult = findToolResult(httpEvents, toolCallIdOf(httpEchoCall))
+    assert(httpEchoResult !== undefined && eventData(httpEchoResult).message?.isError !== true
+      && toolResultText(httpEchoResult).includes('b0-echo:'),
+    `H1: real HTTP MCP tool result: ${httpEchoResult === undefined ? 'missing' : toolResultText(httpEchoResult)}`)
+    assert(modelRecords(httpSession, 'B1_ECHO_A').some(record => record.afterTool === false && record.hasEchoTool === true),
+      'H1: the model step must see the HTTP-scoped tool')
+    const httpListRequest = await httpH1.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list',
+      'H1 HTTP tools/list')
+    assert(httpListRequest.headerMatches?.Authorization === true && httpListRequest.headerMatches?.['X-API-Key'] === true,
+      `H1: the exact configured HTTP headers must reach the endpoint: ${JSON.stringify(httpListRequest)}`)
+    await httpH1.waitForEvent(event => event.kind === 'sse-open', 'H1 HTTP GET stream open')
+    await httpH1.waitForEvent(event => event.kind === 'tools/call' && event.name === 'echo', 'H1 HTTP tools/call')
+    await acpH1.client.request(acp.methods.agent.session.close, { sessionId: httpSession })
+    await waitToolAbsent(httpSession, 'H1 after HTTP close')
+    await httpH1.waitForEvent(event => event.kind === 'sse-close', 'H1 HTTP GET stream close')
+    await closeAcp(acpH1.client)
+    await assertSameHost(hostIdentity, 'H1 Host after HTTP new Session')
+
+    // ── H2: resume the live TUI Session A with HTTP; another Agent cannot see
+    //     the tool, and an ACP close during a live TUI hold defers retirement
+    //     until the real TUI tool terminal.
+    const httpH2 = await startHttpFixture('h2')
+    const acpH2 = await openAcp('H2 http resume')
+    const h2ModelBefore = modelRecords(sessionB, 'B1_ECHO_B').length
+    await resumeWhenAttachable(acpH2, { sessionId: sessionA, cwd: hostCwd, mcpServers: [httpDeclaration('b1scope', httpH2.url)] })
+    // This fixture is fresh for H2; every tools/list event belongs to this mount.
+    await httpH2.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list', 'H2 HTTP tools/list')
+    const beforeHttpB = eventsOf(sessionB).length
+    await sendTuiPrompt(tuiB, `B1_ECHO_B ${digestOf(`http-b-${runNonce}`).slice(0, 16)}`, 'H2 tui B')
+    await waitForTurnEnd(sessionB, beforeHttpB, 'H2 B turn/end')
+    const h2BModel = modelRecords(sessionB, 'B1_ECHO_B').slice(h2ModelBefore)
+    assert(h2BModel.length > 0 && h2BModel.every(record => record.hasEchoTool === false),
+      `H2: another Agent must not see the HTTP-scoped tool: ${JSON.stringify(h2BModel)}`)
+    assert(httpH2.requests.filter(request => request.rpcMethod === 'tools/call').length === 0,
+      'H2: another Agent must never reach the HTTP endpoint')
+    const beforeHttpHold = eventsOf(sessionA).length
+    await sendTuiPrompt(tuiA, `B1_HOLD_A ${digestOf(`http-hold-${runNonce}`).slice(0, 16)}`, 'H2 tui A hold')
+    const httpHoldCall = await waitForEvent(sessionA, beforeHttpHold,
+      event => event.type === 'tool/call' && eventData(event).name === HOLD_TOOL, 'H2 HTTP hold tool/call')
+    const httpHoldCallId = toolCallIdOf(httpHoldCall)
+    await httpH2.waitForEvent(event => event.kind === 'hold-received', 'H2 HTTP hold received')
+    const httpCloseH2 = await acpH2.client.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    assert(JSON.stringify(httpCloseH2) === '{}', `H2: HTTP close must detach with a real terminal: ${JSON.stringify(httpCloseH2)}`)
+    assert(httpH2.sse.some(stream => stream.closedAt === undefined), 'H2: close must not abort the live HTTP stream')
+    assert(findToolResult(sessionEventsAfter(sessionA, beforeHttpHold), httpHoldCallId) === undefined,
+      'H2: close must not fabricate the TUI tool result')
+    httpH2.releaseHold()
+    await waitForEvent(sessionA, beforeHttpHold,
+      event => event.type === 'tool/result' && toolResultCallIdOf(event) === httpHoldCallId, 'H2 HTTP hold tool/result')
+    await waitForTurnEnd(sessionA, beforeHttpHold, 'H2 HTTP hold turn/end')
+    await waitToolAbsent(sessionA, 'H2 after TUI terminal')
+    await httpH2.waitForEvent(event => event.kind === 'sse-close', 'H2 HTTP GET stream close after retirement')
+    await closeAcp(acpH2.client)
+    await assertSameHost(hostIdentity, 'H2 Host after shared HTTP lease')
+
+    // ── H3: session/load replays with a real HTTP lease, EOF retires it, and
+    //     Listener Off/On releases then re-admits exactly the next HTTP View.
+    const httpH3 = await startHttpFixture('h3')
+    const acpH3 = await openAcp('H3 http load')
+    const h3LoadAt = Date.now()
+    await acpH3.client.request(acp.methods.agent.session.load, {
+      sessionId: sessionA,
+      cwd: hostCwd,
+      mcpServers: [httpDeclaration('b1scope', httpH3.url)],
+    })
+    await httpH3.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list' && event.time >= h3LoadAt,
+      'H3 HTTP load tools/list')
+    await acpH3.client.close()
+    await waitToolAbsent(sessionA, 'H3 HTTP EOF')
+    await httpH3.waitForEvent(event => event.kind === 'sse-close' && event.time >= h3LoadAt, 'H3 HTTP EOF stream close')
+    const acpH3Off = await openAcp('H3 http off')
+    const h3OffAt = Date.now()
+    await resumeWhenAttachable(acpH3Off, { sessionId: sessionB, cwd: hostCwd, mcpServers: [httpDeclaration('b1scope', httpH3.url)] })
+    await httpH3.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list' && event.time >= h3OffAt,
+      'H3 HTTP Off tools/list')
+    const h3Disabled = await acpAccess(peer, 'H3 disable ACP', false)
+    assert(h3Disabled.ok === true && h3Disabled.status?.state === 'disabled', `H3: ACP must disable: ${JSON.stringify(h3Disabled)}`)
+    await waitToolAbsent(sessionB, 'H3 HTTP Listener Off')
+    await httpH3.waitForEvent(event => event.kind === 'sse-close' && event.time >= h3OffAt, 'H3 HTTP Off stream close')
+    const h3Enabled = await acpAccess(peer, 'H3 re-enable ACP', true)
+    assert(h3Enabled.ok === true && h3Enabled.status?.state === 'enabled', `H3: ACP must re-enable: ${JSON.stringify(h3Enabled)}`)
+    const acpH3On = await openAcp('H3 http on')
+    await resumeWhenAttachable(acpH3On, { sessionId: sessionB, cwd: hostCwd, mcpServers: [httpDeclaration('b1scope', httpH3.url)] })
+    await acpH3On.client.request(acp.methods.agent.session.close, { sessionId: sessionB })
+    await waitToolAbsent(sessionB, 'H3 HTTP On close')
+    await closeAcp(acpH3On.client)
+    await closeAcp(acpH3Off.client)
+    await assertSameHost(hostIdentity, 'H3 Host after HTTP load/EOF/Off/On')
+
+    // ── H4: a mixed request mounts stdio + HTTP, then the failing HTTP server
+    //     makes the whole admission fail closed; the created Session stays real
+    //     and every earlier scoped transport is rolled back.
+    const httpH4 = await startHttpFixture('h4')
+    const acpH4 = await openAcp('H4 http mixed')
+    const h4CountsBefore = await control('probe')
+    const h4StartedAt = Date.now()
+    const h4Error = await expectRequestError(
+      acpH4.client.request(acp.methods.agent.session.new, {
+        cwd: hostCwd,
+        mcpServers: [
+          mcpDeclaration('b1h4stdio'),
+          httpDeclaration('b1httpok', httpH4.url),
+          httpDeclaration('b1httpfail', httpH4.failListUrl),
+        ],
+      }),
+      'LOCAL_ACP_MCP_START_FAILED',
+      'H4 mixed stdio+HTTP failure',
+    )
+    const h4Session = h4Error?.data?.sessionId
+    assert(typeof h4Session === 'string' && h4Session.length > 0, `H4: mixed failure must preserve the created session id: ${JSON.stringify(h4Error?.data)}`)
+    await httpH4.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list' && event.time >= h4StartedAt,
+      'H4 normal HTTP tools/list')
+    await httpH4.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list' && event.path === '/fail-list',
+      'H4 failing HTTP tools/list')
+    await httpH4.waitForEvent(event => event.kind === 'sse-close' && event.time >= h4StartedAt, 'H4 normal HTTP stream rollback close')
+    const h4Stdio = await waitForProof(line => line.kind === 'server-start' && line.tag === 'b1h4stdio', proofPath, 'H4 stdio child start')
+    assert(await waitForGone(h4Stdio.pid), 'H4: the earlier stdio child must be rolled back')
+    await waitToolNamesAbsent(h4Session, ['mcp__b1h4stdio__echo', 'mcp__b1httpok__echo'], 'H4 mixed rollback')
+    const h4CountsAfter = await control('probe')
+    assert(h4CountsAfter.sessionCount === h4CountsBefore.sessionCount + 1, 'H4: exactly the created Session exists after failure')
+    const acpH4Recover = await openAcp('H4 recover')
+    await resumeWhenAttachable(acpH4Recover, { sessionId: h4Session, cwd: hostCwd })
+    await acpH4Recover.client.request(acp.methods.agent.session.close, { sessionId: h4Session })
+    await closeAcp(acpH4Recover.client)
+    await closeAcp(acpH4.client)
+    await assertSameHost(hostIdentity, 'H4 Host after mixed rollback')
+
+    // ── H5: a held HTTP startup is disposed when the ACP connection disappears;
+    //     a refused wire endpoint stays START_FAILED with the real created id;
+    //     Legacy SSE is rejected before any Host effect.
+    const httpH5 = await startHttpFixture('h5')
+    const acpH5 = await openAcp('H5 http pending')
+    const h5PendingAt = Date.now()
+    const h5Pending = resumeWhenAttachable(acpH5, {
+      sessionId: sessionA,
+      cwd: hostCwd,
+      mcpServers: [httpDeclaration('b1scope', httpH5.holdStartupUrl)],
+    }).catch(() => {})
+    await httpH5.waitForEvent(event => event.kind === 'startup-held' && event.time >= h5PendingAt, 'H5 held HTTP startup')
+    await acpH5.client.close()
+    await h5Pending
+    await httpH5.waitForEvent(event => event.kind === 'startup-held-closed' && event.time >= h5PendingAt, 'H5 held HTTP startup close')
+    await waitToolAbsent(sessionA, 'H5 HTTP pending startup')
+    const closedWire = await startScopedMcpHttpServer({ tag: 'b1-closed-wire' })
+    const closedWireUrl = closedWire.url
+    await closedWire.close()
+    const acpH5Wire = await openAcp('H5 http wire')
+    const h5WireError = await expectRequestError(
+      acpH5Wire.client.request(acp.methods.agent.session.new, {
+        cwd: hostCwd,
+        mcpServers: [httpDeclaration('b1wire', closedWireUrl)],
+      }),
+      'LOCAL_ACP_MCP_START_FAILED',
+      'H5 refused HTTP wire',
+    )
+    const h5WireSession = h5WireError?.data?.sessionId
+    assert(typeof h5WireSession === 'string' && h5WireSession.length > 0,
+      `H5: refused wire must preserve the created session id: ${JSON.stringify(h5WireError?.data)}`)
+    await waitToolAbsent(h5WireSession, 'H5 refused HTTP wire')
+    const h5BeforeSse = await control('probe')
+    await expectRequestError(
+      acpH5Wire.client.request(acp.methods.agent.session.new, {
+        cwd: hostCwd,
+        mcpServers: [{ name: 'legacy', type: 'sse', url: 'https://example.test/mcp', headers: [] }],
+      }),
+      'LOCAL_ACP_MCP_INVALID_DECLARATION',
+      'H5 Legacy SSE',
+    )
+    const h5AfterSse = await control('probe')
+    assert(h5AfterSse.sessionCount === h5BeforeSse.sessionCount && h5AfterSse.agentCount === h5BeforeSse.agentCount,
+      'H5: Legacy SSE must create no Host Session/Agent')
+    const acpH5Recover = await openAcp('H5 recover')
+    await resumeWhenAttachable(acpH5Recover, { sessionId: h5WireSession, cwd: hostCwd })
+    await acpH5Recover.client.request(acp.methods.agent.session.close, { sessionId: h5WireSession })
+    await closeAcp(acpH5Recover.client)
+    await closeAcp(acpH5Wire.client)
+    await assertSameHost(hostIdentity, 'H5 Host after HTTP pending/wire boundaries')
+
     // ── B1-04 negative control: a plain TUI A turn still works after the
     //     production leases were retired (the shared Session was never killed).
     const beforePlain = eventsOf(sessionA).length
@@ -684,6 +917,19 @@ export async function runAcpScopedMcpB1(context) {
       host: { pid: hostIdentity.hostPid, instanceId: hostIdentity.instanceId, scopeId: hostIdentity.scopeId },
       sessions: { A: sessionA, B: sessionB, new: sessionNew, failedNew: createdButFailed },
       mcp: { serverName: 'b1scope', toolNames: [ECHO_TOOL, HOLD_TOOL, FAIL_TOOL], childPids: proofFinal.filter(line => line.kind === 'server-start').map(line => line.pid) },
+      http: {
+        sessions: { new: httpSession, mixedFailed: h4Session, refusedWire: h5WireSession },
+        headersMatched: true,
+        newToolCall: true,
+        sharedTuiClose: true,
+        loadEofOff: true,
+        mixedRollback: true,
+        pendingStartup: true,
+        refusedWire: true,
+        legacySseRejected: true,
+        legacySseAdvertised: initNew.agentCapabilities?.mcpCapabilities?.sse,
+        httpAdvertised: initNew.agentCapabilities?.mcpCapabilities?.http,
+      },
       closeToDispose: { hold: closeHold, toolResultRetired: true, eofRetired: true, offRetired: true },
       negative: { agentBIsolation: true, globalShadowRejected: true, invalidCreatedNothing: true },
       quiesced: true,
@@ -703,11 +949,22 @@ export async function runAcpScopedMcpB1(context) {
       eofRetiresLease: true,
       listenerOffRetiresLease: true,
       tuiContinuesAfterRetire: true,
+      httpScopedMcp: true,
+      httpHeadersPreserved: true,
+      httpSharedTuiClose: true,
+      httpLoadEofOff: true,
+      httpMixedRollback: true,
+      httpPendingStartupDisposed: true,
+      httpRefusedWireStartFailed: true,
+      legacySseRejected: true,
       quiesced: true,
       evidence,
     }
   } finally {
     try { writeFileSync(holdRelease, 'released\n', { mode: 0o600 }) } catch { /* best effort */ }
+    for (const fixture of httpFixtures) {
+      try { await fixture.close() } catch { /* runner backstop */ }
+    }
     for (const client of acpClients) {
       try { await client.close() } catch { /* already gone */ }
     }

@@ -794,7 +794,14 @@ function buildAgentApp(
         agentCapabilities: {
           loadSession: sessionReadReady,
           promptCapabilities: { image: state.imageEnabled, audio: false, embeddedContext: false },
-          mcpCapabilities: { http: false, sse: false },
+          // HTTP MCP support follows the REAL Session View composition: without
+          // Session access/View slots this listener cannot mount a scoped lease,
+          // so it must not advertise the transport. Legacy SSE has no official
+          // DSH transport and stays unsupported.
+          mcpCapabilities: {
+            http: context.sessionAccess !== undefined && state.views !== undefined,
+            sse: false,
+          },
           // Advertise the shared-Session capability ONLY when this Host really
           // installed the connection-scoped View; `list` joins it only when the
           // authorized roster and canonical history read seams are ready.

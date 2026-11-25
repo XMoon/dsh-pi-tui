@@ -10,13 +10,15 @@
  * This module owns no registry, no Session store and no second Agent lifecycle:
  * the ACP View claim remains the sole reservation/retention authority. It never
  * imports the upstream private ACP adapter; it reproduces only the already
- * verified standard ACP stdio mapping within this repository boundary.
+ * verified standard ACP stdio and Streamable HTTP mapping within this
+ * repository boundary.
  *
  * @module app/remote-process/local-acp-scoped-mcp
  */
 
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
+import { validateHeaderName, validateHeaderValue } from 'node:http'
 import { isAbsolute } from 'node:path'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type * as McpClientModule from '@deepseek-ai/dsh-mcp-client'
@@ -49,7 +51,8 @@ export class AcpScopedMcpError extends Error {
 }
 
 /** One validated standard ACP stdio server declaration. */
-export interface AcpScopedMcpDeclaration {
+export interface AcpScopedMcpStdioDeclaration {
+  readonly transport: 'stdio'
   /** The official normalized DSH server namespace. */
   readonly serverName: string
   /** Absolute executable path. */
@@ -58,6 +61,20 @@ export interface AcpScopedMcpDeclaration {
   /** Null-prototype environment map built from the ordered ACP entries. */
   readonly env: Readonly<Record<string, string>>
 }
+
+/** One validated standard ACP Streamable HTTP server declaration. */
+export interface AcpScopedMcpHttpDeclaration {
+  readonly transport: 'streamable-http'
+  /** The official normalized DSH server namespace. */
+  readonly serverName: string
+  /** The exact caller-supplied HTTP(S) endpoint. */
+  readonly url: string
+  /** Null-prototype header map built from the ordered ACP entries. */
+  readonly headers: Readonly<Record<string, string>>
+}
+
+/** One validated standard ACP server declaration. */
+export type AcpScopedMcpDeclaration = AcpScopedMcpStdioDeclaration | AcpScopedMcpHttpDeclaration
 
 /** The exact live Agent surface the Host-only kernel may touch. */
 export interface AcpScopedMcpAgent {
@@ -164,13 +181,70 @@ function cleanupUnconfirmed(lease: AcpScopedMcpLease): AcpScopedMcpError {
   return new AcpScopedMcpError('CLEANUP_UNCONFIRMED', 'the MCP server cleanup could not be confirmed', lease)
 }
 
+/** Validate one HTTP header entry without echoing its name or value. */
+function validateHttpHeader(name: string, value: string): void {
+  try {
+    validateHeaderName(name)
+    validateHeaderValue(name, value)
+  } catch {
+    throw invalidDeclaration('an MCP HTTP header name or value is invalid')
+  }
+}
+
+/** Validate one standard ACP Streamable HTTP declaration. */
+function parseHttpDeclaration(serverName: string, server: Record<string, unknown>): AcpScopedMcpHttpDeclaration {
+  if (typeof server.url !== 'string' || server.url.length === 0) {
+    throw invalidDeclaration(`mcpServers server "${serverName}" requires an HTTP(S) url`)
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(server.url)
+  } catch {
+    throw invalidDeclaration(`mcpServers server "${serverName}" requires a valid HTTP(S) url`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw invalidDeclaration(`mcpServers server "${serverName}" requires an HTTP(S) url`)
+  }
+  if (!Array.isArray(server.headers)) {
+    throw invalidDeclaration(`mcpServers server "${serverName}" requires a standard headers array`)
+  }
+  const headers = Object.create(null) as Record<string, string>
+  const headerNames = new Set<string>()
+  for (const entry of server.headers) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw invalidDeclaration(`mcpServers server "${serverName}" contains an invalid header entry`)
+    }
+    const header = entry as Record<string, unknown>
+    if (typeof header.name !== 'string' || typeof header.value !== 'string') {
+      throw invalidDeclaration(`mcpServers server "${serverName}" contains an invalid header entry`)
+    }
+    const identity = header.name.toLowerCase()
+    if (headerNames.has(identity)) {
+      throw invalidDeclaration(`mcpServers server "${serverName}" contains a duplicate header name`)
+    }
+    headerNames.add(identity)
+    validateHttpHeader(header.name, header.value)
+    // Keep the caller's exact name and value; the official Config receives this
+    // map as data and must not trim, lower-case or merge entries.
+    headers[header.name] = header.value
+  }
+  return {
+    transport: 'streamable-http',
+    serverName,
+    // Keep the exact caller-supplied URL string; the official transport parses it.
+    url: server.url,
+    headers,
+  }
+}
+
 /**
- * Validate and normalize the complete standard ACP stdio declaration list.
+ * Validate and normalize the complete standard ACP declaration list.
  *
  * Pure and synchronous: capacity, transport, shape, executable absolute path,
- * arguments/environment and duplicate normalized names are all decided before
- * any Host Workspace, Session, Agent or child process is touched. HTTP, SSE and
- * the experimental ACP transport are rejected in this phase.
+ * arguments/environment, URL/header validity and duplicate normalized names are
+ * all decided before any Host Workspace, Session, Agent or child process is
+ * touched. Standard stdio and Streamable HTTP are supported; Legacy SSE and the
+ * experimental ACP transport are rejected.
  *
  * @param servers - the raw SDK `mcpServers` list.
  * @returns the validated declarations in request order.
@@ -187,17 +261,22 @@ export function parseAcpMcpServers(servers: readonly unknown[]): readonly AcpSco
       throw invalidDeclaration('an MCP server declaration must be an object')
     }
     const server = raw as Record<string, unknown>
-    // Standard ACP stdio has no `type` discriminator. Any explicit transport
-    // discriminator selects a transport this phase does not implement.
-    if ('type' in server) {
-      throw invalidDeclaration('only the standard ACP stdio MCP transport is supported')
-    }
     if (typeof server.name !== 'string') throw invalidDeclaration('an MCP server name must be a string')
     const serverName = normalizeServerName(server.name)
     if (names.has(serverName)) {
       throw invalidDeclaration(`duplicate normalized MCP server name: ${serverName}`)
     }
     names.add(serverName)
+    // Standard ACP stdio has no `type` discriminator; explicit HTTP is the one
+    // discriminator this phase supports. SSE, ACP, explicit stdio and unknown
+    // transports remain rejected before any Host effect.
+    if ('type' in server) {
+      if (server.type !== 'http') {
+        throw invalidDeclaration('only the standard ACP stdio and HTTP MCP transports are supported')
+      }
+      declarations.push(parseHttpDeclaration(serverName, server))
+      continue
+    }
     if (typeof server.command !== 'string' || server.command.length === 0
       || !isAbsolute(server.command) || server.command.includes('\u0000')) {
       throw invalidDeclaration(`mcpServers server "${serverName}" requires an absolute command without NUL`)
@@ -233,7 +312,7 @@ export function parseAcpMcpServers(servers: readonly unknown[]): readonly AcpSco
       envNames.add(variable.name)
       env[variable.name] = variable.value
     }
-    declarations.push({ serverName, command: server.command, args, env })
+    declarations.push({ transport: 'stdio', serverName, command: server.command, args, env })
   }
   return declarations
 }
@@ -325,15 +404,19 @@ export async function mountAcpScopedMcp(input: {
   const declarations = parseAcpMcpServers(input.servers)
   if (declarations.length === 0) throw invalidDeclaration('at least one MCP server is required')
   if (input.session !== agent.session) throw staleLease()
-  const rawCwd = agent.session.header.cwd
-  if (typeof rawCwd !== 'string' || rawCwd.length === 0 || !isAbsolute(rawCwd) || rawCwd.includes('\u0000')) {
-    throw startFailed()
-  }
-  let cwd: string
-  try {
-    cwd = realpathSync(rawCwd)
-  } catch {
-    throw startFailed()
+  // Only stdio needs the exact Session cwd (the official child spawn cwd). An
+  // HTTP-only declaration list must not depend on the Session/filesystem cwd.
+  let cwd: string | undefined
+  if (declarations.some(declaration => declaration.transport === 'stdio')) {
+    const rawCwd = agent.session.header.cwd
+    if (typeof rawCwd !== 'string' || rawCwd.length === 0 || !isAbsolute(rawCwd) || rawCwd.includes('\u0000')) {
+      throw startFailed()
+    }
+    try {
+      cwd = realpathSync(rawCwd)
+    } catch {
+      throw startFailed()
+    }
   }
   if (agent.status !== 'idle') throw new AcpScopedMcpError('AGENT_BUSY', 'the session agent is busy')
 
@@ -358,18 +441,37 @@ export async function mountAcpScopedMcp(input: {
           if (stillCurrent() !== 'current') throw staleLease()
           let fiber: Fiber
           try {
-            const config = mcp.Config({
-              transport: 'stdio',
+            const common = {
               serverName: declaration.serverName,
-              command: declaration.command,
-              args: [...declaration.args],
-              env: declaration.env as Record<string, string>,
-              cwd,
               startupTimeoutMs: ACP_MCP_STARTUP_TIMEOUT_MS,
               failOnStartupError: true,
               expandTemplates: false,
               reconnect: { enabled: false, initialDelayMs: 500, maxDelayMs: 500, maxAttempts: 1 },
-            })
+            }
+            let config: McpClientModule.Config
+            if (declaration.transport === 'stdio') {
+              config = mcp.Config({
+                transport: 'stdio',
+                ...common,
+                command: declaration.command,
+                args: [...declaration.args],
+                env: declaration.env as Record<string, string>,
+                // `cwd` was resolved once above because at least one stdio
+                // declaration exists in this request.
+                cwd: cwd as string,
+              })
+            } else {
+              const validated = mcp.Config({
+                transport: 'streamable-http',
+                ...common,
+                url: declaration.url,
+                headers: declaration.headers as Record<string, string>,
+              })
+              // The official Config schema treats headers as a dict; keep the
+              // caller's exact null-prototype map after validation so legal
+              // data keys and literal values survive unchanged.
+              config = { ...validated, headers: declaration.headers as Record<string, string> } as McpClientModule.Config
+            }
             fiber = agent.ctx.plugin(mcp, config)
           } catch {
             throw startFailed()

@@ -278,7 +278,7 @@ export interface HostAcpSessionAccess {
    */
   observePromptFacts(listener: AcpPromptFactListener): () => void
   /**
-   * Mount one standard ACP stdio MCP declaration list on the exact Agent. The
+   * Mount one standard ACP stdio/HTTP MCP declaration list on the exact Agent. The
    * returned lease is owned by the caller; `stillCurrent` is re-checked after
    * every asynchronous Host step.
    */
@@ -492,7 +492,7 @@ export type LocalAcpViewErrorCode =
   | 'LOCAL_ACP_VIEW_CREATE_INDETERMINATE'
   | 'LOCAL_ACP_VIEW_HOST_ERROR'
   | 'LOCAL_ACP_VIEW_CLOSED'
-  /** One standard ACP stdio MCP declaration was invalid before any Host create. */
+  /** One standard ACP MCP declaration was invalid before any Host create. */
   | 'LOCAL_ACP_MCP_INVALID_DECLARATION'
   /** The exact Agent was running or owned another maintenance window. */
   | 'LOCAL_ACP_MCP_AGENT_BUSY'
@@ -6385,8 +6385,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private validateNew(request: AcpNewSessionParams): void {
     rejectUnsupportedSystemPrompt(request.systemPrompt)
     validateCwd(request.cwd)
-    // The complete stdio declaration list is validated BEFORE any Host
-    // Workspace/Session create or child process start.
+    // The complete MCP declaration list is validated BEFORE any Host
+    // Workspace/Session create or transport start.
     parseAcpMcpServers(request.mcpServers)
     if (request.additionalDirectories !== undefined && request.additionalDirectories.length !== 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'ACP additional directories are not supported by this Host', JSONRPC_INVALID_PARAMS)

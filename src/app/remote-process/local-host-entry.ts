@@ -1185,7 +1185,7 @@ export function createHostAcpSessionAccess(
     sessionTodos: session => projectionValueOf(sessionProjections, session, 'todos'),
     mountScopedMcp: async (agent, session, servers, stillCurrent, signal) => {
       // The exact Host identities are re-verified synchronously before the
-      // Agent-scoped maintenance window can mount any child process.
+      // Agent-scoped maintenance window can mount any MCP transport.
       const liveAgent = agents.get(agent.id)
       const liveSession = sessions.get(agent.id)
       if (liveAgent !== agent || liveSession !== session || agent.session !== session) {

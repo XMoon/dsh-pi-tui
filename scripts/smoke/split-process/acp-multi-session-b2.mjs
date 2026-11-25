@@ -375,9 +375,9 @@ export async function runAcpMultiSessionB2(context) {
       && acpMain.initialized.agentCapabilities?.sessionCapabilities?.close !== undefined
       && acpMain.initialized.agentCapabilities?.sessionCapabilities?.list !== undefined,
     'B2-01: resume/close/list capabilities must be advertised')
-    assert(acpMain.initialized.agentCapabilities?.mcpCapabilities?.http === false
+    assert(acpMain.initialized.agentCapabilities?.mcpCapabilities?.http === true
       && acpMain.initialized.agentCapabilities?.mcpCapabilities?.sse === false,
-    'B2-01: http/sse MCP capabilities must stay false')
+    'B2-01: HTTP MCP must be advertised and Legacy SSE must stay false')
 
     // B2-02/B2-12: resume the live TUI Session A with a DIFFERENT absolute
     // request cwd on the SAME physical SDK connection, then create B on it.

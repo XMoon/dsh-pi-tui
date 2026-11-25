@@ -294,14 +294,39 @@ node acp-client.mjs
 
 This is a **local** Unix socket, not a network listener.
 
-An ACP `session/new|resume.mcpServers` stdio declaration starts that absolute
-executable as the Host's own user for the Session. Treat it as running a local
-command: use only your own same-UID, explicitly enabled ACP socket and a server
-you trust. The Host accepts at most four stdio servers per Session, rejects
-relative commands, malformed arguments/environment and duplicate normalized
-names, and rejects HTTP/SSE transports. It never saves the declaration in the
-Profile or the Host-wide MCP settings. Omit `ACP_MCP_COMMAND` to create a
-Session with no MCP server.
+An ACP `session/new|resume|load.mcpServers` stdio declaration starts that
+absolute executable as the Host's own user for the Session. Treat it as running
+a local command: use only your own same-UID, explicitly enabled ACP socket and a
+server you trust. A standard Streamable HTTP declaration uses the explicit
+`type: "http"` form instead, for example:
+
+~~~js
+const httpServers = [{
+  name: 'http-tools',
+  type: 'http',
+  url: 'https://mcp.example.test/mcp',
+  headers: [{ name: 'Authorization', value: 'Bearer <your-token>' }],
+}]
+~~~
+
+This is an MCP HTTP endpoint, not the local ACP transport (which remains a
+same-UID Unix socket). Use the endpoint you actually trust and its final URL;
+header values are real credentials and must not be shared in screenshots,
+logs or diagnostics. Legacy SSE remains unsupported because no official DSH
+transport exists.
+
+The Host accepts at most four stdio/HTTP servers per Session in aggregate,
+rejects relative commands, malformed arguments/environment, malformed HTTP
+URLs/headers and duplicate normalized names, and rejects unadvertised
+transports before any Host effect. A stdio child uses the exact Session cwd;
+an HTTP-only declaration does not need a filesystem cwd. The declaration is
+never saved in the Profile or Host-wide MCP settings. Omit `ACP_MCP_COMMAND`
+(and any HTTP declaration) to create a Session with no MCP server. HTTP follows
+the official provider's normal redirect and error behavior; arbitrary
+non-`Authorization` headers are not guaranteed to be stripped on a cross-origin
+redirect and upstream error text is not guaranteed to be fully redacted once a
+server returns it. This is the same accepted upstream limitation described in
+[the ACP contract](../architecture/host-acp.md#host-owned-local-acp-v1-front-door-unix-socket).
 
 ```js
 // acp-client.mjs — run from an independent Node.js client project
@@ -357,4 +382,4 @@ try {
 }
 ```
 
-To borrow an existing Session, use `session.resume({ sessionId, cwd, mcpServers })` instead of `session.new`; a resume always uses the Session's original Host cwd for any MCP child, and a different request cwd only produces a redacted diagnostic. One ACP connection may borrow up to eight Session Views, while an individual Session permits only one ACP View at a time; concurrent TUI views are unaffected. `session.close` detaches its exact view without deleting the shared Host Session, and closing an unknown or inactive Session is an idempotent success with no Host side effect. When a TUI turn is still using an MCP tool, the close returns `{}` after detaching only the ACP View: the Agent, Session and MCP child remain alive until their real Host terminal facts settle, then the Host retires the exact MCP lease. A second ACP View cannot attach that Session while an unconfirmed cleanup keeps the lease fenced. The Host's live ACP status and the next-launch auto-start preference are separate controls.
+To borrow an existing Session, use `session.resume({ sessionId, cwd, mcpServers })` instead of `session.new`; a resume always uses the Session's original Host cwd for any stdio MCP child (an HTTP-only declaration does not use the cwd), and a different request cwd only produces a redacted diagnostic. One ACP connection may borrow up to eight Session Views, while an individual Session permits only one ACP View at a time; concurrent TUI views are unaffected. `session.close` detaches its exact view without deleting the shared Host Session, and closing an unknown or inactive Session is an idempotent success with no Host side effect. When a TUI turn is still using an MCP tool, the close returns `{}` after detaching only the ACP View: the Agent, Session and MCP lease/transport remain alive until their real Host terminal facts settle, then the Host retires the exact MCP lease. A second ACP View cannot attach that Session while an unconfirmed cleanup keeps the lease fenced. The Host's live ACP status and the next-launch auto-start preference are separate controls.
