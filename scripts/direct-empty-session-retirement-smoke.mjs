@@ -52,6 +52,7 @@ import {
 } from './lib/dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { hostSessionEvents } from './lib/split-smoke-sessions.mjs'
+import { installCacheEnvironment, prepareInstallCache } from './lib/test-install-cache.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..')
@@ -380,19 +381,25 @@ async function main() {
 
   let completed = false
   try {
+    const installCacheRoot = prepareInstallCache({
+      tmpBase: workDir,
+      override: process.env.DSH_TEST_INSTALL_CACHE_ROOT,
+      candidateTarballs: [tarball],
+    })
+    const installEnv = installCacheEnvironment(env, installCacheRoot)
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-empty-retirement-harness',
       private: true,
       type: 'module',
       dependencies: { '@deepseek-ai/dsh': targetDshVersion },
     }, null, 2) + '\n', 'utf8')
-    runPnpmInstall(harnessDir, env, loadDshDistribution({ mode: 'npm', version: targetDshVersion }))
+    runPnpmInstall(harnessDir, installEnv, loadDshDistribution({ mode: 'npm', version: targetDshVersion }))
     const dsh = dshInvocation(harnessDir)
     const version = runDsh(dsh, ['--version'], harnessDir, env)
     if (version.status !== 0) fail('INFRA_INSTALL_FAILURE', `installed DSH --version failed:\n${commandOutput(version)}`)
     requireExactVersion('DSH', commandOutput(version).split(/\r?\n/u).find(line => line.trim() !== '')?.trim(), targetDshVersion)
 
-    installPlugin(dsh, tarball, harnessDir, env, false)
+    installPlugin(dsh, tarball, harnessDir, installEnv, false)
     // The official profile requires the base bundle; the candidate tarball is
     // the ONLY other plugin (no probes, no business plugins, no model mock).
     const bundles = runDsh(dsh, ['plugin', '--profile', 'pi-tui', 'list'], harnessDir, env)

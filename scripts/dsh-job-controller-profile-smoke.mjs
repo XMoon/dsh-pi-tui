@@ -38,6 +38,7 @@ import {
 } from './lib/dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
+import { installCacheEnvironment, prepareInstallCache } from './lib/test-install-cache.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const EVIDENCE_ENV = 'PI2DSH_JOB_CONTROLLER_PROFILE_EVIDENCE'
@@ -218,6 +219,12 @@ async function main() {
   const session = `job-controller-profile-${process.pid}`
   let tmux
   try {
+    const installCacheRoot = prepareInstallCache({
+      tmpBase: workDir,
+      override: process.env.DSH_TEST_INSTALL_CACHE_ROOT,
+      candidateTarballs: [tarball],
+    })
+    const installEnv = installCacheEnvironment(env, installCacheRoot)
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-job-controller-profile-harness',
       private: true,
@@ -226,7 +233,7 @@ async function main() {
     }, null, 2) + '\n', 'utf8')
     const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })
     if (pnpm.status !== 0) fail('INFRA_INSTALL_FAILURE', `pnpm is unavailable:\n${commandOutput(pnpm)}`)
-    runPnpmInstall(harnessDir, env, loadDshDistribution({ mode: 'npm', version: targetDshVersion }))
+    runPnpmInstall(harnessDir, installEnv, loadDshDistribution({ mode: 'npm', version: targetDshVersion }))
 
     const dsh = dshInvocation(harnessDir)
     const version = runDsh(dsh, ['--version'], harnessDir, env)
@@ -237,8 +244,8 @@ async function main() {
       targetDshVersion,
     )
 
-    installPlugin(dsh, tarball, harnessDir, env, false)
-    installPlugin(dsh, writeJobProbePackage(workDir), harnessDir, env, false)
+    installPlugin(dsh, tarball, harnessDir, installEnv, false)
+    installPlugin(dsh, writeJobProbePackage(workDir), harnessDir, installEnv, false)
 
     const launcher = join(workDir, 'run-job-controller-profile.sh')
     writeProfileLauncher(launcher, dsh, env)

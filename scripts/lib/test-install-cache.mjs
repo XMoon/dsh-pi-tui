@@ -1,6 +1,7 @@
 /**
  * The single test-tooling owner for account-level pnpm download caches used by
- * the isolated Split installers.
+ * the isolated Split installers and the explicitly enabled standalone npm
+ * smoke installers.
  *
  * The module validates the cache path against the actual checkout, the private
  * run root and every qualified candidate input, then returns the install-only
@@ -133,10 +134,12 @@ function defaultCacheParent(home) {
  * runs a real install.
  *
  * The default root is `<account home>/.cache/dsh-pi-tui-test`. The explicit
- * `SPLIT_VITEST_PNPM_CACHE_ROOT` override must already be an existing,
- * canonical, current-user-owned 0700 directory outside this checkout, every
- * candidate input directory and the private Scene base. The cache is never a
- * product setting and is never removed by Scene cleanup.
+ * override selected by the caller (the Split lanes pass
+ * `SPLIT_VITEST_PNPM_CACHE_ROOT`; the standalone npm smokes pass
+ * `DSH_TEST_INSTALL_CACHE_ROOT`) must already be an existing, canonical,
+ * current-user-owned 0700 directory outside this checkout, every candidate
+ * input directory and the private cleanup root. The cache is never a product
+ * setting and is never removed by Scene cleanup.
  *
  * All forbidden roots are validated before any missing cache directory is
  * created.
@@ -149,7 +152,7 @@ export function prepareInstallCache({ tmpBase, override, candidateTarballs }) {
   try {
     realTmpBase = realpathSync(tmpBase)
   } catch (error) {
-    cacheRefusal(`requires a canonical tmpBase: ${String(error?.code ?? error?.name ?? 'unknown')}`)
+    cacheRefusal(`requires a canonical private cleanup root: ${String(error?.code ?? error?.name ?? 'unknown')}`)
   }
   const candidateDirectories = []
   for (const candidateTarball of candidateTarballs) {
@@ -172,9 +175,9 @@ export function prepareInstallCache({ tmpBase, override, candidateTarballs }) {
     root = join(home, '.cache', INSTALL_CACHE_ROOT_NAME)
   } else {
     if (typeof override !== 'string' || override === '') {
-      cacheRefusal('SPLIT_VITEST_PNPM_CACHE_ROOT must not be empty')
+      cacheRefusal('the explicit install cache override must not be empty')
     }
-    root = qualifiedCacheDirectory(override, 'SPLIT_VITEST_PNPM_CACHE_ROOT', false)
+    root = qualifiedCacheDirectory(override, 'the explicit install cache override', false)
   }
   const rootExists = existsSync(root)
   const rootChain = existingDirectoryChain(root)
@@ -184,7 +187,7 @@ export function prepareInstallCache({ tmpBase, override, candidateTarballs }) {
   for (const [label, path] of [
     ['checkout', realpathSync(PACKAGE_ROOT)],
     ...candidateDirectories.map((path, index) => [`candidate input directory ${String(index + 1)}`, path]),
-    ['SPLIT_VITEST_TMP_BASE', realTmpBase],
+    ['private cleanup root', realTmpBase],
   ]) {
     if (directoriesOverlap(root, path)) cacheRefusal(`must not overlap the ${label}: ${root}`)
   }

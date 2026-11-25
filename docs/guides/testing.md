@@ -655,29 +655,56 @@ It requires two private inputs:
   real bytes and SHA256 before a Scene root, install or Host exists; a changed
   or replaced input is `INPUT_CANDIDATE_CHANGED`.
 
-The Process business project and the default/native Upgrade projects reuse a
-pnpm content store and metadata cache across Scenes. The default root is
+The Process business project, the default/native Upgrade projects and the
+ordinary npm-mode standalone smokes (`smoke:official-presets`,
+`smoke:startup-strictness`, `smoke:job-controller-profile` and
+`smoke:direct-empty-retirement`) reuse the same account-level pnpm content store
+and metadata cache. The default root is
 `<account home>/.cache/dsh-pi-tui-test/{pnpm-store,pnpm-cache}`. Set
-`SPLIT_VITEST_PNPM_CACHE_ROOT` to an existing absolute canonical directory that
-the current user owns with mode 0700, outside this checkout, every candidate
-input directory (the Upgrade projects validate both the old and new tarball
-directories), `SPLIT_VITEST_TMP_BASE` and the account home itself, to use a
-private cache root. The override is a test-run input, not a product setting; it
-is not passed to the Host/Client/daemon runtime environment, and Scene cleanup
-never removes the cache. The Upgrade projects use the same root for the initial
-old Profile, both side-by-side builds, later reload/rollback Profile installs
-and the explicit profile removal. Pilot, the other smokes, the Fresh profile
-lane and Source Mode do not enable this cache.
+`SPLIT_VITEST_PNPM_CACHE_ROOT` for the Process/Upgrade projects, or
+`DSH_TEST_INSTALL_CACHE_ROOT` for the standalone smokes, to an existing absolute
+canonical directory that the current user owns with mode 0700, outside this
+checkout, every candidate input directory (the Upgrade projects validate both
+the old and new tarball directories), the Split `SPLIT_VITEST_TMP_BASE` and the
+account home itself. The two overrides are separate test-run inputs with no
+fallback to each other; the standalone smokes use the same default root when
+their override is unset. The override is not a product setting; it is not passed
+to the Host/Client/daemon runtime environment, and Scene cleanup never removes
+the cache. The standalone `smoke:direct-empty-retirement` keeps its
+checkout-local work root, so its cache override must stay outside that root and
+the checkout. `smoke:official-presets` reads the standalone override only in its
+npm distribution branch; its source-pack branch and every smoke not listed here
+keep their original environment and install path. The Upgrade projects use the
+same root for the initial old Profile, both side-by-side builds, later
+reload/rollback Profile installs and the explicit profile removal. Pilot, the
+Fresh profile lane, Source Mode and the other smokes do not enable this cache.
 
-Only pnpm's downloaded content and metadata are shared: every Scene still
-creates its own HOME, DSH_HOME, profile, lockfile and `node_modules` and runs a
-real install. pnpm imports installed files with `copy` and the side-effects
-cache is disabled. The qualified Profile graph has no lifecycle-script or
-patched dependency, and its installed files do not share a writable inode with
-the shared store; a future dependency of that class must re-qualify the pinned
-pnpm write semantics before the same claim applies. Do not prune or delete the cache while a run is active; a damaged
-cache is an operator cleanup after every user has stopped, with diagnostics
-preserved first. For example:
+Only pnpm's downloaded content and metadata are shared: every Scene or
+standalone run still creates its own HOME, DSH_HOME, profile, lockfile and
+`node_modules` and runs a real install. pnpm imports installed files with `copy`
+and the side-effects cache is disabled. The Process/Upgrade qualified Profile
+graph has no lifecycle-script or patched dependency, and its installed files do
+not share a writable inode with the shared store; a future dependency of that
+class must re-qualify the pinned pnpm write semantics before the same claim
+applies. The standalone smokes keep their existing `--ignore-scripts` install
+policy; their install-only isolation is the same, and a future executed
+build/patch graph must re-qualify the pinned pnpm write semantics before the
+same claim applies. The standalone smokes pass the derived environment only to
+their real install/add calls: CLI version and plugin-list checks, profile
+assertions, tmux/PTY sessions and the real product runtime keep the caller's
+original environment. An outer runner that deletes a private work tree must keep
+the cache outside that tree. Do not prune or delete the cache while a run is
+active; a damaged cache is an operator cleanup after every user has stopped,
+with diagnostics preserved first.
+
+An independent npm-mode smoke uses:
+
+```sh
+DSH_TEST_INSTALL_CACHE_ROOT=/absolute/private/cache \
+  mise exec -- pnpm smoke:startup-strictness -- /absolute/immutable/candidate.tgz
+```
+
+A Split Process run still uses:
 
 ```sh
 SPLIT_VITEST_TMP_BASE=/absolute/private/run-root \
