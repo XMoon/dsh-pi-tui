@@ -276,6 +276,13 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   private preferenceReadiness: 'ready' | 'stale' | 'unavailable'
   private runtimeOutcome: OutcomeNote | undefined
   private configOutcome: OutcomeNote | undefined
+  /** The preference observation that produced the current successful config
+   *  receipt. A later different observation retires it; unknown/refused
+   *  settlements deliberately have no such lifetime. */
+  private configOutcomeSerial: number | undefined
+  /** The runtime observation that produced the current successful runtime
+   *  receipt. A replacement or a different served state retires it. */
+  private runtimeSuccessObservation: { readonly generation: unknown; readonly state: 'enabled' | 'disabled' } | undefined
   /** The staged next-launch candidate; presentation only, never a write. */
   private autostartCandidate: boolean | undefined
   /**
@@ -462,6 +469,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.host = failure !== undefined || status === undefined
       ? { kind: 'unreadable', message: failure ?? 'the Host Web state could not be read' }
       : { kind: 'current', status, generation }
+    this.retireStaleSuccess()
     this.settleReadPhase()
   }
 
@@ -483,6 +491,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     if (this.disposed || this.host.kind === 'split-host-only') return
     this.readSerial += 1
     this.host = { kind: 'checking' }
+    this.retireStaleSuccess()
     // Every ACTUAL rollover retires a local staged preference intent, even
     // when the new Config mirror happens to expose the SAME revision: the
     // decision was made against the old Host's authority. A dispatched write
@@ -531,6 +540,25 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
    * authority retires a staged decision even when it exposes the same revision
    * and value.
    */
+  /** Retire a known-success receipt once its own observation is no longer
+   *  the current one. It never touches a refusal/pending/unknown result. */
+  private retireStaleSuccess(): void {
+    if (this.configOutcome?.tone === 'success'
+      && (this.configOutcomeSerial === undefined || this.configOutcomeSerial !== this.preferenceSerial)) {
+      this.configOutcome = undefined
+      this.configOutcomeSerial = undefined
+    }
+    if (this.runtimeOutcome?.tone === 'success') {
+      const observed = this.runtimeSuccessObservation
+      if (this.host.kind !== 'current' || observed === undefined
+        || !Object.is(observed.generation, this.host.generation)
+        || observed.state !== this.host.status.state) {
+        this.runtimeOutcome = undefined
+        this.runtimeSuccessObservation = undefined
+      }
+    }
+  }
+
   private reconcilePreference(): void {
     const readiness = this.intents.configReadiness()
     const next = this.intents.readPreference()
@@ -547,6 +575,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     }
     this.preferenceReadiness = readiness
     this.preference = next
+    this.retireStaleSuccess()
     // A staged decision whose captured Host authority was replaced (same
     // revision/value or not) is no longer this page's intent.
     if (this.autostartGeneration !== undefined
@@ -936,6 +965,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
         this.runtimeOutcome = unconfirmedChange(`${failure}; the Host may have applied the request.`)
       } else if (status.state === (target ? 'enabled' : 'disabled')) {
         this.runtimeOutcome = { word: target ? 'Web enabled' : 'Web disabled', tone: 'success' }
+        this.runtimeSuccessObservation = { generation, state: target ? 'enabled' : 'disabled' }
       } else if (status.state === 'changing') {
         this.runtimeOutcome = unconfirmedChange('The Host is still applying the change.')
       } else {
@@ -996,6 +1026,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       // verified; the settlement is never applied optimistically.
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote(outcome)
+      this.configOutcomeSerial = outcome.outcome === 'verified' ? this.preferenceSerial : undefined
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.phase = 'settled'
@@ -1005,6 +1036,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       if (this.disposed || serial !== this.writeSerial) return
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote({ outcome: 'indeterminate', reason: safeErrorMessage(error) })
+      this.configOutcomeSerial = undefined
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.phase = 'settled'

@@ -351,6 +351,13 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   private preferenceReadiness: 'ready' | 'stale' | 'unavailable'
   private runtimeOutcome: OutcomeNote | undefined
   private configOutcome: OutcomeNote | undefined
+  /** The preference epoch that produced the current successful config
+   *  receipt. A later different observation retires it; unknown/refused
+   *  settlements deliberately have no such lifetime. */
+  private configOutcomeEpoch: number | undefined
+  /** The runtime observation that produced the current successful runtime
+   *  receipt. A replacement or a different served state retires it. */
+  private runtimeSuccessObservation: { readonly generation: unknown; readonly state: 'enabled' | 'disabled' } | undefined
   /** The staged next-launch candidate; presentation only, never a write. */
   private autostartCandidate: boolean | undefined
   /**
@@ -546,6 +553,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.host = failure !== undefined || status === undefined
       ? { kind: 'unreadable', message: failure ?? 'the Host ACP state could not be read' }
       : { kind: 'current', status, generation }
+    this.retireStaleSuccess()
     this.settleReadPhase()
   }
 
@@ -568,6 +576,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     if (this.disposed || this.host.kind === 'split-host-only') return
     this.readSerial += 1
     this.host = { kind: 'checking' }
+    this.retireStaleSuccess()
     // Every ACTUAL rollover retires a local staged preference intent, even
     // when the new Config mirror happens to expose the SAME revision: the
     // decision was made against the old Host's authority. A dispatched write
@@ -612,6 +621,25 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * one decision, so a painted `Unavailable` fact can never sit beside an
    * editable row (or a stale revision beside an edit grant).
    */
+  /** Retire a known-success receipt once its own observation is no longer
+   *  the current one. It never touches a refusal/pending/unknown result. */
+  private retireStaleSuccess(): void {
+    if (this.configOutcome?.tone === 'success'
+      && (this.configOutcomeEpoch === undefined || this.configOutcomeEpoch !== this.preferenceEpoch)) {
+      this.configOutcome = undefined
+      this.configOutcomeEpoch = undefined
+    }
+    if (this.runtimeOutcome?.tone === 'success') {
+      const observed = this.runtimeSuccessObservation
+      if (this.host.kind !== 'current' || observed === undefined
+        || !Object.is(observed.generation, this.host.generation)
+        || observed.state !== this.host.status.state) {
+        this.runtimeOutcome = undefined
+        this.runtimeSuccessObservation = undefined
+      }
+    }
+  }
+
   private reconcilePreference(): void {
     const previousReadiness = this.preferenceReadiness
     const previous = this.preference
@@ -623,6 +651,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // It only revokes every pointer/frame grant built from the old fact.
       this.preferenceEpoch += 1
     }
+    this.retireStaleSuccess()
     if (!this.preferenceEditable()) {
       // The authority is no longer current: revoke the staged step, zero writes.
       this.retireStagedChoice()
@@ -856,7 +885,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * preflight/`setEnabled` boundary decides the failure vocabulary: a Host
    * replacement BEFORE the invocation is a definitive zero-write
    * `Not changed`; once invoked, a lost receipt/read-back or a Host
-   * replacement is `Could not confirm save` and is never retried.
+   * replacement is `Could not confirm change` and is never retried.
    */
   private dispatchRuntime(target: boolean): void {
     const host = this.hostCurrent()
@@ -1022,6 +1051,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
         this.runtimeOutcome = unconfirmedChange(`${failure}; the Host may have applied the request.`)
       } else if (status.state === (target ? 'enabled' : 'disabled')) {
         this.runtimeOutcome = { word: target ? 'ACP enabled' : 'ACP disabled', tone: 'success' }
+        this.runtimeSuccessObservation = { generation, state: target ? 'enabled' : 'disabled' }
       } else if (status.state === 'changing') {
         this.runtimeOutcome = unconfirmedChange('The Host is still applying the change.')
       } else {
@@ -1084,6 +1114,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       // verified; the settlement is never applied optimistically.
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote(outcome)
+      this.configOutcomeEpoch = outcome.outcome === 'verified' ? this.preferenceEpoch : undefined
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.autostartGenerationFence = undefined
@@ -1094,6 +1125,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       if (this.disposed || serial !== this.writeSerial) return
       this.reconcilePreference()
       this.configOutcome = configOutcomeNote({ outcome: 'indeterminate', reason: safeErrorMessage(error) })
+      this.configOutcomeEpoch = undefined
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.autostartGenerationFence = undefined

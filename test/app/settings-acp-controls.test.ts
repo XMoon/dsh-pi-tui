@@ -756,6 +756,10 @@ test('an invoked ACP preference accepted by A is Could not confirm save, never a
   h.remote!.releaseReceipt()
   await settle(h, 'the cross-generation unverified settlement', frame => /Status\s+Could not confirm save/u.test(frame))
   assert.match(h.view(), /Could not check the original Host after/u)
+  assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the A write')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=acp-autostart value=On outcome=unverified/u,
+    'the command owner keeps the accepted-but-unattributable outcome')
   assert.equal(h.remote!.calls().filter(call => call.ns === 'pi-tui-acp-preferences').length, 1,
     'A is never replayed and B receives no implicit mutation')
   h.dispose()
@@ -775,6 +779,10 @@ test('an unknown ACP receipt is Could not confirm save even when B matches the r
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown receipt settlement', frame => /Status\s+Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Status\s+Could not save/u, 'an uncertain post-invoke failure is never guessed as Not saved')
+  assert.equal((await h.remote!.lastWrite())?.kind, 'outcome-unconfirmed', 'the adapter really lost the A receipt')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=acp-autostart value=On outcome=indeterminate/u,
+    'the command owner keeps the unknown outcome')
   assert.equal(h.remote!.calls().filter(call => call.ns === 'pi-tui-acp-preferences').length, 1,
     'the uncertain A call is not replayed against B')
   h.dispose()
@@ -788,6 +796,10 @@ test('an accepted same-generation ACP write with a disagreeing readback is Could
   await key(h, ENTER)
   await settle(h, 'the same-generation mismatch', frame => /Status\s+Could not confirm save/u.test(frame))
   assert.match(h.view(), /The Host now reads Off\./u)
+  assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the write')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=acp-autostart value=On outcome=unverified/u,
+    'the command owner keeps the accepted-but-disagreeing readback as unverified')
   const calls = h.remote!.calls().filter(call => call.ns === 'pi-tui-acp-preferences')
   assert.equal(calls.length, 1)
   assert.equal(calls[0]!.destination, 'A')
@@ -1257,6 +1269,10 @@ test('an accepted Web write whose readback belongs to B is Could not confirm sav
   h.remote!.releaseReceipt()
   await settle(h, 'the cross-generation Web settlement', frame => /Status\s+Could not confirm save/u.test(frame))
   assert.match(h.view(), /Could not check the original Host after/u)
+  assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the A write')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=web-autostart value=On outcome=unverified/u,
+    'the command owner keeps the accepted Web write as unverified')
   assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 1, 'A is never replayed and B receives no implicit mutation')
   h.dispose()
 })
@@ -1276,6 +1292,10 @@ test('an accepted Backend write whose readback belongs to B is Could not confirm
   h.remote!.releaseReceipt()
   await settle(h, 'the cross-generation Backend settlement', frame => /Could not confirm save/u.test(frame))
   assert.deepEqual(h.backendTransitions(), [], 'B matching the request never records a transition intent')
+  assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the A write')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=startup-backend value=Daemon outcome=unverified/u,
+    'the command owner keeps the accepted Backend write as unverified')
   assert.doesNotMatch(h.view(), /Install service|Not now/u, 'B matching the request never earns the follow-up')
   assert.equal(scalarCalls(h, 'tui-startup'), 1, 'A is never replayed')
   h.dispose()
@@ -1296,6 +1316,10 @@ test('an accepted Visual tools write whose readback belongs to B is Could not co
   h.remote!.releaseReceipt()
   await settle(h, 'the cross-generation Visual tools settlement', frame => /Could not confirm save/u.test(frame))
   assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 1, 'A is never replayed')
+  assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the A write')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=visual-tools value=Off outcome=unverified/u,
+    'the command owner keeps the accepted Visual tools write as unverified')
   h.dispose()
 })
 
@@ -1314,6 +1338,10 @@ test('an unknown Web receipt keeps B\'s own Off value and stays Could not confir
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown Web receipt', frame => /Status\s+Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Status\s+Could not save/u)
+  assert.equal((await h.remote!.lastWrite())?.kind, 'outcome-unconfirmed', 'the adapter really lost the A receipt')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=web-autostart value=On outcome=indeterminate/u,
+    'the command owner keeps the unknown Web outcome')
   assert.doesNotMatch(h.view(), /Status\s+Saved/u)
   assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
   assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1)
@@ -1339,6 +1367,10 @@ test('an unknown Backend receipt keeps B\'s own Direct value and stays Could not
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown Backend receipt', frame => /Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Could not save/u)
+  assert.equal((await h.remote!.lastWrite())?.kind, 'outcome-unconfirmed', 'the adapter really lost the A receipt')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=startup-backend value=Daemon outcome=indeterminate/u,
+    'the command owner keeps the unknown Backend outcome')
   assert.doesNotMatch(h.view(), /\bSaved\b/u)
   assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
   assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1)
@@ -1366,6 +1398,10 @@ test('an unknown Visual tools receipt keeps B\'s own On value and stays Could no
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown Visual tools receipt', frame => /Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Could not save/u)
+  assert.equal((await h.remote!.lastWrite())?.kind, 'outcome-unconfirmed', 'the adapter really lost the A receipt')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=visual-tools value=Off outcome=indeterminate/u,
+    'the command owner keeps the unknown Visual tools outcome')
   assert.doesNotMatch(h.view(), /\bSaved\b/u)
   assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
   assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1)
@@ -1393,6 +1429,10 @@ test('a matching Host B never grants daemon→direct exit intent from an accepte
   await settle(h, 'the cross-generation daemon→direct settlement', frame => /Could not confirm save/u.test(frame))
   assert.deepEqual(h.backendTransitions(), [],
     'the matching B direct value never records a daemon-to-direct intent for the A request')
+  assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the A write')
+  assert.match(h.diagnostics.join('\n'),
+    /settings write.*field=startup-backend value=Direct outcome=unverified/u,
+    'the command owner keeps the accepted daemon-to-direct write as unverified')
   assert.equal(scalarCalls(h, 'tui-startup'), 1, 'A is never replayed')
   h.dispose()
 })
@@ -1425,6 +1465,14 @@ test('an accepted but unapplied write is Could not confirm save on all three rea
     await key(h, ENTER)
     await settle(h, `the unapplied ${item.ns} settlement`, frame => item.expected.test(frame))
     assert.doesNotMatch(h.view(), /Status\s+Could not save/u, 'an accepted mismatch is never a refusal')
+    assert.equal((await h.remote!.lastWrite())?.kind, 'accepted', 'the adapter really accepted the write')
+    const ownerPattern = item.ns === 'pi-tui-web-preferences'
+      ? /settings write.*field=web-autostart value=On outcome=unverified/u
+      : item.ns === 'tui-startup'
+        ? /settings write.*field=startup-backend value=Daemon outcome=unverified/u
+        : /settings write.*field=visual-tools value=Off outcome=unverified/u
+    assert.match(h.diagnostics.join('\n'), ownerPattern,
+      'the command owner keeps the accepted-but-unapplied outcome')
     assert.doesNotMatch(h.view(), /Status\s+Saved/u)
     const calls = h.remote!.calls().filter(call => call.ns === item.ns)
     assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)

@@ -1944,13 +1944,18 @@ test('a saved single-value Agent settlement demotes when the served row moves', 
   page.render(80)
   for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
   assert.equal(writes.length, 1)
+  assert.match(plain(), /^Current value\s+4\s*$/mu, 'the verified save starts as a current value')
   assert.match(plain(), /^Saved\s*$/mu, 'the verified save starts as a current Saved')
 
   revision += 1
   const stale = plain()
+  assert.match(stale, /^Last confirmed\s+4\s*$/mu, 'a stale value is named as the last confirmed fact')
+  assert.doesNotMatch(stale, /^Current value\s/mu)
   assert.match(stale, /^Last-known · read-only\s*$/mu, 'a stale single-value settlement is no longer painted as Saved')
   assert.match(stale, /Previous save completed; refresh to review\./u, 'the history is named as history')
   assert.doesNotMatch(stale, /^Saved\s*$/mu)
+  const narrow = page.render(18).map(strip).join('\n').replace(/\s+/gu, ' ')
+  assert.match(narrow, /Last-known · read-only/u, 'the long status wraps on the real grant instead of being truncated')
   page.dispose()
 })
 

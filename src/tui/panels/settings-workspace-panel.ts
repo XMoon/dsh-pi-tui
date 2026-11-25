@@ -575,6 +575,10 @@ type SettingsWorkspaceEditPhase =
       readonly outcome: SettingsWorkspaceCommitOutcome['outcome']
       readonly reason?: string
       readonly registrationToken?: number
+      /** The Host-config authority observation the post-write readback
+       *  established. A later ready row with a different authority must not
+       *  revive the old success as current. */
+      readonly observation?: { readonly generation: object; readonly revision?: number }
     }
 
 type SettingsLayout = 'wide' | 'medium' | 'narrow'
@@ -3679,6 +3683,19 @@ export class SettingsWorkspacePanel implements Component {
     return field === 'startup-backend' || field === 'visual-tools' || field === 'session-log-upload'
   }
 
+  /** Capture the current Host-config observation of the row that owns a
+   *  settled write. The generation identity is the authority discriminator;
+   *  the revision alone cannot prove a replacement did not occur. */
+  private settledObservation(field: SettingsWorkspaceWritableField): { readonly generation: object; readonly revision?: number } | undefined {
+    const row = this.snapshot.rows.find(candidate => candidate.edit?.field === field)
+    const generation = row?.edit?.generation
+    if (row === undefined || generation === undefined) return undefined
+    return {
+      generation,
+      ...(row.edit?.revision === undefined ? {} : { revision: row.edit.revision }),
+    }
+  }
+
   /** The commit status of the row's own field, as the last settlement reported
    *  it. Only the row that owns the phase shows it — never a global banner.
    *  The WORD and its tone are separate from the explanation so the pane can
@@ -3698,7 +3715,12 @@ export class SettingsWorkspacePanel implements Component {
     }
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
     if (phase.outcome === 'verified') {
-      if (hostConfig && row.freshness !== 'ready') {
+      const observationMatches = hostConfig
+        && phase.observation !== undefined
+        && row.edit?.generation !== undefined
+        && Object.is(phase.observation.generation, row.edit.generation)
+        && phase.observation.revision === row.edit.revision
+      if (hostConfig && (row.freshness !== 'ready' || !observationMatches)) {
         return {
           word: 'Last-known · read-only',
           reason: 'Previous save completed; refresh to review.',
@@ -6172,6 +6194,11 @@ export class SettingsWorkspacePanel implements Component {
       this.serviceInstallRiskSeen = new Set<number>()
     }
     this.refresh()
+    const settled = this.editPhase
+    if (settled.kind === 'settled' && settled.field === field) {
+      const observation = this.settledObservation(field)
+      if (observation !== undefined) this.editPhase = { ...settled, observation }
+    }
   }
 
   /** The ONE explicit install confirmation of the follow-up. The seat locks

@@ -315,6 +315,19 @@ test('Enable ACP dispatches ONE fenced write after ONE live preflight and paints
   h.close()
 })
 
+test('a successful runtime enable is retired by a different served state', async () => {
+  const h = await mount({ status: { state: 'disabled' } })
+  await h.key('\r')
+  await h.flush()
+  assert.match(h.frame(), /Status\s+ACP enabled/u, 'the verified enable starts as a current success')
+
+  h.setStatus({ state: 'disabled' })
+  await h.key('r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+ACP enabled/u, 'a disabled observation retires the old enabled success')
+  h.close()
+})
+
 test('an already-enabled Host is zero-write Not changed with the real state', async () => {
   const h = await mount({ status: { state: 'disabled' } })
   await highlight(h, 'Enable ACP')
@@ -594,6 +607,22 @@ test('the next-start ladder stages zero writes and saves the captured revision o
   assert.match(h.frame(), /Status\s+Saved/u)
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the persisted value is re-read, not optimistically assumed')
   assert.deepEqual(h.writes(), [], 'the preference write never toggles the running Host')
+  h.close()
+})
+
+test('a successful next-start save is retired when the preference observation changes', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await highlight(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Saved/u, 'the verified preference starts as a current Saved')
+
+  h.setAuthority('ready', { autoStart: false, revision: 2, userOverridden: true })
+  await h.key('r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Saved/u, 'a different preference observation retires the old Saved')
   h.close()
 })
 

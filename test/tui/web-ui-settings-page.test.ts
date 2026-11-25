@@ -77,6 +77,8 @@ interface PageHarness {
   readonly connect: () => void
   /** Resolve (or reject) the N-th held status read. */
   readonly resolveRead: (index: number, result: WebAccessStatus | { readonly error: string }) => void
+  /** Replace the served Host state without a generation change. */
+  readonly setStatus: (status: WebAccessStatus) => void
   /** Replace the LIVE Config authority (the Remote mirror's invalidation). The
    *  Config authority identity is retained unless a Host rollover is driven. */
   readonly setAuthority: (
@@ -239,6 +241,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       if (settle === undefined) throw new Error(`no held read at index ${index}`)
       settle(typeof result === 'object' && 'error' in result ? new Error(result.error) : result)
     },
+    setStatus: (next) => { status = next },
     releaseToggle: () => { heldToggle?.(); heldToggle = undefined },
     releaseUrl: () => { heldUrl?.(); heldUrl = undefined },
     key,
@@ -325,6 +328,49 @@ test('a pending runtime write leaves on Esc while its owner keeps settling, diag
   assert.equal(h.diagnoses().length, 1, 'the gone page diagnoses the real outcome')
   assert.equal(h.diagnoses()[0]?.label, 'web ui runtime write')
   assert.equal(h.diagnoses()[0]?.detail.dispatched, true)
+  h.close()
+})
+
+test('a successful runtime enable is retired when the Host generation is replaced', async () => {
+  const h = await mount({ status: { state: 'disabled' } })
+  await h.key('\r')
+  h.releaseToggle()
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Web enabled/u, 'the verified enable starts as a current success')
+
+  h.bumpGeneration()
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Web enabled/u, 'the replacement never inherits the old success word')
+  h.close()
+})
+
+test('a successful runtime enable is retired by a different served state', async () => {
+  const h = await mount({ status: { state: 'disabled' } })
+  await h.key('\r')
+  h.releaseToggle()
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Web enabled/u)
+
+  h.setStatus({ state: 'disabled' })
+  await h.key('r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Web enabled/u, 'a disabled observation retires the old enabled success')
+  h.close()
+})
+
+test('a successful next-start save is retired when the preference observation changes', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Saved/u, 'the verified preference starts as a current Saved')
+
+  h.setAuthority('ready', { autoStart: true, revision: 2, userOverridden: true })
+  await h.key('r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Status\s+Saved/u, 'a different preference observation retires the old Saved')
   h.close()
 })
 

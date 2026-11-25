@@ -126,7 +126,7 @@ async function openCategory(client, category, label) {
 
 async function saveAndVerify(client, label, expected) {
   client.send('s')
-  const frame = await waitForPattern(client, expected, label, 90_000)
+  const frame = await waitForDetailPattern(client, expected, label, 90_000)
   return frame
 }
 
@@ -445,7 +445,9 @@ export async function runHostNumericSettingsFr5B(context) {
     await waitForText(clientA, 'Choose value', 'FR5-B Session log choice')
     await selectFrame(clientA, frame => /^.*> Off(?:\s|$)/mu.test(frame), 'FR5-B Session log Off candidate')
     clientA.send('\r')
-    await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Session log Off saved')
+    const sessionOff = await waitForDetailPattern(clientA, /\bSaved\b/u, 'FR5-B Session log Off saved')
+    assert(/Value\s+Off\b/u.test(detailColumnText(sessionOff)),
+      `the selected Session log field must read back Off: ${JSON.stringify(detailColumnText(sessionOff))}`)
     assert(profileUserConfig(installation.profileDir, SESSION_LOG_NS)?.enabled === false,
       'Off is a real USER value (not treated as absence)')
     clientA.send('\x1b')
@@ -456,8 +458,9 @@ export async function runHostNumericSettingsFr5B(context) {
     await waitForText(clientA, 'Choose value', 'FR5-B Session log reset choice')
     await selectFrame(clientA, frame => /^.*> Reset(?:\s|$)/mu.test(frame), 'FR5-B Session log Reset candidate')
     clientA.send('\r')
-    const resetFrame = await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Session log Reset saved')
-    assert(/\bOn\b/u.test(resetFrame), 'the Reset readback may be On and must be shown as the current value')
+    const resetFrame = await waitForDetailPattern(clientA, /\bSaved\b/u, 'FR5-B Session log Reset saved')
+    assert(/Value\s+On\b/u.test(detailColumnText(resetFrame)),
+      `the selected Session log field must read back its actual current On: ${JSON.stringify(detailColumnText(resetFrame))}`)
     trace('fr5b.session-log', { offPersisted: true, resetVerified: true, resetReadbackOn: true })
 
     // ── Agent loop: the single-value Detail tenant, ONE Confirm ────────────
@@ -483,7 +486,9 @@ export async function runHostNumericSettingsFr5B(context) {
     }
     await sleep(140)
     clientA.send('\r')
-    const agentVerified = await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Agent value saved')
+    const agentVerified = await waitForDetailPattern(clientA, /\bSaved\b/u, 'FR5-B Agent value saved')
+    assert(/Current value\s+2\b/u.test(detailColumnText(agentVerified)),
+      `the Agent tenant must read back the confirmed value: ${JSON.stringify(detailColumnText(agentVerified))}`)
     assert(!/Apply \[Enter\]/u.test(agentVerified) && !/Save \[S\]/u.test(agentVerified),
       'the migrated Agent journey never advertises a second Apply/Save key')
     assert(profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls === 2,
@@ -502,11 +507,11 @@ export async function runHostNumericSettingsFr5B(context) {
     const inherited = Number(inheritedMatch[1])
     await waitForPattern(clientA, /Confirm \[Enter\]/u, 'FR5-B Agent reset confirm affordance')
     clientA.send('\r')
-    const agentReset = await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Agent reset saved')
+    const agentReset = await waitForDetailPattern(clientA, /\bSaved\b/u, 'FR5-B Agent reset saved')
     // The official unset's success criterion is the Host readback, never USER-key
     // absence: an unset may legitimately materialize the inherited value.
-    assert(new RegExp(`Current value\\s+${inherited}(?:\\s|$)`, 'u').test(agentReset),
-      `the reset readback must paint the value the official unset leaves behind (inherited=${inherited}): ${JSON.stringify(agentReset)}`)
+    assert(new RegExp(`Current value\\s+${inherited}(?:\\s|$)`, 'u').test(detailColumnText(agentReset)),
+      `the reset readback must paint the value the official unset leaves behind (inherited=${inherited}): ${JSON.stringify(detailColumnText(agentReset))}`)
     const persistedAfterReset = profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls
     assert(persistedAfterReset === undefined || persistedAfterReset === inherited,
       `the official unset leaves either no USER key or the inherited value, never a different number: ${JSON.stringify(persistedAfterReset)}`)

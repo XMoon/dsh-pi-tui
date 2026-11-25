@@ -6599,6 +6599,30 @@ test('a saved Root scalar demotes to Last-known when its authority goes stale', 
   h.dispose()
 })
 
+test('a saved Root scalar never resurrects on a same-revision authority replacement', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(detailPaneText(h), /\bSaved\b/, 'the verified save starts as a current Saved')
+  const savedRevision = h.visualState()?.revision
+
+  // The replacement exposes the SAME revision and value; only the authority
+  // identity moved. The old A receipt must not become B's current success.
+  h.replaceConfigAuthority({ host: 'replacement' })
+  await key(h, 'r')
+  await settle(h)
+  assert.equal(h.visualState()?.revision, savedRevision, 'the replacement deliberately keeps the same revision')
+  const detail = detailPaneText(h)
+  assert.match(detail, /Last-known · read-only/u, 'the ready replacement does not resurrect A\'s Saved')
+  assert.match(detail, /Previous save completed; refresh to review\./u)
+  assert.doesNotMatch(detail, /\bSaved\b/u)
+  h.dispose()
+})
+
 test('an unavailable Visual tools section stays visible and offers neither choice nor write', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsUnavailable: true })
   await h.open('Tools')

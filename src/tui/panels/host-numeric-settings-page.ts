@@ -1181,14 +1181,17 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
       lines.push({ text: color.textDim('Loading Host settings…') })
       return lines
     }
-    lines.push({ text: this.row('Current value', this.singleValue(snapshot)) })
+    lines.push({ text: this.row(snapshot.current ? 'Current value' : 'Last confirmed', this.singleValue(snapshot)) })
     if (this.intents.spec.effect !== undefined) lines.push(...this.note(this.intents.spec.effect, width))
     const status = snapshot.status
     const historicalSuccess = status?.kind === 'verified' && !snapshot.current
     if (status !== undefined) {
       // The settlement is the page's short user-facing result, never the
-      // workspace's internal status vocabulary.
-      lines.push({ text: historicalSuccess ? color.warning(statusWord(status.kind, snapshot)) : statusInk(status.kind, statusWord(status.kind, snapshot)) })
+      // workspace's internal status vocabulary. Wrap it on the real grant
+      // instead of letting the compose pass truncate it to an ellipsis.
+      const word = statusWord(status.kind, snapshot)
+      const inkWord = historicalSuccess ? color.warning(word) : statusInk(status.kind, word)
+      for (const line of wrapTextWithAnsi(inkWord, Math.max(1, width))) lines.push({ text: line })
       if (status.kind === 'unverified' || status.kind === 'outcome-unconfirmed') {
         lines.push(...this.note(MAY_HAVE_BEEN_SAVED, width))
       }
@@ -1245,7 +1248,9 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     // hide the saved/refused/unknown result behind prose. The word is the
     // page's short user feedback, without the internal `Status` label.
     if (status !== undefined) {
-      lines.push({ text: historicalSuccess ? color.warning(statusWord(status.kind, snapshot)) : statusInk(status.kind, statusWord(status.kind, snapshot)) })
+      const word = statusWord(status.kind, snapshot)
+      const inkWord = historicalSuccess ? color.warning(word) : statusInk(status.kind, word)
+      for (const line of wrapTextWithAnsi(inkWord, Math.max(1, copyWidth))) lines.push({ text: line })
       if (status.kind === 'unverified' || status.kind === 'outcome-unconfirmed') {
         lines.push(...this.note(MAY_HAVE_BEEN_SAVED, copyWidth))
       }
