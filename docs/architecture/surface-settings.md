@@ -276,8 +276,9 @@ specialist-page contract below).
   `not-saved`, painted `Could not save`) with ZERO target mutation. Only a
   CURRENT same-generation readback can earn `verified` (painted `Saved`); an
   accepted write the readback cannot attribute is internally unverified and is
-  painted `Could not confirm save`, never a refusal. The Root's own Change entry re-proves that the row it painted still
-  addresses the same authority after its refresh; otherwise the old gesture
+  painted `Could not confirm save`, never a refusal. The Root's own Change entry
+  re-proves that the row it painted still addresses the same authority after
+  its refresh; otherwise the old gesture
   stays browsing and a new explicit gesture is required.
 - **Host-configuration save feedback.** The three Host-configuration scalars
   (`Backend`, `Tools · Visual tools`, `Host · Session log upload`), the hosted
@@ -870,9 +871,10 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   existing per-open controller; the page paints the current value, the
   requested value and the Host-configuration save feedback above (`Saved` /
   `No changes` / `Could not save` / `Could not confirm save`) exactly as the
-  Host settlement and same-generation readback prove. `Last-known · read-only` is never called Ready, a superseded
-  capture refuses the edit until an explicit Refresh, and a Refresh discards a
-  draft only after its own confirmation.
+  Host settlement and same-generation readback prove. `Last-known · read-only`
+  is never called Ready, a superseded capture refuses the edit until an
+  explicit Refresh, and a Refresh discards a draft only after its own
+  confirmation.
 - **Parent navigation stays guarded, not hidden.** A pending write refuses
   every parent category/row/pane/Tab/Back path; the raw Input, the Advanced
   disclosure and an active page question own their local keys. A definite dirty
@@ -961,8 +963,9 @@ from Rows, or the Detail preview's `Open…`), never by a row click or Tab.
   executor identity stay owned by the ConfigPort and the per-open controller;
   the page paints the same Host-configuration save feedback above (`Saved` /
   `No changes` / `Could not save` / `Could not confirm save`) and the
-  `Last-known`/read-only states as the single route. A superseded, refused or replaced capture paints
-  its heading as `Last-known · …` and a staged field's served value as
+  `Last-known`/read-only states as the single route. A superseded, refused or
+  replaced capture paints its heading as `Last-known · …` and a staged field's
+  served value as
   `Last confirmed: …` (never `Current:`); the settlement state is the FIRST
   readable body row, so a short grant cannot hide it behind prose. The read-only
   state still offers its real local `Discard…` body action (a definite refusal
@@ -1071,10 +1074,10 @@ Two authorities are painted as two separate reading groups and are NEVER merged:
   An accepted write paints `Saved` only from a CURRENT same-generation
   authoritative read that carries the requested value; an
   accepted-but-unattributable readback paints `Could not confirm save` (never
-  `Could not save`), and a lost/unknown receipt paints `Could not confirm
-  save` with `The change may have been saved. Refresh and check.`. No outcome is retried automatically and the page offers no
-  `Retry save`: a new explicit `Change… → Confirm save` is the only way to act
-  again.
+  `Could not save`), and a lost/unknown receipt paints `Could not confirm save`
+  with `The change may have been saved. Refresh and check.`. No outcome is
+  retried automatically and the page offers no `Retry save`: a new explicit
+  `Change… → Confirm save` is the only way to act again.
 
 The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
 `choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config` or
