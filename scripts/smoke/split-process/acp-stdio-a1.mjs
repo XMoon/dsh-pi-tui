@@ -135,7 +135,7 @@ export class CliProcess {
     return await this.rawBegin(method, params).promise
   }
 
-  async initialize() {
+  async initialize(clientCapabilities = {}) {
     const app = acp.client({ name: 'dsh-pi-tui-a1-qualification' })
       .onNotification(acp.methods.client.session.update, ({ params }) => { this.updates.push(params) })
       .onRequest(acp.methods.client.session.requestPermission, async ({ params }) => {
@@ -147,7 +147,7 @@ export class CliProcess {
     this.connection = app.connect(acp.ndJsonStream(Writable.toWeb(this.child.stdin), Readable.toWeb(this.tap)))
     return await this.connection.agent.request(acp.methods.agent.initialize, {
       protocolVersion: acp.PROTOCOL_VERSION,
-      clientCapabilities: {},
+      clientCapabilities,
     })
   }
 

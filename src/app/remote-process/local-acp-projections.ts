@@ -76,6 +76,12 @@ export interface AcpNegotiatedCapabilities {
   readonly compaction: boolean
   readonly subagents: boolean
   readonly notices: boolean
+  /**
+   * Whether this connection advertised support for boolean session config
+   * options (`clientCapabilities.session.configOptions.boolean`). Only such a
+   * connection is ever offered the Agent Team boolean row or may write it.
+   */
+  readonly booleanConfigOptions: boolean
 }
 
 /** One image the ordered tail must read through the official Attachment Store. */

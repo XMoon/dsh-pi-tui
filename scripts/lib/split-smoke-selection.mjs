@@ -101,6 +101,7 @@ import { runAcpMultiSessionB2 } from '../smoke/split-process/acp-multi-session-b
 import { runAcpV1ConformanceB3 } from '../smoke/split-process/acp-v1-conformance-b3.mjs'
 import { runAcpProtocolProjection } from '../smoke/split-process/acp-protocol-projection.mjs'
 import { runAcpCommandInvocation } from '../smoke/split-process/acp-command-invocation.mjs'
+import { runAcpSessionConfig } from '../smoke/split-process/acp-session-config.mjs'
 import {
   runDaemonControlConcurrentControls,
   runDaemonControlInflightStop,
@@ -741,6 +742,14 @@ const CASE_REGISTRY = Object.freeze([
     title: 'one real packed Host advertises the exact official command and human Skill catalog, executes /feedback through the official command runtime, runs /compact through the exact retained maintenance engine and injects a native project Skill through the ordinary prompt path',
     platforms: LINUX_DARWIN,
     run: runAcpCommandInvocation,
+  }),
+  Object.freeze({
+    suite: 'acp',
+    defaultLane: false,
+    id: 'acp.session-config',
+    title: 'one real packed Host serves standard session modes and the negotiated boolean Agent Team option on the official PlanModeController and root Agent Team authority, across a held and rejected official flush, the public stdio bridge and a cold Host restart',
+    platforms: LINUX_DARWIN,
+    run: runAcpSessionConfig,
   }),
   Object.freeze({
     suite: 'acp',

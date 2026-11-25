@@ -150,7 +150,7 @@ async function startC4(
       notifyProjection: async (_sessionId: string, update: { readonly sessionUpdate?: string; readonly [key: string]: unknown }) => {
         updates.push(update)
       },
-      capabilities: { plan: false, compaction: true, subagents: false, notices: false },
+      capabilities: { plan: false, compaction: true, subagents: false, notices: false, booleanConfigOptions: false },
     }
     const created = await registry.newSession(conn, access, { cwd: host.anchorDir, mcpServers: [] }, channels)
     targetSessionId = created.sessionId

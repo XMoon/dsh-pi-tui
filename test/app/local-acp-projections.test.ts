@@ -38,6 +38,7 @@ const ALL_CAPABILITIES: AcpNegotiatedCapabilities = {
   compaction: true,
   subagents: true,
   notices: true,
+  booleanConfigOptions: false,
 }
 
 /** A connection that negotiated none of them (the stable v1 baseline). */
@@ -46,6 +47,7 @@ const NO_CAPABILITIES: AcpNegotiatedCapabilities = {
   compaction: false,
   subagents: false,
   notices: false,
+  booleanConfigOptions: false,
 }
 
 /** One assistant message event with the given blocks. */

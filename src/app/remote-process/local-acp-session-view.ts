@@ -91,6 +91,22 @@ import {
   type AcpModelOptionRequest,
 } from './local-acp-model-selection.ts'
 import {
+  AcpSessionPolicyError,
+  agentTeamConfigOptionOf,
+  invalidPolicyOption,
+  modeConfigOptionOf,
+  modeOfWireId,
+  sessionModeStateOf,
+  stalePolicy,
+  wireModeId,
+  ACP_AGENT_TEAM_CONFIG_ID,
+  ACP_MODE_CONFIG_ID,
+  type AcpSessionMode,
+  type AcpSessionPolicyRequest,
+  type AcpSessionPolicyErrorCode,
+  type AcpSessionPolicyState,
+} from './local-acp-session-policy.ts'
+import {
   AcpScopedMcpError,
   parseAcpMcpServers,
   type AcpScopedMcpCurrentness,
@@ -290,6 +306,27 @@ export interface HostAcpSessionAccess {
     stillCurrent: () => AcpModelCurrentness,
   ): Promise<SessionConfigOption[]>
   /**
+   * Read the committed session policy (collaboration mode and root Agent Team
+   * selection) of one exact attached Agent/Session. A missing official service
+   * is absence; an unreadable one is `UNAVAILABLE`; neither is a fabricated
+   * `default`/`false`.
+   */
+  readSessionPolicy(agent: LiveAgentViewIdentity, session: object): AcpSessionPolicyState
+  /** The exact committed legacy mode alone, independently of the Team row. */
+  readSessionMode(agent: LiveAgentViewIdentity, session: object): AcpSessionMode | undefined
+  /**
+   * Commit ONE official session policy write through the official maintenance
+   * admission. `stillCurrent` re-reads the owning View claim in the same
+   * synchronous callback stack as the final official call.
+   */
+  selectSessionPolicy(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    request: AcpSessionPolicyRequest,
+    signal: AbortSignal,
+    stillCurrent: () => 'current' | 'stale',
+  ): Promise<void>
+  /**
    * Whether the exact Host installed the official `userQuestions` service. An
    * absent service is a capability absence: an ACP-owned question then fails
    * closed instead of being answered by a second/durable answer store.
@@ -356,8 +393,50 @@ export interface HostAcpSessionAccess {
   parseCommand(line: string): { readonly name: string; readonly rawInput: string } | undefined
 }
 
-/** One transient per-connection config-options notification callback. */
-export type AcpConfigOptionsNotifier = (sessionId: string, options: readonly SessionConfigOption[]) => Promise<void>
+/** One transient per-connection config notification. */
+export type AcpConfigUpdate =
+  /** The complete current config-option list (one standard `config_option_update`). */
+  | { readonly kind: 'config'; readonly configOptions: readonly SessionConfigOption[] }
+  /** The committed legacy mode change (one standard `current_mode_update`). */
+  | { readonly kind: 'mode'; readonly currentModeId: string }
+
+/**
+ * The ONE config notification sink of a connection. It sends exactly the two
+ * standard update shapes above through the connection's own SDK client.
+ */
+export type AcpConfigUpdateNotifier = (sessionId: string, update: AcpConfigUpdate) => Promise<void>
+
+/**
+ * One complete config snapshot of an attached View. `modes`/`configOptions`
+ * are optional DISPLAY facts: an unreadable optional model catalog omits the
+ * complete config list (never a partial one), while an absent mode authority
+ * omits the mode rows.
+ */
+export interface AcpSessionConfigSnapshot {
+  /** The committed mode of the same policy cut. */
+  readonly mode?: AcpSessionMode
+  /** The committed root Agent Team selection of the same policy cut. */
+  readonly agentTeam?: boolean
+  /** The legacy `SessionModeState`, when a committed mode authority exists. */
+  readonly modes?: ReturnType<typeof sessionModeStateOf>
+  /** The complete fixed-order config-option list, when the model catalog is readable. */
+  readonly configOptions?: readonly SessionConfigOption[]
+  /**
+   * Why an optional display was omitted: a genuine model-catalog absence vs a
+   * failed/unstable policy cut. The listener reports the actual cause; a failed
+   * policy read is never reported as a model-catalog failure.
+   */
+  readonly omitted?: 'model' | 'policy'
+}
+
+/** The config cut's read purpose: initial display, live refresh or write reply. */
+type AcpConfigCutMode = 'attach' | 'refresh' | 'reply'
+
+/** One fenced config cut: the snapshot plus the invalidation generation it proved. */
+interface AcpConfigCut {
+  readonly snapshot: AcpSessionConfigSnapshot
+  readonly epoch: number
+}
 
 /**
  * The read-only projection sink of ONE connection: a standard `session/update`
@@ -496,6 +575,7 @@ export type LocalAcpSessionErrorCode =
   | LocalAcpListErrorCode
   | AcpCommandFailureCode
   | AcpModelErrorCode
+  | AcpSessionPolicyErrorCode
 
 /**
  * One classified View rejection. `rpcCode` is the JSON-RPC error code the
@@ -625,6 +705,11 @@ export interface AcpPromptFactListener {
   onCommandCatalogInvalidated(): void
   /** The official Skill registry/loader composition was invalidated. */
   onSkillCatalogInvalidated(): void
+  /**
+   * The retained Agent composition may have changed (e.g. `tools/change`): any
+   * mode/Team availability projected from it must be re-read, never inferred.
+   */
+  onPolicyAvailabilityInvalidated(): void
   /** One official inbox discard notice for a removed message. */
   onInboxDiscarded(agent: LiveAgentViewIdentity, message: AcpUserMessageLike): void
   /** One Agent interval failure carrying the owning turn. */
@@ -743,8 +828,8 @@ export type AcpElicitationRequester = (
 
 /** The transient per-connection channels bound at attach time. */
 export interface AcpViewChannels {
-  /** The config-options notification sink of this connection. */
-  readonly notifyConfigOptions?: AcpConfigOptionsNotifier
+  /** The config notification sink of this connection. */
+  readonly notifyConfigUpdate?: AcpConfigUpdateNotifier
   /** The reverse elicitation channel of this connection (absent = no Form). */
   readonly requestElicitation?: AcpElicitationRequester
   /**
@@ -937,13 +1022,50 @@ interface ViewClaim {
   /** Close/EOF/Off committed the retirement intent for `mcpLease`. */
   mcpRetireRequested?: boolean
   /**
-   * The ONE transient config-options notification callback of this claim's
-   * connection. It carries no model fact and dies with the claim; an absent
-   * callback (or a closed/replaced claim) means no config update is sent.
+   * The ONE transient config notification sink of this claim's connection. It
+   * carries no policy fact and dies with the claim; an absent callback (or a
+   * closed/replaced claim) means no config update is sent.
    */
-  notifyConfigOptions?: AcpConfigOptionsNotifier
+  notifyConfigUpdate?: AcpConfigUpdateNotifier
   /** The ordered per-claim config-notification chain; later updates never overtake earlier ones. */
   configNotifyTail?: Promise<void>
+  /** One config refresh loop is running for this claim. */
+  configRefreshRunning?: boolean
+  /**
+   * The initial complete config snapshot of this View has been read. Until
+   * then every invalidation only marks `configDirty`, so no pre-baseline frame
+   * can precede the attach response.
+   */
+  configReady?: boolean
+  /**
+   * The per-claim config invalidation generation. A read captures this value
+   * and discards its result when a newer invalidation won.
+   */
+  configEpoch?: number
+  /** A coalesced config refresh is required after the running one settles. */
+  configDirty?: boolean
+  /**
+   * Number of successfully validated complete reply cuts currently at their
+   * final synchronous submission boundary. Only an unsent config frame is
+   * deferred here; already-submitted frames and provider/maintenance work never
+   * wait on a reply.
+   */
+  configReplyBarrier?: number
+  /**
+   * Whether THIS connection was actually given the legacy `modes` list at
+   * attach. Only such a View may receive `current_mode_update` or call the
+   * legacy `session/set_mode`; this is a delivered-display fact, never the
+   * mode authority.
+   */
+  legacyModeAnnounced?: boolean
+  /** The last legacy mode id this connection was actually delivered. */
+  lastLegacyMode?: AcpSessionMode
+  /**
+   * The ONE session policy write slot of this claim (mode or Agent Team). It is
+   * installed synchronously before the official call and cleared only by that
+   * call's real terminal settlement; it never replaces/cancels a Host write.
+   */
+  policyWrite?: Promise<void>
   /**
    * The ONE reverse-elicitation channel of this claim's connection. It is
    * bound at attach time from the SAME SDK client as `session/new|resume`,
@@ -1334,6 +1456,20 @@ function staleModelSelection(): LocalAcpViewError {
   )
 }
 
+/** One official policy rejection on the View's existing error boundary. */
+function policyViewError(error: AcpSessionPolicyError): LocalAcpViewError {
+  return new LocalAcpViewError(error.code, error.message, error.rpcCode)
+}
+
+/** The stable post-write readback failure: the write may be committed. */
+function readbackUnavailablePolicyView(): LocalAcpViewError {
+  return new LocalAcpViewError(
+    'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE',
+    'the session config state could not be read back completely',
+    -32000,
+  )
+}
+
 /** A stable code from a rejecting Host call, never its message or stack. */
 function hostErrorCode(error: unknown): string | undefined {
   if (typeof error === 'object' && error !== null && 'code' in error) {
@@ -1436,6 +1572,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     for (const claim of this.claims.values()) {
       if (claim.inflight !== undefined && !claim.inflight.settledDone) return true
       if (claim.commandOperation !== undefined) return true
+      if (claim.policyWrite !== undefined) return true
       if (claim.retiringTurn !== undefined) return true
       if (claim.unclaimedHostObligation !== undefined) return true
       if (claim.mcpMountPending === true || claim.mcpLease !== undefined) return true
@@ -1571,12 +1708,338 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * The ONE `session/set_config_option` entry of an attached View.
+   *
+   * The standard request shape decides exactly one authority: `mode` and the
+   * negotiated `agent_team` boolean go to the official session policy, while
+   * `model`/`thought_level` keep the existing Session-only official model path.
+   * Every other id/type/value is refused before any Host call. The reply is the
+   * complete current config list (mode/Team rows included), never a partial
+   * model subset.
+   */
+  async setConfigOption(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    request: AcpSetConfigOptionParams,
+    signal: AbortSignal,
+  ): Promise<SessionConfigOption[]> {
+    if (request.configId === ACP_MODE_CONFIG_ID) {
+      const mode = request.type === undefined ? modeOfWireId(request.value) : undefined
+      if (mode === undefined) throw policyViewError(invalidPolicyOption('the requested session mode is not selectable'))
+      const claim = this.attachedClaim(state, request.sessionId)
+      await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
+      return await this.readConfigReply(claim, access)
+    }
+    if (request.configId === ACP_AGENT_TEAM_CONFIG_ID) {
+      const claim = this.attachedClaim(state, request.sessionId)
+      if (claim.capabilities?.booleanConfigOptions !== true) {
+        throw policyViewError(invalidPolicyOption('this connection did not negotiate boolean session config options'))
+      }
+      if (request.type !== 'boolean' || typeof request.value !== 'boolean') {
+        throw policyViewError(invalidPolicyOption('the requested Agent Team option requires a boolean value'))
+      }
+      const enabled = request.value
+      await this.performPolicyWrite(claim, access, { kind: 'agent-team', enabled }, signal)
+      return await this.readConfigReply(claim, access)
+    }
+    if (request.configId === 'model' || request.configId === 'thought_level') {
+      const claim = this.attachedClaim(state, request.sessionId)
+      await this.setModelOnly(state, access, request, signal)
+      // A same-value write emits no Session event and changes no projection, so
+      // it neither needs nor may race a config notification ahead of its reply.
+      // A real model/selection event owns the post-write refresh. The reply is
+      // ONE fenced full cut after the model terminal.
+      return await this.readConfigReply(claim, access)
+    }
+    throw policyViewError(invalidPolicyOption('unknown session config option'))
+  }
+
+  /**
+   * The legacy `session/set_mode` entry. It is admitted ONLY for a View that
+   * actually received the legacy `modes` list at attach; a View that never did
+   * must re-attach before using this method (the `mode` config row remains
+   * available on the same authority). The standard response is an empty object.
+   */
+  async setMode(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    sessionId: string,
+    modeId: string,
+    signal: AbortSignal,
+  ): Promise<Record<string, never>> {
+    const claim = this.attachedClaim(state, sessionId)
+    if (claim.legacyModeAnnounced !== true) {
+      throw policyViewError(invalidPolicyOption('this session view was not offered the legacy mode list'))
+    }
+    const mode = modeOfWireId(modeId)
+    if (mode === undefined) throw policyViewError(invalidPolicyOption('the requested session mode is not selectable'))
+    await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
+    return {}
+  }
+
+  /**
+   * Read the initial complete config state of one JUST-attached View. The
+   * legacy `modes` list and the `mode` config row come from the SAME policy cut
+   * (read after the model-catalog await); an optional model-catalog failure
+   * omits `configOptions` but keeps the legacy mode list. The delivered legacy
+   * list fact is recorded only AFTER this exact claim proved current.
+   */
+  async sessionConfigState(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    sessionId: string,
+  ): Promise<AcpSessionConfigSnapshot> {
+    const claim = this.attachedClaim(state, sessionId)
+    const cut = await this.readConfigSnapshotFenced(claim, access, 'attach')
+    const snapshot = cut.snapshot
+    claim.legacyModeAnnounced = snapshot.modes !== undefined
+    claim.lastLegacyMode = snapshot.mode
+    // `configReady` is the response-submission boundary, not snapshot
+    // acquisition. Keep it false until the one scheduled task runs, so no
+    // invalidation arriving in between can start a notification ahead of the
+    // attach response. The task always runs, even for a currently clean cut.
+    claim.configReady = false
+    if (snapshot.configOptions === undefined) claim.configDirty = true
+    setImmediate(() => {
+      if (this.claims.get(claim.sessionId) !== claim) return
+      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
+      claim.configReady = true
+      if (claim.configDirty === true) this.enqueueConfigUpdate(claim)
+    })
+    return snapshot
+  }
+
+  private async performPolicyWrite(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    request: AcpSessionPolicyRequest,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.assertPolicyAdmission(claim)
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    const epoch = claim.configEpoch ?? 0
+    const completion = Promise.withResolvers<void>()
+    claim.policyWrite = completion.promise
+    const stillCurrent = (): 'current' | 'stale' => {
+      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return 'stale'
+      if (this.claims.get(claim.sessionId) !== claim) return 'stale'
+      if (claim.exactAgent !== agent || claim.exactSession !== session) return 'stale'
+      if (claim.inflight !== undefined || claim.commandOperation !== undefined
+        || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+        || claim.closing !== undefined || claim.replay !== undefined
+        || claim.mcpMountPending === true || claim.mcpRetireRequested === true) return 'stale'
+      return 'current'
+    }
+    try {
+      await this.callPolicyAccess(() => access.selectSessionPolicy(agent, session, request, signal, stillCurrent))
+    } finally {
+      // The official call's own settlement (or its definite pre-call refusal)
+      // is the ONLY terminal; the slot never outlives it.
+      if (claim.policyWrite === completion.promise) claim.policyWrite = undefined
+      completion.resolve()
+      this.notifyWorkSettled()
+      // Even a failed/indeterminate write may have committed. The write's own
+      // `plan/mode`/`team/mode` event already invalidated the config when it
+      // did; only an event-less terminal asks for the extra refresh here.
+      if ((claim.configEpoch ?? 0) === epoch) this.enqueueConfigUpdate(claim)
+    }
+  }
+
+  /** Refuse one policy write while this View owns ANY other Host obligation. */
+  private assertPolicyAdmission(claim: ViewClaim): void {
+    if (claim.inflight !== undefined || claim.commandOperation !== undefined
+      || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+      || claim.closing !== undefined || claim.replay !== undefined
+      || claim.mcpMountPending === true || claim.mcpRetireRequested === true
+      || claim.policyWrite !== undefined) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_CONFIG_VIEW_BUSY',
+        'this session view already owns unsettled work',
+        -32046,
+      )
+    }
+  }
+
+  /** The strict complete post-write reply; a partial list is never returned. */
+  private async readConfigReply(claim: ViewClaim, access: HostAcpSessionAccess): Promise<SessionConfigOption[]> {
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    // ONE bounded retry total: readConfigSnapshotFenced already retries once
+    // on an epoch change. This is only the final identity/epoch boundary.
+    const cut = await this.readConfigSnapshotFenced(claim, access, 'reply')
+    if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+      throw readbackUnavailablePolicyView()
+    }
+    if (cut.epoch !== (claim.configEpoch ?? 0) || cut.snapshot.configOptions === undefined) {
+      throw readbackUnavailablePolicyView()
+    }
+    // Only a successfully validated complete reply cut reaches this narrow
+    // submission barrier. It never spans provider/maintenance I/O: an unsent
+    // config frame that hits it retains dirty and reschedules on the same task
+    // boundary after the resolved response is enqueued.
+    claim.configReplyBarrier = (claim.configReplyBarrier ?? 0) + 1
+    setImmediate(() => {
+      const remaining = (claim.configReplyBarrier ?? 1) - 1
+      claim.configReplyBarrier = remaining
+      if (remaining <= 0 && claim.configDirty === true) this.enqueueConfigUpdate(claim)
+    })
+    return [...cut.snapshot.configOptions]
+  }
+
+  /**
+   * One config cut under the claim's invalidation generation, retried at most
+   * once. `attach` may omit an optional display caused by a genuine model or
+   * policy unavailability; `refresh` and `reply` never return a partial list.
+   * The final attach fallback re-checks the exact View identity and never
+   * performs an unfenced read.
+   */
+  private async readConfigSnapshotFenced(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    mode: AcpConfigCutMode,
+  ): Promise<AcpConfigCut> {
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const epoch = claim.configEpoch ?? 0
+      const snapshot = await this.readConfigSnapshot(claim, access, mode)
+      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+        if (mode === 'reply') throw readbackUnavailablePolicyView()
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_CONFIG_STALE',
+          'the attached session changed during the config read',
+          -32042,
+        )
+      }
+      if ((claim.configEpoch ?? 0) === epoch) return { snapshot, epoch }
+    }
+    if (mode === 'attach') {
+      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_CONFIG_STALE',
+          'the attached session changed during the config read',
+          -32042,
+        )
+      }
+      // No read here: a still-moving cut cannot prove even the policy display.
+      return { snapshot: { omitted: 'policy' }, epoch: claim.configEpoch ?? 0 }
+    }
+    throw readbackUnavailablePolicyView()
+  }
+
+  /**
+   * One config cut: read the model options first (provider I/O outside any
+   * maintenance), then ONE policy snapshot after that await. A failed policy
+   * read is not an absence; only the official UNAVAILABLE classification may
+   * omit the optional attach display, and a live refresh keeps the previously
+   * delivered list instead of sending a partial replacement.
+   */
+  private async readConfigSnapshot(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    mode: AcpConfigCutMode,
+  ): Promise<AcpSessionConfigSnapshot> {
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    let modelOptions: SessionConfigOption[] | undefined
+    try {
+      modelOptions = await this.callModelAccess(() => access.modelOptions(agent, session))
+    } catch (error) {
+      if (mode === 'reply') {
+        throw readbackUnavailablePolicyView()
+      }
+      if (mode === 'refresh') {
+        // The model list may be temporarily unavailable; the legacy mode fact
+        // is independent and must still be deliverable. The full list is not.
+        modelOptions = undefined
+      } else if (error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MODEL_UNAVAILABLE') {
+        modelOptions = undefined
+      } else {
+        throw error
+      }
+    }
+    if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+      if (mode === 'reply') throw readbackUnavailablePolicyView()
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_CONFIG_STALE',
+        'the attached session changed during the config read',
+        -32042,
+      )
+    }
+    let policy: AcpSessionPolicyState
+    try {
+      policy = access.readSessionPolicy(agent, session)
+    } catch (error) {
+      if (mode === 'attach') {
+        if (error instanceof AcpSessionPolicyError && error.code === 'LOCAL_ACP_CONFIG_UNAVAILABLE') {
+          this.diag.warn('local-acp.config.policy-unavailable', { code: error.code })
+          // The aggregate read may have failed on the Team row while the
+          // legacy mode is independently readable. Announce that real mode;
+          // never manufacture the missing full list.
+          try {
+            const narrowMode = access.readSessionMode(agent, session)
+            if (narrowMode !== undefined) {
+              return {
+                mode: narrowMode,
+                modes: sessionModeStateOf({ mode: narrowMode }),
+                omitted: 'policy',
+              }
+            }
+          } catch (narrowError) {
+            if (narrowError instanceof AcpSessionPolicyError
+              && narrowError.code === 'LOCAL_ACP_CONFIG_UNAVAILABLE') {
+              return { omitted: 'policy' }
+            }
+            if (narrowError instanceof AcpSessionPolicyError) throw policyViewError(narrowError)
+            throw narrowError
+          }
+          return { omitted: 'policy' }
+        }
+        if (error instanceof AcpSessionPolicyError) throw policyViewError(error)
+        throw error
+      }
+      throw readbackUnavailablePolicyView()
+    }
+    const booleanSupported = claim.capabilities?.booleanConfigOptions === true
+    const modeRow = modeConfigOptionOf(policy)
+    const teamRow = agentTeamConfigOptionOf(policy, booleanSupported)
+    const modes = sessionModeStateOf(policy)
+    if (modelOptions === undefined) {
+      return {
+        ...(policy.mode === undefined ? {} : { mode: policy.mode }),
+        ...(policy.agentTeam === undefined ? {} : { agentTeam: policy.agentTeam }),
+        modes,
+        omitted: 'model',
+      }
+    }
+    return {
+      ...(policy.mode === undefined ? {} : { mode: policy.mode }),
+      ...(policy.agentTeam === undefined ? {} : { agentTeam: policy.agentTeam }),
+      modes,
+      configOptions: [...modelOptions, ...modeRow === undefined ? [] : [modeRow], ...teamRow === undefined ? [] : [teamRow]],
+    }
+  }
+
+  /** Map one official policy rejection onto the existing View error boundary. */
+  private async callPolicyAccess<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation()
+    } catch (error) {
+      if (error instanceof AcpSessionPolicyError) {
+        throw new LocalAcpViewError(error.code, error.message, error.rpcCode)
+      }
+      throw error
+    }
+  }
+
+  /**
    * Commit ONE Session-only model/effort selection on the EXACT attached View.
    * A View with any unsettled prompt obligation is refused before the Host
    * service is reached; the Host service re-checks the exact Agent/Session
    * identity and the View claim after every asynchronous validation step.
    */
-  async setModelOption(
+  private async setModelOnly(
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
     request: AcpSetConfigOptionParams,
@@ -1585,7 +2048,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const claim = this.attachedClaim(state, request.sessionId)
     if (claim.inflight !== undefined || claim.commandOperation !== undefined
       || claim.unclaimedHostObligation !== undefined
-      || claim.closing !== undefined
+      || claim.closing !== undefined || claim.policyWrite !== undefined
       || claim.mcpMountPending === true || claim.mcpRetireRequested === true) {
       throw new LocalAcpViewError(
         'LOCAL_ACP_MODEL_VIEW_BUSY',
@@ -1599,6 +2062,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (!this.isStillAttached(state, claim, agent, session)) return 'stale'
       if (claim.inflight !== undefined || claim.commandOperation !== undefined
         || claim.unclaimedHostObligation !== undefined || claim.closing !== undefined
+        || claim.policyWrite !== undefined
         || claim.mcpMountPending === true || claim.mcpRetireRequested === true) return 'view-busy'
       return 'current'
     }
@@ -1613,15 +2077,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       signal,
       stillCurrent,
     ))
-    const currentness = stillCurrent()
-    if (currentness === 'view-busy') {
-      throw new LocalAcpViewError(
-        'LOCAL_ACP_MODEL_VIEW_BUSY',
-        'a prompt is already in flight for this session view',
-        -32046,
-      )
-    }
-    if (currentness !== 'current') throw staleModelSelection()
+    // A completed model terminal is not retroactively refused because an
+    // unrelated policy slot appeared after it. Only a lost View identity makes
+    // the committed readback undeliverable.
+    if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
     return options
   }
 
@@ -2375,6 +2834,15 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * One retained-composition invalidation (`tools/change`): every attached
+   * claim re-reads the real mode/Team availability instead of trusting the
+   * previously projected rows.
+   */
+  onPolicyAvailabilityInvalidated(): void {
+    for (const claim of this.claims.values()) this.invalidateConfig(claim)
+  }
+
+  /**
    * Start (or coalesce) the ONE catalog read owner of this claim. A read never
    * crosses an attach/replay barrier, never cancels command execution and is
    * abandoned by the claim's existing `readAbort` lifetime.
@@ -2777,6 +3245,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // releases after the MCP responsibility is gone.
       if (claim.connectionIdentity.phase === 'attached' && !claim.detachedWithFence) return
       if (claim.inflight !== undefined || claim.commandOperation !== undefined
+        || claim.policyWrite !== undefined
         || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined) {
         claim.detachedWithFence = true
         this.notifyWorkSettled()
@@ -2820,6 +3289,26 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // settlement proof and must not lock the retry (v1.1 §5.B.3).
     const inFlightAttempt = claim.closing
     if (inFlightAttempt !== undefined) return await inFlightAttempt
+    if (claim.policyWrite !== undefined) {
+      // A policy write is terminal work: commit the singleflight close slot
+      // BEFORE stopping delivery, never cancel the Host write, and await its
+      // captured real terminal. A repeated close joins the SAME attempt.
+      const deferred = Promise.withResolvers<Record<string, never>>()
+      claim.closing = deferred.promise
+      claim.notifyConfigUpdate = undefined
+      runDetached('local acp: policy close', async () => {
+        try {
+          deferred.resolve(await this.closeClaim(state, sessionId, claim, access))
+        } catch (error) {
+          deferred.reject(error)
+        }
+      }, { diag: this.diag })
+      try {
+        return await deferred.promise
+      } finally {
+        if (claim.closing === deferred.promise) claim.closing = undefined
+      }
+    }
     if (claim.commandOperation !== undefined) {
       // Commit the singleflight attempt BEFORE any cancellation callback can
       // re-enter close. The command's exact execution terminal is then awaited
@@ -2861,6 +3350,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim: ViewClaim,
     access: HostAcpSessionAccess,
   ): Promise<Record<string, never>> {
+    // A policy write owns the Host maintenance window until its ORIGINAL call
+    // settles. Close never cancels it; it waits for the captured terminal and
+    // only then evaluates the remaining obligations.
+    const policy = claim.policyWrite
+    if (policy !== undefined) {
+      claim.notifyConfigUpdate = undefined
+      await policy
+    }
     const command = claim.commandOperation
     if (command !== undefined) {
       // Close delivery first, record the exact cancellation intent, and wait
@@ -2965,6 +3462,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (!claim.detachedWithFence) return
     if (claim.inflight !== undefined) return
     if (claim.commandOperation !== undefined) return
+    if (claim.policyWrite !== undefined) return
     if (claim.retiringTurn !== undefined) return
     if (claim.unclaimedHostObligation !== undefined) return
     if (claim.mcpMountPending === true || claim.mcpLease !== undefined) return
@@ -2975,7 +3473,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private finishClose(state: ConnectionViewState, sessionId: string, claim: ViewClaim): Record<string, never> {
     if (this.claims.get(sessionId) !== claim || claim.detachedWithFence || state.phase === 'closed') return {}
     // A closed View owns no connection output or reverse Form any more.
-    claim.notifyConfigOptions = undefined
+    claim.notifyConfigUpdate = undefined
     // The read-only projection sink dies with the detach: a queued projection
     // is dropped and a still-open load replay is invalidated here.
     this.stopProjectionOutput(claim)
@@ -2986,6 +3484,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // ACP-owned turn can never be delegated to the TUI and a late insertion is
     // still observed. A claim with no such fact is released now.
     if (claim.retiringTurn !== undefined || claim.commandOperation !== undefined
+      || claim.policyWrite !== undefined
       || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
     } else if (this.claims.get(sessionId) === claim) {
@@ -3557,9 +4056,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       )
     }
     if (claim.inflight !== undefined || claim.commandOperation !== undefined
+      || claim.policyWrite !== undefined
       || claim.unclaimedHostObligation !== undefined || claim.closing !== undefined) {
-      // A previous accepted Prompt/command still owes a Host terminal fact: the
-      // View must not stack a second Host responsibility on top of it.
+      // A previous accepted Prompt/command/policy write still owes a Host
+      // terminal fact: the View must not stack a second responsibility on it.
       throw promptError('LOCAL_ACP_PROMPT_IN_FLIGHT', 'a prompt is already in flight for this session view', JSONRPC_INVALID_PARAMS)
     }
     const content = validatePromptContent(request.prompt, imageEnabled)
@@ -4003,12 +4503,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (event.type === 'working-directory/change' || event.type === 'agent-preset/selected') {
         this.invalidateCatalog(claim)
       }
-      // A committed model/selection record is the ONLY config-update trigger.
-      // It re-reads the Host authority asynchronously; the per-claim chain and
-      // the post-read identity checks keep a late result from replacing a
-      // newer View's state.
-      if (event.type === 'model/selection' && claim.notifyConfigOptions !== undefined) {
-        this.enqueueConfigNotification(claim, session)
+      // Every committed source that can change the session policy/config
+      // projection re-reads the authority on this claim's single ordered
+      // notification chain. The EVENT payload is never the new ACP state.
+      if (event.type === 'model/selection' || event.type === 'plan/mode'
+        || event.type === 'team/mode' || event.type === 'team/task'
+        || event.type === 'agent-preset/selected') {
+        this.invalidateConfig(claim)
       }
       // The read-only projection branch is INDEPENDENT of any prompt flight: a
       // TUI/Goal turn's plan, title, usage, compaction and agent message are
@@ -4595,40 +5096,134 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
-   * Queue ONE full-option refresh on the claim's ordered notification chain.
-   * The chain is transient and per claim: a close/re-bind/teardown clears the
-   * callback, a late catalog read never reaches a newer View, and a delivery
-   * failure retires only this callback instead of becoming a Host failure.
+   * Invalidate the config projection of one claim and coalesce a refresh on its
+   * single ordered notification chain. The chain is transient and per claim: a
+   * close/re-bind/teardown clears the callback, a late read never reaches a
+   * newer View, and a delivery failure retires only this callback.
    */
-  private enqueueConfigNotification(claim: ViewClaim, session: object): void {
-    const notify = claim.notifyConfigOptions
-    const agent = claim.exactAgent
-    if (notify === undefined || agent === undefined) return
+  private invalidateConfig(claim: ViewClaim): void {
+    claim.configEpoch = (claim.configEpoch ?? 0) + 1
+    this.enqueueConfigUpdate(claim)
+  }
+
+  private enqueueConfigUpdate(claim: ViewClaim): void {
+    if (claim.notifyConfigUpdate === undefined) return
+    claim.configDirty = true
+    // No frame may precede the initial attach snapshot, and a load replay owns
+    // the ordered output until its canonical history drained: keep the dirty
+    // bit and start on the real initial/replay terminal.
+    if ((claim.configReplyBarrier ?? 0) > 0) return
+    if (claim.configReady !== true || claim.replay !== undefined) return
+    if (claim.configRefreshRunning === true) return
+    claim.configRefreshRunning = true
     const previous = claim.configNotifyTail ?? Promise.resolve()
     const next = previous.then(async () => {
-      if (claim.notifyConfigOptions !== notify) return
-      if (this.claims.get(claim.sessionId) !== claim || claim.exactSession !== session || claim.exactAgent !== agent) return
-      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
-      const access = this.access
-      if (access === undefined) return
-      let options: SessionConfigOption[]
       try {
-        options = await access.modelOptions(agent, session)
-      } catch {
-        return
-      }
-      if (claim.notifyConfigOptions !== notify) return
-      if (this.claims.get(claim.sessionId) !== claim || claim.exactSession !== session || claim.exactAgent !== agent) return
-      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
-      try {
-        await notify(claim.sessionId, options)
-      } catch {
-        // A closed transport only ends this transient capability; the Host,
-        // Agent and Session keep their own lifecycle and authority.
-        claim.notifyConfigOptions = undefined
+        // Bounded coalescing: a still-moving authority is left to the NEXT real
+        // invalidation instead of an unbounded read loop.
+        for (let pass = 0; claim.configDirty === true && pass < 2; pass++) {
+          claim.configDirty = false
+          if (!this.configSinkCurrent(claim)) return
+          await this.refreshConfig(claim)
+        }
+      } finally {
+        claim.configRefreshRunning = false
+        // An invalidation that arrived during the LAST awaited read/send is
+        // still authoritative: never clear it, and never leave it without a
+        // next ordered pass. A non-current sink is a no-op in enqueue.
+        if (claim.configDirty === true) this.enqueueConfigUpdate(claim)
       }
     }).catch(() => {})
     claim.configNotifyTail = next
+  }
+
+  /** Whether this claim still owns a live config notification sink. */
+  private configSinkCurrent(claim: ViewClaim): boolean {
+    return claim.notifyConfigUpdate !== undefined
+      && this.claims.get(claim.sessionId) === claim
+      && claim.connectionIdentity.phase === 'attached'
+      && !claim.detachedWithFence
+      && claim.configReady === true
+      && claim.replay === undefined
+      && claim.exactAgent !== undefined
+      && claim.exactSession !== undefined
+  }
+
+  /**
+   * ONE complete notification refresh: the legacy mode change first (it never
+   * depends on the model catalog), then the full fixed-order config list.
+   * A model-catalog failure keeps the previously delivered list; a newer
+   * invalidation makes this read stale instead of overwriting it.
+   */
+  private async refreshConfig(claim: ViewClaim): Promise<void> {
+    const access = this.access
+    const agent = claim.exactAgent
+    const session = claim.exactSession
+    const notify = claim.notifyConfigUpdate
+    if (access === undefined || agent === undefined || session === undefined || notify === undefined) return
+    if (claim.configReady !== true || claim.replay !== undefined) return
+    // The legacy committed mode is independent of the model catalog and the
+    // unrelated Team projection: read and deliver it BEFORE provider I/O.
+    if (claim.legacyModeAnnounced === true) {
+      try {
+        const mode = access.readSessionMode(agent, session)
+        if (mode !== undefined && claim.lastLegacyMode !== mode) {
+          if (!await this.sendConfigUpdate(claim, notify, claim.configEpoch ?? 0, {
+            kind: 'mode', currentModeId: wireModeId(mode),
+          })) return
+          claim.lastLegacyMode = mode
+        }
+      } catch {
+        // A narrow mode read failure leaves the full cut to retry/recover; it
+        // never fabricates absence or blocks a readable mode on a later event.
+      }
+    }
+    let cut: AcpConfigCut
+    try {
+      cut = await this.readConfigSnapshotFenced(claim, access, 'refresh')
+    } catch {
+      // A live failed/unstable read never replaces a delivered list. Keep the
+      // last complete projection; a later real invalidation retries.
+      return
+    }
+    const { snapshot, epoch } = cut
+    if (!this.configSinkCurrent(claim) || claim.notifyConfigUpdate !== notify) return
+    // A mode change is delivered BEFORE the full list on the same ordered chain.
+    if (claim.legacyModeAnnounced === true && snapshot.mode !== undefined && claim.lastLegacyMode !== snapshot.mode) {
+      if (!await this.sendConfigUpdate(claim, notify, epoch, { kind: 'mode', currentModeId: wireModeId(snapshot.mode) })) return
+      claim.lastLegacyMode = snapshot.mode
+    }
+    if (snapshot.configOptions === undefined) return
+    await this.sendConfigUpdate(claim, notify, epoch, {
+      kind: 'config',
+      configOptions: [...snapshot.configOptions],
+    })
+  }
+
+  /**
+   * One wire send on the claim's own sink. The exact claim, current epoch and
+   * bound sink are re-checked immediately before submission; a cut invalidated
+   * by a close/replacement/newer event is discarded (never a stale frame).
+   */
+  private async sendConfigUpdate(
+    claim: ViewClaim,
+    notify: AcpConfigUpdateNotifier,
+    epoch: number,
+    update: AcpConfigUpdate,
+  ): Promise<boolean> {
+    if (!this.configSinkCurrent(claim) || claim.notifyConfigUpdate !== notify
+      || (claim.configEpoch ?? 0) !== epoch) return false
+    if ((claim.configReplyBarrier ?? 0) > 0) {
+      claim.configDirty = true
+      return false
+    }
+    try {
+      await notify(claim.sessionId, update)
+      return true
+    } catch {
+      if (claim.notifyConfigUpdate === notify) claim.notifyConfigUpdate = undefined
+      return false
+    }
   }
 
   /**
@@ -4686,6 +5281,29 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // reverse Form of this claim and its read-only projection end here.
       this.stopProjectionOutput(claim)
       this.releaseQuestionForms(claim)
+      const policy = claim.policyWrite
+      if (policy !== undefined) {
+        // The official policy call is still the terminal, even when the Agent
+        // was disposed: wait for that exact settlement, never fabricate it.
+        claim.notifyConfigUpdate = undefined
+        claim.detachedWithFence = true
+        if (claim.connectionIdentity.phase !== 'closed') claim.connectionIdentity.phase = 'idle'
+        runDetached('local acp: disposed policy terminal', async () => {
+          await policy
+          if (this.claims.get(claim.sessionId) !== claim) return
+          if (claim.mcpLease !== undefined && this.access !== undefined) this.requestMcpRetire(claim, this.access)
+          if (claim.policyWrite !== undefined || claim.commandOperation !== undefined || claim.inflight !== undefined
+            || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+            || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
+            claim.detachedWithFence = true
+            this.notifyWorkSettled()
+            return
+          }
+          this.claims.delete(claim.sessionId)
+          this.notifyWorkSettled()
+        }, { diag: this.diag })
+        continue
+      }
       const command = claim.commandOperation
       if (command !== undefined) {
         // The disposed Agent's own cancellation is an INDEPENDENT Host signal;
@@ -4702,6 +5320,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           if (this.claims.get(claim.sessionId) !== claim) return
           if (claim.mcpLease !== undefined && this.access !== undefined) this.requestMcpRetire(claim, this.access)
           if (claim.commandOperation !== undefined || claim.inflight !== undefined
+            || claim.policyWrite !== undefined
             || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
             || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
             claim.detachedWithFence = true
@@ -4898,7 +5517,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       // read-only projection immediately, even when the claim survives for a
       // fence fact. The Host's own durable `userQuestions` projection is never
       // touched.
-      claim.notifyConfigOptions = undefined
+      claim.notifyConfigUpdate = undefined
       this.stopProjectionOutput(claim)
       this.releaseQuestionForms(claim)
       const bound = access ?? this.access
@@ -4909,6 +5528,28 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         claim.mcpRetireRequested = true
         claim.mcpMountAbort?.abort()
         claim.detachedWithFence = true
+        continue
+      }
+      const policy = claim.policyWrite
+      if (policy !== undefined) {
+        // A transport close is not a policy-write cancellation: keep the exact
+        // claim fenced until the original official call reaches its terminal,
+        // then retire the scoped lease and release only proven work.
+        claim.detachedWithFence = true
+        runDetached('local acp: policy disconnect', async () => {
+          await policy
+          if (this.claims.get(sessionId) !== claim) return
+          if (claim.mcpLease !== undefined && bound !== undefined) this.requestMcpRetire(claim, bound)
+          if (claim.policyWrite !== undefined || claim.commandOperation !== undefined || claim.inflight !== undefined
+            || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+            || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
+            claim.detachedWithFence = true
+            this.notifyWorkSettled()
+            return
+          }
+          this.claims.delete(sessionId)
+          this.notifyWorkSettled()
+        }, { diag: this.diag })
         continue
       }
       const command = claim.commandOperation
@@ -4926,6 +5567,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
             this.requestMcpRetire(claim, bound)
           }
           if (claim.commandOperation !== undefined || claim.inflight !== undefined
+            || claim.policyWrite !== undefined
             || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
             || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
             claim.detachedWithFence = true
@@ -4966,6 +5608,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           // claim then survives for that terminal fact alone and dies at it,
           // never leaking the approval and never faking a settled detach.
           if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+            || claim.policyWrite !== undefined
             || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
             claim.detachedWithFence = true
             this.notifyWorkSettled()
@@ -4990,6 +5633,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         }
       }
       if (claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+        || claim.policyWrite !== undefined
         || claim.mcpLease !== undefined) {
         claim.detachedWithFence = true
         continue
@@ -5018,7 +5662,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    */
   private releaseClaimIfUnfenced(sessionId: string, claim: ViewClaim): void {
     if (claim.retiringTurn !== undefined || claim.commandOperation !== undefined
-      || claim.unclaimedHostObligation !== undefined
+      || claim.unclaimedHostObligation !== undefined || claim.policyWrite !== undefined
       || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
       // The fence/obligation survives for its own facts; the claim dies with it.
       claim.detachedWithFence = true
@@ -5032,7 +5676,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** Release one disconnect claim after its flight settled. */
   private releaseClaimAfterDisconnect(sessionId: string, claim: ViewClaim): void {
-    if (claim.commandOperation !== undefined
+    if (claim.commandOperation !== undefined || claim.policyWrite !== undefined
       || claim.mcpLease !== undefined || claim.mcpMountPending === true) {
       claim.detachedWithFence = true
       this.notifyWorkSettled()
@@ -5163,7 +5807,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // View becomes attached, so no model/selection event, owned question or
     // read-only projection can slip between attach and wiring. The negotiated
     // capabilities were frozen at `initialize`, never re-read per attach.
-    claim.notifyConfigOptions = channels?.notifyConfigOptions
+    claim.notifyConfigUpdate = channels?.notifyConfigUpdate
     claim.requestElicitation = channels?.requestElicitation
     claim.notifyProjection = channels?.notifyProjection
     claim.capabilities = channels?.capabilities
@@ -5171,6 +5815,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // scheduled after the attach/load barrier, never from a previous claim.
     claim.catalogEpoch = 0
     claim.catalogDirty = claim.notifyProjection !== undefined
+    // Config state is fresh per View: no previous claim's delivered list or
+    // legacy mode id may leak into this one.
+    claim.configEpoch = 0
+    claim.configDirty = false
+    claim.configRefreshRunning = false
+    claim.configReady = false
+    claim.legacyModeAnnounced = false
+    claim.lastLegacyMode = undefined
   }
 
   /**
@@ -5180,7 +5832,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * a stale operation's late release must not delete the newer claim.
    */
   private releaseReservation(state: ConnectionViewState, claim: ViewClaim): void {
-    if (claim.commandOperation !== undefined
+    if (claim.commandOperation !== undefined || claim.policyWrite !== undefined
       || claim.mcpMountPending === true || claim.mcpLease !== undefined) {
       claim.detachedWithFence = true
       this.notifyWorkSettled()
@@ -5764,6 +6416,7 @@ const NO_PROJECTION_CAPABILITIES: AcpNegotiatedCapabilities = {
   compaction: false,
   subagents: false,
   notices: false,
+  booleanConfigOptions: false,
 }
 
 /** The bounded load replay window could not hold every live event. */
