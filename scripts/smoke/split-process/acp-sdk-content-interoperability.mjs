@@ -442,6 +442,12 @@ async function runScene(context, kind, env, operation, prime) {
     requireFact(isDeepStrictEqual(
       Object.keys(resumed ?? {}).filter(key => key !== 'configOptions' && key !== 'modes'), []),
     `resume must not carry a business payload beyond its connection config (got ${JSON.stringify(resumed)})`)
+    // The attach may emit its connection-local read-only projections
+    // (catalog/capacity/etc.) before the first prompt. Account them here and
+    // prove none of them is content output.
+    const attachProjection = sdk.finishWindow(0, sdk.updates.length, sessionId)
+    requireFact(attachProjection.every(params => READ_ONLY_PROJECTION_KINDS.has(params.update.sessionUpdate)),
+      `resume emits only read-only projections before a prompt (got ${JSON.stringify(attachProjection.map(params => params.update.sessionUpdate))})`)
     const session = { context, scene, sdk, sessionId, workRoot, identity, workspace, primed }
     result = await operation(session)
     sdk.assertWindow()
