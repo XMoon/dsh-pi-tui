@@ -771,8 +771,11 @@ held across the target's reclaim, then released to continue its own business
 path and finalize. A checkpoint reached without an external signal fails; an
 unrun window is `NOT_RUN`, never a pass.
 
-The three public windows bind the cold installed-public positive test. The
-`public-daemon-before-registry` hold is after the detached Host/CLI/Client are
+The two positive public windows bind the cold installed-public positive test
+(`starts one real public daemon Client and Host from the installed CLI`);
+`public-daemon-ownership-refused` binds the separate negative test
+(`refuses an unproven public Host ownership signal and compensates truthfully`).
+The `public-daemon-before-registry` hold is after the detached Host/CLI/Client are
 real but before the product registry is published; the external probe waits for
 the real `instance.json`/`launch.json` to appear after the Worker SIGKILL and
 only then releases cleanup, so the Supervisor must verify and authenticate that
