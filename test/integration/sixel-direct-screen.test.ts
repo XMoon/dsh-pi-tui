@@ -718,7 +718,7 @@ test('a shared graphics probe is drained, never used as the Auto palette decisio
     // The fixture holds every OSC 11 reply: the Direct SIXEL readiness probe is
     // therefore already in flight (and owned by the graphics handle) when the
     // live report arrives.
-    const { terminal, app } = await startSixelApp(t, { holdBackgroundReplies: true })
+    const { terminal, app, store } = await startSixelApp(t, { holdBackgroundReplies: true })
     setTheme('dark')
     app.noteThemeSelection('auto')
     const applied: string[] = []
@@ -738,6 +738,28 @@ test('a shared graphics probe is drained, never used as the Auto palette decisio
     assert.equal(app.currentTheme(), 'dark', 'the real dark background keeps the dark palette')
     assert.equal(currentPalette, darkColors, 'and the installed palette is the dark family')
     assert.deepEqual(applied, [], 'the installed family was already dark: no spurious repaint')
+
+    // The graphics owner must still receive the REAL background after the shared
+    // probe was drained: a later report re-observes it, and a semi-transparent
+    // draft raster proves the encoder composited over #282c34 rather than the
+    // stale light answer.
+    terminal.writes.length = 0
+    terminal.sendInput('\x1b[?997;1n')
+    await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the graphics re-observation')
+    terminal.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07')
+    await until(() => terminal.writes.join('').split('\x1b]11;?').length - 1 >= 2,
+      'the app follow-up after the graphics re-observation')
+    terminal.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07')
+    await tick()
+    const png = await pngFromRgba(fill(8, 8, () => [34, 197, 94, 128]), 8, 8)
+    const image = store.add({ bytes: png, mediaType: 'image/png', width: 8, height: 8, name: 'blend.png' })
+    const beforeRaster = paintedRasters(terminal).length
+    terminal.sendInput(image.placeholder)
+    await until(() => paintedRasters(terminal).length > beforeRaster, 'the draft raster after the shared drain')
+    const decoded = decodeSixel(paintedRasters(terminal).at(-1)!)
+    const [cr, cg, cb] = pixelAt(decoded, 2, 2)
+    assert.ok(Math.abs(cr - 37) <= 12 && Math.abs(cg - 120) <= 16 && Math.abs(cb - 73) <= 12,
+      `the graphics encoder still blends over the real #282c34 background: ${cr},${cg},${cb}`)
   } finally {
     for (const key of ['NO_COLOR', 'FORCE_COLOR', 'CI', 'COLORFGBG'] as const) {
       const value = saved[key]

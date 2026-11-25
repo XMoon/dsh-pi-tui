@@ -4228,6 +4228,14 @@ export class TuiApp {
    * timeout, so it may never fall back to the environment.
    */
   private autoThemePresentationEpoch = 0
+  /**
+   * Whether a live SCREEN presentation actually owns the terminal input now.
+   * A surface that is merely not `stop()`ed may still have handed the PTY to a
+   * child (`$EDITOR`), or be between two screens of a hand-off: an observation
+   * may neither start nor commit in that window. The flag is cleared at every
+   * physical-loss seam and re-armed only by the hand-off completion point.
+   */
+  private autoThemePresentationReady = false
   /** The latest admitted observation demand (monotonic). Only the latest one
    *  is kept; a superseded flight drains and never commits. */
   private autoThemeDemandRevision = 0
@@ -6784,6 +6792,7 @@ export class TuiApp {
     this.disposed = true
     // No automatic observation survives the surface: the running flight's
     // disposed check refuses every commit, and the tenure/pending facts retire.
+    this.autoThemePresentationReady = false
     this.autoThemePresentationEpoch += 1
     this.autoThemeDemandRevision += 1
     this.autoThemePending = false
@@ -29334,8 +29343,14 @@ export class TuiApp {
    * demand means no lifecycle query.
    */
   private completeScreenHandoff(): void {
+    // The new presentation really owns the terminal again: only NOW may a parked
+    // observation be admitted/committed.
+    this.autoThemePresentationReady = true
     if (!this.autoThemeEligible()) {
-      if (!this.themeFollowsTerminal() || this.disposed) this.autoThemePending = false
+      if (this.disposed || !this.themeFollowsTerminal() || themeOptOut()) {
+        this.autoThemePending = false
+        this.autoThemePendingTrigger = undefined
+      }
       return
     }
     if (this.autoThemeFlight !== undefined) {
@@ -29947,7 +29962,8 @@ export class TuiApp {
    *  still follows the terminal, the environment did not opt out, and the surface
    *  actually owns a live presentation. */
   private autoThemeEligible(): boolean {
-    return !this.disposed && !this.surfaceStopped && this.themeFollowsTerminal() && !themeOptOut()
+    return !this.disposed && !this.surfaceStopped && this.autoThemePresentationReady
+      && this.themeFollowsTerminal() && !themeOptOut()
   }
 
   /** Register the ONE latest admitted demand. A superseded flight is detected by
@@ -29965,6 +29981,7 @@ export class TuiApp {
    *  released. It can never commit (a newer epoch), while the still-current
    *  demand is delivered at the hand-off completion point. */
   private invalidateAutoThemeObservation(): void {
+    this.autoThemePresentationReady = false
     this.autoThemePresentationEpoch += 1
     if (this.autoThemeTenure !== undefined) this.autoThemeTenure.hint = undefined
     if (this.autoThemeFlight !== undefined || this.autoThemePending) {
@@ -30000,8 +30017,12 @@ export class TuiApp {
    *  invoked synchronously so the owner slot is established before any await. */
   private startAutoThemeFlight(): Promise<void> {
     if (!this.autoThemeEligible()) {
-      this.autoThemePending = false
-      this.autoThemePendingTrigger = undefined
+      // A temporary presentation loss parks the still-valid demand; only a
+      // retired intent (manual/opt-out/dispose) discards it.
+      if (this.disposed || !this.themeFollowsTerminal() || themeOptOut()) {
+        this.autoThemePending = false
+        this.autoThemePendingTrigger = undefined
+      }
       return Promise.resolve()
     }
     const flight = {
@@ -30277,7 +30298,17 @@ export class TuiApp {
    * follow-ups use the app-owned task entry.
    */
   async autoDetectTheme(): Promise<void> {
-    if (!this.autoThemeEligible()) return
+    if (!this.autoThemeEligible()) {
+      // Park a real demand while the screen presentation is unavailable; the
+      // hand-off completion point delivers it exactly once. A retired intent is
+      // never revived.
+      if (!this.disposed && this.themeFollowsTerminal() && !themeOptOut()) {
+        this.autoThemeDemandRevision += 1
+        this.autoThemePendingTrigger = 'demand'
+        this.autoThemePending = true
+      }
+      return
+    }
     const running = this.autoThemeFlight
     if (running !== undefined && running.selectionRevision === this.themeSelectionRevision && !this.autoThemePending) {
       await this.autoThemeFlightPromise ?? Promise.resolve()

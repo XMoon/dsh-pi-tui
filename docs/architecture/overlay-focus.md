@@ -1092,9 +1092,11 @@ owns only the lease, focus and write-lifecycle mechanics.
   only supplies a fallback for a scheme-only terminal with no confirmed background, and a
   confirmed background is retained through a real query timeout. A released presentation
   (screen stop, Fullscreen/workspace hand-off, `$EDITOR` suspend) invalidates the
-  observation as a CANCELLATION — never a timeout or `COLORFGBG` fallback — and the
-  existing hand-off completion point re-samples once only while the demand is still
-  current. A shared SIXEL/Zellij per-screen probe is drained before the app's own sample;
+  observation as a CANCELLATION — never a timeout or `COLORFGBG` fallback. No
+  observation may start or commit while no live screen presentation owns the terminal
+  (`$EDITOR` owns the PTY during its dwell); the still-current demand is parked and the
+  existing hand-off completion point delivers it once on the screen that now owns the
+  terminal. A shared SIXEL/Zellij per-screen probe is drained before the app's own sample;
   its colour is never a theme decision. The runtime intent (`noteThemeSelection()`) is the
   admission fence, never the asynchronous document, and a deliberate selection commits
   its intent, Auto invalidation, tracking and plugin record BEFORE the theme observers run.

@@ -193,18 +193,25 @@ test('a live light report re-queries the real dark background and keeps the dark
 })
 
 test('a timeout after a confirmed background retains it instead of trusting a contradicting hint', async () => {
-  const h = mountThemeHarness()
-  h.boot()
-  h.vt.sendInput('\x1b]11;#111111\x07')
-  await settle(h.vt)
-  assert.equal(currentPalette, darkColors, 'precondition: a confirmed dark background')
-  h.vt.sendInput('\x1b[?997;2n') // contradicting hint, then a silent (timeout) observation
-  await settle(h.vt)
-  // The renewed observation really has to time out before the retention claim
-  // is observable; 1 s covers the production 800 ms deadline plus slack.
-  await new Promise<void>((resolve) => { setTimeout(resolve, 1000) })
-  assert.equal(currentPalette, darkColors,
-    'an unconfirmed hint may never override a confirmed background after a timeout')
+  const previous = process.env.COLORFGBG
+  process.env.COLORFGBG = '0;15' // would select LIGHT if the timeout fell back to env
+  try {
+    const h = mountThemeHarness()
+    h.boot()
+    h.vt.sendInput('\x1b]11;#111111\x07')
+    await settle(h.vt)
+    assert.equal(currentPalette, darkColors, 'precondition: a confirmed dark background')
+    h.vt.sendInput('\x1b[?997;2n') // contradicting hint, then a silent (timeout) observation
+    await settle(h.vt)
+    // The renewed observation really has to time out before the retention claim
+    // is observable; 1 s covers the production 800 ms deadline plus slack.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 1000) })
+    assert.equal(currentPalette, darkColors,
+      'an unconfirmed hint may never override a confirmed background after a timeout')
+  } finally {
+    if (previous === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = previous
+  }
 })
 
 test('a scheme-only Auto tenure (no confirmed background) follows its latest report after a timeout', async () => {
@@ -226,11 +233,16 @@ test('a scheme-only Auto tenure (no confirmed background) follows its latest rep
   }
 })
 
-test('a same-value report burst coalesces onto ONE committable observation and never flashes light', async () => {
+test('a same-value report burst uses the latest sample and never flashes light', async () => {
   const h = mountThemeHarness()
   h.boot()
   h.vt.sendInput('\x1b]11;#111111\x07')
   await settle(h.vt)
+  // A DISTINCT installed palette makes both failure modes observable: a stale
+  // commit shows light, and a dropped follow-up leaves this custom palette.
+  const custom = { ...darkColors, primary: '#123456' }
+  h.app.applyPalette(custom)
+  assert.equal(h.app.currentTheme(), 'custom', 'precondition: a non-builtin installed palette')
   const applied: string[] = []
   h.app.onThemeChanged(() => applied.push(h.app.currentTheme()))
   const before = h.writes.length
@@ -240,14 +252,17 @@ test('a same-value report burst coalesces onto ONE committable observation and n
   assert.equal(osc11Queries(h.writes.slice(before)), 1,
     'the burst shares ONE app-owned observation, not one query per report')
   // The SUPERSEDED flight answers LIGHT — the opposite of the final background.
-  // A stale-commit implementation would paint it; the follow-up sample below is
-  // the only answer that may decide the family.
+  // A stale-commit implementation would paint it.
   h.vt.sendInput('\x1b]11;#F5F5F5\x07')
   await settle(h.vt)
+  assert.equal(h.app.currentTheme(), 'custom', 'the superseded answer committed nothing')
+  assert.equal(osc11Queries(h.writes.slice(before)), 2,
+    'the follow-up observation is actually issued after the drain (a dropped demand leaves it at 1)')
   h.vt.sendInput('\x1b]11;#282A36\x07')
   await settle(h.vt)
-  assert.deepEqual(applied, [], 'no wrong light frame may be committed during the burst')
-  assert.equal(currentPalette, darkColors, 'the real background keeps the dark palette')
+  assert.deepEqual(applied, ['dark'], 'only the latest real sample commits the family')
+  assert.equal(h.app.currentTheme(), 'dark', 'the real dark background replaces the custom palette')
+  assert.equal(currentPalette, darkColors, 'and the installed palette is the dark family')
 })
 
 test('a manual override during a pending Auto observation wins over its late answer', async () => {
