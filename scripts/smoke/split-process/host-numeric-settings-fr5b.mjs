@@ -37,6 +37,18 @@ async function frameOf(client) {
   return (await client.viewport()).join('\n')
 }
 
+/** The DETAIL-column prose of one frame: a sentence that wraps inside the real
+ *  tenant width must still read as the same complete fact, without the sibling
+ *  Rows column interleaving its physical lines. */
+function detailColumnText(frame) {
+  const lines = frame.split('\n')
+  const header = lines.find(line => line.includes('Details'))
+  if (header === undefined) return frame.replace(/\s+/gu, ' ').trim()
+  const at = header.indexOf('Details')
+  const start = header[at - 1] === '[' ? at - 1 : at
+  return lines.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ').trim()
+}
+
 async function waitForText(client, text, label, timeoutMs = 90_000) {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
@@ -65,6 +77,17 @@ async function waitForNoPattern(client, pattern, label, timeoutMs = 30_000) {
     await sleep(120)
   }
   throw new SplitSmokeAssertionError(`${label}: still matched ${String(pattern)}; frame=${JSON.stringify(await client.viewport())}`)
+}
+
+async function waitForProfileAutoStart(installation, expected, label, timeoutMs = 30_000) {
+  const started = Date.now()
+  let last
+  while (Date.now() - started < timeoutMs) {
+    last = profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)
+    if (last?.autoStart === expected) return last
+    await sleep(100)
+  }
+  throw new SplitSmokeAssertionError(`${label}: ${WEB_PREFERENCE_NS}.autoStart never became ${expected}; last=${JSON.stringify(last)}`)
 }
 
 async function selectFrame(client, predicate, label, limit = 24) {
@@ -228,7 +251,7 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r')
     const disableRisk = await waitForText(clientA, 'Stop serving the Web UI?', 'FR5-B Web disable confirmation')
     assert(/Stop serving the Web UI\? Existing browser credentials and sessions are not revoked\./u
-      .test(disableRisk.replace(/\s+/gu, ' ')),
+      .test(detailColumnText(disableRisk)),
     `the exact disable risk must be painted whole: ${JSON.stringify(disableRisk)}`)
     clientA.send('\r') // Disable Web: the confirmation's own first focus
     await waitForPattern(clientA, /Serving\s+Disabled/u, 'FR5-B Web runtime disabled')
@@ -249,11 +272,17 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r')
     await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B Web confirm step')
     clientA.send('\r')
-    const webPreference = await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web preference verified')
+    // A settled write leaves the pending state; the persisted profile is the
+    // authoritative sink of the next-start preference (never the runtime
+    // Status word, which may still describe the earlier runtime toggle).
+    await waitForNoPattern(clientA, /Waiting for the answer…/u, 'FR5-B Web preference settlement', 60_000)
+    const savedPreference = await waitForProfileAutoStart(installation, false, 'FR5-B Web preference profile')
+    assert(savedPreference.autoStart === false, 'the Web page writes the SAME official preference field')
+    // Saving a Settings value may briefly recompose the Host profile; the final
+    // serving target must still be the running Host the runtime toggle left on.
+    const webPreference = await waitForPattern(clientA, /Serving\s+Enabled/u, 'FR5-B Web runtime unchanged by preference')
     assert(/Serving\s+Enabled/u.test(webPreference),
       `saving the next-start preference must not toggle the running Host: ${JSON.stringify(webPreference)}`)
-    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
-      'the Web page writes the SAME official preference field')
     trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true, runtimeUnchanged: true })
     clientA.send('\x1b') // the page -> the Host Rows
     await sleep(200)
