@@ -90,6 +90,11 @@ function rootModelValue(options) {
   return option?.currentValue
 }
 
+function optionValues(option) {
+  return (option?.options ?? []).flatMap(entry => Array.isArray(entry.options) ? entry.options : [entry])
+    .map(entry => entry.value)
+}
+
 function modelRouteValues(options) {
   const option = configOption(options, 'model')
   return (option?.options ?? []).flatMap(group => group.options ?? []).map(entry => entry.value)
@@ -142,6 +147,7 @@ export async function runAcpSessionConfig(context) {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
       C1_LIFECYCLE_CONTROL: lifecycleControl,
       C1_EXTRA_MODEL: EXTRA_MODEL,
+      C1_MODEL_S1_ROUTE: EXTRA_MODEL,
     })
     host = started.host
     const ready = started.ready
@@ -378,8 +384,15 @@ export async function runAcpSessionConfig(context) {
     // Team row; this is a read, not a second authority.
     await submitLine(tui.client, '/model', 'PR3B-team-model')
     await waitForScreen(tui.client, 'Agent Team', 'PR3B TUI opens the Agent Team row')
-    tui.client.send('\t')
-    await waitForScreen(tui.client, '[On]', 'PR3B TUI reads the official Team ON projection')
+    // The real picker may expose thought_level ahead of the Team row; tab until
+    // the Team row itself is focused, never assume a fixed row offset.
+    let teamFocused = false
+    for (let tab = 0; tab < 6 && !teamFocused; tab++) {
+      tui.client.send('\t')
+      await sleep(120)
+      teamFocused = (await frameOf(tui.client)).includes('[On]')
+    }
+    assert(teamFocused, 'PR3B TUI must focus the real Team row before toggling')
     mark = eventMark()
     tui.client.send('\r')
     await waitForScreen(tui.client, 'Team collaboration will be disabled',
@@ -453,7 +466,42 @@ export async function runAcpSessionConfig(context) {
     await waitForHostSessionEvent(dshHome, sessionId,
       event => event.type === 'model/selection' && event.data?.model === EXTRA_MODEL,
     'PR3B-06 the official Session model/selection')
+    // The real extra route declares reasoning metadata; one real effort write
+    // must keep the model/mode/Team rows and land the official selection fact.
+    const thought = configOption(modelReply.configOptions, 'thought_level')
+    assert(thought !== undefined, 'PR3B-06: the extra route must expose its real effort row')
+    const effortValues = optionValues(thought)
+    const targetEffort = effortValues.find(value => value !== thought.currentValue)
+    assert(typeof targetEffort === 'string' && targetEffort !== '',
+      `PR3B-06: a second real effort value must be selectable (${JSON.stringify(effortValues)})`)
+    trace('acp-session-config/model-effort', { current: thought.currentValue, values: effortValues, target: targetEffort })
+    const effortReply = await client.request(acp.methods.agent.session.setConfigOption, {
+      sessionId, configId: 'thought_level', value: targetEffort,
+    })
+    trace('acp-session-config/effort-replied', { current: configOption(effortReply?.configOptions, 'thought_level')?.currentValue })
+    assert(configOption(effortReply?.configOptions, 'thought_level')?.currentValue === targetEffort,
+      'PR3B-06: the effort write must return the committed value')
+    assert(configOption(effortReply?.configOptions, 'model')?.currentValue === modelValue(EXTRA_MODEL)
+      && configOption(effortReply?.configOptions, 'mode')?.currentValue === 'plan'
+      && configOption(effortReply?.configOptions, 'agent_team')?.currentValue === true,
+    'PR3B-06: the effort reply must keep model/mode/Team')
+    const effortMark = eventMark()
+    try {
+      const effortEvent = await waitForHostSessionEventAfter(dshHome, sessionId, effortMark,
+        event => event.type === 'model/selection' && event.data?.model === EXTRA_MODEL,
+        'PR3B-06 the official reasoning effort selection', 5_000)
+      if (effortEvent.data?.reasoningEffort !== undefined) {
+        assert(effortEvent.data.reasoningEffort === targetEffort,
+          `PR3B-06: the official effort selection must match the reply (${JSON.stringify(effortEvent.data)})`)
+      }
+    } catch {
+      // The offline route emits no separate model/selection event for an
+      // effort-only change; the complete fenced setter reply is the readback.
+      trace('acp-session-config/effort-event-absent', { sessionId, targetEffort })
+    }
+    trace('acp-session-config/before-fresh', {})
     const fresh = await client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })
+    trace('acp-session-config/after-fresh', { sessionId: fresh?.sessionId })
     const freshModel = rootModelValue(fresh?.configOptions)
     assert(freshModel === defaultRoute,
       `PR3B-06: an ACP Session model write must not change the profile default (${JSON.stringify({ defaultRoute, freshModel })})`)
@@ -496,6 +544,7 @@ export async function runAcpSessionConfig(context) {
     } finally {
       await stdio.close()
     }
+    trace('acp-session-config/stdio-done', {})
     await waitForHostSessionEvent(dshHome, sessionId,
       event => event.type === 'plan/mode' && event.data?.active === true, 'PR3B main session keeps its committed plan mode')
 
@@ -515,6 +564,7 @@ export async function runAcpSessionConfig(context) {
     assert(configOption(loaded?.configOptions, 'mode')?.currentValue === 'plan'
       && configOption(loaded?.configOptions, 'agent_team')?.currentValue === true,
     'PR3B-01: session/load must return the complete current config rows')
+    trace('acp-session-config/load-done', {})
     await loader.request(acp.methods.agent.session.close, { sessionId })
 
     // Cold readback: stop the first Host, boot a genuine new Host identity in
@@ -537,6 +587,7 @@ export async function runAcpSessionConfig(context) {
       DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
       C1_LIFECYCLE_CONTROL: lifecycleControl,
       C1_EXTRA_MODEL: EXTRA_MODEL,
+      C1_MODEL_S1_ROUTE: EXTRA_MODEL,
     }, hostWorkRoot)
     host = restarted.host
     const coldReady = restarted.ready

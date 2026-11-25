@@ -1786,20 +1786,18 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const snapshot = cut.snapshot
     claim.legacyModeAnnounced = snapshot.modes !== undefined
     claim.lastLegacyMode = snapshot.mode
-    claim.configReady = true
-    // Never discard an authoritative invalidation just to obtain attach
-    // ordering. Keep the dirty fact and release one coalesced refresh only on
-    // an explicit Node task boundary, after the handler's already-resolved
-    // response has been enqueued by the SDK's same write queue. An omitted
-    // display has no complete cut for that fact, so it is dirty too.
+    // `configReady` is the response-submission boundary, not snapshot
+    // acquisition. Keep it false until the one scheduled task runs, so no
+    // invalidation arriving in between can start a notification ahead of the
+    // attach response. The task always runs, even for a currently clean cut.
+    claim.configReady = false
     if (snapshot.configOptions === undefined) claim.configDirty = true
-    if (claim.configDirty === true) {
-      setImmediate(() => {
-        if (claim.configReady !== true || this.claims.get(claim.sessionId) !== claim) return
-        if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
-        this.enqueueConfigUpdate(claim)
-      })
-    }
+    setImmediate(() => {
+      if (this.claims.get(claim.sessionId) !== claim) return
+      if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
+      claim.configReady = true
+      if (claim.configDirty === true) this.enqueueConfigUpdate(claim)
+    })
     return snapshot
   }
 
@@ -1859,18 +1857,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   private async readConfigReply(claim: ViewClaim, access: HostAcpSessionAccess): Promise<SessionConfigOption[]> {
     const agent = claim.exactAgent as LiveAgentViewIdentity
     const session = claim.exactSession as object
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const cut = await this.readConfigSnapshotFenced(claim, access, 'reply')
-      // The final response boundary: an invalidated/retired View after a
-      // confirmed setter is an undeliverable readback, not a pre-write refusal.
-      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
-        throw readbackUnavailablePolicyView()
-      }
-      if (cut.epoch === (claim.configEpoch ?? 0) && cut.snapshot.configOptions !== undefined) {
-        return [...cut.snapshot.configOptions]
-      }
+    // ONE bounded retry total: readConfigSnapshotFenced already retries once
+    // on an epoch change. This is only the final identity/epoch boundary.
+    const cut = await this.readConfigSnapshotFenced(claim, access, 'reply')
+    if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+      throw readbackUnavailablePolicyView()
     }
-    throw readbackUnavailablePolicyView()
+    if (cut.epoch !== (claim.configEpoch ?? 0) || cut.snapshot.configOptions === undefined) {
+      throw readbackUnavailablePolicyView()
+    }
+    return [...cut.snapshot.configOptions]
   }
 
   /**
@@ -1960,6 +1956,26 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (mode === 'attach') {
         if (error instanceof AcpSessionPolicyError && error.code === 'LOCAL_ACP_CONFIG_UNAVAILABLE') {
           this.diag.warn('local-acp.config.policy-unavailable', { code: error.code })
+          // The aggregate read may have failed on the Team row while the
+          // legacy mode is independently readable. Announce that real mode;
+          // never manufacture the missing full list.
+          try {
+            const narrowMode = access.readSessionMode(agent, session)
+            if (narrowMode !== undefined) {
+              return {
+                mode: narrowMode,
+                modes: sessionModeStateOf({ mode: narrowMode }),
+                omitted: 'policy',
+              }
+            }
+          } catch (narrowError) {
+            if (narrowError instanceof AcpSessionPolicyError
+              && narrowError.code === 'LOCAL_ACP_CONFIG_UNAVAILABLE') {
+              return { omitted: 'policy' }
+            }
+            if (narrowError instanceof AcpSessionPolicyError) throw policyViewError(narrowError)
+            throw narrowError
+          }
           return { omitted: 'policy' }
         }
         if (error instanceof AcpSessionPolicyError) throw policyViewError(error)

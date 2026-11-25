@@ -376,11 +376,15 @@ export class AcpSessionPolicyService {
           throw indeterminatePolicy('the plan-mode write did not commit synchronously')
         }
         try {
-          const after = this.readModeFacts(currentPlan, agent)
+          this.assertExact(agent)
+          const afterPlan = this.readPlanService(agent)
+          if (afterPlan === undefined) {
+            throw readbackUnavailablePolicy('the current plan-mode authority is unavailable after the write')
+          }
+          const after = this.readModeFacts(afterPlan, agent)
           if (after.active !== intended || after.pending !== undefined) {
             throw indeterminatePolicy('the plan-mode readback does not match the requested mode')
           }
-          this.assertExact(agent)
         } catch (error) {
           // The setter already settled. A changed identity or an unreadable
           // projection after the commit is NOT a pre-write refusal; only the
@@ -441,6 +445,10 @@ export class AcpSessionPolicyService {
         }
         try {
           this.assertExact(agent)
+          const afterTeam = this.readTeamService(agent)
+          if (afterTeam === undefined) {
+            throw readbackUnavailablePolicy('the current Agent Team authority is unavailable after the write')
+          }
           const after = this.readTeamEnabled(agent.session)
           if (after !== enabled) {
             throw indeterminatePolicy('the Agent Team readback does not match the requested value')

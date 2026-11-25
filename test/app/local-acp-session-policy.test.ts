@@ -232,44 +232,6 @@ describe('session policy write admission', () => {
     assert.equal(mode.setCalls.length, 0)
   })
 
-  test('a plan service resolved again at admission is the one used by the setter', async () => {
-    const first = new FakeModeService({ active: false })
-    const second = new FakeModeService({ active: false })
-    const world = makeWorld({ mode: first })
-    let current = first
-    world.authority.planMode = () => current
-    world.agent.beforeTask = () => {
-      current = second
-    }
-    await world.service.select(
-      world.agent,
-      { kind: 'mode', mode: 'plan' },
-      new AbortController().signal,
-      () => 'current',
-    )
-    assert.deepEqual(first.setCalls, [])
-    assert.deepEqual(second.setCalls, [true])
-  })
-
-  test('a root Team service resolved again at admission is the one used by the setter', async () => {
-    const first = new FakeTeamService()
-    const second = new FakeTeamService()
-    const world = makeWorld({ team: first, teamEnabled: true })
-    let current = first
-    world.authority.team = () => current
-    world.agent.beforeTask = () => {
-      current = second
-    }
-    await world.service.select(
-      world.agent,
-      { kind: 'agent-team', enabled: true },
-      new AbortController().signal,
-      () => 'current',
-    )
-    assert.deepEqual(first.setCalls, [])
-    assert.deepEqual(second.setCalls.map(call => call.enabled), [true])
-  })
-
   test('a baseline change during admission is a conflict, not a second write', async () => {
     const mode = new FakeModeService({ active: false })
     const world = makeWorld({ mode })

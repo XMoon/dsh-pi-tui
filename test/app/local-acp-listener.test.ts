@@ -4019,6 +4019,60 @@ test('a concurrent close during resume config read propagates STALE instead of a
   }
 })
 
+test('an omitted initial full list retains its dirty fact and converges to the newest complete update', async t => {
+  const { scope } = newScope(t)
+  let catalogStarted!: () => void
+  let releaseCatalog!: () => void
+  const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
+  const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
+  let reads = 0
+  let model = '["p1","a"]'
+  const fake = makeFakeAccess({
+    sessionPolicy: () => ({ mode: 'default' }),
+    modelOptions: async () => {
+      reads += 1
+      if (reads === 1) {
+        catalogStarted()
+        await catalogGate
+      }
+      if (reads <= 2) throw new AcpModelError('LOCAL_ACP_MODEL_UNAVAILABLE', 'catalog unavailable', -32042)
+      return configOptionsFor(model)
+    },
+  })
+  fake.seed('session-omitted-dirty', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-omitted-dirty', cwd: '/host/proj' } })
+    await started
+    const agent = fake.agentOf('session-omitted-dirty')
+    const facts = fake.facts()
+    assert.ok(agent !== undefined && facts !== undefined)
+    model = '["p1","newest"]'
+    facts.onSessionEvent(agent.session, { seq: 1, type: 'model/selection', data: { provider: 'p1', model: 'newest' } })
+    releaseCatalog()
+    const response = (await client.next()) as { id?: number; result?: { modes?: unknown; configOptions?: SessionConfigOption[] } }
+    assert.equal(response.id, 2, 'the omitted attach response is still first')
+    assert.equal(response.result?.configOptions, undefined, 'the failed optional catalog omits the full list')
+    assert.ok(response.result?.modes !== undefined, 'the independently readable legacy modes are kept')
+    const notification = (await client.next()) as {
+      method?: string
+      params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
+    }
+    assert.equal(notification.method, 'session/update')
+    assert.equal(notification.params?.sessionId, 'session-omitted-dirty')
+    assert.equal(notification.params?.update?.sessionUpdate, 'config_option_update')
+    assert.equal(notification.params?.update?.configOptions?.[0]?.currentValue, '["p1","newest"]',
+      'the omitted dirty cut converges to the newest complete list without another external event')
+    assert.equal(notification.params?.update?.configOptions?.find(option => option.id === 'mode')?.currentValue, 'default')
+  } finally {
+    client.close()
+  }
+})
+
 test('a rejected optional catalog read after concurrent close propagates STALE, never a false attach', async t => {
   const { scope } = newScope(t)
   let catalogStarted!: () => void

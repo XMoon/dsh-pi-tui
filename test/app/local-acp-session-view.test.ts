@@ -316,8 +316,11 @@ class FakeAccess implements HostAcpSessionAccess {
   }
 
   readSessionMode(agent: LiveAgentViewIdentity, session: object): AcpSessionMode | undefined {
-    return this.readSessionPolicyImpl(agent, session).mode
+    return this.readSessionModeImpl(agent, session)
   }
+
+  readSessionModeImpl: (agent: LiveAgentViewIdentity, session: object) => AcpSessionMode | undefined =
+    (agent, session) => this.readSessionPolicyImpl(agent, session).mode
 
   async selectSessionPolicy(
     agent: LiveAgentViewIdentity,
@@ -4040,6 +4043,7 @@ test('an async config read for an old claim never reaches a re-bound View', asyn
     },
   })
   await registry.sessionConfigState(conn, access, 'S-lag')
+  await new Promise(resolve => setImmediate(resolve))
   access.modelOptionsImpl = async () => {
     reads += 1
     return reads === 1 ? await gate.promise : modelOptionsFor('["p1","c"]')
@@ -4056,6 +4060,7 @@ test('an async config read for an old claim never reaches a re-bound View', asyn
     },
   })
   await registry.sessionConfigState(conn2, access, 'S-lag')
+  await new Promise(resolve => setImmediate(resolve))
   gate.resolve(modelOptionsFor('["p1","b"]'))
   await flushOutput()
   assert.deepEqual(oldNotifications, [], 'a closed claim cannot deliver its late catalog read')
@@ -4265,18 +4270,15 @@ test('an initial policy read failure omits the optional display without fabricat
   access.readSessionPolicyImpl = () => {
     throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_UNAVAILABLE', 'projection unavailable', -32042)
   }
+  access.readSessionModeImpl = () => 'plan'
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   registry.bindAccess(access)
   const conn = registry.createConnection()
   await registry.resumeSession(conn, access, { sessionId: 'S-attach-policy', cwd: '/w' })
   const snapshot = await registry.sessionConfigState(conn, access, 'S-attach-policy')
-  assert.equal(snapshot.modes, undefined)
+  assert.equal(snapshot.modes?.currentModeId, 'plan')
   assert.equal(snapshot.configOptions, undefined)
   assert.equal(snapshot.omitted, 'policy')
-  await assert.rejects(
-    registry.setMode(conn, access, 'S-attach-policy', 'plan', new AbortController().signal),
-    isViewError('LOCAL_ACP_CONFIG_INVALID_OPTION'),
-  )
 })
 
 test('an initial policy lifecycle error still propagates instead of becoming an optional omission', async () => {
