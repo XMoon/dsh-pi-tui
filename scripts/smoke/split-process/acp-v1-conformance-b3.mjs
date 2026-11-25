@@ -139,6 +139,21 @@ class RawAcpClient {
     return message
   }
 
+  /**
+   * Send one request whose expected response may be preceded by asynchronous
+   * `session/update` notifications (an attach legitimately starts catalog/plan
+   * delivery). Only real notifications may interleave; anything else fails.
+   */
+  async requestSkippingNotifications(id, method, params) {
+    this.send({ jsonrpc: '2.0', id, method, params })
+    for (;;) {
+      const message = await this.next()
+      if (message?.id === id) return message
+      assert(message?.id === undefined && typeof message?.method === 'string',
+        `${CASE_ID}: non-notification message before raw ${method} response ${String(id)}: ${JSON.stringify(message)}`)
+    }
+  }
+
   async silent(windowMs) {
     if (this.queue.length > 0) return false
     return await new Promise(resolveSilent => {
@@ -571,6 +586,35 @@ export async function runAcpV1ConformanceB3(context) {
     assert(unknownMethod.error?.code === -32601, `B3-07: unknown method must be method-not-found: ${JSON.stringify(unknownMethod)}`)
     optional.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: sessionA } })
     assert(await optional.silent(200), 'B3-07: session/cancel must not receive a response')
+    // B3-10: an unadvertised systemPrompt is refused on every lifecycle entry
+    // BEFORE any Host side effect. The pinned v1 schema accepts the field, so a
+    // raw frame is the only way to prove the View does not silently ignore it.
+    // `sessionA` was closed in B3-06, so it has no ACP claim and its resume/load
+    // refusal cannot be masked by a busy/foreign rejection.
+    const systemPrompt = {
+      mode: 'append',
+      content: [{ type: 'text', text: `b3-unannounced-prompt-${digestOf(`b3-prompt-${runNonce}`).slice(0, 16)}` }],
+    }
+    // A schema-valid but empty content array must not be read as "nothing to
+    // apply": the capability is absent, so the field's presence alone decides.
+    const emptySystemPrompt = { mode: 'append', content: [] }
+    const promptNew = await optional.request(7, 'session/new', { cwd: hostCwd, mcpServers: [], systemPrompt })
+    assert(promptNew.error?.code === -32602
+      && promptNew.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
+    `B3-10: session/new must refuse an unadvertised systemPrompt: ${JSON.stringify(promptNew)}`)
+    const promptResume = await optional.request(8, 'session/resume', {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt: emptySystemPrompt,
+    })
+    assert(promptResume.error?.code === -32602
+      && promptResume.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
+    `B3-10: session/resume must refuse an unadvertised systemPrompt: ${JSON.stringify(promptResume)}`)
+    const promptLoad = await optional.request(9, 'session/load', {
+      sessionId: sessionA, cwd: hostCwd, mcpServers: [], systemPrompt,
+    })
+    assert(promptLoad.error?.code === -32602
+      && promptLoad.error?.data?.code === 'LOCAL_ACP_VIEW_INVALID_REQUEST',
+    `B3-10: session/load must refuse an unadvertised systemPrompt: ${JSON.stringify(promptLoad)}`)
+    assert(await optional.silent(200), 'B3-10: a refused session/load must not replay Session history')
     const probeAfter = await control('probe')
     const settingsAfter = existsSync(settingsPath) ? readFileSync(settingsPath, 'utf8') : undefined
     assert(probeAfter.sessionCount === probeBefore.sessionCount && probeAfter.agentCount === probeBefore.agentCount,
@@ -579,6 +623,22 @@ export async function runAcpV1ConformanceB3(context) {
       'B3-07: unsupported methods changed the Host tool roster')
     assert(settingsAfter === settingsBefore, 'B3-07: unsupported methods changed Settings')
     await assertSameHost(hostIdentity, 'B3-07 Host after unsupported methods')
+    // B3-10 positive controls: `null` keeps the default instructions, and the
+    // refused resume/load left no claim that could block a later normal attach.
+    // A real attach may start catalog/plan delivery before its response, so the
+    // positive requests tolerate only genuine notifications.
+    const nullPromptNew = await optional.requestSkippingNotifications(10, 'session/new', { cwd: hostCwd, mcpServers: [], systemPrompt: null })
+    assert(typeof nullPromptNew.result?.sessionId === 'string' && nullPromptNew.result.sessionId.length > 0,
+      `B3-10: a null systemPrompt must keep the default create path: ${JSON.stringify(nullPromptNew)}`)
+    const nullPromptClose = await optional.requestSkippingNotifications(11, 'session/close', { sessionId: nullPromptNew.result.sessionId })
+    assert(JSON.stringify(nullPromptClose.result) === '{}',
+      `B3-10: the null-prompt positive Session must close with {}: ${JSON.stringify(nullPromptClose)}`)
+    const resumedA = await optional.requestSkippingNotifications(12, 'session/resume', { sessionId: sessionA, cwd: hostCwd, mcpServers: [] })
+    assert(resumedA.error === undefined,
+      `B3-10: the refused resume must leave no residual claim: ${JSON.stringify(resumedA)}`)
+    const resumedClose = await optional.requestSkippingNotifications(13, 'session/close', { sessionId: sessionA })
+    assert(JSON.stringify(resumedClose.result) === '{}',
+      `B3-10: the no-residual-claim resume must close with {}: ${JSON.stringify(resumedClose)}`)
     optional.close()
 
     // B3-08: the packaged Host's real capability positive; the empty-View
@@ -659,6 +719,13 @@ export async function runAcpV1ConformanceB3(context) {
       },
       sessions: { A: sessionA, B: sessionB },
       unsupported: { list: listed.error?.code, load: loaded.error?.code, setMode: setMode.error?.code, unknown: unknownMethod.error?.code },
+      systemPrompt: {
+        entries: ['new', 'resume', 'load'],
+        rpcCode: promptNew.error?.code,
+        code: promptNew.error?.data?.code,
+        nullAccepted: true,
+        replay: false,
+      },
       prompt: { stopReason: promptResult.stopReason, resourceLink: true, durableUserText: expectedUserText },
       close: { exact: '{}', repeated: '{}', unknown: '{}' },
       offOn: { sameHost: true, resumed: true, replay: false },
