@@ -412,6 +412,10 @@ export async function createRemoteApplicationHostFixture(
      * engine.
      */
     readonly presetPlugins?: readonly EntryOptions[]
+    /** Seed official persistence or install a latch BEFORE the Host runtime row
+     *  (and its history-search bootstrap) mounts. The callback receives the
+     *  real composed Context; the caller owns cleanup. */
+    readonly beforeHostRuntime?: (ctx: Context) => Promise<void>
   } = {},
 ): Promise<{
   ctx: Context
@@ -510,6 +514,7 @@ export async function createRemoteApplicationHostFixture(
     // historical in-process fixtures mount the row directly, so they publish
     // the same canonical references a real Host profile would.
     ctx.provide('piTuiPreferences', CanonicalPreferencesConfig({ ...(options.preferences ?? {}) } as never))
+    if (options.beforeHostRuntime !== undefined) await options.beforeHostRuntime(ctx)
     if (options.withoutHostRuntime !== true) await ctx.plugin(piTuiHostRuntime, { sessionId: '' } as never)
     await ctx.plugin(performanceHost)
     // The official `workspace` Remote owner (the `workspace-controller` Host

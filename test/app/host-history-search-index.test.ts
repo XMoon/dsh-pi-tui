@@ -16,14 +16,18 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import {
+  HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
   HISTORY_SEARCH_SQLITE_APPLICATION_ID,
   HISTORY_SEARCH_SQLITE_USER_VERSION,
   HistorySearchIndex,
   HistorySearchIndexUnavailableError,
   contentSha256,
+  historyCheckpointHash,
   sessionEventHash,
   sessionHeaderHash,
   type HistoryOccurrenceInput,
+  type HistorySessionCheckpointRow,
+  type HistorySourceProofBasis,
 } from '../../src/app/host/features/history-search-index.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -77,11 +81,11 @@ test('a fresh index owns a private 0700 directory, 0600 file and its fixed schem
     try {
       assert.equal((db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id,
         HISTORY_SEARCH_SQLITE_APPLICATION_ID)
-      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1)
+      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
       const columns = (db.prepare('PRAGMA table_info(history_occurrences)').all() as Array<{ name: string }>)
         .map(column => column.name)
-      assert.ok(columns.includes('preview'), 'the pre-release v1 schema owns the bounded preview column')
-      assert.ok(columns.includes('content_length'), 'the pre-release v1 schema owns the exact UTF-16 length column')
+      assert.ok(columns.includes('preview'), 'the active v2 schema owns the bounded preview column')
+      assert.ok(columns.includes('content_length'), 'the active v2 schema owns the exact UTF-16 length column')
     } finally {
       db.close()
     }
@@ -96,7 +100,7 @@ test('a foreign database at the derived path is refused and never rewritten', (t
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  const dbPath = join(historyDir, 'v1.sqlite')
+  const dbPath = join(historyDir, 'v2.sqlite')
   const foreign = new DatabaseSync(dbPath)
   foreign.exec('CREATE TABLE someone_else (a TEXT)')
   foreign.close()
@@ -115,16 +119,16 @@ test('a corrupt own database is quarantined instead of deleted and a fresh index
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  const dbPath = join(historyDir, 'v1.sqlite')
+  const dbPath = join(historyDir, 'v2.sqlite')
   writeFileSync(dbPath, 'this is not a sqlite database', { mode: 0o600 })
   const index = HistorySearchIndex.open({ profileDir: dir })
   try {
     index.close()
     const names = readdirSync(historyDir)
-    assert.ok(names.includes('v1.sqlite'), 'a fresh index file must exist')
-    assert.ok(names.some(name => name.startsWith('v1.sqlite.quarantine-')),
+    assert.ok(names.includes('v2.sqlite'), 'a fresh index file must exist')
+    assert.ok(names.some(name => name.startsWith('v2.sqlite.quarantine-')),
       `the corrupt bytes must be preserved under a quarantined name: ${names.join(', ')}`)
-    const quarantined = names.find(name => name.startsWith('v1.sqlite.quarantine-'))
+    const quarantined = names.find(name => name.startsWith('v2.sqlite.quarantine-'))
     assert.equal(readFileSync(join(historyDir, quarantined!)).toString('utf8'), 'this is not a sqlite database')
   } finally {
     index.close()
@@ -139,7 +143,7 @@ test('a symlinked index file or a non-private directory refuses the derived inde
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  symlinkSync(target, join(historyDir, 'v1.sqlite'))
+  symlinkSync(target, join(historyDir, 'v2.sqlite'))
   assert.throws(
     () => HistorySearchIndex.open({ profileDir: dir }),
     (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
@@ -398,7 +402,7 @@ test('an incremental checkpoint survives close/reopen and a renamed-away file is
 })
 
 function rejoinedDbPath(profileDirPath: string): string {
-  return join(profileDirPath, '.dsh-pi-tui', 'history-search', 'v1.sqlite')
+  return join(profileDirPath, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
 }
 test('an existing empty SQLite database is refused without being rewritten', (t) => {
   const dir = profileDir(t)
@@ -406,7 +410,7 @@ test('an existing empty SQLite database is refused without being rewritten', (t)
   mkdirSync(historyDir, { recursive: true, mode: 0o700 })
   chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
   chmodSync(historyDir, 0o700)
-  const dbPath = join(historyDir, 'v1.sqlite')
+  const dbPath = join(historyDir, 'v2.sqlite')
   const empty = new DatabaseSync(dbPath)
   empty.close()
   chmodSync(dbPath, 0o600)
@@ -424,7 +428,7 @@ test('unsafe WAL or SHM sidecars refuse the derived index', (t) => {
   const first = HistorySearchIndex.open({ profileDir: dir })
   first.close()
   const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
-  const dbPath = join(historyDir, 'v1.sqlite')
+  const dbPath = join(historyDir, 'v2.sqlite')
   const target = join(dir, 'foreign-sidecar')
   writeFileSync(target, '', { mode: 0o600 })
   symlinkSync(target, `${dbPath}-wal`)
@@ -437,7 +441,7 @@ test('unsafe WAL or SHM sidecars refuse the derived index', (t) => {
   const secondIndex = HistorySearchIndex.open({ profileDir: second })
   secondIndex.close()
   const secondDir = join(second, '.dsh-pi-tui', 'history-search')
-  writeFileSync(join(secondDir, 'v1.sqlite-shm'), '', { mode: 0o644 })
+  writeFileSync(join(secondDir, 'v2.sqlite-shm'), '', { mode: 0o644 })
   assert.throws(
     () => HistorySearchIndex.open({ profileDir: second }),
     (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
@@ -451,7 +455,7 @@ test('a fresh index materializes only private sidecars and refuses dangling syml
     seed(first, 's1', [occurrence('m1', 'private sidecars', 1000, '/repo/a')])
     const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
     for (const suffix of ['-wal', '-shm'] as const) {
-      const path = join(historyDir, `v1.sqlite${suffix}`)
+      const path = join(historyDir, `v2.sqlite${suffix}`)
       if (!existsSync(path)) continue
       assert.equal(lstatSync(path).mode & 0o077, 0,
         `the materialized ${suffix} sidecar must stay private`)
@@ -462,7 +466,7 @@ test('a fresh index materializes only private sidecars and refuses dangling syml
 
   // A DANGLING symlink at the main path or a sidecar path is an existing entry:
   // `existsSync` would follow it and miss the refusal.
-  for (const name of ['v1.sqlite', 'v1.sqlite-wal'] as const) {
+  for (const name of ['v2.sqlite', 'v2.sqlite-wal'] as const) {
     const second = profileDir(t)
     const historyDir = join(second, '.dsh-pi-tui', 'history-search')
     mkdirSync(historyDir, { recursive: true, mode: 0o700 })
@@ -501,5 +505,418 @@ test('search returns only the stored bounded preview and never a full body', (t)
     assert.equal(full?.contentLength, big.length)
   } finally {
     index.close()
+  }
+})
+
+/** One synthetic durable proof basis; the opaque revision is compared literally. */
+function sourceBasis(
+  scopeKey = 'a'.repeat(64),
+  revision = 'rev-1',
+  sourcePath = '/root/sessions/s1.jsonl',
+): HistorySourceProofBasis {
+  return { scopeKey, sourcePath, sourceRevision: revision }
+}
+
+function historyPaths(dir: string): { historyDir: string; dbPath: string; wal: string; shm: string } {
+  const historyDir = join(dir, '.dsh-pi-tui', 'history-search')
+  const dbPath = join(historyDir, 'v2.sqlite')
+  return { historyDir, dbPath, wal: `${dbPath}-wal`, shm: `${dbPath}-shm` }
+}
+
+/** Seed one clean persisted checkpoint with a consistent tail and mint its proof. */
+function seedProof(
+  index: HistorySearchIndex,
+  sessionId: string,
+  basis: HistorySourceProofBasis = sourceBasis(),
+): HistorySessionCheckpointRow {
+  seed(index, sessionId, [occurrence(`${sessionId}-m`, `body of ${sessionId}`, 1000, '/repo/a')], {
+    nextSeq: 10,
+    lastEventHash: `tail-${sessionId}`,
+  })
+  const checkpoint = index.checkpointOf(sessionId)
+  assert.ok(checkpoint !== undefined)
+  index.commitSourceProof(checkpoint, basis)
+  return checkpoint
+}
+
+test('v2 owns the exact source-proof schema and never touches a legacy v1 file set', (t) => {
+  const dir = profileDir(t)
+  const { historyDir, dbPath } = historyPaths(dir)
+  mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+  chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
+  chmodSync(historyDir, 0o700)
+  const legacyFiles = new Map<string, { readonly bytes: Buffer; readonly ino: number; readonly mode: number; readonly mtimeMs: number }>()
+  const v1Path = join(historyDir, 'v1.sqlite')
+  for (const [suffix, contents] of [['', 'legacy-v1-main'], ['-wal', 'legacy-v1-wal'], ['-shm', 'legacy-v1-shm']] as const) {
+    const path = `${v1Path}${suffix}`
+    writeFileSync(path, contents, { mode: 0o600 })
+    const stat = lstatSync(path)
+    legacyFiles.set(suffix, { bytes: readFileSync(path), ino: stat.ino, mode: stat.mode, mtimeMs: stat.mtimeMs })
+  }
+
+  const index = HistorySearchIndex.open({ profileDir: dir })
+  try {
+    assert.equal(index.path, dbPath)
+    seedProof(index, 's-proof')
+    const db = new DatabaseSync(dbPath)
+    try {
+      assert.equal((db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id,
+        HISTORY_SEARCH_SQLITE_APPLICATION_ID)
+      assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2)
+      const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .all() as Array<{ name: string }>).map(row => row.name)
+      assert.deepEqual(tables, ['history_occurrences', 'history_sessions', 'history_source_proofs'])
+      const columns = (db.prepare('PRAGMA table_info(history_source_proofs)').all() as Array<{ name: string }>)
+        .map(row => row.name)
+      assert.deepEqual(columns, ['session_id', 'contract_version', 'scope_key', 'source_path', 'source_revision', 'checkpoint_hash'])
+      const foreignKeys = db.prepare('PRAGMA foreign_key_list(history_source_proofs)').all() as Array<{
+        table: string
+        from: string
+        to: string
+        on_delete: string
+      }>
+      assert.deepEqual(foreignKeys.map(row => [row.table, row.from, row.to, row.on_delete]),
+        [['history_sessions', 'session_id', 'session_id', 'CASCADE']])
+    } finally {
+      db.close()
+    }
+    assert.equal(index.sourceProofOf('s-proof')?.contractVersion, HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION)
+    assert.equal(index.sourceProofOf('s-proof')?.sourcePath, '/root/sessions/s1.jsonl')
+  } finally {
+    index.close()
+  }
+
+  for (const [suffix, before] of legacyFiles) {
+    const path = `${v1Path}${suffix}`
+    const after = lstatSync(path)
+    assert.deepEqual(readFileSync(path), before.bytes, `the legacy v1${suffix} bytes must stay identical`)
+    assert.equal(after.ino, before.ino, `the legacy v1${suffix} inode must never be replaced`)
+    assert.equal(after.mode, before.mode)
+    assert.equal(after.mtimeMs, before.mtimeMs)
+  }
+  assert.equal(existsSync(join(historyDir, 'v1.sqlite.quarantine-')), false)
+})
+
+test('a v1-schema database at the active v2 path is refused untouched', (t) => {
+  const dir = profileDir(t)
+  const { historyDir, dbPath } = historyPaths(dir)
+  mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+  chmodSync(join(dir, '.dsh-pi-tui'), 0o700)
+  chmodSync(historyDir, 0o700)
+  const legacy = new DatabaseSync(dbPath)
+  legacy.exec('CREATE TABLE history_sessions (session_id TEXT PRIMARY KEY)')
+  legacy.exec(`PRAGMA application_id = ${String(HISTORY_SEARCH_SQLITE_APPLICATION_ID)}`)
+  legacy.exec('PRAGMA user_version = 1')
+  legacy.close()
+  chmodSync(dbPath, 0o600)
+  const before = readFileSync(dbPath)
+  assert.throws(
+    () => HistorySearchIndex.open({ profileDir: dir }),
+    (error: unknown) => error instanceof HistorySearchIndexUnavailableError,
+  )
+  assert.deepEqual(readFileSync(dbPath), before, 'the v1-schema file must not be migrated or rewritten')
+})
+
+test('every checkpoint mutation revokes exactly its own source proof atomically', (t) => {
+  const index = HistorySearchIndex.open({ profileDir: profileDir(t) })
+  try {
+    const reset = (): void => {
+      index.resetSession('s-a')
+      index.resetSession('s-b')
+    }
+    const seedBoth = (): void => {
+      seedProof(index, 's-a')
+      seedProof(index, 's-b', sourceBasis('b'.repeat(64), 'rev-b', '/root/sessions/s2.jsonl'))
+    }
+
+    // A proof commit is metadata-only for the content generation.
+    seedBoth()
+    const revision = index.revision
+    index.commitSourceProof(index.checkpointOf('s-a')!, sourceBasis())
+    assert.equal(index.revision, revision)
+
+    // Same-value marker rewrites are conservatively revoked too.
+    index.markSession({ sessionId: 's-a', dirty: false })
+    assert.equal(index.sourceProofOf('s-a'), undefined)
+    assert.ok(index.sourceProofOf('s-b') !== undefined)
+    assert.equal(index.sourceProofRevocations, 1)
+
+    reset()
+    seedBoth()
+    const beforeEmptyMarker = index.sourceProofRevocations
+    index.markSession({ sessionId: 's-a' })
+    assert.ok(index.sourceProofOf('s-a') !== undefined, 'an empty marker is no mutation')
+    assert.equal(index.sourceProofRevocations, beforeEmptyMarker, 'an empty marker revokes nothing')
+
+    const cases: Array<{ readonly label: string; readonly run: () => void }> = [
+      {
+        label: 'an incremental batch',
+        run: () => index.commitBatch({
+          sessionId: 's-a',
+          headerHash: sessionHeaderHash({ id: 's-a' }),
+          inheritedCut: 0,
+          baseNextSeq: 10,
+          nextSeq: 11,
+          headerCwd: '/repo/a',
+          effectiveCwd: '/repo/a',
+          lastEventHash: 'next-tail',
+          sourceState: 'persisted',
+          uncertainSourcesDelta: 0,
+          occurrences: [],
+        }),
+      },
+      {
+        label: 'a zero-event batch',
+        run: () => index.commitBatch({
+          sessionId: 's-a',
+          headerHash: sessionHeaderHash({ id: 's-a' }),
+          inheritedCut: 0,
+          baseNextSeq: 10,
+          nextSeq: 10,
+          headerCwd: '/repo/a',
+          effectiveCwd: '/repo/a',
+          lastEventHash: 'tail-s-a',
+          sourceState: 'persisted',
+          uncertainSourcesDelta: 0,
+          occurrences: [],
+        }),
+      },
+      { label: 'a dirty marker', run: () => index.markSession({ sessionId: 's-a', dirty: true }) },
+      { label: 'a source-state marker', run: () => index.markSession({ sessionId: 's-a', sourceState: 'live' }) },
+      { label: 'an uncertain marker', run: () => index.markSession({ sessionId: 's-a', uncertainSources: 1 }) },
+      { label: 'an exact reset', run: () => index.resetSession('s-a') },
+    ]
+    for (const { label, run } of cases) {
+      reset()
+      seedBoth()
+      const beforeMutation: number = index.sourceProofRevocations
+      run()
+      assert.equal(index.sourceProofOf('s-a'), undefined, `${label} must revoke the session proof`)
+      assert.ok(index.sourceProofOf('s-b') !== undefined, `${label} must not revoke another session`)
+      assert.equal(index.sourceProofRevocations, beforeMutation + 1, `${label} must count its committed revocation`)
+    }
+
+    // An exact delete cascades the proof with the session row.
+    reset()
+    seedBoth()
+    const revocations = index.sourceProofRevocations
+    index.deleteSession('s-a')
+    assert.equal(index.sourceProofOf('s-a'), undefined)
+    assert.ok(index.sourceProofOf('s-b') !== undefined)
+    assert.equal(index.sourceProofRevocations, revocations + 1)
+
+    // A refused batch rolls the revocation back with the old rows.
+    reset()
+    seedBoth()
+    const beforeRollback = index.sourceProofRevocations
+    const checkpoint = index.checkpointOf('s-a')
+    assert.ok(checkpoint !== undefined)
+    assert.throws(() => index.commitBatch({
+      sessionId: 's-a',
+      headerHash: sessionHeaderHash({ id: 's-a' }),
+      inheritedCut: 0,
+      baseNextSeq: 9,
+      nextSeq: 11,
+      headerCwd: '/repo/a',
+      effectiveCwd: '/repo/a',
+      lastEventHash: 'next-tail',
+      sourceState: 'persisted',
+      uncertainSourcesDelta: 0,
+      occurrences: [],
+    }), /checkpoint moved/u)
+    assert.deepEqual(index.sourceProofOf('s-a'), {
+      sessionId: 's-a',
+      contractVersion: HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION,
+      scopeKey: 'a'.repeat(64),
+      sourcePath: '/root/sessions/s1.jsonl',
+      sourceRevision: 'rev-1',
+      checkpointHash: historyCheckpointHash(checkpoint),
+    }, 'a rolled-back batch must restore the previous proof')
+    assert.equal(index.sourceProofRevocations, beforeRollback)
+  } finally {
+    index.close()
+  }
+})
+
+test('a proof requires the exact clean persisted checkpoint and exact contract version', (t) => {
+  const index = HistorySearchIndex.open({ profileDir: profileDir(t) })
+  try {
+    seedProof(index, 's-a')
+    const checkpoint = index.checkpointOf('s-a')!
+    for (const [label, mutated] of [
+      ['header cwd', { ...checkpoint, headerCwd: '/repo/other' }],
+      ['inherited cut', { ...checkpoint, inheritedCut: 1 }],
+      ['next seq', { ...checkpoint, nextSeq: checkpoint.nextSeq + 1 }],
+      ['effective cwd', { ...checkpoint, effectiveCwd: '/repo/other' }],
+      ['tail hash', { ...checkpoint, lastEventHash: 'other-tail' }],
+      ['header hash', { ...checkpoint, headerHash: 'other-header' }],
+      ['source state', { ...checkpoint, sourceState: 'live' as const }],
+      ['uncertain count', { ...checkpoint, uncertainSources: 1 }],
+      ['dirty flag', { ...checkpoint, dirty: true }],
+    ] as const) {
+      assert.notEqual(historyCheckpointHash(mutated), historyCheckpointHash(checkpoint), `${label} must change the digest`)
+      assert.throws(() => index.commitSourceProof(mutated, sourceBasis()), Error, `${label} mismatch must refuse the mint`)
+    }
+    assert.ok(index.sourceProofOf('s-a') !== undefined, 'the refused mints must leave the original proof untouched')
+
+    // A genuinely empty terminal source carries a valid zero checkpoint.
+    seed(index, 's-empty', [], { nextSeq: 0, lastEventHash: null, sourceState: 'persisted' })
+    const empty = index.checkpointOf('s-empty')!
+    index.commitSourceProof(empty, sourceBasis('c'.repeat(64), 'rev-empty', '/root/sessions/empty.jsonl'))
+    assert.equal(index.sourceProofOf('s-empty')?.checkpointHash, historyCheckpointHash(empty))
+
+    // A dirty or uncertain actual checkpoint refuses the mint even when the
+    // caller's expected row claims it is clean.
+    seed(index, 's-dirty', [], { nextSeq: 0, lastEventHash: null })
+    const clean = index.checkpointOf('s-dirty')!
+    index.markSession({ sessionId: 's-dirty', dirty: true })
+    const dirty = index.checkpointOf('s-dirty')!
+    assert.throws(() => index.commitSourceProof(dirty, sourceBasis()), Error)
+    assert.throws(() => index.commitSourceProof(clean, sourceBasis()), Error)
+    assert.equal(index.sourceProofOf('s-dirty'), undefined)
+  } finally {
+    index.close()
+  }
+})
+
+test('proof-only transactions fail closed on unsafe or unmaterialized sidecars', (t) => {
+  const dir = profileDir(t)
+  const index = HistorySearchIndex.open({ profileDir: dir })
+  const { wal, dbPath } = historyPaths(dir)
+  try {
+    seedProof(index, 's-a')
+    index.resetSession('s-a')
+    seed(index, 's-a', [occurrence('m1', 'body', 1000, '/repo/a')], { nextSeq: 10, lastEventHash: 'tail' })
+    const checkpoint = index.checkpointOf('s-a')!
+    assert.ok(existsSync(wal), 'the WAL is materialized by the previous write')
+
+    // Pre-transaction safety check: an unsafe sidecar refuses the proof.
+    chmodSync(wal, 0o644)
+    assert.throws(() => index.commitSourceProof(checkpoint, sourceBasis()), /not private/u)
+    assert.equal(index.sourceProofOf('s-a'), undefined)
+    chmodSync(wal, 0o600)
+    index.commitSourceProof(checkpoint, sourceBasis())
+    assert.ok(index.sourceProofOf('s-a') !== undefined)
+
+    // A successful proof commit is durable: closing and reopening the index
+    // reads the SAME row (there is no fallible post-COMMIT validation window).
+    index.close()
+    const reopened = HistorySearchIndex.open({ profileDir: dir })
+    try {
+      assert.equal(reopened.sourceProofOf('s-a')?.sourceRevision, 'rev-1')
+      // In-transaction safety failure: make the sidecar unsafe only after the
+      // pre-check. The transaction must roll the proof insert back.
+      reopened.resetSession('s-a')
+      seed(reopened, 's-a', [occurrence('m1', 'body', 1000, '/repo/a')], { nextSeq: 10, lastEventHash: 'tail' })
+      const second = reopened.checkpointOf('s-a')!
+      const internals = reopened as unknown as {
+        transaction<T>(work: () => T): T
+      }
+      const original = internals.transaction
+      let injected = false
+      internals.transaction = function injectUnsafeSidecar<T>(work: () => T): T {
+        return original.call(reopened, () => {
+          if (!injected) {
+            injected = true
+            chmodSync(wal, 0o644)
+          }
+          return work()
+        }) as T
+      }
+      try {
+        assert.throws(() => reopened.commitSourceProof(second, sourceBasis('d'.repeat(64), 'rev-2')), /not private/u)
+      } finally {
+        internals.transaction = original
+        chmodSync(wal, 0o600)
+      }
+      assert.equal(injected, true)
+      assert.equal(reopened.sourceProofOf('s-a'), undefined, 'the in-transaction failure must roll the proof back')
+    } finally {
+      reopened.close()
+    }
+    // The partial insert is never reused after a reopen.
+    const final = HistorySearchIndex.open({ profileDir: dir })
+    try {
+      assert.equal(final.sourceProofOf('s-a'), undefined)
+    } finally {
+      final.close()
+    }
+  } finally {
+    try {
+      index.close()
+    } catch {
+      // Already closed for the reopen assertions.
+    }
+    if (existsSync(dbPath)) chmodSync(dbPath, 0o600)
+  }
+})
+
+test('a failed checkpoint update after the proof delete rolls the proof back atomically', (t) => {
+  const dir = profileDir(t)
+  const { dbPath } = historyPaths(dir)
+  const index = HistorySearchIndex.open({ profileDir: dir })
+  const control = new DatabaseSync(dbPath)
+  const trigger = 'fail_s_a_checkpoint_update'
+  try {
+    seedProof(index, 's-a')
+    const checkpoint = index.checkpointOf('s-a')
+    const proof = index.sourceProofOf('s-a')
+    assert.ok(checkpoint !== undefined && proof !== undefined)
+    const revocations = index.sourceProofRevocations
+    const revision = index.revision
+    const occurrences = index.occurrenceCount()
+
+    // The UPDATE is deliberately aborted AFTER the batch already executed the
+    // proof DELETE: this is the rollback boundary that stale-admission tests do
+    // not exercise. The trigger is test-owned schema, removed in cleanup.
+    control.exec(`CREATE TRIGGER ${trigger} BEFORE UPDATE ON history_sessions
+      WHEN OLD.session_id = 's-a'
+      BEGIN SELECT RAISE(ABORT, 'forced checkpoint failure'); END`)
+    assert.throws(() => index.commitBatch({
+      sessionId: 's-a',
+      headerHash: sessionHeaderHash({ id: 's-a' }),
+      inheritedCut: 0,
+      baseNextSeq: 10,
+      nextSeq: 11,
+      headerCwd: '/repo/a',
+      effectiveCwd: '/repo/a',
+      lastEventHash: 'next-tail',
+      sourceState: 'persisted',
+      uncertainSourcesDelta: 0,
+      occurrences: [],
+    }), /forced checkpoint failure/u)
+
+    assert.deepEqual(index.checkpointOf('s-a'), checkpoint, 'the old checkpoint must be restored')
+    assert.deepEqual(index.sourceProofOf('s-a'), proof, 'the old durable proof must be restored')
+    assert.equal(index.sourceProofRevocations, revocations, 'the revocation counter must not advance')
+    assert.equal(index.revision, revision, 'the content generation must not change')
+    assert.equal(index.occurrenceCount(), occurrences, 'the occurrence rows must not change')
+  } finally {
+    try {
+      control.exec(`DROP TRIGGER IF EXISTS ${trigger}`)
+    } finally {
+      control.close()
+      index.close()
+    }
+  }
+
+  const reopened = HistorySearchIndex.open({ profileDir: dir })
+  try {
+    assert.deepEqual(reopened.checkpointOf('s-a'), {
+      sessionId: 's-a',
+      headerCwd: '/repo/a',
+      inheritedCut: 0,
+      nextSeq: 10,
+      effectiveCwd: '/repo/a',
+      lastEventHash: 'tail-s-a',
+      headerHash: sessionHeaderHash({ id: 's-a' }),
+      sourceState: 'persisted',
+      uncertainSources: 0,
+      dirty: false,
+    })
+    assert.equal(reopened.sourceProofOf('s-a')?.sourceRevision, 'rev-1')
+    assert.equal(reopened.sourceProofRevocations, 0, 'a fresh handle starts with no committed revocation')
+  } finally {
+    reopened.close()
   }
 })

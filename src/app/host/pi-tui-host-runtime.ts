@@ -103,6 +103,7 @@ import {
   type HistorySearchQueryLike,
   type HistorySearchSessionsLike,
 } from './features/history-search.ts'
+import { captureHistoryRevisionAuthority } from './features/history-search-revision-authority.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
@@ -355,6 +356,10 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
         sessionPersistence: () => ctx.reflect.get('sessionPersistence') as HistorySearchPersistenceLike | undefined,
         sessionQuery: () => ctx.reflect.get('sessionQuery') as HistorySearchQueryLike | undefined,
         sessions: () => ctx.reflect.get('sessions') as HistorySearchSessionsLike | undefined,
+        // The SAME consumer Context resolves the official persistence service
+        // these closures read; the authority capture proves that exact runtime
+        // binding and package identity before any durable proof is reused.
+        revisionAuthority: (persistence, signal) => captureHistoryRevisionAuthority(ctx, persistence, signal),
       })
     })
     fibers.push(historySearchFiber)
