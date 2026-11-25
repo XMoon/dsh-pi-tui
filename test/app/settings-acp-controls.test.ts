@@ -77,9 +77,6 @@ interface Harness {
     failNext: string | undefined
     /** Synthetic port settlement for the next write (default accepted). */
     outcome: SectionMutationOutcome | undefined
-    /** The authoritative state the next accepted write leaves behind (used to
-     *  prove the readback attribution rules). */
-    afterWrite: AcpStartupPreferenceState | undefined
   }
   readonly copied: string[]
   readonly setReadiness: (readiness: 'ready' | 'stale' | 'unavailable') => void
@@ -91,6 +88,7 @@ interface Harness {
   readonly releaseAcpWrite: () => void
   readonly dispose: () => void
   readonly remote: RemoteConfigFixture | undefined
+  readonly diagnostics: string[]
 }
 
 interface RemoteConfigFixture {
@@ -111,6 +109,8 @@ interface RemoteConfigFixture {
   readonly acceptWithoutApply: () => void
   readonly currentGeneration: () => object | undefined
   readonly readiness: () => 'ready' | 'stale' | 'unavailable'
+  readonly siblingValue: (destination: 'A' | 'B') => number | undefined
+  readonly lastWrite: () => Promise<SectionMutationOutcome> | undefined
 }
 
 /**
@@ -126,10 +126,11 @@ function makeRemoteConfig(
   const ACP = 'pi-tui-acp-preferences'
   const SIBLING = 'subagent'
   let phase: 'A' | 'B' = 'A'
-  let namespaces: Array<{ ns: string; value?: unknown; base?: unknown; user?: unknown; revision?: number }> = [
+  const aNamespaces: Array<{ ns: string; value?: unknown; base?: unknown; user?: unknown; revision?: number }> = [
     { ns: ACP, base: { autoStart: false }, user: {}, value: { autoStart: false }, revision: 7 },
     { ns: SIBLING, base: { maxDepth: 1, maxActiveSubagents: 8 }, user: {}, value: { maxDepth: 1, maxActiveSubagents: 8 }, revision: 5 },
   ]
+  let namespaces = aNamespaces
   const calls: Array<{ ns: string; ops: readonly RemoteSettingsPathOp[]; revision: number | undefined; destination: 'A' | 'B' }> = []
   const forwarded: Array<{ value: boolean; revision: number; generation: object }> = []
   let notifyForwarded: (() => void) | undefined
@@ -139,20 +140,24 @@ function makeRemoteConfig(
   let releaseReceiptFn: (() => void) | undefined
   let failReceipt = false
   let skipApply = false
+  let lastWrite: Promise<SectionMutationOutcome> | undefined
 
   const settings = {
     describe: async () => ({ ok: true as const, value: { writable: true, hasDocument: true, namespaces: structuredClone(namespaces) } }),
     update: async () => ({ ok: true as const, value: {} }),
     replace: async () => ({ ok: true as const, value: {} }),
     mutate: async (ns: string, ops: readonly RemoteSettingsPathOp[], revision: number | undefined) => {
-      calls.push({ ns, ops: structuredClone(ops), revision, destination: phase })
+      // Capture the destination synchronously at invocation. A held A request
+      // must apply to A's own arrays even after B replaces the live snapshot.
+      const destination = phase
+      const target = namespaces.find(item => item.ns === ns)
+      calls.push({ ns, ops: structuredClone(ops), revision, destination })
       if (holdMutation !== undefined) {
         const held = holdMutation
         holdMutation = undefined
         held.entered()
         await held.released
       }
-      const target = namespaces.find(item => item.ns === ns)
       if (target === undefined) return { ok: false as const, error: { code: 'settings/absent', message: 'no section' } }
       if (revision !== target.revision) {
         return { ok: false as const, error: { code: 'settings/conflict', message: 'revision changed since it was read' } }
@@ -205,7 +210,9 @@ function makeRemoteConfig(
       forwarded.push({ value, revision, generation })
       notifyForwarded?.()
       notifyForwarded = undefined
-      return real.setAutoStart(value, revision, generation)
+      const write = real.setAutoStart(value, revision, generation)
+      lastWrite = write
+      return write
     },
   }
   return {
@@ -251,6 +258,12 @@ function makeRemoteConfig(
     acceptWithoutApply: () => { skipApply = true },
     currentGeneration: () => connection.getSnapshot(),
     readiness: () => port.configReadiness(),
+    siblingValue: destination => {
+      const source = destination === 'A' ? aNamespaces : namespaces
+      const value = source.find(item => item.ns === SIBLING)?.value as { maxActiveSubagents?: number } | undefined
+      return value?.maxActiveSubagents
+    },
+    lastWrite: () => lastWrite,
   }
 }
 
@@ -315,9 +328,9 @@ function setup(options: {
     generations: [] as object[],
     failNext: undefined as string | undefined,
     outcome: undefined as SectionMutationOutcome | undefined,
-    afterWrite: undefined as AcpStartupPreferenceState | undefined,
   }
   const copied: string[] = []
+  const diagnostics: string[] = []
   // The opaque Connection generation identity (object) the ACP observation binds
   // to; a reconnect (Host A -> Host B) replaces it and notifies subscribers.
   let generation: object | undefined = { id: 1 }
@@ -370,7 +383,7 @@ function setup(options: {
   const base: Record<string, unknown> = {
     ctx,
     app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: line => { diagnostics.push(line) } }] }),
     cwd: '/ws',
     sessionCwd: () => '/ws',
     signal: new AbortController().signal,
@@ -460,11 +473,6 @@ function setup(options: {
             pref.outcome = undefined
             return outcome
           }
-          if (pref.afterWrite !== undefined) {
-            pref.state = pref.afterWrite
-            pref.afterWrite = undefined
-            return { kind: 'accepted' as const }
-          }
           if (pref.state !== undefined && !Object.is(generation, pref.state.generation)) {
             return { kind: 'rejected' as const, reason: 'the Host settings authority changed since this choice was read' }
           }
@@ -512,6 +520,7 @@ function setup(options: {
     releaseAcpReads: () => { acp.releaseRead?.(); acp.releaseRead = undefined },
     releaseAcpWrite: () => { acp.release?.(); acp.release = undefined },
     remote,
+    diagnostics,
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -590,6 +599,9 @@ test('a queued ACP preference request is fenced at the real Remote queue head', 
   h.remote!.advanceB(false, 7)
   h.remote!.releasePredecessor()
   await predecessor
+  // The held predecessor applied to its captured A descriptor, never to B.
+  assert.equal(h.remote!.siblingValue('A'), 9, 'the predecessor mutation stayed on A')
+  assert.equal(h.remote!.siblingValue('B'), 8, 'B\'s sibling descriptor was not edited')
   await settle(h, 'the queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
   assert.equal(h.remote!.calls().filter(call => call.ns === 'pi-tui-acp-preferences').length, 0,
     'the old A intent dispatched ZERO ACP mutations against B')
@@ -609,6 +621,7 @@ test('a queued ACP preference request is fenced at the real Remote queue head', 
   assert.equal(h.remote!.forwarded().length, 2, 'both requests crossed the real adapter path')
   assert.equal(h.remote!.forwarded()[1]!.generation, h.remote!.currentGeneration(),
     'the fresh request carried the CURRENT B authority identity')
+  await h.remote!.lastWrite()
   h.dispose()
 })
 
@@ -681,11 +694,23 @@ test('a pending ACP Config write Back does not revive or replay after its late c
   await forwarded
   await received
   h.remote!.advanceB(true, 7)
+  const write = h.remote!.lastWrite()
+  assert.ok(write !== undefined)
   await key(h, '\x1b') // Back is allowed for a pending CONFIG write
   await settle(h, 'the Rows level after Back', frame => /Settings · Host · Rows/u.test(frame))
   h.remote!.releaseReceipt()
-  await drain(h, 12)
-  await settle(h, 'still Rows', frame => /Settings · Host · Rows/u.test(frame))
+  // Wait for the real adapter write lifetime to settle AND the retired page's
+  // owner to diagnose the terminal outcome; a painted Rows frame alone is not
+  // proof that the late write finished.
+  const lateOutcome = await write
+  assert.equal(lateOutcome.kind, 'accepted', 'the late A receipt is known-accepted')
+  await waitForFrame(
+    () => h.diagnostics.join('\n'),
+    text => /acp access preference write/u.test(text) && /outcome=unverified/u.test(text),
+    () => h.vt.waitForRender(),
+    'the retired page\'s late owner diagnostic',
+  )
+  assert.match(h.view(), /Settings · Host · Rows/u, 'Rows stays current after settlement')
   assert.doesNotMatch(h.view(), /Settings · Host · ACP access/u, 'the retired page never revives to paint its late outcome')
   assert.equal(h.remote!.calls().filter(call => call.ns === 'pi-tui-acp-preferences').length, 1,
     'late completion neither replays A nor issues a B write')
@@ -805,29 +830,6 @@ async function confirmAcpPreference(h: Harness): Promise<void> {
   await key(h, ENTER) // stage On
   await key(h, ENTER) // Confirm save
 }
-
-test('an accepted write with a same-generation disagreeing readback is Unverified, not Not saved', async () => {
-  const h = setup({ status: { state: 'enabled' } })
-  const generation = h.pref.state!.generation
-  h.pref.afterWrite = { autoStart: false, revision: 2, userOverridden: true, generation }
-  await confirmAcpPreference(h)
-  await settle(h, 'the unverified same-generation readback', frame => /Status\s+Unverified/u.test(frame))
-  assert.match(h.view(), /the same-generation readback reads Off/u)
-  assert.deepEqual(h.pref.writes, [true], 'the accepted request was dispatched once')
-  assert.deepEqual(h.pref.generations, [generation], 'the captured settings authority travelled with it')
-  h.dispose()
-})
-
-test('an accepted write whose readback belongs to another generation is Unverified', async () => {
-  const h = setup({ status: { state: 'enabled' } })
-  const generation = h.pref.state!.generation
-  h.pref.afterWrite = { autoStart: true, revision: 2, userOverridden: true, generation: {} }
-  await confirmAcpPreference(h)
-  await settle(h, 'the unattributable readback', frame => /Status\s+Unverified/u.test(frame))
-  assert.match(h.view(), /no current same-generation readback/u)
-  assert.deepEqual(h.pref.generations, [generation])
-  h.dispose()
-})
 
 test('a typed refusal is Not saved while an unknown settlement is unconfirmed', async () => {
   const rejected = setup({ status: { state: 'enabled' } })

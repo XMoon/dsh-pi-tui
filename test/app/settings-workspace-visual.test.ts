@@ -13509,35 +13509,6 @@ test('a pending ACP preference write settles honestly across A→B without a B w
   h.dispose()
 })
 
-test('Back during a pending ACP preference write leaves without cancelling or replaying it', async () => {
-  const h = setup({
-    columns: 200,
-    rows: 40,
-    backendKind: 'remote',
-    acpStatus: { state: 'enabled' },
-    holdAcpConfigWrite: true,
-  })
-  await openAcpAccess(h)
-  await highlightPageRow(h, 'Start automatically')
-  await key(h, '\r')
-  await key(h, '\r')
-  await key(h, '\r')
-  await settle(h)
-  assert.deepEqual(h.acpAutoStartWrites(), [true])
-  h.bumpAcpGeneration()
-  await settle(h, 12)
-
-  // Back is a real exit for a pending CONFIG write (the write owner keeps
-  // settling it); leaving must not cancel, replay or rebase the request.
-  await key(h, '\x1b')
-  await settle(h)
-  assert.match(h.view(), /Settings · Host · Rows/u)
-  h.releaseAcpConfigWrite()
-  await settle(h, 12)
-  assert.deepEqual(h.acpAutoStartWrites(), [true], 'the pending A write is neither cancelled nor replayed against B')
-  h.dispose()
-})
-
 // ── M6-2A A5: the startup backend preference (`startup-backend`) ───────────
 //
 // The `Backend` row lives in the fixed `General` category. It is a PROFILE
