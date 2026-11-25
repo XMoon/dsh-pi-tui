@@ -1014,7 +1014,10 @@ export async function runAcpScopedMcpB1(context) {
       'H6: the held startup must still be open when the ACP connection is closed')
     await acpH5.client.close()
     await h5Pending
-    await httpH5.waitForEvent(event => event.kind === 'startup-held-closed' && event.time >= h5PendingAt, 'H6 held HTTP startup close')
+    const h6HeldClosed = await httpH5.waitForEvent(event => event.kind === 'startup-held-closed' && event.time >= h5PendingAt,
+      'H6 held HTTP startup close')
+    assert(h6HeldClosed.time - h5PendingAt < 20_000,
+      `H6: the held startup must close before the independent 20s startup budget: ${JSON.stringify({ dispatchedAt: h5PendingAt, closedAt: h6HeldClosed.time })}`)
     await waitToolAbsent(sessionA, 'H6 HTTP pending startup', [ECHO_TOOL, HOLD_TOOL, FAIL_TOOL])
     const closedWire = await startScopedMcpHttpServer({ tag: 'b1-closed-wire' })
     const closedWireUrl = closedWire.url
@@ -1067,6 +1070,10 @@ export async function runAcpScopedMcpB1(context) {
     for (const fixture of httpFixtures) {
       assert(fixture.sse.every(stream => stream.closedAt !== undefined),
         `${fixture.tag}: every run-owned HTTP stream must be closed before Host shutdown`)
+      const held = fixture.events.filter(event => event.kind === 'startup-held').length
+      const heldClosed = fixture.events.filter(event => event.kind === 'startup-held-closed').length
+      assert(held === heldClosed,
+        `${fixture.tag}: every held startup obligation must be settled before fixture teardown: ${JSON.stringify({ held, heldClosed })}`)
       await fixture.close()
     }
     await scene.exitC1Client(tuiB, 'Q11 tui B')
