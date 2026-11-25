@@ -30,6 +30,8 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { bundleVersion } from '../../src/client/launcher/version.ts'
 
+const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -216,8 +218,8 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
       acpStartupPreference: {
-        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
-        setAutoStart: async (_value: boolean, _revision: number) => {},
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: ACP_STARTUP_PREFERENCE_GENERATION }),
+        setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },

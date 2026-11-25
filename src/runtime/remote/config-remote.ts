@@ -2234,18 +2234,29 @@ class RemoteAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
     const revision = view.revision
     if (typeof revision !== 'number') return undefined
     const user = plainRecord(view.user)
-    return { autoStart, revision, userOverridden: user?.autoStart !== undefined }
+    // The value/revision may be the last-known projection of a stale mirror;
+    // only a CURRENT committed read owns a writable Host authority identity.
+    const generation = this.mirror.readyGeneration()
+    return { autoStart, revision, generation, userOverridden: user?.autoStart !== undefined }
   }
 
-  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
-    const view = this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS)
-    if (view === undefined) {
-      throw new Error(`settings namespace "${ACP_STARTUP_PREFERENCE_NS}" is not available in this deployment`)
+  async setAutoStart(value: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
+    if (this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS) === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${ACP_STARTUP_PREFERENCE_NS}" is not available in this deployment` }
     }
-    if (view.value === undefined) {
-      throw new Error(`settings namespace "${ACP_STARTUP_PREFERENCE_NS}" exposes no form projection`)
+    if (this.mirror.namespace(ACP_STARTUP_PREFERENCE_NS)?.value === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${ACP_STARTUP_PREFERENCE_NS}" exposes no form projection` }
     }
-    await this.mirror.mutate(ACP_STARTUP_PREFERENCE_NS, [{ op: 'set', path: ['autoStart'], value }], expectedRevision, 'record')
+    // `mutateRemoteSection` re-checks the generation before the write is even
+    // enqueued and AGAIN inside the same serialized queue before dispatch, so
+    // an A decision queued behind a predecessor can never become a B write.
+    return mutateRemoteSection(
+      this.mirror,
+      ACP_STARTUP_PREFERENCE_NS,
+      [{ op: 'set', path: ['autoStart'], value }],
+      expectedRevision,
+      generation,
+    )
   }
 }
 

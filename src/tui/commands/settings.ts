@@ -527,39 +527,30 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const acpAutostartValueOf = (value: string): boolean | undefined =>
     value === 'On' ? true : value === 'Off' ? false : undefined
 
-  const verifyCommittedAcpAutostart = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+  /** A known-accepted write earns Verified ONLY from a CURRENT readback that
+   *  still belongs to the SAME Host generation the decision was made under.
+   *  Accepted-but-unreadable, a different generation or a disagreeing value is
+   *  Unverified: the mutation may have committed, so it is neither a refusal
+   *  nor a verification claim. */
+  const verifyCommittedAcpAutostart = (
+    expected: boolean,
+    generation: object,
+  ): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed preference could not be re-read` }
+      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
     }
     const state = runner.config.acpStartupPreference.read()
-    if (state === undefined) {
-      return { outcome: 'unverified', reason: 'the committed ACP startup preference could not be re-read' }
+    if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
+      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
     }
     if (state.autoStart !== expected) {
       return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the authoritative preference reads ${state.autoStart ? 'On' : 'Off'}`,
+        outcome: 'unverified',
+        reason: `the write was accepted, but the same-generation readback reads ${state.autoStart ? 'On' : 'Off'}`,
       }
     }
     return { outcome: 'verified' }
-  }
-
-  const classifyRejectedAcpAutostart = (
-    base: boolean,
-    failureReason: string,
-  ): SettingsWorkspaceCommitOutcome => {
-    const state = runner.config.configReadiness() === 'ready'
-      ? runner.config.acpStartupPreference.read()
-      : undefined
-    if (state === undefined) {
-      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
-    }
-    if (state.autoStart === base) return { outcome: 'not-saved', reason: failureReason }
-    return {
-      outcome: 'indeterminate',
-      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
-    }
   }
 
   /** Commit the next-launch preference through the official revision-checked
@@ -567,6 +558,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const commitAcpAutostart = async (
     value: string,
     revision: number | undefined,
+    generation: object | undefined,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
     const autoStart = acpAutostartValueOf(value)
     if (autoStart === undefined) {
@@ -574,6 +566,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     if (revision === undefined) {
       return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    if (generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no current authority generation this choice could be based on' }
     }
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
@@ -583,12 +578,26 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (base === undefined) {
       return { outcome: 'not-saved', reason: 'the Host ACP startup preference is unavailable; nothing was changed' }
     }
-    try {
-      await runner.config.acpStartupPreference.setAutoStart(autoStart, revision)
-    } catch (error) {
-      return classifyRejectedAcpAutostart(base.autoStart, safeErrorMessage(error))
+    // The decision fences are proved AGAIN against the live observation before
+    // the port is entered; the port then carries the captured generation through
+    // its own serialized queue to the dispatch boundary.
+    if (!Object.is(base.generation, generation) || base.revision !== revision) {
+      return { outcome: 'not-saved', reason: 'the Host settings authority changed since this choice was read; nothing was changed' }
     }
-    return verifyCommittedAcpAutostart(autoStart)
+    let outcome: SectionMutationOutcome
+    try {
+      outcome = await runner.config.acpStartupPreference.setAutoStart(autoStart, revision, generation)
+    } catch (error) {
+      // The adapter contract returns a typed settlement; an unexpected throw is
+      // an unattributable outcome, never a refusal derived from a later value.
+      return { outcome: 'indeterminate', reason: safeErrorMessage(error) }
+    }
+    switch (outcome.kind) {
+      case 'accepted': return verifyCommittedAcpAutostart(autoStart, generation)
+      case 'rejected': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'conflict': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'outcome-unconfirmed': return { outcome: 'indeterminate', reason: outcome.reason }
+    }
   }
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
@@ -1441,8 +1450,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             setEnabled: (enabled, expectedGeneration) => runner.acpAccess.setEnabled(enabled, expectedGeneration),
             readPreference: () => runner.config.acpStartupPreference.read(),
             configReadiness: () => runner.config.configReadiness(),
-            commitAutostart: (value, revision) =>
-              commitSettingsWorkspaceField({ field: 'acp-autostart', value, revision }, undefined),
+            commitAutostart: (value, revision, generation) =>
+              commitSettingsWorkspaceField({ field: 'acp-autostart', value, revision, generation }, undefined),
             // The Client command is a pure Client-local clipboard operation: it
             // never reaches the Host, reads no socket path and starts no stdio.
             copyToClipboard: (text) => runner.copyToClipboard(text),
@@ -2702,7 +2711,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         case 'web-autostart': return commitWebAutostart(request.value, request.revision)
         case 'session-log-upload': return commitSessionLogUpload(request.value, request.revision, request.generation)
         case 'startup-backend': return commitBackendStartup(request.value, request.revision)
-        case 'acp-autostart': return commitAcpAutostart(request.value, request.revision)
+        case 'acp-autostart': return commitAcpAutostart(request.value, request.revision, request.generation)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)
         case 'icon-style': return commitIconStyle(request.value)

@@ -248,7 +248,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       acpStartupPreference: {
         read: () => undefined,
-        setAutoStart: async (_value: boolean, _revision: number) => {},
+        setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       extensionConfigs: {
         read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),
