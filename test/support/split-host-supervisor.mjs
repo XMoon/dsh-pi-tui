@@ -92,6 +92,8 @@ let activeQualificationClient
 const qualificationClients = []
 /** Detached Hosts a Scene Client's discovery fallback started, reclaimed by this Supervisor. */
 const fallbackHosts = []
+/** Scratch directories that already existed when the current Host was declared dead. */
+let processFallbackScratchBaseline = []
 /** Process-scene native Clients this Supervisor owns; the Worker never holds one. */
 const processClients = []
 /** The immutable candidate a process Scene installed. */
@@ -4463,7 +4465,7 @@ async function assertProcessClientQuiesced(handle, reason) {
 }
 
 /** Register the real fallback Host one Client's product discovery started. */
-function registerProcessFallbackHost(handle, hostFacts, label) {
+function registerProcessFallbackHost(handle, hostFacts, label, scratchBaseline) {
   const pid = hostFacts.hostPid
   if (!Number.isInteger(pid) || pid <= 0) {
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the discovered Host carries no real PID`)
@@ -4507,7 +4509,9 @@ function registerProcessFallbackHost(handle, hostFacts, label) {
     detectedAt: now(),
     reclaimed: false,
     normalStopRequired: handle.kind === undefined,
-    scratchBaseline: handle.kind === undefined ? readdirSync(processScope.dir).filter(name => name.startsWith('host-scratch-')) : undefined,
+    scratchBaseline: handle.kind === undefined
+      ? (scratchBaseline ?? readdirSync(processScope.dir).filter(name => name.startsWith('host-scratch-')))
+      : undefined,
     exitObserved: undefined,
   }
   assertProcessFallbackOwnership(pid, handle.scratch, record, 'PROCESS_FALLBACK registration')
@@ -4870,6 +4874,7 @@ async function handleStartProcessClient(message) {
     }
   }
   const facts = assertProcessInstalledFacts('START_PROCESS_CLIENT')
+  const fallbackScratchBaseline = [...processFallbackScratchBaseline]
   const sequence = ++processClientSequence
   const clientDir = join(scene.workDir, 'process-clients', `${label}-${String(sequence)}`)
   mkdirSync(clientDir, { recursive: true, mode: 0o700 })
@@ -4951,8 +4956,13 @@ async function handleStartProcessClient(message) {
     handle.exitResult = { code: null, signal: null }
     handle.closeFailure = error
     syncProcessClientsReceipt()
-    await closeProcessPtyOwner(handle, 'START_PROCESS_CLIENT PTY Owner create failure').catch(() => undefined)
+    const cleanupError = await closeProcessPtyOwner(handle, 'START_PROCESS_CLIENT PTY Owner create failure')
+      .then(() => undefined)
+      .catch(failure => failure)
     handle.settlement.resolve()
+    if (cleanupError !== undefined) {
+      throw new AggregateError([error, cleanupError], `${label}: the PTY Owner create failed and its cleanup also failed`)
+    }
     throw error
   }
   syncProcessClientsReceipt()
@@ -5121,7 +5131,7 @@ async function handleStartProcessClient(message) {
   const authenticatedHost = assertProcessHostRecord(handle, authenticated, `${label} host-authenticated`)
   assertHostIdentityMatchesKernel(authenticatedHost, authenticatedHost.hostPid, `${label} host-authenticated`)
   if (fallbackProbe || recovery) {
-    handle.fallbackHostRecord = registerProcessFallbackHost(handle, authenticatedHost, `${label} host-authenticated`)
+    handle.fallbackHostRecord = registerProcessFallbackHost(handle, authenticatedHost, `${label} host-authenticated`, fallbackScratchBaseline)
   } else if (attach) {
     if (authenticatedHost.hostPid !== recoveredRecord.pid
       || authenticatedHost.instanceId !== recoveredRecord.instanceId) {
@@ -5130,7 +5140,7 @@ async function handleStartProcessClient(message) {
     handle.fallbackHostRecord = recoveredRecord
   } else if (authenticatedHost.hostPid !== host.child.pid) {
     // A normal anchor must never be silently rebound to a discovery fallback.
-    registerProcessFallbackHost(handle, authenticatedHost, `${label} unexpected fallback`)
+    registerProcessFallbackHost(handle, authenticatedHost, `${label} unexpected fallback`, fallbackScratchBaseline)
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Client authenticated a Host other than this Scene's ready Host`)
   }
   if (lifecycleClosed || disconnected) {
@@ -7050,6 +7060,7 @@ async function handleSignalEntry(message) {
     }
     if (handle.signalIntent !== undefined) throw new Error('SIGNAL_ENTRY: the Host already received its declared crash signal')
     assertProcessHostSignalOwnership(handle, `SIGNAL_ENTRY ${signal}`)
+    processFallbackScratchBaseline = readdirSync(processScope.dir).filter(name => name.startsWith('host-scratch-'))
     try {
       process.kill(handle.child.pid, signal)
     } catch (error) {

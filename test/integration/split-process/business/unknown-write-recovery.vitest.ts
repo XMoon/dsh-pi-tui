@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
@@ -22,6 +22,10 @@ const sessionHelpers = await import(
 ) as {
   hostUserTexts(events: Record<string, any>[]): string[]
   hostAssistantHasText(events: Record<string, any>[], text: string): boolean
+}
+
+function scopeScratch(scene: SplitProcessScene): string[] {
+  return readdirSync(scene.scopeDir).filter(name => name.startsWith('host-scratch-')).sort()
 }
 
 function clientDirectories(scene: SplitProcessScene, label: string): { home: string; cwd: string } {
@@ -90,6 +94,7 @@ async function recoverAndResume(
   label: string,
   prompt: string,
 ): Promise<void> {
+  const initialScratch = scopeScratch(scene)
   await oldClient.signal('SIGTERM')
   await oldClient.waitForExit(120_000)
   await oldClient.close()
@@ -134,13 +139,14 @@ async function recoverAndResume(
   expect(stop.normalStop).toBe(true)
   expect(stop.reclaimed).toBe(true)
   expect(stop.registryRemoved).toBe(true)
-  expect(stop.scratchEntries).toEqual([])
+  expect(stop.scratchEntries).toEqual(initialScratch)
 }
 
 test('SIGKILL after an accepted write never fakes settlement and cold-resumes the Session once', async () => {
   const scene = await createSplitProcessScene()
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'long-turn', crashSignal: 'SIGKILL' })
     client = await scene.startClient({ label: 't65', ...clientDirectories(scene, 't65') })
@@ -158,8 +164,16 @@ test('SIGKILL after an accepted write never fakes settlement and cold-resumes th
     expect((await client.text()).includes('long-turn answer')).toBe(false)
     await recoverAndResume(scene, host, client, sessionId, 't65', 't65 prompt')
     client = undefined
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'the Host-death recovery test failed and its Scene cleanup also failed')
+      throw cleanupError
+    }
   }
 })
 
@@ -167,6 +181,7 @@ test('ACK-dropped unknown write survives Host death and cold resume without repl
   const scene = await createSplitProcessScene()
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'long-turn', crashSignal: 'SIGKILL' })
     client = await scene.startClient({
@@ -211,7 +226,15 @@ test('ACK-dropped unknown write survives Host death and cold resume without repl
     expect((await client.text()).includes('long-turn answer')).toBe(false)
     await recoverAndResume(scene, host, client, sessionId, 't66', token)
     client = undefined
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'the Host-death recovery test failed and its Scene cleanup also failed')
+      throw cleanupError
+    }
   }
 })

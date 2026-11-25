@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
@@ -25,6 +25,10 @@ const sessionHelpers = await import(
 ) as {
   hostUserTexts(events: WorkEvent[]): string[]
   hostAssistantHasText(events: WorkEvent[], text: string): boolean
+}
+
+function scopeScratch(scene: SplitProcessScene): string[] {
+  return readdirSync(scene.scopeDir).filter(name => name.startsWith('host-scratch-')).sort()
 }
 
 function clientDirectories(scene: SplitProcessScene, label: string): { home: string; cwd: string } {
@@ -561,8 +565,10 @@ test('treats a Host SIGHUP as carrier loss and discovers a new Host for the next
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
   let fresh: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'long-turn', crashSignal: 'SIGHUP' })
+    const initialScratch = scopeScratch(scene)
     client = await scene.startClient({ label: 'host-hup', ...clientDirectories(scene, 'host-hup') })
     const before = new Set(await scene.sessionIds())
     await client.submit('t64 prompt')
@@ -597,8 +603,16 @@ test('treats a Host SIGHUP as carrier loss and discovers a new Host for the next
     expect(stop.reclaimed).toBe(true)
     expect(stop.normalStop).toBe(true)
     expect(stop.registryRemoved).toBe(true)
-    expect(stop.scratchEntries).toEqual([])
+    expect(stop.scratchEntries).toEqual(initialScratch)
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    try {
+      await scene.dispose()
+    } catch (cleanupError) {
+      if (primary !== undefined) throw new AggregateError([primary, cleanupError], 'the Host SIGHUP test failed and its Scene cleanup also failed')
+      throw cleanupError
+    }
   }
 })
