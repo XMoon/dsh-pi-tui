@@ -1893,6 +1893,67 @@ test('the single-value Agent tenant paints one value and dispatches ONE save per
   page.dispose()
 })
 
+test('a saved single-value Agent settlement demotes when the served row moves', async () => {
+  interface NumericLoopSettings {
+    readonly maxParallelToolCalls: number
+  }
+  const generation = {}
+  let revision = 4
+  let effective = { maxParallelToolCalls: 10 }
+  const writes: SectionPatch<NumericLoopSettings>[] = []
+  const fields: readonly HostNumericSettingsField<NumericLoopSettings>[] = [
+    { key: 'maxParallelToolCalls', label: 'Parallel tool calls' },
+  ]
+  const tasks: Promise<void>[] = []
+  const controller = new HostNumericSettingsController<NumericLoopSettings>({
+    port: {
+      read: () => ({
+        kind: 'ready', generation, revision, effective: { ...effective },
+        inherited: { maxParallelToolCalls: 2 }, overridden: { maxParallelToolCalls: true },
+      }),
+      refresh: async () => {},
+      mutate: async patch => {
+        writes.push(patch)
+        const edit = patch.maxParallelToolCalls!
+        effective = { maxParallelToolCalls: edit.kind === 'reset' ? 2 : edit.value }
+        revision += 1
+        return { kind: 'accepted' }
+      },
+    },
+    fields,
+    requestRender: () => {},
+    runOwned: (_label, task) => { tasks.push(Promise.resolve().then(task)) },
+  })
+  const page = new HostNumericSettingsPage<NumericLoopSettings>({
+    controller,
+    fields,
+    spec: { title: 'Parallel tool calls', commitMode: 'single', sourceHeading: () => 'Host profile', help: [], scope: 'Host profile' },
+    requestRender: () => {},
+    done: () => {},
+  })
+  page.setMaxRows(10)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const plain = (): string => page.render(80).map(strip).join('\n')
+  page.handleInput(ENTER)
+  page.render(80)
+  page.handleInput('\x15')
+  page.render(80)
+  page.handleInput('4')
+  page.render(80)
+  page.handleInput(ENTER)
+  page.render(80)
+  for (let turn = 0; turn < 8; turn += 1) await Promise.all(tasks.splice(0))
+  assert.equal(writes.length, 1)
+  assert.match(plain(), /^Saved\s*$/mu, 'the verified save starts as a current Saved')
+
+  revision += 1
+  const stale = plain()
+  assert.match(stale, /^Last-known · read-only\s*$/mu, 'a stale single-value settlement is no longer painted as Saved')
+  assert.match(stale, /Previous save completed; refresh to review\./u, 'the history is named as history')
+  assert.doesNotMatch(stale, /^Saved\s*$/mu)
+  page.dispose()
+})
+
 test('the single-value Reset confirmation requires the risk copy to be painted first', async () => {
   interface NumericLoopSettings {
     readonly maxParallelToolCalls: number

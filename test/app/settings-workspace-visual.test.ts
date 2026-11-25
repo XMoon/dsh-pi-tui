@@ -4390,7 +4390,8 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   await key(stale, 's')
   await settle(stale, 8)
   assert.equal(stale.shellExecutionAttempts(), 0, 'a stale captured read never dispatches')
-  assert.match(stale.view(), /Last-known|\bSaved\b|Could not save/u)
+  assert.match(stale.view(), /Last-known|Could not save/u)
+  assert.doesNotMatch(stale.view(), /\bSaved\b/u, 'a stale zero-dispatch capture never claims Saved')
   assert.match(stale.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the draft is retained')
   stale.dispose()
 
