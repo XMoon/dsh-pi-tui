@@ -51,30 +51,36 @@ function settingsService(initial: { backend: string }, revision = 1) {
   }
 }
 
-const PANEL_SNAPSHOT: any = {
-  configReadiness: 'ready',
-  capturedAt: 0,
-  rows: [{
-    id: 'startup-backend',
-    category: 'general',
-    label: 'Backend',
-    summary: 'Direct',
-    value: 'Direct',
-    scope: 'DSH Host profile · next cold launch',
-    freshness: 'ready',
-    description: 'Which backend a new launch runs',
-    edit: {
-      field: 'startup-backend',
-      primary: 'persisted',
-      runtime: 'Applies on next launch; current TUI/Host remains unchanged',
-      persisted: 'Direct',
-      revision: 1,
-      options: [
-        { value: 'Direct', label: 'Direct', available: true, current: true },
-        { value: 'Daemon', label: 'Daemon', available: true, current: false },
-      ],
-    },
-  }],
+/** The panel's painted Backend row. The edit's generation MUST be the SAME Host
+ *  settings-authority object the real Direct port reads (the service identity),
+ *  otherwise the generation-addressed Change entry correctly refuses it. */
+function panelSnapshot(generation: object): any {
+  return {
+    configReadiness: 'ready',
+    capturedAt: 0,
+    rows: [{
+      id: 'startup-backend',
+      category: 'general',
+      label: 'Backend',
+      summary: 'Direct',
+      value: 'Direct',
+      scope: 'DSH Host profile · next cold launch',
+      freshness: 'ready',
+      description: 'Which backend a new launch runs',
+      edit: {
+        field: 'startup-backend',
+        primary: 'persisted',
+        runtime: 'Applies on next launch; current TUI/Host remains unchanged',
+        persisted: 'Direct',
+        revision: 1,
+        generation,
+        options: [
+          { value: 'Direct', label: 'Direct', available: true, current: true },
+          { value: 'Daemon', label: 'Daemon', available: true, current: false },
+        ],
+      },
+    }],
+  }
 }
 
 function host(services: Record<string, unknown>): HostContextLike {
@@ -119,7 +125,7 @@ function buildComposition(t: test.TestContext, mode: 'capture' | 'panel' = 'capt
         // The production panel class with the SAME options `settings.ts`
         // produced: `onBackendServiceInstall` is passed through unchanged (only
         // `onCommit` needs the panel's settle adapter, exactly like TuiApp).
-        livePanel = new SettingsWorkspacePanel({ readSnapshot: () => PANEL_SNAPSHOT }, {
+        livePanel = new SettingsWorkspacePanel({ readSnapshot: () => panelSnapshot(service) }, {
           rows: () => 60,
           columns: () => 120,
           requestRender: () => {},
@@ -169,6 +175,7 @@ function buildComposition(t: test.TestContext, mode: 'capture' | 'panel' = 'capt
   return {
     capturedCommit: () => capturedCommit!,
     capturedInstall: () => capturedInstall!,
+    state: () => config.backendStartupPreference.read(),
     observed,
     expected,
     transitions,
@@ -180,7 +187,11 @@ function buildComposition(t: test.TestContext, mode: 'capture' | 'panel' = 'capt
 test('the Settings verified direct→daemon confirmation drives the production install sink with the bound Profile identity', async t => {
   const c = buildComposition(t)
   assert.ok(c.capturedCommit() !== undefined && c.capturedInstall() !== undefined, 'the production Settings handlers are captured')
-  const outcome = (await c.capturedCommit()({ field: 'startup-backend', value: 'Daemon', revision: 1 })) as any
+  const decision = c.state()
+  assert.ok(decision !== undefined && decision.generation !== undefined)
+  const outcome = (await c.capturedCommit()({
+    field: 'startup-backend', value: 'Daemon', revision: decision.revision, generation: decision.generation,
+  })) as any
   assert.equal(outcome.outcome, 'verified', 'the official DirectConfigPort confirmed the save')
   assert.deepEqual(outcome.followUp, { kind: 'daemon-service-install', installable: true }, 'the verified direct→daemon save offers the service install')
   const installResult = await new Promise<{ ok: boolean; detail?: string }>(resolve => c.capturedInstall()(resolve))
@@ -193,7 +204,11 @@ test('the Settings verified direct→daemon confirmation drives the production i
 
 test('the safe Not-now path through the real Settings route performs zero manager IO', async t => {
   const c = buildComposition(t)
-  const outcome = (await c.capturedCommit()({ field: 'startup-backend', value: 'Daemon', revision: 1 })) as any
+  const decision = c.state()
+  assert.ok(decision !== undefined && decision.generation !== undefined)
+  const outcome = (await c.capturedCommit()({
+    field: 'startup-backend', value: 'Daemon', revision: decision.revision, generation: decision.generation,
+  })) as any
   assert.equal(outcome.outcome, 'verified', 'the save is verified and the follow-up is offered')
   // The user chooses `Not now` (or Esc): the production install handler is NEVER
   // invoked, so the real admin sink sees zero manager IO — the real reachable
