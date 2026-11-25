@@ -382,6 +382,16 @@ export async function runAcpSessionConfig(context) {
     const resumed2 = await client.request(acp.methods.agent.session.resume, { sessionId, cwd: hostCwd })
     assert(configOption(resumed2?.configOptions, 'agent_team')?.currentValue === true,
       'PR3B-04: the reattached View must read the committed Team=true')
+    // L5: a normal A prompt recovers after the held write reattaches; this is
+    // the same Session/View, not a new fault or a second profile.
+    const recoveryMark = eventMark()
+    const recoveredPrompt = await client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText('PR3B_RECOVERY_AFTER_HOLD'),
+    })
+    assert(recoveredPrompt?.stopReason === 'end_turn',
+      `PR3B-04: A must accept a normal prompt after reattach (${JSON.stringify(recoveredPrompt)})`)
+    await waitForHostSessionEventAfter(dshHome, sessionId, recoveryMark,
+      event => event.type === 'turn/end', 'PR3B-04 the recovered A turn end')
     // The real TUI observes the SAME committed Team projection on its `/model`
     // Team row; this is a read, not a second authority.
     await submitLine(tui.client, '/model', 'PR3B-team-model')
