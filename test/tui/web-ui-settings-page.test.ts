@@ -338,22 +338,22 @@ test('a Host generation change revokes the actions and re-reads before any new a
   h.close()
 })
 
-test('a generation change during a pending write reports Outcome unconfirmed', async () => {
+test('a generation change during a pending write reports Could not confirm change', async () => {
   const h = await mount({ status: { state: 'disabled' } })
   await h.key('\r') // Enable, held
   h.bumpGeneration()
   await h.flush()
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.equal(h.writes().length, 0, 'the toggle had not even settled yet')
   h.close()
 })
 
-test('a lost toggle receipt is Outcome unconfirmed and is never retried', async () => {
+test('a lost toggle receipt is Could not confirm change and is never retried', async () => {
   const h = await mount({ status: { state: 'disabled' }, toggleFailure: 'the connection dropped after dispatch' })
   await h.key('\r')
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'exactly one dispatch')
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.match(h.frame(), /the Host may have applied the request/u)
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'no automatic retry')
@@ -431,7 +431,7 @@ test('a committed preference re-reads the persisted value, never the requested o
   assert.equal(h.commitGenerations().length, 1)
   assert.ok(Object.is(h.commitGenerations()[0], h.configAuthority()),
     'the confirmation carried the SAME observation generation the choice was opened against')
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   assert.equal(h.writes().length, 0, 'the preference write never toggles the running Host')
   h.close()
 })
@@ -551,7 +551,7 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
   await h.flush()
   assert.deepEqual(h.commitRevisions(), [7], 'the adoption really refreshed the revision')
   assert.deepEqual(h.commits(), ['Off'])
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   h.close()
 })
 
@@ -568,7 +568,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   await h.flush()
   assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
   assert.deepEqual(h.commitRevisions(), [], 'no revision was ever submitted')
-  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /Status\s+Could not save/u)
   assert.match(h.frame(), /the configuration changed since this choice was opened; review the new value and confirm again/u)
   assert.doesNotMatch(h.frame(), /Confirm save/u, 'the stale confirmation is retired')
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
@@ -581,7 +581,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   await h.flush()
   assert.deepEqual(h.commitRevisions(), [2], 'the fresh decision carries the CURRENT revision')
   assert.deepEqual(h.commits(), ['Off'])
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   h.close()
 })
 
@@ -592,7 +592,7 @@ test('a throwing commit is an honest unconfirmed outcome', async () => {
   await h.key('\r') // confirm step
   await h.key('\r') // Confirm save
   await h.flush()
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm save/u)
   assert.match(h.frame(), /the writer crashed/u)
   h.close()
 })

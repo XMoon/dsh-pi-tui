@@ -302,7 +302,7 @@ test('a failed refresh keeps the settled ambiguous write, and a successful refre
   assert.equal(failed.limits.status?.kind, 'outcome-unconfirmed', 'an unreadable refresh cannot clear an unproven write')
   assert.equal(failed.limits.dirty, true, 'the retained intent stays visible')
   assert.match(failed.notice ?? '', /Refresh failed/u)
-  assert.match(failed.limits.status?.text ?? '', /possibly saved/u)
+  assert.match(failed.limits.status?.text ?? '', /reply lost/u)
   assert.equal(failed.selection.status?.kind, undefined, 'the clean sibling is not marked ambiguous')
 
   h.limits.refresh = async () => { h.limits.refreshCalls += 1 }
@@ -725,7 +725,9 @@ test('refused and unconfirmed outcomes keep the draft and never claim Verified',
     const snapshot = controller.snapshot()
     assert.notEqual(snapshot.status?.kind, 'verified')
     assert.equal(snapshot.dirty, true, `${outcome.kind}: the draft is retained`)
-    assert.match(snapshot.status?.text ?? '', outcome.kind === 'outcome-unconfirmed' ? /Outcome unconfirmed/u : /Not saved/u)
+    assert.match(snapshot.status?.text ?? '', outcome.kind === 'outcome-unconfirmed'
+      ? /transport lost after dispatch/u
+      : outcome.kind === 'conflict' ? /revision changed/u : /official validator refused/u)
     controller.dispose()
   }
 })
@@ -869,7 +871,7 @@ test('the post-save readback must serve the SAME executor row, even when the cap
   let snapshot = controller.snapshot()
   assert.equal(mutations.length, 1)
   assert.equal(snapshot.status?.kind, 'unverified', 'a swapped served row is never Verified')
-  assert.match(snapshot.status?.text ?? '', /different row/u)
+  assert.match(snapshot.status?.text ?? '', /different executor row/u)
   assert.equal(snapshot.dirty, true, 'the captured draft is retained')
   assert.deepEqual(snapshot.dirtyFields, ['timeoutMs'])
   assert.equal(snapshot.current, false, 'the captured row is no longer the served one')

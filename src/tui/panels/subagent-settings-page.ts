@@ -97,6 +97,8 @@ const DETAILS_KEY = '?'
 const GROUP_DISCARD = ['Discard unsaved changes?', 'Staged values are lost; nothing is written.'] as const
 const GROUP_REFRESH = ['Refresh discards unsaved edits.', 'The staged values are lost.'] as const
 const AMBIGUOUS_COPY = ['The Host may have applied changes.', 'Leaving does not undo them.'] as const
+/** The ONE recovery line of an accepted-but-unattributable write. */
+const MAY_HAVE_BEEN_SAVED = 'The change may have been saved. Refresh and check.'
 
 function fit(text: string, width: number): string {
   const line = truncateToWidth(text, Math.max(0, width), '…', false)
@@ -104,10 +106,10 @@ function fit(text: string, width: number): string {
 }
 function sectionWord(section: SubagentSectionSnapshot<object>): string {
   const kind = section.status?.kind
-  if (kind === 'verified') return 'Verified'
-  if (kind === 'not-saved') return 'Not saved'
-  if (kind === 'unverified') return 'Unverified'
-  if (kind === 'outcome-unconfirmed') return 'Outcome unconfirmed'
+  if (kind === 'verified') return 'Saved'
+  if (kind === 'not-saved') return 'Could not save'
+  if (kind === 'unverified') return 'Could not confirm save'
+  if (kind === 'outcome-unconfirmed') return 'Could not confirm save'
   if (kind === 'saving') return 'Saving…'
   if (section.source.kind !== 'ready') return section.source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable'
   if (!section.current) return 'Last-known · read-only'
@@ -1299,6 +1301,7 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
   private sectionFacts(snapshot: SubagentSettingsSnapshot, width: number): ContentLine[] {
     const lines: ContentLine[] = []
     const copyWidth = Math.min(width, 72)
+    let unknownShown = false
     for (const [name, section] of [['Limits', snapshot.limits], ['Selection', snapshot.selection]] as const) {
       const kind = section.status?.kind
       const stale = section.source.kind === 'ready' && !section.current
@@ -1307,11 +1310,18 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
           // A previous verification is history, never a certificate that an old
           // source is current.
           lines.push(...this.fact(name, 'Last-known · read-only', width, color.warning).lines)
-          lines.push(...this.note('Previous save verified; refresh to review.', copyWidth, color.textDim))
+          lines.push(...this.note('Previous save completed; refresh to review.', copyWidth, color.textDim))
         } else {
-          lines.push({ text: color.textDim(`${name}:`) + ' ' + statusInk(kind, sectionWord(section)) })
+          // The section keeps its own name; a long feedback word wraps as this
+          // page's own fact instead of being cut on a narrow grant.
+          const body = `${color.textDim(`${name}: `)}${statusInk(kind, sectionWord(section))}`
+          for (const line of wrapTextWithAnsi(body, Math.max(1, width))) lines.push({ text: line })
           if (stale) lines.push(...this.note('Last-known · read-only', copyWidth, color.warning))
           if (kind !== 'verified' && kind !== 'saving') lines.push(...this.note(section.status!.text, copyWidth))
+          if ((kind === 'unverified' || kind === 'outcome-unconfirmed') && !unknownShown) {
+            lines.push(...this.note(MAY_HAVE_BEEN_SAVED, copyWidth))
+            unknownShown = true
+          }
         }
       } else if (section.source.kind !== 'ready') {
         lines.push(...this.fact(name, section.source.kind === 'unavailable' ? 'Unavailable' : 'Unreadable', width, color.error).lines)
@@ -1337,8 +1347,12 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
       return { lines, saveFacts: { dirty: dirtyBlocks } }
     }
     lines.push(...this.sectionFacts(snapshot, width))
-    if (this.feedback === 'no-changes') lines.push(...this.fact('Status', 'No changes', width, color.textDim).lines)
-    if (snapshot.notice !== undefined && snapshot.notice !== this.fieldError) {
+    if (this.feedback === 'no-changes') lines.push({ text: color.textDim('No changes') })
+    // A whole-form notice that is just a section's own settlement text is
+    // already painted by `sectionFacts`: show the same fact ONCE.
+    const sectionSettlementTexts = new Set([snapshot.limits.status?.text, snapshot.selection.status?.text])
+    if (snapshot.notice !== undefined && snapshot.notice !== this.fieldError
+      && !sectionSettlementTexts.has(snapshot.notice)) {
       lines.push(...this.note(snapshot.notice, copyWidth, color.error))
     }
     if (this.fieldError !== undefined) lines.push(...this.note(this.fieldError, copyWidth, color.error))

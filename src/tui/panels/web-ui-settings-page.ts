@@ -204,14 +204,29 @@ function preferenceSummary(state: WebStartupPreferenceState | undefined, readine
   return readiness === 'ready' ? value : `${value} · last known`
 }
 
-/** The frozen status word + explanation of one Config write settlement. */
+/** The frozen user feedback of one Config write settlement. A verified write is
+ *  a short `Saved`; a proven refusal keeps its reason; an accepted write the
+ *  page cannot attribute is NEVER a failure claim. */
 function configOutcomeNote(outcome: SettingsWorkspaceCommitOutcome): OutcomeNote {
   switch (outcome.outcome) {
-    case 'verified': return { word: 'Verified', tone: 'success' }
-    case 'not-saved': return { word: 'Not saved', tone: 'error', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
-    case 'unverified': return { word: 'Unverified', tone: 'warning', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
-    case 'indeterminate': return { word: 'Outcome unconfirmed', tone: 'warning', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
+    case 'verified': return { word: 'Saved', tone: 'success' }
+    case 'not-saved': return { word: 'Could not save', tone: 'error', ...(outcome.reason === undefined ? {} : { detail: outcome.reason }) }
+    case 'unverified':
+    case 'indeterminate': {
+      const recovery = 'The change may have been saved. Refresh and check.'
+      return {
+        word: 'Could not confirm save',
+        tone: 'warning',
+        detail: outcome.reason === undefined ? recovery : `${recovery} ${outcome.reason}`,
+      }
+    }
   }
+}
+
+/** A dispatched RUNTIME change whose settlement cannot be attributed. It is
+ *  never a `Saved`/`Not saved` claim: the Host may have applied it. */
+function unconfirmedChange(detail: string): OutcomeNote {
+  return { word: 'Could not confirm change', tone: 'warning', detail: `${detail} Refresh and check.` }
 }
 
 function fit(text: string, width: number): string {
@@ -229,9 +244,10 @@ function statusInk(tone: 'success' | 'error' | 'warning' | 'muted', text: string
 }
 
 /** Paint one already-sanitized value by its content role. */
-function valueInk(ink: 'text' | 'dim' | 'error' | 'muted', text: string): string {
+function valueInk(ink: 'text' | 'dim' | 'error' | 'warning' | 'muted', text: string): string {
   if (ink === 'dim') return color.textDim(text)
   if (ink === 'error') return color.error(text)
+  if (ink === 'warning') return color.warning(text)
   if (ink === 'muted') return color.textMuted(text)
   return color.text(text)
 }
@@ -470,7 +486,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       // paint its result (its owner still settles and diagnoses) and state the
       // only honest outcome.
       this.writeSerial += 1
-      this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running' }
+      this.runtimeOutcome = unconfirmedChange('The Host changed while the request was running.')
       this.phase = 'ready'
     } else if (this.phase === 'confirm-disable' || this.phase === 'loading' || this.phase === 'settled') {
       this.phase = 'ready'
@@ -553,7 +569,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.revealSelection = true
     }
     this.configOutcome = {
-      word: 'Not saved',
+      word: 'Could not save',
       tone: 'error',
       detail: 'the configuration changed since this choice was opened; review the new value and confirm again',
     }
@@ -818,7 +834,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   /**
    * ONE runtime toggle. The action is qualified by the generation the CURRENT
    * status was read under: a replaced Host receives no request at all, and a
-   * request that MAY have been applied is reported `Outcome unconfirmed` — it
+   * request that MAY have been applied is painted `Could not confirm change` — it
    * is never retried and never attributed from the fresh read.
    */
   private dispatchRuntime(target: boolean): void {
@@ -875,7 +891,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.commitRuntimeSettlement(target, generation, failure, status, readFailure, stillCurrent)
     }, (error) => {
       if (this.disposed || serial !== this.writeSerial) return
-      this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
+      this.runtimeOutcome = unconfirmedChange(safeErrorMessage(error))
       this.phase = 'ready'
       this.revealSelection = true
       this.changed()
@@ -893,7 +909,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   ): void {
     if (!stillCurrent) {
       this.host = { kind: 'checking' }
-      this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host changed while the request was running; its outcome cannot be attributed' }
+      this.runtimeOutcome = unconfirmedChange('The Host changed while the request was running; its outcome cannot be attributed.')
       this.phase = 'ready'
       this.startStatusRead()
       this.changed()
@@ -902,22 +918,22 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     if (status === undefined) {
       this.host = { kind: 'unreadable', message: readFailure ?? 'the Host Web state could not be re-read' }
       this.runtimeOutcome = failure === undefined
-        ? { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the request was sent but the Host state could not be re-read' }
-        : { word: 'Outcome unconfirmed', tone: 'warning', detail: `${failure}; the Host state could not be re-read either` }
+        ? unconfirmedChange('The request was sent, but the Host state could not be re-read.')
+        : unconfirmedChange(`${failure}; the Host state could not be re-read either.`)
     } else {
       this.host = { kind: 'current', status, generation }
       if (failure !== undefined) {
         // A thrown request may still have been applied by the Host. The fresh
         // read refreshes the fact; it never proves this request's outcome.
-        this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: `${failure}; the Host may have applied the request` }
+        this.runtimeOutcome = unconfirmedChange(`${failure}; the Host may have applied the request.`)
       } else if (status.state === (target ? 'enabled' : 'disabled')) {
-        this.runtimeOutcome = { word: 'Verified', tone: 'success' }
+        this.runtimeOutcome = { word: target ? 'Web enabled' : 'Web disabled', tone: 'success' }
       } else if (status.state === 'changing') {
-        this.runtimeOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: 'the Host is still applying the change' }
+        this.runtimeOutcome = unconfirmedChange('The Host is still applying the change.')
       } else {
         this.runtimeOutcome = {
-          word: 'Not saved',
-          tone: 'error',
+          word: 'Requested state not reached',
+          tone: 'warning',
           detail: `the request reported success, but the Host reads ${servingWord(status).text.replace(/…$/u, '')}`,
         }
       }
@@ -980,7 +996,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     }, (error) => {
       if (this.disposed || serial !== this.writeSerial) return
       this.reconcilePreference()
-      this.configOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
+      this.configOutcome = configOutcomeNote({ outcome: 'indeterminate', reason: safeErrorMessage(error) })
       this.autostartCandidate = undefined
       this.autostartFence = undefined
       this.phase = 'settled'
@@ -1197,9 +1213,9 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
 
   /** A diagnostic/risk/question sentence, wrapped to the pane width and painted
    *  whole. Every physical line becomes a `copy` group member when asked. */
-  private wrapped(text: string, ink: 'text' | 'dim' | 'error', width: number, group?: 'copy'): ContentLine[] {
+  private wrapped(text: string, ink: 'text' | 'dim' | 'error' | 'warning', width: number, group?: 'copy'): ContentLine[] {
     return wrapTextWithAnsi(sanitizedPhysicalLine(text), Math.max(1, width)).map(line => ({
-      text: valueInk(ink === 'error' ? 'error' : ink === 'text' ? 'text' : 'dim', line),
+      text: valueInk(ink, line),
       ...(group === undefined ? {} : { group }),
     }))
   }
@@ -1398,7 +1414,9 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     const lines = this.hostFactLines(width)
     if (this.runtimeOutcome !== undefined) {
       lines.push(...this.factLines('Status', statusInk(this.runtimeOutcome.tone, this.runtimeOutcome.word), width))
-      if (this.runtimeOutcome.detail !== undefined) lines.push(...this.wrapped(this.runtimeOutcome.detail, 'dim', width))
+      if (this.runtimeOutcome.detail !== undefined) {
+        lines.push(...this.wrapped(this.runtimeOutcome.detail, this.runtimeOutcome.tone === 'error' ? 'error' : this.runtimeOutcome.tone === 'warning' ? 'warning' : 'dim', width))
+      }
     }
     if (this.phase === 'loading') {
       lines.push(...this.wrapped('Reading the Host Web state…', 'dim', width))
@@ -1435,7 +1453,8 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       if (this.configOutcome.detail !== undefined) {
         lines.push(...this.wrapped(
           this.configOutcome.detail,
-          this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim' : 'error',
+          this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim'
+            : this.configOutcome.tone === 'warning' ? 'warning' : 'error',
           width,
         ))
       }

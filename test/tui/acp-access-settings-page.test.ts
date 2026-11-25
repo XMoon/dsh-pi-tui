@@ -302,7 +302,7 @@ test('Direct states Split Host only, offers no toggle and still edits the prefer
 
 /* ------------------------------------------------------------- runtime */
 
-test('Enable ACP dispatches ONE fenced write after ONE live preflight and reaches Verified', async () => {
+test('Enable ACP dispatches ONE fenced write after ONE live preflight and paints ACP enabled', async () => {
   const h = await mount({ status: { state: 'disabled' } })
   await h.key('\r') // Enable ACP
   await h.flush()
@@ -310,7 +310,7 @@ test('Enable ACP dispatches ONE fenced write after ONE live preflight and reache
   assert.deepEqual(h.writeGenerations(), [h.generation.value], 'the generation the state was read under')
   assert.equal(h.reads(), 3, 'entry read + preflight + ONE read-back')
   assert.match(h.frame(), /Listener\s+Enabled/u)
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+ACP enabled/u)
   assert.match(h.bar(), /Refresh \[R\] · Back \[Esc\]/u)
   h.close()
 })
@@ -371,23 +371,23 @@ test('the Disable risk confirmation stages zero writes and Cancel leaves the Hos
   await h.flush()
   assert.deepEqual(h.writes(), [false], 'only the confirmed step dispatches ONE Host disable')
   assert.match(h.frame(), /Listener\s+Disabled/u)
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+ACP disabled/u)
   h.close()
 })
 
-test('a lost Host receipt is Outcome unconfirmed and is never replayed', async () => {
+test('a lost Host receipt is Could not confirm change and is never replayed', async () => {
   const h = await mount({ status: { state: 'disabled' }, writeFailureAfterApply: 'the connection dropped after dispatch' })
   await h.key('\r')
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'exactly one dispatch')
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.match(h.frame(), /the Host may have applied the request/u)
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'no automatic retry')
   h.close()
 })
 
-test('a write the Host does not reflect is Not saved', async () => {
+test('a write the Host does not reflect is Requested state not reached', async () => {
   // The Host accepted the request but still reports the old state: the read-back
   // is the authority and disagrees with the requested target.
   const h = await mount({ status: { state: 'disabled' }, ignoreWrite: true })
@@ -395,18 +395,18 @@ test('a write the Host does not reflect is Not saved', async () => {
   await h.key('\r')
   await h.flush()
   assert.deepEqual(h.writes(), [true])
-  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /Status\s+Requested state not reached/u)
   assert.match(h.frame(), /the request reported success, but the Host reads Disabled/u)
   h.close()
 })
 
-test('a Host generation change during a pending write is Outcome unconfirmed and never replays', async () => {
+test('a Host generation change during a pending write is Could not confirm change and never replays', async () => {
   const h = await mount({ status: { state: 'disabled' }, holdWrite: true })
   await h.key('\r') // Enable, held in flight
   assert.match(h.frame(), /Waiting for the answer…/u)
   h.bumpGeneration()
   await h.flush()
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.deepEqual(h.writes(), [true])
   h.releaseWrite()
   await h.flush()
@@ -590,7 +590,7 @@ test('the next-start ladder stages zero writes and saves the captured revision o
   assert.equal(commits[0]!.value, 'On')
   assert.equal(commits[0]!.revision, 1, 'the writer received the captured revision')
   assert.equal(typeof commits[0]!.generation, 'object', 'and the captured settings authority')
-  assert.match(h.frame(), /Status\s+Verified/u)
+  assert.match(h.frame(), /Status\s+Saved/u)
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the persisted value is re-read, not optimistically assumed')
   assert.deepEqual(h.writes(), [], 'the preference write never toggles the running Host')
   h.close()
@@ -607,7 +607,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   await h.key('\r') // Confirm save
   await h.flush()
   assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
-  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /Status\s+Could not save/u)
   assert.match(h.frame(), /the configuration changed since this choice was opened; review the new value and confirm again/u)
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
   h.close()
@@ -636,7 +636,7 @@ test('a throwing preference writer is an honest unconfirmed outcome', async () =
   await h.key('\r')
   await h.key('\r')
   await h.flush()
-  assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
+  assert.match(h.frame(), /Status\s+Could not confirm save/u)
   assert.match(h.frame(), /the writer crashed/u)
   h.close()
 })
@@ -711,7 +711,7 @@ test('a silently replaced Host refuses the staged save with zero writes', async 
   await h.key('\r')
   await h.flush()
   assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
-  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /Status\s+Could not save/u)
   assert.match(h.frame(), /the configuration changed since this choice was opened/u)
   h.close()
 })
@@ -832,7 +832,7 @@ test('Refresh is a real body action and its shortcut acts only while the row is 
   short.close()
 })
 
-test('a preference write accepted without an agreeing readback is Unverified', async () => {
+test('a preference write accepted without an agreeing readback is Could not confirm save', async () => {
   const h = await mount({
     status: { state: 'enabled' },
     commitOutcome: { outcome: 'unverified', reason: 'the readback disagrees' },
@@ -842,7 +842,7 @@ test('a preference write accepted without an agreeing readback is Unverified', a
   await h.key('\r')
   await h.key('\r')
   await h.flush()
-  assert.match(h.frame(), /Status\s+Unverified/u)
+  assert.match(h.frame(), /Status\s+Could not confirm save/u)
   assert.match(h.frame(), /the readback disagrees/u)
   h.close()
 })

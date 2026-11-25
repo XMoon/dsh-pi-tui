@@ -4100,7 +4100,7 @@ test('a same-Host revision change while L2 stays painted refuses Confirm with ze
   plain(h)
   h.panel.handleInput('\r')
   assert.equal(h.commits(), 0, 'the rebased row never dispatches')
-  assert.match(plain(h), /Not saved/u, 'the stale fence is reported')
+  assert.match(plain(h), /Could not save/u, 'the stale fence is reported')
   assert.match(plain(h), /Host settings changed since/u)
 })
 
@@ -4113,7 +4113,7 @@ test('a replaced Host generation with the SAME revision refuses Confirm with zer
   plain(h)
   h.panel.handleInput('\r')
   assert.equal(h.commits(), 0, 'a same-revision Host replacement is not the captured fence')
-  assert.match(plain(h), /Not saved/u)
+  assert.match(plain(h), /Could not save/u)
 })
 
 test('the confirmation warning is scrollable in L2 and must be read before Confirm', () => {

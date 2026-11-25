@@ -263,7 +263,7 @@ export async function runHostNumericSettingsFr5B(context) {
     await selectFrame(clientA, frame => selectedRow(frame, 'Daemon'), 'FR5-B Backend Daemon candidate')
     clientA.send('\r') // Confirm: ONE official revision-checked mutation
     await waitForDetailPattern(clientA, /Value\s+Daemon\b/u, 'FR5-B Backend verified Daemon')
-    await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B Backend write verified')
+    await waitForDetailPattern(clientA, /\bSaved\b/u, 'FR5-B Backend write saved')
     const backendSaved = profileUserConfig(installation.profileDir, STARTUP_NS)
     assert(backendSaved?.backend === 'daemon',
       `the Backend save must persist the official tui-startup.backend field, got ${JSON.stringify(backendSaved)}`)
@@ -310,13 +310,13 @@ export async function runHostNumericSettingsFr5B(context) {
     `the exact disable risk must be painted whole: ${JSON.stringify(disableRisk)}`)
     clientA.send('\r') // Disable Web: the confirmation's own first focus
     await waitForPattern(clientA, /Serving\s+Disabled/u, 'FR5-B Web runtime disabled')
-    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web runtime disable verified')
+    await waitForPattern(clientA, /Status\s+Web disabled/u, 'FR5-B Web runtime disable settled')
     // The runtime mutation must not have rewritten the next-start preference.
     assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === true,
       'Disable Web must leave the next-start USER preference On')
     clientA.send('\r') // the disabled page's first focus is Enable Web
     await waitForPattern(clientA, /Serving\s+Enabled/u, 'FR5-B Web runtime re-enabled')
-    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web runtime enable verified')
+    await waitForPattern(clientA, /Status\s+Web enabled/u, 'FR5-B Web runtime enable settled')
     assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === true,
       'Enable Web must leave the next-start USER preference On')
     trace('fr5b.host-web-runtime', { disabled: true, reEnabled: true, authoritativeReadback: true, preferenceUnchanged: true })
@@ -335,7 +335,7 @@ export async function runHostNumericSettingsFr5B(context) {
     // Wait for the NEXT-START field and its OWN settled Status, not the earlier
     // runtime Status word; then prove the official profile sink.
     await waitForDetailPattern(clientA,
-      /Next Host Start\s+Start automatically Off(?:\s|·).*?Status Verified/u,
+      /Next Host Start\s+Start automatically Off(?:\s|·).*?Status Saved/u,
       'FR5-B Web preference settled in the next-start section')
     const savedPreference = await waitForProfileAutoStart(installation, false, 'FR5-B Web preference profile')
     assert(savedPreference.autoStart === false, 'the Web page writes the SAME official preference field')
@@ -380,14 +380,14 @@ export async function runHostNumericSettingsFr5B(context) {
     `the exact ACP disable risk must be painted whole: ${JSON.stringify(acpDisableRisk)}`)
     clientA.send('\r') // Disable ACP: the confirmation's own first focus
     await waitForPattern(clientA, /Listener\s+Disabled/u, 'FR5-B ACP runtime disabled')
-    await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP runtime disable verified')
+    await waitForDetailPattern(clientA, /Status\s+ACP disabled/u, 'FR5-B ACP runtime disable settled')
     // A runtime toggle must NEVER rewrite the persisted next-start preference.
     // The preference still reads On here, BEFORE the Enable toggle below.
     assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === true,
       'the disabled runtime must leave the next-start USER preference On')
     clientA.send('\r') // the disabled page's first focus is Enable ACP
     await waitForPattern(clientA, /Listener\s+Enabled/u, 'FR5-B ACP runtime re-enabled')
-    await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP runtime enable verified')
+    await waitForDetailPattern(clientA, /Status\s+ACP enabled/u, 'FR5-B ACP runtime enable settled')
     // The runtime round trip must not have rewritten the next-start preference.
     assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === true,
       'the ACP runtime toggle must leave the next-start USER preference On')
@@ -411,7 +411,7 @@ export async function runHostNumericSettingsFr5B(context) {
     // Wait for the NEXT-START section's own settled Status, not the earlier
     // runtime Status word.
     await waitForDetailPattern(clientA,
-      /Next Host Start\s+Start automatically Off(?:\s|·).*?Status Verified/u,
+      /Next Host Start\s+Start automatically Off(?:\s|·).*?Status Saved/u,
       'FR5-B ACP preference settled in the next-start section')
     const acpSaved = await waitForProfileAutoStart(installation, false, 'FR5-B ACP preference profile', 30_000, ACP_PREFERENCE_NS)
     assert(acpSaved.autoStart === false, 'the ACP page writes the SAME official preference field')
@@ -445,7 +445,7 @@ export async function runHostNumericSettingsFr5B(context) {
     await waitForText(clientA, 'Choose value', 'FR5-B Session log choice')
     await selectFrame(clientA, frame => /^.*> Off(?:\s|$)/mu.test(frame), 'FR5-B Session log Off candidate')
     clientA.send('\r')
-    await waitForPattern(clientA, /Verified/u, 'FR5-B Session log Off verified')
+    await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Session log Off saved')
     assert(profileUserConfig(installation.profileDir, SESSION_LOG_NS)?.enabled === false,
       'Off is a real USER value (not treated as absence)')
     clientA.send('\x1b')
@@ -456,7 +456,7 @@ export async function runHostNumericSettingsFr5B(context) {
     await waitForText(clientA, 'Choose value', 'FR5-B Session log reset choice')
     await selectFrame(clientA, frame => /^.*> Reset(?:\s|$)/mu.test(frame), 'FR5-B Session log Reset candidate')
     clientA.send('\r')
-    const resetFrame = await waitForPattern(clientA, /Verified/u, 'FR5-B Session log Reset verified')
+    const resetFrame = await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Session log Reset saved')
     assert(/\bOn\b/u.test(resetFrame), 'the Reset readback may be On and must be shown as the current value')
     trace('fr5b.session-log', { offPersisted: true, resetVerified: true, resetReadbackOn: true })
 
@@ -483,7 +483,7 @@ export async function runHostNumericSettingsFr5B(context) {
     }
     await sleep(140)
     clientA.send('\r')
-    const agentVerified = await waitForPattern(clientA, /Verified/u, 'FR5-B Agent value verified')
+    const agentVerified = await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Agent value saved')
     assert(!/Apply \[Enter\]/u.test(agentVerified) && !/Save \[S\]/u.test(agentVerified),
       'the migrated Agent journey never advertises a second Apply/Save key')
     assert(profileUserConfig(installation.profileDir, AGENT_LOOP_NS)?.maxParallelToolCalls === 2,
@@ -502,7 +502,7 @@ export async function runHostNumericSettingsFr5B(context) {
     const inherited = Number(inheritedMatch[1])
     await waitForPattern(clientA, /Confirm \[Enter\]/u, 'FR5-B Agent reset confirm affordance')
     clientA.send('\r')
-    const agentReset = await waitForPattern(clientA, /Verified/u, 'FR5-B Agent reset verified')
+    const agentReset = await waitForPattern(clientA, /\bSaved\b/u, 'FR5-B Agent reset saved')
     // The official unset's success criterion is the Host readback, never USER-key
     // absence: an unset may legitimately materialize the inherited value.
     assert(new RegExp(`Current value\\s+${inherited}(?:\\s|$)`, 'u').test(agentReset),
@@ -591,12 +591,12 @@ export async function runHostNumericSettingsFr5B(context) {
       && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(shellStagedFrame),
     `the Shell group must paint both staged caps: ${JSON.stringify(shellStagedFrame)}`)
     assertShellCaps(installation.profileDir, seededCaps, 'A local stages')
-    await saveAndVerify(clientA, 'FR5-B Shell verified A', /Status\s+Verified/u)
+    await saveAndVerify(clientA, 'FR5-B Shell saved A', /\bSaved\b/u)
     const shellPatch = profileUserConfig(installation.profileDir, SHELL_NS)
     assert(shellPatch?.timeoutMs === 45_000 && shellPatch?.maxOutputBytes === 128_000,
       `the shell group writes both caps in the official patch: ${JSON.stringify(shellPatch)}`)
     const aVerifiedFrame = await frameOf(clientA)
-    assert(/Status\s+Verified/u.test(aVerifiedFrame) && /Settings · Tools · Shell execution/u.test(aVerifiedFrame),
+    assert(/\bSaved\b/u.test(aVerifiedFrame) && /Settings · Tools · Shell execution/u.test(aVerifiedFrame),
       'a verified Save stays in the SAME group')
     assert(/Command timeout \(ms\)\s+45000 ms/u.test(aVerifiedFrame)
       && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(aVerifiedFrame),
@@ -604,19 +604,19 @@ export async function runHostNumericSettingsFr5B(context) {
 
     // A's committed write invalidated B's captured revision. Depending on
     // whether the shared document-updated event reaches B before the key, the
-    // stale Save either meets the CAS ("Not saved") or is refused by the
+    // stale Save either meets the CAS ("Could not save") or is refused by the
     // Last-known read-only page (no Save painted). Both are refusals; neither
     // may write.
     clientB.send('s')
     // ONE explicit Save attempt; its OWN refusal receipt must arrive (the Host
     // CAS or the landed Last-known page). The explicit retry is not used to
     // fish for a refusal.
-    const bAfterSaveAttempt = await waitForPattern(clientB, /Not saved|refresh to review|Last-known/u,
+    const bAfterSaveAttempt = await waitForPattern(clientB, /Could not save|refresh to review|Last-known/u,
       'FR5-B stale Client B refusal', 30_000)
-    assert(!/Verified/u.test(bAfterSaveAttempt), 'the stale Client never claims a verified write')
+    assert(!/\bSaved\b/u.test(bAfterSaveAttempt), 'the stale Client never claims a saved write')
     assert(/Command timeout \(ms\)\s+90000 ms/u.test(bAfterSaveAttempt)
       && /Last confirmed: 60000 ms · Unsaved/u.test(bAfterSaveAttempt)
-      && !/Current: 60000 ms/u.test(bAfterSaveAttempt) && !/Verified/u.test(bAfterSaveAttempt),
+      && !/Current: 60000 ms/u.test(bAfterSaveAttempt) && !/\bSaved\b/u.test(bAfterSaveAttempt),
     `the stale Client retains its requested value and the real last-confirmed fact: ${JSON.stringify(bAfterSaveAttempt)}`)
     assertShellCaps(installation.profileDir, { timeoutMs: 45_000, maxOutputBytes: 128_000 },
       'Client B stale Save')
@@ -642,7 +642,7 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(/1 unsaved change/u.test(shellResetStaged),
       'the staged reset is a real dirty intent')
     assertShellCaps(installation.profileDir, committedCaps, 'A staged reset (both caps)')
-    await saveAndVerify(clientA, 'FR5-B Shell reset verified A', /Status\s+Verified/u)
+    await saveAndVerify(clientA, 'FR5-B Shell reset saved A', /\bSaved\b/u)
     const shellAfterReset = await frameOf(clientA)
     assert(new RegExp(`Output cap per stream \\(bytes\\)\\s+${inheritedCap} bytes`, 'u').test(shellAfterReset),
       `the verified group paints the Host readback, not the requested unset: ${JSON.stringify(shellAfterReset)}`)

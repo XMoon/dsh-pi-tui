@@ -330,8 +330,14 @@ export interface SettingsWorkspaceCommitOutcome {
  *  token (design language §3.2 / role 9). */
 interface SettingsCommitStatus {
   readonly word: string
-  readonly reason: string
+  readonly reason?: string
   readonly tone: 'success' | 'error' | 'warning' | 'muted'
+  /** The Host-config scalars paint the short user feedback without the generic
+   *  `Status` label instead of the workspace's internal settlement words. */
+  readonly plain?: true
+  /** An accepted-but-unattributable settlement: the user must know the change
+   *  MAY be saved and refresh before deciding anything else. */
+  readonly unknown?: true
 }
 
 /** The snapshot one open/refresh reads from the live authorities. */
@@ -3666,6 +3672,13 @@ export class SettingsWorkspacePanel implements Component {
     return { text: paint, painted }
   }
 
+  /** The three Host-config scalars share one short, user-facing feedback
+   *  vocabulary with the hosted pages. Every other row keeps the workspace's
+   *  established settlement words. */
+  private hostConfigFeedbackField(field: SettingsWorkspaceWritableField): boolean {
+    return field === 'startup-backend' || field === 'visual-tools' || field === 'session-log-upload'
+  }
+
   /** The commit status of the row's own field, as the last settlement reported
    *  it. Only the row that owns the phase shows it — never a global banner.
    *  The WORD and its tone are separate from the explanation so the pane can
@@ -3677,19 +3690,41 @@ export class SettingsWorkspacePanel implements Component {
     // the previous record's pending/settled acknowledgement.
     const sameRegistration = phase.kind === 'browsing' || phase.registrationToken === row.extensionRegistrationToken
     if (!sameRegistration) return undefined
+    const hostConfig = this.hostConfigFeedbackField(field)
     if (phase.kind === 'pending' && phase.field === field) {
-      return { word: 'Saving…', reason: 'the Host has not confirmed yet', tone: 'muted' }
+      return hostConfig
+        ? { word: 'Saving…', tone: 'muted', plain: true }
+        : { word: 'Saving…', reason: 'the Host has not confirmed yet', tone: 'muted' }
     }
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
-    if (phase.outcome === 'verified') return { word: 'Verified', reason: 'the authoritative read agrees', tone: 'success' }
-    if (phase.outcome === 'not-saved') return { word: 'Not saved', reason: phase.reason ?? 'the write was refused', tone: 'error' }
+    if (phase.outcome === 'verified') {
+      return hostConfig
+        ? { word: 'Saved', tone: 'success', plain: true }
+        : { word: 'Verified', reason: 'the authoritative read agrees', tone: 'success' }
+    }
+    if (phase.outcome === 'not-saved') {
+      return {
+        word: hostConfig ? 'Could not save' : 'Not saved',
+        reason: phase.reason ?? 'the write was refused',
+        tone: 'error',
+        ...(hostConfig ? { plain: true as const } : {}),
+      }
+    }
     if (phase.outcome === 'indeterminate') {
-      return { word: 'Outcome unknown', reason: phase.reason ?? 'the write could not be attributed', tone: 'warning' }
+      return {
+        word: hostConfig ? 'Could not confirm save' : 'Outcome unknown',
+        reason: phase.reason ?? 'the write could not be attributed',
+        tone: 'warning',
+        ...(hostConfig ? { plain: true as const, unknown: true as const } : {}),
+      }
     }
     return {
-      word: 'Commit accepted',
-      reason: `verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`,
+      word: hostConfig ? 'Could not confirm save' : 'Commit accepted',
+      reason: hostConfig
+        ? phase.reason ?? 'the Host accepted the write, but its value could not be checked'
+        : `verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`,
       tone: 'warning',
+      ...(hostConfig ? { plain: true as const, unknown: true as const } : {}),
     }
   }
 
@@ -3789,7 +3824,21 @@ export class SettingsWorkspacePanel implements Component {
           : status.tone === 'error' ? color.error
             : status.tone === 'warning' ? color.warning
               : color.textDim
-        statusField('Status', status.word, status.reason, paint)
+        if (status.plain === true) {
+          // The Host-config scalars paint the settlement as their own short
+          // line: no generic `Status` label and no internal outcome word.
+          for (const line of wrapTextWithAnsi(paint(escapedPhysicalLine(status.word)), Math.max(1, width))) {
+            lines.push(line)
+          }
+          if (status.reason !== undefined) {
+            const detail = status.unknown === true
+              ? `The change may have been saved. Refresh and check. ${escapedPhysicalLine(status.reason)}`
+              : escapedPhysicalLine(status.reason)
+            for (const line of wrapTextWithAnsi(color.textDim(detail), Math.max(1, width))) lines.push(line)
+          }
+        } else {
+          statusField('Status', status.word, status.reason, paint)
+        }
       }
       if (edit.options.length === 0) field('Choice', 'No candidate is available for this setting right now.')
     }
