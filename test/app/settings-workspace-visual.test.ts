@@ -172,12 +172,16 @@ interface HarnessOptions {
   /** An external writer commits this enabled value (and bumps the revision)
    *  just before the next switch write: the decision is then stale. */
   visualToolsExternalChange?: boolean
+  /** Publish a readable Visual tools value with NO current Host authority. */
+  visualToolsGenerationless?: boolean
   /** M5-W PR-C: the profile-owned Web startup preference the ConfigPort reads. */
   webStartupPreference?: WebStartupPreferenceInput
   /** The Web startup preference section is absent/unreadable. */
   webStartupUnavailable?: boolean
   /** Make `setAutoStart` reject with this reason (a refused Host write). */
   webStartupWriteFailure?: string
+  /** Publish a readable Web next-start value with NO current Host authority. */
+  webStartupGenerationless?: boolean
   /** PR-A: the renderer's backend kind. The Web runtime cases need `remote`
    *  (a Split Host); every other composition keeps Direct. */
   backendKind?: 'direct' | 'remote'
@@ -216,6 +220,8 @@ interface HarnessOptions {
   backendStartupUnavailable?: boolean
   /** Make `setBackend` reject with this reason (a refused Host write). */
   backendStartupWriteFailure?: string
+  /** Publish a readable startup-backend value with NO current Host authority. */
+  backendStartupGenerationless?: boolean
   /**
    * Compose a LIVE main Session for the About page: the exact seams the real
    * `/settings` command injects (`captureLiveSessionScope` / scope currency /
@@ -1166,7 +1172,10 @@ function setup(options: HarnessOptions = {}): Harness {
       ...(options.extensionConfigs === undefined ? {} : { extensionConfigs: options.extensionConfigs }),
       configReadiness: () => readiness,
       visualTools: {
-        read: () => visualState === undefined ? undefined : { ...visualState, generation: configGeneration },
+        read: () => visualState === undefined ? undefined : {
+          ...visualState,
+          generation: options.visualToolsGenerationless === true ? undefined : configGeneration,
+        },
         setEnabled: async (enabled: boolean, revision: number, generation: object) => {
           if (!Object.is(generation, configGeneration)) {
             return { kind: 'rejected' as const, reason: 'the Host settings authority changed; refresh before saving' }
@@ -1205,7 +1214,10 @@ function setup(options: HarnessOptions = {}): Harness {
         },
       },
       webStartupPreference: {
-        read: () => webStartupState === undefined ? undefined : { ...webStartupState, generation: configGeneration },
+        read: () => webStartupState === undefined ? undefined : {
+          ...webStartupState,
+          generation: options.webStartupGenerationless === true ? undefined : configGeneration,
+        },
         setAutoStart: async (value: boolean, revision: number, generation: object) => {
           if (!Object.is(generation, configGeneration)) {
             return { kind: 'rejected' as const, reason: 'the Host settings authority changed; refresh before saving' }
@@ -1225,7 +1237,10 @@ function setup(options: HarnessOptions = {}): Harness {
         },
       },
       backendStartupPreference: {
-        read: () => backendStartupState === undefined ? undefined : { ...backendStartupState, generation: configGeneration },
+        read: () => backendStartupState === undefined ? undefined : {
+          ...backendStartupState,
+          generation: options.backendStartupGenerationless === true ? undefined : configGeneration,
+        },
         readFresh: async () => undefined,
         setBackend: async (value: PublicBackendValue, revision: number, generation: object) => {
           if (!Object.is(generation, configGeneration)) {
@@ -6572,6 +6587,19 @@ test('an unavailable Visual tools section stays visible and offers neither choic
   h.dispose()
 })
 
+test('a readable Visual tools value without a current Host authority is read-only', async () => {
+  const h = setup({ columns: 200, rows: 40, visualToolsGenerationless: true })
+  await h.open('Tools')
+  await key(h, '\r') // L0 -> L1: the value is readable…
+  assert.match(h.view(), /Visual tools/u)
+  assert.match(h.view(), /On \[default\]/u, 'the readable value is still painted truthfully')
+  assert.ok(!h.view().includes('Change…'), '…but no generation means no writable affordance')
+  await key(h, '\r')
+  assert.ok(!h.view().includes('Choose value'), 'no candidate can be staged without a current authority')
+  assert.deepEqual(h.visualWrites(), [], 'zero writes')
+  h.dispose()
+})
+
 test('a stale backend keeps the last-known Visual tools value but refuses the write', async () => {
   const h = setup({
     columns: 200,
@@ -6646,6 +6674,8 @@ test('a refused Visual tools write is reported as Not saved and never Verified',
   assert.deepEqual(h.visualWrites(), [true])
   assert.match(h.view(), /Not saved · settings namespace "pi-tui-visual-tools" changed since it was read/)
   assert.ok(!h.view().includes('Verified'))
+  assert.ok(!h.view().includes('Retry save'),
+    'a non-verified Host decision requires a fresh Change, never a Retry save')
   h.dispose()
 })
 
@@ -12478,6 +12508,22 @@ test('a same-generation Config update refuses the painted confirmation with zero
   h.dispose()
 })
 
+test('a readable next-start preference without a current Host authority is read-only', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    backendKind: 'remote',
+    webStatus: { state: 'enabled' },
+    webStartupGenerationless: true,
+  })
+  await openWebUi(h)
+  assert.match(webUiPlain(h), /Start automatically\s+Off \(default\)/u, 'the readable value is still painted')
+  assert.match(webUiPlain(h), /No persisted preference is available to edit\./u)
+  assert.doesNotMatch(webUiPlain(h), /Change…/u, 'without a current authority the row offers no Change')
+  assert.equal(h.webAutoStartWrites().length, 0, 'zero preference writes')
+  h.dispose()
+})
+
 test('a credential-bearing URL failure never reaches the real composition diagnostics or a painted cell', async () => {
   const canary = 'CANARY-URL-LEAK-7c41'
   const h = setup({
@@ -13661,6 +13707,60 @@ test('an unreadable startup backend offers no confirmable candidate', async () =
   assert.doesNotMatch(h.view(), /Choose value/u, 'no candidate exists without an authoritative read')
   assert.equal(h.backendStartupWrites().length, 0)
   h.dispose()
+})
+
+test('a readable startup backend without a current Host authority is read-only', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const h = setup({ columns: 200, rows: 40, backendStartupGenerationless: true })
+    await openStartupBackendRow(h)
+    assert.match(h.view(), /Backend/u)
+    assert.match(h.view(), /Direct \(default\)/u, 'the readable value is still painted truthfully')
+    assert.ok(!h.view().includes('Change…'), 'a last-known value with no authority offers no Change')
+    await key(h, '\r')
+    assert.doesNotMatch(h.view(), /Choose value/u)
+    assert.equal(h.backendStartupWrites().length, 0, 'zero writes')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})
+
+test('a refused Backend write offers no Retry save and a fresh Change commits once', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const options: Parameters<typeof setup>[0] = {
+      columns: 200,
+      rows: 44,
+      backendStartupWriteFailure: 'the Host refused the startup backend write',
+    }
+    const h = setup(options)
+    await openStartupBackendRow(h)
+    await key(h, '\r') // L1 -> L2 choice
+    await key(h, '\x1b[B') // Direct -> Daemon
+    await key(h, '\r') // Confirm: the Host refuses
+    await settle(h)
+    assert.match(h.view(), /Not saved/u, 'the refusal is attributed to THIS request')
+    assert.doesNotMatch(h.view(), /Retry save/u,
+      'a non-verified Host decision requires a fresh Change, never a Retry save')
+    assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'exactly the refused request was dispatched')
+
+    options.backendStartupWriteFailure = undefined
+    await key(h, '\r') // the fresh explicit Change on the CURRENT row
+    await key(h, '\x1b[B')
+    await key(h, '\r')
+    await settle(h)
+    assert.deepEqual(h.backendStartupWrites(), ['daemon', 'daemon'],
+      'the fresh Change -> Confirm is the only second request')
+    assert.match(h.view(), /Status\s+Verified/u, 'that fresh same-generation commit verifies')
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
 })
 
 test('the Host Backend row is reachable and operable at 108/76/75 columns and two heights', async () => {

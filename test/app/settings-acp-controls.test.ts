@@ -1127,6 +1127,8 @@ test('a queued Web next-start decision is fenced at the REAL Remote queue head',
   h.remote!.advanceB(false, 7, { web: { autoStart: false, revision: 4 } })
   h.remote!.releasePredecessor()
   await predecessor
+  assert.equal(h.remote!.siblingValue('A'), 9, 'the predecessor stayed on Host A')
+  assert.equal(h.remote!.siblingValue('B'), 8, 'Host B received no queued A work')
   await settle(h, 'the Web queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
   assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 0,
     'the old A intent dispatched ZERO Web mutations against B')
@@ -1163,6 +1165,8 @@ test('a queued Backend decision is fenced at the REAL Remote queue head and reco
   h.remote!.advanceB(false, 7, { backend: { backend: 'direct', revision: 6 } })
   h.remote!.releasePredecessor()
   await predecessor
+  assert.equal(h.remote!.siblingValue('A'), 9, 'the predecessor stayed on Host A')
+  assert.equal(h.remote!.siblingValue('B'), 8, 'Host B received no queued A work')
   await settle(h, 'the Backend queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
   assert.equal(scalarCalls(h, 'tui-startup'), 0, 'the old A intent dispatched ZERO startup mutations against B')
   assert.deepEqual(h.backendTransitions(), [], 'a refused A decision records no exit transition')
@@ -1196,6 +1200,8 @@ test('a queued Visual tools decision is fenced at the REAL Remote queue head', a
   h.remote!.advanceB(false, 7, { visual: { enabled: true, revision: 3 } })
   h.remote!.releasePredecessor()
   await predecessor
+  assert.equal(h.remote!.siblingValue('A'), 9, 'the predecessor stayed on Host A')
+  assert.equal(h.remote!.siblingValue('B'), 8, 'Host B received no queued A work')
   await settle(h, 'the Visual tools queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
   assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 0, 'the old A intent dispatched ZERO visual-tools mutations against B')
 
