@@ -460,12 +460,14 @@ profile's independent `autoStart` preference enables it (see below).
   - **Session collaboration mode and Agent Team configuration.** The same
     attached View exposes the standard `modes`/`current_mode_update` and the
     complete fixed-order config lists. The two collaboration modes are the
-    fixed wire ids `default` and `plan`; their ONE authority is the exact
-    retained official PlanModeController resolved through
-    `agentPresets.serviceFor(agent,'planMode')` and matched by instance against
-    the installed class. A Session without that retained service advertises no
-    mode list and no `mode` row; a different-shaped/non-official service is
-    never projected. `active` is the committed mode; a pending target selection
+    fixed wire ids `default` and `plan`; their ONE authority is the retained
+    official PlanModeController resolved through
+    `agentPresets.serviceFor(agent,'planMode')` and matched by installed class.
+    Each operation re-resolves the current official service at admission and
+    the post-terminal readback re-resolves the current target authority; wrapper
+    reference equality is not an authority check. A Session without that
+    retained service advertises no mode list and no `mode` row; a
+    different-shaped/non-official service is never projected. `active` is the committed mode; a pending target selection
     is NEVER `currentModeId`, and a pending selection refuses a new mode write.
     The legacy `modes`/`session/set_mode` pair and the `mode` select row are
     two projections of the same committed state. `session/new`,
@@ -493,6 +495,13 @@ profile's independent `autoStart` preference enables it (see below).
     display may be omitted and writes stay refused until a real read succeeds;
     a genuine service absence removes the rows, while a transient live read
     failure never replaces the last delivered complete list.
+    A blank-session preset recompose is an invalidation, not a live
+    `availableModes` replacement. The already-announced legacy list can remain
+    stale until that connection reattaches; the recomposed live full list
+    removes the absent `mode`/`agent_team` rows while keeping the model rows,
+    and every later write is revalidated against the current policy authority
+    and fails closed when it is absent. A reattach supplies the fresh complete
+    list and, for a preset with the retained service, the current legacy list.
     An attached View receives one full `config_option_update` after every
     committed config-policy invalidation (`model/selection`, `plan/mode`,
     `team/mode`, `team/task`, `agent-preset/selected` and the existing
