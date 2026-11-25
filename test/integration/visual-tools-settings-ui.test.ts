@@ -1135,7 +1135,12 @@ test('a Subagent profile write blocked by a temporary home overlay stays unverif
   assert.deepEqual(calls, [{ ns: 'subagent', ops: [{ op: 'set', path: ['maxDepth'], value: 0 }], revision: opened.revision }])
   assert.equal(readySection(port.subagentLimits.read()).effective.maxDepth, 4)
   assert.equal(plane.userConfig('subagent'), undefined, 'the ConfigEditor refusal did not create a profile override')
-  assert.match(ui.vt.getViewport().join(' ').replace(/\s+/gu, ' '), /is overridden by a home patch or command-line/u)
+  const frame = ui.vt.getViewport()
+  const detailsHeader = frame.find(line => line.includes('[Details]'))
+  assert.ok(detailsHeader !== undefined, 'the wide frame keeps the Details column')
+  const detailStart = detailsHeader.indexOf('[Details]')
+  const detailRegion = frame.map(line => line.slice(detailStart)).join(' ').replace(/\s+/gu, ' ')
+  assert.match(detailRegion, /is overridden by a home patch or command-line/u)
   assert.doesNotMatch(ui.vt.getViewport().join('\n'), /Limits: Saved/u)
 })
 
