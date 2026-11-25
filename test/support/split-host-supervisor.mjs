@@ -4837,6 +4837,7 @@ async function handleStartProcessClient(message) {
     if (processClients.some(client => !client.closed || client.verifiedTerminal === undefined)) {
       throw new Error('START_PROCESS_CLIENT: every older Client must be verified terminal before recovery')
     }
+    await auditProcessClientLedger('START_PROCESS_CLIENT recovery admission')
     if (recovery && fallbackHosts.some(record => record.reclaimed !== true)) {
       throw new Error('START_PROCESS_CLIENT: an earlier discovered Host is still attached')
     }
@@ -8328,6 +8329,7 @@ async function handleReclaimDiscoveredHost(message) {
     if (processClients.some(value => !value.closed || value.verifiedTerminal === undefined)) {
       throw new Error('RECLAIM_DISCOVERED_HOST: every related Client must be verified terminal before normal stop')
     }
+    await auditProcessClientLedger('RECLAIM_DISCOVERED_HOST admission')
     const record = fallbackHosts.find(entry => entry.clientId === client.clientId)
     if (record === undefined) throw new Error('RECLAIM_DISCOVERED_HOST: this Client registered no recovered Host')
     return await stopRecoveredProcessHost(record, client)

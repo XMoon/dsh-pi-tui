@@ -198,6 +198,15 @@ function processGroupState(pgid: number): 'gone' | 'live' | 'unknown' {
   }
 }
 
+async function disposeScene(scene: SplitProcessScene, primary: unknown, label: string): Promise<void> {
+  try {
+    await scene.dispose()
+  } catch (cleanupError) {
+    if (primary !== undefined) throw new AggregateError([primary, cleanupError], `${label} failed and its Scene cleanup also failed`)
+    throw cleanupError
+  }
+}
+
 async function exitChat(client: SplitProcessClient, label: string, expectedCode = 0): Promise<void> {
   if (client.closed) return
   await client.exitGracefully()
@@ -263,6 +272,7 @@ test('replaces the settled Client surface without changing the Host and submits 
   const scene = await createSplitProcessScene()
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'long-turn' })
     client = await scene.startClient({ label: 'hmr-settled', ...clientDirectories(scene, 'hmr-settled'), hmr: 'replace' })
@@ -315,8 +325,11 @@ test('replaces the settled Client surface without changing the Host and submits 
     expectHostRowsKept(rowsBefore, await protectedHostRows(scene, host), 'T57 post-HMR Host')
     await exitChat(client, 'T57 Client')
     await closeHost(scene, host)
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    await disposeScene(scene, primary, 'T57')
   }
 })
 
@@ -324,6 +337,7 @@ test('keeps a real Host Job running across HMR and observes its settlement after
   const scene = await createSplitProcessScene()
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'job' })
     const directories = clientDirectories(scene, 'hmr-job')
@@ -364,8 +378,11 @@ test('keeps a real Host Job running across HMR and observes its settlement after
     expect(settled.owner).toBe(jobOwner)
     await exitChat(client, 'T58 Client')
     await closeHost(scene, host)
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    await disposeScene(scene, primary, 'T58')
   }
 })
 
@@ -375,6 +392,7 @@ test('fails HMR closed and stops during HMR without publishing a forged Ready', 
   let failure: SplitProcessClient | undefined
   let hold: SplitProcessClient | undefined
   let reuse: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost({ scenario: 'job' })
     failure = await scene.startClient({
@@ -422,8 +440,11 @@ test('fails HMR closed and stops during HMR without publishing a forged Ready', 
     expect(hold.readRecords().some(record => record.m4a0 === 'cleanup-failure')).toBe(false)
     expect((await scene.hostStatus(host)).localHost.hostPid).toBe(host.ready.localHost.hostPid)
     await closeHost(scene, host)
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    await disposeScene(scene, primary, 'T59')
   }
 })
 
@@ -445,7 +466,7 @@ test('rejects an HMR mount failure left on the ordinary terminal contract and re
     await expect(client.close()).rejects.toThrow(/declared normal path requires code 0|exited/)
     await expect(scene.dispose()).rejects.toThrow()
     const supervisorExit = await scene.waitSupervisorExit(120_000)
-    expect(supervisorExit.code).not.toBe(0)
+    expect(supervisorExit).toEqual({ code: 1, signal: null })
     const receipt = await scene.readSupervisorReceipt()
     expect(receipt.phase).toBe('NOT_QUIESCED')
     const failed = receipt.processClients?.find(value => value.label === 'hmr-mount-negative')
@@ -486,6 +507,7 @@ test('delivers a real SIGINT to the business PID with code 130 and keeps Host hi
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
   let reader: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost()
     client = await scene.startClient({ label: 'sigint', ...clientDirectories(scene, 'sigint'), terminal: 'sigint' })
@@ -505,8 +527,11 @@ test('delivers a real SIGINT to the business PID with code 130 and keeps Host hi
     await waitFrame(reader, 't62 prompt', 'T62 history readback')
     await exitChat(reader, 'T62 reader')
     await closeHost(scene, host)
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    await disposeScene(scene, primary, 'T62')
   }
 })
 
@@ -516,6 +541,7 @@ test('exits only on the second real Ctrl+C/Ctrl+D chord and preserves the Sessio
   let ctrlC: SplitProcessClient | undefined
   let ctrlD: SplitProcessClient | undefined
   let recovered: SplitProcessClient | undefined
+  let primary: unknown
   try {
     host = await scene.startHost()
     ctrlC = await scene.startClient({ label: 'ctrl-c', ...clientDirectories(scene, 'ctrl-c') })
@@ -553,8 +579,11 @@ test('exits only on the second real Ctrl+C/Ctrl+D chord and preserves the Sessio
     expect((await scene.hostStatus(host)).localHost.hostPid).toBe(host.ready.localHost.hostPid)
     await exitChat(recovered, 'T63 recovery')
     await closeHost(scene, host)
+  } catch (error) {
+    primary = error
+    throw error
   } finally {
-    await scene.dispose()
+    await disposeScene(scene, primary, 'T63')
   }
 })
 

@@ -76,7 +76,9 @@ async function startHeldSession(
   label: string,
 ): Promise<string> {
   const before = new Set(await scene.sessionIds())
-  await client.submit(prompt)
+  await client.type(prompt)
+  await waitFrame(client, prompt, `${label} typed draft`)
+  await client.submit()
   const sessionId = await scene.waitForNewSessionId(before, `${label} Session`)
   await fixtureHelpers.waitForC1WorkEvent(host.workloadRoot!, event => event.kind === 'long-turn-held' && event.sessionId === sessionId,
     `${label} held Turn`)
