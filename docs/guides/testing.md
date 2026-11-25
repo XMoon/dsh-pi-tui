@@ -668,8 +668,10 @@ removes the cache.
 Only pnpm's downloaded content and metadata are shared: every Scene still
 creates its own HOME, DSH_HOME, profile, lockfile and `node_modules` and runs a
 real install. pnpm imports installed files with `copy` and the side-effects
-cache is disabled, so an installed file never shares a writable inode with the
-shared store. Do not prune or delete the cache while a run is active; a damaged
+cache is disabled. The qualified Profile graph has no lifecycle-script or
+patched dependency, and its installed files do not share a writable inode with
+the shared store; a future dependency of that class must re-qualify the pinned
+pnpm write semantics before the same claim applies. Do not prune or delete the cache while a run is active; a damaged
 cache is an operator cleanup after every user has stopped, with diagnostics
 preserved first. For example:
 
