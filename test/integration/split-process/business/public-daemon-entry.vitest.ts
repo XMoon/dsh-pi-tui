@@ -170,6 +170,87 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
   }
 })
 
+test.skipIf(!linuxOnly)('resumes a durable public Session through --session and -c without another Session', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  let testError: unknown
+  try {
+    const seed = await scene.startPublicDaemon({ label: 'session-seed', backend: 'daemon' })
+    launches.push(seed)
+    await waitForFrame(seed, '❯', 'public session seed composer')
+    const before = new Set(await scene.sessionIds())
+    await seed.submit('public session seed')
+    const sessionId = await scene.waitForNewSessionId(before, 'public session seed')
+    await scene.waitForSessionEvent(sessionId, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'public session seed answer')
+    const seedEvents = scene.sessionEvents(sessionId)?.length ?? 0
+    expect(seedEvents, 'the seeded Session recorded its turn').toBeGreaterThan(0)
+    await exitPublicLaunch(seed, 'public session seed launch')
+    const expectedSessions = [...before, sessionId].sort()
+
+    const full = await scene.startPublicDaemon({
+      label: 'session-full-id',
+      backend: 'daemon',
+      args: { session: sessionId },
+    })
+    launches.push(full)
+    await waitForFrame(full, 'public session seed', '--session full id history')
+    expect([...(await scene.sessionIds())].sort(), '--session full id created no Session').toEqual(expectedSessions)
+    await exitPublicLaunch(full, 'public session full id')
+
+    const prefix = sessionId.slice(0, 'session-'.length + 8)
+    const browser = await scene.startPublicDaemon({
+      label: 'session-prefix-browser',
+      backend: 'daemon',
+      args: { session: prefix },
+      surface: 'workspace',
+    })
+    launches.push(browser)
+    await browser.press('Escape')
+    await waitForFrame(browser, '❯', 'the Session browser returned to the chat')
+    await waitForFrame(browser, 'public session seed', 'the Session browser opened the exact history')
+    expect([...(await scene.sessionIds())].sort(), 'the prefix browser created no Session').toEqual(expectedSessions)
+    await exitPublicLaunch(browser, 'public session prefix browser')
+
+    const continued = await scene.startPublicDaemon({
+      label: 'session-continue',
+      backend: 'daemon',
+      args: { continue: true },
+    })
+    launches.push(continued)
+    await waitForFrame(continued, 'public session seed', '-c resumed the same workspace history')
+    expect([...(await scene.sessionIds())].sort(), '-c created no Session').toEqual(expectedSessions)
+    await exitPublicLaunch(continued, 'public session continue')
+    await continued.stopHost()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the public Session test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the public Session test cleanup failed')
+    }
+  }
+})
+
 test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
