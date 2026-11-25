@@ -62,6 +62,10 @@ function headerFacts(headers, expectedHeaders) {
   return { headerMatches: facts, headerDigests: values, headerNames: Object.keys(headers).sort() }
 }
 
+function headersMatch(facts) {
+  return Object.values(facts).every(Boolean)
+}
+
 /**
  * Start one real loopback Streamable HTTP MCP fixture.
  *
@@ -161,6 +165,13 @@ export async function startScopedMcpHttpServer(options = {}) {
       response.destroy()
       return
     }
+    const facts = headerFacts(request.headers, expectedHeaders)
+    record('request', { path, rpcMethod: 'GET', ...facts })
+    if (!headersMatch(facts.headerMatches)) {
+      record('header-rejected', { path, rpcMethod: 'GET', ...facts })
+      sendJson(response, 401, { error: 'fixture header mismatch' })
+      return
+    }
     const recordEntry = { id: sse.length + 1, path, openedAt: Date.now() }
     sse.push(recordEntry)
     record('sse-open', { path, streamId: recordEntry.id })
@@ -210,6 +221,12 @@ export async function startScopedMcpHttpServer(options = {}) {
         ...typeof request.headers['mcp-session-id'] === 'string' ? { sessionHeader: request.headers['mcp-session-id'] } : {},
       })
       record('request', { path, rpcMethod: method, rpcId: id, ...facts })
+
+      if (!headersMatch(facts.headerMatches)) {
+        record('header-rejected', { path, rpcMethod: method, rpcId: id, ...facts })
+        sendJson(response, 401, { error: 'fixture header mismatch' })
+        return
+      }
 
       if (path === '/hold-startup') {
         record('startup-held', { rpcMethod: method, rpcId: id })

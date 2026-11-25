@@ -287,11 +287,24 @@ test('the declaration parser rejects capacity, transport, command, argument, env
     )
   }
   const secret = 'B1_SECRET_VALUE_MUST_NOT_APPEAR'
-  try {
-    parseAcpMcpServers([{ name: 's', command: 'relative', args: [secret], env: [{ name: 'A', value: secret }] }])
-  } catch (error) {
-    assert.ok(error instanceof AcpScopedMcpError)
-    assert.equal(error.message.includes(secret), false)
+  for (const servers of [
+    [{ name: 's', command: 'relative', args: [secret], env: [{ name: 'A', value: secret }] }],
+    [{
+      name: 's',
+      type: 'http',
+      url: 'https://example.test/mcp',
+      headers: [{ name: 'Bad Header', value: secret }],
+    }],
+  ]) {
+    assert.throws(
+      () => parseAcpMcpServers(servers),
+      (error: unknown) => {
+        assert.ok(error instanceof AcpScopedMcpError)
+        assert.equal(error.code, 'INVALID_DECLARATION')
+        assert.equal(error.message.includes(secret), false)
+        return true
+      },
+    )
   }
 })
 
@@ -385,6 +398,29 @@ test('a mixed stdio+HTTP request with a missing stdio cwd fails before the HTTP 
       stillCurrent: () => 'current',
     }),
     (error: unknown) => error instanceof AcpScopedMcpError && error.code === 'START_FAILED',
+  )
+  assert.equal(server.requests.length, 0)
+  assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__')), false)
+})
+
+test('a malformed HTTP header declaration is refused before any loopback request', async t => {
+  const { agent, temp } = setup(t)
+  const server = await startScopedMcpHttpServer({ tag: 'badheader' })
+  temp.defer(() => server.close())
+  await assert.rejects(
+    mountAcpScopedMcp({
+      agent,
+      session: agent.session,
+      servers: [{
+        name: 'badheader',
+        type: 'http',
+        url: server.url,
+        headers: [{ name: 'Bad Header', value: 'not-sent' }],
+      }],
+      tools: agent.ctx.tools,
+      stillCurrent: () => 'current',
+    }),
+    (error: unknown) => error instanceof AcpScopedMcpError && error.code === 'INVALID_DECLARATION',
   )
   assert.equal(server.requests.length, 0)
   assert.equal(toolsOf(agent).some(name => name.startsWith('mcp__')), false)

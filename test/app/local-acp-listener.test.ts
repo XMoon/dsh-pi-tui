@@ -1595,6 +1595,49 @@ test('a second ACP connection cannot attach an already-held Session; invalid req
   }
 })
 
+test('malformed HTTP declarations are refused before dispatch for new, resume and load', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    sessionRead: true,
+    sessionHistory: sessionId => ({ header: { sessionId, cwd: '/host/proj' }, events: [] }),
+  })
+  fake.seed('http-invalid-target', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const malformed = {
+      name: 'bad-http',
+      type: 'http',
+      url: 'https://example.test/mcp',
+      headers: [{ name: 'Bad Header', value: 'not-sent' }],
+    }
+    for (const [id, method, params] of [
+      [2, 'session/new', { cwd: '/host/proj', mcpServers: [malformed] }],
+      [3, 'session/resume', { sessionId: 'http-invalid-target', cwd: '/host/proj', mcpServers: [malformed] }],
+      [4, 'session/load', { sessionId: 'http-invalid-target', cwd: '/host/proj', mcpServers: [malformed] }],
+    ]) {
+      client.send({ jsonrpc: '2.0', id, method, params })
+      const refused = (await client.next()) as { id?: number; error?: { code?: number; data?: { code?: string } } }
+      assert.equal(refused.id, id)
+      assert.equal(refused.error?.code, -32602)
+      assert.equal(refused.error?.data?.code, 'LOCAL_ACP_MCP_INVALID_DECLARATION')
+    }
+    assert.deepEqual(fake.resolveCalls(), [], 'malformed HTTP never resolves a target Agent')
+    assert.deepEqual(fake.sessionHistoryReads(), [], 'malformed HTTP load never reads history')
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: { sessionId: 'http-invalid-target', cwd: '/host/proj' } })
+    const legal = (await client.next()) as { result?: unknown }
+    assert.deepEqual(legal.result, {})
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId: 'http-invalid-target' } })
+    const closed = (await client.next()) as { result?: unknown }
+    assert.deepEqual(closed.result, {})
+  } finally {
+    client.close()
+  }
+})
+
 test('one ACP socket routes concurrent prompts and close to their exact Session', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()
