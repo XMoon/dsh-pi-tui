@@ -6202,7 +6202,9 @@ async function waitForPublicWorkspaceSurface(handle, label, timeoutMs = PUBLIC_D
 function assertPublicHostRecord(host, registry, launch) {
   if (registry === null || typeof registry !== 'object') throw new Error('the public Host registry is not an object')
   if (registry.hostPid !== host.pid) throw new Error('the public Host registry names another PID')
-  if (registry.instanceId !== host.instanceId) throw new Error('the public Host registry names another instance')
+  if (host.instanceId !== undefined && registry.instanceId !== host.instanceId) {
+    throw new Error('the public Host registry names another instance')
+  }
   if (registry.scopeId !== processScope.scopeId) throw new Error('the public Host registry names another scope')
   if (registry.buildId !== processScope.buildId) throw new Error('the public Host registry names another build')
   if (registry.profileRealpath !== processScope.profileRealpath) throw new Error('the public Host registry names another profile')
