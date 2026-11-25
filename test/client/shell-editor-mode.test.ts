@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../../src/tui-app.ts'
 import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
 import { EditorSeatHolder } from '../../src/tui/interaction/editor-seat-holder.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../../src/extension/public-types.ts'
 import { runOwned, type OwnedTaskOptions } from '../../src/runtime/process/tasks.ts'
@@ -997,6 +998,65 @@ test('the plugin action sink steers the wire form and clears the editor', async 
   assert.equal(created[0]!.getText(), '', 'the steer clears the plugin document')
   handle.dispose()
   app.reconcileEditorNow()
+})
+
+test('a child viewer steer never enters the main process recall', async (t) => {
+  const life = testLifecycle(t)
+  const registry = new EditorRegistry()
+  const vt = new VirtualTerminal(100, 24)
+  const steered: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: (text) => { steered.push(text) },
+  }, { editorRegistry: registry, inputRecall: createInputMemoryRecall() })
+  app.setCommandCompletions([], fixtureWorkspace(life), null, undefined, undefined, undefined, [], directShellCompletion)
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  // One real accepted main input is the only legitimate recall entry.
+  vt.sendInput('main accepted memory')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual([...app.getInputHistory()], ['main accepted memory'])
+
+  // A Replacement Editor in a live child viewer dispatches the REAL legacy
+  // steer through the EditorHost; the business owner rejects a viewer steer,
+  // but the draft is still a CHILD-scoped document and must never become a
+  // parent process-recall input.
+  let pluginHost: EditorHost | undefined
+  const created: ReturnType<typeof pluginEditor>[] = []
+  const handle = registry.register({
+    id: 'viewer-steer-plugin',
+    priority: 0,
+    create: (host: EditorHost) => {
+      pluginHost = host
+      const editor = pluginEditor()
+      created.push(editor)
+      return editor
+    },
+  }, 'plugin')
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  app.setViewerMode(continuableViewer())
+  await vt.waitForRender()
+  created[0]!.setText('child-only marker')
+  assert.equal(pluginHost?.dispatch('steer').kind, 'accepted')
+  assert.deepEqual(steered, ['child-only marker'], 'the viewer gate still runs the existing legacy dispatch')
+  assert.deepEqual([...app.getInputHistory()], ['main accepted memory'],
+    'a child-scoped steer must never enter the main process recall')
+
+  // Back on the main composer, the real ↑ reaches only the main input.
+  app.setViewerMode(undefined)
+  handle.dispose()
+  app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'main accepted memory')
+  assert.ok(!app.getDraft().includes('child-only marker'), 'the child marker is never recalled in the main composer')
 })
 
 test('a host adapter without setSerializedInput still receives the handoff draft (setText fallback)', () => {

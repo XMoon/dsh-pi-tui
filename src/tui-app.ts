@@ -5878,11 +5878,16 @@ export class TuiApp {
             // Same scoped bridge as the Ctrl+S action: the clear's retention
             // reconcile must not evict an image the steer dispatch needs.
             // Feature History PR2-A (Split Client only): a real, deliverable
-            // main-composer steer draft is a user input exactly like the
+            // MAIN-composer steer draft is a user input exactly like the
             // legacy Enter path above — record it ONCE, under the same
             // remember admission, BEFORE the clear. The empty queue sweep
-            // delivers no draft and records nothing.
-            if (this.memoryRecall !== undefined && serializedDraftHasPayload(serialized)) {
+            // delivers no draft and records nothing. A child viewer is NOT the
+            // main composer: its steer is rejected/restored by the business
+            // owner, and its child-scoped text must never become a parent
+            // recall entry (an ↑ in the parent would resend it).
+            if (this.memoryRecall !== undefined
+              && this.viewerMode === undefined
+              && serializedDraftHasPayload(serialized)) {
               this.rememberInput(serialized)
             }
             const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
@@ -8286,9 +8291,12 @@ export class TuiApp {
         // the synchronous steer dispatch, like the submit paths.
         // Feature History PR2-A (Split Client only): the same legacy record as
         // the editor-action steer — once, before its clear, and only for a
-        // real deliverable draft (an empty accelerated gesture sweeps the
-        // queue and delivers nothing).
-        if (this.memoryRecall !== undefined && serializedDraftHasPayload(serialized)) {
+        // real deliverable MAIN-composer draft (an empty accelerated gesture
+        // sweeps the queue and delivers nothing). A child viewer is never the
+        // main composer, so its steer is not a parent recall input.
+        if (this.memoryRecall !== undefined
+          && this.viewerMode === undefined
+          && serializedDraftHasPayload(serialized)) {
           this.rememberInput(serialized)
         }
         const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
