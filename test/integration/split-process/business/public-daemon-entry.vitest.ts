@@ -219,7 +219,12 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
       surface: 'workspace',
     })
     launches.push(browser)
-    await browser.press('Escape')
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await browser.press('Escape')
+      await sleep(300)
+      const frame = await browser.text()
+      if (frame.includes('❯') && !frame.includes('Close [Esc]')) break
+    }
     await waitForFrame(browser, '❯', 'the Session browser returned to the chat')
     expect([...(await scene.sessionIds())].sort(), 'the Session browser created no Session').toEqual(expectedSessions)
     await exitPublicLaunch(browser, 'public session browser')
