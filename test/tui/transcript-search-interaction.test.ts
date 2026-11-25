@@ -16,7 +16,7 @@ import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type TuiAppOptions } from '../../src/tui-app.ts'
 import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
-import type { TranscriptMessage, TranscriptSearchMatch } from '../../src/transcript.ts'
+import type { TranscriptMessage, TranscriptSearchMatch, TurnActivity } from '../../src/transcript.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -1544,28 +1544,63 @@ test('the plan lease and the search reveal COMPOSE (union) and release independe
 })
 
 test('Focus resolves the independent search + plan reveals once per projection and releases them independently', async () => {
-  const fixture = searchPlanFixture()
-  const filler: TranscriptMessage[] = Array.from({ length: 2000 }, (_, index) =>
-    index % 2 === 0
-      ? { kind: 'user', turn: 0, text: `filler prompt ${index}` }
-      : { kind: 'thinking', turn: 0, text: `filler process ${index}`, running: false })
-  const messages: TranscriptMessage[] = [fixture.messages[0]!, ...filler, ...fixture.messages.slice(1)]
-  const vt = new VirtualTerminal(100, 26)
+  const tool = (turn: number, callId: string, name: string): Extract<TranscriptMessage, { kind: 'tool' }> => ({
+    kind: 'tool', turn, name, callId, args: '{}', result: 'ok', status: 'ok',
+  })
+  const root: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 1, name: 'run_code', callId: 'call-root',
+    args: '{}', result: '', status: 'running',
+    subCalls: [{
+      kind: 'tool', turn: 1, name: 'read', subCallId: 'search-child',
+      parentCallId: 'call-root', rootCallId: 'call-root',
+      args: JSON.stringify({ path: 'src/a.ts' }), result: 'needle body line', status: 'ok',
+    }],
+  }
+  const planCard: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 2, name: 'exit_plan_mode', callId: 'call-plan-1',
+    args: JSON.stringify({ plan: SEARCH_PLAN }), result: '', status: 'running',
+  }
+  const contextBoundary: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'independent context boundary', label: 'context',
+    context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'plugin', role: 'inject' },
+  }
+  const messages: TranscriptMessage[] = [
+    { kind: 'user', turn: 1, text: 'search turn prompt' },
+    tool(1, 'call-a', 'read'),
+    { kind: 'user', turn: 1, text: 'independent Work boundary' },
+    root,
+    contextBoundary,
+    tool(1, 'call-c', 'bash'),
+    { kind: 'user', turn: 2, text: 'plan turn prompt' },
+    planCard,
+  ]
+  const activity = (turn: number, completed: boolean, toolCalls: number, tools: ReadonlyArray<readonly [string, number]>): TurnActivity => ({
+    turn, completed, assistantMessages: 0, toolCalls, tools: new Map(tools), revision: 1,
+  })
+  const activities = new Map<number, TurnActivity>([
+    [1, activity(1, true, 3, [['read', 2], ['run_code', 1]])],
+    [2, activity(2, false, 1, [['exit_plan_mode', 1]])],
+  ])
+  const vt = new VirtualTerminal(100, 60)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
   app.start()
   startedApps.add(app)
   app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
   app.setDisplayPreset('focus')
   app.setFullscreen(true)
-  app.setTranscript(messages)
+  app.setTranscript(messages, activities)
   await vt.waitForRender()
   const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
-  assert.ok(!body().includes('needle body line'), 'precondition: the collapsed Focus hides the search target')
-  assert.ok(!body().includes('## Scope'), 'precondition: the collapsed Focus hides the plan target')
+  const workHeaders = (): number => (body().match(/Activity/g) ?? []).length
+  assert.ok(!body().includes('needle body line'), 'precondition: the collapsed Focus hides the search target behind real Work')
+  assert.ok(!body().includes('## Scope'), 'precondition: the active plan target is hidden behind its real root')
+  assert.equal(workHeaders(), 0, 'precondition: no Work header is materialized before either reveal')
 
-  app.setTranscriptSearchPresentation(searchTargetFor(fixture.root))
+  app.setTranscriptSearchPresentation(searchTargetFor(root))
   await vt.waitForRender()
-  assert.ok(body().includes('needle body line'), `the search request opens its own target:\n${body()}`)
+  assert.ok(body().includes('needle body line'), `the search request opens its hidden Work target:\n${body()}`)
+  assert.ok(workHeaders() >= 2, `the search Turn materializes multiple actual Work headers:\n${body()}`)
   const settle = app.askQuestions([{
     id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
     options: [{ label: 'Approve' }, { label: 'Keep planning' }],
@@ -1577,17 +1612,20 @@ test('Focus resolves the independent search + plan reveals once per projection a
   assert.ok(body().includes('## Scope'), `the plan request opens its own target:\n${body()}`)
   assert.ok(body().includes('needle body line'),
     `the plan request must not shadow the search request:\n${body()}`)
+  assert.ok(workHeaders() >= 3, `both live requests expose the actual Work projection:\n${body()}`)
 
-  // ONE passive publication with BOTH current requests. The resolver is bounded
-  // by the two requests, never by the 2000 filler rows.
+  // ONE passive publication with BOTH current requests over the REAL activity
+  // map. The resolver remains bounded by the two requests, never by rows or
+  // the number of materialized Work headers.
   app.resetTranscriptPresentationDiagnosticsForTest()
-  app.setTranscript(messages)
+  app.setTranscript(messages, activities)
   await vt.waitForRender()
   const diagnostics = app.transcriptPresentationDiagnosticsForTest()
   assert.ok(diagnostics.searchOwnerResolutions <= 4,
     `both independent requests must resolve a small constant number of times per projection, got ${diagnostics.searchOwnerResolutions}`)
   assert.ok(body().includes('## Scope') && body().includes('needle body line'),
     'both independent request bodies remain rendered after the bounded projection')
+  assert.ok(workHeaders() >= 3, 'the passive publication retains the actual multiple-Work projection')
 
   vt.sendInput('\x1b') // release the plan lease only
   await vt.waitForRender()
