@@ -289,7 +289,7 @@ async function setupEnvironment(): Promise<Harness> {
       visualTools: { read: () => undefined },
       webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
-      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
+      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }) },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available' as const, value: undefined }) },
       permissions: {
         presetNames: () => [],

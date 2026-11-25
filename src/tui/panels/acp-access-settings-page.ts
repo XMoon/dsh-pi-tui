@@ -211,9 +211,10 @@ export interface AcpAccessSettingsPageIntents {
   readonly readPreference: () => AcpStartupPreferenceState | undefined
   /** The live Config readiness (`ready` is the only writable state). */
   readonly configReadiness: () => 'ready' | 'stale' | 'unavailable'
-  /** The EXISTING revision-checked `acp-autostart` writer. A resolved write is
-   *  not a read-back: the four official outcomes decide what is painted. */
-  readonly commitAutostart: (value: 'On' | 'Off', revision: number) => Promise<SettingsWorkspaceCommitOutcome>
+  /** The EXISTING revision-and-generation checked `acp-autostart` writer. A
+   *  resolved write is not a read-back: the four official outcomes decide what
+   *  is painted. The captured Host settings generation travels with the write. */
+  readonly commitAutostart: (value: 'On' | 'Off', revision: number, generation: object) => Promise<SettingsWorkspaceCommitOutcome>
   /** The Client-local clipboard; resolves whether the command was copied. */
   readonly copyToClipboard: (text: string) => Promise<boolean>
   /** The OFFICIAL current Profile identity when this composition proves it,
@@ -262,6 +263,20 @@ function preferenceSummary(state: AcpStartupPreferenceState | undefined, readine
   if (readiness === 'unavailable' || state === undefined) return 'Unavailable'
   const value = state.autoStart ? 'On' : state.userOverridden ? 'Off' : 'Off (default)'
   return readiness === 'ready' ? value : `${value} · last known`
+}
+
+/** Whether two preference observations are the SAME decision fact. The
+ *  generation is compared by identity: a replacement Host can expose the same
+ *  revision and value and still be a different authority. */
+function samePreferenceObservation(
+  a: AcpStartupPreferenceState | undefined,
+  aReadiness: 'ready' | 'stale' | 'unavailable',
+  b: AcpStartupPreferenceState | undefined,
+  bReadiness: 'ready' | 'stale' | 'unavailable',
+): boolean {
+  if (aReadiness !== bReadiness) return false
+  if (a === undefined || b === undefined) return a === b
+  return a.autoStart === b.autoStart && a.revision === b.revision && Object.is(a.generation, b.generation)
 }
 
 /** The frozen status word + explanation of one Config write settlement. */
@@ -322,13 +337,25 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    */
   private autostartFence: number | undefined
   /**
-   * The Connection generation the staged choice was opened under. The revision
-   * alone cannot prove the authority still belongs to the Host the user was
-   * reading: a silent replacement (no rollover notification) keeps the same
-   * revision while its Config mirror already belongs to another Host, so the
-   * confirm compares BOTH captured facts.
+   * The Config settings-authority identity the staged choice was opened under.
+   * The revision alone cannot prove the authority still belongs to the Host the
+   * user was reading: a silent replacement (no rollover notification) keeps the
+   * same revision while its Config mirror already belongs to another Host, so
+   * the confirm compares BOTH captured facts.
    */
-  private autostartGenerationFence: { readonly value: unknown } | undefined
+  private autostartGenerationFence: { readonly value: object } | undefined
+  /** The preference observation the LAST painted frame actually admitted from:
+   *  a silent Host replacement must not let a press on the old field establish
+   *  a NEW choice from the newer fact without a fresh frame/user gesture. */
+  private paintedPreference: {
+    readonly readiness: 'ready' | 'stale' | 'unavailable'
+    readonly autoStart: boolean
+    readonly revision: number
+    readonly generation: object | undefined
+  } | undefined
+  /** Bumped whenever the Config observation (authority identity included)
+   *  changes, so every old painted pointer/gesture identity is revoked. */
+  private preferenceEpoch = 0
   private selectedId: string | undefined
   private scrollOffset = 0
   private revealSelection = true
@@ -442,7 +469,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     const preference = this.preference === undefined
       ? 'none'
       : `${this.preference.revision}:${this.preference.autoStart}:${this.preferenceReadiness}`
-    return `${this.phase}|${this.selectedId ?? ''}|${this.autostartCandidate === undefined ? '' : this.autostartCandidate ? 'on' : 'off'}|${this.host.kind}|${preference}|${this.revision}`
+    return `${this.phase}|${this.selectedId ?? ''}|${this.autostartCandidate === undefined ? '' : this.autostartCandidate ? 'on' : 'off'}|${this.host.kind}|${preference}|${this.preferenceEpoch}|${this.revision}`
   }
 
   // ── observations ──────────────────────────────────────────────────────────
@@ -562,12 +589,19 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * editable row (or a stale revision beside an edit grant).
    */
   private reconcilePreference(): void {
+    const previousReadiness = this.preferenceReadiness
+    const previous = this.preference
     this.preferenceReadiness = this.intents.configReadiness()
     this.preference = this.intents.readPreference()
+    if (!samePreferenceObservation(previous, previousReadiness, this.preference, this.preferenceReadiness)) {
+      // The observation identity changed (value, revision, generation or
+      // readiness). This is NOT a selection move: it must not force a reveal.
+      // It only revokes every pointer/frame grant built from the old fact.
+      this.preferenceEpoch += 1
+    }
     if (!this.preferenceEditable()) {
       // The authority is no longer current: revoke the staged step, zero writes.
       this.retireStagedChoice()
-      if (this.phase === 'ready' || this.phase === 'settled') this.revealSelection = true
     }
   }
 
@@ -593,7 +627,9 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    *  caller reconciles first (projection, generation change, refresh, action,
    *  write admission), so this never re-reads the authority. */
   private preferenceEditable(): boolean {
-    return this.preferenceReadiness === 'ready' && this.preference !== undefined
+    return this.preferenceReadiness === 'ready'
+      && this.preference !== undefined
+      && this.preference.generation !== undefined
   }
 
   private hostCurrent(): { readonly status: AcpAccessStatus; readonly generation: unknown } | undefined {
@@ -650,20 +686,33 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
         this.changed()
         return
       case 'refresh': this.refreshAll(); return
-      case 'autostart':
-        if (!this.preferenceEditable() || this.preference === undefined) return
+      case 'autostart': {
+        const painted = this.paintedPreference
+        // The row was painted from ONE observation. If a silently replaced
+        // authority already changed the live fact, this press must neither
+        // stage a choice from the new value nor read as a successful activation:
+        // revoke and require a fresh frame + explicit gesture.
+        if (painted === undefined || this.preference === undefined || this.preference.generation === undefined
+          || !this.preferenceEditable() || painted.readiness !== 'ready'
+          || painted.revision !== this.preference.revision
+          || !Object.is(painted.generation, this.preference.generation)) {
+          this.revealSelection = true
+          this.changed()
+          return
+        }
         // Stage the OPPOSITE of the persisted value: the row was activated to
         // change it, and the current candidate stays visible (marked below).
-        // The revision AND the Connection generation are captured HERE, at
-        // choice entry, and travel with the staged decision.
+        // The revision AND the settings authority are captured HERE, at choice
+        // entry, and travel with the staged decision to the writer boundary.
         this.phase = 'choose-autostart'
         this.autostartFence = this.preference.revision
-        this.autostartGenerationFence = { value: this.intents.currentGeneration() }
+        this.autostartGenerationFence = { value: this.preference.generation }
         this.autostartCandidate = this.preference.autoStart ? false : true
         this.selectedId = this.candidateId(this.autostartCandidate)
         this.revealSelection = true
         this.changed()
         return
+      }
       case 'candidate-on': this.stageCandidate(true); return
       case 'candidate-off': this.stageCandidate(false); return
       case 'confirm-disable': this.dispatchRuntime(false); return
@@ -979,24 +1028,25 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     const generationFence = this.autostartGenerationFence
     if (candidate === undefined || state === undefined || fence === undefined
       || generationFence === undefined || !this.preferenceEditable()) return
-    // The captured revision AND generation are the ONE decision this submit may
-    // use; a moved authority refuses the stale confirmation instead of
-    // CAS-rebasing it onto the intervening write, and a silently replaced Host
-    // can never receive a choice derived from its predecessor.
-    if (state.revision !== fence
-      || !Object.is(generationFence.value, this.intents.currentGeneration())) {
+    // The captured revision AND settings authority are the ONE decision this
+    // submit may use; a moved authority refuses the stale confirmation instead
+    // of CAS-rebasing it onto the intervening write, and a silently replaced
+    // Host can never receive a choice derived from its predecessor.
+    if (state.revision !== fence || state.generation === undefined
+      || !Object.is(generationFence.value, state.generation)) {
       this.settleStaleAutostartChoice()
       this.changed()
       return
     }
     const revision = fence
+    const generation = generationFence.value
     const serial = ++this.writeSerial
     this.phase = 'pending-config'
     this.configOutcome = undefined
     this.selectedId = undefined
     this.changed()
     this.intents.runOwned('acp access next launch preference', async () => {
-      const outcome = await this.intents.commitAutostart(candidate ? 'On' : 'Off', revision)
+      const outcome = await this.intents.commitAutostart(candidate ? 'On' : 'Off', revision, generation)
       if (this.disposed || serial !== this.writeSerial) {
         this.intents.diagnose('acp access preference write', {
           value: candidate ? 'On' : 'Off',
@@ -1546,6 +1596,14 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     // read, so a non-current authority can never survive as an affordance.
     this.reconcilePreference()
     this.ensureSelection()
+    this.paintedPreference = this.preference === undefined
+      ? undefined
+      : {
+          readiness: this.preferenceReadiness,
+          autoStart: this.preference.autoStart,
+          revision: this.preference.revision,
+          generation: this.preference.generation,
+        }
     const bodyRows = this.bodyRows()
     const content = this.content(width)
     const selectedLines: number[] = []

@@ -1110,17 +1110,34 @@ merged:
 - `Next Host Start` is the persisted PROFILE preference
   (`pi-tui-acp-preferences.autoStart`, default Off) for the NEXT Split Host
   start, read through the ConfigPort and written ONLY by the existing
-  revision-checked `acp-autostart` settings writer. It never toggles the running
-  Host, and a runtime toggle never changes it. `Off (default)` marks the schema
-  default the USER layer does not declare; a non-ready configuration, a missing
-  revision or an unreadable section is `Unavailable`/read-only and never a
-  guessed default. The revision AND the Connection generation captured when the
-  choice opened are the decision fence: a moved revision is `Not saved`, and a
-  silently replaced Host is refused at the submit boundary, both with ZERO
-  writes and without rebasing the CAS onto newer authority. Every actual
-  generation rollover retires a staged choice even when the replacement exposes
-  the same revision. The writer's four outcomes (`Verified`, `Not saved`,
-  `Unverified`, `Outcome unconfirmed`) are painted as its own `Status`.
+  revision-and-authority-checked `acp-autostart` settings writer. It never
+  toggles the running Host, and a runtime toggle never changes it.
+  `Off (default)` marks the schema default the USER layer does not declare; a
+  non-ready configuration, a missing revision or a missing current
+  settings-authority generation (the ConfigPort's `generation`) is
+  `Unavailable`/read-only and never a guessed default. A last-known value may
+  stay painted while the backend is stale, but its undefined generation never
+  grants an edit.
+  The revision AND the settings-authority generation captured when the choice
+  opened are the decision fence. They travel with the request through the
+  ConfigPort's serialized write queue to the actual official mutation boundary:
+  the adapter re-checks both at the queue head immediately before dispatch, so a
+  decision made against Host A can never become a write against Host B. A moved
+  revision or a replaced generation refused before dispatch is `Not saved`, with
+  ZERO writes and without rebasing the CAS onto newer authority. When dispatch
+  is known accepted, only a CURRENT same-generation authoritative read that
+  carries the requested value earns `Verified`; an unreadable, disagreeing or
+  different-generation readback is `Unverified` because the mutation may have
+  committed — never `Not saved`. A dispatched request whose receipt/readback is
+  lost is `Outcome unconfirmed` and is never retried. Every actual generation
+  rollover retires a staged choice that has not dispatched, even when the
+  replacement exposes the same revision and value; an old-frame `Change…` press
+  cannot establish a new choice against the replacement without a fresh frame
+  and gesture. An already dispatched `pending-config` request keeps its
+  original owner until settlement, is never cancelled or replayed by the page
+  or a rollover, and the page Back may leave while that owner still settles it.
+  The writer's four outcomes (`Verified`, `Not saved`, `Unverified`, `Outcome
+  unconfirmed`) are painted as its own `Status`.
 - `Client Setup` is Client-local: it states the local Unix socket /
   same-OS-user / stdio bridge facts and the ONE copyable command
   `dsh --profile <proven-profile> acp stdio`, composed from the OFFICIAL Profile

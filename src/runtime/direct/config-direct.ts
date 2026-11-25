@@ -2478,18 +2478,23 @@ class DirectAcpStartupPreferenceConfig implements AcpStartupPreferenceConfig {
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
       : undefined
-    return { autoStart, revision, userOverridden: userSection?.autoStart !== undefined }
+    // Direct's settings service object identity is the Host settings authority.
+    // A missing service is a displayable absence, never a writable identity.
+    const generation = settings === undefined ? undefined : settingsAuthorityOf(settings)
+    return { autoStart, revision, generation, userOverridden: userSection?.autoStart !== undefined }
   }
 
-  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+  async setAutoStart(value: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-    if (settings === undefined) throw new Error('the Host settings service is unavailable')
-    if (readSettingsDescriptor(settings, ACP_STARTUP_PREFERENCE_NS) === undefined) {
-      throw new Error(`the "pi-tui-acp-preferences" Host settings section is not mounted`)
+    if (settings === undefined) {
+      return { kind: 'rejected', reason: 'the Host settings service is unavailable' }
     }
-    await mutateSettings(settings, ACP_STARTUP_PREFERENCE_NS, [
+    if (readSettingsDescriptor(settings, ACP_STARTUP_PREFERENCE_NS) === undefined) {
+      return { kind: 'rejected', reason: 'the "pi-tui-acp-preferences" Host settings section is not mounted' }
+    }
+    return mutateDirectSection(this.ctx, ACP_STARTUP_PREFERENCE_NS, [
       { op: 'set', path: ['autoStart'], value },
-    ], expectedRevision)
+    ], expectedRevision, generation)
   }
 }
 

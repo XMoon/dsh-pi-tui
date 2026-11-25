@@ -66,7 +66,7 @@ interface PageHarness {
   readonly writes: () => readonly boolean[]
   readonly writeGenerations: () => readonly unknown[]
   readonly copied: () => readonly string[]
-  readonly commits: () => readonly { readonly value: 'On' | 'Off'; readonly revision: number }[]
+  readonly commits: () => readonly { readonly value: 'On' | 'Off'; readonly revision: number; readonly generation: object }[]
   readonly diagnoses: () => readonly { readonly label: string; readonly detail: Record<string, unknown> }[]
   readonly doneCalls: () => number
   readonly generation: { value: object | undefined }
@@ -78,7 +78,7 @@ interface PageHarness {
   readonly resolveRead: (index: number, result: AcpAccessStatus | { readonly error: string }) => void
   readonly setAuthority: (
     readiness: 'ready' | 'stale' | 'unavailable',
-    preference: AcpStartupPreferenceState | undefined,
+    preference: (Omit<AcpStartupPreferenceState, 'generation'> & { readonly generation?: object }) | undefined,
   ) => void
   readonly setStatus: (status: AcpAccessStatus) => void
   readonly releaseWrite: () => void
@@ -91,17 +91,18 @@ interface PageHarness {
 async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   const vt = new VirtualTerminal(options.columns ?? 100, options.rows ?? 30)
   const generation = { value: (options.disconnected === true ? undefined : {}) as object | undefined }
+  let settingsAuthority: object = {}
   const listeners = new Set<() => void>()
   let status: AcpAccessStatus = options.status ?? { state: 'enabled' }
   let preference = 'preference' in options
     ? options.preference
-    : { autoStart: false, revision: 1, userOverridden: false } satisfies AcpStartupPreferenceState
+    : { autoStart: false, revision: 1, userOverridden: false, generation: settingsAuthority } satisfies AcpStartupPreferenceState
   let readiness = options.readiness ?? 'ready'
   let reads = 0
   const writes: boolean[] = []
   const writeGenerations: unknown[] = []
   const copied: string[] = []
-  const commits: { value: 'On' | 'Off'; revision: number }[] = []
+  const commits: { value: 'On' | 'Off'; revision: number; generation: object }[] = []
   const diagnoses: { label: string; detail: Record<string, unknown> }[] = []
   let doneCalls = 0
   let pageRef: AcpAccessSettingsPage | undefined
@@ -134,13 +135,16 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     },
     readPreference: () => preference,
     configReadiness: () => readiness,
-    commitAutostart: async (value, revision) => {
-      commits.push({ value, revision })
+    commitAutostart: async (value, revision, commitGeneration) => {
+      commits.push({ value, revision, generation: commitGeneration })
       if (options.commitFailure !== undefined) throw new Error(options.commitFailure)
       if (options.commitOutcome !== undefined) return options.commitOutcome
+      if (!Object.is(commitGeneration, settingsAuthority)) {
+        return { outcome: 'not-saved', reason: 'the Host settings authority changed since this choice was read' }
+      }
       preference = preference === undefined
         ? undefined
-        : { ...preference, autoStart: value === 'On', revision: preference.revision + 1, userOverridden: true }
+        : { ...preference, autoStart: value === 'On', revision: preference.revision + 1, userOverridden: true, generation: settingsAuthority }
       return { outcome: 'verified' }
     },
     copyToClipboard: async (text) => {
@@ -192,9 +196,15 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     generation,
     bumpGeneration: () => {
       generation.value = {}
+      settingsAuthority = {}
+      if (preference !== undefined) preference = { ...preference, generation: settingsAuthority }
       for (const listener of [...listeners]) listener()
     },
-    replaceGenerationSilently: () => { generation.value = {} },
+    replaceGenerationSilently: () => {
+      generation.value = {}
+      settingsAuthority = {}
+      if (preference !== undefined) preference = { ...preference, generation: settingsAuthority }
+    },
     connect: () => {
       generation.value = {}
       for (const listener of [...listeners]) listener()
@@ -206,7 +216,9 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     },
     setAuthority: (nextReadiness, nextPreference) => {
       readiness = nextReadiness
-      preference = nextPreference
+      preference = nextPreference === undefined
+        ? undefined
+        : { ...nextPreference, generation: nextPreference.generation ?? settingsAuthority }
     },
     setStatus: (next) => { status = next },
     releaseWrite: () => { heldWrite?.(); heldWrite = undefined },
@@ -573,7 +585,11 @@ test('the next-start ladder stages zero writes and saves the captured revision o
   await h.key('\r')
   await h.key('\r') // Confirm save
   await h.flush()
-  assert.deepEqual(h.commits(), [{ value: 'On', revision: 1 }], 'the EXISTING writer received the captured revision')
+  const commits = h.commits()
+  assert.equal(commits.length, 1, 'the EXISTING writer received exactly one request')
+  assert.equal(commits[0]!.value, 'On')
+  assert.equal(commits[0]!.revision, 1, 'the writer received the captured revision')
+  assert.equal(typeof commits[0]!.generation, 'object', 'and the captured settings authority')
   assert.match(h.frame(), /Status\s+Verified/u)
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the persisted value is re-read, not optimistically assumed')
   assert.deepEqual(h.writes(), [], 'the preference write never toggles the running Host')
@@ -622,6 +638,25 @@ test('a throwing preference writer is an honest unconfirmed outcome', async () =
   await h.flush()
   assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
   assert.match(h.frame(), /the writer crashed/u)
+  h.close()
+})
+
+test('a non-current authority does not scroll the page back to the selected row', async () => {
+  const h = await mount({ status: { state: 'enabled' }, columns: 60, rows: 12 })
+  await h.key('\x1b[F') // End: read the Client Setup facts at the bottom
+  assert.match(h.frame(), /Closing an ACP View detaches it; Host/u)
+
+  // The Config authority becomes non-current while the user reads the bottom.
+  // This is a read observation, NOT a selection move, so the viewport must stay
+  // where the user put it.
+  h.setAuthority('unavailable', undefined)
+  const reads = h.reads()
+  h.mount.requestRender()
+  await h.flush()
+  assert.match(h.frame(), /Closing an ACP View detaches it; Host/u, 'the reader keeps the scrolled viewport')
+  assert.doesNotMatch(h.frame(), /^> /mu, 'no forced reveal of the off-screen selection')
+  assert.match(h.frame(), /Start automatically\s+Unavailable/u)
+  assert.equal(h.reads(), reads, 'the repaint performs no extra Host read')
   h.close()
 })
 
@@ -692,13 +727,27 @@ test('a page left during the live preflight invokes no Host mutation', async () 
 })
 
 test('a short confirm frame withholds the accept until the necessary copy is fully painted', async () => {
-  const disable = await mount({ status: { state: 'enabled' }, columns: 34, rows: 5 })
+  const disable = await mount({ status: { state: 'enabled' }, columns: 34, rows: 24 })
   await highlight(disable, 'Disable ACP…')
   await disable.key('\r')
+  const formerAcceptY = rowOf(disable, '> Disable ACP')
+
+  disable.vt.resize(34, 5)
   await disable.flush()
   assert.doesNotMatch(disable.frame(), /> Disable ACP/u, 'the accept row is blank while the risk is incomplete')
   assert.doesNotMatch(disable.bar(), /Confirm \[Enter\]/u, 'the bar advertises no hidden confirm')
   assert.match(disable.bar(), /Cancel \[Esc\]/u, 'Cancel stays reachable')
+  // The hidden keyboard/bar routes and a pointer at the former accept cell
+  // must all be inert while the necessary copy is unreadable.
+  await disable.key('\r')
+  await disable.flush()
+  disable.page.activateBarSpan('bar:confirm')
+  disable.page.handleMouse(mouseEvent(disable, 'press', 3, formerAcceptY))
+  disable.page.handleMouse(mouseEvent(disable, 'click', 3, formerAcceptY))
+  await disable.flush()
+  assert.deepEqual(disable.writes(), [], 'no hidden/former accept route dispatches a partial confirmation')
+  assert.match(disable.frame(), /Cancel/u, 'the confirmation is still open for recovery')
+
   disable.vt.resize(34, 24)
   await disable.flush()
   assert.match(disable.frame(), /> Disable ACP/u, 'the sufficient grant paints a NEW accept row')
@@ -707,19 +756,35 @@ test('a short confirm frame withholds the accept until the necessary copy is ful
   assert.deepEqual(disable.writes(), [false], 'the fresh confirmation dispatched exactly once')
   disable.close()
 
-  const save = await mount({ status: { state: 'enabled' }, columns: 34, rows: 5 })
+  const save = await mount({ status: { state: 'enabled' }, columns: 34, rows: 24 })
   await highlight(save, 'Start automatically')
   await save.key('\r')
   await save.key('\r')
+  const formerSaveY = rowOf(save, '> Confirm save')
+
+  save.vt.resize(34, 5)
   await save.flush()
   assert.doesNotMatch(save.frame(), /> Confirm save/u, 'the save accept is withheld with its lifetime fact offscreen')
   assert.doesNotMatch(save.bar(), /Confirm save/u)
+  await save.key('\r')
+  await save.flush()
+  save.page.activateBarSpan('bar:confirm')
+  save.page.handleMouse(mouseEvent(save, 'press', 3, formerSaveY))
+  save.page.handleMouse(mouseEvent(save, 'click', 3, formerSaveY))
+  await save.flush()
+  assert.deepEqual(save.commits(), [], 'no hidden/former save route dispatches a partial confirmation')
+  assert.match(save.frame(), /Cancel/u)
+
   save.vt.resize(34, 24)
   await save.flush()
   assert.match(save.frame(), /> Confirm save/u)
   await save.key('\r')
   await save.flush()
-  assert.deepEqual(save.commits(), [{ value: 'On', revision: 1 }], 'the recovered confirmation submits once')
+  const commits = save.commits()
+  assert.equal(commits.length, 1, 'the recovered confirmation submits once')
+  assert.equal(commits[0]!.value, 'On')
+  assert.equal(commits[0]!.revision, 1)
+  assert.equal(typeof commits[0]!.generation, 'object')
   save.close()
 })
 
@@ -773,6 +838,44 @@ test('a preference write accepted without an agreeing readback is Unverified', a
   await h.flush()
   assert.match(h.frame(), /Status\s+Unverified/u)
   assert.match(h.frame(), /the readback disagrees/u)
+  h.close()
+})
+
+test('a silent Host replacement cannot turn an old Change press into a new choice', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await highlight(h, 'Start automatically')
+  assert.match(h.frame(), /Start automatically\s+Off \(default\) · Change…/u)
+
+  // A replacement Host exposes the same revision and value, without a rollover
+  // notification: the painted row still belongs to the OLD authority.
+  h.replaceGenerationSilently()
+  await h.key('\r')
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Choose the value the next Host start applies:/u,
+    'the old painted Change press does not establish a choice from the new authority')
+  assert.doesNotMatch(h.frame(), /Save the next Host start preference/u)
+  assert.equal(h.commits().length, 0)
+
+  await h.key('\r')
+  await h.flush()
+  assert.match(h.frame(), /Choose the value the next Host start applies:/u,
+    'a fresh frame plus a new explicit gesture admits the current authority')
+  assert.equal(h.commits().length, 0, 'even the fresh choice stages zero writes')
+  h.close()
+})
+
+test('a ready preference without a current authority generation offers no change', async () => {
+  const h = await mount({
+    status: { state: 'enabled' },
+    preference: { autoStart: false, revision: 1, userOverridden: false, generation: undefined },
+  })
+  assert.match(h.frame(), /Start automatically\s+Off \(default\)/u)
+  assert.doesNotMatch(h.frame(), /Change…/u, 'a value without a writable authority identity is read-only')
+  const y = rowOf(h, 'Start automatically')
+  h.page.handleMouse(mouseEvent(h, 'press', 3, y))
+  h.page.handleMouse(mouseEvent(h, 'click', 3, y))
+  await h.flush()
+  assert.equal(h.commits().length, 0, 'no hidden pointer/Change route can stage a write')
   h.close()
 })
 

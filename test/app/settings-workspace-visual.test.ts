@@ -191,6 +191,12 @@ interface HarnessOptions {
   /** Hold a real ACP runtime toggle after it reached the Host, so a case can
    *  prove the pending parent/own-Back contract. */
   holdAcpToggle?: boolean
+  /** Hold the ACP next-start settings mutation after the page called it, so a
+   *  case can prove the queued A-write settles honestly across A→B without a B
+   *  write, replay or optimistic verification. */
+  holdAcpConfigWrite?: boolean
+  /** Publish a last-known ACP preference with no writable settings authority. */
+  acpStartupGenerationless?: boolean
   /** Hold the official URL reply until `releaseWebUrl()`: the window between
    *  the URL RPC settling and the Client sink. */
   holdWebUrl?: boolean
@@ -510,6 +516,10 @@ interface Harness {
   readonly acpEnabledWrites: () => readonly boolean[]
   /** PR-B: release a held ACP runtime toggle. */
   readonly releaseAcpToggle: () => void
+  /** PR-B: release a held ACP next-start settings mutation. */
+  readonly releaseAcpConfigWrite: () => void
+  /** PR-B: replace the ACP Generation WITHOUT notifying (a silent replacement). */
+  readonly replaceAcpGenerationSilently: () => void
   /** PR-B: replace the LIVE Connection generation (a Host A -> B replacement). */
   readonly bumpAcpGeneration: () => void
   /** PR-B: set the fake Host ACP listener state (the Host's own answer). */
@@ -646,8 +656,15 @@ function setup(options: HarnessOptions = {}): Harness {
   let webStartupState: WebStartupPreferenceState | undefined = options.webStartupUnavailable === true
     ? undefined
     : options.webStartupPreference ?? { autoStart: false, revision: 1, userOverridden: false }
-  let acpStartupState: AcpStartupPreferenceState | undefined = { autoStart: false, revision: 1, userOverridden: false }
+  let acpSettingsGeneration: object = {}
+  let acpStartupState: AcpStartupPreferenceState | undefined = {
+    autoStart: false,
+    revision: 1,
+    userOverridden: false,
+    generation: options.acpStartupGenerationless === true ? undefined : acpSettingsGeneration,
+  }
   const acpAutoStartWrites: boolean[] = []
+  let heldAcpConfigWrite: (() => void) | undefined
   const backendStartupWrites: PublicBackendValue[] = []
   let backendStartupState: BackendStartupPreferenceState | undefined = options.backendStartupUnavailable === true
     ? undefined
@@ -1195,14 +1212,31 @@ function setup(options: HarnessOptions = {}): Harness {
       // the `Host · ACP access` page through its own revision-checked writer.
       acpStartupPreference: {
         read: () => acpStartupState,
-        setAutoStart: async (value: boolean, revision: number) => {
+        setAutoStart: async (value: boolean, revision: number, generation: object) => {
           acpAutoStartWrites.push(value)
+          if (!Object.is(generation, acpSettingsGeneration)) {
+            return { kind: 'rejected' as const, reason: 'the Host settings authority changed before dispatch' }
+          }
           if (acpStartupState !== undefined && acpStartupState.revision !== revision) {
-            throw new Error(`settings namespace "pi-tui-acp-preferences" changed since it was read (expected revision ${revision}, now ${acpStartupState.revision})`)
+            return { kind: 'conflict' as const, reason: 'the Host settings section changed since it was read' }
+          }
+          if (options.holdAcpConfigWrite === true) {
+            await new Promise<void>(resolve => { heldAcpConfigWrite = resolve })
+            // A settles after A→B: the A receipt is unknown for the B authority,
+            // and the A writer must NOT have reached B.
+            if (acpStartupState === undefined || !Object.is(generation, acpSettingsGeneration)) {
+              return { kind: 'outcome-unconfirmed' as const, reason: 'the Host settings authority changed while the write was queued' }
+            }
           }
           if (acpStartupState !== undefined) {
-            acpStartupState = { autoStart: value, revision: acpStartupState.revision + 1, userOverridden: true }
+            acpStartupState = {
+              autoStart: value,
+              revision: acpStartupState.revision + 1,
+              userOverridden: true,
+              generation: acpSettingsGeneration,
+            }
           }
+          return { kind: 'accepted' as const }
         },
       },
       footerCustomItems: {
@@ -1641,9 +1675,17 @@ function setup(options: HarnessOptions = {}): Harness {
     acpStatusReads: () => acpStatusReads.count,
     acpEnabledWrites: () => acpEnabledWrites,
     releaseAcpToggle: () => { heldAcpToggle?.(); heldAcpToggle = undefined },
+    releaseAcpConfigWrite: () => { heldAcpConfigWrite?.(); heldAcpConfigWrite = undefined },
     bumpAcpGeneration: () => {
       acpGeneration = {}
+      acpSettingsGeneration = {}
+      if (acpStartupState !== undefined) acpStartupState = { ...acpStartupState, generation: acpSettingsGeneration }
       for (const listener of [...acpGenerationListeners]) listener()
+    },
+    replaceAcpGenerationSilently: () => {
+      acpGeneration = {}
+      acpSettingsGeneration = {}
+      if (acpStartupState !== undefined) acpStartupState = { ...acpStartupState, generation: acpSettingsGeneration }
     },
     setAcpStatus: (status: AcpAccessStatus) => { acpStatus = status },
     backendStartupWrites: () => backendStartupWrites,
@@ -1997,7 +2039,7 @@ test('200 → 72 → 44 → 200 preserves the category, the row, the level and t
   h.vt.resize(72, 24)
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Transcript d/, 'the level, category and row survive the narrow resize')
-  h.vt.resize(44, 24)
+  h.vt.resize(80, 24)
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Transcript d/, 'the selected row survives the resize')
   h.vt.resize(200, 40)
@@ -13387,15 +13429,25 @@ test('an /acp first frame without one real Detail row reports the command error 
 })
 
 test('a short ACP confirmation withholds the accept until the real frame grants the necessary copy', async () => {
-  const h = setup({ columns: 80, rows: 10, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  const h = setup({ columns: 80, rows: 24, backendKind: 'remote', acpStatus: { state: 'enabled' } })
   await openAcpAccess(h)
   await highlightPageRow(h, 'Disable ACP…')
   await key(h, '\r')
   await settle(h)
+  const formerAcceptY = rowOf(h, '> Disable ACP')
+
+  h.vt.resize(80, 6)
+  await settle(h)
   assert.doesNotMatch(acpAccessPlain(h), /> Disable ACP/u, 'the accept row is blank while the risk is incomplete')
   assert.doesNotMatch(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'the bar advertises no hidden confirm')
   assert.match(h.rowsPlain().at(-1) ?? '', /Cancel \[Esc\]/u, 'Cancel stays reachable')
-  assert.deepEqual(h.acpEnabledWrites(), [])
+  // The hidden keyboard route and a pointer at the former accept cell are inert.
+  await key(h, '\r')
+  press(h, formerAcceptY, 3)
+  release(h, formerAcceptY, 3)
+  await settle(h)
+  assert.deepEqual(h.acpEnabledWrites(), [], 'no hidden/former accept route dispatches a partial confirmation')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Cancel \[Esc\]/u, 'the confirmation stays open for recovery')
   // A sufficient real grant paints a NEW accept row; only an explicit gesture
   // after that dispatch can write.
   h.vt.resize(80, 24)
@@ -13405,6 +13457,91 @@ test('a short ACP confirmation withholds the accept until the real frame grants 
   await key(h, '\r')
   await settle(h, 10)
   assert.deepEqual(h.acpEnabledWrites(), [false], 'the fresh confirmation dispatched exactly once')
+  h.dispose()
+})
+
+test('an ACP preference without a writable settings generation is read-only', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    backendKind: 'remote',
+    acpStatus: { state: 'enabled' },
+    acpStartupGenerationless: true,
+  })
+  await openAcpAccess(h)
+  assert.match(acpAccessPlain(h), /Start automatically\s+Off \(default\)/u)
+  assert.doesNotMatch(acpAccessPlain(h), /Change…/u, 'no edit affordance without a writable authority identity')
+  const row = rowOf(h, 'Start automatically')
+  press(h, row, cellIndexOf(h, row, 'Start automatically'))
+  release(h, row, cellIndexOf(h, row, 'Start automatically'))
+  await settle(h)
+  assert.deepEqual(h.acpAutoStartWrites(), [], 'no hidden pointer route can stage a write')
+  h.dispose()
+})
+
+test('a pending ACP preference write settles honestly across A→B without a B write', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    backendKind: 'remote',
+    acpStatus: { state: 'enabled' },
+    holdAcpConfigWrite: true,
+  })
+  await openAcpAccess(h)
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r') // candidates
+  await key(h, '\r') // stage On
+  await key(h, '\r') // Confirm save: the settings mutation is held after dispatch
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Waiting for the answer…/u)
+  assert.deepEqual(h.acpAutoStartWrites(), [true], 'the A decision reached the real writer once')
+
+  // The Host is replaced while A is pending. The write stays owned by A; it is
+  // never cancelled, replayed or rebased onto B.
+  h.bumpAcpGeneration()
+  await settle(h, 12)
+  assert.equal(h.acpAutoStartWrites().length, 1, 'A→B dispatches no second/B write')
+  assert.match(acpAccessPlain(h), /Waiting for the answer…/u, 'the pending A settlement still owns its phase')
+  assert.doesNotMatch(acpAccessPlain(h), /Status\s+Verified/u, 'no optimistic verification across the replacement')
+
+  h.releaseAcpConfigWrite()
+  await settle(h, 12)
+  assert.match(acpAccessPlain(h), /Status\s+Outcome unconfirmed/u, 'the A settlement is reported honestly, not as Verified')
+  assert.equal(h.acpAutoStartWrites().length, 1, 'the unknown A outcome is never retried against B')
+  assert.match(acpAccessPlain(h), /Start automatically\s+Off \(default\)/u, 'B paints its OWN current preference')
+  assert.doesNotMatch(acpAccessPlain(h), /Status\s+Verified/u)
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the settled page still leaves through the normal Back')
+  h.dispose()
+})
+
+test('Back during a pending ACP preference write leaves without cancelling or replaying it', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    backendKind: 'remote',
+    acpStatus: { state: 'enabled' },
+    holdAcpConfigWrite: true,
+  })
+  await openAcpAccess(h)
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\r')
+  await settle(h)
+  assert.deepEqual(h.acpAutoStartWrites(), [true])
+  h.bumpAcpGeneration()
+  await settle(h, 12)
+
+  // Back is a real exit for a pending CONFIG write (the write owner keeps
+  // settling it); leaving must not cancel, replay or rebase the request.
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u)
+  h.releaseAcpConfigWrite()
+  await settle(h, 12)
+  assert.deepEqual(h.acpAutoStartWrites(), [true], 'the pending A write is neither cancelled nor replayed against B')
   h.dispose()
 })
 

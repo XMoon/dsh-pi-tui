@@ -1032,6 +1032,12 @@ export interface AcpStartupPreferenceState {
    *  as the official `expectedRevision`, so an external write between the read
    *  and the Confirm is a conflict instead of a silent last-write-wins. */
   readonly revision: number
+  /** The opaque Host settings authority this observation belongs to. It is
+   *  `undefined` when the last-known value is not current; a `undefined` value
+   *  is therefore displayable but NEVER writable, and the mutation carries the
+   *  captured generation through the serialized write queue to the actual
+   *  adapter boundary. */
+  readonly generation: object | undefined
   /** Whether the USER profile layer declares the value. `false` means the
    *  effective value is the schema default, so the UI may mark it `[default]`;
    *  the default is never re-derived here. */
@@ -1040,19 +1046,22 @@ export interface AcpStartupPreferenceState {
 
 /**
  * The profile-wide ACP startup preference. The write is the official
- * revision-checked settings mutation of the `pi-tui-acp-preferences` entry. A
- * resolved write is NOT a read-back: the caller must
- * {@link AcpStartupPreferenceConfig.read} again and only that read earns
- * `Verified`.
+ * revision-and-generation-checked settings mutation of the
+ * `pi-tui-acp-preferences` entry. A resolved write is NOT a read-back: the
+ * caller must {@link AcpStartupPreferenceConfig.read} again and only a
+ * same-generation read earns `Verified`.
  */
 export interface AcpStartupPreferenceConfig {
   /** The current Host preference, or `undefined` when the profile section
-   *  cannot be read at all. Never a fabricated default. */
+   *  cannot be read at all. Never a fabricated default. A last-known value is
+   *  still returned when the backend is stale, with an undefined generation. */
   read(): AcpStartupPreferenceState | undefined
   /** Persist `autoStart` through the official settings write at the revision
-   *  the user's decision was read at. A stale revision is a refusal (the
-   *  official conflict), never a silent overwrite. */
-  setAutoStart(value: boolean, expectedRevision: number): Promise<void>
+   *  and Host authority the user's decision was read at. The generation travels
+   *  to the actual mutation/queue boundary: a replaced Host or a superseded
+   *  queued decision is a refusal, never a silent write to the new authority.
+   *  A stale revision is the official conflict. */
+  setAutoStart(value: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome>
 }
 
 /**

@@ -336,13 +336,23 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r') // Disable ACP: the confirmation's own first focus
     await waitForPattern(clientA, /Listener\s+Disabled/u, 'FR5-B ACP runtime disabled')
     await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP runtime disable verified')
+    // A runtime toggle must NEVER rewrite the persisted next-start preference.
+    // The preference still reads On here, BEFORE the Enable toggle below.
+    assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === true,
+      'the disabled runtime must leave the next-start USER preference On')
     clientA.send('\r') // the disabled page's first focus is Enable ACP
     await waitForPattern(clientA, /Listener\s+Enabled/u, 'FR5-B ACP runtime re-enabled')
     await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP runtime enable verified')
     // The runtime round trip must not have rewritten the next-start preference.
     assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === true,
       'the ACP runtime toggle must leave the next-start USER preference On')
-    trace('fr5b.host-acp-runtime', { disabled: true, reEnabled: true, authoritativeReadback: true, preferenceUnchanged: true })
+    trace('fr5b.host-acp-runtime', {
+      disabled: true,
+      disabledPreferenceStillOn: true,
+      reEnabled: true,
+      authoritativeReadback: true,
+      preferenceUnchanged: true,
+    })
 
     // Next Host Start: the ACP page writes its own official preference id after
     // the explicit candidate -> Confirm save ladder.

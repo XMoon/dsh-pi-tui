@@ -219,7 +219,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     },
     acpStartupPreference: {
       read: () => undefined,
-      setAutoStart: async (_value: boolean, _revision: number) => {},
+      setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
     },
     extensionConfigs: {
       read: () => ({ kind: 'unavailable' as const, reason: 'no Host settings in this fixture' }),

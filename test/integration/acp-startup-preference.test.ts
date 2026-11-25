@@ -93,6 +93,7 @@ test('a default profile projects autoStart=false with no USER override', async t
   assert.equal(state.autoStart, false, 'the schema default is OFF')
   assert.equal(state.userOverridden, false, 'the default is not a user choice')
   assert.equal(typeof state.revision, 'number', 'the decision fence is a real Host revision')
+  assert.equal(typeof state.generation, 'object', 'the mutation fence carries the real Host settings authority')
 
   const descriptor = settingsDescriptor(plane)
   assert.equal(descriptor?.value?.autoStart, false, 'the Host Settings form projects the effective OFF')
@@ -112,7 +113,8 @@ test('a revision-checked On write persists the USER patch and a NEW Host cold bo
   assert.ok(before !== undefined)
   assert.equal(before.autoStart, false)
 
-  await first.port.acpStartupPreference.setAutoStart(true, before.revision)
+  const accepted = await first.port.acpStartupPreference.setAutoStart(true, before.revision, before.generation!)
+  assert.equal(accepted.kind, 'accepted', 'the exact revision/generation is accepted')
   const after = first.port.acpStartupPreference.read()
   assert.ok(after !== undefined, 'the committed preference must be re-readable')
   assert.equal(after.autoStart, true, 'the authoritative read carries the committed On')
@@ -143,16 +145,26 @@ test('a stale revision is refused instead of overwriting an external change', as
   const read = plane.port.acpStartupPreference.read()
   assert.ok(read !== undefined)
   // An external writer commits On and advances the revision.
-  await plane.port.acpStartupPreference.setAutoStart(true, read.revision)
+  const external = await plane.port.acpStartupPreference.setAutoStart(true, read.revision, read.generation!)
+  assert.equal(external.kind, 'accepted')
   const second = plane.port.acpStartupPreference.read()
   assert.ok(second !== undefined)
 
-  await assert.rejects(
-    plane.port.acpStartupPreference.setAutoStart(false, read.revision),
-    /changed since it was read/u,
-    'the official revision guard refuses the stale decision',
-  )
+  const stale = await plane.port.acpStartupPreference.setAutoStart(false, read.revision, second.generation!)
+  assert.equal(stale.kind, 'conflict', 'the official revision guard refuses the stale decision')
   assert.equal(plane.port.acpStartupPreference.read()?.autoStart, true, 'the external change survived')
+})
+
+test('a replaced settings authority is rejected before any write', async t => {
+  const life = testLifecycle(t)
+  const plane = await bootPlane(life, life.tempDir('acp-prefs-replaced-'), { resetUserDocument: true })
+  const read = plane.port.acpStartupPreference.read()
+  assert.ok(read !== undefined)
+  assert.equal(read.autoStart, false)
+
+  const replaced = await plane.port.acpStartupPreference.setAutoStart(true, read.revision, {})
+  assert.equal(replaced.kind, 'rejected', 'the old authority identity is refused at the mutation boundary')
+  assert.equal(plane.port.acpStartupPreference.read()?.autoStart, false, 'a rejected write leaves the preference unchanged')
 })
 
 test('a DISABLED preference row contributes no writable section', async t => {
@@ -160,9 +172,7 @@ test('a DISABLED preference row contributes no writable section', async t => {
   const plane = await bootPlane(life, life.tempDir('acp-prefs-disabled-'), { disabledRow: true })
   assert.equal(settingsDescriptor(plane), undefined, 'a disabled row must not project a settings section')
   assert.equal(plane.port.acpStartupPreference.read(), undefined, 'and the adapter must not fabricate the default')
-  await assert.rejects(
-    plane.port.acpStartupPreference.setAutoStart(true, 1),
-    /is not mounted/u,
-    'a write against the missing section is refused, never silently applied',
-  )
+  const rejected = await plane.port.acpStartupPreference.setAutoStart(true, 1, {})
+  assert.equal(rejected.kind, 'rejected', 'a write against the missing section is refused, never silently applied')
+  assert.match(rejected.kind === 'rejected' ? rejected.reason : '', /is not mounted/u)
 })
