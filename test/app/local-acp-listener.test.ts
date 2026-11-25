@@ -3819,22 +3819,27 @@ test('a model reply whose fenced cut is invalidated during its held read returns
     current = optionsC
     facts.onSessionEvent(agent.session, { seq: 1, type: 'model/selection', data: { provider: 'p1', model: 'c' } })
     release()
-    const first = (await client.next()) as {
-      id?: number
+    let response: { id?: number; result?: { configOptions?: SessionConfigOption[] } } | undefined
+    let notification: {
       method?: string
-      result?: { configOptions?: SessionConfigOption[] }
       params?: { update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
+    } | undefined
+    for (let seen = 0; seen < 2; seen++) {
+      const message = (await client.next()) as typeof response & typeof notification
+      if (message?.id === 3) {
+        assert.equal(response, undefined, 'exactly one setter response')
+        response = message
+      } else {
+        assert.equal(notification, undefined, 'exactly one config notification')
+        notification = message
+      }
     }
-    assert.equal(first.id, 3, 'the setter response must be submitted before the invalidated cut notification')
-    assert.deepEqual(first.result?.configOptions, optionsC,
+    assert.deepEqual(response?.result?.configOptions, optionsC,
       'the response must carry the newest complete cut after exactly one bounded retry')
-    const second = (await client.next()) as {
-      method?: string
-      params?: { update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
-    }
-    assert.equal(second.method, 'session/update')
-    assert.equal(second.params?.update?.sessionUpdate, 'config_option_update')
-    assert.deepEqual(second.params?.update?.configOptions, optionsC)
+    assert.equal(notification?.method, 'session/update')
+    assert.equal(notification?.params?.update?.sessionUpdate, 'config_option_update')
+    assert.deepEqual(notification?.params?.update?.configOptions, optionsC,
+      'both frames carry the newest complete state; neither may deliver the stale B cut')
   } finally {
     client.close()
   }

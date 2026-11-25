@@ -1044,9 +1044,13 @@ interface ViewClaim {
   configEpoch?: number
   /** A coalesced config refresh is required after the running one settles. */
   configDirty?: boolean
-  /** Writes hold notifications until the SDK has enqueued their response. */
-  configNotifyHold?: number
-  configNotifyWaiters?: Array<() => void>
+  /**
+   * Number of successfully validated complete reply cuts currently at their
+   * final synchronous submission boundary. Only an unsent config frame is
+   * deferred here; already-submitted frames and provider/maintenance work never
+   * wait on a reply.
+   */
+  configReplyBarrier?: number
   /**
    * Whether THIS connection was actually given the legacy `modes` list at
    * attach. Only such a View may receive `current_mode_update` or call the
@@ -1713,41 +1717,6 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * complete current config list (mode/Team rows included), never a partial
    * model subset.
    */
-  private holdConfigNotifications(claim: ViewClaim): void {
-    claim.configNotifyHold = (claim.configNotifyHold ?? 0) + 1
-  }
-
-  private releaseConfigNotifications(claim: ViewClaim): void {
-    // The handler returns after this method; its resolved response is enqueued
-    // on the SDK write queue before this task runs. Only then may a held
-    // notification resume, so it cannot precede the setter response.
-    setImmediate(() => {
-      const remaining = (claim.configNotifyHold ?? 1) - 1
-      claim.configNotifyHold = remaining
-      if (remaining > 0) return
-      const waiters = claim.configNotifyWaiters ?? []
-      claim.configNotifyWaiters = []
-      for (const resolve of waiters) resolve()
-    })
-  }
-
-  private async waitConfigNotifications(claim: ViewClaim): Promise<void> {
-    while ((claim.configNotifyHold ?? 0) > 0) {
-      await new Promise<void>(resolve => {
-        claim.configNotifyWaiters = [...(claim.configNotifyWaiters ?? []), resolve]
-      })
-    }
-  }
-
-  private async withConfigResponseHold<T>(claim: ViewClaim, run: () => Promise<T>): Promise<T> {
-    this.holdConfigNotifications(claim)
-    try {
-      return await run()
-    } finally {
-      this.releaseConfigNotifications(claim)
-    }
-  }
-
   async setConfigOption(
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
@@ -1758,10 +1727,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const mode = request.type === undefined ? modeOfWireId(request.value) : undefined
       if (mode === undefined) throw policyViewError(invalidPolicyOption('the requested session mode is not selectable'))
       const claim = this.attachedClaim(state, request.sessionId)
-      return await this.withConfigResponseHold(claim, async () => {
-        await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
-        return await this.readConfigReply(claim, access)
-      })
+      await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
+      return await this.readConfigReply(claim, access)
     }
     if (request.configId === ACP_AGENT_TEAM_CONFIG_ID) {
       const claim = this.attachedClaim(state, request.sessionId)
@@ -1772,21 +1739,17 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         throw policyViewError(invalidPolicyOption('the requested Agent Team option requires a boolean value'))
       }
       const enabled = request.value
-      return await this.withConfigResponseHold(claim, async () => {
-        await this.performPolicyWrite(claim, access, { kind: 'agent-team', enabled }, signal)
-        return await this.readConfigReply(claim, access)
-      })
+      await this.performPolicyWrite(claim, access, { kind: 'agent-team', enabled }, signal)
+      return await this.readConfigReply(claim, access)
     }
     if (request.configId === 'model' || request.configId === 'thought_level') {
       const claim = this.attachedClaim(state, request.sessionId)
-      return await this.withConfigResponseHold(claim, async () => {
-        await this.setModelOnly(state, access, request, signal)
-        // A same-value write emits no Session event and changes no projection, so
-        // it neither needs nor may race a config notification ahead of its reply.
-        // A real model/selection event owns the post-write refresh. The reply is
-        // ONE fenced full cut after the model terminal.
-        return await this.readConfigReply(claim, access)
-      })
+      await this.setModelOnly(state, access, request, signal)
+      // A same-value write emits no Session event and changes no projection, so
+      // it neither needs nor may race a config notification ahead of its reply.
+      // A real model/selection event owns the post-write refresh. The reply is
+      // ONE fenced full cut after the model terminal.
+      return await this.readConfigReply(claim, access)
     }
     throw policyViewError(invalidPolicyOption('unknown session config option'))
   }
@@ -1810,10 +1773,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const mode = modeOfWireId(modeId)
     if (mode === undefined) throw policyViewError(invalidPolicyOption('the requested session mode is not selectable'))
-    return await this.withConfigResponseHold(claim, async () => {
-      await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
-      return {}
-    })
+    await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
+    return {}
   }
 
   /**
@@ -1913,6 +1874,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (cut.epoch !== (claim.configEpoch ?? 0) || cut.snapshot.configOptions === undefined) {
       throw readbackUnavailablePolicyView()
     }
+    // Only a successfully validated complete reply cut reaches this narrow
+    // submission barrier. It never spans provider/maintenance I/O: an unsent
+    // config frame that hits it retains dirty and reschedules on the same task
+    // boundary after the resolved response is enqueued.
+    claim.configReplyBarrier = (claim.configReplyBarrier ?? 0) + 1
+    setImmediate(() => {
+      const remaining = (claim.configReplyBarrier ?? 1) - 1
+      claim.configReplyBarrier = remaining
+      if (remaining <= 0 && claim.configDirty === true) this.enqueueConfigUpdate(claim)
+    })
     return [...cut.snapshot.configOptions]
   }
 
@@ -5141,6 +5112,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     // No frame may precede the initial attach snapshot, and a load replay owns
     // the ordered output until its canonical history drained: keep the dirty
     // bit and start on the real initial/replay terminal.
+    if ((claim.configReplyBarrier ?? 0) > 0) return
     if (claim.configReady !== true || claim.replay !== undefined) return
     if (claim.configRefreshRunning === true) return
     claim.configRefreshRunning = true
@@ -5239,9 +5211,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     epoch: number,
     update: AcpConfigUpdate,
   ): Promise<boolean> {
-    await this.waitConfigNotifications(claim)
     if (!this.configSinkCurrent(claim) || claim.notifyConfigUpdate !== notify
       || (claim.configEpoch ?? 0) !== epoch) return false
+    if ((claim.configReplyBarrier ?? 0) > 0) {
+      claim.configDirty = true
+      return false
+    }
     try {
       await notify(claim.sessionId, update)
       return true

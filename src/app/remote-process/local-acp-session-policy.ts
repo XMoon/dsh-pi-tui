@@ -450,6 +450,9 @@ export class AcpSessionPolicyService {
             throw readbackUnavailablePolicy('the current Agent Team authority is unavailable after the write')
           }
           const after = this.readTeamEnabled(agent.session)
+          if (after === undefined) {
+            throw readbackUnavailablePolicy('the committed Agent Team state is not readable')
+          }
           if (after !== enabled) {
             throw indeterminatePolicy('the Agent Team readback does not match the requested value')
           }
