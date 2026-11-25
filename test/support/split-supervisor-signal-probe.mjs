@@ -55,6 +55,9 @@ const PROCESS_ATS = [
   'host-artifact-absent-started',
   'identity-witness-spawned',
   'finalize-compensation-started',
+  'public-daemon-before-registry',
+  'public-daemon-before-ready-ack',
+  'public-daemon-ownership-refused',
 ]
 /**
  * The three installed-entry windows bind ONE exact business test so the probe
@@ -85,6 +88,18 @@ const PROCESS_AT_TARGETS = new Map([
   ['finalize-compensation-started', {
     file: 'test/integration/split-process/business/host-bootstrap.vitest.ts',
     title: 'compensates a failed finalization without leaking a live Client or witness',
+  }],
+  ['public-daemon-before-registry', {
+    file: 'test/integration/split-process/business/public-daemon-entry.vitest.ts',
+    title: 'starts one real public daemon Client and Host from the installed CLI',
+  }],
+  ['public-daemon-before-ready-ack', {
+    file: 'test/integration/split-process/business/public-daemon-entry.vitest.ts',
+    title: 'starts one real public daemon Client and Host from the installed CLI',
+  }],
+  ['public-daemon-ownership-refused', {
+    file: 'test/integration/split-process/business/public-daemon-entry.vitest.ts',
+    title: 'refuses an unproven public Host ownership signal and compensates truthfully',
   }],
 ])
 const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
@@ -622,6 +637,46 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
       }
     }
   }
+  for (const launch of receipt.publicLaunches ?? []) {
+    if (launch.closed !== true) problems.push(`public daemon launch ${String(launch.label)} did not record its terminal state`)
+    for (const entry of [launch.cli, launch.client]) {
+      if (entry === null || entry === undefined) continue
+      const state = identityLiveness(kernel, entry.pid, entry.birth)
+      if (state !== 'gone' && state !== 'foreign') {
+        problems.push(`public daemon launch ${String(launch.label)} ${String(entry.entry)} PID is ${state}: ${String(entry.pid)}`)
+      }
+    }
+    if (launch.shellPid !== null && launch.shellPid !== undefined) {
+      const shellState = identityLiveness(kernel, launch.shellPid, launch.shellBirth)
+      if (shellState !== 'gone' && shellState !== 'foreign') {
+        problems.push(`public daemon launch ${String(launch.label)} native shell is ${shellState}: ${String(launch.shellPid)}`)
+      }
+    }
+  }
+  for (const host of receipt.publicHosts ?? []) {
+    if (host.reclaimed !== true) problems.push(`public Host PID ${String(host.pid)} was not reclaimed`)
+    const state = identityLiveness(kernel, host.pid, host.birth)
+    if (state !== 'gone' && state !== 'foreign') {
+      problems.push(`public Host PID is ${state}: ${String(host.pid)}`)
+    }
+    if (Number.isInteger(host.pgid)) {
+      const groupState = processGroupTerminalState(kernel, host.pgid)
+      if (groupState !== 'terminal') {
+        problems.push(`public Host process group is ${groupState}: ${String(host.pgid)}`)
+      }
+    }
+  }
+  if (receipt.publicOwnershipRefused !== undefined) {
+    if (receipt.publicOwnershipRefused.signalSent !== false) {
+      problems.push('the public ownership refusal claims a signal was sent')
+    }
+    if (receipt.publicOwnershipRefused.targetLiveAtRefusal !== true) {
+      problems.push('the public ownership refusal did not observe its target live')
+    }
+    if (receipt.publicOwnershipRefused.compensationCompleted !== true) {
+      problems.push('the public ownership refusal compensation did not complete')
+    }
+  }
   if (receipt.installationMutation !== undefined) {
     problems.push(`the scoped installation mutation ${String(receipt.installationMutation.fault)} was not restored`)
   }
@@ -819,6 +874,11 @@ const env = {
         SPLIT_VITEST_UPGRADE_NEW_TGZ: newTgz,
       }
     : { SPLIT_VITEST_CANDIDATE_TGZ: candidate }),
+}
+const publicRefusalReleaseFile = join(tmpBase, `split-public-refusal-release-${String(process.pid)}.flag`)
+if (processMode && at === 'public-daemon-ownership-refused') {
+  if (existsSync(publicRefusalReleaseFile)) unlinkSync(publicRefusalReleaseFile)
+  env.SPLIT_VITEST_PUBLIC_REFUSAL_RELEASE = publicRefusalReleaseFile
 }
 if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
 if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || at === 'qualification-client-active'
@@ -1060,6 +1120,65 @@ try {
           return identityLiveness(kernel, fallback.pid, fallback.birth ?? fallback.starttime) === 'live'
             ? current : undefined
         }, 'a registered live discovery-fallback Host', 900_000)
+      } else if (at === 'public-daemon-before-registry' || at === 'public-daemon-before-ready-ack') {
+        receipt = await waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          const note = processNote(current, 'process-probe-hold', at)
+          if (note === undefined) return undefined
+          const launch = (current.publicLaunches ?? []).find(value => value.launchId === note.detail?.launchId)
+          if (launch === undefined || launch.cli === undefined || launch.cli === null
+            || launch.client === undefined || launch.client === null
+            || launch.host === undefined || launch.host === null) return undefined
+          const cliState = identityLiveness(kernel, launch.cli.pid, launch.cli.birth)
+          const clientState = identityLiveness(kernel, launch.client.pid, launch.client.birth)
+          const hostState = identityLiveness(kernel, launch.host.pid, launch.host.birth)
+          if (cliState !== 'live' || clientState !== 'live' || hostState !== 'live') {
+            fail(`${String(at)}: the captured public CLI/Client/Host is not the live kernel identity`)
+          }
+          const hostObservation = kernel.read(launch.host.pid)
+          if (hostObservation.kind !== 'alive' || hostObservation.identity.ppid !== launch.client.pid) {
+            fail(`${String(at)}: the public Host is not the captured Client's direct child`)
+          }
+          if (note.detail?.hostPid !== launch.host.pid) {
+            fail(`${String(at)}: the checkpoint note names another public Host`)
+          }
+          if (at === 'public-daemon-before-registry') {
+            if (note.detail?.registryAbsent !== true) {
+              fail('public-daemon-before-registry: the registry was already published before the window')
+            }
+            if (launch.readyAt !== undefined) fail('public-daemon-before-registry: the launch already reached ready')
+            if (typeof note.detail?.registryPath !== 'string' || existsSync(note.detail.registryPath)) {
+              fail('public-daemon-before-registry: the registry path exists at the trigger')
+            }
+          } else {
+            if (launch.readyAt === undefined || launch.host.instanceId === undefined) return undefined
+            if (note.detail?.registryPublished !== true || note.detail?.authenticated !== true
+              || note.detail?.ackOutstanding !== true) {
+              fail('public-daemon-before-ready-ack: the checkpoint lacks registry/authentication/ACK facts')
+            }
+            const registryPath = join(current.installation.dshHome, 'run', 'dsh-pi-tui',
+              launch.host.scopeId, 'instance.json')
+            if (!existsSync(registryPath)) {
+              fail('public-daemon-before-ready-ack: the published registry is not on disk at the trigger')
+            }
+            const registry = JSON.parse(readFileSync(registryPath, 'utf8'))
+            if (registry.hostPid !== launch.host.pid || registry.instanceId !== launch.host.instanceId) {
+              fail('public-daemon-before-ready-ack: the registry does not name the checkpoint Host')
+            }
+          }
+          return current
+        }, `${String(at)} public daemon checkpoint`, 900_000)
+      } else if (at === 'public-daemon-ownership-refused') {
+        receipt = await waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          if (processNote(current, 'public-daemon-ownership-refused-ready') === undefined) return undefined
+          const launch = (current.publicLaunches ?? []).find(value => value.readyAt !== undefined && value.host !== null)
+          if (launch === undefined || launch.host === null) return undefined
+          if (identityLiveness(kernel, launch.host.pid, launch.host.birth) !== 'live') return undefined
+          if (launch.cli === null || identityLiveness(kernel, launch.cli.pid, launch.cli.birth) !== 'live') return undefined
+          if (launch.client === null || identityLiveness(kernel, launch.client.pid, launch.client.birth) !== 'live') return undefined
+          return current
+        }, 'a ready public daemon launch with a live Host', 900_000)
       } else {
         receipt = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
@@ -1238,6 +1357,27 @@ try {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
       }
       deadline = Date.now() + 180_000
+      if (at === 'public-daemon-ownership-refused') {
+        const refused = await waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          return current?.publicOwnershipRefused !== undefined
+            && current.publicOwnershipRefused.compensationCompleted !== true
+            && current.phase === 'NOT_QUIESCED' ? current : undefined
+        }, 'the real public ownership refusal checkpoint', 120_000)
+        const refusal = refused.publicOwnershipRefused
+        const refusedHost = (refused.publicHosts ?? []).find(host => host.pid === refusal.pid)
+        if (refusedHost === undefined) fail('public-daemon-ownership-refused: no public Host row at the refusal')
+        if (identityLiveness(kernel, refusedHost.pid, refusedHost.birth) !== 'live') {
+          fail('public-daemon-ownership-refused: the refused target is not live (a signal was sent)')
+        }
+        if (refusal.signalSent !== false) fail('public-daemon-ownership-refused: the receipt claims a signal was sent')
+        if (refusal.expectedBirth === refusal.birth) fail('public-daemon-ownership-refused: the expected birth was not mismatched')
+        if (refusedHost.reclaimed === true) fail('public-daemon-ownership-refused: the Host was already reclaimed before release')
+        if (typeof refused.sceneRoot !== 'string' || !existsSync(refused.sceneRoot)) {
+          fail('public-daemon-ownership-refused: the refused root was not retained')
+        }
+        writeFileSync(publicRefusalReleaseFile, 'release\n', { mode: 0o600 })
+      }
     }
   } else if (upgradeMode) {
     if (mode === 'upgrade-qualification-host-death') {
@@ -1607,7 +1747,15 @@ try {
           ? current
           : undefined
       }, 'failed FINALIZE compensation terminal', Math.max(1, deadline - Date.now()))
-      : waitProcessTerminal(tmpBase, runId, Math.max(1, deadline - Date.now())))
+      : at === 'public-daemon-ownership-refused'
+        ? waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          return current?.phase === 'NOT_QUIESCED'
+            && current?.publicOwnershipRefused?.compensationCompleted === true
+            ? current
+            : undefined
+        }, 'public ownership refusal compensation terminal', Math.max(1, deadline - Date.now()))
+        : waitProcessTerminal(tmpBase, runId, Math.max(1, deadline - Date.now())))
     : await waitUntil(() => {
       const current = latestReceipt(tmpBase, runId)
       return current?.phase === 'ABORTED_CLEAN' ? current : undefined
@@ -1648,11 +1796,13 @@ try {
   await sleep(Math.min(300, Math.max(1, deadline - Date.now())))
   const problems = processMode
     ? checkProcessReceiptResources(receipt, kernel, {
-      allowRemainingRoot: at === 'finalize-compensation-started',
+      allowRemainingRoot: at === 'finalize-compensation-started' || at === 'public-daemon-ownership-refused',
     })
     : checkReceiptResources(receipt)
   if (problems.length > 0) fail(problems.join('; '))
-  if (at !== 'finalize-compensation-started') checkNoLingeringPaths(receipt)
+  if (at !== 'finalize-compensation-started' && at !== 'public-daemon-ownership-refused') {
+    checkNoLingeringPaths(receipt)
+  }
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   const sentinelState = processMode && sentinelIdentity !== undefined
     ? identityLiveness(kernel, sentinelIdentity.pid, sentinelIdentity.birth)
