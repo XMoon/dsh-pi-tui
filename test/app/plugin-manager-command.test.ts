@@ -168,7 +168,7 @@ function proxyRunner(
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
       acpStartupPreference: {
-        read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: {} }),
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: ACP_STARTUP_PREFERENCE_GENERATION }),
         setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       permissions: {
