@@ -408,6 +408,45 @@ test('the process install cache keeps a private reusable root and refuses unsafe
   assert.equal(existsSync(join(checkoutCache, 'pnpm-store')), false)
 })
 
+test('the process install cache refuses a case-alias overlap on a case-insensitive volume', t => {
+  const life = testLifecycle(t)
+  const root = realpathSync(life.tempDir('process-cache-case-'))
+  const tmpBase = join(root, 'RunBase')
+  mkdirSync(tmpBase, { mode: 0o700 })
+  const lowerBase = join(root, 'runbase')
+  if (!existsSync(lowerBase)) {
+    t.skip('case-insensitive filesystem required for the alias fixture')
+    return
+  }
+  const baseStats = lstatSync(tmpBase)
+  const aliasStats = lstatSync(lowerBase)
+  if (aliasStats.dev !== baseStats.dev || aliasStats.ino !== baseStats.ino) {
+    t.skip('case-insensitive filesystem required for the alias fixture')
+    return
+  }
+
+  const cache = join(tmpBase, 'Cache')
+  mkdirSync(cache, { mode: 0o700 })
+  const inputs = privateBase(life, root, 'inputs')
+  const candidate = join(inputs, 'candidate.tgz')
+  writeFileSync(candidate, 'input fixture\n', { mode: 0o600 })
+  const sentinel = join(tmpBase, 'sentinel')
+  writeFileSync(sentinel, 'owned\n', { mode: 0o600 })
+
+  // realpathSync keeps this spelling for the case-insensitive components, so
+  // only actual directory identity can see that it is inside tmpBase.
+  assert.throws(
+    () => prepareProcessInstallCache({
+      tmpBase,
+      override: join(lowerBase, 'cache'),
+      candidateTarball: candidate,
+    }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(sentinel), true)
+  assert.equal(existsSync(join(cache, 'pnpm-store')), false)
+})
+
 test('the shared official-record reader keeps complete-line strictness and only streams an incomplete tail', async t => {
   const life = testLifecycle(t)
   const root = realpathSync(life.tempDir('split-process-records-'))

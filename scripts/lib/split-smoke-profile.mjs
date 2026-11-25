@@ -268,13 +268,46 @@ function cacheRefusal(detail) {
   throw new Error(`INPUT_UNQUALIFIED: process install cache root ${detail}`)
 }
 
-function pathContains(parent, child) {
-  const rel = relative(parent, child)
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`))
+function directoryIdentity(path) {
+  const stats = statSync(path)
+  if (!stats.isDirectory()) cacheRefusal(`a filesystem ancestor is not a directory: ${path}`)
+  return `${String(stats.dev)}:${String(stats.ino)}`
 }
 
-function pathsIntersect(first, second) {
-  return pathContains(first, second) || pathContains(second, first)
+/**
+ * The nearest existing directory and every ancestor, keyed by actual device +
+ * inode. realpathSync keeps the caller's spelling for case-insensitive
+ * non-symlink components, so path.relative alone cannot prove containment.
+ */
+function existingDirectoryChain(path) {
+  let current = path
+  while (!existsSync(current)) {
+    const parent = dirname(current)
+    if (parent === current) cacheRefusal(`cannot resolve an existing ancestor: ${path}`)
+    current = parent
+  }
+  const identities = new Set()
+  let nearest
+  for (;;) {
+    const identity = directoryIdentity(current)
+    if (nearest === undefined) nearest = identity
+    identities.add(identity)
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return { nearest, identities }
+}
+
+function directoriesOverlap(cacheRoot, forbidden) {
+  const cache = existingDirectoryChain(cacheRoot)
+  const target = existingDirectoryChain(forbidden)
+  // The forbidden directory exists. If its identity is in the cache chain, the
+  // cache root (or its nearest existing ancestor) is at/inside it.
+  if (cache.identities.has(target.nearest)) return true
+  // Only an existing cache root can be an ancestor of the existing forbidden
+  // directory; a not-yet-created root cannot contain an existing path.
+  return existsSync(cacheRoot) && target.identities.has(cache.nearest)
 }
 
 function lstatOrUndefined(path) {
@@ -365,21 +398,28 @@ export function prepareProcessInstallCache({ tmpBase, override, candidateTarball
   }
   let root
   if (override === undefined) {
-    root = join(defaultCacheParent(home), PROCESS_INSTALL_CACHE_ROOT_NAME)
+    // Do not create the default .cache parent (or any cache contents) until
+    // the intended root's existing ancestor chain proves separation.
+    root = join(home, '.cache', PROCESS_INSTALL_CACHE_ROOT_NAME)
   } else {
     if (typeof override !== 'string' || override === '') {
       cacheRefusal('SPLIT_VITEST_PNPM_CACHE_ROOT must not be empty')
     }
     root = qualifiedCacheDirectory(override, 'SPLIT_VITEST_PNPM_CACHE_ROOT', false)
   }
-  if (root === home) cacheRefusal('the account home itself cannot be the cache root')
+  const rootExists = existsSync(root)
+  const rootChain = existingDirectoryChain(root)
+  if (rootExists && rootChain.nearest === directoryIdentity(home)) {
+    cacheRefusal('the account home itself cannot be the cache root')
+  }
   for (const [label, path] of [
     ['checkout', realpathSync(PACKAGE_ROOT)],
     ['candidate input directory', candidateDirectory],
     ['SPLIT_VITEST_TMP_BASE', realTmpBase],
   ]) {
-    if (pathsIntersect(root, path)) cacheRefusal(`must not overlap the ${label}: ${root}`)
+    if (directoriesOverlap(root, path)) cacheRefusal(`must not overlap the ${label}: ${root}`)
   }
+  if (override === undefined) defaultCacheParent(home)
   qualifiedCacheDirectory(root, 'cache root', true)
   qualifiedCacheDirectory(join(root, 'pnpm-store'), 'pnpm store directory', true)
   qualifiedCacheDirectory(join(root, 'pnpm-cache'), 'pnpm cache directory', true)
