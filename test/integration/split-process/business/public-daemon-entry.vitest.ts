@@ -711,3 +711,22 @@ test.skipIf(!linuxOnly || !ownershipRefusalProbe)(
     })
   },
 )
+
+
+test.skipIf(!linuxOnly)('__debug_settings_frames', async () => {
+  const scene = await createSplitProcessScene()
+  let launch: PublicDaemonLaunch | undefined
+  try {
+    launch = await scene.startPublicDaemon({ label: 'debug-settings', backend: 'daemon' })
+    await waitForFrame(launch, '❯', 'debug composer')
+    await launch.submit('/settings')
+    for (let index = 0; index < 8; index += 1) {
+      await sleep(800)
+      const frame = await launch.text()
+      console.log(`DEBUG_SETTINGS_FRAME_${index}\n${frame.slice(-2400)}`)
+    }
+  } finally {
+    if (launch !== undefined && !launch.closed) await launch.reclaim().catch(() => undefined)
+    await scene.dispose().catch(() => undefined)
+  }
+})
