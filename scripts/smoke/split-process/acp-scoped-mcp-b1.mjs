@@ -540,6 +540,7 @@ export async function runAcpScopedMcpB1(context) {
     // ── B1-04: a real global tool with the same public name makes the next
     //     standard MCP admission fail closed; the global tool keeps working.
     await acpNew.request(acp.methods.agent.session.close, { sessionId: sessionA })
+    await waitToolAbsent(sessionA, 'Q06 after ACP close', [ECHO_TOOL, HOLD_TOOL, FAIL_TOOL])
     await closeAcp(acpNew)
     const shadow = await control('global-shadow', { sessionId: sessionB })
     assert(shadow.ok === true && Array.isArray(shadow.toolNames) && shadow.toolNames.includes(ECHO_TOOL), `Q06: global shadow installed: ${JSON.stringify(shadow)}`)
