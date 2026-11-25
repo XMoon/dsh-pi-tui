@@ -5950,6 +5950,7 @@ test('F2 opens the SAME admitted Inspector page, scrolls its own body and return
   let page = h.view()
   assert.ok(page.includes('Session Inspector · other-se'), `F2 opens the full-width page:\n${page}`)
   assert.ok(page.includes('Whole session') && page.includes('Token usage'), 'the complete groups paint')
+  assert.ok(page.includes(`ID ${OTHER}`), 'the full-width page keeps the complete official Session id')
   assert.ok(page.includes('Model deepseek/deepseek-v4-pro'), 'the exact Inspector cut is visible')
   assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the page reports the SAME target')
   // A matching data-only refresh repaints the SAME page/identity.

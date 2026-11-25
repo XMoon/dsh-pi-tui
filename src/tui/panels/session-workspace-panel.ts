@@ -2947,6 +2947,9 @@ export class SessionWorkspacePanel implements Component {
     const identity = `${color.textStrong(truncateToWidth(view.title, titleBudget, '…', false))}${color.textMuted(truncateToWidth(suffix, width, '…', false))}`
     const fixed = [
       fit(identity, width),
+      // The full-width page is the complete identity reading: it keeps the
+      // complete official Host id (the inline pane keeps the short id).
+      fit(`${color.textDim('ID ')}${color.text(view.fullId)}`, width),
       ...(view.notice === '' ? [] : [fit(this.inspectorNotice(view, width), width)]),
     ]
     // The page's real object identity is painted: from here its body target is
