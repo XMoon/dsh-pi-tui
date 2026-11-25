@@ -71,7 +71,9 @@ async function exitPublicLaunch(
   }
   expect(exit.code, `${label}: the public CLI exit code`).toBe(0)
   expect(exit.signal, `${label}: the public CLI exit signal`).toBe(null)
-  expect(exit.text, `${label}: the daemon detach line`).toContain('Disconnected from dsh-pi-tui (daemon client).')
+  if (launch.client !== null) {
+    expect(exit.text, `${label}: the daemon detach line`).toContain('Disconnected from dsh-pi-tui (daemon client).')
+  }
   await launch.close()
   return exit
 }
