@@ -876,6 +876,85 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
   }
 })
 
+test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and never seeds the process recall', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r11-remote-ctrlr'
+  const presetId = 'm3-4-r11-remote-ctrlr-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: () => {
+      // A disk-only row in the SAME file the legacy Ctrl+R source reads. It is
+      // old Ctrl+R data, never a ↑/↓ process-recall source.
+      appendHistoryRecord(currentFile, {
+        v: 2, content: 'foreign disk-only ctrl r row', cwd: host.anchorDir, ts: 10, sessionId: mainId,
+      }, undefined)
+    },
+  })
+  const edited = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    getInputHistory(): readonly string[]
+  }
+  const viewport = (): string => fixture.vt.getViewport().join('\n')
+  const pendingFor = (text: string): boolean => {
+    const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId) ?? []
+    return pending.some(item => item.text === text)
+  }
+  try {
+    // A new process recall is empty even though the legacy file already has a row.
+    assert.deepEqual([...edited.getInputHistory()], [],
+      'the resumed Split Client starts with an empty process recall')
+    // A real keyboard submission accepted by the Host: the legacy writer stores
+    // it in the Ctrl+R file, while the accepted boundary fills the process recall.
+    const marker = 'ctrl r remote accepted memory'
+    fixture.vt.sendInput(marker)
+    await fixture.vt.waitForRender()
+    fixture.vt.sendInput('\r')
+    await waitFor('the accepted prompt is recalled from the process memory', () =>
+      [...edited.getInputHistory()].includes(marker), 20_000)
+    await waitFor('the legacy Ctrl+R writer recorded the accepted prompt', () =>
+      loadHistoryRecords(currentFile).some(row => row.content === marker), 20_000)
+    const memoryBefore = [...edited.getInputHistory()]
+    assert.deepEqual(memoryBefore, [marker], 'the process recall holds exactly the accepted input')
+
+    // Ctrl+R opens the ONE History seat over the REAL file source. The disk-only
+    // row is searchable there (the old source still works) and never becomes a
+    // process-recall entry.
+    fixture.vt.sendInput('\x12')
+    await waitFor('the History seat opened', () => viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('foreign disk-only')
+    await waitFor('the disk row is found by Ctrl+R', () => viewport().includes('foreign disk-only ctrl r row'), 15_000)
+    fixture.vt.sendInput('\x1b')
+    await fixture.vt.waitForRender()
+    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
+      'searching the legacy file never seeds the process recall')
+
+    // The marker restores into the editor WITHOUT submitting.
+    fixture.vt.sendInput('\x12')
+    await waitFor('the History seat reopened', () => viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('ctrl r remote accepted')
+    // Settle on the FILTERED result state (the match painted AND the previous
+    // disk row gone), never on the debounced query echo: acceptance stays frozen
+    // until the search really commits.
+    await waitFor('the accepted marker is the committed filtered result', () =>
+      viewport().includes(marker) && !viewport().includes('foreign disk-only ctrl r row'), 15_000)
+    fixture.vt.sendInput('\r')
+    await fixture.vt.waitForRender()
+    assert.equal(edited.getDraft(), marker, 'Ctrl+R restores the accepted prompt into the editor')
+    assert.equal(pendingFor(marker), false, 'restoring from Ctrl+R dispatches no submission')
+    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
+      'Ctrl+R restore never changes the process recall')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
 test('the Remote branch performs zero Direct graph construction', async (t) => {
   const life = testLifecycle(t)
   const fixture = await mountRemoteRunner(life, {})
