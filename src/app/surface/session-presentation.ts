@@ -181,21 +181,18 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly records: (cwd: string) => readonly ParsedHistoryRecord[]
     readonly setLastContent: (content: string | undefined) => void
     /** The SAME Client-local history source's cold cross-cwd session recall
-     * reader (no content dedupe, all client history files). */
-    readonly readSessionRecall: (sessionId: string, signal?: AbortSignal) => Promise<SessionRecallSeed>
+     * reader (no content dedupe, all client history files). Feature History
+     * PR2-A: DIRECT only — the Split Client recalls from its process memory,
+     * so it injects no cold reader and the hydration tail never schedules one. */
+    readonly readSessionRecall?: (sessionId: string, signal?: AbortSignal) => Promise<SessionRecallSeed>
   }
   /**
    * The exact ownership currentness fence for the asynchronous history read:
-   * the generation is captured BEFORE the await and re-checked after it. On
-   * the Remote branch the transport token (Connection generation + exact
-   * binding) is an additional identity that can roll over without a TUI owner
-   * commit.
+   * the generation is captured BEFORE the await and re-checked after it.
    */
   readonly currentness: {
     readonly captureGeneration: () => number
     readonly isStillCurrent: (sessionId: string, generation: number) => boolean
-    readonly captureTransportToken?: (sessionId: string) => unknown
-    readonly isTransportTokenCurrent?: (sessionId: string, token: unknown) => boolean
   }
   /** Late-bound command catalog registration (A5b-3 owns it). */
   readonly commands: {
@@ -533,7 +530,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   /** The exact identity a cold history read was started under. */
   interface HydrationRecallFence {
     readonly generation: number
-    readonly transportToken: unknown
   }
 
   /** A cold history seed paired with the identity it was read under. */
@@ -546,7 +542,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   /**
    * Read the cold cross-cwd session recall seed under ONE exact ownership
-   * fence. The generation (and, on Remote, the transport token) is captured
+   * fence (DIRECT only; Feature History PR2-A). The generation is captured
    * BEFORE the read; the caller re-validates the returned fence in the SAME
    * synchronous stack as the recall commit. A global read failure is
    * diagnosed and falls back to the SAME session's current-cwd records (still
@@ -557,14 +553,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     sessionId: string,
     signal: AbortSignal,
   ): Promise<FencedSessionRecallSeed | undefined> => {
+    const readSessionRecall = deps.history.readSessionRecall
+    if (readSessionRecall === undefined) return undefined
     const fence: HydrationRecallFence = {
       generation: deps.currentness.captureGeneration(),
-      transportToken: deps.remote === undefined
-        ? undefined
-        : deps.currentness.captureTransportToken?.(sessionId),
     }
     try {
-      return { seed: await deps.history.readSessionRecall(sessionId, signal), fence }
+      return { seed: await readSessionRecall(sessionId, signal), fence }
     } catch (error) {
       if (isAbortError(error)) return undefined
       deps.diag.warn('session recall read failed; falling back to the current cwd file', {
@@ -575,15 +570,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     }
   }
 
-  /** Whether the captured cold-read identity is still the exact current owner
-   *  (and Remote transport). MUST be called synchronously just before the
-   *  recall commit — never before an await. */
+  /** Whether the captured cold-read identity is still the exact current owner.
+   *  MUST be called synchronously just before the recall commit — never before
+   *  an await. */
   const isHistoryRecallFenceCurrent = (sessionId: string, fence: HydrationRecallFence): boolean => {
     if (deps.isCleanedUp()) return false
-    if (!deps.currentness.isStillCurrent(sessionId, fence.generation)) return false
-    if (fence.transportToken !== undefined
-      && deps.currentness.isTransportTokenCurrent?.(sessionId, fence.transportToken) === false) return false
-    return true
+    return deps.currentness.isStillCurrent(sessionId, fence.generation)
   }
 
   /** The current cwd file's session rows in the seed shape (the documented
@@ -738,14 +730,18 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     deps.status.refreshTerminalCwd()
     deps.status.updateWelcomeCard()
     deps.commands.register()
-    // Cold cross-cwd session recall: ONE detached read per hydration. The
-    // synchronous hydration (first frame, command registration, input
+    // Cold cross-cwd session recall (Direct): ONE detached read per hydration.
+    // The synchronous hydration (first frame, command registration, input
     // acceptance) is never blocked on the history scan; the scope stays open
     // and keeps its accepted inputs provisional until this read commits. A
     // superseded read is dropped before it can touch the kernel.
     historyRecallController?.abort()
     historyRecallController = undefined
-    if (input.sessionId !== undefined) {
+    // Feature History PR2-A: the cold cross-cwd recall scan is the DIRECT
+    // contract. The Split Client's ↑/↓ projection is its process memory, so
+    // it schedules no read, opens no abort controller and commits no reset —
+    // the anchor read above is the only file touch of this hydration.
+    if (deps.remote === undefined && deps.history.readSessionRecall !== undefined && input.sessionId !== undefined) {
       const sessionId = input.sessionId
       const controller = new AbortController()
       historyRecallController = controller
@@ -759,7 +755,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
         const result = await readSessionRecallForHydration(sessionId, signal)
         if (result === undefined || historyRecallController !== controller) return
         // SAME synchronous stack as the commit: no await between this exact
-        // generation/transport re-check and the kernel reset.
+        // generation re-check and the kernel reset.
         if (!isHistoryRecallFenceCurrent(sessionId, result.fence)) return
         if (result.degraded === true) {
           deps.surface.display.notify(

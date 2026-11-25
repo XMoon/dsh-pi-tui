@@ -70,6 +70,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { bundleVersion } from '../../src/client/launcher/version.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
@@ -360,6 +361,7 @@ export async function mountRemoteRunner(
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
     ...(options.profileDaemonAdmin === undefined ? {} : { profileDaemonAdmin: options.profileDaemonAdmin }),
   }
   const aggregateRef = aggregate
@@ -583,18 +585,17 @@ test('a Remote Full Find with the official complete window says only Loaded hist
   assert.ok(!frame.includes('earlier history not searched'), 'hasMore=false adds no earlier-history suffix')
 })
 
-test('the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {
-  // The Remote startup resume awaits `remote.read` AFTER the terminal is already
-  // accepting input. A submission accepted in that window is owned by the
-  // resumed Session, and its own persistence is ordered behind the hydration
-  // continuation — so the reseed provably reads a snapshot WITHOUT it. The
-  // editor-recall scope must keep it, while the submission that did persist is
-  // never doubled, and the late row must land under the SAME Session.
+test('the resumed Remote startup accepts and recalls an input while its hydration read is held', async (t) => {
+  // The Remote startup resume awaits `remote.read` AFTER the terminal already
+  // accepts input. Feature History PR2-A makes that window harmless for ↑/↓:
+  // the ACCEPTED submission is committed to the Client process memory, and the
+  // hydration commit never reseeds it from a history file — the same-text disk
+  // row written by the legacy Ctrl+R writer is not a recall source.
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-remote-startup-window'
   const hostPreset = 'm3-4-pr2-preset'
   const host = await mountRemotePresentationHost(life, hostPreset)
-  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   {
     const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
       append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
@@ -620,25 +621,17 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
   let releaseRead!: () => void
   const readGate = new Promise<void>(resolve => { releaseRead = resolve })
   let gated = false
-  let historyReadEntered = false
-  let releaseHistoryRead!: () => void
-  const historyReadGate = new Promise<void>(resolve => { releaseHistoryRead = resolve })
-  let historyGated = false
+  // Negative control: the Split Client never executes the Direct cold
+  // cross-cwd recall read — at boot, at hydration, or from the settlement.
+  const coldReads: string[] = []
   const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
-  FileHistorySearchSource.prototype.readSessionRecall = async function gatedHistoryRead(
+  FileHistorySearchSource.prototype.readSessionRecall = async function countedColdRead(
     this: FileHistorySearchSource,
     sessionId: string,
     signal?: AbortSignal,
   ) {
-    if (historyGated) return realHistoryRead.call(this, sessionId, signal)
-    historyGated = true
-    // The REAL cold read completes first (its snapshot is exactly what
-    // production would carry); the gate then holds its RESULT so the terminal
-    // keeps accepting input while the hydration continuation is still pending.
-    const captured = await realHistoryRead.call(this, sessionId, signal)
-    historyReadEntered = true
-    await historyReadGate
-    return captured
+    coldReads.push(sessionId)
+    return realHistoryRead.call(this, sessionId, signal)
   }
   life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
   const fixture = await mountRemoteRunner(life, {
@@ -647,13 +640,11 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
     host,
     productionSerializer: true,
     beforeRunnerMount: (presentation) => {
-      // The boot recall reads the CLIENT cwd's history file (the launch cwd), not
-      // the Host workspace's: a FOREIGN Session's row is already there, and a live
-      // owner IS current (the resume published before this mount), so ↑ must never
-      // be seeded with other Sessions' rows.
+      // The legacy Ctrl+R writer's data for this exact Session already exists
+      // on disk; the process recall must not import it.
       appendHistoryRecord(
         historyFilePath(dshHome(process.env), process.cwd()),
-        { v: 2, content: 'foreign client-cwd prompt', cwd: process.cwd(), ts: Date.now(), sessionId: 'session-foreign-earlier' },
+        { v: 2, content: 'disk-only client-cwd prompt', cwd: process.cwd(), ts: Date.now(), sessionId: mainId },
         undefined,
       )
       const reader = presentation.presentationReader as unknown as {
@@ -664,10 +655,8 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
         if (gated) return real.call(reader, sessionId, signal)
         gated = true
         // The REAL read completes first (its wire round trip is exactly what
-        // production awaits); the gate then holds its RESULT, so releasing it
-        // resumes the hydration continuation immediately — the same
-        // "hydration still pending while the terminal accepts input" window a
-        // slow production read produces.
+        // production awaits); the gate then holds its RESULT, so the terminal
+        // keeps accepting input while the hydration continuation is pending.
         const captured = await real.call(reader, sessionId, signal)
         readEntered = true
         await readGate
@@ -675,215 +664,397 @@ test('the resumed Remote startup keeps input accepted while its hydration read i
       }
     },
   })
-  // Bounded readiness: a startup read that never runs (or a first persist that
-  // never lands) fails this test instead of parking it.
+  // Bounded readiness: a startup read that never runs fails this test instead
+  // of parking it.
   await waitFor('the held startup read to be entered', () => readEntered, 20_000)
+  const editor = fixture.runnerApp() as unknown as {
+    getDraft(): string
+    getInputHistory(): readonly string[]
+  }
+  const historyFile = historyFilePath(host.workRoot, host.anchorDir)
+  const ownersOf = (text: string): readonly (string | undefined)[] => loadHistoryRecords(historyFile)
+    .filter(row => row.content === text).map(row => row.sessionId)
+  try {
+    assert.deepEqual([...editor.getInputHistory()], [],
+      'a new Client process recall starts empty even though a disk row exists')
+
+    // A REAL keyboard submission while the hydration read is still held.
+    fixture.vt.sendInput('first remote prompt')
+    await fixture.vt.waitForRender()
+    fixture.vt.sendInput('\r')
+    await waitFor('the held-window submission persisted under the resumed Session', () =>
+      ownersOf('first remote prompt').includes(mainId), 20_000)
+    await waitFor('the accepted input is recalled from the process memory', () =>
+      [...editor.getInputHistory()].includes('first remote prompt'), 5_000)
+
+    // Release the official read: the hydration commits the transcript and must
+    // NOT reseed or clear the recall list.
+    releaseRead()
+    await waitFor('the resumed hydration committed the transcript', () =>
+      fixture.vt.getViewport().join('').includes('earlier remote answer'), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], ['first remote prompt'],
+      'the hydration commit never reseeds ↑ from the history file')
+    assert.deepEqual(coldReads, [], 'the Split Client never runs the Direct cold cross-cwd recall read')
+
+    // The REAL ↑ sink recalls the acceptance-boundary input.
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('the real ↑ sink recalls the accepted input', () =>
+      editor.getDraft() === 'first remote prompt', 5_000)
+  } finally {
+    releaseRead()
+    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
+    await fixture.dispose()
+  }
+})
+
+test('a resumed Remote Session recalls only this process\'s accepted inputs, never disk rows', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-r11-process-pitui'
+  const otherId = 'm3-4-r11-process-pitui-b'
+  const presetId = 'm3-4-r11-process-pitui-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(otherId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  seedTurns(appendOf(mainId), 1, 1, 'resume')
+  seedTurns(appendOf(otherId), 1, 1, 'switch')
+  // The OLD cold-seed data: rows for the SAME Session in two cwds. A resumed
+  // Session used to import these; the process recall must not.
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd disk row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
+  const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
+  mkdirSync(dirname(otherFile), { recursive: true })
+  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd disk row', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
+  const coldReads: string[] = []
+  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
+  FileHistorySearchSource.prototype.readSessionRecall = async function countedColdRead(
+    this: FileHistorySearchSource,
+    sessionId: string,
+    signal?: AbortSignal,
+  ) {
+    coldReads.push(sessionId)
+    return realHistoryRead.call(this, sessionId, signal)
+  }
+  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host, productionSerializer: true })
   const editor = fixture.runnerApp() as unknown as {
     setDraft(text: string): void
     submitDraft(): void
     getDraft(): string
     getInputHistory(): readonly string[]
-    resetInputHistory(entries: readonly string[], owner?: string): void
   }
-  // Capture what the resumed Session's hydration reseed commits.
-  assert.ok(!editor.getInputHistory().includes('foreign client-cwd prompt'),
-    `the boot recall of the client cwd must not back a live owner: ${JSON.stringify(editor.getInputHistory())}`)
-  const commits: { readonly entries: readonly string[]; readonly recall: readonly string[] }[] = []
-  const originalReset = editor.resetInputHistory.bind(editor)
-  editor.resetInputHistory = ((entries: readonly string[], owner?: string) => {
-    originalReset(entries, owner)
-    // The recall EXACTLY as this commit left it: the decisive moment, before
-    // any later append can repair it.
-    commits.push({ entries: [...entries], recall: [...editor.getInputHistory()] })
-  }) as typeof editor.resetInputHistory
-  const historyFile = historyFilePath(host.workRoot, host.anchorDir)
-  const ownersOf = (text: string): readonly (string | undefined)[] => loadHistoryRecords(historyFile)
-    .filter(row => row.content === text).map(row => row.sessionId)
+  const viewport = (): string => fixture.vt.getViewport().join('\n')
+  const userRowsFor = (sessionId: string, text: string): number => appendOf(sessionId).snapshotEvents()
+    .filter(event => event.type === 'user/message' && JSON.stringify(event.data).includes(text)).length
   try {
+    await waitFor('the resumed Session hydrated', () => viewport().includes('resume answer 1'), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], [], 'a new process recall never imports a history file')
+    assert.deepEqual(coldReads, [], 'the Split Client never runs the Direct cold cross-cwd recall read')
 
-  // The first submission persists BEFORE the held hydration commits.
-  editor.setDraft('first remote prompt')
-  editor.submitDraft()
-  await waitFor('the first submission persisted under the resumed Session', () =>
-    ownersOf('first remote prompt').includes(mainId), 20_000)
+    // A REAL keyboard submission into the resumed Session (the production
+    // admission/writer path, never a store seed).
+    const submitted = 'live process prompt'
+    fixture.vt.sendInput(submitted)
+    await fixture.vt.waitForRender()
+    fixture.vt.sendInput('\r')
+    await waitFor('the accepted input is recalled from the process memory', () =>
+      [...editor.getInputHistory()].includes(submitted), 20_000)
+    assert.equal(editor.getDraft(), '', 'the accepted commit cleared the composer')
 
-  // Release the transport read; the hydration then starts its COLD HISTORY
-  // read, whose completed snapshot this test holds so the window stays open.
-  releaseRead()
-  await waitFor('the held cold history read to be entered', () => historyReadEntered, 20_000)
-  // Accept the second submission while the history snapshot (captured before
-  // it) is still parked: its persistence continuation is queued behind the
-  // released hydration continuation.
-  editor.setDraft('pending remote prompt')
-  editor.submitDraft()
-  releaseHistoryRead()
-  await waitFor('the resumed hydration committed', () => commits.length > 0, 20_000)
-  // The reseed that commits while the second submission's row is still absent
-  // from the file: its snapshot carries the persisted submission only …
-  const first = commits[0]!
-  assert.deepEqual(first.entries, ['first remote prompt'],
-    `the snapshot carries the persisted submission only: ${JSON.stringify(first.entries)}`)
-  assert.equal(first.entries.includes('pending remote prompt'), false,
-    'the accepted-but-unpersisted submission is NOT in the snapshot')
-  // PR2: the second submission's recall occurrence completes at its Host
-  // ACCEPTANCE, which follows the write — so the hydration commit that runs
-  // first legitimately carries only the persisted submission, while the
-  // pending one is still the LIVE DRAFT (held) at that moment.
-  assert.deepEqual(first.recall, ['first remote prompt'],
-    `the hydration commit carries the persisted submission only: ${JSON.stringify(first.recall)}`)
-  await waitFor('the pending submission accepted', () => editor.getDraft() === '', 20_000)
-  assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
-    'the acceptance-boundary recall keeps the pending submission and never doubles the persisted one')
+    await waitFor('the accepted prompt reaches the Host durable log', () =>
+      userRowsFor(mainId, submitted) === 1, 20_000)
+    // ↑ recalls the text into the composer and NEVER submits it.
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('↑ recalls the process input', () => editor.getDraft() === submitted, 5_000)
+    assert.equal(userRowsFor(mainId, submitted), 1, 'a recalled draft is never submitted by ↑')
 
-  // The late append lands under the SAME Session after the reseed, and the
-  // recall is unchanged by it (its occurrence is already represented).
-  await waitFor('the pending submission persists after the reseed', () =>
-    ownersOf('pending remote prompt').includes(mainId), 20_000)
-  assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
-    'the late append never re-adds an already-recalled occurrence')
+    // A real Session switch through the mounted command registry: the process
+    // list survives, and the outgoing draft/bookmark is not restored into the
+    // new Session.
+    editor.setDraft(`/resume ${otherId}`)
+    editor.submitDraft()
+    await waitFor('Session B hydrated', () => viewport().includes('switch answer 1'), 20_000)
+    const afterSwitch = [...editor.getInputHistory()]
+    assert.ok(afterSwitch.includes(submitted), `the list survives the Session switch: ${JSON.stringify(afterSwitch)}`)
+    assert.ok(afterSwitch.includes(`/resume ${otherId}`), 'the switching command itself is history')
+    assert.equal(afterSwitch.includes('current cwd disk row'), false, 'no disk row ever joins the list')
+    assert.equal(afterSwitch.includes('other cwd disk row'), false, 'no other-cwd disk row either')
+    assert.equal(editor.getDraft(), '', 'no old draft is restored into the new Session')
 
-  // The REAL ↑ sink recalls the input accepted during the held read.
-  fixture.vt.sendInput('\x1b[A')
-  await waitFor('↑ recalls the input accepted during the held read', () =>
-    editor.getDraft() === 'pending remote prompt', 5_000)
+    // Reconnect (Connection generation rollover): a full re-hydration of the
+    // same process must keep the list intact.
+    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
+    connection.reconnect()
+    await waitFor('the reconnect re-hydrated Session B', () => viewport().includes('switch answer 1'), 20_000)
+    assert.deepEqual([...editor.getInputHistory()], afterSwitch,
+      'a reconnect never reseeds or clears the process recall')
+    fixture.vt.sendInput('\x1b[A')
+    await waitFor('↑ still recalls the process input after the reconnect', () =>
+      editor.getDraft() === `/resume ${otherId}`, 5_000)
+    assert.deepEqual(coldReads, [], 'no reconnect path reads a history file for recall')
   } finally {
-    // Never leave the startup hydration parked, whatever failed above.
-    releaseRead()
-    releaseHistoryRead()
     FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
-  }
-})
-
-test('a resumed Remote Session recalls cross-cwd history through the real PiTui runner editor', async (t) => {
-  const life = testLifecycle(t)
-  const mainId = 'm3-4-r11-cross-cwd-pitui'
-  const presetId = 'm3-4-r11-cross-cwd-preset'
-  const host = await mountRemotePresentationHost(life, presetId)
-  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
-  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
-  mkdirSync(dirname(currentFile), { recursive: true })
-  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
-  const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
-  mkdirSync(dirname(otherFile), { recursive: true })
-  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd newest', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
-  appendHistoryRecord(otherFile, { v: 2, content: 'foreign session row', cwd: '/client-other-cwd', ts: 30, sessionId: 'session-foreign' }, undefined)
-  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host })
-  const editor = fixture.runnerApp() as unknown as {
-    setDraft(text: string): void
-    getDraft(): string
-    getInputHistory(): readonly string[]
-  }
-  try {
-    await waitFor('the cross-cwd cold seed reaches the real runner recall', () =>
-      [...editor.getInputHistory()].includes('other cwd newest'), 10_000)
-    assert.ok(!editor.getInputHistory().includes('foreign session row'),
-      'another Session never leaks into the resumed recall')
-    editor.setDraft('')
-    fixture.vt.sendInput('\x1b[A')
-    await waitFor('the first ↑ recalls the other cwd row', () => editor.getDraft() === 'other cwd newest', 5_000)
-    fixture.vt.sendInput('\x1b[A')
-    await waitFor('the second ↑ recalls the current cwd row', () => editor.getDraft() === 'current cwd row', 5_000)
-  } finally {
     await fixture.dispose()
   }
 })
 
-test('a resumed Remote Session recalls cross-cwd history through the real TSP runner composer', async (t) => {
+test('a resumed Remote TSP composer recalls only this process\'s accepted inputs, never disk rows', async (t) => {
   const life = testLifecycle(t)
-  const mainId = 'm3-4-r11-cross-cwd-tsp'
-  const presetId = 'm3-4-r11-cross-cwd-tsp-preset'
+  const mainId = 'm3-4-r11-process-tsp'
+  const presetId = 'm3-4-r11-process-tsp-preset'
   const host = await mountRemotePresentationHost(life, presetId)
-  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const otherId = 'm3-4-r11-process-tsp-b'
+  const otherCwd = `${host.anchorDir}-b`
+  mkdirSync(otherCwd, { recursive: true })
+  await host.harness.create(SessionId(otherId), { provider: 'smoke', model: 'smoke' }, { cwd: otherCwd })
+  const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }
+  seedTurns(appendOf(mainId), 1, 1, 'tsp-resume')
+  seedTurns(appendOf(otherId), 1, 1, 'tsp-b')
   const currentFile = historyFilePath(host.workRoot, host.anchorDir)
   mkdirSync(dirname(currentFile), { recursive: true })
-  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
+  appendHistoryRecord(currentFile, { v: 2, content: 'current cwd disk row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
   const otherFile = historyFilePath(host.workRoot, '/client-other-cwd')
   mkdirSync(dirname(otherFile), { recursive: true })
-  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd newest', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
-  let recallDone = false
+  appendHistoryRecord(otherFile, { v: 2, content: 'other cwd disk row', cwd: '/client-other-cwd', ts: 20, sessionId: mainId }, undefined)
+  const coldReads: string[] = []
   const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
-  FileHistorySearchSource.prototype.readSessionRecall = async function (
-    this: FileHistorySearchSource, sessionId: string, signal?: AbortSignal,
+  FileHistorySearchSource.prototype.readSessionRecall = async function countedColdRead(
+    this: FileHistorySearchSource,
+    sessionId: string,
+    signal?: AbortSignal,
   ) {
-    const seed = await realHistoryRead.call(this, sessionId, signal)
-    recallDone = true
-    return seed
+    coldReads.push(sessionId)
+    return realHistoryRead.call(this, sessionId, signal)
   }
   life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
-  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host, renderer: 'tsp' })
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    renderer: 'tsp',
+    sessionBrowser: true,
+    productionSerializer: true,
+  })
   const pane = fixture.pane
   assert.ok(pane, 'the Remote TSP pane must be mounted')
   const composerText = (): string => {
     const node = wireNodes({ frames: () => pane.frames() }).find(candidate => candidate.id === 'dock.composer')
     return typeof node?.p.text === 'string' ? node.p.text : ''
   }
+  /** The exact official Host user texts (never a substring match: a disk-seeded
+   * composer draft would append to the typed marker and must be caught). */
+  const hostTextsOf = (id: string): string[] => appendOf(id).snapshotEvents()
+    .filter(event => event.type === 'user/message')
+    .map(event => {
+      const data = event.data as { content?: Array<{ type?: string; text?: string }> }
+      return (data.content ?? [])
+        .filter(part => part.type === 'text')
+        .map(part => part.text ?? '')
+        .join('')
+    })
   try {
-    await waitFor('the TSP cold seed read settles', () => recallDone, 10_000)
+    await waitFor('the TSP composer is painted', () =>
+      wireNodes({ frames: () => pane.frames() }).some(candidate => candidate.id === 'dock.composer'), 20_000)
+    assert.equal(composerText(), '', 'a new process recall paints no recalled draft')
+    assert.deepEqual(coldReads, [], 'the Split Client never runs the Direct cold cross-cwd recall read')
+
+    // DECISIVE fresh-draft negative: the isolated launch-cwd files already hold
+    // disk rows. A real TSP ↑ on the empty composer must be a no-op; the typed
+    // marker then reaches the Host EXACTLY as typed. A disk-seeded list would
+    // have appended the disk row to this draft.
+    const submitted = 'tsp live process prompt'
     pane.input.type('\x1b[A')
-    await waitFor('the first TSP ↑ recalls the other cwd row', () => composerText() === 'other cwd newest', 5_000)
+    pane.input.type(submitted)
+    await waitFor('the composer carries the typed draft after ↑', () => composerText() === submitted, 5_000)
+    pane.input.type('\r')
+    await waitFor('the accepted TSP input is the EXACT typed text', () =>
+      hostTextsOf(mainId).filter(text => text === submitted).length === 1, 20_000)
+    assert.equal(hostTextsOf(mainId).filter(text => text === submitted).length, 1,
+      'a disk-only ↑ seed would have appended to the typed marker')
+    // The accepted settle clears the composer; ↑ then recalls the same text.
+    await waitFor('the accepted commit cleared the TSP composer', () => composerText() === '', 5_000)
     pane.input.type('\x1b[A')
-    await waitFor('the second TSP ↑ recalls the current cwd row', () => composerText() === 'current cwd row', 5_000)
+    await waitFor('the TSP ↑ recalls the process input', () => composerText() === submitted, 5_000)
+    assert.equal(hostTextsOf(mainId).filter(text => text === submitted).length, 1,
+      'a recalled draft is never submitted by ↑')
+
+    // ↓ returns from the recalled row to the bookmarked empty draft (real key
+    // sink), so the switch command starts from a genuinely empty composer.
+    pane.input.type('\x1b[B')
+    await waitFor('↓ returns to the empty bookmarked draft', () => composerText() === '', 5_000)
+    // A REAL owner publication A → B (different cwd) through the TSP key sink.
+    // The process snapshot survives, while the outgoing draft/bookmark is not
+    // restored into B.
+    pane.input.type(`/sessions ${otherId}\r`)
+    await waitFor('the TSP Session Browser opened', () =>
+      JSON.stringify(pane.frames()).includes('session-browser-picker'), 20_000)
+    pane.input.type('\r')
+    await waitFor('Session B authoritative baseline is painted', () =>
+      JSON.stringify(pane.frames()).includes('tsp-b answer 1'), 20_000)
+    assert.equal(composerText(), '', 'the owner publication restores no old draft/bookmark into B')
+    // The real TSP key sink still reaches the old process inputs after the
+    // publication: newest is the accepted switch command, older is A's marker.
+    pane.input.type('\x1b[A')
+    await waitFor('↑ after the publication recalls the switch command', () =>
+      composerText() === `/sessions ${otherId}`, 5_000)
+    pane.input.type('\x1b[A')
+    await waitFor('the old process input is still recallable after the switch', () =>
+      composerText() === submitted, 5_000)
+    pane.input.type('\x1b[B')
+    await waitFor('↓ moves back to the newer process input', () =>
+      composerText() === `/sessions ${otherId}`, 5_000)
+    await waitFor('the old Session A input never reaches Session B', () =>
+      hostTextsOf(otherId).filter(text => text === submitted).length === 0, 5_000)
+    assert.equal(hostTextsOf(otherId).filter(text => text === submitted).length, 0,
+      'the old Session A input never leaks into Session B')
+    assert.deepEqual(coldReads, [], 'no hydration path read a history file for recall')
   } finally {
     FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
     await fixture.dispose()
   }
 })
 
-test('a Remote transport rollover during a held cross-cwd recall read refuses the stale seed', async (t) => {
+test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and never seeds the process recall', async (t) => {
   const life = testLifecycle(t)
-  const mainId = 'm3-4-r10-transport-rollover'
-  const presetId = 'm3-4-r10-rollover-preset'
+  const mainId = 'm3-4-r11-remote-ctrlr'
+  const presetId = 'm3-4-r11-remote-ctrlr-preset'
   const host = await mountRemotePresentationHost(life, presetId)
-  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
-  const otherFile = historyFilePath(host.workRoot, '/rolled-client-cwd')
-  mkdirSync(dirname(otherFile), { recursive: true })
-  appendHistoryRecord(otherFile, {
-    v: 2, content: 'stale cross-cwd seed', cwd: '/rolled-client-cwd', ts: Date.now() + 1000, sessionId: mainId,
-  }, undefined)
-  let readEntered = false
-  let readReturned = false
-  let releaseRead!: () => void
-  const gate = new Promise<void>(resolve => { releaseRead = resolve })
-  let gated = false
-  const realHistoryRead = FileHistorySearchSource.prototype.readSessionRecall
-  FileHistorySearchSource.prototype.readSessionRecall = async function (
-    this: FileHistorySearchSource, sessionId: string, signal?: AbortSignal,
-  ) {
-    if (gated) return realHistoryRead.call(this, sessionId, signal)
-    gated = true
-    const captured = await realHistoryRead.call(this, sessionId, signal)
-    readEntered = true
-    await gate
-    readReturned = true
-    return captured
-  }
-  life.defer(() => { FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead })
-  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host })
-  const editor = fixture.runnerApp() as unknown as {
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const currentFile = historyFilePath(host.workRoot, host.anchorDir)
+  mkdirSync(dirname(currentFile), { recursive: true })
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: () => {
+      // A disk-only row in the SAME file the legacy Ctrl+R source reads. It is
+      // old Ctrl+R data, never a ↑/↓ process-recall source.
+      appendHistoryRecord(currentFile, {
+        v: 2, content: 'foreign disk-only ctrl r row', cwd: host.anchorDir, ts: 10, sessionId: mainId,
+      }, undefined)
+    },
+  })
+  const edited = fixture.runnerApp() as unknown as {
+    getDraft(): string
     getInputHistory(): readonly string[]
-    resetInputHistory(entries: readonly string[], owner?: string, writeIds?: readonly (string | undefined)[]): void
   }
-  const resets: Array<readonly string[]> = []
-  const originalReset = editor.resetInputHistory.bind(editor)
-  editor.resetInputHistory = ((entries, owner, writeIds) => {
-    resets.push([...entries])
-    originalReset(entries, owner, writeIds)
-  }) as typeof editor.resetInputHistory
+  const viewport = (): string => fixture.vt.getViewport().join('\n')
+  /** The official Host user/message texts — the submission witness. A Ctrl+R
+   * restore that (incorrectly) submitted would add a durable occurrence; the
+   * pending echo alone is not decisive because a fast accepted submit clears
+   * it again. */
+  const hostUserTexts = (): string[] => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => {
+        const data = event.data as { content?: Array<{ type?: string; text?: string }> }
+        return (data.content ?? [])
+          .filter(part => part.type === 'text')
+          .map(part => part.text ?? '')
+          .join('')
+      })
+  }
+  /** The painted History RESULT rows (between the counter and the Preview
+   * band). The transcript above can carry the same text, so a whole-viewport
+   * substring is not a result-row proof. */
+  const historyResultLines = (): string[] => {
+    const lines = fixture.vt.getViewport()
+    const start = lines.findIndex(line => line.includes('Results ·'))
+    if (start < 0) return []
+    const end = lines.findIndex((line, index) => index > start && line.trimStart().startsWith('Preview'))
+    return lines.slice(start + 1, end < 0 ? undefined : end)
+  }
   try {
-    await waitFor('the held cross-cwd recall read is entered', () => readEntered, 10_000)
-    const connection = fixture.aggregate.wire.client.connection as unknown as { reconnect(): void }
-    connection.reconnect()
-    releaseRead()
-    await waitFor('the held read returned', () => readReturned, 10_000)
-    // Flush the read→helper→commit/discard continuation before asserting.
-    await new Promise<void>(resolve => setImmediate(resolve))
-    assert.equal(resets.some(entries => entries.includes('stale cross-cwd seed')), false,
-      'the stale seed read under the previous transport generation never reaches the recall commit')
-    assert.equal(editor.getInputHistory().includes('stale cross-cwd seed'), false,
-      'the stale seed is absent from the live recall projection')
+    // A new process recall is empty even though the legacy file already has a row.
+    assert.deepEqual([...edited.getInputHistory()], [],
+      'the resumed Split Client starts with an empty process recall')
+    // A real keyboard submission accepted by the Host: the legacy writer stores
+    // it in the Ctrl+R file, while the accepted boundary fills the process recall.
+    const marker = 'ctrl r remote accepted memory'
+    fixture.vt.sendInput(marker)
+    await fixture.vt.waitForRender()
+    fixture.vt.sendInput('\r')
+    await waitFor('the accepted prompt is recalled from the process memory', () =>
+      [...edited.getInputHistory()].includes(marker), 20_000)
+    await waitFor('the legacy Ctrl+R writer recorded the accepted prompt', () =>
+      loadHistoryRecords(currentFile).some(row => row.content === marker), 20_000)
+    const memoryBefore = [...edited.getInputHistory()]
+    assert.deepEqual(memoryBefore, [marker], 'the process recall holds exactly the accepted input')
+    await waitFor('the accepted marker reached the official Host log', () =>
+      hostUserTexts().filter(text => text === marker).length === 1, 20_000)
+    const hostSubmitsBefore = hostUserTexts()
+    assert.equal(hostSubmitsBefore.filter(text => text === marker).length, 1,
+      'the accepted marker has exactly one official Host occurrence')
+
+    // Ctrl+R opens the ONE History seat over the REAL file source. The disk-only
+    // row is searchable there (the old source still works) and never becomes a
+    // process-recall entry.
+    fixture.vt.sendInput('\x12')
+    await waitFor('the History seat opened', () => viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('foreign disk-only')
+    await waitFor('the disk row is the committed filtered result', () =>
+      viewport().includes('Results · 1 match')
+      && historyResultLines().some(line => line.includes('foreign disk-only ctrl r row')), 15_000)
+    fixture.vt.sendInput('\x1b')
+    await fixture.vt.waitForRender()
+    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
+      'searching the legacy file never seeds the process recall')
+
+    // The marker restores into the editor WITHOUT submitting.
+    fixture.vt.sendInput('\x12')
+    await waitFor('the History seat reopened', () => viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('ctrl r remote accepted')
+    // Settle on the painted RESULT ROW (not a transcript substring): one
+    // committed match whose row really carries the accepted marker. Acceptance
+    // stays frozen until the debounced search commits.
+    await waitFor('the accepted marker is the committed filtered result', () =>
+      viewport().includes('Results · 1 match')
+      && historyResultLines().some(line => line.includes(marker))
+      && !historyResultLines().some(line => line.includes('foreign disk-only ctrl r row')), 15_000)
+    fixture.vt.sendInput('\r')
+    await fixture.vt.waitForRender()
+    assert.equal(edited.getDraft(), marker, 'Ctrl+R restores the accepted prompt into the editor')
+    assert.ok(!viewport().includes('Input History'), 'the seat closed on the real accept boundary')
+    assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
+      'restoring the accepted prompt from Ctrl+R dispatches no submission')
+    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
+      'Ctrl+R restore never changes the process recall')
+
+    // DISCRIMINATING NEGATIVE: a text that is ONLY on disk and NOT in memory
+    // (not even adjacent to a memory entry) is restored through the same real
+    // seat. If the restore were treated as a recall record, the list would gain
+    // it; if it were submitted, the Host would gain a durable occurrence.
+    const diskOnly = 'foreign disk-only ctrl r row'
+    fixture.vt.sendInput('\x12')
+    await waitFor('the History seat reopened for the disk-only restore', () =>
+      viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('foreign disk-only')
+    await waitFor('the disk-only row is the committed filtered result', () =>
+      viewport().includes('Results · 1 match')
+      && historyResultLines().some(line => line.includes(diskOnly)), 15_000)
+    fixture.vt.sendInput('\r')
+    await fixture.vt.waitForRender()
+    assert.equal(edited.getDraft(), diskOnly, 'Ctrl+R restores the disk-only text into the editor')
+    assert.ok(!viewport().includes('Input History'), 'the seat closed on the disk-only accept boundary')
+    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
+      'a disk-only restore never becomes a process-recall entry')
+    assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
+      'restoring the disk-only text dispatches no submission')
+    assert.equal(hostUserTexts().filter(text => text === diskOnly).length, 0,
+      'the disk-only text has no official Host occurrence')
   } finally {
-    releaseRead()
-    FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
     await fixture.dispose()
   }
 })
@@ -1832,6 +2003,14 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
       statusStore: { snapshot(): { composition?: { model?: { id?: string } } } }
     }).statusStore.snapshot().composition?.model?.id === 'offline-model'
   }, 20_000)
+  // Feature History PR2-A: the process recall spans the WHOLE journey — the two
+  // `/resume` commands this Client accepted are remembered, and the switch,
+  // same-id rollover and Connection reconnect never reseed or clear the list.
+  const recalledCommands = [...(app as unknown as { getInputHistory(): readonly string[] }).getInputHistory()]
+  assert.ok(recalledCommands.includes(`/resume ${sessionB}`),
+    `the process recall survives the switch: ${JSON.stringify(recalledCommands)}`)
+  assert.ok(recalledCommands.includes(`/resume ${sessionA}`),
+    `the process recall survives the same-id rollover and reconnect: ${JSON.stringify(recalledCommands)}`)
 
   // ── /fork: the Host forks the current session at its latest completed
   // prefix and the TUI ADOPTS the child. The inherited prefix alone cannot

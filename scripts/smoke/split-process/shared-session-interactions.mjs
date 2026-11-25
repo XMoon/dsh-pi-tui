@@ -17,7 +17,8 @@
  * @module split-process/shared-session-interactions
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -101,6 +102,42 @@ export async function runSharedSessionInteractions(context) {
         return prefix
       }
 
+      // Feature History PR2-A / A05-D fresh-Client negative. The positive
+      // control runs BEFORE Client B starts, so B's boot path really sees the
+      // existing row: A's Host-accepted seed must be in the isolated launch-cwd
+      // legacy history file with the row's own cwd and the file's hash identity.
+      // Verifying this after B's mount could not prove the row existed at B's
+      // boot, so a broken cold-seed implementation could still pass.
+      const launchCwd = realpathSync(context.installation.profileDir)
+      const historyDir = join(dshHome, 'user-history')
+      const historyRows = file => existsSync(file)
+        ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => {
+            try { return JSON.parse(line) } catch { return undefined }
+          }).filter(row => row !== undefined)
+        : []
+      const seedOccurrence = await waitForHostSessionEvent(dshHome, sessionX,
+        event => event.type === 'user/message' && textOf(event.data) === 'm5b-seed-a',
+        'M5B A seed durable user/message', 120_000)
+      assert(typeof seedOccurrence.data?.id === 'string' && seedOccurrence.data.id !== '',
+        'M5B the seed occurrence carries no durable identity')
+      const launchHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
+      const launchHistoryFile = join(historyDir, launchHistoryName)
+      {
+        const deadline = Date.now() + 30_000
+        while (Date.now() < deadline
+          && !historyRows(launchHistoryFile).some(row => row.content === 'm5b-seed-a')) {
+          await sleep(100)
+        }
+      }
+      const seedRow = historyRows(launchHistoryFile).find(row => row.content === 'm5b-seed-a')
+      assert(seedRow !== undefined,
+        `A05-D: the accepted seed is not in B's launch-cwd history file ${launchHistoryName}`)
+      assert(seedRow.cwd === launchCwd,
+        `A05-D: the seed history row carries cwd=${JSON.stringify(seedRow.cwd)}, expected ${JSON.stringify(launchCwd)}`)
+      assert(seedRow.sessionId === sessionX,
+        'A05-D: the seed history row is not attributed to Session X')
+      assert(!existsSync(releaseBarrier), 'M5B the held Turn was released before the fresh-Client negative')
+
       // MB-01: B is a SECOND real pty — its own `script(1)` wrapper and its
       // own business PID — whose startup intent opens the SAME Session X.
       const { client: clientB, ready: bReady } = await startC1Client('M5B B', {
@@ -132,6 +169,12 @@ export async function runSharedSessionInteractions(context) {
       await clientB.waitForScreen('long-turn started', 'M5B B read the running Host stream', 120_000)
       await clientA.waitForScreen('long-turn started', 'M5B A still shows the running Host stream', 120_000)
       assert(alive(hostBefore.hostPid), 'M5B the Host died while both Clients retained Session X')
+
+      // B boots with that real row present. Its empty composer is given a REAL
+      // Up first; a boot file seed would put the seed text there and the
+      // original marker would append to it, so the unchanged exact occurrence
+      // below is the decisive negative (no transcript substring is used).
+      clientB.send('\x1b[A')
 
       // MB-02: B queues into the shared Host inbox while the Turn is held.
       // A never typed that text, so A's frame can only carry the Host
@@ -404,6 +447,70 @@ export async function runSharedSessionInteractions(context) {
         'M5B Session Y lost one of A\'s own writes')
       assert(yFinal.every(entry => !['m5b-seed-a', 'm5b-b-queued', 'm5b-a-queued', 'm5b-same-text', 'm5b-b-after-a-left-x'].includes(entry)),
         'M5B an X-only write leaked into Session Y')
+
+      // Feature History PR2-A / A05-D own-memory positive. `m5b-y-after-b-exit`
+      // is A's last accepted input in Session Y; B is gone. Make the run's own
+      // legacy history unavailable first (the dir is recreated empty so the
+      // writer stays healthy), then a real Up must recall the accepted text
+      // from the process memory and Enter must create a SECOND official
+      // occurrence of exactly it.
+      assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY,
+        'A05-D Client A is not on Session Y for the recall proof')
+      const yHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
+      const yHistoryFile = join(historyDir, yHistoryName)
+      const yRow = historyRows(yHistoryFile)
+        .find(row => row.content === 'm5b-y-after-b-exit' && row.sessionId === sessionY)
+      assert(yRow !== undefined, 'A05-D: A\'s Y accepted input has no real legacy history row')
+      const yBeforeRecall = hostSessionEvents(dshHome, sessionY) ?? []
+      const yBoundary = yBeforeRecall.length
+      const priorYOccurrences = yBeforeRecall
+        .filter(event => event.type === 'user/message' && textOf(event.data) === 'm5b-y-after-b-exit')
+      assert(priorYOccurrences.length === 1 && priorYOccurrences[0] !== undefined,
+        'A05-D: Session Y does not hold exactly one prior m5b-y-after-b-exit occurrence')
+      const priorYId = priorYOccurrences[0].data?.id
+      const historyBackup = join(workDir, 'm5b-user-history-backup')
+      rmSync(historyBackup, { recursive: true, force: true })
+      renameSync(historyDir, historyBackup)
+      assert(!existsSync(historyDir), 'A05-D the legacy history directory was not moved aside')
+      mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+      clientA.send('\x1b[A')
+      clientA.send('\r')
+      const recalledY = await waitForHostSessionEventAfter(dshHome, sessionY, yBoundary,
+        event => event.type === 'user/message' && textOf(event.data) === 'm5b-y-after-b-exit',
+        'A05-D A recalled the Y input from process memory', 120_000)
+      assert(typeof recalledY.data?.id === 'string' && recalledY.data.id !== priorYId,
+        'A05-D the recalled Y submission did not create a DISTINCT official occurrence')
+      await waitForHostSessionEventAfter(dshHome, sessionY, yBoundary,
+        event => event.type === 'turn/end', 'A05-D the recalled Y Turn settled', 120_000)
+      const yAfterRecall = hostSessionEvents(dshHome, sessionY) ?? []
+      assert(yAfterRecall.filter(event => event.type === 'user/message'
+        && textOf(event.data) === 'm5b-y-after-b-exit').length === 2,
+      'A05-D the recalled Y marker did not become exactly the second occurrence')
+      assert(!(hostSessionEvents(dshHome, sessionX) ?? []).some(event => event.type === 'user/message'
+        && textOf(event.data) === 'm5b-y-after-b-exit'),
+      'A05-D the Y marker leaked into Session X')
+      await assertHostIdentityKept(host, hostBefore, 'A05-D Host after the recall')
+      const afterRecallHistory = join(workDir, 'm5b-user-history-after-recall')
+      rmSync(afterRecallHistory, { recursive: true, force: true })
+      if (existsSync(historyDir)) renameSync(historyDir, afterRecallHistory)
+      renameSync(historyBackup, historyDir)
+      trace('m5b-process-recall', {
+        hostPid: hostBefore.hostPid,
+        clientPid: aReady.pid,
+        sessionX,
+        sessionY,
+        launchCwd,
+        seedHistoryRowPresent: true,
+        freshClientUpWasEmpty: true,
+        recalledText: textOf(recalledY.data),
+        occurrenceId: recalledY.data?.id,
+        distinctOccurrence: true,
+        recalledTurnSettled: true,
+        sessionXUntouched: true,
+        hostIdentityKept: true,
+        priorStage: 'm5b-same-session pre-recall accounting',
+        cleanup: 'live rows archived; legacy history restored',
+      })
 
       await exitC1Client(clientA, 'M5B A')
       await stopC1Host(host)

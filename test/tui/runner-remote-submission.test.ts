@@ -41,6 +41,7 @@ import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { probeAttachment } from '../../src/client/media/attachment/intake.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
@@ -222,6 +223,7 @@ async function mountPr3Runner(
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -260,6 +262,11 @@ function submitDraft(fixture: Pr3Fixture, text: string): void {
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   app.setDraft(text)
   app.submitDraft()
+}
+
+/** Feature History PR2-A: the mounted renderer's process recall projection. */
+function recallOf(fixture: Pr3Fixture): readonly string[] {
+  return (fixture.runnerApp() as unknown as { getInputHistory(): readonly string[] }).getInputHistory()
 }
 
 /** Wait for a viewport fact, failing with the FULL viewport so a rendering
@@ -342,6 +349,8 @@ test('prompt: an idle plain prompt reaches the Host durable log through the offi
   await waitFor('durable user row', () => hostUserRows(fixture, mainId).some(row => row.includes('unique pr3 plain prompt alpha')), 20_000)
   const rows = hostUserRows(fixture, mainId).filter(row => row.includes('unique pr3 plain prompt alpha'))
   assert.equal(rows.length, 1, `exactly one durable row (got ${rows.length})`)
+  assert.deepEqual([...recallOf(fixture)], ['unique pr3 plain prompt alpha'],
+    'the Host-accepted prompt is recalled exactly once from the process memory')
   // The official pending echo list retired (the authoritative event replaced it).
   await waitFor('official echo retired', () => {
     const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId)
@@ -402,6 +411,8 @@ test('prompt negative: an empty or whitespace-only draft dispatches nothing', as
   const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId) ?? []
   assert.equal(pending.some(item => item.text.trim() === ''), false,
     'no official submission echo exists for an empty draft')
+  assert.deepEqual([...recallOf(fixture)], ['after empty gamma'],
+    'empty and whitespace-only submits never enter the process recall')
 })
 
 test('prompt: a sessionless first prompt creates the Session, then reaches the Host durable log', async (t) => {
@@ -421,6 +432,8 @@ test('prompt: a sessionless first prompt creates the Session, then reaches the H
       await new Promise(resolve => setTimeout(resolve, 50))
     }
   }
+  assert.deepEqual([...recallOf(fixture)], ['first prompt creates the session beta'],
+    'a sessionless accepted prompt is process history exactly like a scoped one')
 })
 
 test('shell (Remote): `!!` and `!` execute in the effective Host working directory', async (t) => {
@@ -478,6 +491,10 @@ test('shell (Remote): `!!` and `!` execute in the effective Host working directo
   assert.ok(resultRows[0]?.includes('$ pwd; echo remote-shell-context-marker'),
     `the Host writer preserves the command/result context: ${JSON.stringify(resultRows[0])}`)
   assert.deepEqual(notices, [], `Remote shell completion must not report writer/transport errors: ${JSON.stringify(notices)}`)
+  assert.deepEqual([...recallOf(fixture)], [
+    '!pwd; echo remote-shell-context-marker',
+    '!!pwd; echo remote-shell-local-marker',
+  ], 'PiTui keeps its clear-first shell policy: both shell lines are recalled verbatim')
 })
 
 test('image: known staged bytes → PromptContentPart → Host durable attachment → official readAttachment byte equality', async (t) => {
@@ -567,6 +584,8 @@ test('image: known staged bytes → PromptContentPart → Host durable attachmen
       'staged bytes → PromptContentPart → Host durable attachment → readAttachment BYTE EQUALITY',
     )
   }
+  assert.equal([...recallOf(fixture)].some(entry => entry.includes('pr3 image proof')), false,
+    'an attachment-bearing submission is never recalled (its placeholder would die with the draft)')
 })
 
 test('generic file: the real /attach intake → official receipt → Host durable file block with byte equality', async (t) => {
@@ -1108,6 +1127,10 @@ test('queue/steer: a busy queue prompt lands as an official queued occurrence; a
   await waitFor('queued occurrence becomes durable', () => {
     return hostUserRows(fixture, mainId).some(row => row.includes('queued while busy delta'))
   }, 20_000)
+  const queuedRecall = [...recallOf(fixture)]
+  assert.equal(queuedRecall.filter(entry => entry === 'queued while busy delta').length, 1,
+    `the queued occurrence is recalled exactly once: ${JSON.stringify(queuedRecall)}`)
+  assert.ok(queuedRecall.includes('busy opener gamma'), 'the opener stays recalled')
 })
 
 test('a submit inside a session transition is refused, keeps the draft and dispatches nothing', async (t) => {
@@ -1184,6 +1207,10 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
     'a fenced submit is never dispatched later, once the transaction settles')
   assert.equal(hostUserRows(fixture, 'pr3-transition-a').length, 0,
     'the retired session stays untouched after the settle')
+  assert.equal([...recallOf(fixture)].includes('fenced transition draft zeta'), false,
+    'a fenced/refused submit never enters the process recall')
+  assert.ok([...recallOf(fixture)].includes('/sessions'),
+    'the accepted clear-first command is still history')
 })
 
 test('a Remote submit after /resume targets the replacement current Session, never the retired Session', async (t) => {
@@ -1305,6 +1332,9 @@ test('busy steer: a steer gesture while running lands as next-step with its own 
   await waitFor('steer marker durable', () => {
     return hostUserRows(fixture, mainId).some(row => row.includes('steer while busy iota'))
   }, 20_000)
+  const steerRecall = [...recallOf(fixture)]
+  assert.equal(steerRecall.filter(entry => entry === 'steer while busy iota').length, 1,
+    `a real steer draft is recalled exactly once: ${JSON.stringify(steerRecall)}`)
 })
 
 test('busy steer with a file: the steered occurrence carries the Host file block into next-step and the durable row', async (t) => {

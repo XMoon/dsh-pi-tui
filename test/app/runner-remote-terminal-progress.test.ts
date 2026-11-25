@@ -37,6 +37,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { TerminalProgressState } from '@xmoon76/pi-tui'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { isTernTerminal } from '../../src/tui/terminal/tern.ts'
 import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
@@ -138,6 +139,7 @@ async function mountRemoteRunner(
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start

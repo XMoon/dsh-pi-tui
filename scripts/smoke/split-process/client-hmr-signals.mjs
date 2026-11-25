@@ -13,8 +13,9 @@
  * @module split-process/client-hmr-signals
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
 import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
@@ -30,6 +31,7 @@ import {
   hostSessionEvents,
   hostUserTexts,
   waitForHostSessionEvent,
+  waitForHostSessionEventAfter,
 } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
 
@@ -107,6 +109,45 @@ export async function runClientHmrSignals(context) {
       const beforeRootFiber = before.rootFiberUid
       const beforeGeneration = before.generationId
       const beforeRevision = before.surfaceRevision
+      // Feature History PR2-A disk negative, established BEFORE the HMR: the
+      // new revision's mount/hydration is exactly where the removed file
+      // cold-seed used to run, so the run's legacy history must already be
+      // gone when the replacement Surface starts. The durable user row is the
+      // official occurrence identity: the initial prompt and the recalled
+      // resubmission must be two DISTINCT rows of the same text, and the
+      // recalled text is what the new revision's editor actually held (an
+      // empty draft would create no occurrence at all).
+      const durableBeforeHmr = hostSessionEvents(dshHome, sessionId) ?? []
+      const userTextOf = event => Array.isArray(event?.data?.content)
+        ? event.data.content.map(part => typeof part?.text === 'string' ? part.text : '').join('')
+        : ''
+      const isInitialOccurrence = event => event.type === 'user/message' && userTextOf(event) === 't57 prompt'
+      const initialOccurrenceIndex = durableBeforeHmr.findIndex(isInitialOccurrence)
+      const initialOccurrence = durableBeforeHmr[initialOccurrenceIndex]
+      assert(initialOccurrenceIndex >= 0 && initialOccurrence !== undefined,
+        'T57 the initial prompt is not a durable official user occurrence')
+      // The legacy Ctrl+R writer is STILL the local-search source: the same
+      // accepted prompt must have a real history row BEFORE the disk negative.
+      const legacyHistoryDir = join(dshHome, 'user-history')
+      const legacyHistoryText = () => !existsSync(legacyHistoryDir)
+        ? ''
+        : readdirSync(legacyHistoryDir)
+          .filter(name => name.endsWith('.jsonl'))
+          .map(name => readFileSync(join(legacyHistoryDir, name), 'utf8'))
+          .join('\n')
+      {
+        const deadline = Date.now() + 30_000
+        while (Date.now() < deadline && !legacyHistoryText().includes('t57 prompt')) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      }
+      assert(legacyHistoryText().includes('t57 prompt'),
+        'T57 the legacy Ctrl+R writer did not record the accepted prompt')
+      const legacyHistoryBackup = join(workDir, 't57-user-history-backup')
+      rmSync(legacyHistoryBackup, { recursive: true, force: true })
+      renameSync(legacyHistoryDir, legacyHistoryBackup)
+      assert(!existsSync(legacyHistoryDir), 'T57 the legacy history directory was not moved aside')
+
       client.signalBusiness('SIGUSR2')
       await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T57 HMR start', 60_000)
       await waitForSurfaceStatus(client, record => record.surfaceRevision === beforeRevision && record.surfaceMounted === false, 'T57 retired surface status', 60_000)
@@ -128,24 +169,96 @@ export async function runClientHmrSignals(context) {
           `T57 expected exactly one ${operation} record`)
       }
       await client.waitForScreen('long-turn answer', 'T57 new TTY paint', 120_000)
-      // Q1 / RFL-012: the replacement Surface must CONTINUE the same-Peer
-      // presence revision scope. Submit one Prompt through the new surface:
-      // the admission gate awaits the Host's ACK for the current view — a
-      // `stale-revision` refusal (the old per-owner counter resetting to 1)
-      // restores the draft and dispatches NOTHING. A fresh Host Turn is the
-      // real source->decision->sink proof on the real Gateway/Peer; the old
-      // surface already retired (status above), so this is also the teardown
-      // negative — no second owner can carry the vote.
-      client.send('\x15t57 post-hmr prompt\r')
+
+
+      // The new composer is empty: a real Up recalls the accepted prompt from
+      // the process memory (the disk history is gone since before the HMR), and
+      // Enter submits exactly that text as a SECOND
+      // official occurrence (a fresh Host Turn is the source->decision->sink
+      // proof on the real Gateway/Peer; the old surface already retired, so
+      // this is also the teardown negative).
+      client.send('\x1b[A')
+      client.send('\r')
+      const recalledOccurrence = await waitForHostSessionEventAfter(
+        dshHome,
+        sessionId,
+        initialOccurrenceIndex + 1,
+        isInitialOccurrence,
+        'T57 recalled second occurrence',
+        120_000,
+      )
+      assert(recalledOccurrence.data?.id !== initialOccurrence.data?.id,
+        'T57 the recalled submission did not create a DISTINCT official occurrence')
+      const postRecallOccurrences = (hostSessionEvents(dshHome, sessionId) ?? [])
+        .slice(initialOccurrenceIndex + 1)
+        .filter(isInitialOccurrence)
+      assert(postRecallOccurrences.length === 1,
+        `T57 expected exactly one recalled occurrence, got ${String(postRecallOccurrences.length)}`)
       await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/start' && event.data?.turn === 2, 'T57 post-HMR turn/start')
       await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end' && event.data?.turn === 2, 'T57 post-HMR turn/end')
       await client.waitForScreen('long-turn answer', 'T57 post-HMR reply paint', 120_000)
-      trace('t57-post-hmr-prompt', { sessionId, turn: 2, admission: 'host-accepted', staleRevisionRefusal: false })
+      trace('t57-post-hmr-recall', {
+        sessionId,
+        turn: 2,
+        recalledText: userTextOf(recalledOccurrence),
+        occurrenceId: recalledOccurrence.data?.id,
+        distinctOccurrence: true,
+        legacyHistoryMovedAside: true,
+        admission: 'host-accepted',
+      })
       await assertHostIdentityKept(host, hostBefore, 'T57 Host identity')
       await assertHostRowsKept(host, rowsBefore, 'T57 Host Loader rows')
       await exitC1Client(client, 'T57 Client')
+
+      // Fresh OS process negative: a NEW Client on the SAME real Host starts
+      // with an EMPTY recall even though a run-owned disk row exists for its
+      // exact launch cwd. Any wrongly imported row would make the submitted
+      // occurrence differ from the marker (Up recalls it, typing appends).
+      const freshLaunchCwd = workDir
+      // The disk-only row exists BEFORE the fresh Client boots: the boot recall
+      // (sessionless) reads the launch cwd's file, so an imported row would be
+      // visible to this process. Writing it after `ready` would prove nothing.
+      const freshHistoryFile = join(
+        dshHome,
+        'user-history',
+        `${createHash('md5').update(freshLaunchCwd, 'utf-8').digest('hex')}.jsonl`,
+      )
+      mkdirSync(dirname(freshHistoryFile), { recursive: true, mode: 0o700 })
+      writeFileSync(freshHistoryFile, `${JSON.stringify({ content: 't57 fresh-client disk row' })}\n`, { mode: 0o600 })
+      const { client: fresh } = await startC1Client('T57 fresh Client', {}, { cwd: freshLaunchCwd })
+      const freshReadyPid = fresh.records.find(record => record.m4a0 === 'ready')?.pid
+      assert(typeof freshReadyPid === 'number' && freshReadyPid !== beforePid,
+        `T57 the fresh Client did not become a new OS process: ${String(freshReadyPid)} vs ${String(beforePid)}`)
+      await waitForSurfaceStatus(fresh, record => record.surfaceMounted === true && record.sessionOpen === false, 'T57 fresh Client sessionless surface', 120_000)
+      fresh.send('\x1b[A')
+      fresh.send('t57 fresh marker\r')
+      const freshStatus = await waitForSurfaceStatus(fresh, record => record.sessionOpen === true && typeof record.openSessionId === 'string', 'T57 fresh Client first Session', 120_000)
+      const freshOccurrence = await waitForHostSessionEvent(
+        dshHome,
+        freshStatus.openSessionId,
+        event => event.type === 'user/message',
+        'T57 fresh Client first occurrence',
+        120_000,
+      )
+      assert(userTextOf(freshOccurrence) === 't57 fresh marker',
+        `T57 a fresh process must not import a disk row; submitted ${JSON.stringify(userTextOf(freshOccurrence))}`)
+      await exitC1Client(fresh, 'T57 fresh Client')
       await stopC1Host(host)
-      trace('t57', { hostPid: ready.pid, clientPid: beforePid, sessionId, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, sessionWrapper: 're-adopted', newTty: true, hostRows: 'same loader fibers', hostRowUids: PROTECTED_HOST_ROWS.length })
+      trace('t57-fresh-process', {
+        hostPid: ready.pid,
+        clientPid: freshReadyPid,
+        sessionId: freshStatus.openSessionId,
+        diskOnlyRowPresent: true,
+        recalled: 'empty',
+        submitted: userTextOf(freshOccurrence),
+      })
+      // Keep the live Clients' new rows as this run's evidence, then restore
+      // the run's shared legacy history directory.
+      const afterHistoryDir = join(workDir, 't57-user-history-after-a')
+      rmSync(afterHistoryDir, { recursive: true, force: true })
+      if (existsSync(legacyHistoryDir)) renameSync(legacyHistoryDir, afterHistoryDir)
+      renameSync(legacyHistoryBackup, legacyHistoryDir)
+      trace('t57', { hostPid: ready.pid, clientPid: beforePid, sessionId, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, sessionWrapper: 're-adopted', newTty: true, processRecallAcrossHmr: true, freshProcessRecallEmpty: true, hostRows: 'same loader fibers', hostRowUids: PROTECTED_HOST_ROWS.length })
     }
 
     // T58: HMR while a real Host Job is running. The Host Job continues

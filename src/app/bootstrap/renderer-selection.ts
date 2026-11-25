@@ -251,6 +251,12 @@ export interface ProductionTspConnectorDeps {
    *  no keymap; this getter is how its raw key stream and `Manage` label point
    *  at the same effective action. */
   readonly queueOpenKeys?: () => readonly string[]
+  /**
+   * Feature History PR2-A: the Split Client root's process-lifetime input
+   * recall memory. The TSP composer reads this snapshot for ↑/↓ instead of
+   * creating a mount-local scope kernel; absent on Direct.
+   */
+  readonly inputRecall?: import('../../client/history/memory-recall.ts').InputMemoryRecall
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */

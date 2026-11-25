@@ -364,6 +364,17 @@ export interface RemoteApplicationOverride {
   readonly selected: SelectedApplicationRuntime
   readonly presentation: RemoteApplicationSources
   readonly extensionService: PiTuiExtensionService
+  /**
+   * Feature History PR2-A: the ONE process-lifetime input-recall memory of the
+   * Split Client root (`startSurfaceLocalClient`). The SAME object is borrowed
+   * by every surface revision and injected into the selected renderer (PiTui
+   * editor mirror or TSP composer snapshot); a replacement revision re-borrows
+   * it instead of creating a mount-local one. It is a plain process-local
+   * capability — never a Host service, a wire object or a public declaration —
+   * and the Direct composition never supplies it (Direct keeps its scoped
+   * kernel).
+   */
+  readonly inputRecall: import('../client/history/memory-recall.ts').InputMemoryRecall
   /** Split-Client only: the Client-root interaction delivery owner. */
   readonly interactionDelivery?: SplitClientInteractionDeliveryControl
   /**

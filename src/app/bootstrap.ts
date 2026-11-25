@@ -1136,6 +1136,13 @@ export function applyRunnerWithRuntime(
      */
     const remoteSources = override === undefined ? undefined : override.presentation
     /**
+     * Feature History PR2-A: the Split Client root's process-lifetime input
+     * recall memory (absent on Direct). The SAME object is forwarded to the
+     * PiTui mount options and to the TSP connector below; the Direct branch
+     * keeps its scoped kernel and never receives one.
+     */
+    const inputRecall = override?.inputRecall
+    /**
      * The lazy Direct-only accessor: the Direct helpers below read the ONE
      * Direct runtime the selection seam constructed. On the Direct branch
      * (the only branch bootstrap selects in PR1) it is already constructed.
@@ -1358,12 +1365,14 @@ export function applyRunnerWithRuntime(
         },
         beginInputHistoryScope: (owner) => {
           // The editor-recall scope of the owner this commit section publishes
-          // or creates: the owner's hydration reseeds ↕ recall from its
-          // session-scoped disk rows afterwards, while a submission accepted in
-          // between has its own append ordered behind the transition (submit
-          // FIFO turn + ensureSession), so the row can land after that read.
-          // Recording the scope-bound temporary submissions lets the reseed
-          // reconcile them instead of dropping them (PiTui editor history).
+          // or creates. On Direct the owner's hydration reseeds ↕ recall from
+          // its session-scoped disk rows afterwards, while a submission accepted
+          // in between has its own append ordered behind the transition (submit
+          // FIFO turn + ensureSession), so the row can land after that read;
+          // recording the scope-bound temporary submissions lets the reseed
+          // reconcile them instead of dropping them (PiTui editor history). The
+          // Daemon/Split Client's process recall is not a Session scope: this
+          // commit only retires the outgoing browse/bookmark and keeps the list.
           surface.display.beginInputHistoryScope(owner)
         },
         dropOutgoingActiveDraft: () => {
@@ -2057,20 +2066,20 @@ export function applyRunnerWithRuntime(
         currentCwd: () => status.sessionCwd(),
         records: (cwd) => history.records(cwd),
         setLastContent: (content) => history.setLastContent(content),
-        readSessionRecall: (sessionId, signal) => historySearchSource.readSessionRecall(sessionId, signal),
+        // Feature History PR2-A: the cold cross-cwd session recall read is the
+        // DIRECT backend's contract only. The Split Client recalls from its
+        // process memory, so it injects no reader at all — the hydration tail
+        // then never scans a history file or schedules a reset.
+        ...(override === undefined
+          ? { readSessionRecall: (sessionId, signal) => historySearchSource.readSessionRecall(sessionId, signal) }
+          : {}),
       },
       // The exact ownership fence for the asynchronous cold recall read. The
-      // generation is captured before the read and re-checked after it; on the
-      // Remote branch the transport token adds the Connection/binding identity.
+      // generation is captured before the read and re-checked after it.
       currentness: {
         captureGeneration: () => ownership.generation(),
         isStillCurrent: (sessionId, generation) =>
           ownership.currentSessionId() === sessionId && ownership.generation() === generation,
-        ...(remoteSources === undefined ? {} : {
-          captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
-          isTransportTokenCurrent: (sessionId, token) =>
-            remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
-        }),
       },
       commands: { register: () => command.register({ snapshot: initialSnapshot, skills: initialSkills }) },
       submission: { clearPending: () => submission.clearPending() },
@@ -3226,6 +3235,11 @@ export function applyRunnerWithRuntime(
       sessionCwd: () => status.sessionCwd(),
       diag,
       isCleanedUp: () => cleanedUp,
+      // Feature History PR2-A: the file writer (and the old Ctrl+R source)
+      // stay in place on both backends, but only Direct feeds the renderer's
+      // scoped recall kernel with boot seeds and row settlements. The Split
+      // Client recalls from the injected process memory instead.
+      recallAuthority: override === undefined ? 'direct' : 'none',
     })
 
     // Surface lifetime fence: every callback below can outlive the TUI
@@ -4290,6 +4304,10 @@ export function applyRunnerWithRuntime(
           // visual's authoritative payload. Clipboard policy stays in
           // ClientActions; the renderer only forwards the exact payload.
           copyVisual: text => clientActions.copySelection(text),
+          // Feature History PR2-A: the SAME process recall memory the PiTui
+          // branch receives, injected before the renderer selection so the TSP
+          // mount never creates a mount-local kernel on the Split Client.
+          ...(inputRecall === undefined ? {} : { inputRecall }),
         }),
         env: process.env,
       })
@@ -4382,6 +4400,10 @@ export function applyRunnerWithRuntime(
       // panel lifecycle (plan §27 — TuiApp never touches the filesystem). The
       // SAME source instance also backs the cold session-recall reader above.
       historySearchSource,
+      // Feature History PR2-A: the Split Client's process recall memory. The
+      // surface forwards it to the PiTui mount options; Direct passes nothing
+      // and keeps its scoped kernel.
+      ...(inputRecall === undefined ? {} : { inputRecall }),
       // The durable-image read (plan M8/M10): history images resolve through
       // `ctx.attachments.readImage` only — never the draft store. The read
       // callback is a late-bound service access (AGENTS.md: never a bare

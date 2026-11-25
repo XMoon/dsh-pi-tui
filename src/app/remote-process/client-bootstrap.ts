@@ -32,6 +32,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../extensions.ts'
+import { createInputMemoryRecall } from '../../client/history/memory-recall.ts'
 import type { RemoteApplicationOverride, RemotePromptPresenceCapability } from '../application-runtime.ts'
 import { Config as TuiConfigSchema } from '../config/schema.ts'
 import {
@@ -718,6 +719,15 @@ async function startSurfaceLocalClient(
   }
   const domains = composition.domains
   const delivery = composition.interactionDelivery
+  /**
+   * Feature History PR2-A: the ONE process-lifetime input-recall memory of this
+   * Client root. It lives OUTSIDE the per-revision loop: a same-PID HMR
+   * replacement re-borrows this SAME object (never a fresh mount-local one, and
+   * never disposed by the revision cleanup), while a new OS process naturally
+   * starts empty. It holds plain strings only — no Session, cwd, file or Host
+   * identity.
+   */
+  const inputRecall = createInputMemoryRecall()
 
   let currentRevision: SurfaceRevision | undefined
   let revisionSequence = 0
@@ -935,6 +945,8 @@ async function startSurfaceLocalClient(
       selected: revision.application.selected,
       presentation: revision.application.presentation,
       extensionService: revision.application.extensionService,
+      // Feature History PR2-A: the SAME Client-root memory across revisions.
+      inputRecall,
       // Client-local only: the Plugin Manager controller's committed inventory
       // callback lands on THIS revision's live mount owner. A superseded or
       // disposed revision is ignored instead of publishing stale state.

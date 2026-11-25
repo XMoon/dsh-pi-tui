@@ -44,6 +44,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
 import { Config as TuiConfigSchema } from '../../../src/index.ts'
+import { createInputMemoryRecall } from '../../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../../src/app/bootstrap.ts'
 import { createRemoteApplicationRuntime } from '../../support/m3-inprocess/application-runtime.ts'
@@ -193,6 +194,7 @@ async function mountPluginManagerRunner(
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start

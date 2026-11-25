@@ -41,6 +41,7 @@ import { runOwned } from '../../src/runtime/process/tasks.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { FileHistorySearchSource } from '../../src/client/history/search.ts'
 import { historyFilePath } from '../../src/client/history/store.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
@@ -6485,6 +6486,81 @@ test('PR2/F5: a settlement while stopped completes the hold; start() leaves no s
     app.settleSubmission('attempt-after-restart', 'not-accepted')
     assert.equal(app.getDraft(), 'fresh after restart',
       'a rejection after the restart keeps the live draft')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2-A: the process recall commits an accepted-while-stopped input exactly once and never a refusal', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const recall = createInputMemoryRecall()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { inputRecall: recall })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('stopped accepted input')
+    app.holdSubmission('attempt-a')
+    app.stop()
+    // The Host acceptance lands while the surface is stopped: the LOGICAL
+    // process-memory commit is not a physical effect, so it happens now.
+    app.settleSubmission('attempt-a', 'accepted')
+    assert.deepEqual([...recall.snapshot()], ['stopped accepted input'],
+      'the accepted-while-stopped input is recalled from the process memory immediately')
+    app.start()
+    await vt.waitForRender()
+    assert.deepEqual([...recall.snapshot()], ['stopped accepted input'],
+      'the re-presentation mirrors the snapshot and never records the input twice')
+    assert.equal(app.getDraft(), '', 'the deferred accepted clear ran once')
+
+    // A refusal while stopped records nothing and keeps its retained draft.
+    app.setDraft('stopped refused input')
+    app.holdSubmission('attempt-b')
+    app.stop()
+    app.settleSubmission('attempt-b', 'not-accepted')
+    app.start()
+    await vt.waitForRender()
+    assert.deepEqual([...recall.snapshot()], ['stopped accepted input'], 'a refusal is never recalled')
+    assert.equal(app.getDraft(), 'stopped refused input', 'the refused draft stays live')
+
+    // A late settlement of the already-retired attempt cannot record again.
+    app.settleSubmission('attempt-a', 'accepted')
+    assert.deepEqual([...recall.snapshot()], ['stopped accepted input'],
+      'a retired attempt never records a second occurrence')
+
+    // The real ↑ sink reads the process memory through the editor mirror.
+    app.setDraft('')
+    vt.sendInput('\x1b[A')
+    await vt.waitForRender()
+    assert.equal(app.getDraft(), 'stopped accepted input', '↑ recalls the process memory')
+  } finally {
+    app.stop()
+  }
+})
+
+test('PR2-A: a legacy steer draft is recalled once and an empty queue sweep records nothing', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const recall = createInputMemoryRecall()
+  const steered: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: (text) => { steered.push(text) },
+  }, { inputRecall: recall })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setDraft('steer this recall draft')
+    vt.sendInput('\x13')
+    await vt.waitForRender()
+    assert.deepEqual(steered, ['steer this recall draft'], 'the legacy steer dispatch is unchanged')
+    assert.deepEqual([...recall.snapshot()], ['steer this recall draft'],
+      'a real non-empty steer draft is a recalled user input')
+    assert.equal(app.getDraft(), '', 'the steer clear is unchanged')
+    // An EMPTY steer sweeps the queue and delivers no draft: nothing to record.
+    vt.sendInput('\x13')
+    await vt.waitForRender()
+    assert.deepEqual([...recall.snapshot()], ['steer this recall draft'],
+      'an empty queue sweep never fabricates a recall entry')
   } finally {
     app.stop()
   }
