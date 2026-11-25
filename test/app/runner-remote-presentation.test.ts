@@ -808,11 +808,16 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
   const presetId = 'm3-4-r11-process-tsp-preset'
   const host = await mountRemotePresentationHost(life, presetId)
   await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const otherId = 'm3-4-r11-process-tsp-b'
+  const otherCwd = `${host.anchorDir}-b`
+  mkdirSync(otherCwd, { recursive: true })
+  await host.harness.create(SessionId(otherId), { provider: 'smoke', model: 'smoke' }, { cwd: otherCwd })
   const appendOf = (id: string) => host.ctx.sessions.get(SessionId(id)) as unknown as {
     append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
     snapshotEvents(): Array<{ type: string; data: unknown }>
   }
   seedTurns(appendOf(mainId), 1, 1, 'tsp-resume')
+  seedTurns(appendOf(otherId), 1, 1, 'tsp-b')
   const currentFile = historyFilePath(host.workRoot, host.anchorDir)
   mkdirSync(dirname(currentFile), { recursive: true })
   appendHistoryRecord(currentFile, { v: 2, content: 'current cwd disk row', cwd: host.anchorDir, ts: 10, sessionId: mainId }, undefined)
@@ -835,6 +840,7 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
     resumeSessionId: mainId,
     host,
     renderer: 'tsp',
+    sessionBrowser: true,
     productionSerializer: true,
   })
   const pane = fixture.pane
@@ -843,32 +849,72 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
     const node = wireNodes({ frames: () => pane.frames() }).find(candidate => candidate.id === 'dock.composer')
     return typeof node?.p.text === 'string' ? node.p.text : ''
   }
-  const userRowsFor = (text: string): number => appendOf(mainId).snapshotEvents()
-    .filter(event => event.type === 'user/message' && JSON.stringify(event.data).includes(text)).length
+  /** The exact official Host user texts (never a substring match: a disk-seeded
+   * composer draft would append to the typed marker and must be caught). */
+  const hostTextsOf = (id: string): string[] => appendOf(id).snapshotEvents()
+    .filter(event => event.type === 'user/message')
+    .map(event => {
+      const data = event.data as { content?: Array<{ type?: string; text?: string }> }
+      return (data.content ?? [])
+        .filter(part => part.type === 'text')
+        .map(part => part.text ?? '')
+        .join('')
+    })
   try {
     await waitFor('the TSP composer is painted', () =>
       wireNodes({ frames: () => pane.frames() }).some(candidate => candidate.id === 'dock.composer'), 20_000)
     assert.equal(composerText(), '', 'a new process recall paints no recalled draft')
     assert.deepEqual(coldReads, [], 'the Split Client never runs the Direct cold cross-cwd recall read')
 
-    // A REAL TSP input wire submission: type into the dock composer and press
-    // the renderer's Enter — the producer is the actual SDK input path, never a
-    // direct store call.
+    // DECISIVE fresh-draft negative: the isolated launch-cwd files already hold
+    // disk rows. A real TSP ↑ on the empty composer must be a no-op; the typed
+    // marker then reaches the Host EXACTLY as typed. A disk-seeded list would
+    // have appended the disk row to this draft.
     const submitted = 'tsp live process prompt'
+    pane.input.type('\x1b[A')
     pane.input.type(submitted)
-    await waitFor('the composer carries the typed draft', () => composerText() === submitted, 5_000)
+    await waitFor('the composer carries the typed draft after ↑', () => composerText() === submitted, 5_000)
     pane.input.type('\r')
-    await waitFor('the accepted TSP input is recalled from the process memory', () =>
-      userRowsFor(submitted) === 1, 20_000)
+    await waitFor('the accepted TSP input is the EXACT typed text', () =>
+      hostTextsOf(mainId).filter(text => text === submitted).length === 1, 20_000)
+    assert.equal(hostTextsOf(mainId).filter(text => text === submitted).length, 1,
+      'a disk-only ↑ seed would have appended to the typed marker')
     // The accepted settle clears the composer; ↑ then recalls the same text.
     await waitFor('the accepted commit cleared the TSP composer', () => composerText() === '', 5_000)
     pane.input.type('\x1b[A')
     await waitFor('the TSP ↑ recalls the process input', () => composerText() === submitted, 5_000)
-    // A second ↑ stays on the OLDEST (only) process entry. A disk-seeded list
-    // would now show the seeded row, so this is the decisive negative control.
+    assert.equal(hostTextsOf(mainId).filter(text => text === submitted).length, 1,
+      'a recalled draft is never submitted by ↑')
+
+    // ↓ returns from the recalled row to the bookmarked empty draft (real key
+    // sink), so the switch command starts from a genuinely empty composer.
+    pane.input.type('\x1b[B')
+    await waitFor('↓ returns to the empty bookmarked draft', () => composerText() === '', 5_000)
+    // A REAL owner publication A → B (different cwd) through the TSP key sink.
+    // The process snapshot survives, while the outgoing draft/bookmark is not
+    // restored into B.
+    pane.input.type(`/sessions ${otherId}\r`)
+    await waitFor('the TSP Session Browser opened', () =>
+      JSON.stringify(pane.frames()).includes('session-browser-picker'), 20_000)
+    pane.input.type('\r')
+    await waitFor('Session B authoritative baseline is painted', () =>
+      JSON.stringify(pane.frames()).includes('tsp-b answer 1'), 20_000)
+    assert.equal(composerText(), '', 'the owner publication restores no old draft/bookmark into B')
+    // The real TSP key sink still reaches the old process inputs after the
+    // publication: newest is the accepted switch command, older is A's marker.
     pane.input.type('\x1b[A')
-    await waitFor('the second TSP ↑ has no older entry to show', () => composerText() === submitted, 5_000)
-    assert.equal(userRowsFor(submitted), 1, 'a recalled draft is never submitted by ↑')
+    await waitFor('↑ after the publication recalls the switch command', () =>
+      composerText() === `/sessions ${otherId}`, 5_000)
+    pane.input.type('\x1b[A')
+    await waitFor('the old process input is still recallable after the switch', () =>
+      composerText() === submitted, 5_000)
+    pane.input.type('\x1b[B')
+    await waitFor('↓ moves back to the newer process input', () =>
+      composerText() === `/sessions ${otherId}`, 5_000)
+    await waitFor('the old Session A input never reaches Session B', () =>
+      hostTextsOf(otherId).filter(text => text === submitted).length === 0, 5_000)
+    assert.equal(hostTextsOf(otherId).filter(text => text === submitted).length, 0,
+      'the old Session A input never leaks into Session B')
     assert.deepEqual(coldReads, [], 'no hydration path read a history file for recall')
   } finally {
     FileHistorySearchSource.prototype.readSessionRecall = realHistoryRead
@@ -902,9 +948,23 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
     getInputHistory(): readonly string[]
   }
   const viewport = (): string => fixture.vt.getViewport().join('\n')
-  const pendingFor = (text: string): boolean => {
-    const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId) ?? []
-    return pending.some(item => item.text === text)
+  /** The official Host user/message texts — the submission witness. A Ctrl+R
+   * restore that (incorrectly) submitted would add a durable occurrence; the
+   * pending echo alone is not decisive because a fast accepted submit clears
+   * it again. */
+  const hostUserTexts = (): string[] => {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }
+    return session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => {
+        const data = event.data as { content?: Array<{ type?: string; text?: string }> }
+        return (data.content ?? [])
+          .filter(part => part.type === 'text')
+          .map(part => part.text ?? '')
+          .join('')
+      })
   }
   /** The painted History RESULT rows (between the counter and the Preview
    * band). The transcript above can carry the same text, so a whole-viewport
@@ -932,6 +992,11 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
       loadHistoryRecords(currentFile).some(row => row.content === marker), 20_000)
     const memoryBefore = [...edited.getInputHistory()]
     assert.deepEqual(memoryBefore, [marker], 'the process recall holds exactly the accepted input')
+    await waitFor('the accepted marker reached the official Host log', () =>
+      hostUserTexts().filter(text => text === marker).length === 1, 20_000)
+    const hostSubmitsBefore = hostUserTexts()
+    assert.equal(hostSubmitsBefore.filter(text => text === marker).length, 1,
+      'the accepted marker has exactly one official Host occurrence')
 
     // Ctrl+R opens the ONE History seat over the REAL file source. The disk-only
     // row is searchable there (the old source still works) and never becomes a
@@ -961,9 +1026,34 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
     fixture.vt.sendInput('\r')
     await fixture.vt.waitForRender()
     assert.equal(edited.getDraft(), marker, 'Ctrl+R restores the accepted prompt into the editor')
-    assert.equal(pendingFor(marker), false, 'restoring from Ctrl+R dispatches no submission')
+    assert.ok(!viewport().includes('Input History'), 'the seat closed on the real accept boundary')
+    assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
+      'restoring the accepted prompt from Ctrl+R dispatches no submission')
     assert.deepEqual([...edited.getInputHistory()], memoryBefore,
       'Ctrl+R restore never changes the process recall')
+
+    // DISCRIMINATING NEGATIVE: a text that is ONLY on disk and NOT in memory
+    // (not even adjacent to a memory entry) is restored through the same real
+    // seat. If the restore were treated as a recall record, the list would gain
+    // it; if it were submitted, the Host would gain a durable occurrence.
+    const diskOnly = 'foreign disk-only ctrl r row'
+    fixture.vt.sendInput('\x12')
+    await waitFor('the History seat reopened for the disk-only restore', () =>
+      viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('foreign disk-only')
+    await waitFor('the disk-only row is the committed filtered result', () =>
+      viewport().includes('Results · 1 match')
+      && historyResultLines().some(line => line.includes(diskOnly)), 15_000)
+    fixture.vt.sendInput('\r')
+    await fixture.vt.waitForRender()
+    assert.equal(edited.getDraft(), diskOnly, 'Ctrl+R restores the disk-only text into the editor')
+    assert.ok(!viewport().includes('Input History'), 'the seat closed on the disk-only accept boundary')
+    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
+      'a disk-only restore never becomes a process-recall entry')
+    assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
+      'restoring the disk-only text dispatches no submission')
+    assert.equal(hostUserTexts().filter(text => text === diskOnly).length, 0,
+      'the disk-only text has no official Host occurrence')
   } finally {
     await fixture.dispose()
   }
