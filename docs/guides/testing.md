@@ -704,8 +704,8 @@ The installed-public-entry anchor
 that same checkpoint explicitly. It drives the packed public
 `dsh --profile ...` CLI under a real PTY and proves the Direct default, the
 daemon cold start, public Session/preset/peer/alias/Settings paths and the
-public refusal boundary; the positive terminal cases are Linux-only and report
-`N/A` on Darwin, while the public Client is observed through the real OS
+public refusal boundary; the positive terminal cases are Linux-only and skip
+on Darwin, while the public Client is observed through the real OS
 process tree and the public daemon CLI, never an internal JSONL sink. Its cold
 anchor runs first in the file; the remaining public business cases run after
 the overlap. Select both files in ONE Vitest invocation (the Worker parent-edge
