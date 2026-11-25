@@ -673,17 +673,18 @@ async function outputScene(context) {
     'two streamed text deltas plus one durable file residual')
     requireFact(new Set(assistantFileFlight.updates.map(params => params.update.messageId)).size === 1,
       'the file residual shares the one attempt message id')
-    for (const index of [0, 2]) {
-      assertTextChunks([assistantFileFlight.updates[index]],
-        { content: [assistantFileMessage.content[index === 0 ? 0 : 2]] },
-        sessionId, assistantFileFlight.updates[0].update.messageId)
-    }
+    // Append-only wire order: the two streamed text chunks arrive as they are
+    // produced, then the never-streamed durable file is appended at the join.
+    assertTextChunks([assistantFileFlight.updates[0]],
+      { content: [assistantFileMessage.content[0]] }, sessionId, assistantFileFlight.updates[0].update.messageId)
+    assertTextChunks([assistantFileFlight.updates[1]],
+      { content: [assistantFileMessage.content[2]] }, sessionId, assistantFileFlight.updates[0].update.messageId)
     const assistantFileExpected = {
       uri: `dsh-attachment://sha256/${assistantFileProof.sha256}/${encodeURIComponent(assistantFileProof.name)}`,
       bytes: assistantFileProof.bytes,
       sha256: assistantFileProof.sha256,
     }
-    assertFileResource(assistantFileFlight.updates[1].update.content, assistantFileExpected, 'assistant generic file')
+    assertFileResource(assistantFileFlight.updates[2].update.content, assistantFileExpected, 'assistant generic file')
 
     const toolFileFlight = await run('po4d:tool-file:v1', 'ordered generic file tool result')
     const toolFileCalls = toolFileFlight.turnEvents.filter(event => event.type === 'tool/call')
