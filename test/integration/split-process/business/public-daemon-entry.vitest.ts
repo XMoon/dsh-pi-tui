@@ -49,7 +49,23 @@ function asError(error: unknown): Error {
 
 async function exitPublicLaunch(launch: PublicDaemonLaunch, label: string): Promise<void> {
   await launch.submit('/exit')
-  const exit = await launch.waitForExit(120_000)
+  const started = Date.now()
+  let exit: { code: number | null; signal: string | null; text: string }
+  for (;;) {
+    const state = await launch.state()
+    if (state.exited) {
+      exit = await launch.waitForExit(5_000)
+      break
+    }
+    const frame = await launch.text()
+    if (frame.includes('Keep working and disconnect')) {
+      await launch.press('Enter')
+    }
+    if (Date.now() - started >= 120_000) {
+      throw new Error(`${label}: /exit did not reach a terminal fact; frame=${JSON.stringify(frame.slice(-2000))}`)
+    }
+    await sleep(100)
+  }
   expect(exit.code, `${label}: the public CLI exit code`).toBe(0)
   expect(exit.signal, `${label}: the public CLI exit signal`).toBe(null)
   expect(exit.text, `${label}: the daemon detach line`).toContain('Disconnected from dsh-pi-tui (daemon client).')
@@ -285,6 +301,9 @@ test.skipIf(!linuxOnly)('applies --preset minimal to the first public Session he
     const minimalHeader = await scene.waitForHostSessionHeader(minimalSession, 'minimal preset header')
     const minimalHeaderText = JSON.stringify(minimalHeader)
     expect(minimalHeaderText, `the durable minimal header (${minimalHeaderText})`).toContain('"agentPreset":"minimal"')
+    await scene.waitForSessionEvent(minimalSession, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'minimal preset answer')
     expect([...(await scene.sessionIds())].sort(), 'the minimal launch created exactly one Session')
       .toEqual([...beforeMinimal, minimalSession].sort())
     await exitPublicLaunch(minimal, 'minimal preset launch')
@@ -298,6 +317,9 @@ test.skipIf(!linuxOnly)('applies --preset minimal to the first public Session he
     const standardHeader = await scene.waitForHostSessionHeader(standardSession, 'default preset header')
     const standardHeaderText = JSON.stringify(standardHeader)
     expect(standardHeaderText, `the durable default header (${standardHeaderText})`).toContain('"agentPreset":"standard"')
+    await scene.waitForSessionEvent(standardSession, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'default preset answer')
     expect([...(await scene.sessionIds())].sort(), 'the default launch created exactly one Session')
       .toEqual([...beforeStandard, standardSession].sort())
     await exitPublicLaunch(standard, 'default preset launch')
