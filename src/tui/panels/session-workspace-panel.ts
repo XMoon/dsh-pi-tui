@@ -560,6 +560,9 @@ export class SessionWorkspacePanel implements Component {
   /** Whether THIS frame really painted the Inspector page's own identity/body.
    *  A frame too short to paint it reports no target and advertises no scroll. */
   private inspectorPagePainted = false
+  /** Whether THIS page frame really painted at least one scrollable body row.
+   *  Its identity alone must never advertise a Scroll/Page key that does nothing. */
+  private inspectorScrollPainted = false
   /** The selected Session whose inline Inspector this frame really painted (the
    *  two-column right pane). Used only for presentation-only repaint admission. */
   private lastPaintedInlineInspectorSessionId: string | undefined
@@ -1994,6 +1997,7 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedResultIds = []
     this.lastPaintedInlineInspectorSessionId = undefined
     this.inspectorPagePainted = false
+    this.inspectorScrollPainted = false
     this.directoryEditorPainted = false
     this.paintedDirectorySuggestionPaths = []
     this.directoryInputDisplaySafe = true
@@ -2956,6 +2960,7 @@ export class SessionWorkspacePanel implements Component {
     page.scrollRow = Math.min(Math.max(0, page.scrollRow), maxScroll)
     const body = all.slice(page.scrollRow, page.scrollRow + bodyBudget)
     this.lastPaintedListRows = Math.max(1, body.length)
+    this.inspectorScrollPainted = body.length > 0
     const regions: HitRegion[] = body.length === 0
       ? []
       : this.wheelZoneRegions('wheel-inspector', fixed.length, fixed.length + body.length, width)
@@ -3356,7 +3361,7 @@ export class SessionWorkspacePanel implements Component {
       // The full-width Inspector keeps the ONE real Back verb and advertises
       // scroll keys only when it really painted its reading body.
       const segments: SessionBarSegment[] = []
-      if (this.inspectorPagePainted) {
+      if (this.inspectorScrollPainted) {
         segments.push({ text: 'Up/Down scroll', priority: 6, short: 'Scroll' })
         segments.push({ text: 'PgUp/PgDn page', priority: 5, short: 'Page' })
       }

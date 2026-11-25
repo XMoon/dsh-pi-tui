@@ -6009,6 +6009,14 @@ test('F2 opens the SAME admitted Inspector page, scrolls its own body and return
   assert.ok(x > 0, `the bar paints Inspect [F2]:\n${bar}`)
   await clickCell(h, x, panelFrame(h).length - 1)
   assert.ok(h.view().includes('Session Inspector · other-se'), 'the painted Inspect verb opens the same page')
+  // A 3-row frame paints the page identity but has no scrollable body row: it
+  // keeps the target and the real Back verb, and advertises no inert Scroll.
+  h.vt.resize(80, 3)
+  await h.paint()
+  assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' },
+    'a 3-row frame really paints the Inspector identity and reports it')
+  assert.doesNotMatch(panelFrame(h).at(-1)!, /Scroll|Page/u,
+    'a page with no scrollable body advertises no scroll key')
   // A 0-2 row frame cannot paint the page's own identity: it reports no target
   // and advertises no scroll, but the page survives the shrink and is readable
   // again after the resize.
