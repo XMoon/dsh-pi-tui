@@ -172,6 +172,7 @@ export interface SplitProcessClient {
   readonly ready: SplitProcessClientReady
   /** Whether this Worker already observed the normal terminal close. */
   readonly closed: boolean
+  readonly exit: { code: number | null; signal: string | null } | null
   type(text: string): Promise<void>
   press(...keys: string[]): Promise<void>
   submit(text?: string): Promise<void>
@@ -323,6 +324,7 @@ export interface PublicDaemonLaunch {
   readonly loaderRows: Array<{ id: string; disabled: boolean; state: unknown }> | null
   readonly herdr: PublicDaemonHerdrFacts | null
   readonly closed: boolean
+  readonly exit: { code: number | null; signal: string | null } | null
   type(text: string): Promise<void>
   press(...keys: string[]): Promise<void>
   submit(text?: string): Promise<void>
@@ -878,6 +880,10 @@ class ProcessClient implements SplitProcessClient {
     return this.#closed
   }
 
+  get exit(): { code: number | null; signal: string | null } | null {
+    return this.#exitFacts ?? null
+  }
+
 
   /**
    * Test teardown only: ask the real surface to leave, take the busy Exit Choice
@@ -953,10 +959,17 @@ class PublicDaemon implements PublicDaemonLaunch {
     this.surface = payload.surface ?? null
     this.loaderRows = payload.loaderRows ?? null
     this.herdr = payload.herdr ?? null
+    if (payload.exit !== null && payload.exit !== undefined) {
+      this.#exitFacts = { code: payload.exit.code ?? null, signal: payload.exit.signal ?? null }
+    }
   }
 
   get closed(): boolean {
     return this.#closed
+  }
+
+  get exit(): { code: number | null; signal: string | null } | null {
+    return this.#exitFacts ?? null
   }
 
   async type(text: string): Promise<void> {

@@ -6042,6 +6042,43 @@ function processCommandLineTokens(pid) {
   }
 }
 
+/**
+ * Wait for one public entry role OR a real early exit. A refused CLI is a
+ * business fact, not a discovery timeout: the caller reads the actual exit and
+ * frame instead of inventing a missing process.
+ */
+async function waitForPublicProcessOrExit(handle, rootPid, marker, label, timeoutMs, options = {}) {
+  const started = Date.now()
+  for (;;) {
+    const candidates = options.includeRoot === true ? [rootPid, ...linuxDescendantPids(rootPid)] : linuxDescendantPids(rootPid)
+    for (const pid of candidates) {
+      if (options.excludePids?.includes(pid) === true) continue
+      const captured = capturePublicProcess(pid, marker, label)
+      if (captured !== undefined) return { kind: 'process', process: captured }
+    }
+    const state = await handle.terminal.state().catch(() => undefined)
+    if (state !== undefined && state.exited !== null) {
+      const text = await handle.terminal.text({ full: true }).catch(() => '')
+      return { kind: 'exit', exit: { code: state.exited, signal: state.exit_signal ?? null }, text }
+    }
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: no real ${marker} process and no real exit under PID ${String(rootPid)} within ${String(timeoutMs)}ms`)
+    }
+    await sleep(25)
+  }
+}
+
+function finishPublicRefusal(handle, outcome) {
+  handle.refused = true
+  handle.exited = true
+  handle.exitResult = outcome.exit
+  handle.exitText = outcome.text
+  handle.verifiedTerminal = { kind: 'native', code: outcome.exit.code, signal: outcome.exit.signal }
+  syncPublicLaunchReceipt()
+  writeReceipt({ phase: 'PUBLIC_DAEMON_REFUSED' })
+  return { ...publicLaunchReturnFacts(handle), exit: outcome.exit, text: outcome.text }
+}
+
 async function waitForPublicProcess(rootPid, marker, label, timeoutMs, options = {}) {
   const started = Date.now()
   for (;;) {
@@ -6520,17 +6557,15 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     writeReceipt({ phase: 'PUBLIC_DAEMON_OPENED' })
     if (handle.backend === 'wire-local' || handle.backend === '') {
       const exit = await waitForTerminalExit(handle.terminal, `${label} illegal backend`, 60_000)
-      handle.refused = true
-      handle.exited = true
-      handle.exitResult = exit
-      handle.exitText = await handle.terminal.text({ full: true }).catch(() => '')
-      handle.verifiedTerminal = { kind: 'native', code: exit.code, signal: exit.signal }
-      syncPublicLaunchReceipt()
-      writeReceipt({ phase: 'PUBLIC_DAEMON_REFUSED' })
-      return { ...publicLaunchReturnFacts(handle), exit, text: handle.exitText }
+      return finishPublicRefusal(handle, {
+        exit,
+        text: await handle.terminal.text({ full: true }).catch(() => ''),
+      })
     }
-    handle.cli = await waitForPublicProcess(handle.shellPid, scene.installation.dshInvocation[1],
-      `${label} public CLI`, 120_000, { includeRoot: true })
+    const cliOutcome = await waitForPublicProcessOrExit(handle, handle.shellPid,
+      scene.installation.dshInvocation[1], `${label} public CLI`, 120_000, { includeRoot: true })
+    if (cliOutcome.kind === 'exit') return finishPublicRefusal(handle, cliOutcome)
+    handle.cli = cliOutcome.process
     if (handle.cli.pid === handle.shellPid) {
       // A direct native spawn has no intermediate shell; the same kernel
       // identity is one process, never a fabricated edge.
@@ -6554,8 +6589,10 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       writeReceipt({ phase: 'PUBLIC_DAEMON_READY' })
       return publicLaunchReturnFacts(handle)
     }
-    handle.client = await waitForPublicProcess(handle.cli.pid, 'local-client.mjs',
-      `${label} public Client`, 120_000)
+    const clientOutcome = await waitForPublicProcessOrExit(handle, handle.cli.pid,
+      'local-client.mjs', `${label} public Client`, 120_000)
+    if (clientOutcome.kind === 'exit') return finishPublicRefusal(handle, clientOutcome)
+    handle.client = clientOutcome.process
     syncPublicLaunchReceipt()
     appendNote('public-daemon-client-captured', {
       launchId: handle.launchId,

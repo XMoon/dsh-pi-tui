@@ -102,6 +102,74 @@ test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the spli
   }
 })
 
+test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a split Host', async () => {
+  const scene = await createSplitProcessScene()
+  let launch: PublicDaemonLaunch | undefined
+  let testError: unknown
+  try {
+    for (const [label, backend] of [['refuse-wire-local', 'wire-local'], ['refuse-empty-env', '']] as const) {
+      const before = await scene.sessionIds()
+      launch = await scene.startPublicDaemon({ label, backend })
+      expect(launch.refused, `${label}: the invalid backend was accepted`).toBe(true)
+      expect(launch.exit, `${label}: the invalid backend produced a real exit`).not.toBeNull()
+      expect(launch.exit?.code, `${label}: the invalid backend exit code`).not.toBe(0)
+      expect(launch.host, `${label}: the invalid backend started a Host`).toBeNull()
+      expect(launch.client, `${label}: the invalid backend started a Client`).toBeNull()
+      expect(existsSync(join(scene.scopeDir, 'instance.json')),
+        `${label}: the invalid backend published a Host registry`).toBe(false)
+      expect(await scene.sessionIds(), `${label}: the invalid backend created a Session`).toEqual(before)
+      await launch.close()
+    }
+
+    const headless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless', backend: 'daemon' })
+    expect(headless.exit.code, 'the non-TTY daemon launch exit code').not.toBe(0)
+    expect(headless.text, `the non-TTY daemon refusal text (${headless.text})`).toMatch(/daemon|TTY|interactive/iu)
+    expect(existsSync(join(scene.scopeDir, 'instance.json')),
+      'the non-TTY daemon launch published no Host registry').toBe(false)
+
+    const beforeMutual = await scene.sessionIds()
+    launch = await scene.startPublicDaemon({
+      label: 'refuse-session-and-continue',
+      backend: 'daemon',
+      args: {
+        session: 'session-00000000-0000-0000-0000-000000000000',
+        continue: true,
+      },
+    })
+    expect(launch.refused, '--session and -c together must be refused by the product').toBe(true)
+    expect(launch.exit?.code, 'the mutually exclusive launch exit code').not.toBe(0)
+    expect(launch.host, 'the mutually exclusive launch started a Host').toBeNull()
+    expect(existsSync(join(scene.scopeDir, 'instance.json')),
+      'the mutually exclusive launch published a Host registry').toBe(false)
+    expect(await scene.sessionIds(), 'the mutually exclusive launch created a Session').toEqual(beforeMutual)
+    await launch.close()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    if (launch !== undefined) {
+      try {
+        if (!launch.closed) await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the refusal test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the refusal test cleanup failed')
+    }
+  }
+})
+
 test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
