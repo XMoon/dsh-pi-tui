@@ -707,8 +707,9 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 ```
 
 `<window>` is one of `bootstrap-install`, `host-spawned-before-ack`,
-`client-reserved-before-spawn`, `client-opened-before-ack`, `clients-ready`,
-`fallback-host-ready`, `host-contenders-spawned`,
+`client-reserved-before-spawn`, `client-opened-before-ack`,
+`terminal-owner-client-opened-before-ack`, `clients-ready`, `fallback-host-ready`,
+`host-contenders-spawned`,
 `qualification-client-spawned`, `host-artifact-absent-started`,
 `identity-witness-spawned` (Linux only) and `finalize-compensation-started`.
 Each installed-entry window binds one exact business test and only holds after
@@ -719,8 +720,16 @@ registered live qualification Client against the authenticated Host,
 live Host attempt, `identity-witness-spawned` the Linux holder registration
 window before its zombie child identity exists, and
 `finalize-compensation-started` the joined compensation of an intentionally
-failed FINALIZE while a registered Client/helper is still live. The last window
-expects the compensated `NOT_QUIESCED` receipt and a retained diagnostic root;
+failed FINALIZE while a registered Client/helper is still live. The
+`terminal-owner-client-opened-before-ack` window holds after the Supervisor
+registered the real PTY Owner, its native session, exact Owner/shell/business
+kernel identities and before the start acknowledgement; the Owner holds the
+`/dev/ptmx` master and the Supervisor holds none. Its external Worker kill must
+reclaim the Owner/helper/shell/business and reach the terminal `ABORTED_CLEAN`
+receipt. The ordinary terminal-owner loss proof is separate: the exact Owner
+SIGKILL leaves the Host PID/birth/instance live, the Client's kernel terminal is
+proven, and a fresh Client authenticates and exits against the same Host.
+`finalize-compensation-started` expects the compensated `NOT_QUIESCED` receipt and a retained diagnostic root;
 the other windows pass only with the terminal `ABORTED_CLEAN` receipt, the
 exact Host seat free, the registered kernel identities gone or
 provably reused, and — for `clients-ready` — a separate real sibling Scene

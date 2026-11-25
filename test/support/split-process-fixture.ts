@@ -102,6 +102,11 @@ export interface SplitProcessHostHandle {
   readonly scopeId: string
   readonly pgid: number | null
   readonly entryRealpath: string
+  readonly scenario?: string | null
+  readonly crashSignal?: 'SIGHUP' | 'SIGKILL' | null
+  readonly workloadRoot?: string | null
+  readonly holdReleasePath?: string | null
+  readonly jobWorkRoot?: string | null
   exited: boolean
   exitResult?: { code: number | null; signal: NodeJS.Signals | null }
 }
@@ -137,9 +142,25 @@ export interface SplitProcessClientState {
   rows?: number
 }
 
+export interface SplitProcessClientTerminal {
+  kind: 'native' | 'owner-loss'
+  code?: number | null
+  signal?: string | null
+  ownerPid?: number
+  ownerBirth?: string
+  ownerExit?: { code: number | null; signal: string | null }
+  hostPid?: number
+  hostInstanceId?: string
+  [key: string]: unknown
+}
+
 export interface SplitProcessClientExitFacts {
   code: number | null
   signal: string | null
+  kind?: 'native' | 'owner-loss'
+  terminal?: SplitProcessClientTerminal | null
+  ownerPid?: number | null
+  ownerExit?: { code: number | null; signal: string | null } | null
 }
 
 export interface SplitProcessClient {
@@ -156,6 +177,11 @@ export interface SplitProcessClient {
   text(): Promise<string>
   state(): Promise<SplitProcessClientState>
   readRecords(): Record<string, any>[]
+  waitForRecord(
+    predicate: (record: Record<string, any>) => boolean,
+    label: string,
+    timeoutMs?: number,
+  ): Promise<Record<string, any>>
   waitForSurfaceStatus(
     predicate: (record: Record<string, any>) => boolean,
     label: string,
@@ -163,6 +189,16 @@ export interface SplitProcessClient {
   ): Promise<Record<string, any>>
   waitForExit(timeoutMs?: number): Promise<SplitProcessClientExitFacts>
   close(): Promise<SplitProcessClientExitFacts>
+  /** Use the existing current-frame safe /exit path, then close. */
+  exitGracefully(): Promise<void>
+  /** Send one declared product signal to the real business Client PID. */
+  signal(signal: 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void>
+  /** The ONE declared terminal-owner loss; returns the tagged verified fact. */
+  loseTerminalOwner(): Promise<SplitProcessClientTerminal>
+  /** Release the Supervisor-allocated HMR hold barrier exactly once. */
+  releaseHmrHold(): void
+  readonly holdBarrierPath: string | null
+  readonly terminalKind: 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss'
 }
 
 export interface StartProcessClientOptions {
@@ -172,6 +208,11 @@ export interface StartProcessClientOptions {
   sessionId?: string
   cols?: number
   rows?: number
+  hmr?: 'replace' | 'mount-failure' | 'hold'
+  dropPromptAck?: true
+  terminal?: 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss'
+  recoverFromHostId?: string
+  attachRecoveredHostId?: string
 }
 
 /** A bounded official record match; never a Worker-supplied predicate. */
@@ -316,6 +357,7 @@ export interface DiscoveredHostTerminalFacts {
   birth: string | null
   reclaimed: boolean
   registryRemoved: boolean
+  normalStop?: boolean
   scratchEntries: string[]
 }
 
@@ -336,7 +378,10 @@ export interface SplitProcessScene {
   readSupervisorReceipt(): Promise<SupervisorReceipt>
   /** Bounded typed Supervisor IPC, for boundary negatives on a real Scene. */
   request(type: string, payload: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, any>>
-  startHost(): Promise<SplitProcessHostHandle>
+  startHost(options?: {
+    scenario?: 'long-turn' | 'job'
+    crashSignal?: 'SIGHUP' | 'SIGKILL'
+  }): Promise<SplitProcessHostHandle>
   hostStatus(host: SplitProcessHostHandle): Promise<Record<string, any>>
   stopHost(host: SplitProcessHostHandle): Promise<SplitProcessClientExitFacts>
   startClient(options: StartProcessClientOptions): Promise<SplitProcessClient>
@@ -366,7 +411,7 @@ export interface SplitProcessScene {
       schedule?: true
     },
   ): Promise<void>
-  signalEntry(handle: EntryQualificationHandle, signal: EntrySignal): Promise<void>
+  signalEntry(handle: EntryQualificationHandle | SplitProcessHostHandle, signal: EntrySignal | 'SIGHUP'): Promise<void>
   finishEntry(handle: EntryQualificationHandle | SplitProcessHostHandle): Promise<EntryTerminalFacts>
   acceptHostWinner(handle: HostAttemptHandle): Promise<SplitProcessHostHandle>
   runBootstrapCli(mode: 'inherited-host-role' | 'direct-help'): Promise<BootstrapCliFacts>
@@ -374,7 +419,7 @@ export interface SplitProcessScene {
   restoreInstallation(): Promise<void>
   startIdentityWitness(kind: 'live-non-host' | 'linux-zombie'): Promise<IdentityWitnessHandle>
   finishIdentityWitness(handle: IdentityWitnessHandle): Promise<void>
-  reclaimDiscoveredHost(client: QualificationClientHandle): Promise<DiscoveredHostTerminalFacts>
+  reclaimDiscoveredHost(client: QualificationClientHandle | SplitProcessClient): Promise<DiscoveredHostTerminalFacts>
   assertEntrySeatsFree(): Promise<void>
   /** Release one Supervisor-preallocated qualification barrier (file existence). */
   releaseBarrier(handle: EntryQualificationHandle, name: string): void
@@ -472,15 +517,23 @@ interface SupervisorReceipt {
   qualificationHelpers?: Array<Record<string, any>>
   installationMutation?: Record<string, any>
   compensation?: { attempted?: boolean; completed?: boolean; failure?: string }
-  cleanup?: { sceneRootRemoved?: boolean; hostSeatFree?: boolean; qualificationSeatFree?: boolean }
+  cleanup?: { sceneRootRemoved?: boolean; hostsExited?: boolean; hostSeatFree?: boolean; qualificationSeatFree?: boolean }
   processClients?: Array<{
     clientId?: string
     label?: string
     sessionId?: string
     scratch?: string
+    terminal?: string
+    ownerPid?: number | null
+    ownerBirth?: string | null
+    ownerExit?: { code?: number | null; signal?: string | null } | null
     shellPid?: number
     shellBirth?: string
     businessIdentities?: Array<{ pid?: number; birth?: string }>
+    exited?: boolean
+    exitCode?: number | null
+    exitSignal?: string | null
+    verifiedTerminal?: Record<string, any> | null
   }>
   notes?: Array<{ event?: string; detail?: Record<string, any>; at?: string }>
 }
@@ -491,6 +544,8 @@ class ProcessClient implements SplitProcessClient {
   readonly sessionId: string
   readonly recordFile: string
   readonly ready: SplitProcessClientReady
+  readonly holdBarrierPath: string | null
+  readonly terminalKind: 'normal' | 'sigint' | 'hmr-failure' | 'terminal-owner-loss'
   readonly #scene: ProcessScene
   #closed = false
   #exitFacts: SplitProcessClientExitFacts | undefined
@@ -502,6 +557,39 @@ class ProcessClient implements SplitProcessClient {
     this.sessionId = String(payload.sessionId)
     this.recordFile = String(payload.recordFile)
     this.ready = payload.ready as SplitProcessClientReady
+    this.holdBarrierPath = payload.holdBarrier === null || payload.holdBarrier === undefined
+      ? null
+      : String(payload.holdBarrier)
+    this.terminalKind = (payload.terminal ?? 'normal') as ProcessClient['terminalKind']
+  }
+
+  async signal(signal: 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void> {
+    await this.#scene.clientRequest(this.clientId, 'SIGNAL_PROCESS_CLIENT', { signal })
+  }
+
+  async loseTerminalOwner(): Promise<SplitProcessClientTerminal> {
+    const payload = await this.#scene.request('PROCESS_CLIENT_TERMINAL_LOSS', { clientId: this.clientId }, 120_000)
+    this.#closed = true
+    this.#exitFacts = {
+      code: null,
+      signal: null,
+      kind: 'owner-loss',
+      terminal: payload.terminal as SplitProcessClientTerminal,
+      ownerPid: payload.ownerPid ?? null,
+      ownerExit: payload.ownerExit ?? null,
+    }
+    return payload.terminal as SplitProcessClientTerminal
+  }
+
+  releaseHmrHold(): void {
+    const path = this.holdBarrierPath
+    if (path === null) throw new Error(`${this.label}: no Supervisor-allocated HMR hold barrier`)
+    const parent = realpathSync(dirname(path))
+    const rel = relative(this.#scene.workDir, parent)
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) {
+      throw new Error(`${this.label}: the HMR hold barrier parent escapes the Scene root`)
+    }
+    writeFileSync(path, 'release\n', { mode: 0o600, flag: 'wx' })
   }
 
   async type(text: string): Promise<void> {
@@ -531,33 +619,50 @@ class ProcessClient implements SplitProcessClient {
     return readOfficialClientRecords(this.recordFile, this.label)
   }
 
-  async waitForSurfaceStatus(
+  async waitForRecord(
     predicate: (record: Record<string, any>) => boolean,
     label: string,
     timeoutMs = 120_000,
   ): Promise<Record<string, any>> {
     const started = Date.now()
     // Streaming poll: a live JSONL append may end in a partial record, which is
-    // not a malformed line. The final audit below re-reads strictly.
-    const last = (allowIncompleteTail: boolean): Record<string, any> | undefined =>
-      readOfficialClientRecords(this.recordFile, this.label, { allowIncompleteTail })
-        .filter(record => record?.m4b2s === 'surface-status')
-        .at(-1)
+    // not a malformed line. The final strict read below still rejects it.
+    const find = (allowIncompleteTail: boolean): Record<string, any> | undefined =>
+      readOfficialClientRecords(this.recordFile, this.label, { allowIncompleteTail }).find(predicate)
     let stateCheckedAt = 0
     for (;;) {
-      const status = last(true)
-      if (status !== undefined && predicate(status)) return status
+      const record = find(true)
+      if (record !== undefined) return record
       if (Date.now() - stateCheckedAt >= 500) {
         stateCheckedAt = Date.now()
         const state = await this.state()
         if (state.exited) {
-          throw new Error(`${label}: the Client exited before a matching official surface status`)
+          throw new Error(`${label}: the Client exited before a matching official record`)
         }
       }
       if (Date.now() - started >= timeoutMs) {
-        // A status written just before the deadline must not be reported as
-        // missing; a genuinely truncated final line still fails this strict read.
-        const late = last(false)
+        const late = find(false)
+        if (late !== undefined) return late
+        throw new Error(`${label}: no matching official record within ${String(timeoutMs)}ms`)
+      }
+      await sleep(25)
+    }
+  }
+
+  async waitForSurfaceStatus(
+    predicate: (record: Record<string, any>) => boolean,
+    label: string,
+    timeoutMs = 120_000,
+  ): Promise<Record<string, any>> {
+    const started = Date.now()
+    for (;;) {
+      const records = readOfficialClientRecords(this.recordFile, this.label, { allowIncompleteTail: true })
+        .filter(record => record?.m4b2s === 'surface-status')
+      const status = records.at(-1)
+      if (status !== undefined && predicate(status)) return status
+      if (Date.now() - started >= timeoutMs) {
+        const late = readOfficialClientRecords(this.recordFile, this.label)
+          .filter(record => record?.m4b2s === 'surface-status').at(-1)
         if (late !== undefined && predicate(late)) return late
         throw new Error(`${label}: no matching official surface status within ${String(timeoutMs)}ms`)
       }
@@ -566,6 +671,9 @@ class ProcessClient implements SplitProcessClient {
   }
 
   async waitForExit(timeoutMs = 120_000): Promise<SplitProcessClientExitFacts> {
+    if (this.terminalKind === 'terminal-owner-loss') {
+      throw new Error(`${this.label}: a terminal-owner-loss Client has no native exit fact; use loseTerminalOwner()`)
+    }
     const started = Date.now()
     for (;;) {
       const state = await this.state()
@@ -584,6 +692,9 @@ class ProcessClient implements SplitProcessClient {
 
   async close(): Promise<SplitProcessClientExitFacts> {
     if (this.#closed) return this.#exitFacts ?? { code: null, signal: null }
+    if (this.terminalKind === 'terminal-owner-loss') {
+      throw new Error(`${this.label}: the terminal-owner-loss Client must be closed by loseTerminalOwner()`)
+    }
     const payload = await this.#scene.clientRequest(this.clientId, 'CLOSE_PROCESS_CLIENT', {})
     this.#closed = true
     this.#exitFacts = {
@@ -690,8 +801,14 @@ class ProcessScene implements SplitProcessScene {
     return await this.request(type, { clientId, ...payload }, type === 'CLOSE_PROCESS_CLIENT' ? 240_000 : 120_000)
   }
 
-  async startHost(): Promise<SplitProcessHostHandle> {
-    const payload = await this.request('START_HOST', {}, 600_000)
+  async startHost(options: {
+    scenario?: 'long-turn' | 'job'
+    crashSignal?: 'SIGHUP' | 'SIGKILL'
+  } = {}): Promise<SplitProcessHostHandle> {
+    const payload = await this.request('START_HOST', {
+      ...(options.scenario === undefined ? {} : { scenario: options.scenario }),
+      ...(options.crashSignal === undefined ? {} : { crashSignal: options.crashSignal }),
+    }, 600_000)
     const host: SplitProcessHostHandle = {
       hostId: String(payload.hostId),
       entryId: String(payload.hostId),
@@ -701,6 +818,11 @@ class ProcessScene implements SplitProcessScene {
       scopeId: String(payload.scopeId),
       pgid: payload.pgid === null || payload.pgid === undefined ? null : Number(payload.pgid),
       entryRealpath: String(payload.entryRealpath),
+      scenario: payload.scenario ?? null,
+      crashSignal: payload.crashSignal ?? null,
+      workloadRoot: payload.workloadRoot ?? null,
+      holdReleasePath: payload.holdReleasePath ?? null,
+      jobWorkRoot: payload.jobWorkRoot ?? null,
       exited: false,
     }
     return host
@@ -813,7 +935,7 @@ class ProcessScene implements SplitProcessScene {
     }, 60_000)
   }
 
-  async signalEntry(handle: EntryQualificationHandle, signal: EntrySignal): Promise<void> {
+  async signalEntry(handle: EntryQualificationHandle | SplitProcessHostHandle, signal: EntrySignal | 'SIGHUP'): Promise<void> {
     await this.request('SIGNAL_ENTRY', { entryId: handle.entryId, signal }, 60_000)
   }
 
@@ -864,8 +986,10 @@ class ProcessScene implements SplitProcessScene {
     await this.request('FINISH_IDENTITY_WITNESS', { entryId: handle.entryId }, 120_000)
   }
 
-  async reclaimDiscoveredHost(client: QualificationClientHandle): Promise<DiscoveredHostTerminalFacts> {
-    return await this.request('RECLAIM_DISCOVERED_HOST', { entryId: client.entryId }, 240_000) as DiscoveredHostTerminalFacts
+  async reclaimDiscoveredHost(client: QualificationClientHandle | SplitProcessClient): Promise<DiscoveredHostTerminalFacts> {
+    return await this.request('RECLAIM_DISCOVERED_HOST',
+      'clientId' in client ? { clientId: client.clientId } : { entryId: client.entryId },
+      240_000) as DiscoveredHostTerminalFacts
   }
 
   async assertEntrySeatsFree(): Promise<void> {
@@ -919,6 +1043,11 @@ class ProcessScene implements SplitProcessScene {
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(options.cols === undefined ? {} : { cols: options.cols }),
       ...(options.rows === undefined ? {} : { rows: options.rows }),
+      ...(options.hmr === undefined ? {} : { hmr: options.hmr }),
+      ...(options.dropPromptAck === undefined ? {} : { dropPromptAck: options.dropPromptAck }),
+      ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+      ...(options.recoverFromHostId === undefined ? {} : { recoverFromHostId: options.recoverFromHostId }),
+      ...(options.attachRecoveredHostId === undefined ? {} : { attachRecoveredHostId: options.attachRecoveredHostId }),
     }, 600_000)
     const client = new ProcessClient(this, payload)
     this.#clients.push(client)

@@ -32,7 +32,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -47,6 +47,7 @@ const PROCESS_ATS = [
   'host-spawned-before-ack',
   'client-reserved-before-spawn',
   'client-opened-before-ack',
+  'terminal-owner-client-opened-before-ack',
   'clients-ready',
   'fallback-host-ready',
   'host-contenders-spawned',
@@ -61,6 +62,10 @@ const PROCESS_ATS = [
  * windows keep the complete target file, unchanged.
  */
 const PROCESS_AT_TARGETS = new Map([
+  ['terminal-owner-client-opened-before-ack', {
+    file: 'test/integration/split-process/business/client-lifecycle.vitest.ts',
+    title: 'loses the terminal owner without stopping the Host and reconnects a fresh Client',
+  }],
   ['host-contenders-spawned', {
     file: 'test/integration/split-process/business/host-seat.vitest.ts',
     title: 'admits exactly one Host when the same installed profile is started concurrently',
@@ -510,6 +515,22 @@ function isDescendantOf(rows, pid, ancestorPid) {
 }
 
 /** Whether a real installer child of the Supervisor is running for this Scene. */
+/** The real fd links of a live Linux process, read by the external probe. */
+function processFdLinks(pid) {
+  return Object.fromEntries(readdirSync(`/proc/${String(pid)}/fd`).map(name => {
+    try { return [name, readlinkSync(`/proc/${String(pid)}/fd/${name}`)] } catch { return [name, '<unreadable>'] }
+  }))
+}
+
+/** The kernel tty-index of one fd, or undefined when it is not a PTY fd. */
+function processFdTtyIndex(pid, fd) {
+  const info = readFileSync(`/proc/${String(pid)}/fdinfo/${String(fd)}`, 'utf8')
+  const match = /^tty-index:\s*(\d+)$/mu.exec(info)
+  if (match === null) throw new Error(`fd ${String(fd)} of PID ${String(pid)} has no tty-index`)
+  return Number(match[1])
+}
+
+
 function installerProcessRunning(receipt) {
   const supervisorPid = Number(receipt?.supervisor?.pid) || (Number(receipt?.worker?.ppid) + 1)
   const rows = processTable()
@@ -532,6 +553,8 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) problems.push('install is still marked in progress')
+  if (receipt.cleanup?.hostSeatFree !== true) problems.push('the process Scene did not report its Host seat free')
+  if (receipt.cleanup?.qualificationSeatFree !== true) problems.push('the process Scene did not report its Client seat free')
   for (const host of receipt.hosts ?? []) {
     const state = identityLiveness(kernel, host.pid, host.birth)
     if (state !== 'gone' && state !== 'foreign') {
@@ -556,6 +579,15 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
       const state = identityLiveness(kernel, business.pid, business.birth)
       if (state !== 'gone' && state !== 'foreign') {
         problems.push(`process Client ${String(client.label)} business PID is ${state}: ${String(business.pid)}`)
+      }
+    }
+    if (client.ownerPid !== null && client.ownerPid !== undefined) {
+      if (client.ownerExit === null || client.ownerExit === undefined) {
+        problems.push(`process Client ${String(client.label)} Owner has no terminal exit fact`)
+      }
+      const state = identityLiveness(kernel, client.ownerPid, client.ownerBirth)
+      if (state !== 'gone' && state !== 'foreign') {
+        problems.push(`process Client ${String(client.label)} Owner PID is ${state}: ${String(client.ownerPid)}`)
       }
     }
   }
@@ -1060,6 +1092,72 @@ try {
             fail('client-opened-before-ack: the registered shell is not the live kernel process')
           }
           if (client.readyAt !== undefined) fail('client-opened-before-ack: the Client already reached ready')
+        } else if (at === 'terminal-owner-client-opened-before-ack') {
+          const client = (receipt.processClients ?? [])[0]
+          if (client === undefined || client.shellPid === null || client.ownerPid === null) {
+            fail('terminal-owner-client-opened-before-ack: no registered PTY Owner/shell identity')
+          }
+          if (client.terminal !== 'terminal-owner-loss') {
+            fail('terminal-owner-client-opened-before-ack: the Client did not declare the owner-loss terminal')
+          }
+          if (client.readyAt !== undefined) fail('terminal-owner-client-opened-before-ack: the Client already reached ready')
+          if (identityLiveness(kernel, client.ownerPid, client.ownerBirth) !== 'live') {
+            fail('terminal-owner-client-opened-before-ack: the PTY Owner is not the live kernel process')
+          }
+          if (identityLiveness(kernel, client.shellPid, client.shellBirth) !== 'live') {
+            fail('terminal-owner-client-opened-before-ack: the shell is not the live kernel process')
+          }
+          if (!Array.isArray(client.businessIdentities) || client.businessIdentities.length === 0
+            || client.businessIdentities.some(value => identityLiveness(kernel, value.pid, value.birth) !== 'live')) {
+            fail('terminal-owner-client-opened-before-ack: the business identity is not live')
+          }
+          if (!Number.isInteger(client.ownerPid) || !Number.isInteger(client.shellPid)) {
+            fail('terminal-owner-client-opened-before-ack: the owner/shell PID is not a real kernel PID')
+          }
+          const host = (receipt.hosts ?? []).find(value => value.exited !== true)
+          if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
+            fail('terminal-owner-client-opened-before-ack: the authenticated Host is not live at the checkpoint')
+          }
+          if (host.pgid === undefined || !groupAlive(host.pgid)) {
+            fail('terminal-owner-client-opened-before-ack: the authenticated Host group is not live at the checkpoint')
+          }
+          const ownerLinks = processFdLinks(client.ownerPid)
+          if (Object.values(ownerLinks).includes('<unreadable>')) {
+            fail('terminal-owner-client-opened-before-ack: the Owner fd table is unreadable')
+          }
+          const ownerMasters = Object.entries(ownerLinks).filter(([, link]) => link === '/dev/ptmx')
+          if (ownerMasters.length === 0) {
+            fail('terminal-owner-client-opened-before-ack: the Owner process holds no /dev/ptmx master')
+          }
+          const shellLinks = processFdLinks(client.shellPid)
+          const shellTty = shellLinks['0']
+          const ttyMatch = typeof shellTty === 'string' ? /^\/dev\/pts\/(\d+)$/u.exec(shellTty) : null
+          if (ttyMatch === null) fail('terminal-owner-client-opened-before-ack: the shell has no pts index')
+          const shellTtyIndex = Number(ttyMatch[1])
+          const ownerMasterIndexes = ownerMasters.map(([fd]) => processFdTtyIndex(client.ownerPid, fd))
+          const matchingOwnerMasters = ownerMasterIndexes.filter(index => index === shellTtyIndex)
+          if (matchingOwnerMasters.length === 0) {
+            fail(`terminal-owner-client-opened-before-ack: the Owner has no matching ptmx master for ${String(shellTty)}`)
+          }
+          if (ownerMasterIndexes.some(index => index !== shellTtyIndex)) {
+            fail(`terminal-owner-client-opened-before-ack: the Owner has a ptmx master for another tty (${JSON.stringify(ownerMasterIndexes)})`)
+          }
+          const supervisorPid = receipt.supervisor?.pid
+          if (!Number.isInteger(supervisorPid)) fail('terminal-owner-client-opened-before-ack: no Supervisor PID')
+          const supervisorLinks = processFdLinks(supervisorPid)
+          const matchingSupervisorMasters = Object.entries(supervisorLinks)
+            .filter(([, link]) => link === '/dev/ptmx')
+            .filter(([fd]) => processFdTtyIndex(supervisorPid, fd) === shellTtyIndex)
+          if (matchingSupervisorMasters.length !== 0) {
+            fail('terminal-owner-client-opened-before-ack: the Supervisor holds the matching ptmx master')
+          }
+          if (typeof shellLinks['0'] !== 'string' || !shellLinks['0'].startsWith('/dev/pts/')) {
+            fail('terminal-owner-client-opened-before-ack: the shell has no controlling pts')
+          }
+          const shellObservation = kernel.read(client.shellPid)
+          if (shellObservation.kind !== 'alive' || shellObservation.identity.ppid !== client.ownerPid) {
+            fail('terminal-owner-client-opened-before-ack: the shell is not the Owner direct child')
+          }
         } else if (at === 'host-contenders-spawned') {
           const contenders = (receipt.hosts ?? []).filter(value => value.mode === 'seat-race')
           if (contenders.length < 2) fail('host-contenders-spawned: fewer than two registered contenders')
