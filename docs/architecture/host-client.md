@@ -1611,9 +1611,69 @@ workspace/question/approval store and keeps no cross-session cache.
   for another Session. Its existing in-process Question/Approval modal and
   Session/Writer/Navigation lifecycle are unchanged.
 
+### Selected Session Inspector (exact projection read)
+
+The Session Workspace also answers the ONE selected main Session's full facts
+without touching the roster summary or the activity sample:
+
+- **Authority.** `SessionWorkspaceFactsPort.openInspector(sessionId,
+  onInvalidated)` opens ONE caller-owned source for the already-authorized main
+  Session id; `session-inspector-projection.ts` maps exactly these official
+  projection keys to a detached `SessionInspectorData`: `sessionStats`,
+  `tokenUsage`, `contextPressure`, `modelSelection`, `agentPreset`, `title`,
+  `workingDirectory`, `goal`, `todos`. The whole-log `sessionStats` unit is
+  summary-excluded, so it is read only through this exact path; raw buckets,
+  totals and averages are derived from the official values, and a missing or
+  malformed unit omits its own group (never a fabricated zero). The context
+  occupancy is explicitly approximate; `migration-required` is a refusal, not
+  a value. The standard bundle declares the official
+  `@deepseek-ai/dsh-session-stats` row once under its historical
+  `split-host-session-stats` id; the Host-only overlay only withdraws its Direct
+  `tuiStartup` admission gate, so a standard Direct or Split Host registers the
+  unit exactly once.
+- **Direct.** An attached Session reads ONE synchronous official
+  `sessionProjections.snapshot(session, keys)` cut. A cold Session uses the
+  official `sessionPersistence.stat` and then one caller-owned, non-activating
+  `sessionQuery.observeSession(sessionId, {projectionMode:'all'})` lease; a
+  `migration-required` stat is refused BEFORE the observation. It never retains,
+  resumes, activates, migrates or materializes the Session, and it reads no
+  Agent status or list hint into the DTO.
+- **Remote.** The selected Session reads ONE passive official
+  `session.projections` unary at that id. Only a `sequenced` envelope with an
+  exact cut is a value; `migration-required`, `cached`, null and unknown
+  envelopes are truthful non-values. The source subscribes only for
+  invalidation witness: the selected id's relevant stored projection values, its
+  official list-row running bit, the borrowed binding identity and the
+  Connection generation. A relevant same-identity change is `changed`; a
+  generation/binding identity or authorization change is `source-replaced` and
+  revokes the prior cut. It never calls `refreshProjections`, `retainInfo`/
+  `retain`, polls, or uses merged list hints as an exact value. A missing
+  generation or unlisted target performs no RPC.
+- **Presentation and lifecycle.** The TUI renderer reports only the typed main
+  Session its committed frame really painted (never a Folder, Show more, Add,
+  Reader, inline directory editor or search editor without a painted result).
+  The read owner debounces a settled selection (~150 ms), keeps at most ONE
+  physical exact read per open, coalesces same-source changes into ONE trailing
+  read, and fences every result by the panel, selection/source epoch and the
+  request identity. A roster removal clears the selection at the acceptance
+  boundary; retire aborts the source/request without waiting for the network.
+  The report carries the presenter's actual Browse/Search provenance. A Search
+  target must still be an ACCEPTED search result (main roster membership alone
+  is insufficient): its source/timer/flight is retired synchronously at the
+  search/roster acceptance boundary, before that accepted state is published.
+  A same-id provenance change keeps the source and cut. An Inspector-only
+  publication is explicitly marked: presenters store the detached data without
+  advancing native action/target revision or requesting a render while no
+  Inspector UI is painted. A late or stale result is inert. The DTO carries no
+  Session-switch authority:
+  the renderer may present it later, while the existing Browser Resume owner
+  remains the only switch authority. This seam is data-only; a later visual
+  surface consumes it without changing the read owner.
+
 Authority: `src/runtime/session-workspace-facts-port.ts`,
 `src/runtime/remote/session-workspace-facts-remote.ts`,
-`src/runtime/direct/session-workspace-facts-direct.ts`; the port is a required
+`src/runtime/direct/session-workspace-facts-direct.ts`,
+`src/runtime/session-inspector-projection.ts`; the port is a required
 read-only `Backend` member served once by the Direct assembly and the ONE
 Remote M3A assembly.
 

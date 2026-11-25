@@ -203,18 +203,14 @@ function assertDirectoryBrowseComposition(
 
 /** The thirteen Host execution rows whose lifetime must not depend on the
  *  mutable `tuiStartup` provider: `webserver` / `workspace-files` /
- *  `workspace-controller` / `directory-picker` are the four existing rows
- *  overridden in place, the other nine are the Host-only inserted rows.
- *  The rc.2 official `deepseek-account` owner is a BASE row (not an overlay
- *  row): the overlay must not mount a second account controller. */
+ *  `workspace-controller` / `directory-picker` / `split-host-session-stats` are
+ *  the five existing bundle rows overridden in place, the other eight are the
+ *  Host-only inserted rows. The rc.2 official `deepseek-account` owner is a
+ *  BASE row (not an overlay row): the overlay must not mount a second account
+ *  controller. */
 const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string[] }> = [
-  { id: 'webserver', inject: [] },
-  { id: 'workspace-files', inject: [] },
-  { id: 'workspace-controller', inject: [] },
-  { id: 'directory-picker', inject: [] },
   { id: 'split-host-connection', inject: ['credentials', 'webServer'] },
   { id: 'split-host-file-upload', inject: ['agents', 'attachments', 'commands', 'connection'] },
-  { id: 'split-host-session-stats', inject: ['sessionProjections'] },
   { id: 'split-host-turn-outline', inject: ['sessionProjections'] },
   {
     id: 'split-host-session-controller',
@@ -253,12 +249,21 @@ function assertHostExecutionInject(entries: readonly OverlayEntry[]): void {
         true, 'the overlay must only enable the bundle-declared Host Runtime row')
     }
   }
-  // The three existing rows are overridden in place; inserting them again would
-  // create a second service owner instead of retuning the production row.
-  for (const id of ['webserver', 'workspace-files', 'workspace-controller', 'directory-picker']) {
+  // The existing bundle rows are overridden in place; inserting them again would
+  // create a second service owner instead of retuning the production row. The
+  // official session-stats row keeps its own bundle declaration and only
+  // withdraws the Direct `tuiStartup` admission gate.
+  for (const { id, inject } of [
+    { id: 'webserver', inject: [] },
+    { id: 'workspace-files', inject: [] },
+    { id: 'workspace-controller', inject: [] },
+    { id: 'directory-picker', inject: [] },
+    { id: 'split-host-session-stats', inject: ['sessionProjections'] },
+  ]) {
     const topLevel = entries.filter(entry => entry.insert === undefined && entry.id === id)
     assert.equal(topLevel.length, 1, `the overlay must declare exactly one top-level "${id}" override`)
-    assert.deepEqual(topLevel[0].inject, [], `the "${id}" top-level override must inject nothing`)
+    assert.deepEqual(topLevel[0].inject, inject, `the "${id}" top-level override inject mismatch`)
+    assert.equal(topLevel[0].name, undefined, `the "${id}" in-place override must not re-declare the package`)
   }
 }
 
@@ -320,9 +325,20 @@ test('the Host-only overlay declares the official Host service rows and only ENA
   assert.equal(OVERLAY_ROWS.filter(candidate => candidate.id.startsWith('split-host-')).length, 10,
     'the overlay must own the two B1 rows, seven official Host service rows and the enable-only runtime row')
   for (const { id, name } of FOUNDATION_ROWS) {
-    if (id === 'split-host-pi-tui-runtime') continue
+    if (id === 'split-host-pi-tui-runtime' || id === 'split-host-session-stats') continue
     assert.equal(row(id).name, name)
   }
+  // PR2: the official whole-log stats row is now the BUNDLE's single
+  // declaration; the Host-only overlay only retunes its inject and must not
+  // re-declare (or duplicate) the package.
+  const statsBundle = BUNDLE_ROWS.filter(candidate => candidate.id === 'split-host-session-stats')
+  assert.equal(statsBundle.length, 1, 'the bundle must own exactly one official session-stats row')
+  assert.equal(statsBundle[0].name, '@deepseek-ai/dsh-session-stats')
+  assert.deepEqual(statsBundle[0].inject, ['tuiStartup', 'sessionProjections'],
+    'Direct keeps the command-line admission gate; the Host-only overlay withdraws it')
+  assert.deepEqual(row('split-host-session-stats').inject, ['sessionProjections'])
+  assert.deepEqual(row('split-host-session-stats'), { id: 'split-host-session-stats', inject: ['sessionProjections'] },
+    'the Host-only override only retunes the bundle row')
   // The package runtime stays ONE combined row, but the BUNDLE declares it: the
   // official ConfigEditor refuses to persist an entry whose config a home patch
   // or command-line overlay overrides, and this row is the Split Host's ONE live
@@ -471,14 +487,14 @@ test('the protected thirteen-row dependency assertion rejects a duplicated prote
   const insertEntry = OVERLAY_ENTRIES.find(entry => entry.insert !== undefined)
   const insertRows = insertEntry?.insert
   assert.ok(insertRows !== undefined, 'the overlay must insert the Host execution rows')
-  const protectedRow = insertRows.find(candidate => candidate.id === 'split-host-session-stats')
+  const protectedRow = insertRows.find(candidate => candidate.id === 'split-host-turn-outline')
   assert.ok(protectedRow !== undefined, 'the negative control needs one real protected row to duplicate')
   const duplicated = OVERLAY_ENTRIES.map(entry => entry === insertEntry
     ? { ...entry, insert: [...insertRows, protectedRow] }
     : entry)
   assert.throws(
     () => assertHostExecutionInject(duplicated),
-    /the overlay must own exactly one "split-host-session-stats" row/u,
+    /the overlay must own exactly one "split-host-turn-outline" row/u,
     'the negative control must reject the duplicated row itself',
   )
 })

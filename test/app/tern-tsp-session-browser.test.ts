@@ -5,13 +5,18 @@ import { connect, type PickerGroup } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../../src/app/command/session-browser-read.ts'
 import type { SessionBrowserOpenOptions, SessionBrowserReadOwnerOptions } from '../../src/app/command/session-browser-read.ts'
+import type {
+  SessionBrowserPanelRequest,
+  SessionBrowserReadSnapshot,
+} from '../../src/app/command/session-browser-presentation.ts'
+import { TspSessionBrowser } from '../../src/tui/tsp/session-browser.ts'
 import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../../src/runtime/session-reader-port.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { findSessionMatch, formatSessionAge } from '../../src/tui/pickers/sessions.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 import type { SessionScope } from '../../src/app/session/scope.ts'
-import type { SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
+import type { SessionInspectorData, SessionWorkspaceFactsPort } from '../../src/runtime/session-workspace-facts-port.ts'
 import {
   layerNodes,
   pickerActionByBase,
@@ -218,12 +223,23 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   let presentedInitialDirectoryPath: string | undefined
   let presentedHandleDisposed: boolean | undefined
   let latestPresentedHandle: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserPanelHandle | undefined
+  const inspectorSelections: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
   const readPresentation = {
     open: (request: Parameters<typeof browserPresentation.open>[0]) => {
       presentedDirectoryEntry = request.initialDirectoryChooser
       presentedInitialDirectoryEntry = request.initialDirectoryEntry
       presentedInitialDirectoryPath = request.initialDirectoryPath
-      const handle = browserPresentation.open(request)
+      // Record what the REAL native Presenter itself reports (its committed
+      // renderLayer), while still forwarding every report to the read owner.
+      const own = request.onInspectorSelection
+      const observed = own === undefined ? request : {
+        ...request,
+        onInspectorSelection: (selection: import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined) => {
+          inspectorSelections.push(selection)
+          own(selection)
+        },
+      }
+      const handle = browserPresentation.open(observed)
       latestPresentedHandle = handle
       presentedHandleDisposed = handle.isDisposed()
       return handle
@@ -274,6 +290,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     presentedInitialDirectoryPath: () => presentedInitialDirectoryPath,
     presentedHandleDisposed: () => presentedHandleDisposed,
     presentedHandleIsDisposed: () => latestPresentedHandle?.isDisposed(),
+    inspectorSelections,
     moveSubject: () => { current = false },
   }
 }
@@ -1595,4 +1612,194 @@ test('native Session: a KV re-render and a resize never remount the Reader body'
   assert.notEqual(detailBody(pane)!.id, bodyId, 'a new reading gets its own scroll body')
   assert.deepEqual(detailGroups(pane), factsBefore, 'and it reads the same facts again')
   assert.equal(m.resumeIntents.length, 0, 'nothing on this page wrote or resumed')
+})
+
+// ── Session Workspace PR2: the real native Presenter selection report ───────
+
+test('TSP PR2: the real presenter reports only its typed Session row and clears on Folder/Details', async (t) => {
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    observeActivity: () => inertActivityObservation(),
+    followWorkspaces: (signal) => ({
+      isCurrent: () => true,
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'baseline' as const,
+          items: [{
+            workspaceId: 'ws-current',
+            path: '/workspace/project',
+            title: 'Workspace',
+            sessionIds: ['session-current', 'session-other'],
+          }],
+        }
+        // Keep the observation OPEN: a normal stream end is a truthful
+        // membership loss, not a baseline this case is testing.
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('the baseline Folder row', () => items(pane).some(item => item.id === 'workspace:ws-current'))
+  await waitUntil('the initial typed selection report', () => m.inspectorSelections.at(-1)?.sessionId === 'session-current')
+
+  sendSelect(pane, 'workspace:ws-current', picker(pane)!.id)
+  await waitUntil('the Folder selection report', () => m.inspectorSelections.at(-1) === undefined)
+  sendSelect(pane, 'session:session-other', picker(pane)!.id)
+  await waitUntil('the Session selection report', () => m.inspectorSelections.at(-1)?.sessionId === 'session-other')
+
+  pane.key('\t')
+  await waitUntil('the Footer focuses Details', () =>
+    ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>)
+      .some(action => String(action.label).includes('Details [Enter]')))
+  pane.key('\r')
+  await waitUntil('the Details Reader opens', () => details(pane) !== undefined)
+  assert.equal(m.inspectorSelections.at(-1), undefined,
+    'the full-width Details Reader has no selectable Session target')
+  pane.key('\x1b')
+  await waitUntil('the Details Reader closes', () => details(pane) === undefined && picker(pane) !== undefined)
+  await waitUntil('the restored native selection report', () => m.inspectorSelections.at(-1)?.sessionId === 'session-other')
+
+  // A resize repaints the SAME typed selection; it never reports a different one.
+  const reports = m.inspectorSelections.length
+  sendResize(pane, 90)
+  await waitUntil('the resized frame publishes', () => m.inspectorSelections.length > reports)
+  assert.deepEqual(m.inspectorSelections.at(-1), { sessionId: 'session-other', origin: 'browse' })
+  assert.equal(m.resumeIntents.length, 0, 'reporting a selection never resumes or opens a Session')
+})
+
+test('TSP PR2: inspector-only data never invalidates a painted native action', async (t) => {
+  let resolveRead!: (result: { readonly kind: 'ready'; readonly data: SessionInspectorData }) => void
+  let reads = 0
+  const gate = new Promise<{ readonly kind: 'ready'; readonly data: SessionInspectorData }>((resolve) => { resolveRead = resolve })
+  const data: SessionInspectorData = {
+    sessionId: 'session-current',
+    asOfSeq: 1,
+    stats: { turns: 1, steps: 1, llmMs: 10, toolMs: 0 },
+  }
+  const facts: SessionWorkspaceFactsPort = {
+    readActivity: async () => [],
+    observeActivity: () => inertActivityObservation(),
+    followWorkspaces: (signal) => ({
+      isCurrent: () => true,
+      dispose() {},
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'baseline' as const,
+          items: [{
+            workspaceId: 'ws-current',
+            path: '/workspace/project',
+            title: 'Workspace',
+            sessionIds: ['session-current', 'session-other'],
+          }],
+        }
+        if (signal?.aborted === true) return
+        await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
+      },
+    }),
+    openInspector: () => ({
+      read: async () => { reads += 1; return gate },
+      dispose() {},
+    }),
+  }
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
+  }), false, 'ready', {}, { sessionBrowser: true }, facts)
+  const { pane } = m
+  await waitUntil('the baseline Folder row', () => items(pane).some(item => item.id === 'workspace:ws-current'))
+  await waitUntil('the initial typed selection report', () =>
+    m.inspectorSelections.at(-1)?.sessionId === 'session-current')
+  const pickerId = picker(pane)!.id
+  const detailsAction = pickerActionByBase(pane, 'details', BROWSER)
+  assert.ok(detailsAction !== undefined, 'the committed native details action exists')
+  const token = String(detailsAction.id)
+  assert.match(token, /#\d+$/u, 'the native action token embeds the committed revision')
+
+  resolveRead({ kind: 'ready', data })
+  await waitUntil('the selected Inspector read settles', () => reads === 1)
+  // Let the owner's settled result publish through the shared snapshot seam.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(String(pickerActionByBase(pane, 'details', BROWSER)?.id), token,
+    'inspector-only data must not advance the native action revision')
+  sendAction(pane, token, undefined, pickerId)
+  await waitUntil('the painted native details action is admitted', () => details(pane) !== undefined)
+})
+
+test('TSP PR2: a Search-result snapshot reports Search provenance', () => {
+  const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const presenter = new TspSessionBrowser({
+    surfaceId: 'session-browser-pr2-search',
+    render() {},
+    canInteract: () => true,
+    notify() {},
+    nativeScroll() {},
+    scrollSupported: false,
+    nativeKv: false,
+  })
+  const request: SessionBrowserPanelRequest = {
+    subject: { currentSessionId: 'session-current', currentCwd: '/workspace/project', isCurrent: () => true },
+    onQueryChange() {},
+    onResumeIntent() {},
+    onInspectorSelection: selection => { reports.push(selection) },
+    onClose() {},
+  }
+  const handle = presenter.presentation.open(request)
+  handle.setSnapshot({
+    listState: 'ready',
+    rows: [row('session-current'), row('session-other')],
+    query: 'needle',
+    resumePending: false,
+    searchState: 'ready',
+    searchResults: [{ row: row('session-other'), source: 'Content', snippet: 'hit' }],
+    hasMore: false,
+    listRevision: 1,
+  })
+  presenter.renderLayer()
+  assert.deepEqual(reports.at(-1), { sessionId: 'session-other', origin: 'search' },
+    'the native query layer, not an id guess, supplies Search provenance')
+  presenter.retire()
+})
+
+test('TSP PR2: suspend clears the reported target before hiding; the next resume re-reports it', () => {
+  const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const presenter = new TspSessionBrowser({
+    surfaceId: 'session-browser-pr2-suspend',
+    render() {},
+    canInteract: () => true,
+    notify() {},
+    nativeScroll() {},
+    scrollSupported: false,
+    nativeKv: false,
+  })
+  const request: SessionBrowserPanelRequest = {
+    subject: { currentSessionId: 'session-current', currentCwd: '/workspace/project', isCurrent: () => true },
+    onQueryChange() {},
+    onResumeIntent() {},
+    onInspectorSelection: selection => { reports.push(selection) },
+    onClose() {},
+  }
+  const handle = presenter.presentation.open(request)
+  const snapshot: SessionBrowserReadSnapshot = {
+    listState: 'ready',
+    rows: [row('session-current'), row('session-other', { updatedAt: 90 })],
+    query: '',
+    resumePending: false,
+    searchState: 'idle',
+    searchResults: [],
+    hasMore: false,
+    listRevision: 1,
+  }
+  handle.setSnapshot(snapshot)
+  presenter.renderLayer()
+  assert.equal(reports.at(-1)?.sessionId, 'session-current', 'the committed browse frame reports its typed Session')
+  presenter.suspend()
+  assert.equal(reports.at(-1), undefined, 'a suspended/hidden page reports no live Session target')
+  presenter.renderLayer()
+  assert.equal(reports.at(-1)?.sessionId, 'session-current', 'the resumed frame re-reports the same typed Session')
+  presenter.retire()
 })

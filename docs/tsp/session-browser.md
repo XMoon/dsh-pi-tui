@@ -105,6 +105,17 @@ production default; TSP keeps the experimental opt-in described in
   migration it performs.
 - Details is one read-only native Overlay Reader. Back or Esc returns to the same Picker and retains query/selection. Each reading owns a distinct Reader/
   body/scroll identity; no Resume action is offered from Details.
+- The native Browser reports its typed Session-row selection (Browse and
+  Search-results rows only; a Folder, Show more, Details page, directory editor
+  or suspended Browser reports none) to the SAME shared
+  [`SessionBrowserReadOwner` selected-Session Inspector seam](../architecture/host-client.md#selected-session-inspector-exact-projection-read).
+  The owner owns the debounce, exact read, fences and teardown; TSP performs no
+  read of its own and paints no Inspector data of its own. It reports Browse
+  versus Search from the actual query-mode layer. An Inspector-only publication
+  stores detached data without advancing the native revision, invalidating a
+  painted action token or requesting a rerender; normal semantic snapshots keep
+  the existing action admission. The Details Reader, Action Bar, query and
+  Resume semantics are unchanged.
 - Details presents the Identity, Activity, Lineage and Configuration groups in
   reading order. Where the pane negotiated the `kv` kind each of those groups is
   one aligned grid; where it did not, the same facts are the original muted-label

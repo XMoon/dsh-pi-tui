@@ -25,7 +25,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { boot, loadProfileDirectory } from '@deepseek-ai/dsh-app-boot'
+import { parse as parseYaml } from 'yaml'
+import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import type { ScheduleCatalogEntry, ScheduleService } from '@deepseek-ai/dsh-schedule'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
@@ -52,6 +56,10 @@ const HEADLESS_HOST_PATCHES = [
   { id: 'workspace-files', inject: [] },
   { id: 'webserver', inject: [] },
   { id: 'workspace-controller', inject: [] },
+  // The bundle's ONE official session-stats row is retuned exactly like the
+  // real Host-only overlay: withdraw the Direct `tuiStartup` admission gate so
+  // the long-lived Host keeps the whole-log unit after the TUI is gone.
+  { id: 'split-host-session-stats', inject: ['sessionProjections'] },
   { id: 'pi-tui-schedule', inject: ['sessionController'] },
   { id: 'pi-tui-direct-connection', inject: ['credentials', 'webServer'] },
   { id: 'pi-tui-direct-file-upload', inject: ['agents', 'attachments', 'commands', 'connection'] },
@@ -64,6 +72,25 @@ const HEADLESS_HOST_PATCHES = [
   },
 ]
 
+/** Normal Direct admission: only the UI runner and unrelated surface rows are
+ *  stood down; `tui-startup` stays ACTIVE, so the standard stats row resolves
+ *  its production `tuiStartup` + `sessionProjections` injects unchanged. */
+const DIRECT_HOST_PATCHES = [
+  { id: 'hmr', disabled: true },
+  { id: 'tui-app', disabled: true },
+  { id: 'pi-tui-extension-host', disabled: true },
+  { id: 'pi-tui-builtins', disabled: true },
+  { id: 'pi-tui-performance-host', disabled: true },
+  { id: 'pi-tui-visual-tools', disabled: true },
+  { id: 'pi-tui-web-preferences', disabled: true },
+]
+
+/** The REAL Host-only overlay used by the Split Host process. */
+const SPLIT_HOST_PATCHES = [
+  { id: 'hmr', disabled: true },
+  ...parseYaml(HOST_ONLY_PATCH) as Array<Record<string, unknown>>,
+]
+
 interface BootedHost {
   readonly ctx: Context
   readonly workRoot: string
@@ -71,7 +98,7 @@ interface BootedHost {
 }
 
 /** Provision one profile over THIS checkout and boot it through the real Loader. */
-async function bootHost(root: string): Promise<BootedHost> {
+async function bootHost(root: string, mode: 'headless' | 'direct' | 'split' = 'headless'): Promise<BootedHost> {
   const profileDir = join(root, 'profile')
   const installationDir = join(root, 'installation')
   // One flat installation tree over THIS checkout's own dependency graph: the
@@ -108,7 +135,7 @@ async function bootHost(root: string): Promise<BootedHost> {
   const patches = [
     ...profile.layers.flatMap(layer => layer.patches),
     ...profile.patches,
-    ...HEADLESS_HOST_PATCHES,
+    ...(mode === 'direct' ? DIRECT_HOST_PATCHES : mode === 'split' ? SPLIT_HOST_PATCHES : HEADLESS_HOST_PATCHES),
   ]
   const home = join(root, 'home')
   mkdirSync(home, { recursive: true })
@@ -131,7 +158,10 @@ async function bootHost(root: string): Promise<BootedHost> {
         overlays: [],
         telemetryDisabledEnv: undefined,
       })
-      hostCtx.provide('cmdlineArgs', [])
+      hostCtx.provide('cmdlineArgs', { get: () => [] })
+      // The launcher normally owns this service; the headless profile fixture
+      // must provide it before the standard tui-startup row mounts.
+      hostCtx.provide('appExit', () => {})
     }, pathToFileURL(installationManifest).href)
     return {
       ctx,
@@ -234,6 +264,7 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal(count('pi-tui-direct-file-upload'), 1, 'exactly one Direct FileUploads row')
   assert.equal(count('pi-tui-direct-connection'), 1, 'exactly one Direct Connection row')
   assert.equal(count('split-host-session-controller'), 0, 'a Direct Host mounts no split Session controller')
+  assert.equal(count('split-host-session-stats'), 1, 'the bundle owns exactly ONE official session-stats row')
 
   const schedule = host.ctx.get('schedule') as unknown as ScheduleService
   const controller = host.ctx.get('sessionController') as unknown as SessionController
@@ -311,6 +342,134 @@ test('L5: the real profile mounts ONE Host Schedule closure and delivers through
   assert.equal(changes.length, settled, 'the unsubscribed listener never hears another commit')
   const afterDelete = await schedule.view({ id: existing.id })
   assert.equal('code' in afterDelete, true, 'the deleted task is really gone')
+})
+
+test('L5: the real profile mounts the ONE official session-stats row and folds a real closed step', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('session-stats-loader')
+  const host = await bootHost(root)
+  life.defer(() => host.dispose())
+
+  const session = host.ctx.sessions.create(SessionId('loader-stats-proof'), { meta: { cwd: host.workRoot } })
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: MessageId('stats-proof'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [{ type: 'chunk', time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
+    usage: { inputTokens: 3, outputTokens: 7 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  const registry = host.ctx.get('sessionProjections') as {
+    snapshot(session: unknown, keys?: readonly string[]): {
+      readonly asOfSeq: number
+      readonly values: Readonly<Record<string, unknown>>
+    }
+  }
+  const snapshot = registry.snapshot(session, ['sessionStats'])
+  const stats = snapshot.values.sessionStats as
+    | { readonly turns: number; readonly steps: number; readonly decodeTokens: number }
+    | undefined
+  assert.ok(stats !== undefined, 'the real Loader row must register the whole-log sessionStats unit')
+  assert.equal(stats.turns, 1)
+  assert.equal(stats.steps, 1)
+  assert.equal(stats.decodeTokens, 7)
+})
+
+test('L5: the normal Direct Loader activates the ONE official stats unit with positive data', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('session-stats-direct')
+  const host = await bootHost(root, 'direct')
+  life.defer(() => host.dispose())
+
+  const loader = host.ctx.get('loader') as {
+    entries(): Iterable<{ readonly options?: { readonly id?: string } }>
+  }
+  assert.equal([...loader.entries()].filter(entry => entry.options?.id === 'split-host-session-stats').length, 1,
+    'the normal Direct composition must activate exactly ONE official stats unit')
+
+  const session = host.ctx.sessions.create(SessionId('direct-stats-proof'), { meta: { cwd: host.workRoot } })
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: MessageId('direct-stats-message'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [{ type: 'chunk', time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
+    usage: { inputTokens: 3, outputTokens: 7 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  const registry = host.ctx.get('sessionProjections') as {
+    snapshot(session: unknown, keys?: readonly string[]): {
+      readonly values: Readonly<Record<string, unknown>>
+    }
+  }
+  const stats = registry.snapshot(session, ['sessionStats']).values.sessionStats as
+    | { readonly turns: number; readonly steps: number; readonly decodeTokens: number }
+    | undefined
+  assert.ok(stats !== undefined, 'normal Direct Loader admission must register the official stats row')
+  assert.equal(stats.turns, 1)
+  assert.equal(stats.steps, 1)
+  assert.equal(stats.decodeTokens, 7)
+})
+
+test('L5: the REAL Split Host-only overlay activates the ONE official stats unit with positive data', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('session-stats-split')
+  const host = await bootHost(root, 'split')
+  life.defer(() => host.dispose())
+
+  const loader = host.ctx.get('loader') as {
+    entries(): Iterable<{ readonly options?: { readonly id?: string } }>
+  }
+  assert.equal([...loader.entries()].filter(entry => entry.options?.id === 'split-host-session-stats').length, 1,
+    'the real Split Host overlay must activate exactly ONE official stats unit')
+
+  const session = host.ctx.sessions.create(SessionId('split-stats-proof'), { meta: { cwd: host.workRoot } })
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: MessageId('split-stats-message'),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [{ type: 'chunk', time: Date.now(), chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
+    usage: { inputTokens: 3, outputTokens: 7 },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  const registry = host.ctx.get('sessionProjections') as {
+    snapshot(session: unknown, keys?: readonly string[]): {
+      readonly values: Readonly<Record<string, unknown>>
+    }
+  }
+  const stats = registry.snapshot(session, ['sessionStats']).values.sessionStats as
+    | { readonly turns: number; readonly steps: number; readonly decodeTokens: number }
+    | undefined
+  assert.ok(stats !== undefined, 'the Split Host must serve a nonempty official sessionStats cut after admission')
+  assert.equal(stats.turns, 1)
+  assert.equal(stats.steps, 1)
+  assert.equal(stats.decodeTokens, 7)
 })
 
 /** A bounded observation of one authoritative fact: the assertion fails with

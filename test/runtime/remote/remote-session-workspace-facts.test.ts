@@ -222,6 +222,16 @@ interface Harness {
   setGeneration(id: string | undefined): void
   /** Fire the official list notification (the same subscribers the adapter holds). */
   notifyList(): void
+  /** Replace the official listed rows (membership/order/running inputs). */
+  setListed(next: readonly SessionSummary[]): void
+  /** Replace one official list row's running bit. */
+  setRunning(id: string, running: boolean): void
+  /** Replace one Session's shared-store projection values (a scheduling witness). */
+  setProjectionValues(id: string, values: RemoteProjectionValues | undefined): void
+  /** Replace the borrowed binding identity (or remove it). */
+  setBinding(next: unknown): void
+  /** The live subscription counts, for dispose proof. */
+  subscribers(): { readonly list: number; readonly generation: number }
 }
 
 function harness(options: {
@@ -244,11 +254,22 @@ function harness(options: {
   initialGeneration?: RemoteSessionWorkspaceFactsSource['initialGeneration']
   /** Register a callback that receives the official list notification. */
   onListNotify?: (notify: () => void) => void
+  /** The borrowed official binding identity (undefined = no binding, legal). */
+  binding?: unknown
 }): Harness {
   const stateCalls: string[] = []
   const projectionCalls: string[] = []
   const otherCalls: string[] = []
   let generation = options.noGeneration === true ? undefined : { id: 'gen-1' }
+  let listed = options.listed ?? []
+  let binding = options.binding
+  let projectionStore = options.projectionsBySession ?? {}
+  // The PR1 cases mutate their OWN `listedRunning` record in place to simulate
+  // an official list transition; keep reading the caller's live record and use
+  // the override map only for the Inspector-specific controlled setters.
+  const runningOverrides = new Map<string, boolean>()
+  const runningOf = (id: string): boolean =>
+    runningOverrides.get(id) ?? options.listedRunning?.[id] ?? false
   const generationListeners = new Set<() => void>()
   const generationSource: RemoteConnectionGenerationSource = {
     getSnapshot: () => generation,
@@ -257,7 +278,6 @@ function harness(options: {
       return () => { generationListeners.delete(listener) }
     },
   }
-  const listed = options.listed ?? []
   const listListeners = new Set<() => void>()
   const sessions = {
     list: {
@@ -265,11 +285,12 @@ function harness(options: {
         ids: listed.map(row => row.id),
         byId: Object.fromEntries(listed.map(row => [row.id, {
           id: row.id,
-          running: options.listedRunning?.[row.id] ?? false,
+          running: runningOf(row.id),
           updatedAt: row.updatedAt,
+          ...(row.origin === undefined ? {} : { origin: row.origin }),
         }])),
         phase: options.listPhase ?? 'ready',
-        projectionsBySession: options.projectionsBySession ?? {},
+        projectionsBySession: projectionStore,
       }),
       subscribe: (listener: () => void) => {
         listListeners.add(listener)
@@ -279,7 +300,7 @@ function harness(options: {
     },
     refresh: async () => { otherCalls.push('refresh') },
     search: async () => ({ ok: true, value: { items: [], hasMore: false } }),
-    binding: () => { otherCalls.push('binding'); return undefined },
+    binding: () => { otherCalls.push('binding'); return binding },
   } as unknown as RemoteSessionsReadSource
   const session: RemoteSessionFactsRemotes['session'] = {
     async state(request) {
@@ -333,6 +354,16 @@ function harness(options: {
     notifyList: () => {
       for (const listener of [...listListeners]) listener()
     },
+    setListed: next => { listed = next },
+    setRunning: (id, running) => { runningOverrides.set(id, running) },
+    setProjectionValues: (id, values) => {
+      const next = { ...projectionStore }
+      if (values === undefined) delete next[id]
+      else next[id] = { values, state: 'idle' as const }
+      projectionStore = next
+    },
+    setBinding: next => { binding = next },
+    subscribers: () => ({ list: listListeners.size, generation: generationListeners.size }),
   }
 }
 
@@ -1947,4 +1978,241 @@ test('R24 a falling-only running transition fences the held read and schedules t
     gates.splice(0).forEach(release => { release() })
     await flushTurns()
   })
+})
+
+// ── L3: the per-selection Remote Inspector source ───────────────────────────
+
+const INSPECTOR_SESSION = 'session-inspector-remote'
+const INSPECTOR_OTHER = 'session-inspector-other'
+
+function deferred<Value>(): { readonly promise: Promise<Value>; readonly resolve: (value: Value) => void } {
+  let resolve!: (value: Value) => void
+  const promise = new Promise<Value>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+async function until(predicate: () => boolean, label: string, timeoutMs = 2_000): Promise<void> {
+  const started = Date.now()
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() - started > timeoutMs) throw new Error(`${label}: timed out`)
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
+const inspectorStats = {
+  turns: 2,
+  steps: 3,
+  llmMs: 3000,
+  toolMs: 700,
+  ttftMs: 600,
+  ttftSteps: 2,
+  decodeMs: 1500,
+  decodeTokens: 120,
+}
+
+const inspectorSequenced = (values: Readonly<Record<string, unknown>>, asOfSeq = 3): { readonly result: unknown } => ({
+  result: { kind: 'sequenced', asOfSeq, values },
+})
+
+test('INS-R1 ONE exact unary targets the selected Session and maps the sequenced envelope', async () => {
+  const h = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: {
+      [INSPECTOR_SESSION]: inspectorSequenced({
+        sessionStats: inspectorStats,
+        workingDirectory: '/host/project',
+      }, 11),
+    },
+  })
+  const source = h.facts.openInspector(INSPECTOR_SESSION, () => {
+    throw new Error('an exact cut never invalidates itself')
+  })
+  const result = await source.read(new AbortController().signal)
+  assert.equal(result.kind, 'ready')
+  if (result.kind === 'ready') {
+    assert.equal(result.data.sessionId, INSPECTOR_SESSION)
+    assert.equal(result.data.asOfSeq, 11)
+    assert.equal(result.data.stats?.decodeTokensPerSec, 80)
+    assert.equal(result.data.effectiveCwd, '/host/project')
+  }
+  assert.deepEqual(h.projectionCalls, [INSPECTOR_SESSION], 'exactly one unary at the selected id')
+  assert.equal(h.otherCalls.includes('refresh'), false, 'an exact read never refreshes the roster')
+  source.dispose()
+})
+
+test('INS-R2 migration/cache/absent/denied/unavailable/error envelopes never become statistics', async () => {
+  const migration = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: {
+      [INSPECTOR_SESSION]: { result: { kind: 'migration-required', values: { sessionStats: inspectorStats } } },
+    },
+  })
+  const migrationResult = await migration.facts.openInspector(INSPECTOR_SESSION, () => {})
+    .read(new AbortController().signal)
+  assert.deepEqual(migrationResult, { kind: 'migration-required', message: 'Session migration is required' },
+    'migration-required wins and its cached values are ignored')
+
+  const absent = harness({ listed: [row(INSPECTOR_SESSION)] })
+  assert.equal((await absent.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable', 'a null envelope is unavailable, never an empty DTO')
+
+  const cachedHint = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: { result: { kind: 'cached', asOfSeq: 1, values: { sessionStats: inspectorStats } } } },
+  })
+  assert.equal((await cachedHint.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable', 'a cached hint is never an exact cut')
+
+  const badCut = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: inspectorSequenced({ sessionStats: inspectorStats }, 1.5) },
+  })
+  assert.equal((await badCut.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable', 'a non-integer cut cannot be presented as exact')
+
+  const denied = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: { failure: { code: 'remote-access/denied' } } },
+  })
+  assert.equal((await denied.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'denied')
+
+  const unavailable = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: { failure: { code: 'gateway/invocation-unavailable' } } },
+  })
+  assert.equal((await unavailable.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable')
+
+  const unknown = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: { failure: { code: 'gateway/internal' } } },
+  })
+  const unknownResult = await unknown.facts.openInspector(INSPECTOR_SESSION, () => {})
+    .read(new AbortController().signal)
+  assert.equal(unknownResult.kind, 'error')
+  if (unknownResult.kind === 'error') assert.ok(unknownResult.message !== '', 'a real failure keeps a safe message')
+
+  const noGeneration = harness({ noGeneration: true, listed: [row(INSPECTOR_SESSION)] })
+  assert.equal((await noGeneration.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable')
+  assert.deepEqual(noGeneration.projectionCalls, [], 'a missing generation never sends an RPC')
+
+  const missingTarget = harness({ listed: [row(INSPECTOR_OTHER)] })
+  assert.equal((await missingTarget.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable')
+  assert.deepEqual(missingTarget.projectionCalls, [], 'an unlisted target never sends an RPC')
+
+  const subagentTarget = harness({ listed: [row(INSPECTOR_SESSION, { origin: 'subagent' })] })
+  assert.equal((await subagentTarget.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal)).kind,
+    'unavailable')
+  assert.deepEqual(subagentTarget.projectionCalls, [], 'a subagent child is never an Inspector target')
+})
+
+test('INS-R3 generation/binding/removal changes during the unary supersede the result', async () => {
+  const cases: Array<{
+    readonly label: string
+    readonly mutate: (h: Harness) => void
+  }> = [
+    { label: 'generation replacement', mutate: h => { h.setGeneration('gen-2') } },
+    { label: 'binding identity replacement', mutate: h => { h.setBinding({}) } },
+    { label: 'target removal', mutate: h => { h.setListed([]) } },
+  ]
+  for (const scenario of cases) {
+    const gate = deferred<void>()
+    const h = harness({
+      listed: [row(INSPECTOR_SESSION)],
+      projections: { [INSPECTOR_SESSION]: inspectorSequenced({ sessionStats: inspectorStats }) },
+      projectionGate: async () => gate.promise,
+    })
+    const source = h.facts.openInspector(INSPECTOR_SESSION, () => {})
+    const pending = source.read(new AbortController().signal)
+    await until(() => h.projectionCalls.length === 1, `${scenario.label} started`)
+    scenario.mutate(h)
+    gate.resolve()
+    await assert.rejects(pending, (error: unknown) => error instanceof SupersededReadError,
+      `${scenario.label} must never commit the stale exact result`)
+    source.dispose()
+  }
+})
+
+test('INS-R4 only the selected relevant witness change/identity replacement notifies', () => {
+  const reasons: Array<'changed' | 'source-replaced'> = []
+  const h = harness({
+    listed: [row(INSPECTOR_SESSION), row(INSPECTOR_OTHER)],
+    listedRunning: { [INSPECTOR_SESSION]: false, [INSPECTOR_OTHER]: false },
+    projectionsBySession: {
+      [INSPECTOR_SESSION]: {
+        values: { sessionStats: { turns: 1 }, title: 'before' } as unknown as RemoteProjectionValues,
+        state: 'idle',
+      },
+      [INSPECTOR_OTHER]: {
+        values: { sessionStats: { turns: 9 } } as unknown as RemoteProjectionValues,
+        state: 'idle',
+      },
+    },
+  })
+  const source = h.facts.openInspector(INSPECTOR_SESSION, reason => { reasons.push(reason) })
+  // +1 each is the adapter-lifetime discovery-receipt subscription, which stays
+  // open across every per-selection source.
+  assert.deepEqual(h.subscribers(), { list: 2, generation: 2 }, 'the source subscribes once to each official source')
+  h.notifyList()
+  assert.deepEqual(reasons, [], 'an unchanged publication is inert')
+  h.setProjectionValues(INSPECTOR_SESSION, { sessionStats: { turns: 2 }, title: 'before' } as unknown as RemoteProjectionValues)
+  h.notifyList()
+  assert.deepEqual(reasons, ['changed'], 'a relevant selected-key value change is a real change')
+  h.setProjectionValues(INSPECTOR_OTHER, { sessionStats: { turns: 99 } } as unknown as RemoteProjectionValues)
+  h.notifyList()
+  assert.deepEqual(reasons, ['changed'], 'another row never notifies')
+  h.setRunning(INSPECTOR_OTHER, true)
+  h.notifyList()
+  assert.deepEqual(reasons, ['changed'], 'another row running never notifies')
+  h.setRunning(INSPECTOR_SESSION, true)
+  h.notifyList()
+  assert.deepEqual(reasons, ['changed', 'changed'], 'the selected official running bit is a real change')
+  h.setBinding({ id: 'replacement' })
+  h.notifyList()
+  assert.deepEqual(reasons, ['changed', 'changed', 'source-replaced'], 'a binding identity change revokes the data')
+  h.setGeneration('gen-2')
+  assert.deepEqual(reasons, ['changed', 'changed', 'source-replaced', 'source-replaced'],
+    'a generation change revokes the data')
+  h.setListed([row(INSPECTOR_OTHER)])
+  h.notifyList()
+  assert.deepEqual(reasons, ['changed', 'changed', 'source-replaced', 'source-replaced', 'source-replaced'],
+    'a removed selected target revokes the data')
+  source.dispose()
+  assert.deepEqual(h.subscribers(), { list: 1, generation: 1 }, 'dispose releases both per-selection subscriptions')
+  h.notifyList()
+  h.setGeneration('gen-3')
+  assert.equal(reasons.length, 5, 'a disposed source never publishes a later callback')
+})
+
+test('INS-R5 a missing generation reads unavailable and a real arrival re-proves the same target', async () => {
+  const reasons: Array<'changed' | 'source-replaced'> = []
+  const h = harness({
+    noGeneration: true,
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: inspectorSequenced({ sessionStats: inspectorStats }, 4) },
+  })
+  const source = h.facts.openInspector(INSPECTOR_SESSION, reason => { reasons.push(reason) })
+  assert.equal((await source.read(new AbortController().signal)).kind, 'unavailable')
+  assert.deepEqual(h.projectionCalls, [], 'no generation means no RPC')
+  h.setGeneration('gen-1')
+  assert.deepEqual(reasons, ['source-replaced'], 'the generation arrival revokes the old identity')
+  const result = await source.read(new AbortController().signal)
+  assert.equal(result.kind, 'ready')
+  assert.deepEqual(h.projectionCalls, [INSPECTOR_SESSION])
+  source.dispose()
+})
+
+test('INS-R6 a transport cancellation during the unary rejects as a superseded read, never as a statistic', async () => {
+  const h = harness({
+    listed: [row(INSPECTOR_SESSION)],
+    projections: { [INSPECTOR_SESSION]: { failure: { code: 'gateway/cancelled' } } },
+  })
+  await assert.rejects(
+    h.facts.openInspector(INSPECTOR_SESSION, () => {}).read(new AbortController().signal),
+    (error: unknown) => error instanceof SupersededReadError,
+  )
 })

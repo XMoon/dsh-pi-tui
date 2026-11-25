@@ -205,6 +205,12 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 # here would register the directory-picker seam twice.
 - id: directory-picker
   inject: []
+# The bundle's ONE official whole-log session-stats row stays the bundle's row
+# too: the overlay only drops its Direct tuiStartup admission gate so the
+# long-lived Host keeps serving complete sessionStats after the TUI Client is
+# gone. A second declaration here would register the projection twice.
+- id: split-host-session-stats
+  inject: [sessionProjections]
 
 # Host Schedule management (S5-PR4): the bundle's ONE official Schedule row
 # stays this bundle's row; the overlay only drops its Direct tuiStartup
@@ -247,10 +253,6 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     - id: split-host-file-upload
       name: '@deepseek-ai/dsh-client-file-upload'
       inject: [agents, attachments, commands, connection]
-
-    - id: split-host-session-stats
-      name: '@deepseek-ai/dsh-session-stats'
-      inject: [sessionProjections]
 
     - id: split-host-turn-outline
       name: '@deepseek-ai/dsh-session-turn-outline'

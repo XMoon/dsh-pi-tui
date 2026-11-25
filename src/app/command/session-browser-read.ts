@@ -23,20 +23,29 @@ import type {
   SessionBrowserPresentation,
   SessionBrowserSubject,
   SessionBrowserWorkspaceSnapshot,
+  SessionInspectorSelection,
+  SessionInspectorSnapshot,
 } from './session-browser-presentation.ts'
 import type {
   ActivityObservation,
   ActivityObservationSnapshot,
+  InspectorInvalidation,
+  SessionInspectorReadResult,
+  SessionInspectorSource,
   SessionWorkspaceFact,
   SessionWorkspaceFactsPort,
   WorkspaceFactsFrame,
   WorkspaceFactsHandle,
 } from '../../runtime/session-workspace-facts-port.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { SessionScope } from '../session/scope.ts'
 
 const FIRST_PROJECTION_BATCH = 20
 const PROJECTION_BATCH_SIZE = 50
 const CONTENT_SEARCH_DEBOUNCE_MS = 250
+/** The fixed selected-Session Inspector debounce: a settled typed selection
+ *  must reach exactly ONE exact read after this window. */
+const INSPECTOR_DEBOUNCE_MS = 150
 
 interface CapturedSessionBrowserSubject {
   readonly subject: SessionBrowserSubject
@@ -141,6 +150,28 @@ interface ActiveRead {
   resumeAttempt: number
   resumeSettledAttempt: number
   resumeHandleSettled: boolean
+  /** The ONE selected-Session Inspector lifecycle of this panel. */
+  inspectorId: string | undefined
+  /** The actual Browse/Search provenance of `inspectorId`. It is part of the
+   *  selected target, not a second store: a Search target must still be an
+   *  accepted search result while a Browse target is validated against the
+   *  main roster. */
+  inspectorOrigin: SessionInspectorSelection['origin'] | undefined
+  inspectorSource: SessionInspectorSource | undefined
+  inspectorSnapshot: SessionInspectorSnapshot | undefined
+  /** Bumped on selection change AND `source-replaced`; a read/invalidation
+   *  captured under an older epoch is inert. */
+  inspectorSourceEpoch: number
+  /** Request identity of the one in-flight Inspector read. */
+  inspectorRequestEpoch: number
+  inspectorRequestController: AbortController | undefined
+  inspectorTimer: ReturnType<typeof setTimeout> | undefined
+  /** A real same-source relevant change arrived and a trailing exact read is due. */
+  inspectorDirty: boolean
+  /** The debounce expired while the one physical read was still unsettled. */
+  inspectorDue: boolean
+  /** At most ONE coalesced deferred publication is queued. */
+  inspectorPublishScheduled: boolean
 }
 
 export interface SessionBrowserReadHandle {
@@ -196,6 +227,10 @@ export interface SessionBrowserReadOwnerOptions {
 export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOptions): SessionBrowserReadOwner {
   let active: ActiveRead | undefined
   let disposed = false
+  /** The ONE physical selected-Session Inspector read of this owner. It is
+   *  released only when the actual promise settles, so a retire/reopen never
+   *  treats an aborted-but-pending read as free capacity. */
+  let inspectorInFlight = false
 
   /** The accepted Activity observation's provenance. A snapshot measured on an
    *  OLDER roster is inert: its facts and revision can never be relabeled as the
@@ -241,6 +276,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     searchResults: panel.searchResults,
     hasMore: panel.hasMore,
     listRevision: panel.listRevision,
+    ...(panel.inspectorSnapshot === undefined ? {} : { inspector: panel.inspectorSnapshot }),
     ...(workspaceSnapshotOf(panel) === undefined ? {} : { workspace: workspaceSnapshotOf(panel)! }),
     ...(panel.listError === undefined ? {} : { listError: panel.listError }),
     ...(panel.projectionError === undefined ? {} : { projectionError: panel.projectionError }),
@@ -257,10 +293,283 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return true
   }
 
-  const publish = (panel: ActiveRead, initialQuery?: string): void => {
+  const publish = (panel: ActiveRead, initialQuery?: string, inspectorOnly = false): void => {
     if (!isActive(panel)) return
-    const options = initialQuery === undefined ? undefined : { initialQuery }
+    // The ONE publication boundary: an accepted roster/search state can never
+    // carry an Inspector cut for a target it no longer admits. Reconcile BEFORE
+    // snapshot construction so the first publication of the new state is clean.
+    reconcileInspectorSelection(panel)
+    const options = initialQuery === undefined && !inspectorOnly ? undefined : {
+      ...(initialQuery === undefined ? {} : { initialQuery }),
+      ...(inspectorOnly ? { inspectorOnly: true } : {}),
+    }
     panel.handle?.setSnapshot(snapshotOf(panel), options)
+  }
+
+  // ── Selected-Session Inspector lifecycle ──────────────────────────────────
+  // ONE read per settled selection, at most ONE physical flight per owner and
+  // no timer/queue per id. The renderer reports its own painted typed selection;
+  // this owner never guesses a target and never publishes from the render call.
+
+  /** At most ONE deferred publication for selection/refresh/clear state: the
+   *  presenter's committed frame callback must never synchronously re-enter
+   *  `setSnapshot`/render/Host reads. */
+  const scheduleInspectorPublish = (panel: ActiveRead): void => {
+    if (panel.inspectorPublishScheduled || panel.disposed) return
+    panel.inspectorPublishScheduled = true
+    queueMicrotask(() => {
+      panel.inspectorPublishScheduled = false
+      if (!isActive(panel)) return
+      publish(panel, undefined, true)
+    })
+  }
+
+  /** Release the panel's ONE selected source and fence its in-flight request. */
+  const stopInspectorSource = (panel: ActiveRead): void => {
+    const source = panel.inspectorSource
+    panel.inspectorSource = undefined
+    source?.dispose()
+    panel.inspectorRequestController?.abort()
+    panel.inspectorRequestController = undefined
+  }
+
+  /** Drop this panel's selection/read state. The owner-level physical read slot
+   *  is NOT touched here: an aborted promise may still be settling. */
+  const clearInspector = (panel: ActiveRead, publishAfter: boolean): void => {
+    panel.inspectorId = undefined
+    panel.inspectorOrigin = undefined
+    panel.inspectorSnapshot = undefined
+    panel.inspectorSourceEpoch += 1
+    panel.inspectorDirty = false
+    panel.inspectorDue = false
+    if (panel.inspectorTimer !== undefined) {
+      clearTimeout(panel.inspectorTimer)
+      panel.inspectorTimer = undefined
+    }
+    stopInspectorSource(panel)
+    if (publishAfter) scheduleInspectorPublish(panel)
+  }
+
+  /** The ONE validity predicate for the selected Inspector target: a main
+   *  roster row is always required; a Search target additionally needs an
+   *  ACCEPTED search result. It deliberately does not infer mode from the
+   *  retained query (PiTUI keeps the query after Esc returns to Browse). */
+  const inspectorSelectionValid = (panel: ActiveRead, selection: SessionInspectorSelection): boolean => {
+    if (!panel.rosterRows.some(row => row.id === selection.sessionId)) return false
+    if (selection.origin === 'browse') return true
+    return panel.searchResults.some(result => result.row.id === selection.sessionId)
+  }
+
+  /** Retire an Inspector target that is no longer legal in the CURRENT accepted
+   *  roster/search state. It is a data/state acceptance boundary: no source,
+   *  timer or in-flight result may outlive the state that admitted it. */
+  const reconcileInspectorSelection = (panel: ActiveRead): void => {
+    if (panel.inspectorId === undefined || panel.inspectorOrigin === undefined) return
+    if (inspectorSelectionValid(panel, { sessionId: panel.inspectorId, origin: panel.inspectorOrigin })) return
+    clearInspector(panel, false)
+  }
+
+  /** The ONE accepted-search-results writer: every query/reset/error/empty,
+   *  page, enrichment, workspace and roster update reaches Inspector validity
+   *  through this boundary before the next publication. */
+  const acceptSearchResults = (
+    panel: ActiveRead,
+    results: readonly SessionBrowserSearchResult[],
+  ): void => {
+    panel.searchResults = [...results]
+    reconcileInspectorSelection(panel)
+  }
+
+  const commitInspectorResult = (
+    panel: ActiveRead,
+    sessionId: string,
+    result: SessionInspectorReadResult,
+  ): void => {
+    if (result.kind === 'ready') {
+      panel.inspectorSnapshot = {
+        sessionId,
+        state: 'ready',
+        data: result.data,
+        refreshing: panel.inspectorDirty,
+      }
+      return
+    }
+    panel.inspectorSnapshot = { sessionId, state: result.kind, message: result.message }
+  }
+
+  const startInspectorRead = (panel: ActiveRead): void => {
+    if (!isActive(panel)) return
+    // A newer intent is recorded, not queued as a second physical read.
+    if (inspectorInFlight) {
+      panel.inspectorDue = true
+      return
+    }
+    const sessionId = panel.inspectorId
+    const source = panel.inspectorSource
+    const sourceEpoch = panel.inspectorSourceEpoch
+    if (sessionId === undefined || source === undefined) return
+    // Re-prove the CURRENT accepted target at admission: a removed roster row
+    // or a vanished accepted Search result never reads.
+    if (!inspectorSelectionValid(panel, { sessionId, origin: panel.inspectorOrigin ?? 'browse' })) {
+      clearInspector(panel, true)
+      return
+    }
+    const controller = new AbortController()
+    const requestEpoch = ++panel.inspectorRequestEpoch
+    panel.inspectorRequestController = controller
+    panel.inspectorDirty = false
+    panel.inspectorDue = false
+    inspectorInFlight = true
+    const isCurrentAttempt = (): boolean => isActive(panel)
+      && panel.inspectorId === sessionId
+      && panel.inspectorSource === source
+      && panel.inspectorSourceEpoch === sourceEpoch
+      && panel.inspectorRequestEpoch === requestEpoch
+      && inspectorSelectionValid(panel, { sessionId, origin: panel.inspectorOrigin ?? 'browse' })
+    runOwned('session inspector read', () => source.read(controller.signal), {
+      diag: options.diag,
+      sessionId: options.sessionId,
+      isCancellation: error => error instanceof SupersededReadError
+        || controller.signal.aborted
+        || cancellation(panel)
+        || !isCurrentAttempt(),
+      onResult: (result: SessionInspectorReadResult) => {
+        inspectorInFlight = false
+        if (panel.inspectorRequestController === controller) panel.inspectorRequestController = undefined
+        if (!isCurrentAttempt()) {
+          startDueInspectorRead()
+          return
+        }
+        // Commit BEFORE publishing; the publication may synchronously repaint.
+        commitInspectorResult(panel, sessionId, result)
+        publish(panel, undefined, true)
+        startDueInspectorRead()
+      },
+      onError: (error) => {
+        inspectorInFlight = false
+        if (panel.inspectorRequestController === controller) panel.inspectorRequestController = undefined
+        if (!isCurrentAttempt()) {
+          startDueInspectorRead()
+          return
+        }
+        panel.inspectorSnapshot = { sessionId, state: 'error', message: safeErrorMessage(error) }
+        publish(panel, undefined, true)
+        startDueInspectorRead()
+      },
+      onCancel: () => {
+        inspectorInFlight = false
+        if (panel.inspectorRequestController === controller) panel.inspectorRequestController = undefined
+        startDueInspectorRead()
+      },
+    })
+  }
+
+  /** The one physical read settled: start the latest due intent, if any. */
+  const startDueInspectorRead = (): void => {
+    const panel = active
+    if (panel === undefined || !panel.inspectorDue || !isActive(panel)) return
+    panel.inspectorDue = false
+    startInspectorRead(panel)
+  }
+
+  const scheduleInspectorRead = (panel: ActiveRead): void => {
+    if (!isActive(panel) || panel.inspectorId === undefined || panel.inspectorSource === undefined) return
+    if (panel.inspectorTimer !== undefined) clearTimeout(panel.inspectorTimer)
+    // A rearmed debounce SUPERSEDES any earlier due intent. Keeping both a live
+    // timer and an older due flag would let the old flag dispatch as soon as the
+    // physical flight settles, then let the new timer dispatch again.
+    panel.inspectorDue = false
+    panel.inspectorTimer = setTimeout(() => {
+      panel.inspectorTimer = undefined
+      if (!isActive(panel)) return
+      if (inspectorInFlight) {
+        panel.inspectorDue = true
+        return
+      }
+      startInspectorRead(panel)
+    }, INSPECTOR_DEBOUNCE_MS)
+  }
+
+  const onInspectorInvalidated = (panel: ActiveRead, reason: InspectorInvalidation): void => {
+    if (!isActive(panel) || panel.inspectorId === undefined) return
+    if (reason === 'source-replaced') {
+      // Revoke the old exact cut and fence the in-flight read by epoch; the same
+      // source stays responsible for the fresh identity.
+      panel.inspectorSourceEpoch += 1
+      panel.inspectorSnapshot = { sessionId: panel.inspectorId, state: 'loading' }
+      panel.inspectorDirty = false
+      panel.inspectorDue = false
+      panel.inspectorRequestController?.abort()
+      panel.inspectorRequestController = undefined
+      scheduleInspectorRead(panel)
+    } else {
+      // Same identity: keep the known cut, mark it refreshing, and coalesce ONE
+      // trailing exact read; never abort a legitimate same-source read.
+      panel.inspectorDirty = true
+      if (panel.inspectorSnapshot?.state === 'ready') {
+        panel.inspectorSnapshot = { ...panel.inspectorSnapshot, refreshing: true }
+      }
+      scheduleInspectorRead(panel)
+    }
+    scheduleInspectorPublish(panel)
+  }
+
+  /** The renderer's ONE committed-frame typed selection report. Repeated ids
+   *  and pre-handle renders are inert; an unauthorized/undefined id clears. */
+  const reportInspectorSelection = (
+    panel: ActiveRead,
+    selection: SessionInspectorSelection | undefined,
+  ): void => {
+    if (!isActive(panel) || panel.handle === undefined) return
+    if (selection === undefined || !inspectorSelectionValid(panel, selection)) {
+      if (panel.inspectorId !== undefined || panel.inspectorSnapshot !== undefined) clearInspector(panel, true)
+      return
+    }
+    // A repeated same-id frame never recreates the source or restarts the timer.
+    // The provenance may still change (Browse <-> Search) without reopening the
+    // source: the exact cut belongs to the Session id, not to the presenter mode.
+    if (panel.inspectorId === selection.sessionId) {
+      panel.inspectorOrigin = selection.origin
+      return
+    }
+    // Commit the new selection identity BEFORE releasing the old source/read.
+    panel.inspectorId = selection.sessionId
+    panel.inspectorOrigin = selection.origin
+    panel.inspectorSourceEpoch += 1
+    if (panel.inspectorTimer !== undefined) {
+      clearTimeout(panel.inspectorTimer)
+      panel.inspectorTimer = undefined
+    }
+    panel.inspectorDirty = false
+    panel.inspectorDue = false
+    stopInspectorSource(panel)
+    panel.inspectorSnapshot = { sessionId: selection.sessionId, state: 'loading' }
+    const facts = options.sessionWorkspaceFacts
+    const openInspector = facts?.openInspector
+    if (openInspector === undefined) {
+      panel.inspectorSnapshot = { sessionId: selection.sessionId, state: 'unavailable', message: 'Session statistics unavailable' }
+      scheduleInspectorPublish(panel)
+      return
+    }
+    let source: SessionInspectorSource | undefined
+    try {
+      source = openInspector.call(facts, selection.sessionId, (reason) => {
+        // The source OBJECT identity owns the callback lifetime. `sourceEpoch`
+        // fences READ results only: a `source-replaced` bumps it while keeping
+        // this same source responsible for its future changes.
+        if (source === undefined || panel.inspectorSource !== source) return
+        onInspectorInvalidated(panel, reason)
+      })
+    } catch (error) {
+      options.diag.error('session inspector source', { error: safeErrorMessage(error) })
+      panel.inspectorSnapshot = { sessionId: selection.sessionId, state: 'error', message: safeErrorMessage(error) }
+      scheduleInspectorPublish(panel)
+      return
+    }
+    if (source === undefined) return
+    panel.inspectorSource = source
+    scheduleInspectorRead(panel)
+    scheduleInspectorPublish(panel)
   }
 
   const retire = (panel: ActiveRead, closePresenter: boolean): void => {
@@ -281,6 +590,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.refreshing = false
     panel.queryController?.abort()
     panel.controller.abort()
+    // The selected Inspector read belongs to THIS panel: clear its selection,
+    // timer and subscription and fence its request before the panel data is
+    // dropped. The owner-level physical slot stays until the promise settles.
+    clearInspector(panel, false)
     const activityUnsubscribe = panel.activityUnsubscribe
     panel.activityUnsubscribe = undefined
     activityUnsubscribe?.()
@@ -405,9 +718,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.workspaceRevision += 1
     panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
     if (panel.query !== '') {
-      panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
+      acceptSearchResults(panel, panel.searchState === 'ready' && panel.searchPage !== undefined
         ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
-        : localResults(panel)
+        : localResults(panel))
     }
     publish(panel)
   }
@@ -421,9 +734,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.workspaceRevision += 1
     panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
     if (panel.query !== '') {
-      panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
+      acceptSearchResults(panel, panel.searchState === 'ready' && panel.searchPage !== undefined
         ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
-        : localResults(panel)
+        : localResults(panel))
     }
     publish(panel)
   }
@@ -463,9 +776,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.rosterSemantics = rosterSemanticsOf(enriched)
         panel.rows = rowsWithWorkspaceMetadata(panel, panel.rosterRows)
         if (panel.query !== '') {
-          panel.searchResults = panel.searchState === 'ready' && panel.searchPage !== undefined
+          acceptSearchResults(panel, panel.searchState === 'ready' && panel.searchPage !== undefined
             ? mergeSearchPage(panel.rows, panel.query, panel.searchPage)
-            : localResults(panel)
+            : localResults(panel))
         }
         publish(panel)
         if (!isActive(panel)) return
@@ -501,11 +814,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.searchPage = page
         if (page === undefined) {
           panel.searchState = 'unavailable'
-          panel.searchResults = localResults(panel)
+          acceptSearchResults(panel, localResults(panel))
           panel.hasMore = false
         } else {
           panel.searchState = 'ready'
-          panel.searchResults = mergeSearchPage(panel.rows, query, page)
+          acceptSearchResults(panel, mergeSearchPage(panel.rows, query, page))
           panel.hasMore = page.hasMore
         }
         publish(panel)
@@ -513,7 +826,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       onError: (error) => {
         if (!isActive(panel) || panel.queryGeneration !== expectedGeneration || panel.searchRun !== run) return
         panel.searchState = 'error'
-        panel.searchResults = localResults(panel)
+        acceptSearchResults(panel, localResults(panel))
         panel.searchPage = undefined
         panel.hasMore = false
         panel.searchError = safeErrorMessage(error)
@@ -526,7 +839,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     if (panel.query === '' || panel.listState === 'loading' || panel.listState === 'unavailable' || panel.listState === 'error') return
     const expectedGeneration = panel.queryGeneration
     panel.searchState = 'loading'
-    panel.searchResults = localResults(panel)
+    acceptSearchResults(panel, localResults(panel))
     panel.hasMore = false
     panel.searchError = undefined
     publish(panel)
@@ -548,7 +861,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.searchState = query === '' || panel.listState === 'unavailable' || panel.listState === 'error'
       ? 'idle'
       : 'loading'
-    panel.searchResults = query === '' ? [] : localResults(panel)
+    acceptSearchResults(panel, query === '' ? [] : localResults(panel))
     panel.searchPage = undefined
     panel.hasMore = false
     panel.searchError = undefined
@@ -658,8 +971,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // error state) would leave a removed Session selectable and peekable.
     if (panel.searchResults.length > 0) {
       const live = new Set(panel.rows.map((row) => row.id))
-      panel.searchResults = panel.searchResults.filter((result) => live.has(result.row.id))
+      acceptSearchResults(panel, panel.searchResults.filter((result) => live.has(result.row.id)))
     }
+    // A removed target can never keep a selected exact read alive. Clear it at
+    // THIS acceptance boundary BEFORE the Activity observation can synchronously
+    // publish, never waiting for the presenter's next frame.
+    reconcileInspectorSelection(panel)
     // Commit the new roster identity/epochs on the ONE Activity observation
     // BEFORE the presenter is notified; the observation publishes its
     // provisional running facts synchronously inside this call.
@@ -1015,9 +1332,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         panel.listState = 'unavailable'
         panel.rows = []
         panel.searchState = 'idle'
-        panel.searchResults = []
+        acceptSearchResults(panel, [])
         panel.searchPage = undefined
         panel.searchError = undefined
+        clearInspector(panel, false)
         publish(panel)
         if (initial) panel.settle({ kind: 'refused', text: 'session persistence unavailable' })
         return
@@ -1038,7 +1356,8 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.listError = message
     panel.rows = []
     panel.searchState = 'idle'
-    panel.searchResults = []
+    acceptSearchResults(panel, [])
+    clearInspector(panel, false)
     publish(panel)
     panel.settle({ kind: 'refused', text: message })
     scheduleRefresh(panel)
@@ -1065,9 +1384,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           panel.listState = 'unavailable'
           panel.rows = []
           panel.searchState = 'idle'
-          panel.searchResults = []
+          acceptSearchResults(panel, [])
           panel.searchPage = undefined
           panel.searchError = undefined
+          clearInspector(panel, false)
           publish(panel)
           panel.settle({ kind: 'refused', text: 'session persistence unavailable' })
           // The fullscreen Workspace stays mounted on a refused first read: the
@@ -1158,6 +1478,17 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         resumeAttempt: 0,
         resumeSettledAttempt: 0,
         resumeHandleSettled: false,
+        inspectorId: undefined,
+        inspectorOrigin: undefined,
+        inspectorSource: undefined,
+        inspectorSnapshot: undefined,
+        inspectorSourceEpoch: 0,
+        inspectorRequestEpoch: 0,
+        inspectorRequestController: undefined,
+        inspectorTimer: undefined,
+        inspectorDirty: false,
+        inspectorDue: false,
+        inspectorPublishScheduled: false,
       }
       active = panel
       let presentationHandle: SessionBrowserPanelHandle
@@ -1185,6 +1516,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
             if (intent.source === 'direct') return
             requestResume(panel, intent, panel.rows)
           },
+          onInspectorSelection: (sessionId) => { reportInspectorSelection(panel, sessionId) },
           onClose: () => retire(panel, false),
         })
       } catch (error) {

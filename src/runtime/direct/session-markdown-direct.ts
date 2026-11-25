@@ -38,7 +38,10 @@ interface SessionPersistenceLike {
   stat(
     sessionId: SessionId,
     options?: { readonly signal?: AbortSignal },
-  ): Promise<{ readonly location?: { readonly path?: string } } | undefined>
+  ): Promise<{
+    readonly location?: { readonly path?: string }
+    readonly formatStatus?: 'current' | 'migration-required'
+  } | undefined>
 }
 
 /** The official stable Session Query not-found machine code. */
@@ -50,6 +53,46 @@ export class DirectSessionMarkdown implements SessionMarkdownPort {
 
   constructor(ctx: HostContextLike) {
     this.ctx = ctx
+  }
+
+  /** Session Workspace PR2: the official header-only cold `stat`. It performs
+   *  no open/migration/retain; an absent capability or not-found answers
+   *  `undefined` to the Inspector source's truthful `unavailable`. */
+  async inspectorStat(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<{ readonly formatStatus?: 'current' | 'migration-required' } | undefined> {
+    const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined
+    if (persistence === undefined) return undefined
+    return persistence.stat(SessionId(sessionId), { signal })
+  }
+
+  /** Session Workspace PR2: ONE caller-owned non-activating exact observation.
+   *  The returned lease MUST be disposed by the caller; a missing capability
+   *  answers `undefined`. */
+  async inspectorObservation(sessionId: string, signal: AbortSignal): Promise<{
+    readonly header: { readonly id: unknown }
+    readonly projections?: {
+      readonly asOfSeq: number
+      readonly values?: Readonly<Record<string, unknown>>
+    }
+    [Symbol.dispose](): void
+  } | undefined> {
+    const query = this.ctx.get('sessionQuery') as {
+      observeSession?(
+        sessionId: SessionId,
+        options?: { readonly signal?: AbortSignal; readonly projectionMode?: 'all' | 'none' },
+      ): Promise<{
+        readonly header: { readonly id: unknown }
+        readonly projections?: {
+          readonly asOfSeq: number
+          readonly values?: Readonly<Record<string, unknown>>
+        }
+        [Symbol.dispose](): void
+      }>
+    } | undefined
+    if (query?.observeSession === undefined) return undefined
+    return query.observeSession(SessionId(sessionId), { signal, projectionMode: 'all' })
   }
 
   async read(sessionId: string, signal?: AbortSignal): Promise<SessionMarkdownReadResult> {

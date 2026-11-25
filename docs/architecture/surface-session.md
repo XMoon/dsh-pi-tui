@@ -360,6 +360,23 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   pre-emption abort and release the document, and every late result is fenced by
   the Reader object identity and its exact Session id. There is no background
   prefetch, periodic read, global transcript cache or second read source.
+- **The typed painted row is the ONE selected-Session Inspector trigger.**
+  Every committed frame reports the exact selected main Session row it really
+  painted in Browse or Search Results, with its actual Browse/Search
+  provenance; a Folder, New, Add, Show more, the Reader, the inline directory
+  editor or an unpainted id reports no Session target. A selected Search target
+  is retired at the search-acceptance boundary when that accepted result
+  disappears, even if its Session remains in the main roster. The shared `SessionBrowserReadOwner` (never the renderer) owns the
+  debounced exact read: a settled selection reaches at most ONE passive
+  projection read through
+  [`SessionWorkspaceFactsPort.openInspector`](./host-client.md#selected-session-inspector-exact-projection-read),
+  the same-source trailing refresh, and the identity/epoch fences. A roster
+  removal clears the selection at the roster-acceptance boundary; closing the
+  panel, entering the Reader/directory editor or suspending the native
+  presenter clears it, and every late result is inert. This is a DATA seam
+  only: it adds no visible statistics, loading row, action or layout, and it
+  never changes the Current marker, the typed selection, the
+  query, Resume or Return authority.
 - **Header, Preview and navigation.** The header is ONE row: `Sessions · <listed
   count>` (or `Choose workspace` in the chooser) with the real `/ Search` target
   on the right. It never repeats the Current Session id or an `All workspaces`

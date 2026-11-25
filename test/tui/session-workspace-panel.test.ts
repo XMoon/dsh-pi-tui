@@ -91,6 +91,7 @@ function harness(options: {
   readonly readMarkdown?: (sessionId: string, signal: AbortSignal) => Promise<SessionMarkdownReadResult>
   readonly onNewSession?: (workspaceId: string, settle?: (outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserNewSessionSettlement) => void) => void
   readonly onUseDirectory?: (workspaceId: string, canonicalPath: string) => void
+  readonly onInspectorSelection?: (selection: import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined) => void
   readonly isCurrent?: () => boolean
 } = {}): Harness {
   const columns = options.columns ?? 100
@@ -122,6 +123,7 @@ function harness(options: {
     ...(options.onListDirectory === undefined ? {} : { onListDirectory: options.onListDirectory }),
     ...(options.onNewSession === undefined ? {} : { onNewSession: options.onNewSession }),
     ...(options.onUseDirectory === undefined ? {} : { onUseDirectory: options.onUseDirectory }),
+    ...(options.onInspectorSelection === undefined ? {} : { onInspectorSelection: options.onInspectorSelection }),
     onClose: () => { state.closes += 1 },
     initialMode: options.initialMode ?? 'browse',
     initialBrowseScope: options.initialBrowseScope ?? 'all',
@@ -5725,4 +5727,98 @@ test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frame
   assert.equal(three.view(), threeFrame, 'the tiny action bar row is not a wheel sink')
   assert.ok(/^> .*Other session/m.test(three.view()), 'the bar wheel never moved the selection')
   three.dispose()
+})
+
+// ── Session Workspace PR2: the real presenter selection report ──────────────
+
+test('the real panel reports ONLY its painted typed Session target across tree/Reader updates', async () => {
+  const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const h = harness({ onInspectorSelection: selection => reports.push(selection) })
+  const workspace = {
+    revision: 1,
+    state: 'ready' as const,
+    facts: [
+      { workspaceId: 'ws-current', path: '/ws', title: 'Current', sessionIds: [CURRENT] },
+      { workspaceId: 'ws-other', path: '/other', title: 'Other', sessionIds: [OTHER] },
+    ],
+    baselineProven: true,
+    answerEligibility: undefined,
+  }
+  const base = snapshot({ workspace })
+  h.handle.setSnapshot(base)
+  await h.paint()
+  assert.deepEqual(reports.at(-1), { sessionId: CURRENT, origin: 'browse' }, 'the initial typed current-Session row is reported')
+
+  h.handle.setSnapshot({ ...base, refreshError: 'a nonfatal roster fact' })
+  await h.paint()
+  assert.deepEqual(reports.at(-1), { sessionId: CURRENT, origin: 'browse' }, 'a same-id repaint reports the same selected Session')
+
+  h.vt.sendInput('\x1b[A')
+  await h.paint()
+  assert.equal(reports.at(-1), undefined, 'a Folder row is never reported as a Session target')
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  assert.deepEqual(reports.at(-1), { sessionId: CURRENT, origin: 'browse' }, 'returning to the Session row reports it again')
+
+  h.vt.sendInput(' ')
+  await h.paint()
+  assert.equal(reports.at(-1), undefined, 'the full-screen Reader paints no selectable Session target')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.deepEqual(reports.at(-1), { sessionId: CURRENT, origin: 'browse' }, 'leaving the Reader reports the restored typed selection')
+
+  h.handle.setSnapshot(base)
+  await h.paint()
+  const before = h.view()
+  h.handle.setSnapshot({
+    ...base,
+    inspector: {
+      sessionId: CURRENT,
+      state: 'ready',
+      data: { sessionId: CURRENT, asOfSeq: 3 },
+      refreshing: false,
+    },
+  })
+  await h.paint()
+  assert.equal(h.view(), before, 'receiving the same-id Inspector snapshot changes no painted frame')
+  assert.deepEqual(reports.at(-1), { sessionId: CURRENT, origin: 'browse' }, 'the same-id Inspector snapshot changes no selection')
+})
+
+test('the real panel reports a Search result target and reports no target in the inline directory editor', async () => {
+  const searchReports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const search = harness({ initialMode: 'search', onInspectorSelection: selection => searchReports.push(selection) })
+  search.handle.setSnapshot(snapshot({
+    query: 'other',
+    searchState: 'ready',
+    searchResults: [{ row: row(OTHER, 2_000, { title: 'Other session' }), source: 'Content', snippet: 'hit' }],
+    hasMore: false,
+  }))
+  await search.paint()
+  assert.deepEqual(searchReports.at(-1), { sessionId: OTHER, origin: 'search' }, 'the selected Search result row is a real Session target')
+  search.handle.setSnapshot(snapshot({
+    query: 'third',
+    searchState: 'ready',
+    searchResults: [{ row: row(THIRD, 1_000, { title: 'Third session' }), source: 'Metadata' }],
+    hasMore: false,
+  }))
+  await search.paint()
+  assert.deepEqual(searchReports.at(-1), { sessionId: THIRD, origin: 'search' }, 'a different accepted result target is reported')
+  // Esc leaves the global search but keeps the query text; the restored Browse
+  // row is a BROWSE target, never inferred as Search from the retained query.
+  search.vt.sendInput('\x1b')
+  await search.paint()
+  assert.deepEqual(searchReports.at(-1), { sessionId: CURRENT, origin: 'browse' },
+    'Browse after Esc with a retained query reports Browse provenance')
+  search.dispose()
+
+  const directoryReports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const directory = harness({
+    initialDirectoryEntry: true,
+    initialDirectoryPath: '/host/proposed',
+    onInspectorSelection: selection => directoryReports.push(selection),
+  })
+  directory.handle.setSnapshot(snapshot())
+  await directory.paint()
+  assert.equal(directoryReports.at(-1), undefined,
+    'the inline directory editor owns the keyboard and reports no Session target')
 })
