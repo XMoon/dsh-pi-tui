@@ -5984,7 +5984,7 @@ function publicLaunchFacts(handle) {
 function syncPublicLaunchReceipt() {
   writeReceipt({
     publicLaunches: publicLaunches.map(publicLaunchFacts),
-    publicHosts: publicHosts.map(publicHostFacts),
+    publicHosts: publicHosts.map(publicDaemonHostFacts),
   })
 }
 
