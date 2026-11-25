@@ -1108,6 +1108,10 @@ export async function runHostHistorySearch(context) {
       coldForkOwnRows: 1,
       coldForkInheritedRows: 0,
       coldForkProofHit: true,
+      coldForkProofRevision: forkProofBefore.source_revision,
+      coldForkProofCheckpoint: forkProofBefore.checkpoint_hash,
+      coldForkProofUnchanged: forkProofAfter?.source_revision === forkProofBefore.source_revision
+        && forkProofAfter?.checkpoint_hash === forkProofBefore.checkpoint_hash,
       coldForkHitOpens: Number(forkRestartCounters.directPersistenceOpenCalls),
       queueEditRemove: true,
       queueSteer: true,
