@@ -312,6 +312,8 @@ export interface HostAcpSessionAccess {
    * `default`/`false`.
    */
   readSessionPolicy(agent: LiveAgentViewIdentity, session: object): AcpSessionPolicyState
+  /** The exact committed legacy mode alone, independently of the Team row. */
+  readSessionMode(agent: LiveAgentViewIdentity, session: object): AcpSessionMode | undefined
   /**
    * Commit ONE official session policy write through the official maintenance
    * admission. `stillCurrent` re-reads the owning View claim in the same
@@ -1785,11 +1787,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim.legacyModeAnnounced = snapshot.modes !== undefined
     claim.lastLegacyMode = snapshot.mode
     claim.configReady = true
-    // The attach snapshot IS the baseline. Any invalidation observed while it
-    // was read was already proven by the fenced cut (or forced the optional
-    // omission); it must never start a notification before the SDK has
-    // submitted the attach response. The next real invalidation refreshes.
-    claim.configDirty = false
+    // Never discard an authoritative invalidation just to obtain attach
+    // ordering. Keep the dirty fact and release one coalesced refresh only on
+    // an explicit Node task boundary, after the handler's already-resolved
+    // response has been enqueued by the SDK's same write queue. An omitted
+    // display has no complete cut for that fact, so it is dirty too.
+    if (snapshot.configOptions === undefined) claim.configDirty = true
+    if (claim.configDirty === true) {
+      setImmediate(() => {
+        if (claim.configReady !== true || this.claims.get(claim.sessionId) !== claim) return
+        if (claim.connectionIdentity.phase !== 'attached' || claim.detachedWithFence) return
+        this.enqueueConfigUpdate(claim)
+      })
+    }
     return snapshot
   }
 
@@ -1847,15 +1857,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
 
   /** The strict complete post-write reply; a partial list is never returned. */
   private async readConfigReply(claim: ViewClaim, access: HostAcpSessionAccess): Promise<SessionConfigOption[]> {
-    const cut = await this.readConfigSnapshotFenced(claim, access, 'reply')
-    if (cut.snapshot.configOptions === undefined) {
-      throw new LocalAcpViewError(
-        'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE',
-        'the session config state could not be read back completely',
-        -32000,
-      )
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cut = await this.readConfigSnapshotFenced(claim, access, 'reply')
+      // The final response boundary: an invalidated/retired View after a
+      // confirmed setter is an undeliverable readback, not a pre-write refusal.
+      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+        throw readbackUnavailablePolicyView()
+      }
+      if (cut.epoch === (claim.configEpoch ?? 0) && cut.snapshot.configOptions !== undefined) {
+        return [...cut.snapshot.configOptions]
+      }
     }
-    return [...cut.snapshot.configOptions]
+    throw readbackUnavailablePolicyView()
   }
 
   /**
@@ -1876,6 +1891,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const epoch = claim.configEpoch ?? 0
       const snapshot = await this.readConfigSnapshot(claim, access, mode)
       if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+        if (mode === 'reply') throw readbackUnavailablePolicyView()
         throw new LocalAcpViewError(
           'LOCAL_ACP_CONFIG_STALE',
           'the attached session changed during the config read',
@@ -1930,6 +1946,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       }
     }
     if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+      if (mode === 'reply') throw readbackUnavailablePolicyView()
       throw new LocalAcpViewError(
         'LOCAL_ACP_CONFIG_STALE',
         'the attached session changed during the config read',
@@ -5110,6 +5127,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const notify = claim.notifyConfigUpdate
     if (access === undefined || agent === undefined || session === undefined || notify === undefined) return
     if (claim.configReady !== true || claim.replay !== undefined) return
+    // The legacy committed mode is independent of the model catalog and the
+    // unrelated Team projection: read and deliver it BEFORE provider I/O.
+    if (claim.legacyModeAnnounced === true) {
+      try {
+        const mode = access.readSessionMode(agent, session)
+        if (mode !== undefined && claim.lastLegacyMode !== mode) {
+          if (!await this.sendConfigUpdate(claim, notify, claim.configEpoch ?? 0, {
+            kind: 'mode', currentModeId: wireModeId(mode),
+          })) return
+          claim.lastLegacyMode = mode
+        }
+      } catch {
+        // A narrow mode read failure leaves the full cut to retry/recover; it
+        // never fabricates absence or blocks a readable mode on a later event.
+      }
+    }
     let cut: AcpConfigCut
     try {
       cut = await this.readConfigSnapshotFenced(claim, access, 'refresh')

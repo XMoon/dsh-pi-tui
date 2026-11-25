@@ -20,6 +20,7 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
   AcpSessionPolicyError,
+  type AcpSessionMode,
   type AcpSessionPolicyRequest,
   type AcpSessionPolicyState,
 } from '../../src/app/remote-process/local-acp-session-policy.ts'
@@ -312,6 +313,10 @@ class FakeAccess implements HostAcpSessionAccess {
 
   readSessionPolicy(agent: LiveAgentViewIdentity, session: object): AcpSessionPolicyState {
     return this.readSessionPolicyImpl(agent, session)
+  }
+
+  readSessionMode(agent: LiveAgentViewIdentity, session: object): AcpSessionMode | undefined {
+    return this.readSessionPolicyImpl(agent, session).mode
   }
 
   async selectSessionPolicy(
@@ -4201,12 +4206,15 @@ test('a live mode change still notifies when the model catalog is unavailable, w
   })
   await registry.sessionConfigState(conn, access, 'S-mode-model-fail')
   access.readSessionPolicyImpl = () => ({ mode: 'plan' })
-  access.modelOptionsImpl = async () => {
-    throw new LocalAcpViewError('LOCAL_ACP_MODEL_UNAVAILABLE', 'catalog unavailable', -32042)
-  }
+  let rejectCatalog!: (error: Error) => void
+  const catalogGate = new Promise<SessionConfigOption[]>((_resolve, reject) => { rejectCatalog = reject })
+  access.modelOptionsImpl = async () => await catalogGate
   registry.onSessionEvent(agent.session, { seq: 1, type: 'plan/mode', data: { active: true } })
   await flushOutput()
-  assert.deepEqual(updates, ['mode:plan'], 'the mode update does not depend on the model catalog')
+  assert.deepEqual(updates, ['mode:plan'], 'the held catalog cannot suppress the legacy mode')
+  rejectCatalog(new LocalAcpViewError('LOCAL_ACP_MODEL_UNAVAILABLE', 'catalog unavailable', -32042))
+  await flushOutput()
+  assert.deepEqual(updates, ['mode:plan'], 'the failed catalog never produces a partial list')
 })
 
 test('a held mode send is fenced against a newer cut before the full list is submitted', async () => {

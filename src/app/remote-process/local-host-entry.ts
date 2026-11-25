@@ -1217,6 +1217,12 @@ export function createHostAcpSessionAccess(
       }
       return policyService.read(agent as unknown as AcpSessionPolicyAgent)
     },
+    readSessionMode: (agent, session) => {
+      if (agents.get(agent.id) !== agent || sessions.get(agent.id) !== session || agent.session !== session) {
+        throw stalePolicy()
+      }
+      return policyService.readMode(agent as unknown as AcpSessionPolicyAgent)
+    },
     selectSessionPolicy: async (agent, session, request: AcpSessionPolicyRequest, signal, stillCurrent) => {
       if (agents.get(agent.id) !== agent || sessions.get(agent.id) !== session || agent.session !== session) {
         throw stalePolicy()

@@ -326,6 +326,15 @@ export class AcpSessionPolicyService {
     await this.selectTeam(agent, request.enabled, signal, stillCurrent)
   }
 
+  /** Read ONLY the exact committed legacy mode; unrelated Team rows are not read. */
+  readMode(agent: AcpSessionPolicyAgent): AcpSessionMode | undefined {
+    this.assertExact(agent)
+    const plan = this.readPlanService(agent)
+    if (plan === undefined) return undefined
+    const facts = this.readModeFacts(plan, agent)
+    return facts.active ? 'plan' : 'default'
+  }
+
   private async selectMode(
     agent: AcpSessionPolicyAgent,
     mode: AcpSessionMode,
@@ -431,11 +440,11 @@ export class AcpSessionPolicyService {
           throw indeterminatePolicy('the Agent Team write outcome is unconfirmed')
         }
         try {
+          this.assertExact(agent)
           const after = this.readTeamEnabled(agent.session)
           if (after !== enabled) {
             throw indeterminatePolicy('the Agent Team readback does not match the requested value')
           }
-          this.assertExact(agent)
         } catch (error) {
           // Post-settlement identity/projection failure is a readback fact, not
           // a pre-write refusal; a real target mismatch stays indeterminate.

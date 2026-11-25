@@ -1323,6 +1323,9 @@ function makeFakeAccess(options: {
       readSessionPolicy(agent: LiveAgentViewIdentity, session: object) {
         return options.sessionPolicy?.(agent, session) ?? {}
       },
+      readSessionMode(agent: LiveAgentViewIdentity, session: object) {
+        return options.sessionPolicy?.(agent, session)?.mode
+      },
       async selectSessionPolicy(
         agent: LiveAgentViewIdentity,
         session: object,
@@ -2082,6 +2085,9 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     },
     readSessionPolicy() {
       return {}
+    },
+    readSessionMode() {
+      return undefined
     },
     async selectSessionPolicy() {},
     async prompt() {
@@ -3921,6 +3927,7 @@ test('the initial attach response is submitted before any config notification af
   const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
   const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
   let reads = 0
+  let model = '["p1","a"]'
   const fake = makeFakeAccess({
     modelOptions: async () => {
       reads += 1
@@ -3928,7 +3935,7 @@ test('the initial attach response is submitted before any config notification af
         catalogStarted()
         await catalogGate
       }
-      return configOptionsFor('["p1","a"]')
+      return configOptionsFor(model)
     },
   })
   fake.seed('session-attach-order', '/host/proj')
@@ -3943,17 +3950,23 @@ test('the initial attach response is submitted before any config notification af
     const agent = fake.agentOf('session-attach-order')
     const facts = fake.facts()
     assert.ok(agent !== undefined && facts !== undefined)
+    model = '["p1","a2"]'
     facts.onSessionEvent(agent.session, { seq: 1, type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
     releaseCatalog()
     const response = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
     assert.equal(response.id, 2, 'the attach response is never preceded by a config notification')
-    assert.deepEqual(response.result?.configOptions, configOptionsFor('["p1","a"]'))
-    // A later real invalidation owns the one refresh — after the baseline response.
-    facts.onSessionEvent(agent.session, { seq: 2, type: 'model/selection', data: { provider: 'p1', model: 'a3' } })
-    const notification = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string } } }
+    assert.deepEqual(response.result?.configOptions, configOptionsFor('["p1","a2"]'))
+    // The invalidation observed during the held read survives even though the
+    // fenced response already carries the newest value; the deferred attach
+    // refresh closes the last dirty fact without a third external event.
+    const notification = (await client.next()) as {
+      method?: string
+      params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
+    }
     assert.equal(notification.method, 'session/update')
     assert.equal(notification.params?.sessionId, 'session-attach-order')
     assert.equal(notification.params?.update?.sessionUpdate, 'config_option_update')
+    assert.deepEqual(notification.params?.update?.configOptions, configOptionsFor('["p1","a2"]'))
   } finally {
     client.close()
   }

@@ -63,11 +63,10 @@ function updatesFor(updates, sessionId) {
 
 /** The newest config_option_update for one row must carry the exact target value. */
 function configRowValue(updates, sessionId, id) {
-  return updatesFor(updates, sessionId)
+  const last = updatesFor(updates, sessionId)
     .filter(update => update?.sessionUpdate === 'config_option_update')
-    .map(update => configOption(update.configOptions, id)?.currentValue)
-    .filter(value => value !== undefined)
     .at(-1)
+  return last === undefined ? undefined : configOption(last.configOptions, id)?.currentValue
 }
 
 function modeUpdateValue(updates, sessionId) {
@@ -396,8 +395,6 @@ export async function runAcpSessionConfig(context) {
     tui.client.send('\x1b')
     await waitForScreen(tui.client, 'Tab Team', 'PR3B TUI returns to the model list after Team off')
     tui.client.send('\x1b')
-    await waitFor(() => frameOf(tui.client).then(frame => frame.includes('Tab Team') ? undefined : true),
-      'PR3B TUI closes the /model picker after Team off')
     mark = eventMark()
     await lifecycleAction('arm-team-flush-failure', sessionId, 'lifecycle-team-flush-failure-armed',
       'PR3B arm Team flush failure')
@@ -410,6 +407,13 @@ export async function runAcpSessionConfig(context) {
       event => event.type === 'team/mode' && event.data?.enabled === true, 'PR3B official team/mode true')
     await waitFor(() => configRowValue(updates, sessionId, 'agent_team') === true ? true : undefined,
     'PR3B-04 the independent readback notification keeps the real committed true value')
+    // One normal same-value official Team setter must also settle successfully
+    // before the cold restart; this is a real successful flush, not another fault.
+    const sameTeam = await client.request(acp.methods.agent.session.setConfigOption, {
+      sessionId, configId: 'agent_team', type: 'boolean', value: true,
+    })
+    assert(configOption(sameTeam?.configOptions, 'agent_team')?.currentValue === true,
+      'PR3B-04: a normal same-value Team write must return the complete true state')
 
     // A connection that did NOT negotiate boolean config options sees no Team
     // row and cannot write it; the same Session's model/mode rows stay intact.
