@@ -128,7 +128,8 @@ let inspectSplitCandidate
 let inspectImmutableSplitCandidate
 let assertImmutableSplitCandidateUnchanged
 let createSplitSmokeProfile
-let prepareProcessInstallCache
+let prepareInstallCache
+let installCacheEnvironment
 let writeC1WorkFixture
 let createTestTempDir
 let inspectSplitUpgradePair
@@ -236,6 +237,7 @@ setInterval(() => {}, 1_000)
 
 const modulesReady = Promise.all([
   import('../../scripts/lib/split-smoke-profile.mjs'),
+  import('../../scripts/lib/test-install-cache.mjs'),
   import('../../scripts/lib/split-smoke-fixtures.mjs'),
   import('./temp-lifecycle.ts'),
   import('./split-upgrade-pair.mjs'),
@@ -245,12 +247,13 @@ const modulesReady = Promise.all([
   import('../../src/app/remote-process/local-scope.ts'),
   import('./split-process-client.ts'),
   import('@microsoft/tui-test'),
-]).then(([profile, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness, nativeIdentity, localScope, processClient, tuiTest]) => {
+]).then(([profile, installCache, fixtures, tempLifecycle, pair, upgradeSupport, smokeHarness, nativeIdentity, localScope, processClient, tuiTest]) => {
   inspectSplitCandidate = profile.inspectSplitCandidate
   inspectImmutableSplitCandidate = profile.inspectImmutableSplitCandidate
   assertImmutableSplitCandidateUnchanged = profile.assertImmutableSplitCandidateUnchanged
   createSplitSmokeProfile = profile.createSplitSmokeProfile
-  prepareProcessInstallCache = profile.prepareProcessInstallCache
+  prepareInstallCache = installCache.prepareInstallCache
+  installCacheEnvironment = installCache.installCacheEnvironment
   writeC1WorkFixture = fixtures.writeC1WorkFixture
   createTestTempDir = tempLifecycle.createTestTempDir
   inspectSplitUpgradePair = pair.inspectSplitUpgradePair
@@ -2750,7 +2753,8 @@ async function installProfilePackage(tarball) {
   installInProgress = true
   writeReceipt({ install: { inProgress: true, completed: false, startedAt: now(), completedAt: undefined } })
   try {
-    installPlugin(scene.installation.dshInvocation, tarball, scene.installation.harnessDir, scene.installation.env, false)
+    const installEnv = installCacheEnvironment(scene.installation.env, scene.installCacheRoot)
+    installPlugin(scene.installation.dshInvocation, tarball, scene.installation.harnessDir, installEnv, false)
     const facts = installedPackageFacts(
       join(scene.installation.profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'),
       undefined,
@@ -2897,10 +2901,10 @@ async function handleBootstrapProcess(message) {
     // The shared download cache is account-level state, not a Scene resource:
     // it is validated before the root/install/Host exists and is never removed
     // by Scene cleanup. Only this explicit Process branch opts in.
-    const installCacheRoot = prepareProcessInstallCache({
+    const installCacheRoot = prepareInstallCache({
       tmpBase,
       override: process.env.SPLIT_VITEST_PNPM_CACHE_ROOT,
-      candidateTarball: processCandidate.tarball,
+      candidateTarballs: [processCandidate.tarball],
     })
     root = createTestTempDir('dsh-split-process-foundation.', tmpBase)
     scene = { kind: 'process', workDir: root }
@@ -3051,8 +3055,17 @@ async function handleBootstrapUpgrade(message) {
   try {
     pair = inspectSplitUpgradePair(message.oldTgz, message.newTgz, { policy })
     assertPairReceipt(pair, message.expectedPairSha)
+    // The account-level download cache is validated after the real pair
+    // receipt and before any Scene root, install or manager mutation. The
+    // Upgrade lifecycle uses the same shared qualifier as the Process branch,
+    // but admits BOTH real candidate input directories.
+    const installCacheRoot = prepareInstallCache({
+      tmpBase,
+      override: process.env.SPLIT_VITEST_PNPM_CACHE_ROOT,
+      candidateTarballs: [pair.old.path, pair.new.path],
+    })
     root = createTestTempDir('upgrade-scene-', tmpBase)
-    scene = { kind: 'upgrade', workDir: root, pair, sideOld: undefined, sideNew: undefined, profileInstall: undefined }
+    scene = { kind: 'upgrade', workDir: root, pair, installCacheRoot, sideOld: undefined, sideNew: undefined, profileInstall: undefined }
     if (nativeAdapter !== undefined) {
       nativeRuntime = {
         manager: admission.manager,
@@ -3084,12 +3097,13 @@ async function handleBootstrapUpgrade(message) {
       targetDshVersion: pair.targetDshVersion,
       workDir: root,
       clientPlatformProvisioning: 'legacy-preseed',
+      installCacheRoot,
     })
     c1Work = writeC1WorkFixture(installation.profileDir, root)
     oldProfile = installedPackageFacts(installation.profilePackage, pair.old.version, pair.targetDshVersion, 'old profile')
     currentProfile = { role: 'old', installGeneration: 1, ...oldProfile }
     if (nativeRuntime !== undefined) nativeRuntime.currentProfile = currentProfile
-    scene = { kind: 'upgrade', workDir: root, pair, installation, c1Work, sideOld: undefined, sideNew: undefined, profileInstall: oldProfile }
+    scene = { kind: 'upgrade', workDir: root, pair, installation, installCacheRoot, c1Work, sideOld: undefined, sideNew: undefined, profileInstall: oldProfile }
   } catch (error) {
     installInProgress = false
     let cleanupError
@@ -3167,10 +3181,11 @@ async function handleUpgradeInstallSide(message, role) {
   })
   let facts
   try {
+    const installEnv = installCacheEnvironment(scene.installation.env, scene.installCacheRoot)
     const packageRoot = installSideBuild(
       dir,
       scene.pair[role].path,
-      scene.installation.env,
+      installEnv,
       scene.pair.targetDshVersion,
       { legacyClientPeers: role === 'old' },
     )
@@ -4063,9 +4078,10 @@ async function handleUpgradeRemoveProfileForReloadRefusal(message) {
   if (!existsSync(profilePackageRoot)) {
     throw new Error('UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the profile package is not installed before removal')
   }
+  const installEnv = installCacheEnvironment(scene.installation.env, scene.installCacheRoot)
   const result = runDsh(scene.installation.dshInvocation,
     ['plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME],
-    scene.installation.harnessDir, scene.installation.env)
+    scene.installation.harnessDir, installEnv)
   if (result.status !== 0) {
     throw new Error(`UPGRADE_REMOVE_PROFILE_FOR_RELOAD_REFUSAL: the official DSH remove failed (status ${String(result.status)})`)
   }

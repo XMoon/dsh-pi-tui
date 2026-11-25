@@ -655,15 +655,19 @@ It requires two private inputs:
   real bytes and SHA256 before a Scene root, install or Host exists; a changed
   or replaced input is `INPUT_CANDIDATE_CHANGED`.
 
-For this Project only, the Process bootstrap reuses a pnpm content store and
-metadata cache across Scenes. The default root is
+The Process business project and the default/native Upgrade projects reuse a
+pnpm content store and metadata cache across Scenes. The default root is
 `<account home>/.cache/dsh-pi-tui-test/{pnpm-store,pnpm-cache}`. Set
 `SPLIT_VITEST_PNPM_CACHE_ROOT` to an existing absolute canonical directory that
-the current user owns with mode 0700, outside this checkout, the candidate
-input directory, `SPLIT_VITEST_TMP_BASE` and the account home itself, to use a
+the current user owns with mode 0700, outside this checkout, every candidate
+input directory (the Upgrade projects validate both the old and new tarball
+directories), `SPLIT_VITEST_TMP_BASE` and the account home itself, to use a
 private cache root. The override is a test-run input, not a product setting; it
-is not passed to the Host/Client runtime environment, and Scene cleanup never
-removes the cache.
+is not passed to the Host/Client/daemon runtime environment, and Scene cleanup
+never removes the cache. The Upgrade projects use the same root for the initial
+old Profile, both side-by-side builds, later reload/rollback Profile installs
+and the explicit profile removal. Pilot, the other smokes, the Fresh profile
+lane and Source Mode do not enable this cache.
 
 Only pnpm's downloaded content and metadata are shared: every Scene still
 creates its own HOME, DSH_HOME, profile, lockfile and `node_modules` and runs a
