@@ -423,7 +423,19 @@ test('rejects an HMR mount failure left on the ordinary terminal contract and re
     expect(failed?.exitCode).toBe(1)
     expect(failed?.verifiedTerminal ?? null).toBeNull()
     expect(receipt.compensation?.attempted).toBe(true)
+    expect(receipt.compensation?.completed).toBe(true)
+    expect(receipt.cleanup?.hostsExited).toBe(true)
+    expect(receipt.cleanup?.hostSeatFree).toBe(true)
+    expect(receipt.cleanup?.qualificationSeatFree).toBe(true)
     expect(receipt.cleanup?.sceneRootRemoved).toBe(false)
+    for (const hostRecord of receipt.hosts ?? []) {
+      expect(processGone(hostRecord.pid), `retained Host PID ${String(hostRecord.pid)} is live`).toBe(true)
+    }
+    expect(failed?.shellPid).toBeDefined()
+    expect(processGone(failed!.shellPid!), 'retained Client shell is live').toBe(true)
+    for (const business of failed?.businessIdentities ?? []) {
+      expect(processGone(business.pid!), `retained Client business PID ${String(business.pid)} is live`).toBe(true)
+    }
     expect(existsSync(scene.workDir)).toBe(true)
     rmSync(scene.workDir, { recursive: true, force: true })
   } finally {

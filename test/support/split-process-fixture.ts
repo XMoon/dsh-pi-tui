@@ -515,7 +515,7 @@ interface SupervisorReceipt {
   qualificationHelpers?: Array<Record<string, any>>
   installationMutation?: Record<string, any>
   compensation?: { attempted?: boolean; completed?: boolean; failure?: string }
-  cleanup?: { sceneRootRemoved?: boolean; hostSeatFree?: boolean; qualificationSeatFree?: boolean }
+  cleanup?: { sceneRootRemoved?: boolean; hostsExited?: boolean; hostSeatFree?: boolean; qualificationSeatFree?: boolean }
   processClients?: Array<{
     clientId?: string
     label?: string
