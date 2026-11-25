@@ -363,8 +363,10 @@ export async function runAcpSessionConfig(context) {
     const closeRequest = client.request(acp.methods.agent.session.close, { sessionId })
       .then(value => { closeSettled = true; return value }, error => { closeSettled = true; throw error })
     closeRequest.catch(() => {})
-    await sleep(150)
-    assert(closeSettled === false, 'PR3B-03: close cannot fabricate a detach while the policy terminal is unproven')
+    // The held official flush is the causal gate: close's promise is still
+    // pending because its only detach path awaits that same policy terminal.
+    // No timer or attach probe is used; release is the next exact action.
+    assert(closeSettled === false, 'PR3B-03: close cannot settle while the policy terminal is unproven')
     writeFileSync(teamHold, '1', { mode: 0o600 })
     const teamOutcome = await teamRequest.then(value => ({ value }), error => ({ error }))
     assert(teamOutcome.error?.data?.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE',
@@ -408,6 +410,38 @@ export async function runAcpSessionConfig(context) {
     tui.client.send('\x1b')
     await waitForScreen(tui.client, 'Tab Team', 'PR3B TUI returns to the model list after Team off')
     tui.client.send('\x1b')
+    let pickerClosed = false
+    for (let attempt = 0; attempt < 30 && !pickerClosed; attempt++) {
+      await sleep(100)
+      pickerClosed = !(await frameOf(tui.client)).includes('Tab Team')
+    }
+    assert(pickerClosed, 'PR3B TUI must leave the /model picker before /new')
+    // A real blank same-Host Session under the minimal preset: /new leaves it
+    // before its first turn, /preset is the official blank-session selection,
+    // and ACP resume proves the absence of modes and the Team/mode rows.
+    const knownSessions = new Set((await client.request('session/list', {})).sessions.map(row => row.sessionId))
+    await submitLine(tui.client, '/new', 'PR3B-minimal-new')
+    let minimalId
+    for (let attempt = 0; attempt < 60 && minimalId === undefined; attempt++) {
+      await sleep(100)
+      const rows = (await client.request('session/list', {})).sessions
+      minimalId = rows.map(row => row.sessionId).find(id => !knownSessions.has(id))
+    }
+    assert(typeof minimalId === 'string' && minimalId !== sessionId,
+      'PR3B-07: /new must create a real blank root Session')
+    await submitLine(tui.client, '/preset minimal', 'PR3B-minimal-preset')
+    await sleep(500)
+    const minimal = await client.request(acp.methods.agent.session.resume, { sessionId: minimalId, cwd: hostCwd })
+    assert(minimal?.modes === undefined, 'PR3B-07: the minimal preset has no legacy modes')
+    assert(configOption(minimal?.configOptions, 'mode') === undefined,
+      'PR3B-07: the minimal preset has no mode row')
+    const minimalMode = await client.request(acp.methods.agent.session.setMode, {
+      sessionId: minimalId, modeId: 'plan',
+    }).then(value => ({ value }), error => ({ error }))
+    assert(minimalMode.error?.data?.code === 'LOCAL_ACP_CONFIG_INVALID_OPTION',
+      `PR3B-07: a minimal Session refuses plan mode (${JSON.stringify(minimalMode.error?.data)})`)
+    await client.request(acp.methods.agent.session.close, { sessionId: minimalId })
+
     mark = eventMark()
     await lifecycleAction('arm-team-flush-failure', sessionId, 'lifecycle-team-flush-failure-armed',
       'PR3B arm Team flush failure')
@@ -422,16 +456,20 @@ export async function runAcpSessionConfig(context) {
     'PR3B-04 the independent readback notification keeps the real committed true value')
     // One normal same-value official Team setter must also settle successfully
     // before the cold restart; this is a real successful flush, not another fault.
+    trace('acp-session-config/before-same-team', {})
     const sameTeam = await client.request(acp.methods.agent.session.setConfigOption, {
       sessionId, configId: 'agent_team', type: 'boolean', value: true,
     })
+    trace('acp-session-config/after-same-team', {})
     assert(configOption(sameTeam?.configOptions, 'agent_team')?.currentValue === true,
       'PR3B-04: a normal same-value Team write must return the complete true state')
 
     // A connection that did NOT negotiate boolean config options sees no Team
     // row and cannot write it; the same Session's model/mode rows stay intact.
     const plainUpdates = []
+    trace('acp-session-config/before-plain', {})
     const plain = await openSdkClient(endpoint, params => { plainUpdates.push(params) })
+    trace('acp-session-config/after-plain', {})
     clients.push(plain)
     await plain.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
     // A second connection owns its OWN root Session: one Host Session carries
@@ -451,6 +489,7 @@ export async function runAcpSessionConfig(context) {
     // L4: a real model/effort write keeps the Session-only model authority and
     // returns the same complete config list; a FRESH session proves the default
     // route was untouched by the ACP write.
+    trace('acp-session-config/before-model-write', {})
     const modelOptions = resumed2?.configOptions
     const routes = modelRouteValues(modelOptions)
     assert(routes.includes(modelValue(EXTRA_MODEL)), `PR3B-06: the real extra model must be selectable (${JSON.stringify(routes)})`)

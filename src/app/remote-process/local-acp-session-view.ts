@@ -1044,6 +1044,9 @@ interface ViewClaim {
   configEpoch?: number
   /** A coalesced config refresh is required after the running one settles. */
   configDirty?: boolean
+  /** Writes hold notifications until the SDK has enqueued their response. */
+  configNotifyHold?: number
+  configNotifyWaiters?: Array<() => void>
   /**
    * Whether THIS connection was actually given the legacy `modes` list at
    * attach. Only such a View may receive `current_mode_update` or call the
@@ -1710,6 +1713,41 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
    * complete current config list (mode/Team rows included), never a partial
    * model subset.
    */
+  private holdConfigNotifications(claim: ViewClaim): void {
+    claim.configNotifyHold = (claim.configNotifyHold ?? 0) + 1
+  }
+
+  private releaseConfigNotifications(claim: ViewClaim): void {
+    // The handler returns after this method; its resolved response is enqueued
+    // on the SDK write queue before this task runs. Only then may a held
+    // notification resume, so it cannot precede the setter response.
+    setImmediate(() => {
+      const remaining = (claim.configNotifyHold ?? 1) - 1
+      claim.configNotifyHold = remaining
+      if (remaining > 0) return
+      const waiters = claim.configNotifyWaiters ?? []
+      claim.configNotifyWaiters = []
+      for (const resolve of waiters) resolve()
+    })
+  }
+
+  private async waitConfigNotifications(claim: ViewClaim): Promise<void> {
+    while ((claim.configNotifyHold ?? 0) > 0) {
+      await new Promise<void>(resolve => {
+        claim.configNotifyWaiters = [...(claim.configNotifyWaiters ?? []), resolve]
+      })
+    }
+  }
+
+  private async withConfigResponseHold<T>(claim: ViewClaim, run: () => Promise<T>): Promise<T> {
+    this.holdConfigNotifications(claim)
+    try {
+      return await run()
+    } finally {
+      this.releaseConfigNotifications(claim)
+    }
+  }
+
   async setConfigOption(
     state: ConnectionViewState,
     access: HostAcpSessionAccess,
@@ -1720,8 +1758,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       const mode = request.type === undefined ? modeOfWireId(request.value) : undefined
       if (mode === undefined) throw policyViewError(invalidPolicyOption('the requested session mode is not selectable'))
       const claim = this.attachedClaim(state, request.sessionId)
-      await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
-      return await this.readConfigReply(claim, access)
+      return await this.withConfigResponseHold(claim, async () => {
+        await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
+        return await this.readConfigReply(claim, access)
+      })
     }
     if (request.configId === ACP_AGENT_TEAM_CONFIG_ID) {
       const claim = this.attachedClaim(state, request.sessionId)
@@ -1731,17 +1771,22 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       if (request.type !== 'boolean' || typeof request.value !== 'boolean') {
         throw policyViewError(invalidPolicyOption('the requested Agent Team option requires a boolean value'))
       }
-      await this.performPolicyWrite(claim, access, { kind: 'agent-team', enabled: request.value }, signal)
-      return await this.readConfigReply(claim, access)
+      const enabled = request.value
+      return await this.withConfigResponseHold(claim, async () => {
+        await this.performPolicyWrite(claim, access, { kind: 'agent-team', enabled }, signal)
+        return await this.readConfigReply(claim, access)
+      })
     }
     if (request.configId === 'model' || request.configId === 'thought_level') {
       const claim = this.attachedClaim(state, request.sessionId)
-      await this.setModelOnly(state, access, request, signal)
-      // A same-value write emits no Session event and changes no projection, so
-      // it neither needs nor may race a config notification ahead of its reply.
-      // A real model/selection event owns the post-write refresh. The reply is
-      // ONE fenced full cut after the model terminal.
-      return await this.readConfigReply(claim, access)
+      return await this.withConfigResponseHold(claim, async () => {
+        await this.setModelOnly(state, access, request, signal)
+        // A same-value write emits no Session event and changes no projection, so
+        // it neither needs nor may race a config notification ahead of its reply.
+        // A real model/selection event owns the post-write refresh. The reply is
+        // ONE fenced full cut after the model terminal.
+        return await this.readConfigReply(claim, access)
+      })
     }
     throw policyViewError(invalidPolicyOption('unknown session config option'))
   }
@@ -1765,8 +1810,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     const mode = modeOfWireId(modeId)
     if (mode === undefined) throw policyViewError(invalidPolicyOption('the requested session mode is not selectable'))
-    await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
-    return {}
+    return await this.withConfigResponseHold(claim, async () => {
+      await this.performPolicyWrite(claim, access, { kind: 'mode', mode }, signal)
+      return {}
+    })
   }
 
   /**
@@ -5192,6 +5239,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     epoch: number,
     update: AcpConfigUpdate,
   ): Promise<boolean> {
+    await this.waitConfigNotifications(claim)
     if (!this.configSinkCurrent(claim) || claim.notifyConfigUpdate !== notify
       || (claim.configEpoch ?? 0) !== epoch) return false
     try {

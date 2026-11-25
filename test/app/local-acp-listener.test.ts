@@ -3768,6 +3768,79 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
 })
 
 
+test('a model reply whose fenced cut is invalidated during its held read returns the newest complete state first', async t => {
+  const { scope } = newScope(t)
+  const optionsA = configOptionsFor('["p1","a"]')
+  const optionsB = configOptionsFor('["p1","b"]')
+  const optionsC = configOptionsFor('["p1","c"]')
+  let current = optionsA
+  let hold = false
+  let reads = 0
+  let release!: () => void
+  let started!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const held = new Promise<void>(resolve => { started = resolve })
+  const fake = makeFakeAccess({
+    modelOptions: async () => {
+      if (hold && reads++ === 0) {
+        started()
+        await gate
+        return optionsA // deliberately the stale pre-invalidation snapshot
+      }
+      return current
+    },
+    selectModelOnly: async () => {
+      current = optionsB
+      return optionsB
+    },
+  })
+  fake.seed('session-reply-order', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host/proj', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    assert.equal(typeof sessionId, 'string')
+    hold = true
+    client.send({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/set_config_option',
+      params: { sessionId, configId: 'model', value: '["p1","b"]' },
+    })
+    await held
+    const agent = fake.agentOf(sessionId)
+    const facts = fake.facts()
+    assert.ok(agent !== undefined && facts !== undefined)
+    current = optionsC
+    facts.onSessionEvent(agent.session, { seq: 1, type: 'model/selection', data: { provider: 'p1', model: 'c' } })
+    release()
+    const first = (await client.next()) as {
+      id?: number
+      method?: string
+      result?: { configOptions?: SessionConfigOption[] }
+      params?: { update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
+    }
+    assert.equal(first.id, 3, 'the setter response must be submitted before the invalidated cut notification')
+    assert.deepEqual(first.result?.configOptions, optionsC,
+      'the response must carry the newest complete cut after exactly one bounded retry')
+    const second = (await client.next()) as {
+      method?: string
+      params?: { update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } }
+    }
+    assert.equal(second.method, 'session/update')
+    assert.equal(second.params?.update?.sessionUpdate, 'config_option_update')
+    assert.deepEqual(second.params?.update?.configOptions, optionsC)
+  } finally {
+    client.close()
+  }
+})
+
+
 test('ACP v1 modes and the negotiated boolean config option are served on the official session policy authority', async t => {
   const { scope } = newScope(t)
   const options = configOptionsFor('["p1","a"]')
