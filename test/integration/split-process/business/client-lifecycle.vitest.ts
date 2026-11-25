@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -144,15 +145,51 @@ async function settleInitialPrompt(
   return sessionId
 }
 
-/** Kernel liveness for a Linux PID; a zombie is already terminal. */
-function processGone(pid: number): boolean {
+/**
+ * Portable terminal-state observation for a recorded PID. An absent process
+ * and a zombie are both terminal; an unreadable or permission-denied record is
+ * NOT terminal and must fail the negative control.
+ */
+function processState(pid: number): 'gone' | 'terminal' | 'live' | 'unknown' {
+  if (!Number.isInteger(pid) || pid <= 0) return 'unknown'
   try {
-    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
-    const end = stat.lastIndexOf(')')
-    const state = stat.slice(end + 2, end + 3)
-    return state === 'Z' || state === 'X'
-  } catch {
-    return true
+    process.kill(pid, 0)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return 'gone'
+    if (code === 'EPERM') return 'live'
+    return 'unknown'
+  }
+  try {
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+      const end = stat.lastIndexOf(')')
+      const state = stat.slice(end + 2, end + 3)
+      return state === 'Z' || state === 'X' ? 'terminal' : 'live'
+    }
+    if (process.platform === 'darwin') {
+      const state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim()
+      if (state === '') return 'gone'
+      return state.startsWith('Z') ? 'terminal' : 'live'
+    }
+    return 'unknown'
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ESRCH' ? 'gone' : 'unknown'
+  }
+}
+
+/** A recorded POSIX process group is terminal only when the kernel no longer owns it. */
+function processGroupState(pgid: number): 'gone' | 'live' | 'unknown' {
+  if (!Number.isInteger(pgid) || pgid <= 0) return 'unknown'
+  try {
+    process.kill(-pgid, 0)
+    return 'live'
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return 'gone'
+    if (code === 'EPERM') return 'live'
+    return 'unknown'
   }
 }
 
@@ -200,7 +237,7 @@ test.skipIf(process.platform !== 'linux')(
       const terminal = await ownerClient.loseTerminalOwner()
       expect(terminal.kind).toBe('owner-loss')
       expect(terminal.ownerExit).toEqual({ code: null, signal: 'SIGKILL' })
-      expect(processGone(businessPid)).toBe(true)
+      expect(['gone', 'terminal']).toContain(processState(businessPid))
       expect(terminal.hostPid).toBe(hostBefore.localHost.hostPid)
       const after = await scene.hostStatus(host)
       expect(after.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
@@ -429,12 +466,17 @@ test('rejects an HMR mount failure left on the ordinary terminal contract and re
     expect(receipt.cleanup?.qualificationSeatFree).toBe(true)
     expect(receipt.cleanup?.sceneRootRemoved).toBe(false)
     for (const hostRecord of receipt.hosts ?? []) {
-      expect(processGone(hostRecord.pid), `retained Host PID ${String(hostRecord.pid)} is live`).toBe(true)
+      expect(Number.isInteger(hostRecord.pid) && hostRecord.pid > 0, 'retained Host has no real PID').toBe(true)
+      expect(['gone', 'terminal']).toContain(processState(hostRecord.pid))
+      if (Number.isInteger(hostRecord.pgid) && hostRecord.pgid > 0) {
+        expect(processGroupState(hostRecord.pgid), `retained Host group ${String(hostRecord.pgid)} is live`).toBe('gone')
+      }
     }
-    expect(failed?.shellPid).toBeDefined()
-    expect(processGone(failed!.shellPid!), 'retained Client shell is live').toBe(true)
+    expect(Number.isInteger(failed?.shellPid) && failed!.shellPid! > 0, 'retained Client has no real shell PID').toBe(true)
+    expect(['gone', 'terminal']).toContain(processState(failed!.shellPid!))
     for (const business of failed?.businessIdentities ?? []) {
-      expect(processGone(business.pid!), `retained Client business PID ${String(business.pid)} is live`).toBe(true)
+      expect(Number.isInteger(business.pid) && business.pid! > 0, 'retained Client has no real business PID').toBe(true)
+      expect(['gone', 'terminal']).toContain(processState(business.pid!))
     }
     expect(existsSync(scene.workDir)).toBe(true)
     rmSync(scene.workDir, { recursive: true, force: true })
