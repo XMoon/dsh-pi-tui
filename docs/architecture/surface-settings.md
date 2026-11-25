@@ -416,7 +416,10 @@ specialist-page contract below).
     search Input owns the keyboard, `Enter`/`Tab` is `Done` and only the real
     Back remains, and route hit targets/actions and Refresh are not painted.
     The first `Esc` ends search, and a second `Esc`/`Left` returns to the group
-    with the query, the field and the selected route intact. A saved route
+    with the query, the field, the selected route and the manually scrolled
+    directory offset intact. At a medium Detail width the complete Refresh
+    receipt survives even when the longer route action moves to its complete
+    body target. A saved route
     remains visible and removable when the directory or that provider is
     unavailable; absence means only that a route was not listed in a current
     successful ready directory, never physical deletion or future routability. Removing the last allowed route while the

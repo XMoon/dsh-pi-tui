@@ -363,7 +363,14 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
     this.browseOffset = 0
     this.changed()
   }
-  private keepEditing(): void { this.question = undefined; this.revealSelection = true; this.changed() }
+  private keepEditing(): void {
+    this.question = undefined
+    // Keeping a directory-refresh question returns to the SAME directory
+    // projection; it must not re-anchor the manually scrolled offset. A browse
+    // question still reveals its selected field.
+    if (this.view !== 'directory') this.revealSelection = true
+    this.changed()
+  }
 
   private acceptQuestion(): void {
     const question = this.question
@@ -484,8 +491,13 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
   private openDirectory(): void {
     if (this.view === 'directory') return
     if (!this.editable('allowedModels', this.controller.snapshot())) return
+    // First/new-authority entry reveals the selected route. Re-entering the
+    // same live directory (Back -> Manage) preserves its manually scrolled
+    // offset/query/key; it is the same projection, not a fresh disclosure.
+    const sameAuthority = this.catalogAuthority === this.authorityIdentity(this.controller.snapshot())
     this.view = 'directory'
-    this.revealSelection = true
+    this.revealSelection = !sameAuthority
+    if (!sameAuthority) this.directoryOffset = 0
     this.routeNotice = undefined
     this.loadDirectory(false)
     this.changed()
@@ -1743,7 +1755,11 @@ export class SubagentSettingsPage implements EmbeddedSpecialistPage {
         segments = [
           ...(actionWord === undefined ? [] : [{ text: actionWord, priority: 850, action: 'route-toggle' as const }]),
           { text: `Search [${KEYS.search}]`, priority: 400, action: 'search' as const },
-          { text: `Refresh [${KEYS.refresh.toUpperCase()}]`, short: 'Refresh', priority: 500, action: 'refresh' as const },
+          // A real medium Detail width drops the route span before Refresh.
+          // The route action still has its complete body target, so Refresh
+          // must keep the higher-priority bar receipt rather than becoming a
+          // dead `r` key at exactly the width where it is needed.
+          { text: `Refresh [${KEYS.refresh.toUpperCase()}]`, short: 'Refresh', priority: 900, action: 'refresh' as const },
           { text: 'Back [Esc]', priority: 1000, escape: true },
         ]
       }

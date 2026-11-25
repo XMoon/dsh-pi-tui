@@ -2818,20 +2818,46 @@ test('a narrow ambiguous question reserves its answer before long optional route
   controller.toggleEnabled()
   controller.toggleRoute(longRoute)
   page.render(80)
-  const saveFrame = page.render(80)
-  assert.match(barLine(saveFrame), /Save/u)
   activateBar(page, 'bar:save')
   await h.drainTasks()
   assert.equal(controller.snapshot().selection.status?.kind, 'outcome-unconfirmed')
-  page.setMaxRows(8)
+  page.setMaxRows(8) // body 7: the full mandatory copy + complete answer; optional detail does not fit
   page.render(80)
   page.handleInput(ESC)
-  const frame = page.render(30)
-  const plain = strip(frame.join('\n'))
+  let frame = page.render(26)
+  let plain = strip(frame.join('\n'))
   assert.match(plain, /The Host may have applied\s+changes\./u, 'the necessary ambiguous copy is complete')
   const acceptRow = rowIndex(frame, line => line.includes('Leave anyway…'))
   assert.ok(acceptRow >= 0, `the body answer is reserved before optional details:\n${frame.join('\n')}`)
-  assert.ok(acceptRow < 8, 'the reserved answer is inside the grant')
+  assert.ok(acceptRow < 7, 'the reserved answer is inside the grant')
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:leave'), false,
+    'the 26-cell bar cannot supply the accept')
+  assert.equal(page.handleMouse(mouse('press', 0, acceptRow, 26, frame.length))?.handled, true,
+    'the body answer is a real press target')
+  // One scroll puts the first necessary fact outside while the reserved answer
+  // row is still physically inside; the final viewport predicate must blank its
+  // text and withdraw its target at the SHIFTED physical row.
+  page.handleInput(DOWN)
+  frame = page.render(26)
+  plain = strip(frame.join('\n'))
+  assert.doesNotMatch(plain, /Leave anyway…/u, 'the answer text is blank once necessary copy is scrolled out')
+  const blankRow = acceptRow - 1
+  assert.notEqual(page.handleMouse(mouse('press', 0, blankRow, 26, frame.length))?.handled, true,
+    'the shifted blank is not a press target')
+  assert.notEqual(page.handleMouse(mouse('click', 0, blankRow, 26, frame.length))?.handled, true,
+    'the shifted blank is not a release target')
+  page.handleInput('d')
+  await h.drainTasks()
+  assert.equal(h.dones.length, 0, 'the hidden key never leaves')
+  assert.equal(h.writes.length, 1, 'the uncertain write is not replayed')
+  assert.equal(controller.snapshot().selection.dirty, true, 'the draft is unchanged')
+  // Home restores the complete copy; the actual fresh press/release leaves once.
+  page.handleInput(HOME)
+  frame = page.render(26)
+  assert.match(strip(frame.join('\n')), /Leave anyway…/u)
+  clickRow(page, frame, acceptRow, 26, 'Leave anyway…')
+  assert.equal(h.dones.length, 1, 'the fresh answer leaves exactly once')
+  assert.equal(h.writes.length, 1, 'leaving never replays the uncertain write')
   h.page.dispose()
 })
 
@@ -2934,43 +2960,91 @@ test('a clean directory refresh invalidates the old read and never publishes its
 })
 
 test('a dirty directory refresh keeps its state on Keep and re-reads once on the accepted path', async () => {
+  const models = Array.from({ length: 18 }, (_, index) => ({ id: `m${index + 1}`, name: `Model ${index + 1}` }))
   const h = await started({
     directoryValue: {
-      default: { provider: 'p', model: 'm' },
+      default: { provider: 'p', model: 'm1' },
       routableProviders: ['p'],
-      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }, { id: 'n', name: 'Other N' }] }],
+      groups: [{ id: 'p', name: 'Provider P', models }],
       failures: [],
     },
   })
   const { page, controller } = h
+  const firstModel = (lines: readonly string[]): string | undefined =>
+    lines.map(strip).find(line => /\bModel \d+\b/u.test(line))
   page.focused = true
+  page.setMaxRows(12)
   selectField(page, 'Allowed models')
   page.handleInput(ENTER)
   await h.drainTasks()
   page.render(80)
   page.handleInput('/')
-  page.handleInput('other')
+  page.handleInput('model')
   page.handleInput(ENTER)
-  page.render(80)
-  activateBar(page, 'bar:route-toggle')
+  let frame = page.render(34)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /Search \[\/\]\s+model/u)
+  // A real 34-cell Detail bar keeps the complete Refresh receipt and drops the
+  // longer route span; the route action remains a complete body target.
+  assert.match(barLine(frame), /Refresh/u)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false,
+    'the 34-cell bar drops the route action')
+  const addRow = rowIndex(frame, line => line.includes('Add route [Enter]'))
+  assert.ok(addRow >= 0, `the complete body Add remains:\n${frame.join('\n')}`)
+  clickRow(page, frame, addRow, 34, 'Add route [Enter]')
   await settleMicrotasks()
   assert.equal(controller.snapshot().selection.patch.allowedModels?.kind, 'set')
-  page.render(80) // the staged route changed the frame; admit the key only on this fresh one
-  page.handleInput('r')
-  page.render(80)
-  assert.match(strip(page.render(80).join('\n')), /Refresh discards unsaved edits\./u)
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /Remove route \[Enter\]/u,
+    'the body action flips to Remove without a bar span')
   const reads = h.directoryReadCount()
-  page.handleInput(ESC) // the refresh question's real Keep
-  page.render(80)
+  // Manually scroll away from the selected first route (nonzero actual offset).
+  page.handleInput('\x1b[6~')
+  frame = page.render(34)
+  const anchor = firstModel(frame)
+  assert.ok(anchor !== undefined, 'the scrolled directory paints a model anchor')
+  assert.doesNotMatch(strip(frame.join('\n')), /> Model 1/u, 'the selected route is offscreen')
+  // r opens the dirty refresh question; Keep preserves the query/key/actual
+  // manually scrolled offset and starts no read.
+  page.handleInput('r')
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /Refresh discards unsaved edits\./u)
+  page.handleInput(ESC)
+  frame = page.render(34)
   assert.equal(h.directoryReadCount(), reads, 'Keep starts no new read')
-  assert.match(strip(page.render(80).join('\n')), /Search \[\/\]\s+other/u, 'Keep preserves the query')
+  assert.equal(firstModel(frame), anchor, 'Keep preserves the manually scrolled anchor')
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+model/u, 'Keep preserves the query')
+  assert.doesNotMatch(strip(frame.join('\n')), /> Model 1/u, 'Keep does not re-anchor the selected route')
+  // Same-authority Back -> Manage reuses the same projection and offset.
+  page.handleInput(ESC)
+  page.render(34)
+  // At the narrow dirty group the bar keeps Save+Back, so the field's complete
+  // body Manage is the explicit pointer action; use it for the same-authority
+  // re-entry.
+  page.handleInput(END)
+  frame = page.render(34)
+  const manageRow = rowIndex(frame, line => line.includes('Manage [Enter]'))
+  assert.ok(manageRow >= 0, `the complete body Manage remains:\n${frame.join('\n')}`)
+  clickRow(page, frame, manageRow, 34, 'Manage [Enter]')
+  await settleMicrotasks()
+  frame = page.render(34)
+  assert.equal(h.directoryReadCount(), reads, 'same-authority reuse starts no read')
+  assert.equal(firstModel(frame), anchor, 'same-authority reuse preserves the anchor')
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+model/u)
+  // The selected key survives; Home reveals it without a new read.
+  page.handleInput(HOME)
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /> Model 1/u, 'the same selected key survives')
+  // The accepted dirty refresh discards the draft, aborts the old projection
+  // and reloads exactly once.
   page.handleInput('r')
-  page.render(80)
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /Refresh discards unsaved edits\./u)
   page.handleInput('r')
   await h.drainTasks()
-  page.render(80)
+  page.render(34)
   await h.drainTasks()
-  page.render(80)
+  page.render(34)
   assert.equal(h.directoryReadCount(), reads + 1, 'the accepted refresh reads the current authority once')
   h.page.dispose()
 })
