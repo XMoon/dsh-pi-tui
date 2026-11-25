@@ -47,7 +47,10 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
-async function exitPublicLaunch(launch: PublicDaemonLaunch, label: string): Promise<void> {
+async function exitPublicLaunch(
+  launch: PublicDaemonLaunch,
+  label: string,
+): Promise<{ code: number | null; signal: string | null; text: string }> {
   await launch.submit('/exit')
   const started = Date.now()
   let exit: { code: number | null; signal: string | null; text: string }
@@ -70,6 +73,7 @@ async function exitPublicLaunch(launch: PublicDaemonLaunch, label: string): Prom
   expect(exit.signal, `${label}: the public CLI exit signal`).toBe(null)
   expect(exit.text, `${label}: the daemon detach line`).toContain('Disconnected from dsh-pi-tui (daemon client).')
   await launch.close()
+  return exit
 }
 
 test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the split backend', async () => {
@@ -462,6 +466,124 @@ test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after t
           'the public peer test failed and its Scene cleanup also failed')
       }
       throw new AggregateError(teardown, 'the public peer test cleanup failed')
+    }
+  }
+})
+
+test.skipIf(!linuxOnly)('pins the public alias resume command and replays it against the live Host', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  const alias = 'public-alias'
+  let testError: unknown
+  try {
+    const owner = await scene.startPublicDaemon({
+      label: 'alias-owner',
+      backend: 'daemon',
+      alias,
+      herdr: true,
+    })
+    launches.push(owner)
+    await waitForFrame(owner, '❯', 'alias owner composer')
+    const before = new Set(await scene.sessionIds())
+    await owner.submit('alias resume seed')
+    const sessionId = await scene.waitForNewSessionId(before, 'alias Session')
+    await scene.waitForSessionEvent(sessionId, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'alias seed answer')
+    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 'alias seed turn end')
+
+    let invocations = owner.readHerdrInvocations()
+    const herdStarted = Date.now()
+    while (!invocations.some(invocation => invocation.argv[1] === 'report-agent-session')
+      && Date.now() - herdStarted < 60_000) {
+      await sleep(100)
+      invocations = owner.readHerdrInvocations()
+    }
+    expect(invocations.length, `the controlled Herdr fake received invocations: ${JSON.stringify(invocations)}`).toBeGreaterThan(0)
+    for (const invocation of invocations) {
+      expect(invocation.ppid, 'the Herdr reporter runs inside the real public Client').toBe(owner.client?.pid)
+      expect(invocation.argv[0]).toBe('pane')
+      expect(['report-agent', 'report-agent-session', 'release-agent']).toContain(invocation.argv[1])
+      expect(invocation.argv[2]).toBe(owner.herdr?.paneId)
+      const sourceAt = invocation.argv.indexOf('--source')
+      const agentAt = invocation.argv.indexOf('--agent')
+      expect(invocation.argv[sourceAt + 1]).toBe('dsh-pi-tui')
+      expect(invocation.argv[agentAt + 1]).toBe('dsh-pi-tui')
+    }
+    const seqs = invocations.map((invocation) => Number(invocation.argv[invocation.argv.indexOf('--seq') + 1]))
+    for (let index = 1; index < seqs.length; index += 1) {
+      expect(seqs[index], 'Herdr seq is strictly increasing').toBeGreaterThan(seqs[index - 1] as number)
+    }
+    const stateIndex = invocations.findIndex(invocation => invocation.argv[1] === 'report-agent')
+    const sessionIndex = invocations.findIndex(invocation => invocation.argv[1] === 'report-agent-session')
+    expect(stateIndex, 'a real state report was sent').toBeGreaterThanOrEqual(0)
+    expect(sessionIndex, 'a real Session report was sent').toBeGreaterThan(stateIndex)
+    const sessionArgs = invocations[sessionIndex]!.argv
+    expect(sessionArgs[sessionArgs.indexOf('--agent-session-id') + 1]).toBe(sessionId)
+    const resumeAt = sessionArgs.indexOf('--')
+    expect(resumeAt).toBeGreaterThan(0)
+    const capturedResume = sessionArgs.slice(resumeAt + 1)
+    expect(capturedResume).toEqual([
+      'env', 'DSH_PI_TUI_BACKEND=daemon', 'dsh', '--profile', alias, '--session', sessionId,
+    ])
+
+    const peer = await scene.startPublicDaemon({
+      label: 'alias-peer',
+      backend: 'daemon',
+      alias,
+      args: { session: sessionId },
+    })
+    launches.push(peer)
+    await waitForFrame(peer, 'alias resume seed', 'the alias peer opened the same history')
+    expect(peer.host?.instanceId).toBe(owner.host?.instanceId)
+
+    const exit = await exitPublicLaunch(owner, 'alias owner')
+    expect(exit.text).toContain('Disconnected from dsh-pi-tui (daemon client).')
+    expect(exit.text).toContain('The daemon Host was not stopped by this action.')
+    expect(exit.text).toContain(`dsh --profile ${alias} --session ${sessionId}`)
+    expect(exit.text).toContain('DSH_PI_TUI_BACKEND=daemon ')
+    expect(exit.text).toContain(`dsh --profile ${alias} daemon status`)
+    expect(exit.text).toContain(`dsh --profile ${alias} daemon logs`)
+    expect(exit.text).toContain(`dsh --profile ${alias} daemon stop`)
+    expect((await peer.kernelState()).clientState, 'the peer Client is live before the replay').toBe('alive')
+
+    const replay = await scene.startPublicDaemon({
+      label: 'alias-resume-replay',
+      alias,
+      replayCommand: capturedResume,
+    })
+    launches.push(replay)
+    await waitForFrame(replay, 'alias resume seed', 'the replayed resume command opened the exact history')
+    expect(replay.host?.instanceId).toBe(owner.host?.instanceId)
+    expect((await peer.kernelState()).clientState, 'the peer Client stays live during the replay').toBe('alive')
+    await exitPublicLaunch(replay, 'alias replay')
+    expect((await peer.kernelState()).clientState, 'the peer Client stays live after the replay').toBe('alive')
+    await exitPublicLaunch(peer, 'alias peer')
+    await peer.stopHost()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the public alias/replay test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the public alias/replay test cleanup failed')
     }
   }
 })
