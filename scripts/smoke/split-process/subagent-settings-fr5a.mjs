@@ -69,12 +69,20 @@ async function openSubagentSettings(client, label) {
   await sleep(180)
   await selectFrame(client, frame => /^> Subagent settings\b/mu.test(frame), `${label} Subagent row`)
   client.send('\r')
-  await waitForPattern(client, /Settings · Agent · Subagent settings[\s\S]*Limits · Ready[\s\S]*Model selection · Ready/u,
-    `${label} authoritative Subagent page`)
+  await waitForPattern(client, /Settings · Agent · Subagent settings[\s\S]*> Maximum depth[\s\S]*Model selection/u,
+    `${label} authoritative Subagent group`)
+}
+
+const BROWSE_LABEL = {
+  'Maximum recursion depth': 'Maximum depth',
+  'Subagent parallelism limit': 'Parallelism',
 }
 
 async function focusField(client, label, where) {
-  await selectFrame(client, frame => new RegExp(`^> ${label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'mu').test(frame), where, '\x1b[B', 6)
+  const visible = BROWSE_LABEL[label] ?? label
+  // The field lives inside the Detail pane; its cursor is column-relative,
+  // never at the physical line start.
+  await selectFrame(client, frame => new RegExp(`> ${visible.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'mu').test(frame), where, '\x1b[B', 6)
 }
 
 async function stageNumber(client, label, value, where) {
@@ -87,8 +95,9 @@ async function stageNumber(client, label, value, where) {
     client.send(char)
     await sleep(40)
   }
+  await waitForText(client, 'Stage [Enter]', `${where} stage action`)
   client.send('\r')
-  const frame = await waitForPattern(client, /Limits: Unsaved/u, `${where} staged limit`)
+  const frame = await waitForPattern(client, /unsaved change/u, `${where} staged limit`)
   assert(frame.includes('Save [S]'), `${where}: the staged limit must paint Save`)
 }
 
@@ -96,7 +105,7 @@ async function stageEnabled(client, where) {
   await focusField(client, 'Enabled', `${where} Enabled`)
   client.send('\r')
   await waitForPattern(client, /> Enabled\s+On\b/u, `${where} staged Enabled`)
-  const frame = await waitForPattern(client, /Selection: Unsaved/u, `${where} staged selection`)
+  const frame = await waitForPattern(client, /unsaved changes/u, `${where} staged selection`)
   assert(frame.includes('Save [S]'), `${where}: Enabled must remain staged before Save`)
 }
 
@@ -109,8 +118,9 @@ async function closeClient(client, scene, label) {
   for (let attempt = 0; attempt < 14; attempt += 1) {
     const frame = await frameOf(client)
     if (!/Settings ·/u.test(frame)) break
-    if (/Discard unsaved changes\? y\/N/u.test(frame)) {
-      client.send('y')
+    if (/Discard and leave loses staged values\.|Leaving does not undo them\./u.test(frame)) {
+      await waitForPattern(client, /Discard and leave \[D\]|Leave anyway \[D\]/u, `${label} painted leave action`)
+      client.send('d')
       await sleep(180)
     } else {
       client.send('\x1b')
@@ -176,21 +186,34 @@ export async function runSubagentSettingsFr5A(context) {
       'neither Client has written Selection before Save')
 
     clientB.send('s')
-    const bFrame = await waitForPattern(clientB,
+    await waitForPattern(clientB,
       /Limits: Verified[\s\S]*Selection: Outcome unconfirmed/u,
       'FR5-A Client B partial namespace settlement')
     assert(isDeepStrictEqual(profileUserConfig(installation.profileDir, 'subagent'), { maxDepth: 3 }),
       'the writable Limits namespace reaches the actual Host USER profile patch')
     assert(profileUserConfig(installation.profileDir, SELECTION_NS) === undefined,
       'the home-overlay refusal creates no Selection USER override')
-    assert(bFrame.includes('home patch or command-line overlay'),
-      'the failed section names the official higher-layer refusal')
+    // Prove the reason inside the REAL Detail region, not by joining unrelated
+    // parent columns. The status label starts the region column; the reason is
+    // the wrapped continuation below it. Normalize whitespace only inside that
+    // region so the same official sentence is proven at any pane width.
+    const bLines = await clientB.viewport()
+    const statusIndex = bLines.findIndex(line => line.includes('Selection: Outcome unconfirmed'))
+    assert(statusIndex >= 0, 'Client B paints the failed section settlement')
+    const statusColumn = bLines[statusIndex].indexOf('Selection:')
+    assert(statusColumn >= 0, 'Client B paints the settlement label in its Detail column')
+    const region = bLines.slice(statusIndex, Math.min(bLines.length, statusIndex + 8))
+      .map(line => line.slice(statusColumn).trimEnd()).join(' ').replace(/\s+/gu, ' ')
+    assert(region.includes('is overridden by a home patch or command-line overlay'),
+      `the failed section names the official higher-layer refusal (region=${JSON.stringify(region)})`)
     trace('fr5a.remote-partial-save', { limitsVerified: true, selectionOutcomeUnconfirmed: true, profilePatch: true })
 
     // A must not rebase its draft onto B's newer Host revision or overwrite it.
     // Whether the shared document-updated event has already refreshed A's mirror
     // or A discovers the revision at Save, the real Settings page refuses the
     // stale intent and the bytes remain B's committed value.
+    await waitForPattern(clientA, /Settings · Agent · Subagent settings[\s\S]*Current: 1 · Unsaved/u,
+      'FR5-A Client A actual staged frame before its stale save')
     clientA.send('s')
     const aFrame = await waitForPattern(clientA,
       /Last-known|Not saved · settings changed|Refresh to review/u,

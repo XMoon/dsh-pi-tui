@@ -2637,24 +2637,37 @@ test('Subagent settings stages Enabled and routes in one lease until explicit Sa
     directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
   } })
   await openAgentRow(h, 'Subagent settings')
-  await key(h, '\r')
+  await key(h, '\r') // Rows Enter is the explicit tenant entry
   await settle(h)
-  assert.match(h.view(), /Maximum recursion depth/u)
+  assert.match(h.view(), /> Maximum depth/u)
+  assert.match(h.view(), /Limits/u)
   assert.doesNotMatch(h.view(), /Subagent allowed models|Subagent model selection/u)
+
+  // Enabled with an empty route list is a LEGAL staged draft, not a write.
   await key(h, '\x1b[B')
   await key(h, '\x1b[B')
-  await key(h, '\r') // stage Enabled
+  assert.match(h.view(), /> Enabled/u)
+  await key(h, '\r') // the explicit Toggle
+  await settle(h)
+  assert.match(h.view(), /Select at least one allowed route/u)
   await key(h, 's')
   await settle(h)
   assert.equal(h.subagentWrites().length, 0, 'enabled + empty routes never dispatches')
-  assert.match(h.view(), /at least one allowed route/u)
+
+  // The model directory stages routes only through its explicit action.
   await key(h, '\x1b[B')
-  await key(h, '\r') // Manage
+  assert.match(h.view(), /> Allowed models/u)
+  await key(h, '\r') // the explicit Manage entry
   await settle(h)
   assert.match(h.view(), /Provider One/u)
-  await key(h, '\r') // stage first route
-  assert.equal(h.subagentWrites().length, 0, 'directory Enter only edits draft')
-  await key(h, '\x1b')
+  assert.match(h.view(), /Add route \[Enter\]/u)
+  await clickPainted(h, 'Add route [Enter]', true)
+  await settle(h)
+  assert.match(h.view(), /\[allowed\]/u)
+  assert.equal(h.subagentWrites().length, 0, 'the directory action only stages')
+  await key(h, '\x1b') // directory -> the selected group field
+  await settle(h)
+  assert.match(h.view(), /> Allowed models/u)
   await key(h, 's')
   await settle(h)
   assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
@@ -2665,13 +2678,17 @@ test('Subagent settings stages Enabled and routes in one lease until explicit Sa
   h.dispose()
 })
 
-test('the embedded Subagent page keeps its selection and Save bar inside every frozen Settings viewport', async () => {
+test('the embedded Subagent tenant keeps its selection and Save bar inside every frozen Settings viewport', async () => {
   const matrix = [
     [200, 50, 'dark', 'symbols'],
     [120, 40, 'light', 'minimal'],
+    [108, 40, 'dark', 'symbols'],
+    [107, 40, 'light', 'minimal'],
     [100, 40, 'plugin:acme/solarized', 'emoji'],
     [80, 24, 'dark', 'symbols'],
     [80, 10, 'light', 'minimal'],
+    [76, 24, 'dark', 'emoji'],
+    [75, 24, 'light', 'symbols'],
     [72, 24, 'dark', 'emoji'],
     [44, 20, 'light', 'symbols'],
     [44, 8, 'plugin:acme/solarized', 'minimal'],
@@ -2694,12 +2711,15 @@ test('the embedded Subagent page keeps its selection and Save bar inside every f
     await key(h, '\r')
     await settle(h)
     assert.match(h.view(), /Settings · Agent · Subagent settings/u, `${columns}x${rows}: the page identity stays visible`)
+    assert.match(h.view(), /> Maximum depth/u, `${columns}x${rows}: the group browse keeps its selected field`)
     assertRowWidths(h, columns)
     assert.match(h.rowsPlain().at(-1) ?? '', /Back \[Esc\]/u, `${columns}x${rows}: the Root-owned exit stays painted`)
-    for (let step = 0; step < 2; step += 1) await key(h, '\x1b[B')
+    await key(h, '\x1b[B')
+    await key(h, '\x1b[B')
     await key(h, '\r') // Enabled changes only the per-open draft.
+    await settle(h)
     assert.equal(h.subagentWrites().length, 0, `${columns}x${rows}: staging has no Host write`)
-    assert.match(h.rowsPlain().at(-1) ?? '', /Save \[S\]/u, `${columns}x${rows}: the dirty primary action stays complete`)
+    assert.match(h.rowsPlain().at(-1) ?? '', /Save \[S\]|Save ·/u, `${columns}x${rows}: the dirty primary action stays complete`)
     await key(h, 's')
     await settle(h)
     assert.equal(h.subagentWrites().length, 1, `${columns}x${rows}: Save reaches the typed section once`)
@@ -2714,53 +2734,127 @@ test('the real Settings Root row and delegated spans complete the Subagent point
     subagent: { enabled: false, allowedModels: [] },
     directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
   } })
-  const clickText = async (text: string, last = false): Promise<void> => {
-    const row = last ? h.rowsPlain().length - 1 : rowOf(h, text)
-    const col = cellIndexOf(h, row, text)
-    press(h, row, col)
-    // The Root requests a render after admitting a body press; the child's
-    // next painted frame is what a release must resolve against.
-    await h.vt.waitForRender()
-    release(h, row, col)
-    await settle(h)
-  }
   await h.open('Agent')
   await key(h, '\r')
-  await clickText('Subagent settings')
-  assert.match(h.view(), /Maximum recursion depth/u, 'Root painted row click opens the real embedded page')
-  await clickText('Enabled')
-  await clickText('Manage…')
-  assert.match(h.view(), /Provider One/u, `the managed row opens the model directory:\n${h.view()}`)
-  await clickText('Model One')
-  assert.equal(h.subagentWrites().length, 0)
-  await clickText('Back [Esc]', true)
-  // The numeric field and its Reset are pointer-operable too: the input accepts
-  // normal text, while Apply stays a painted bar action.
-  await clickText('Maximum recursion depth')
-  await key(h, '2')
-  await clickText('Apply [Enter]', true)
-  await clickText('Reset')
-  assert.match(h.view(), /Reset staged/u, 'the pointer Reset really staged the draft')
-  assert.match(h.view(), /Save \[S\]/u, 'the dirty page paints its delegated Save')
-  await clickText('Save [S]', true)
+  for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  // A painted Root row click only SELECTS; the Detail preview's explicit
+  // `Open…` is the pointer entry into the SAME Detail tenant.
+  await clickPainted(h, 'Subagent settings')
+  assert.doesNotMatch(h.view(), /> Maximum depth/u, 'a row click never mounts the tenant')
+  assert.match(h.view(), /Open…/u)
+  await key(h, '\t')
+  assert.doesNotMatch(h.view(), /> Maximum depth/u, 'Root Tab never mounts the tenant')
+  await clickPainted(h, 'Open…')
+  await settle(h)
+  assert.match(h.view(), /> Maximum depth/u, 'the painted Detail Open entry mounts the tenant')
+
+  // Field selection and the explicit Toggle are separate gestures.
+  await clickPainted(h, 'Enabled')
+  assert.equal(h.subagentSection()?.enabled, false, 'a field row click only selects')
+  await clickPainted(h, 'Toggle [Enter]', true)
+  await settle(h)
+  assert.equal(h.view().includes('Select at least one allowed route'), true, 'Toggle stages the empty route draft')
+
+  await clickPainted(h, 'Allowed models')
+  await clickPainted(h, 'Manage [Enter]', true)
+  await settle(h)
+  assert.match(h.view(), /Provider One/u)
+  await clickPainted(h, 'Model One')
+  await clickPainted(h, 'Add route [Enter]', true)
+  await settle(h)
+  assert.match(h.view(), /\[allowed\]/u)
+  assert.equal(h.subagentWrites().length, 0, 'directory selection stages only')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h)
   assert.equal(h.subagentWrites().length, 1, 'Root delegated Save is the only writer')
-  assert.deepEqual(h.subagentLimitsWrites(), [{ maxDepth: 1 }],
-    'the Reset staged one official maxDepth unset/effective restore')
   assert.deepEqual(h.subagentSection(), { enabled: true, allowedModels: [{ provider: 'p1', model: 'm1' }] })
-  await clickText('Enabled')
-  await clickText('Back [Esc]', true)
-  assert.match(h.view(), /Discard unsaved changes\? y\/N/u)
-  await clickText('Keep [Esc]', true)
-  assert.match(h.view(), /Maximum recursion depth/u)
-  await clickText('Back [Esc]', true)
-  await clickText('Discard [Y]', true)
+
+  // A second pointer-only edit stays dirty. An ACTUAL parent row click must
+  // ask the leave question; Keep retains the tenant, then Save keeps it again
+  // and drops the queued destination, and only a fresh dirty parent click with
+  // Discard and leave really leaves without another write.
+  await clickPainted(h, 'Enabled')
+  await clickPainted(h, 'Toggle [Enter]', true)
+  await settle(h)
+  await clickPainted(h, 'Parallel tool calls')
+  await settle(h)
+  assert.match(h.view(), /Discard and leave loses staged values\./u)
+  await clickPainted(h, 'Keep [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /> Enabled/u, 'Keep retains the group, its field and the draft')
+  await clickPainted(h, 'Parallel tool calls')
+  await settle(h)
+  await clickPainted(h, 'Save [S]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Agent · Subagent settings/u, 'Save keeps the tenant')
+  assert.doesNotMatch(h.view(), />\s+Parallel tool calls/u, 'Save drops the queued parent destination')
+  assert.equal(h.subagentWrites().length, 2, 'the leave question Save is the second real write')
+  await clickPainted(h, 'Enabled')
+  await clickPainted(h, 'Toggle [Enter]', true)
+  await settle(h)
+  await clickPainted(h, 'Parallel tool calls')
+  await settle(h)
+  await clickPainted(h, 'Discard and leave [D]', true)
+  await settle(h)
   assert.match(h.view(), /Settings · Agent · Rows/u)
-  assert.equal(h.subagentWrites().length, 1, 'discard never sends another Host write')
+  assert.match(h.rowsPlain().join('\n'), />\s+Parallel tool calls/u, 'the captured destination is reached')
+  assert.equal(h.subagentWrites().length, 2, 'discard never sends another Host write')
   h.dispose()
 })
 
+test('a mounted Subagent tenant with a bar-only grant keeps only its real Back', async () => {
+  const h = setup({ columns: 44, rows: 8, agent: {
+    subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  await h.open('Agent')
+  await key(h, '\r')
+  for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.ok(h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)))
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /> Maximum depth/u, 'the tenant is really mounted before the resize')
+  h.vt.resize(44, 2)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Back \[Esc\]\s*$/u, 'the bar-only grant paints ONLY the page Back')
+  const writesBefore = h.subagentWrites().length + h.subagentLimitsWrites().length
+  await key(h, 's')
+  await settle(h, 4)
+  await key(h, 'r')
+  await settle(h, 4)
+  await key(h, '\r')
+  await settle(h, 4)
+  assert.equal(h.subagentWrites().length + h.subagentLimitsWrites().length, writesBefore,
+    'a hidden Save/Refresh/Enter never reaches the Host')
+  assert.doesNotMatch(h.view(), /Edit Maximum recursion depth|Value:/u, 'no hidden Input is started')
+  h.dispose()
+})
 
-// ── FR5-B: the numeric specialist pages and the General migration ──────────
+test('the medium Subagent preview forward action is pointer-reachable without a keyboard step', async () => {
+  const h = setup({ columns: 76, rows: 24, agent: {
+    subagent: { enabled: false, allowedModels: [{ provider: 'p1', model: 'm1' }] },
+    directory: [{ id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] }],
+  } })
+  await h.open('Agent')
+  await key(h, '\r')
+  for (let step = 0; step < 8 && !h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)); step += 1) {
+    await key(h, '\x1b[B')
+  }
+  assert.ok(h.rowsPlain().some(line => />\s+Subagent settings/u.test(line)))
+  assert.match(h.view(), /Categories|Rows/u, 'the passive parent stays painted')
+  await clickPainted(h, 'Open…')
+  await settle(h)
+  assert.match(h.view(), /> Maximum depth/u, 'the painted forward action enters the same Detail tenant')
+  assert.match(h.view(), /Settings · Agent · Subagent settings/u)
+  assert.match(h.view(), /Categories|Rows/u, 'the parent context remains readable')
+  h.dispose()
+})
 
 test('the real Root Agent Detail tenant is entered explicitly and edits the cap with ONE Confirm', async () => {
   const h = setup({ columns: 200, rows: 50, agentLoop: { maxParallelToolCalls: 10, inherited: 2 } })

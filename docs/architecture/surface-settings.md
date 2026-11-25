@@ -382,45 +382,85 @@ specialist-page contract below).
     running Session's preset, sandbox and approval knobs are untouched — and a
     Host port without a settings service REFUSES explicitly instead of
     succeeding as a no-op.
-  - `Subagent settings` is the single embedded page for the official `subagent`
-    limits and `subagent-model-selection-settings` preference. It mounts in this
-    workspace's existing body and screen lease; the Root keeps the physical
-    Action Bar and Esc. Enter or the painted Agent-row click opens the page, and
-    its Back/Discard exit returns to the Agent rows. The page order is fixed:
-    Limits (`maxDepth`, `maxActiveSubagents`), then Model selection (`enabled`,
-    `allowedModels`).
-  - Drafts are per-open Client-local state. Editing numbers, toggling Enabled,
-    selecting or removing a `(provider, model)` route, and Reset only stage
-    field intents. The grouped Model Directory is read-only; a route toggle
-    sends no Host mutation. Saved routes remain visible and removable when the
-    directory or that provider is unavailable; absence is claimed only from a
-    current successful directory read.
-  - Save validates the staged fields and dispatches at most one exact-revision
-    mutation per dirty namespace, Limits first. Selection is dispatched only
-    while the original Host generation remains current. The two namespaces are
-    not a transaction: each settles and reads back independently, a successful
-    namespace is not rolled back when the other fails, and only its own verified
-    fields leave the draft. A revision conflict requires an explicit Refresh;
-    a dispatched Remote write with lost settlement is Outcome unconfirmed and
-    is never replayed automatically. A verified result requires a current
+  - `Subagent settings` is the third real grouped Detail TENANT: it mounts
+    INSIDE this workspace's existing Detail pane, so the parent Categories/Rows
+    stay painted and readable while it holds the active device. Its route is
+    entered only through Rows `Enter`/`Right` or the Detail preview's `Open…`
+    (a painted row click only selects), and its one page renders the two
+    official sections as ONE group of four fields: Limits (`maxDepth`,
+    `maxActiveSubagents`), then Model selection (`enabled`, `allowedModels`).
+    The Root keeps the ONE physical Action Bar and the ONE Esc affordance; the
+    child's painted bar is that last row, and every actionable key is admitted
+    only through its really painted span (the body fallbacks included).
+  - The group browses fields without a second store: a field row click only
+    selects, and the selected field's complete explicit action
+    (`Edit [Enter]` for a number, `Toggle [Enter]` for Enabled,
+    `Manage [Enter]` for the model directory) is the ONE way to start a change.
+    `Tab`/`Shift+Tab` move the field selection locally. Numeric editing shows
+    the raw Input and the current/last-confirmed value; Stage accepts only the
+    field's real safe-integer contract, so empty/whitespace/negative/fraction/
+    exponent/out-of-range text stays in the Input with its real error and
+    stages nothing. A blank input is never an implicit Reset.
+  - The selected field's `Details [?]` is a page-local Advanced disclosure in
+    the SAME Detail space: it states the complete field identity, the current/
+    last-confirmed, inherited, comparison, revision, scope and effect timing,
+    and `Reset to inherited…` publishes after that necessary copy was really
+    read. Reset stages ONE official field-level `unset` (no second confirm at
+    this group level) and never substitutes `set(inherited)` or edits a profile
+    file. `allowedModels` is read by its complete route identities rather than
+    a count.
+  - The model directory is a read-only projection inside the same tenant:
+    route identity is always the exact `(provider, model)` pair, a row click
+    only selects and the explicit `Add route [Enter]` / `Remove route [Enter]`
+    stages the choice. A `/` search filters provider/model identities; while the
+    search Input owns the keyboard, `Enter`/`Tab` is `Done` and only the real
+    Back remains, and route hit targets/actions and Refresh are not painted.
+    The first `Esc` ends search, and a second `Esc`/`Left` returns to the group
+    with the query, the field, the selected route and the manually scrolled
+    directory offset intact. At a medium Detail width the complete Refresh
+    receipt survives even when the longer route action moves to its complete
+    body target. A saved route
+    remains visible and removable when the directory or that provider is
+    unavailable; absence means only that a route was not listed in a current
+    successful ready directory, never physical deletion or future routability. Removing the last allowed route while the
+    candidate Enabled is On is refused with its real reason; Enabled Off allows
+    it, and On with no routes is a legal dirty draft that Save refuses.
+  - Save is the ONE explicit grouped commit: it validates the whole staged
+    candidate and dispatches at most one exact-revision mutation per dirty
+    namespace, Limits first. Selection is dispatched only while the original
+    Host generation remains current. The two namespaces are not a transaction:
+    each settles and reads back independently, a successful namespace is not
+    rolled back when the other fails, and only its own verified fields leave the
+    draft. A captured-authority change rejects the whole intent; a definite
+    stale sibling does not block a still-current dirty namespace, while a
+    settled unconfirmed outcome offers no new Save/Retry and requires an
+    explicit Refresh. A lost settlement is `Outcome unconfirmed` and is never
+    replayed automatically; a verified result requires a current
     same-generation authoritative readback, not only an ACK.
-  - Reset stages one official field-level `unset` and never substitutes
-    `set(inherited)`, edits a profile file, or creates another writer. DSH
-    computes and returns the current effective value. Its official `unset` may
-    materialize that value in the USER patch when a sibling field remains
-    overridden; physical USER-field deletion and `overridden=false` are not
-    Reset success criteria. The UI's `Inherited` / `Overridden` label compares
-    the same descriptor's effective value with its base, not USER-key presence.
+  - Dirty parent navigation is the ONE page-owned leave question: `Save` keeps
+    the group, `Discard and leave` clears the local intents and re-proves the
+    captured target before it navigates, and `Keep` stays. A settled unknown
+    outcome is asked as `Leave anyway` and never claims a rollback. Save/exit,
+    Refresh and the question are admitted only while their necessary facts and
+    the complete action span were painted in THIS frame; a bar-dropped action
+    stays reachable through its body fallback, and a grant that cannot paint
+    the necessary copy publishes only the safe Back/Keep/Wait. The current
+    field's visible block, the real dirty count, the section settlement and any
+    refusal reason are the priority facts on a short grant.
   - Limits affect later subagent delegations. Model-selection policy is sampled
     when a new top-level Session is composed; an existing Session keeps its
     recorded policy after settings change.
+  - `Subagent settings` labels each unavailable or last-known section
+    independently; an unreadable or stale section is read-only and its facts
+    never become a fabricated current value. A User-patch materialization on
+    Reset is legal: DSH's Host readback decides the effective value, and
+    physical USER-field deletion / `overridden=false` are not Reset success
+    criteria.
   - Every `Agent` row that owns a Host write refuses to offer a confirmable
     candidate while its authority cannot vouch for the value: a non-`ready`
     backend (or an unreadable document) keeps the row and its truthful
     last-known/raw facts but offers no candidate, so the UI never invites a
-    Confirm that the writer must refuse. `Subagent settings` remains reachable
-    and labels each unavailable or last-known section independently; unavailable
-    or stale values are read-only.
+    Confirm that the writer must refuse.
   - `User shell sandbox policy` is a PERSIST-FIRST TUI-document row: `Value` is
     the RAW stored `localShellSandbox` (`not set` when absent, the invalid raw
     value when illegal, `unknown` when the document cannot be read), `Runtime`

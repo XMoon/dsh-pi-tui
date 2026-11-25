@@ -46,6 +46,9 @@ interface RigOptions {
   readonly directoryValue?: ModelDirectoryDto
   readonly holdLimits?: boolean
   readonly rejectLimits?: boolean
+  readonly lostAckLimits?: boolean
+  readonly lostAckSelection?: boolean
+  readonly holdDirectory?: boolean
 }
 
 function rig(options: RigOptions = {}) {
@@ -66,6 +69,9 @@ function rig(options: RigOptions = {}) {
   let renderRequests = 0
   let refreshes = 0
   let directoryReads = 0
+  const directoryHolds: Array<() => void> = []
+  let markDirectoryStarted: (() => void) | undefined
+  const directoryStarted = new Promise<void>(resolve => { markDirectoryStarted = resolve })
   let releaseLimits: (() => void) | undefined
   const limitsWait = options.holdLimits ? new Promise<void>(resolve => { releaseLimits = resolve }) : undefined
   let markLimitsDispatched: (() => void) | undefined
@@ -105,6 +111,7 @@ function rig(options: RigOptions = {}) {
       if (pinned !== generation || revision !== limitsRevision) return { kind: 'conflict', reason: 'stale' }
       if (limitsWait !== undefined) await limitsWait
       if (options.rejectLimits === true) return { kind: 'rejected', reason: 'limits refused' }
+      if (options.lostAckLimits === true) return { kind: 'outcome-unconfirmed', reason: 'reply lost' }
       limitsValue = apply(limitsValue, limitsBase, patch)
       limitsRevision += 1
       return { kind: 'accepted' }
@@ -116,6 +123,7 @@ function rig(options: RigOptions = {}) {
     mutate: async (patch, revision, pinned): Promise<SectionMutationOutcome> => {
       writes.push({ section: 'selection', patch, revision, generation: pinned })
       if (pinned !== generation || revision !== selectionRevision) return { kind: 'conflict', reason: 'stale' }
+      if (options.lostAckSelection === true) return { kind: 'outcome-unconfirmed', reason: 'reply lost' }
       selectionValue = apply(selectionValue, selectionBase, patch)
       selectionRevision += 1
       return { kind: 'accepted' }
@@ -132,6 +140,10 @@ function rig(options: RigOptions = {}) {
     catalog: {
       loadDirectory: async signal => {
         directoryReads += 1
+        markDirectoryStarted?.()
+        if (options.holdDirectory === true) {
+          await new Promise<void>(resolve => { directoryHolds.push(resolve) })
+        }
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
         if (options.directoryError !== undefined) throw options.directoryError
         return options.directoryValue ?? directory()
@@ -153,6 +165,8 @@ function rig(options: RigOptions = {}) {
     limitsDispatched,
     refreshCount: () => refreshes,
     directoryReadCount: () => directoryReads,
+    directoryStarted,
+    releaseDirectory: () => { directoryHolds.shift()?.() },
     renderRequestCount: () => renderRequests,
     replaceGeneration: () => { generation = {} },
     drainTasks: async () => {
@@ -193,288 +207,507 @@ async function started(options: RigOptions = {}) {
   return harness
 }
 
-test('numeric Apply and Reset stage controller operations while Cancel keeps the staged draft', async () => {
-  const harness = await started()
-  const { page, controller } = harness
+function barLine(frame: readonly string[]): string { return strip(frame.at(-1) ?? '') }
+function activateBar(page: SubagentSettingsPage, id: string): void {
+  const span = page.paintedBarSpans().find(candidate => candidate.id === id)
+  assert.ok(span !== undefined, `expected painted bar span ${id}`)
+  page.activateBarSpan(id)
+}
+async function settleMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+}
+function selectField(page: SubagentSettingsPage, name: string): string[] {
+  let frame = page.render(80)
+  for (let step = 0; step < 4 && !strip(frame.join('\n')).includes(`> ${name}`); step += 1) {
+    page.handleInput(UP)
+    frame = page.render(80)
+  }
+  for (let step = 0; step < 4 && !strip(frame.join('\n')).includes(`> ${name}`); step += 1) {
+    page.handleInput(DOWN)
+    frame = page.render(80)
+  }
+  assert.match(strip(frame.join('\n')), new RegExp(`> ${name}`, 'u'), `field ${name} must be selected`)
+  return frame
+}
+
+test('the grouped Subagent tenant browses four fields and opens the editor only on an explicit Edit', async () => {
+  const h = await started()
+  const { page, controller } = h
   page.focused = true
   let frame = page.render(80)
-  let depthRow = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  assert.notEqual(depthRow, -1)
-  clickRow(page, frame, depthRow, 80, 'Maximum recursion depth')
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /Limits/u)
+  assert.match(plain, /> Maximum depth\s+1/u, 'entering the group selects the first field, never its Input')
+  assert.match(plain, /Parallelism\s+8/u)
+  assert.match(plain, /Model selection/u)
+  assert.match(plain, /Enabled\s+Off/u)
+  assert.match(plain, /Allowed models\s+0 routes/u)
+  assert.match(plain, /Changes are staged until Save\./u)
+  assert.doesNotMatch(plain, /Value:\s/u, 'no editor opens on entry')
+  assert.match(barLine(frame), /Edit \[Enter\].*Details \[\?\].*Back \[Esc\]/u)
+
+  // A field row click only SELECTS: the editor stays closed.
+  const parallelRow = rowIndex(frame, line => line.includes('Parallelism'))
+  assert.notEqual(parallelRow, -1)
+  clickRow(page, frame, parallelRow, 80, 'Parallelism')
   frame = page.render(80)
-  assert.match(strip(frame[frame.length - 1] ?? ''), /Apply \[Enter\].*Cancel \[Esc\]/u)
-  assert.ok(page.paintedEscapeSpan(), 'the Root receives a painted Cancel/Esc target')
+  assert.match(strip(frame.join('\n')), /> Parallelism/u)
+  assert.doesNotMatch(strip(frame.join('\n')), /Value:\s/u, 'a field row click never opens the editor')
+  assert.equal(controller.snapshot().dirty, false)
+
+  // The explicit Edit opens the current field's raw Input.
+  activateBar(page, 'bar:edit')
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Edit Subagent parallelism limit/u)
+  assert.match(barLine(frame), /Stage \[Enter\].*Cancel \[Esc\]/u)
+  page.handleInput('\x15')
   page.handleInput('2')
   frame = page.render(80)
-  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:apply'))
-  page.activateBarSpan('bar:apply')
-  assert.equal(controller.snapshot().depthText, '12')
+  activateBar(page, 'bar:apply')
+  frame = page.render(80)
+  assert.deepEqual(controller.snapshot().limits.patch.maxActiveSubagents, { kind: 'set', value: 2 })
   assert.equal(controller.snapshot().dirty, true)
-  assert.equal(harness.writes.length, 0)
+  assert.equal(h.writes.length, 0, 'Stage never writes')
+  assert.match(strip(frame.join('\n')), /Current: 8 · Unsaved/u)
+  assert.match(strip(frame.join('\n')), /1 unsaved change · Limits/u)
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:save'), 'the grouped Save is painted for the dirty field')
 
+  // Tab wraps field selection locally and never leaves the tenant.
+  page.handleInput('\t')
   frame = page.render(80)
-  const resetRow = rowIndex(frame, line => line.includes('Source: Inherited') && line.includes('Reset'))
-  assert.notEqual(resetRow, -1)
-  clickRow(page, frame, resetRow, 80, 'Reset')
-  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'reset' })
-  assert.equal(controller.snapshot().depthText, '')
-  assert.equal(harness.writes.length, 0)
-
-  frame = page.render(80)
-  depthRow = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  clickRow(page, frame, depthRow, 80, 'Maximum recursion depth')
-  page.render(80)
-  page.handleInput('9')
-  page.render(80)
-  page.handleInput(ESC)
-  assert.equal(controller.snapshot().depthText, '')
-  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'reset' })
-  assert.equal(harness.writes.length, 0)
+  assert.match(strip(frame.join('\n')), /> Enabled/u)
 })
 
-test('directory toggles and search text stay in the draft without Host writes', async () => {
-  const harness = await started({ allowedModels: [{ provider: 'p', model: 'saved-model' }] })
-  const { page, controller } = harness
+test('a blank or invalid Stage stays in the raw Input with the real error and zero patch', async () => {
+  const h = await started()
+  const { page, controller } = h
   page.focused = true
-  for (let index = 0; index < 3; index += 1) page.handleInput(DOWN)
-  page.handleInput(ENTER)
-  await harness.drainTasks()
   let frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Provider P/u)
-  assert.match(frame.map(strip).join('\n'), /saved-model/u)
-
-  const savedRow = rowIndex(frame, line => line.includes('saved-model'))
-  clickRow(page, frame, savedRow, 80, 'saved-model')
-  assert.deepEqual(controller.snapshot().allowedModels, [])
-  assert.equal(controller.snapshot().dirty, true)
-  assert.equal(harness.writes.length, 0)
-
-  page.handleInput('/')
-  page.handleInput('s')
+  activateBar(page, 'bar:edit')
   frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Search: s/u)
-  assert.equal(controller.snapshot().dirty, true)
-  assert.equal(harness.writes.length, 0)
+  page.handleInput('\x15')
+  frame = page.render(80)
+  assert.match(barLine(frame), /Stage \[Enter\]/u, 'an empty visible Input still offers the real Stage')
+  activateBar(page, 'bar:apply')
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Value is required\./u)
+  assert.match(strip(frame.join('\n')), /Edit Maximum recursion depth/u, 'the refused Stage stays in the Input')
+  assert.equal(controller.snapshot().dirty, false)
+  assert.equal(h.writes.length, 0)
+
+  for (const invalid of ['-1', '1.5', '1e3', '999999999999999999999']) {
+    page.handleInput('\x15')
+    for (const character of invalid) page.handleInput(character)
+    frame = page.render(80)
+    activateBar(page, 'bar:apply')
+    frame = page.render(80)
+    assert.match(strip(frame.join('\n')), /Enter a safe integer from 0 to/u, `${invalid} must paint the real issue`)
+    assert.equal(controller.snapshot().dirty, false, `${invalid} must not stage`)
+    assert.equal(h.writes.length, 0)
+  }
+  // A legal value stages; Cancel keeps it and never writes.
+  page.handleInput('\x15')
+  page.handleInput('0')
+  frame = page.render(80)
+  activateBar(page, 'bar:apply')
+  frame = page.render(80)
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'set', value: 0 })
+  activateBar(page, 'bar:edit')
+  page.handleInput('\x15')
+  page.handleInput('7')
+  page.render(80)
   page.handleInput(ESC)
   frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Allowed models/u)
-  assert.deepEqual(controller.snapshot().allowedModels, [])
-  assert.equal(harness.writes.length, 0)
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'set', value: 0 }, 'Cancel keeps the prior staged value')
+  assert.equal(h.writes.length, 0)
 })
 
-test('failed directory reads keep saved routes visible and removable', async () => {
-  const harness = await started({
+test('a legal Stage equal to the served value removes only that field and paints No changes', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('1')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  const frame = page.render(80)
+  assert.equal(controller.snapshot().limits.patch.maxDepth, undefined)
+  assert.equal(controller.snapshot().dirty, false)
+  assert.match(strip(frame.join('\n')), /Status\s+No changes/u)
+  assert.doesNotMatch(barLine(frame), /Save \[S\]/u, 'a real no-op never offers a fabricated Save')
+  assert.equal(h.writes.length, 0)
+})
+
+test('the selected-field Advanced stages ONE official reset and revokes an unread action', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  page.render(80)
+  page.handleInput('?')
+  let frame = page.render(80)
+  let plain = strip(frame.join('\n'))
+  assert.match(plain, /Maximum recursion depth/u, 'the Advanced names the complete field identity')
+  assert.match(plain, /Effective\s+1/u)
+  assert.match(plain, /Inherited\s+1/u)
+  assert.match(plain, /Matches base/u)
+  assert.match(plain, /Reset stages the official unset\./u)
+  assert.match(barLine(frame), /Reset \[X\].*Back \[Esc\]/u)
+  page.handleInput('x')
+  frame = page.render(80)
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'reset' })
+  assert.equal(controller.snapshot().dirty, true, 'an explicit reset is dirty even when effective equals inherited')
+  assert.equal(h.writes.length, 0, 'Reset only stages')
+  assert.match(strip(frame.join('\n')), /Reset staged/u)
+
+  // The action is published only after THIS disclosure instance's complete
+  // facts were really read; a width change revokes that receipt.
+  page.setMaxRows(3)
+  page.render(80)
+  page.handleInput('?')
+  page.render(80)
+  page.handleInput('x')
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'reset' }, 'an unread short grant stages nothing')
+  let paintedReset = false
+  for (let step = 0; step < 80 && !paintedReset; step += 1) {
+    page.handleInput(DOWN)
+    page.render(80)
+    paintedReset = page.paintedBarSpans().some(span => span.id === 'bar:reset')
+  }
+  assert.equal(paintedReset, true, 'reading the complete facts over successive frames publishes Reset')
+  page.handleInput('x')
+  frame = page.render(80)
+  assert.doesNotMatch(strip(frame.join('\n')), /Reset to inherited…/u, 'the admitted Reset leaves the disclosure')
+  assert.match(strip(frame.join('\n')), /Maximum depth\s+Reset staged/u, 'the group browse is visible again')
+})
+
+test('an explicit Toggle stages Enabled while a row click never toggles; an On+empty draft refuses Save', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  let frame = page.render(80)
+  const enabledRow = rowIndex(frame, line => line.includes('Enabled'))
+  assert.notEqual(enabledRow, -1)
+  clickRow(page, frame, enabledRow, 80, 'Enabled')
+  assert.equal(controller.snapshot().enabled, false, 'a row click only selects Enabled')
+  assert.equal(controller.snapshot().dirty, false)
+
+  frame = selectField(page, 'Enabled')
+  page.handleInput(ENTER)
+  frame = page.render(80)
+  assert.equal(controller.snapshot().enabled, true)
+  assert.equal(controller.snapshot().dirty, true)
+  assert.match(strip(frame.join('\n')), /Select at least one allowed route before enabling model selection\./u)
+  assert.equal(controller.canSave(), false)
+  assert.doesNotMatch(barLine(frame), /Save \[S\]/u, 'an invalid draft offers no Save')
+  assert.equal(h.writes.length, 0)
+})
+
+test('the directory keeps exact provider+model identity and toggles only through its explicit action', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p1', model: 'm1' },
+      routableProviders: ['p1', 'p2'],
+      groups: [
+        { id: 'p1', name: 'Provider One', models: [{ id: 'm1', name: 'Model One' }] },
+        { id: 'p2', name: 'Provider Two', models: [{ id: 'm1', name: 'Shared Model' }] },
+      ],
+      failures: [],
+    },
+  })
+  const { page, controller, writes } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  let frame = page.render(80)
+  let plain = strip(frame.join('\n'))
+  assert.match(plain, /Provider One/u)
+  assert.match(plain, /Provider Two/u)
+  assert.match(plain, /> Model One/u, 'the first allowed/available route is selected')
+  assert.match(barLine(frame), /Add route \[Enter\]/u)
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'))
+
+  // A row click only selects: the same model id under another provider keeps
+  // its own full identity and does not inherit the other row's state.
+  const sharedRow = rowIndex(frame, line => line.includes('Shared Model'))
+  assert.notEqual(sharedRow, -1)
+  clickRow(page, frame, sharedRow, 80, 'Shared Model')
+  frame = page.render(80)
+  plain = strip(frame.join('\n'))
+  assert.match(plain, /> Shared Model/u)
+  assert.match(plain, /p2 \/ m1/u)
+  assert.match(plain, /Add route \[Enter\]/u)
+  assert.deepEqual(controller.snapshot().allowedModels, [], 'a row click never toggles the route')
+
+  activateBar(page, 'bar:route-toggle')
+  frame = page.render(80)
+  assert.deepEqual(controller.snapshot().allowedModels, [{ provider: 'p2', model: 'm1' }])
+  assert.equal(writes.length, 0, 'Add route stages only')
+  assert.match(strip(frame.join('\n')), /\[allowed\]/u)
+
+  // Last route + candidate Enabled On refuses the remove action in the page;
+  // the controller remains the final validator.
+  page.handleInput(ESC)
+  selectField(page, 'Enabled')
+  page.handleInput(ENTER)
+  page.render(80)
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  frame = page.render(80)
+  plain = strip(frame.join('\n'))
+  assert.match(plain, /> Shared Model/u)
+  assert.match(plain, /Disable model selection before removing the last route\./u)
+  assert.doesNotMatch(barLine(frame), /route \[Enter\]/u)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false)
+  page.handleInput(ENTER)
+  assert.deepEqual(controller.snapshot().allowedModels, [{ provider: 'p2', model: 'm1' }], 'a blocked remove stages nothing')
+
+  // Enabled Off permits removing the last route.
+  page.handleInput(ESC)
+  selectField(page, 'Enabled')
+  page.handleInput(ENTER)
+  page.render(80)
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  frame = page.render(80)
+  assert.match(barLine(frame), /Remove route \[Enter\]/u)
+  activateBar(page, 'bar:route-toggle')
+  frame = page.render(80)
+  assert.deepEqual(controller.snapshot().allowedModels, [])
+  assert.equal(controller.snapshot().issues.allowedModels, undefined, 'Off + empty routes is a legal draft')
+  assert.equal(writes.length, 0)
+})
+
+test('directory search, no-match and return preserve the query and the selected route', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }, { id: 'n', name: 'Other N' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput('/')
+  page.handleInput('other')
+  let frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search: other/u)
+  assert.match(strip(frame.join('\n')), /Other N/u)
+  assert.doesNotMatch(strip(frame.join('\n')), /Model M/u)
+  page.handleInput(TAB)
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+other/u, 'Done/Tab keeps the query in the directory')
+  page.handleInput(ESC)
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /> Allowed models/u, 'Back returns to the selected group field')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+other/u, 're-entering the directory keeps the query')
+  page.handleInput('/')
+  page.handleInput('\x15')
+  page.handleInput('zzz')
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /No matching models/u)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false)
+  assert.equal(controller.snapshot().allowedModels.length, 0)
+})
+
+test('a failed directory keeps saved routes visible and removable and never claims absence', async () => {
+  const h = await started({
     allowedModels: [{ provider: 'missing-provider', model: 'saved-model' }],
     directoryError: new Error('directory offline'),
   })
-  const { page } = harness
+  const { page, controller } = h
   page.focused = true
-  for (let index = 0; index < 3; index += 1) page.handleInput(DOWN)
+  selectField(page, 'Allowed models')
   page.handleInput(ENTER)
-  await harness.drainTasks()
-  const frame = page.render(80)
-  const painted = frame.map(strip).join('\n')
-  assert.match(painted, /saved-model/u)
-  assert.match(painted, /catalog unavailable/u)
-  assert.doesNotMatch(painted, /not in the current catalog/u)
-  assert.equal(harness.writes.length, 0)
-})
-
-test('dirty Escape requires a newly painted confirmation before Discard returns to Agent', async () => {
-  const harness = await started()
-  const { page, controller } = harness
-  page.focused = true
-  page.handleInput(ENTER)
-  page.handleInput('2')
-  page.handleInput(ENTER)
-  assert.equal(controller.snapshot().dirty, true)
-
-  page.handleInput(ESC)
-  page.handleInput('y')
-  assert.equal(controller.snapshot().dirty, true, 'an answer before the new question frame is refused')
-  assert.equal(harness.dones.length, 0)
-
+  await h.drainTasks()
   let frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Discard unsaved changes\? y\/N/u)
-  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:discard'))
-  page.handleInput('n')
-  assert.equal(controller.snapshot().dirty, true, 'No keeps the staged value')
-
-  page.handleInput(ESC)
-  page.handleInput('y')
-  assert.equal(controller.snapshot().dirty, true, 'the second question also requires its own painted fact')
+  let plain = strip(frame.join('\n'))
+  assert.match(plain, /saved-model/u)
+  assert.match(plain, /Saved route; the model directory is unavailable\./u)
+  assert.match(plain, /Unavailable: Model directory: directory offline/u)
+  assert.doesNotMatch(plain, /not listed in the current directory/u, 'a failed catalog never claims absence')
+  assert.match(barLine(frame), /Remove route \[Enter\]/u)
+  activateBar(page, 'bar:route-toggle')
   frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Discard unsaved changes\? y\/N/u)
-  page.activateBarSpan('bar:discard')
-  assert.equal(controller.snapshot().dirty, false)
-  assert.deepEqual(harness.dones, [1])
-  assert.equal(harness.writes.length, 0)
+  assert.deepEqual(controller.snapshot().allowedModels, [])
+  assert.equal(h.writes.length, 0)
 })
 
-test('dirty Refresh asks before discard and refreshes only after the painted answer', async () => {
-  const harness = await started()
-  const { page, controller } = harness
-  page.focused = true
-  page.handleInput(ENTER)
-  page.handleInput('2')
-  page.handleInput(ENTER)
-  const initialRefreshes = harness.refreshCount()
-
-  page.handleInput('r')
-  assert.equal(harness.refreshCount(), initialRefreshes)
-  let frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Discard unsaved changes\? y\/N/u)
-  page.handleInput('y')
-  await harness.drainTasks()
-  assert.equal(controller.snapshot().dirty, false)
-  assert.equal(harness.refreshCount(), initialRefreshes + 2)
-  assert.equal(controller.snapshot().loading, false)
-  assert.equal(harness.writes.length, 0)
-})
-
-test('Save freezes edits and a rejected section does not hide the independently verified section', async () => {
-  const harness = await started({
-    allowedModels: [{ provider: 'p', model: 'm' }],
-    holdLimits: true,
-    rejectLimits: true,
+test('a late catalog result after an authority replacement or dispose never publishes', async () => {
+  const h = await started({
+    holdDirectory: true,
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }] }],
+      failures: [],
+    },
   })
-  const { page, controller } = harness
+  const { page } = h
   page.focused = true
+  selectField(page, 'Allowed models')
   page.handleInput(ENTER)
-  page.handleInput('2')
-  page.handleInput(ENTER)
-  page.handleInput(DOWN)
-  page.handleInput(DOWN)
-  page.handleInput(ENTER)
-  assert.equal(controller.snapshot().enabled, true)
-  assert.equal(controller.snapshot().dirty, true)
-
-  let frame = page.render(80)
-  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:save'))
-  page.activateBarSpan('bar:save')
-  assert.equal(controller.snapshot().saving, true)
-  await harness.limitsDispatched
-  assert.deepEqual(harness.writes.map(write => write.section), ['limits'])
-  page.activateBarSpan('bar:save')
-  page.handleInput(DOWN)
-  page.handleInput(ENTER)
-  assert.equal(controller.snapshot().enabled, true, 'input cannot change a saving draft')
-  assert.equal(harness.writes.length, 1, 'repeated Save never dispatches a second section write')
-
-  frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Limits: Saving/u)
-  assert.doesNotMatch(frame.map(strip).at(-1) ?? '', /Save \[S\]/u)
-  harness.releaseLimits()
-  await harness.drainTasks()
-  assert.deepEqual(harness.writes.map(write => write.section), ['limits', 'selection'])
-  assert.equal(controller.snapshot().limits.status?.kind, 'not-saved')
-  assert.equal(controller.snapshot().selection.status?.kind, 'verified')
-  assert.equal(controller.snapshot().limits.dirty, true)
-  assert.equal(controller.snapshot().selection.dirty, false)
-  frame = page.render(80)
-  assert.match(frame.map(strip).join('\n'), /Limits: Not saved/u)
-  assert.match(frame.map(strip).join('\n'), /Selection: Verified/u)
-})
-
-test('a terminal-sized duplicate click does not consume the admitted body press', async () => {
-  const harness = await started()
-  const { page } = harness
-  page.focused = true
-  page.setMaxRows(12)
-  const frame = page.render(80)
-  const row = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  assert.notEqual(row, -1)
-  const x = 3
-  assert.equal(page.handleMouse(mouse('press', x, row, 80, frame.length))?.handled, true)
-  // The screen can forward the release once with the terminal dimensions before
-  // the Root's body grant dimensions. The first must be inert AND must not
-  // consume the press; the grant-sized event is the ONE real activation.
-  assert.equal(page.handleMouse(mouse('click', x, row, 80, 40)), undefined)
+  await h.directoryStarted
   page.render(80)
-  assert.equal(page.handleMouse(mouse('click', x, row, 80, frame.length))?.handled, true)
-  let opened = false
-  for (let step = 0; step < 8 && !opened; step += 1) {
-    opened = page.render(80).map(strip).some(line => line.includes('Edit Maximum recursion depth'))
-  }
-  assert.equal(opened, true, 'the grant-sized release really activated the field')
-  assert.equal(harness.writes.length, 0)
+  // The authority changes while the request is in flight: the page starts ONE
+  // fresh read for the new identity and drops the old answer.
+  h.replaceGeneration()
+  page.render(80)
+  await settleMicrotasks()
+  assert.equal(h.directoryReadCount(), 2, 'the authority change starts exactly ONE fresh read')
+  h.releaseDirectory()
+  await settleMicrotasks()
+  assert.match(strip(page.render(80).join('\n')), /Loading models…/u,
+    'the stale first answer never publishes over the newer in-flight request')
+  assert.doesNotMatch(strip(page.render(80).join('\n')), /Provider P/u)
+  h.releaseDirectory()
+  await settleMicrotasks()
+  assert.match(strip(page.render(80).join('\n')), /Provider P/u, 'the current request publishes its real directory')
+
+  const disposed = await started({ holdDirectory: true })
+  disposed.page.focused = true
+  selectField(disposed.page, 'Allowed models')
+  disposed.page.handleInput(ENTER)
+  await disposed.directoryStarted
+  disposed.page.render(80)
+  const renders = disposed.renderRequestCount()
+  disposed.page.dispose()
+  disposed.releaseDirectory()
+  await settleMicrotasks()
+  assert.equal(disposed.renderRequestCount(), renders, 'a late directory result never republishes a disposed page')
 })
 
-test('a valid body click released outside the pressed target retires that gesture', async () => {
-  const harness = await started()
-  const { page, controller } = harness
+test('short and zero-body grants keep only the real safe actions', async () => {
+  const h = await started()
+  const { page, controller } = h
   page.focused = true
-  page.setMaxRows(12)
-  const frame = page.render(80)
-  const row = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  assert.notEqual(row, -1)
-  assert.equal(page.handleMouse(mouse('press', 3, row, 80, frame.length))?.handled, true)
-  assert.equal(page.handleMouse(mouse('click', 79, row, 80, frame.length)), undefined)
-  assert.equal(page.handleMouse(mouse('click', 3, row, 80, frame.length)), undefined,
-    'a later same-cell click cannot inherit a press released outside its target')
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('0')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.setMaxRows(8)
+  let frame = page.render(44)
+  assert.equal(frame.length, 8)
+  assert.ok(frame.every(line => visibleWidth(line) <= 44))
+  assert.match(barLine(frame), /Save \[S\]/u, '44x8 keeps the dirty Save complete')
+  assert.match(barLine(frame), /Back \[Esc\]/u)
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:save'))
+
+  // The dirty leave question needs its necessary copy in ONE frame; a grant
+  // that cannot show it publishes only Keep and refuses the shortcut.
+  page.setMaxRows(3)
+  page.handleInput(ESC)
+  frame = page.render(44)
+  assert.equal(frame.length, 3)
+  assert.match(barLine(frame), /^Keep \[Esc\]/u)
+  page.handleInput('d')
+  assert.deepEqual(h.dones, [], 'a hidden leave answer is never keyboard-admitted')
+  assert.equal(controller.snapshot().dirty, true)
+  page.setMaxRows(8)
+  frame = page.render(44)
+  assert.match(barLine(frame), /Save · Discard and leave \[D\] · Keep \[Esc\]/u, 'a sufficient grant publishes the complete leave actions')
+  page.handleInput('d')
+  assert.deepEqual(h.dones, [1])
   assert.equal(controller.snapshot().dirty, false)
-  assert.equal(harness.writes.length, 0)
+  assert.equal(h.writes.length, 0)
 })
 
-test('a Host generation replacement after pointer press revokes the painted field target', async () => {
-  const harness = await started()
-  const { page, controller } = harness
+test('the local Discard and the dirty Refresh questions keep their own stay semantics', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('2')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  const refreshes = h.refreshCount()
+  page.handleInput('d')
+  let frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Discard unsaved changes\?/u)
+  assert.match(barLine(frame), /Discard \[D\].*Keep \[Esc\]/u)
+  page.handleInput('d')
+  frame = page.render(80)
+  assert.equal(controller.snapshot().dirty, false)
+  assert.deepEqual(h.dones, [], 'a local Discard stays on the page')
+  assert.equal(h.writes.length, 0)
+  assert.equal(h.refreshCount(), refreshes)
+
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('3')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  page.handleInput('r')
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Refresh discards unsaved edits\./u)
+  assert.match(barLine(frame), /Refresh \[R\].*Keep \[Esc\]/u)
+  page.handleInput('r')
+  await h.drainTasks()
+  frame = page.render(80)
+  assert.equal(controller.snapshot().dirty, false)
+  assert.equal(h.refreshCount(), refreshes + 2, 'the confirmed refresh re-reads both official sections')
+  assert.equal(h.dones.length, 0, 'Refresh never leaves the group')
+})
+
+test('a pointer press released on another target or a newer authority dispatches nothing', async () => {
+  const h = await started()
+  const { page, controller } = h
   page.focused = true
   page.setMaxRows(12)
-  const frame = page.render(80)
-  const row = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  assert.notEqual(row, -1)
-  const x = 3
-  assert.equal(page.handleMouse(mouse('press', x, row, 80, frame.length))?.handled, true)
-  const identity = page.gestureIdentity()
-  harness.replaceGeneration()
-  assert.notEqual(page.gestureIdentity(), identity)
-  assert.equal(page.handleMouse(mouse('click', x, row, 80, frame.length)), undefined)
+  let frame = page.render(80)
+  const parallelRow = rowIndex(frame, line => line.includes('Parallelism'))
+  const enabledRow = rowIndex(frame, line => line.includes('Enabled'))
+  assert.notEqual(parallelRow, -1)
+  assert.notEqual(enabledRow, -1)
+  assert.equal(page.handleMouse(mouse('press', 3, parallelRow, 80, frame.length))?.handled, true)
+  assert.equal(page.handleMouse(mouse('click', 3, enabledRow, 80, frame.length)), undefined,
+    'a release on another target is refused')
+  assert.match(strip(page.render(80).join('\n')), /> Maximum depth/u, 'the press did not select Enabled')
+
+  frame = page.render(80)
+  // The grant-sized click after a terminal-sized duplicate is still ONE gesture.
+  assert.equal(page.handleMouse(mouse('press', 3, enabledRow, 80, frame.length))?.handled, true)
+  assert.equal(page.handleMouse(mouse('click', 3, enabledRow, 80, 40)), undefined)
+  page.render(80)
+  assert.equal(page.handleMouse(mouse('click', 3, enabledRow, 80, frame.length))?.handled, true)
+  assert.match(strip(page.render(80).join('\n')), /> Enabled/u)
+
+  // A Host replacement between a NEW press and its release revokes the target.
+  frame = page.render(80)
+  const freshEnabledRow = rowIndex(frame, line => line.includes('Enabled'))
+  assert.notEqual(freshEnabledRow, -1)
+  assert.equal(page.handleMouse(mouse('press', 3, freshEnabledRow, 80, frame.length))?.handled, true)
+  h.replaceGeneration()
+  assert.equal(page.handleMouse(mouse('click', 3, freshEnabledRow, 80, frame.length)), undefined,
+    'a Host replacement between press and release revokes the painted target')
   assert.equal(controller.snapshot().limits.current, false)
   assert.equal(controller.snapshot().dirty, false)
-  assert.equal(harness.writes.length, 0)
 })
 
-test('keyboard, scrolling, resize and replacement question frames revoke old pointer targets', async () => {
-  const harness = await started()
-  const { page, controller } = harness
-  page.focused = true
-  let frame = page.render(80)
-  let row = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  assert.equal(page.handleMouse(mouse('press', 3, row, 80, frame.length))?.handled, true)
-  page.handleInput(DOWN)
-  assert.equal(page.handleMouse(mouse('click', 3, row, 80, frame.length)), undefined)
-  assert.equal(controller.snapshot().dirty, false)
-
-  frame = page.render(80)
-  row = rowIndex(frame, line => line.includes('Maximum recursion depth'))
-  assert.equal(page.handleMouse(mouse('press', 3, row, 80, frame.length))?.handled, true)
-  page.handleMouse({ ...mouse('press', 3, row, 80, frame.length), type: 'wheel', wheelDelta: 1 })
-  assert.equal(page.handleMouse(mouse('click', 3, row, 80, frame.length)), undefined)
-  assert.equal(controller.snapshot().dirty, false)
-
-  frame = page.render(80)
-  row = rowIndex(frame, line => line.includes('Subagent parallelism'))
-  assert.equal(page.handleMouse(mouse('press', 3, row, 80, frame.length))?.handled, true)
-  page.setMaxRows(8)
-  assert.equal(page.handleMouse(mouse('click', 3, row, 80, frame.length)), undefined)
-  assert.equal(controller.snapshot().dirty, false)
-
-  controller.reset('maxDepth')
-  page.handleInput(ESC)
-  page.setMaxRows(1)
-  frame = page.render(44)
-  assert.equal(frame.length, 1)
-  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:discard'), false)
-  page.handleInput('y')
-  assert.equal(controller.snapshot().dirty, true, 'an unpainted discard fact stays blocked at the physical floor')
-  page.handleInput(ESC)
-  assert.equal(controller.snapshot().dirty, true)
-  assert.equal(harness.writes.length, 0)
-})
-
-test('CJK provider and model rows stay cell-accurate and toggle by their painted route identity', async () => {
-  const harness = await started({
+test('CJK directory rows stay cell-accurate and toggle only by their painted route identity', async () => {
+  const h = await started({
     directoryValue: {
       default: { provider: '提供者', model: '模型甲' },
       routableProviders: ['提供者'],
@@ -482,44 +715,210 @@ test('CJK provider and model rows stay cell-accurate and toggle by their painted
       failures: [],
     },
   })
-  const { page, controller } = harness
+  const { page, controller } = h
   page.focused = true
-  page.setMaxRows(8)
-  for (let index = 0; index < 3; index += 1) page.handleInput(DOWN)
+  selectField(page, 'Allowed models')
   page.handleInput(ENTER)
-  await harness.drainTasks()
+  await h.drainTasks()
   let frame: string[] = []
   for (const width of [200, 120, 100, 80, 72, 44]) {
     frame = page.render(width)
-    assert.equal(frame.length, 8)
-    assert.ok(frame.every(line => visibleWidth(line) <= width))
-    assert.match(strip(frame[frame.length - 1] ?? ''), /Back \[Esc\]/u)
+    assert.ok(frame.every(line => visibleWidth(line) <= width), `${width}: every row fits its cells`)
+    assert.match(barLine(frame), /Back \[Esc\]/u)
   }
   const routeRow = rowIndex(frame, line => line.includes('模型甲'))
   assert.notEqual(routeRow, -1)
   clickRow(page, frame, routeRow, 44, '模型甲')
+  frame = page.render(44)
+  assert.deepEqual(controller.snapshot().allowedModels, [], 'a row click never toggles')
+  activateBar(page, 'bar:route-toggle')
   assert.deepEqual(controller.snapshot().allowedModels, [{ provider: '提供者', model: '模型甲' }])
-  assert.equal(harness.writes.length, 0)
 })
 
-test('44 by 8 keeps a truthful pinned status and a complete reachable action bar', async () => {
-  const harness = await started()
-  const { page, controller } = harness
+
+test('a canonical value is shown when the raw text cannot fit, and an out-of-range value stays refused in the Input', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  for (const character of '0'.repeat(24) + '2') page.handleInput(character)
+  let frame = page.render(30)
+  assert.match(strip(frame.join('\n')), /Value sends\s+2/u, 'the sent canonical stays readable when the raw text cannot')
+  assert.match(barLine(frame), /Stage \[Enter\]/u)
+  activateBar(page, 'bar:apply')
+  frame = page.render(30)
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'set', value: 2 })
+
+  // An out-of-range value keeps the real Stage so its own error is reported;
+  // the Stage refuses it, the Input stays and the prior patch survives.
+  page.render(80)
+  frame = page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(30)
+  page.handleInput('\x15')
+  for (const character of '9'.repeat(40)) page.handleInput(character)
+  frame = page.render(30)
+  assert.match(barLine(frame), /Stage \[Enter\]/u, 'the real Stage stays reachable')
+  activateBar(page, 'bar:apply')
+  frame = page.render(30)
+  assert.match(strip(frame.join('\n')), /Enter a safe integer from 0 to/u)
+  assert.match(strip(frame.join('\n')), /Edit Maximum recursion depth/u, 'the refused Stage stays in the Input')
+  assert.deepEqual(controller.snapshot().limits.patch.maxDepth, { kind: 'set', value: 2 }, 'the prior patch is untouched')
+})
+
+test('an unknown outcome asks Leave anyway and offers neither an ordinary Discard nor a new Save', async () => {
+  const h = await started({ lostAckLimits: true })
+  const { page, controller, writes } = h
+  page.focused = true
+  page.render(80)
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('2')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  let frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Limits: Outcome unconfirmed/u)
+  assert.equal(controller.snapshot().limits.dirty, true)
+  assert.equal(writes.length, 1)
+  assert.doesNotMatch(barLine(frame), /Save \[S\]|Discard \[D\]/u, 'a settled unknown offers no new Save or ordinary Discard')
+  assert.match(barLine(frame), /Refresh \[R\]/u)
+
+  page.handleInput(ESC)
+  frame = page.render(80)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /The Host may have applied changes\./u)
+  assert.match(plain, /Leaving does not undo them\./u)
+  assert.match(barLine(frame), /Leave anyway \[D\].*Keep \[Esc\]/u)
+  assert.doesNotMatch(barLine(frame), /Discard and leave/u, 'an unknown leave never wears the definite discard label')
+  page.handleInput('d')
+  await settleMicrotasks()
+  assert.deepEqual(h.dones, [1])
+  assert.equal(writes.length, 1, 'acknowledging the unknown leave never replays the write')
+})
+
+test('a same-authority resize reuses the existing directory result without a new read', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider One', models: [{ id: 'm', name: 'Model One' }] }],
+      failures: [],
+    },
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  const reads = h.directoryReadCount()
   page.setMaxRows(8)
-  controller.setNumber('maxDepth', '999999999999999999999')
-  const frame = page.render(44)
-  assert.equal(frame.length, 8)
-  assert.ok(frame.every(line => visibleWidth(line) <= 44))
-  const plain = frame.map(strip)
-  assert.ok(plain.slice(0, -1).some(line => line.includes('Enter a safe integer')))
-  const bar = plain[plain.length - 1] ?? ''
-  assert.match(bar, /Save \[S\]/u, 'the short-screen dirty page keeps Save painted')
-  assert.match(bar, /Back \[Esc\]/u)
-  assert.equal(visibleWidth(bar), 44)
-  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:save'), 'Save has a live hit span at 44 by 8')
-  page.activateBarSpan('bar:save')
-  assert.match(strip(page.render(44).join('\n')), /Enter a safe integer/u, 'Save leaves the field error visible')
-  assert.equal(harness.writes.length, 0)
+  page.render(100)
+  page.setMaxRows(12)
+  page.render(80)
+  assert.equal(h.directoryReadCount(), reads, 'a same-authority resize/search/scroll only reprojects')
+  assert.match(strip(page.render(80).join('\n')), /Provider One/u)
+})
+
+test('a width-only repaint revokes a press even at identical cells, and a fresh gesture works', async () => {
+  const h = await started()
+  const { page } = h
+  page.focused = true
+  let frame = page.render(80)
+  const parallelRow = rowIndex(frame, line => line.includes('Parallelism'))
+  assert.notEqual(parallelRow, -1)
+  assert.equal(page.handleMouse(mouse('press', 3, parallelRow, 80, frame.length))?.handled, true)
+  const grown = page.render(100)
+  assert.equal(page.handleMouse(mouse('click', 3, parallelRow, 100, grown.length)), undefined,
+    'the press-frame width no longer matches the painted frame')
+  assert.match(strip(page.render(100).join('\n')), /> Maximum depth/u)
+  const freshRow = rowIndex(grown, line => line.includes('Parallelism'))
+  assert.equal(page.handleMouse(mouse('press', 3, freshRow, 100, grown.length))?.handled, true)
+  page.render(100)
+  assert.equal(page.handleMouse(mouse('click', 3, freshRow, 100, grown.length))?.handled, true)
+  assert.match(strip(page.render(100).join('\n')), /> Parallelism/u)
+})
+
+test('a directory action is withheld until the complete selected route identity is readable', async () => {
+  const provider = 'provider-with-a-very-long-identity'
+  const model = 'model-with-a-very-long-identity'
+  const h = await started({
+    directoryValue: {
+      default: { provider, model },
+      routableProviders: [provider],
+      groups: [{ id: provider, name: 'Long Provider', models: [{ id: model, name: 'Long Model' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller, writes } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.setMaxRows(4) // 3 body rows: the complete route detail cannot fit
+  let frame = page.render(44)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false)
+  assert.doesNotMatch(strip(frame.join('\n')), /Add route \[Enter\]/u, 'the unreadable action text is withdrawn too')
+  page.handleInput(ENTER)
+  assert.deepEqual(controller.snapshot().allowedModels, [], 'Enter cannot toggle an unreadable route')
+
+  page.setMaxRows(6) // 5 body rows: the complete selected detail fits
+  frame = page.render(44)
+  assert.match(strip(frame.join('\n')), new RegExp(`${provider} /\\s+${model}`, 'u'))
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), 'the complete identity admits the action')
+  activateBar(page, 'bar:route-toggle')
+  assert.deepEqual(controller.snapshot().allowedModels, [{ provider, model }])
+  assert.equal(writes.length, 0)
+})
+
+test('the Allowed models Advanced lists complete effective and staged route identities', async () => {
+  const h = await started({
+    allowedModels: [{ provider: 'alpha', model: 'fast' }],
+    directoryValue: {
+      default: { provider: 'alpha', model: 'fast' },
+      routableProviders: ['alpha', 'beta'],
+      groups: [
+        { id: 'alpha', name: 'Alpha', models: [{ id: 'fast', name: 'Fast' }] },
+        { id: 'beta', name: 'Beta', models: [{ id: 'slow', name: 'Slow' }] },
+      ],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  page.setMaxRows(16)
+  selectField(page, 'Allowed models')
+  page.handleInput('?')
+  let frame = page.render(80)
+  let plain = strip(frame.join('\n'))
+  assert.match(plain, /Effective routes/u)
+  assert.match(plain, /alpha \/ fast/u)
+  assert.match(plain, /Inherited/u)
+  page.handleInput('?')
+  page.render(80)
+  page.handleInput(ENTER) // Manage
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput(DOWN) // Beta / Slow
+  page.render(80)
+  activateBar(page, 'bar:route-toggle')
+  page.render(80)
+  page.handleInput(ESC) // back to the group
+  page.render(80)
+  page.handleInput('?')
+  frame = page.render(80)
+  plain = strip(frame.join('\n'))
+  assert.match(plain, /Staged routes/u)
+  assert.match(plain, /alpha \/ fast/u)
+  assert.match(plain, /beta \/ slow/u)
+  assert.deepEqual(controller.snapshot().allowedModels, [{ provider: 'alpha', model: 'fast' }, { provider: 'beta', model: 'slow' }])
 })
 
 // ── FR5-B: the shared host numeric page ──────────────────────────────────
@@ -2310,5 +2709,391 @@ test('the dirty block receipt measures the real composed Current line', async ()
   h.page.handleInput('s')
   await h.drain()
   assert.deepEqual(h.writes[0]?.patch, { timeoutMs: { kind: 'set', value: 45_000 } })
+  h.page.dispose()
+})
+
+function scrollSubagentUntil(page: SubagentSettingsPage, width: number, needle: string, limit = 60): string[] {
+  let frame = page.render(width)
+  for (let step = 0; step < limit && !strip(frame.join('\n')).includes(needle); step += 1) {
+    page.handleInput(DOWN)
+    frame = page.render(width)
+  }
+  return frame
+}
+
+test('a complete dirty count alone admits Save while the dirty field block is offscreen', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Parallelism')
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  page.handleInput('4')
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  assert.equal(controller.snapshot().dirty, true)
+  page.setMaxRows(4) // body 3: the count and section heading fit, the dirty block does not
+  page.render(80)
+  page.handleInput(HOME)
+  const frame = page.render(80)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /1 unsaved change/u, 'the real total is complete')
+  assert.doesNotMatch(plain, /> Parallelism/u, 'the dirty field block is offscreen at the home position')
+  assert.match(barLine(frame), /Save \[S\]/u, 'the complete count alone admits its Save')
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  assert.equal(h.writes.length, 1)
+  assert.equal(h.writes[0]?.section, 'limits')
+  assert.deepEqual(h.writes[0]?.patch, { maxActiveSubagents: { kind: 'set', value: 4 } })
+  h.page.dispose()
+})
+
+test('bar Toggle and Enter converge on one reveal-only decision for a hidden selected field', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Enabled')
+  page.setMaxRows(6)
+  page.render(80)
+  page.handleInput(END)
+  let frame = page.render(80)
+  assert.doesNotMatch(strip(frame.join('\n')), /> Enabled/u, 'the selected field is really hidden')
+  assert.match(barLine(frame), /Toggle \[Enter\]/u, 'the bar still names the selected field action')
+  activateBar(page, 'bar:toggle')
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /> Enabled/u, 'the bar reveals instead of staging a hidden field')
+  assert.equal(controller.snapshot().dirty, false, 'the bar gesture staged nothing')
+  page.handleInput(END)
+  page.render(80)
+  page.handleInput(ENTER)
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /> Enabled/u, 'the keyboard uses the same reveal-only decision')
+  assert.equal(controller.snapshot().dirty, false, 'the keyboard gesture staged nothing')
+  activateBar(page, 'bar:toggle')
+  await settleMicrotasks()
+  assert.equal(controller.snapshot().selection.patch.enabled?.kind, 'set', 'the fresh visible frame stages the chosen action')
+  assert.deepEqual(h.writes, [])
+  h.page.dispose()
+})
+
+test('a height-only Advanced reflow retires the read receipt until its facts are read again', async () => {
+  const h = await started()
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Maximum depth')
+  page.handleInput('?')
+  let frame = page.render(80)
+  assert.match(barLine(frame), /Reset \[X\]/u, 'the full grant reads the short disclosure')
+  assert.equal(controller.snapshot().limits.patch.maxDepth, undefined)
+  page.setMaxRows(3)
+  frame = page.render(80)
+  assert.doesNotMatch(barLine(frame), /Reset \[X\]/u, 'a new height grant has no read receipt')
+  page.handleInput('x')
+  frame = page.render(80)
+  assert.equal(controller.snapshot().limits.patch.maxDepth, undefined, 'the stale Reset is inert')
+  page.handleInput(HOME)
+  frame = scrollSubagentUntil(page, 80, 'Reset [X]')
+  assert.match(barLine(frame), /Reset \[X\]/u, 'the fresh grant re-reads the same disclosure')
+  page.handleInput('x')
+  await settleMicrotasks()
+  assert.equal(controller.snapshot().limits.patch.maxDepth?.kind, 'reset')
+  h.page.dispose()
+})
+
+test('a narrow ambiguous question reserves its answer before long optional route identities', async () => {
+  const longRoute = { provider: 'provider-with-a-very-long-identity', model: 'model-with-a-very-long-identity' }
+  const h = await started({
+    lostAckSelection: true,
+    directoryValue: {
+      default: { provider: longRoute.provider, model: longRoute.model },
+      routableProviders: [longRoute.provider],
+      groups: [{ id: longRoute.provider, name: 'Provider Long', models: [{ id: longRoute.model, name: 'Model Long' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  controller.toggleEnabled()
+  controller.toggleRoute(longRoute)
+  page.render(80)
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  assert.equal(controller.snapshot().selection.status?.kind, 'outcome-unconfirmed')
+  page.setMaxRows(8) // body 7: the full mandatory copy + complete answer; optional detail does not fit
+  page.render(80)
+  page.handleInput(ESC)
+  let frame = page.render(26)
+  let plain = strip(frame.join('\n'))
+  assert.match(plain, /The Host may have applied\s+changes\./u, 'the necessary ambiguous copy is complete')
+  const acceptRow = rowIndex(frame, line => line.includes('Leave anyway…'))
+  assert.ok(acceptRow >= 0, `the body answer is reserved before optional details:\n${frame.join('\n')}`)
+  assert.ok(acceptRow < 7, 'the reserved answer is inside the grant')
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:leave'), false,
+    'the 26-cell bar cannot supply the accept')
+  assert.equal(page.handleMouse(mouse('press', 0, acceptRow, 26, frame.length))?.handled, true,
+    'the body answer is a real press target')
+  // One scroll puts the first necessary fact outside while the reserved answer
+  // row is still physically inside; the final viewport predicate must blank its
+  // text and withdraw its target at the SHIFTED physical row.
+  page.handleInput(DOWN)
+  frame = page.render(26)
+  plain = strip(frame.join('\n'))
+  assert.doesNotMatch(plain, /Leave anyway…/u, 'the answer text is blank once necessary copy is scrolled out')
+  const blankRow = acceptRow - 1
+  assert.notEqual(page.handleMouse(mouse('press', 0, blankRow, 26, frame.length))?.handled, true,
+    'the shifted blank is not a press target')
+  assert.notEqual(page.handleMouse(mouse('click', 0, blankRow, 26, frame.length))?.handled, true,
+    'the shifted blank is not a release target')
+  page.handleInput('d')
+  await h.drainTasks()
+  assert.equal(h.dones.length, 0, 'the hidden key never leaves')
+  assert.equal(h.writes.length, 1, 'the uncertain write is not replayed')
+  assert.equal(controller.snapshot().selection.dirty, true, 'the draft is unchanged')
+  // Home restores the complete copy; the actual fresh press/release leaves once.
+  page.handleInput(HOME)
+  frame = page.render(26)
+  assert.match(strip(frame.join('\n')), /Leave anyway…/u)
+  clickRow(page, frame, acceptRow, 26, 'Leave anyway…')
+  assert.equal(h.dones.length, 1, 'the fresh answer leaves exactly once')
+  assert.equal(h.writes.length, 1, 'leaving never replays the uncertain write')
+  h.page.dispose()
+})
+
+test('a stale formerly Verified section paints Last-known, never a current Verified', async () => {
+  const h = await started()
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Maximum depth')
+  activateBar(page, 'bar:edit')
+  page.render(80)
+  page.handleInput('\x15')
+  for (const character of '2') page.handleInput(character)
+  page.render(80)
+  activateBar(page, 'bar:apply')
+  page.render(80)
+  activateBar(page, 'bar:save')
+  await h.drainTasks()
+  let plain = strip(page.render(80).join('\n'))
+  assert.match(plain, /Limits:\s+Verified/u)
+  h.replaceGeneration()
+  plain = strip(page.render(80).join('\n'))
+  assert.match(plain, /Limits:?\s+Last-known · read-only/u)
+  assert.match(plain, /Previous save verified; refresh to review\./u)
+  assert.doesNotMatch(plain, /Limits:\s+Verified/u)
+  h.page.dispose()
+})
+
+test('directory search suppresses route targets/actions and Done republishes them', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }, { id: 'n', name: 'Other N' }] }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput('/')
+  page.handleInput('other')
+  let frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search: other/u)
+  assert.equal(barLine(frame).replace(/\s+$/u, ''), 'Done [Enter] · Back [Esc]')
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:refresh'), false)
+  assert.doesNotMatch(strip(frame.join('\n')), /Add route \[Enter\]|Remove route \[Enter\]/u)
+  const otherRow = rowIndex(frame, line => line.includes('Other N'))
+  assert.ok(otherRow >= 0)
+  assert.notEqual(page.handleMouse(mouse('press', 2, otherRow, 80, frame.length))?.handled, true,
+    'a filtered search row is not a route hit target')
+  assert.equal(controller.snapshot().allowedModels.length, 0)
+  page.handleInput(ENTER)
+  frame = page.render(80)
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+other/u)
+  assert.match(barLine(frame), /Add route \[Enter\]/u, 'Done republishes the route action on a fresh frame')
+  assert.equal(controller.snapshot().allowedModels.length, 0)
+  h.page.dispose()
+})
+
+test('a clean directory refresh invalidates the old read and never publishes its late answer', async () => {
+  const h = await started({
+    holdDirectory: true,
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }] }],
+      failures: [],
+    },
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.directoryStarted
+  page.render(80)
+  assert.match(barLine(page.render(80)), /Refresh/u)
+  page.handleInput('r')
+  h.releaseDirectory() // release the aborted first read; it must never publish
+  await h.drainTasks()
+  page.render(80) // start the post-refresh current request (held)
+  await settleMicrotasks() // let the scheduled loader really enter its hold
+  assert.equal(h.directoryReadCount(), 2, 'the refresh starts exactly one current read')
+  const stale = strip(page.render(80).join('\n'))
+  assert.match(stale, /Loading models…/u, 'the aborted first read never publishes')
+  assert.doesNotMatch(stale, /Provider P/u)
+  h.releaseDirectory()
+  await settleMicrotasks()
+  let published = strip(page.render(80).join('\n'))
+  for (let step = 0; step < 5 && !published.includes('Provider P'); step += 1) {
+    await settleMicrotasks()
+    published = strip(page.render(80).join('\n'))
+  }
+  assert.match(published, /Provider P/u, 'the current request publishes its real directory')
+  assert.equal(h.directoryReadCount(), 2, 'the accepted refresh starts exactly ONE fresh read')
+  h.page.dispose()
+})
+
+test('a dirty directory refresh keeps its state on Keep and re-reads once on the accepted path', async () => {
+  const models = Array.from({ length: 18 }, (_, index) => ({ id: `m${index + 1}`, name: `Model ${index + 1}` }))
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm1' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models }],
+      failures: [],
+    },
+  })
+  const { page, controller } = h
+  const firstModel = (lines: readonly string[]): string | undefined =>
+    lines.map(strip).find(line => /\bModel \d+\b/u.test(line))
+  page.focused = true
+  page.setMaxRows(12)
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  page.handleInput('/')
+  page.handleInput('model')
+  page.handleInput(ENTER)
+  let frame = page.render(34)
+  const plain = strip(frame.join('\n'))
+  assert.match(plain, /Search \[\/\]\s+model/u)
+  // A real 34-cell Detail bar keeps the complete Refresh receipt and drops the
+  // longer route span; the route action remains a complete body target.
+  assert.match(barLine(frame), /Refresh/u)
+  assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:route-toggle'), false,
+    'the 34-cell bar drops the route action')
+  const addRow = rowIndex(frame, line => line.includes('Add route [Enter]'))
+  assert.ok(addRow >= 0, `the complete body Add remains:\n${frame.join('\n')}`)
+  clickRow(page, frame, addRow, 34, 'Add route [Enter]')
+  await settleMicrotasks()
+  assert.equal(controller.snapshot().selection.patch.allowedModels?.kind, 'set')
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /Remove route \[Enter\]/u,
+    'the body action flips to Remove without a bar span')
+  const reads = h.directoryReadCount()
+  // Manually scroll away from the selected first route (nonzero actual offset).
+  page.handleInput('\x1b[6~')
+  frame = page.render(34)
+  const anchor = firstModel(frame)
+  assert.ok(anchor !== undefined, 'the scrolled directory paints a model anchor')
+  assert.doesNotMatch(strip(frame.join('\n')), /> Model 1/u, 'the selected route is offscreen')
+  // r opens the dirty refresh question; Keep preserves the query/key/actual
+  // manually scrolled offset and starts no read.
+  page.handleInput('r')
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /Refresh discards unsaved edits\./u)
+  page.handleInput(ESC)
+  frame = page.render(34)
+  assert.equal(h.directoryReadCount(), reads, 'Keep starts no new read')
+  assert.equal(firstModel(frame), anchor, 'Keep preserves the manually scrolled anchor')
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+model/u, 'Keep preserves the query')
+  assert.doesNotMatch(strip(frame.join('\n')), /> Model 1/u, 'Keep does not re-anchor the selected route')
+  // Same-authority Back -> Manage reuses the same projection and offset.
+  page.handleInput(ESC)
+  page.render(34)
+  // At the narrow dirty group the bar keeps Save+Back, so the field's complete
+  // body Manage is the explicit pointer action; use it for the same-authority
+  // re-entry.
+  page.handleInput(END)
+  frame = page.render(34)
+  const manageRow = rowIndex(frame, line => line.includes('Manage [Enter]'))
+  assert.ok(manageRow >= 0, `the complete body Manage remains:\n${frame.join('\n')}`)
+  clickRow(page, frame, manageRow, 34, 'Manage [Enter]')
+  await settleMicrotasks()
+  frame = page.render(34)
+  assert.equal(h.directoryReadCount(), reads, 'same-authority reuse starts no read')
+  assert.equal(firstModel(frame), anchor, 'same-authority reuse preserves the anchor')
+  assert.match(strip(frame.join('\n')), /Search \[\/\]\s+model/u)
+  // The selected key survives; Home reveals it without a new read.
+  page.handleInput(HOME)
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /> Model 1/u, 'the same selected key survives')
+  // The accepted dirty refresh discards the draft, aborts the old projection
+  // and reloads exactly once.
+  page.handleInput('r')
+  frame = page.render(34)
+  assert.match(strip(frame.join('\n')), /Refresh discards unsaved edits\./u)
+  page.handleInput('r')
+  await h.drainTasks()
+  page.render(34)
+  await h.drainTasks()
+  page.render(34)
+  assert.equal(h.directoryReadCount(), reads + 1, 'the accepted refresh reads the current authority once')
+  h.page.dispose()
+})
+
+test('route identities are sanitized in Advanced and a narrow body never paints a clipped primary verb', async () => {
+  const h = await started({
+    allowedModels: [{ provider: 'provider\u001b]0;OWNED\u0007', model: 'model-with-a-long-name' }],
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput('?')
+  const raw = page.render(80).join('')
+  assert.ok(raw.includes('provider'), 'the visible route identity remains readable')
+  assert.equal(raw.includes('\u001b]0;'), false, 'the OSC identity/control introducer is stripped')
+  assert.equal(raw.includes('OWNED\u0007'), false, 'the BEL-terminated control payload is stripped')
+  page.handleInput(LEFT)
+  page.render(80)
+  const narrow = strip(page.render(8).join('\n'))
+  assert.doesNotMatch(narrow, /Search \[|Add route|Remove route|Edit \[|Toggle \[|Manage \[|Details \[|Refresh \[/u,
+    'a width that cannot host a primary verb paints no clipped action word')
+  h.page.dispose()
+})
+
+test('a zero-body authority drift starts no directory read until a real body grant returns', async () => {
+  const h = await started({
+    directoryValue: {
+      default: { provider: 'p', model: 'm' },
+      routableProviders: ['p'],
+      groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm', name: 'Model M' }] }],
+      failures: [],
+    },
+  })
+  const { page } = h
+  page.focused = true
+  selectField(page, 'Allowed models')
+  page.handleInput(ENTER)
+  await h.drainTasks()
+  page.render(80)
+  const reads = h.directoryReadCount()
+  page.setMaxRows(1) // body 0: only the page's own Back
+  h.replaceGeneration()
+  page.render(80)
+  await settleMicrotasks()
+  assert.equal(h.directoryReadCount(), reads, 'a bar-only grant starts no new directory read')
+  page.setMaxRows(12)
+  page.render(80)
+  await settleMicrotasks()
+  assert.equal(h.directoryReadCount(), reads + 1, 'the returned body grant reads the current authority once')
+  assert.match(strip(page.render(80).join('\n')), /Provider P/u)
   h.page.dispose()
 })

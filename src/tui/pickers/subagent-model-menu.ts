@@ -8,19 +8,6 @@ export function allowlistSummary(routes: readonly SubagentAllowedModelRoute[]): 
   return routes.length === 1 ? '1 route' : `${routes.length} routes`
 }
 
-/** Whether toggling `route` would violate the official "enabled requires
- *  at least one route" rule (removing the last route while enabled). */
-export function lastRouteWhileEnabled(
-  enabled: boolean,
-  routes: readonly SubagentAllowedModelRoute[],
-  route: SubagentAllowedModelRoute,
-): boolean {
-  return enabled
-    && routes.length === 1
-    && routes[0]!.provider === route.provider
-    && routes[0]!.model === route.model
-}
-
 /** One flattened, identity-complete model presentation row. */
 export interface SubagentAllowlistModelRow {
   readonly providerId: string

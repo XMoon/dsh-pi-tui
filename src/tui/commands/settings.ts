@@ -1350,7 +1350,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId })
             },
           })
-          const page = new SubagentSettingsPage({
+          // The page's constructor is the ONE controller.start(): a second
+          // start here would issue a duplicate authoritative read.
+          return new SubagentSettingsPage({
             controller,
             catalog: runner.catalog.models,
             requestRender: () => app.requestRender(),
@@ -1359,8 +1361,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               runOwned(label, task, { diag: runner.diag, sessionId: () => runner.currentSessionId, ...options })
             },
           })
-          controller.start()
-          return page
         },
         // C2-R4: the ONE embedded Web Search / Fetch page, mounted in this same
         // workspace body on the Tools row's explicit activation. The page reads
@@ -4001,9 +4001,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       summary: `${limitsSummary} · ${selectionSummary}`,
       scope: 'Host profile · official settings',
       freshness: configReadiness === 'ready' ? 'ready' : configReadiness === 'stale' ? 'last-known' : 'unavailable',
-      description: 'Stage subagent limits, model selection and allowed routes in one page, then Save. '
-        + 'The two official settings sections save independently. Limits affect later delegation; '
-        + 'model selection is sampled only by new top-level Sessions.',
+      description: 'Edit subagent limits and model selection in this Detail pane, then Save. '
+        + 'Limits apply to later delegations; model selection is sampled only by new top-level Sessions. '
+        + 'The two official sections save independently.',
       specialist: 'subagent-settings',
     }]
     // EXECUTION POLICY. The RAW document value is the primary fact; the

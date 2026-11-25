@@ -11,12 +11,10 @@ import test from 'node:test'
 import {
   allowlistRouteKey,
   allowlistSummary,
-  lastRouteWhileEnabled,
   projectSubagentAllowlist,
   type AllowlistCatalogState,
 } from '../../src/tui/pickers/subagent-model-menu.ts'
 import type { ModelDirectoryDto } from '../../src/runtime/catalog-port.ts'
-import type { SubagentAllowedModelRoute } from '../../src/runtime/config-port.ts'
 
 /** One provider group spec for the fixture directory. */
 interface GroupSpec {
@@ -46,14 +44,10 @@ function directoryOf(options: {
   }
 }
 
-test('allowlistSummary and lastRouteWhileEnabled are pure', () => {
+test('allowlistSummary is pure', () => {
   assert.equal(allowlistSummary([]), '0 routes')
   assert.equal(allowlistSummary([{ provider: 'p', model: 'm' }]), '1 route')
   assert.equal(allowlistSummary([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'n' }]), '2 routes')
-  const only: readonly SubagentAllowedModelRoute[] = [{ provider: 'p', model: 'm' }]
-  assert.equal(lastRouteWhileEnabled(true, only, { provider: 'p', model: 'm' }), true)
-  assert.equal(lastRouteWhileEnabled(false, only, { provider: 'p', model: 'm' }), false)
-  assert.equal(lastRouteWhileEnabled(true, [...only, { provider: 'q', model: 'n' }], { provider: 'p', model: 'm' }), false)
 })
 
 test('projection flattens directory groups in catalog order with full-identity allowed markers', () => {
