@@ -8,6 +8,8 @@
  * reaches a private record sink: a public Client legitimately has none.
  */
 
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { expect, test } from 'vitest'
@@ -17,6 +19,8 @@ import {
   type PublicDaemonLaunch,
   type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
+
+const linuxOnly = process.platform === 'linux'
 
 async function frameText(launch: PublicDaemonLaunch): Promise<string> {
   return await launch.text()
@@ -52,7 +56,53 @@ async function exitPublicLaunch(launch: PublicDaemonLaunch, label: string): Prom
   await launch.close()
 }
 
-test('starts one real public daemon Client and Host from the installed CLI', async () => {
+test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the split backend', async () => {
+  const scene = await createSplitProcessScene()
+  let launch: PublicDaemonLaunch | undefined
+  let testError: unknown
+  try {
+    launch = await scene.startPublicDaemon({ label: 'direct-default', cols: 120, rows: 36 })
+    expect(launch.ready, 'the default Direct launch reached a usable surface').toBe(true)
+    expect(launch.host, 'a Direct launch owns no split Host').toBeNull()
+    expect(launch.client, 'a Direct launch owns no split Client').toBeNull()
+    expect(existsSync(join(scene.scopeDir, 'instance.json')),
+      'a Direct launch published no split Host registry').toBe(false)
+    await launch.type('direct default')
+    await waitForFrame(launch, 'direct default', 'default Direct composer accepts input')
+    await launch.press('Ctrl+U')
+    await launch.submit('/exit')
+    const exit = await launch.waitForExit(60_000)
+    expect(exit.code, 'the default Direct CLI exit code').toBe(0)
+    expect(exit.signal).toBe(null)
+    await launch.close()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    if (launch !== undefined) {
+      try {
+        if (!launch.closed) await launch.close()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the default Direct test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the default Direct test cleanup failed')
+    }
+  }
+})
+
+test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
   let testError: unknown
@@ -62,6 +112,7 @@ test('starts one real public daemon Client and Host from the installed CLI', asy
       backend: 'daemon',
       cols: 140,
       rows: 40,
+      loaderDump: true,
     })
     expect(launch.ready, 'the public daemon launch reached a usable surface').toBe(true)
     expect(launch.refused).toBe(false)
@@ -69,6 +120,26 @@ test('starts one real public daemon Client and Host from the installed CLI', asy
     expect(launch.client, 'the real foreground Client identity').not.toBeNull()
     expect(launch.host, 'the detached public Host identity').not.toBeNull()
     await waitForFrame(launch, '❯', 'public daemon composer')
+
+    const rows = launch.loaderRows
+    expect(rows, 'the parent daemon Loader dump').not.toBeNull()
+    const byId = new Map((rows ?? []).map(row => [row.id, row]))
+    for (const id of [
+      'session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway',
+      'remote-access', 'deepseek-account', 'authorization', 'credentials', 'workspace',
+      'job-controller', 'webserver', 'pi-tui-extension-host', 'pi-tui-builtins',
+      'pi-tui-performance-host', 'workspace-files', 'tui-app', 'workspace-controller',
+      'directory-picker', 'pi-tui-schedule', 'pi-tui-direct-connection',
+      'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller',
+    ]) {
+      expect(byId.get(id), `the real parent Loader row ${id}`).toBeDefined()
+      expect(byId.get(id)?.disabled, `the second Host authority row ${id} is disabled`).toBe(true)
+    }
+    for (const id of ['timer', 'llm', 'tools']) {
+      const row = byId.get(id)
+      if (row !== undefined) expect(row.disabled, `the stateless Loader row ${id} is not disabled`).not.toBe(true)
+    }
+    expect(new Set(rows?.map(row => row.id)).size, 'the Loader dump has unique row ids').toBe(rows?.length)
 
     const status = await launch.daemonStatus()
     expect(status.exit.code, 'public daemon status exit code').toBe(0)
@@ -126,7 +197,7 @@ test('starts one real public daemon Client and Host from the installed CLI', asy
 
 const ownershipRefusalProbe = process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'public-daemon-ownership-refused'
 
-test.skipIf(!ownershipRefusalProbe)(
+test.skipIf(!linuxOnly || !ownershipRefusalProbe)(
   'refuses an unproven public Host ownership signal and compensates truthfully',
   async () => {
     const scene = await createSplitProcessScene()
