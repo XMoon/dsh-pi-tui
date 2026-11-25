@@ -50,17 +50,21 @@ prevents a settings whole-file replacement from erasing another window's input.
   demand. Consecutive repeats and empty lines are skipped (shell-history
   behavior); non-consecutive repeats are legal history and survive.
 - Recall vs. persistence (decoupled):
-  - **Recall**: `HISTORY_RECALL_LIMIT` (100) entries seed the editor's
-    ↑/↓ history. The canonical JSONL is NEVER truncated or rewritten on
-    read — a concurrent append from another window must never land in an
-    orphaned inode. No read-side compaction may rewrite the append-only file or
-    replace the inode while concurrent writers can hold it.
+  - **Recall (Direct)**: `HISTORY_RECALL_LIMIT` (100) session-scoped entries
+    seed the editor's ↑/↓ history. The Daemon/Split Client instead recalls from
+    its own process memory (see "Daemon/Split Client: process-lifetime recall"
+    below); this file remains its Ctrl+R source and write target. The canonical
+    JSONL is NEVER truncated or rewritten on read — a concurrent append from
+    another window must never land in an orphaned inode. No read-side
+    compaction may rewrite the append-only file or replace the inode while
+    concurrent writers can hold it.
 - Corrupt lines are skipped on load, never fatal.
 - `!` shell commands are stored verbatim (with the `!`), so ↑ recall
   restores them as text and Enter re-runs the shell branch.
-- The runner loads the file per session (and once at boot for the launch
-  cwd, so a fresh window recalls immediately — see below) and appends on
-  every submitted line.
+- The runner loads the file per session on Direct (and once at boot for the
+  launch cwd, so a fresh window recalls immediately — see below) and appends on
+  every submitted line on both backends. The Daemon/Split Client's ↑/↓ never
+  reads these files.
 
 ## Ctrl+R history search
 
@@ -317,7 +321,54 @@ The runner seeds the recall history from the LAUNCH cwd at boot too, so ↑
 works immediately in a new window; `initLiveSession` replaces it when the
 first session is born (and on every session switch).
 
+### Daemon/Split Client: process-lifetime recall (↑/↓)
+
+The Daemon/Split backend (`dsh --profile` with the split Client process) has a
+different ↑/↓ owner, by product decision: the recall is the **current Client
+OS process's** most recent 100 admitted main-Composer inputs, and it is NEVER
+imported from a history file, the Host, another Client or a previous process.
+
+- **Owner and lifetime.** ONE pure in-memory store is created by
+  `startSurfaceLocalClient` outside its surface-revision loop
+  (`src/client/history/memory-recall.ts`). A same-PID HMR/replacement revision
+  re-borrows the SAME object; the OS process exiting releases it, so a new
+  process starts empty. It holds plain strings only — no Session id, cwd, file,
+  Host identity, occurrence token or write settlement.
+- **Content and order.** Each entry is the trimmed, already-serialized draft of
+  a real main-Composer submission. Empty input is ignored, a CONSECUTIVE
+  duplicate collapses, a non-consecutive duplicate is legal history, the list
+  is newest-first and bounded by the shared 100-entry cap. No byte cap and no
+  TTL.
+- **Admission.** The store is written at the same boundaries the Direct scoped
+  kernel uses: a `holdSubmission` attempt's `accepted` settlement records its
+  captured gesture-time text exactly once (`refused` / `unknown` / retired
+  attempts never record), and a clear-first `legacy` submission records before
+  its clear (the same `shouldRememberInput` + trim policy; it is not an
+  execution-success audit). The two PiTui legacy steer entries record a real
+  non-empty deliverable draft before their clear; an empty queue sweep never
+  records. Child-Viewer drafts, attachment-bearing inputs and pending pastes
+  never enter the list. The TSP composer has no raw steer key and keeps only
+  the submissions it really supports.
+- **Projections.** Both renderers consume the SAME store. The PiTui editor
+  stack is a disposable mirror rebuilt from the store's snapshot
+  (oldest→newest through `addToHistory`), and ordinary recordings update the
+  store and the live editor together. The TSP renderer reads the store's
+  snapshot directly from its composer's `entries` getter and owns only its
+  short-lived browse position and the draft it replaced. A formal owner
+  publication (`beginInputHistoryScope`) retires the outgoing browse/bookmark
+  and never restores the old Session's draft, but it does NOT clear or reseed
+  the list — the process memory is not a Session or cwd scope.
+- **No cold recall read.** The Split Client does not call
+  `readSessionRecall`, does not schedule the cross-cwd hydration scan and does
+  not apply a current-cwd fallback; a disk row written by the Ctrl+R writer
+  never seeds ↑/↓. The writer still runs, because Ctrl+R remains the CURRENT
+  local-file search on this backend: rows, `sessionId`/`cwd`/`ts`, the
+  persistence dedupe anchor and the search scopes are unchanged.
+
 ### Editor recall scope: session-first (↑/↓), cwd-first (Ctrl+R)
+
+This section documents the DIRECT backend. The Daemon/Split Client's ↑/↓ owner
+is its process memory; its Ctrl+R still follows the file search contract above.
 
 The EDITOR's ↑/↓ recall is session-scoped once a live session exists: the
 hydration reseed reads the SAME Client-local history source's
@@ -326,11 +377,11 @@ rows whose `sessionId` matches, no content dedupe, the globally newest
 `HISTORY_RECALL_LIMIT` (100) rows by stored `ts` (then file path and byte
 offset). A resumed Session therefore recalls its inputs across every working
 directory it submitted from. v1/sessionless/other-session rows never
-participate and are never guessed. The read is asynchronous: its ownership
-generation (and, on Remote, the exact transport binding token) is captured
-before the read and re-checked in the same synchronous stack as the recall
-commit; a Session replacement or teardown aborts the in-flight scan, and a
-superseded read is discarded without touching the recall kernel. A global history-read failure is
+participate and are never guessed. The read is asynchronous: the ownership
+generation is captured before the read and re-checked in the same synchronous
+stack as the recall commit; a Session replacement or teardown aborts the
+in-flight scan, and a superseded read is discarded without touching the recall
+kernel. A global history-read failure is
 diagnosed and falls back to the same Session's CURRENT cwd file (with the
 same optional `writeId` provenance), never to an empty or unfiltered pool.
 With no live session (fresh/deferred start) the recall pool is the whole cwd
@@ -509,6 +560,13 @@ unwritten entries.
 
 ## Where the code lives
 
+- `src/client/history/memory-recall.ts` — the Daemon/Split Client's ONE
+  process-lifetime recall memory (trim, adjacent dedupe, newest-first, the
+  shared 100 cap; no IO, Session, cwd or acceptance knowledge). Created once in
+  `src/app/remote-process/client-bootstrap.ts` outside the surface-revision
+  loop; consumed by the PiTui editor mirror (`src/tui-app.ts`) and the TSP
+  composer (`src/tui/tsp/session.ts`). Pinned by
+  `test/client/memory-recall.test.ts` and the Remote runner recall cases.
 - `src/client/history/store.ts` — the pure store: pathing (`historyFilePath`), parsing
   (`parseHistoryLines` / `parseHistoryRecords`), read-only load
   (`loadHistoryFile` / `loadHistoryRecords` / `loadRecallHistory`), append

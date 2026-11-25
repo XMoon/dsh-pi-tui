@@ -323,6 +323,7 @@ async function mountChain(
     sessionCwd: () => home,
     diag: createDiag({ stderrLevel: 'off' }),
     isCleanedUp: () => false,
+    recallAuthority: 'direct',
   })
   const agent: AgentLike = { status: 'idle', session: { id: SESSION_ID }, options: {}, cancel: () => {} }
   const images = new DraftImageStore()

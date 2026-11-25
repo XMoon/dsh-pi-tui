@@ -21,6 +21,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
@@ -91,6 +92,7 @@ test('Remote permission cycle — projection current, one semantic apply, pushed
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -267,6 +269,7 @@ test('stale permission: apply A → switch B before settle → NO B contaminatio
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -410,6 +413,7 @@ test('/yolo on a Remote live session reaches the semantic permission apply with 
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -505,6 +509,7 @@ test('a real pending Remote Question survives reconnect — the same flow answer
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   // `waitFor('remote runner mount')` only proves the terminal has painted; it
   // does NOT prove the interaction port has registered its question provider.
@@ -766,6 +771,7 @@ test('a dispatched continued-answer settlement stays real across reconnect — c
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -1042,6 +1048,7 @@ test('a same-session-id transport rollover suppresses the stale permission notic
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -1205,6 +1212,7 @@ test('a post-dispatch Remote failure stays indeterminate, notifies once and neve
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start

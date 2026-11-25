@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride, RemotePromptPresenceCapability } from '../../src/app/application-runtime.ts'
@@ -93,6 +94,7 @@ test('the presence revision scope survives a Surface replacement through the pro
       selected: aggregate.selected,
       presentation: aggregate.presentation,
       extensionService: aggregate.clientUi.extensionService,
+      inputRecall: createInputMemoryRecall(),
       promptPresence,
     }
     const fiber = host.ctx.plugin(pluginCtx => {

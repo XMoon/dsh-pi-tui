@@ -220,12 +220,13 @@ export interface SurfaceDisplaySeam {
    * sites consult this before merging.
    */
   retainsStaleDraftRestore(): boolean
-  /** Replace the recall projection with the CURRENT workspace's rows. Each
-   * renderer owns ONE Client-local recall kernel
+  /** Replace the recall projection with the CURRENT workspace's rows. On the
+   * Direct backend each renderer owns ONE Client-local recall kernel
    * (`src/client/history/recall-scope.ts`) and commits the reset into it; the
    * PiTui adapter additionally mirrors the kernel's snapshot into its editor's
-   * ↑/↓ stack. Neither one renders, clears a draft nor opens a second
-   * persistence owner.
+   * ↑/↓ stack. The Daemon/Split Client's recall is its process memory and is
+   * not an external import target, so there the call is inert. Neither backend
+   * renders, clears a draft or opens a second persistence owner.
    * @param entries - the current Session's rows, most recent first.
    * @param owner - the owner whose hydration committed this reseed. Omitted
    *   for the sessionless boot seed, which only seeds the recall pool.
@@ -237,7 +238,8 @@ export interface SurfaceDisplaySeam {
    * publishing (or creating): the following {@link resetInputHistory} for that
    * owner must reconcile the inputs accepted since the publication
    * (scope-bound temporary submissions) instead of dropping them. Every
-   * mounted renderer records it in its own kernel. */
+   * Direct-mounted renderer records it in its own kernel; the Daemon/Split
+   * Client only retires the outgoing browse/caret (its process list stays). */
   beginInputHistoryScope(owner: string | undefined): void
   /** Record ONE settlement of the open editor-recall scope, IN APPEND ORDER:
    * called from the SAME synchronous stack as the append (or from the policy

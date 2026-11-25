@@ -53,6 +53,7 @@ import {
 import type { WorkflowMemberView, WorkflowRunId, WorkflowRunStatus } from '../../domain/transcript/workflow-projection.ts'
 import { TSP_WORKFLOW_BROWSE_ACTION } from './workflow-actions.ts'
 import { createHistoryRecallScope } from '../../client/history/recall-scope.ts'
+import type { InputMemoryRecall } from '../../client/history/memory-recall.ts'
 import type {
   DisplayDockNotice,
   DisplayStatusFacts,
@@ -479,6 +480,13 @@ export interface TspRendererOptions {
    * action. Absent = no queue-open key (the Dock shows `Manage` only).
    */
   readonly queueOpenKeys?: () => readonly string[]
+  /**
+   * Feature History PR2-A: the Split/Daemon Client root's process-lifetime
+   * input-recall memory. When present the composer's ↑/↓ reads THAT snapshot
+   * and this mount creates no scope kernel; absent (Direct) keeps the existing
+   * mount-private kernel unchanged.
+   */
+  readonly inputRecall?: InputMemoryRecall
   /**
    * PR-B1: the presentation bridge over the REGISTERED tool definitions (the
    * SAME bridge the PiTui renderer consumes). It is consulted ONLY to decide
@@ -967,8 +975,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * through the existing display seam. I-A added no visible recall surface;
    * TSP I-B made the composer's ↑/↓ read exactly this projection — the composer
    * owns only the short-lived browse position and the draft it replaced.
+   * Feature History PR2-A: absent when the Split Client injected its process
+   * memory — that backend has no leased occurrences, settlements or reseeds to
+   * reconcile, so it owns no kernel at all.
    */
-  const historyRecall = createHistoryRecallScope()
+  const historyRecall = options.inputRecall === undefined ? createHistoryRecallScope() : undefined
+  /**
+   * Feature History PR2-A: the SELECTED recall authority's newest-first
+   * projection. The Split Client's process memory is the owner across mounts
+   * (a same-PID HMR replacement reads the SAME object); Direct keeps this
+   * mount's kernel. Exactly one of the two exists.
+   */
+  const recallSnapshot = (): readonly string[] => options.inputRecall?.snapshot() ?? historyRecall!.snapshot()
   /**
    * PR2: the live submission attempt freezing the composer, or undefined.
    * Set ONLY by the application's `holdSubmission` (through the composer
@@ -994,9 +1012,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     notify: (text, kind) => display.notify(text, kind),
   }, {
-    // The recall read is the mount's own kernel snapshot — no second history
+    // The recall read is the SELECTED authority's snapshot — the Split
+    // Client's process memory or this mount's own kernel. No second history
     // source, no file handle, no Session filter invented here.
-    entries: () => historyRecall.snapshot(),
+    entries: () => recallSnapshot(),
     // The SAME two application admissions a submission consults, read off the
     // CURRENT bound handlers (never a boot-time capture) and only when the
     // composer is about to replace a live draft with a recalled row. A refusal
@@ -4472,6 +4491,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // either down. Only the editor's positional recall browse is invalidated,
       // because its indices point at the replaced projection. Pure state.
       if (disposed) return
+      // Feature History PR2-A: the Split Client has no scoped kernel to reseed
+      // and no external recall import entry — the process memory is written by
+      // real admitted inputs alone. The composer seat stays untouched.
+      if (historyRecall === undefined) return
       composer.reseatRecallAfterReseed()
       historyRecall.reset(entries, owner, writeIds)
     },
@@ -4488,7 +4511,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // TSP I-E: a newly published Owner retires the card before any older
       // subject's rows could be restored into the incoming one.
       historySearch?.retire()
-      historyRecall.begin(owner)
+      // Feature History PR2-A: the process memory is NOT a Session scope, so a
+      // publication keeps the same list — only the browse positions above die.
+      historyRecall?.begin(owner)
     },
     settleScopeInput(settlement) {
       // TSP I-A: the row owner's synchronous append/skip report, in append
@@ -4497,7 +4522,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // reading is the projection of the moment, and a settlement only updates
       // the ledger the NEXT reseed reconciles with.
       if (disposed) return
-      historyRecall.settle(settlement)
+      // Feature History PR2-A: the Split Client writer reports no occurrence
+      // into a process memory (there is no scope ledger to reconcile).
+      historyRecall?.settle(settlement)
     },
     setSearchResult() {
       // Search chrome is PiTui-only (input-gated); nothing to present.
@@ -4864,9 +4891,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Session, the draft restored), so accepting such a line into the recall
     // would advertise a submission that cannot run. The submission itself
     // still takes its ORIGINAL path either way.
-    const scopeToken = serializedDraft.startsWith('!') || !handlers.shouldRememberInput(serializedDraft)
-      ? undefined
-      : historyRecall.rememberAccepted(serializedDraft)
+    const eligible = !serializedDraft.startsWith('!') && handlers.shouldRememberInput(serializedDraft)
+    let scopeToken: number | undefined
+    if (eligible) {
+      // Feature History PR2-A: the Split Client's process memory has no leased
+      // occurrence to settle later — the accepted legacy gesture is committed
+      // here, once, and carries no token into the write owner.
+      if (options.inputRecall === undefined) scopeToken = historyRecall!.rememberAccepted(serializedDraft)
+      else options.inputRecall.remember(serializedDraft)
+    }
     composer.setDraft('')
     handlers.submit(serializedDraft, gesture, scopeToken)
   }
@@ -6331,7 +6364,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (result === 'accepted') {
         // The accepted occurrence is what the ↑ recall records. Order: the
         // recall occurrence (the document is still available), then the clear.
-        if (hold.remember) historyRecall.rememberAccepted(hold.text)
+        // Feature History PR2-A: the Split Client's process memory is committed
+        // in this same accepted stack — exactly once, never on refusal/unknown.
+        if (hold.remember) {
+          if (options.inputRecall === undefined) historyRecall!.rememberAccepted(hold.text)
+          else options.inputRecall.remember(hold.text)
+        }
         composer.setDraft('')
       }
       render()
@@ -6481,8 +6519,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     // TSP I-A: the mount kernel's own headless diagnostics, passed through with
     // no consumer in production code (see `TspRenderer`).
-    scopeFactCountForTest: () => historyRecall.scopeFactCountForTest(),
-    reconcileStepsForTest: () => historyRecall.reconcileStepsForTest(),
+    // Feature History PR2-A: these are Direct-kernel diagnostics only. The
+    // Split Client recall memory has no scope facts or reconcile to report, so
+    // a misuse fails loudly instead of fabricating numbers.
+    scopeFactCountForTest: () => {
+      if (historyRecall === undefined) throw new Error('the Split Client recall memory has no Direct scope facts to report')
+      return historyRecall.scopeFactCountForTest()
+    },
+    reconcileStepsForTest: () => {
+      if (historyRecall === undefined) throw new Error('the Split Client recall memory has no Direct scope reconcile to report')
+      return historyRecall.reconcileStepsForTest()
+    },
     installCommandCompletions: (installation) => {
       // A disposed mount installs nothing and never re-acquires anything: the
       // surface withdraws this installer with the renderer, and a late catalog

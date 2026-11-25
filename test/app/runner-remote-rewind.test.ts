@@ -26,6 +26,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { createInputMemoryRecall } from '../../src/client/history/memory-recall.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
@@ -127,6 +128,7 @@ test('Remote /rewind lists an out-of-window turn from turnOutline, then loadThro
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -280,6 +282,7 @@ test('stale rewind: select A\'s old turn → switch away mid-loadThrough → the
     selected: aggregate.selected,
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
   }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
@@ -394,7 +397,12 @@ test('a rewind pre-admission LOAD failure follows the PICKER identity (Remote as
   host.ctx.provide('appExit', (code: number) => { void code })
   const { TUI_STARTUP_SERVICE } = await import('../../src/startup.ts')
   host.ctx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
-  const override: RemoteApplicationOverride = { selected: aggregate.selected, presentation: aggregate.presentation, extensionService: aggregate.clientUi.extensionService }
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+    inputRecall: createInputMemoryRecall(),
+  }
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
   TuiApp.prototype.start = function patchedStart(this: unknown) { apps.push(this); return originalStart.call(this) }

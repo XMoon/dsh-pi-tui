@@ -824,6 +824,12 @@ export interface SurfaceMountDeps {
   readonly displayState: OptionCapability<'displayState'>
   /** Ctrl+R input-history source (the runner owns its filesystem IO). */
   readonly historySearchSource: OptionCapability<'historySearchSource'>
+  /**
+   * Feature History PR2-A: the Split Client root's process-lifetime input
+   * recall memory, forwarded verbatim to the PiTui mount. Absent on Direct,
+   * whose renderer owns the scoped kernel instead.
+   */
+  readonly inputRecall?: OptionCapability<'inputRecall'>
   /** Durable-attachment read for the image loader (the runner owns Host access).
    *  The `context` is the OWNING presentation's scope, captured by the renderer
    *  ONCE when it constructs the thumbnail and kept immutably by that component —
@@ -3417,6 +3423,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
     historySearchSource: deps.historySearchSource,
     historySearchCwd: () => deps.sessionCwd(),
+    // Feature History PR2-A: the process recall memory forwarded to the PiTui
+    // mount (absent on Direct, where the renderer owns the scoped kernel).
+    ...(deps.inputRecall === undefined ? {} : { inputRecall: deps.inputRecall }),
     // The Session currentness bridge (Phase 3B / B3-B): the application
     // composition captured ONE scope authority pair for this open; the TUI
     // stores the pair and never re-derives a session identity.

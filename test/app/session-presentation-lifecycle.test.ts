@@ -766,6 +766,7 @@ function historyFenceHarness(mode: 'direct' | 'remote') {
   const readSignals: Array<AbortSignal | undefined> = []
   const notifications: string[] = []
   let fallbackRecords: import('../../src/client/history/store.ts').ParsedHistoryRecord[] = []
+  const lastContents: Array<string | undefined> = []
   let generation = 0
   let currentSessionId: string | undefined
   let transportCurrent = true
@@ -811,7 +812,7 @@ function historyFenceHarness(mode: 'direct' | 'remote') {
       rememberCwd: noop,
       currentCwd: () => '/c',
       records: () => fallbackRecords,
-      setLastContent: noop,
+      setLastContent: (content) => lastContents.push(content),
       readSessionRecall: (_sessionId, signal) => new Promise((resolve, reject) => {
         // The fixture deliberately ignores abort (keeps the promise pending):
         // the ownership fence must ALSO protect a reader that does not honour
@@ -823,12 +824,6 @@ function historyFenceHarness(mode: 'direct' | 'remote') {
     currentness: {
       captureGeneration: () => generation,
       isStillCurrent: (sessionId, captured) => currentSessionId === sessionId && generation === captured,
-      ...(mode === 'remote'
-        ? {
-            captureTransportToken: () => transportToken,
-            isTransportTokenCurrent: () => transportCurrent,
-          }
-        : {}),
     },
     commands: { register: noop },
     submission: { clearPending: noop },
@@ -858,6 +853,7 @@ function historyFenceHarness(mode: 'direct' | 'remote') {
     reads,
     readSignals,
     notifications,
+    lastContents,
     setFallbackRecords(records: import('../../src/client/history/store.ts').ParsedHistoryRecord[]): void {
       fallbackRecords = records
     },
@@ -868,7 +864,6 @@ function historyFenceHarness(mode: 'direct' | 'remote') {
       generation += 1
       return mode === 'direct' ? presentation.initLiveSession(agent(id)) : presentation.initLiveRemoteSession(id)
     },
-    setTransportCurrent(value: boolean): void { transportCurrent = value },
     /** Change the exact current owner WITHOUT the production generation reset
      * (that reset aborts the controller); used to isolate the final fence. */
     advanceOwner(sessionId: string): void {
@@ -901,19 +896,6 @@ test('an owner publication between the read settlement and the commit drops the 
   await flushDetached()
   assert.equal(h.resets.some(reset => reset.entries.includes('late stale seed')), false,
     'the final synchronous fence re-check rejects a seed whose owner changed before the commit')
-})
-
-test('a transport rollover between the read settlement and the commit drops the Remote seed', async () => {
-  const h = historyFenceHarness('remote')
-  const hydrated = h.init('s')
-  await flushDetached()
-  assert.equal(h.reads.length, 1)
-  h.reads[0]!.resolve({ entries: ['late transport seed'], writeIds: [] })
-  queueMicrotask(() => h.setTransportCurrent(false))
-  await hydrated
-  await flushDetached()
-  assert.equal(h.resets.some(reset => reset.entries.includes('late transport seed')), false,
-    'the final transport fence rejects the stale seed')
 })
 
 test('a session replacement aborts the in-flight cold history scan', async () => {
@@ -956,26 +938,22 @@ test('a stale Direct cold recall read never overwrites a newer same-id generatio
     'the old generation seed never reaches the newer same-id Session')
 })
 
-test('a Remote transport rollover during the cold recall read drops the stale seed and a later hydrate recovers', async () => {
+test('the Remote hydrate performs no cold recall read, reset or fallback (process memory owns recall)', async () => {
+  // Feature History PR2-A: the Split Client's ↑/↓ authority is the process
+  // memory, so its hydration must not schedule the Direct cold cross-cwd read,
+  // commit a reseed, or take the current-cwd fallback. The reader is still
+  // INJECTED here on purpose: if the branch ever consumed it, the count below
+  // would fire. The anchor read (records → setLastContent) is the one file
+  // touch that must remain (the legacy Ctrl+R writer needs it).
   const h = historyFenceHarness('remote')
-  const first = h.init('s')
+  const hydrated = h.init('s')
+  await hydrated
   await flushDetached()
-  assert.equal(h.reads.length, 1)
-  h.setTransportCurrent(false)
-  h.reads[0]!.resolve({ entries: ['stale transport seed'], writeIds: [] })
-  await first
-  await flushDetached()
-  assert.equal(h.resets.some(reset => reset.entries.includes('stale transport seed')), false,
-    'a rolled-over transport never updates the renderer recall kernel')
-  h.setTransportCurrent(true)
-  const second = h.init('s')
-  await flushDetached()
-  assert.equal(h.reads.length, 2)
-  h.reads[1]!.resolve({ entries: ['recovered seed'], writeIds: [] })
-  await second
-  await flushDetached()
-  assert.ok(h.resets.some(reset => reset.entries.includes('recovered seed')),
-    'a subsequent current hydrate recovers the recall')
+  assert.equal(h.reads.length, 0, 'the Remote hydrate never starts the Direct cold cross-cwd read')
+  assert.equal(h.resets.length, 0, 'the Remote hydrate never reseeds the renderer recall')
+  assert.deepEqual(h.notifications, [], 'no cold-recall fallback notice exists on the Remote branch')
+  assert.deepEqual(h.lastContents, [undefined],
+    'the current-cwd records are still read for the persistence dedupe anchor')
 })
 
 test('a global cold-read failure warns and falls back to the current cwd session rows', async () => {

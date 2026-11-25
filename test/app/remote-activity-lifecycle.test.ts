@@ -406,8 +406,6 @@ async function mountLifecycleHarness(options: {
     currentness: {
       captureGeneration: () => fixture.ownerGeneration(),
       isStillCurrent: (id, generation) => fixture.currentSessionId() === id && fixture.ownerGeneration() === generation,
-      captureTransportToken: id => fixture.captureTransportToken(id),
-      isTransportTokenCurrent: (id, token) => fixture.isTransportTokenCurrent(id, token),
     },
     commands: { register: noop },
     submission: { clearPending: noop },
