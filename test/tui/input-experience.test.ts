@@ -810,7 +810,7 @@ test('a terminal observation released by the external-editor suspend is re-sampl
 
     // A boot-shaped observation for the active screen.
     app.noteThemeSelection('auto')
-    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    const pending = app.autoDetectTheme()
     assert.equal(queries(), 1, 'the observation is issued on the active screen')
 
     // The $EDITOR round trip stops and RESTARTS the same screen object, so its probe is

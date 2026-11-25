@@ -29,7 +29,6 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
 import { resolveTspNativeFooterConfig, type TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
-import { themeOptOut } from '../../client/theme/environment.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { resolveThemeSelection } from './theme-selection.ts'
 import { wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
@@ -453,9 +452,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     // VALUE-addressed (the unified theme protocol).
     const themeRef = deps.extensions()?._recordRegistryHealthRef('theme', selectable)
     try {
-      deps.surface.app.applyPluginPalette(selectable, palette)
-      // A deliberate selection: it owns the terminal detections from here on.
-      deps.surface.app.noteThemeSelection(selectable)
+      // The palette install commits the deliberate selection (intent, Auto
+      // invalidation, tracking and plugin record) before theme observers run.
+      deps.surface.app.applyPluginPalette(selectable, palette, { value: selectable })
       if (themeRef !== undefined) deps.extensions()?._clearRegistryError(themeRef)
     } catch (error) {
       if (themeRef !== undefined) deps.extensions()?._recordRegistryError(themeRef, error)
@@ -488,21 +487,6 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * step must precede the first fullscreen entry.
    */
   const applyBootDisplay = (): void => {
-  // The live scheme-report listener is registered for EVERY persisted theme: the
-  // apply-time guards below decide whether a report may win, and a runtime switch
-  // to `auto` (the settings/skills paths) enables Mode 2031 without re-entering
-  // this boot wiring — an `auto`-only registration would silently drop those
-  // reports. Registered once, so the fan-out has exactly one apply site.
-  deps.surface.app.onTerminalThemeChange((theme) => {
-    // The opt-out owns the palette: a terminal that reports a scheme change
-    // must not override NO_COLOR / FORCE_COLOR=0 / CI by switching the user to
-    // the light palette.
-    if (themeOptOut()) return
-    // The runtime owner's own INTENT, not the asynchronous document: a report that
-    // arrives while a newer explicit choice's write is still in flight must not colour
-    // over it.
-    if (deps.surface.app.themeFollowsTerminal()) deps.surface.app.applyTheme(theme)
-  })
   // The Home/End preset is TUI-owned (TS5 §12): the application owner hands
   // the persisted raw value to the mounted surface.
   deps.surface.app.setHomeEndMode(deps.tuiSettings?.get().homeEndKeys)
@@ -520,19 +504,15 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   if (storedTheme === 'auto') {
     // Follow the terminal: query once at boot, then track scheme reports.
     // The boot query is detached: a terminal that never answers (or a
-    // failure) must not crash the runner. The settled result applies only
-    // while the preference is STILL auto — a boot-time detection must
-    // never override a theme the user chose while the query was in flight.
-    runDetached('theme autodetect', () => deps.surface.app.autoDetectTheme({
-      shouldApply: () => deps.tuiSettings?.get().theme === 'auto',
-    }), { diag: deps.diag })
+    // failure) must not crash the runner. The runtime intent (recorded above)
+    // is the only admission; a later explicit choice supersedes this demand.
+    runDetached('theme autodetect', () => deps.surface.app.autoDetectTheme(), { diag: deps.diag })
     // Enable Mode 2031 on the screens: the terminal reports live scheme
     // changes only while the mode is set. The boot sample above is the only
     // color query — tracking does not sample again.
     deps.surface.app.trackTerminalTheme(true)
   } else if (storedTheme === 'dark' || storedTheme === 'light') {
-    deps.surface.app.applyTheme(storedTheme)
-    deps.surface.app.trackTerminalTheme(false)
+    deps.surface.app.applyTheme(storedTheme, { value: storedTheme })
   } else if (storedTheme !== undefined && storedTheme !== '') {
     // Any non-builtin persisted theme. SOURCE-QUALIFIED resolution (the
     // review's P2): the persisted value is the identity — `file:<name>`
@@ -549,14 +529,10 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     const themeRef = deps.extensions()?._recordRegistryHealthRef('theme', qualified)
     if (selection !== undefined) {
       try {
-        // A PLUGIN palette records the selection (the unload fallback
-        // restores builtin dark when it disappears); a custom FILE
-        // clears it.
-        if (selection.kind === 'plugin') deps.surface.app.applyPluginPalette(selection.value, selection.palette)
-        else {
-          deps.surface.app.clearActivePluginTheme()
-          deps.surface.app.applyPalette(selection.palette)
-        }
+        // The palette install commits the deliberate selection (intent,
+        // tracking and plugin record) before the theme observers run.
+        if (selection.kind === 'plugin') deps.surface.app.applyPluginPalette(selection.value, selection.palette, { value: storedTheme })
+        else deps.surface.app.applyPalette(selection.palette, { value: storedTheme })
         if (selection.kind === 'plugin' && themeRef !== undefined) deps.extensions()?._clearRegistryError(themeRef)
       } catch (error) {
         if (themeRef !== undefined) deps.extensions()?._recordRegistryError(themeRef, error)
@@ -571,7 +547,6 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       deps.surface.app.clearActivePluginTheme()
       deps.surface.app.applyTheme('dark')
     }
-    deps.surface.app.trackTerminalTheme(false)
   }
   }
 

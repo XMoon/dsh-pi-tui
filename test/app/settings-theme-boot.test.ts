@@ -1,17 +1,26 @@
 /**
- * The boot display wiring for `Theme: auto` (settings-runtime).
+ * The boot display wiring and the live `Theme: auto` observation contract.
  *
- * The runtime owns the policy: it samples the terminal ONCE through
- * `autoDetectTheme`, enables Mode 2031 tracking through `trackTerminalTheme`
- * (which no longer samples), and a live scheme report may only change the
- * palette while the persisted preference is still `auto`.
+ * Every case drives the REAL composition: `createSettingsRuntime.applyBootDisplay()`
+ * over a real `TuiApp`, a `VirtualTerminal` and the real fork parser/query seam.
+ * The only substitutions are the external Host-ish seams a unit composition cannot
+ * own (the settings document, the display preset and the theme registry).
+ *
+ * A live scheme report is a change HINT, never a palette decision: the app issues
+ * ONE OSC 11 observation, the real background wins, and a timeout retains a
+ * previously confirmed background (a scheme-only terminal still follows its
+ * report). Boot/settings/reload/hand-off share this ONE owner.
  * @module @xmoon76/dsh-pi-tui/settings-theme-boot.test
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { afterEach, test } from 'node:test'
+import type { Terminal } from '@xmoon76/pi-tui'
 import { createSettingsRuntime, type SettingsRuntimeDeps } from '../../src/app/surface/settings-runtime.ts'
-import type { TuiApp } from '../../src/tui-app.ts'
+import { TuiApp, type OwnedRunner } from '../../src/tui-app.ts'
+import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
+import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 // themeOptOut() skips terminal queries and live scheme reports under NO_COLOR /
 // FORCE_COLOR=0 / CI=true — clear all three so the wiring under test stays live
@@ -22,54 +31,56 @@ process.env.CI = ''
 
 const noop = (): void => {}
 
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+  // The active palette is process-wide; leave the dark default behind.
+  setTheme('dark')
+})
+
+const runOwned: OwnedRunner = ((_label, task, options) => {
+  Promise.resolve().then(task).then(
+    (result) => { options.onResult?.(result as never) },
+    (error) => { options.onError?.(error) },
+  )
+}) as OwnedRunner
+
 type ThemeHarness = {
-  runtime: ReturnType<typeof createSettingsRuntime>
-  applied: string[]
-  detectCalls: number[]
-  trackCalls: boolean[]
-  /** Every `setFullscreen` the boot application issued. */
-  fullscreenCalls: boolean[]
-  /** Set the persisted fullscreen preference the boot application reads. */
-  setFullscreenPreference(value: string): void
-  report(scheme: 'dark' | 'light'): void
-  setTheme(theme: string | undefined): void
-  /** Record ONLY the selection intent (a write still in flight). */
-  noteSelection(value: string): void
+  readonly app: TuiApp
+  readonly vt: VirtualTerminal
+  readonly writes: string[]
+  readonly doc: { theme?: string; homeEndKeys?: string; wheelScrollLines?: string; fullscreen?: string }
+  readonly runtime: ReturnType<typeof createSettingsRuntime>
+  boot(): void
 }
 
-function mountThemeRuntime(): ThemeHarness {
-  const applied: string[] = []
-  const detectCalls: number[] = []
-  const trackCalls: boolean[] = []
-  const fullscreenCalls: boolean[] = []
-  let fullscreen = 'off'
-  let report: ((scheme: 'dark' | 'light') => void) | undefined
-  let theme: string | undefined = 'auto'
-  /** The runtime owner's deliberate-selection intent (the real `TuiApp` keeps it). */
-  let intent: string | undefined
-  const app = {
-    setHomeEndMode: noop,
-    setWheelScrollLines: noop,
-    setFullscreen: (enabled: boolean): void => { fullscreenCalls.push(enabled) },
-    autoDetectTheme: (): Promise<void> => {
-      detectCalls.push(1)
-      return Promise.resolve()
+/** Mount the SAME production boot owner over a real app + VirtualTerminal. */
+function mountThemeHarness(options: { theme?: string; doc?: Partial<ThemeHarness['doc']> } = {}): ThemeHarness {
+  const vt = new VirtualTerminal(100, 24)
+  const writes: string[] = []
+  const terminal = new Proxy(vt, {
+    get(target, prop) {
+      if (prop === 'write') {
+        return (data: string): void => { writes.push(data); target.write(data) }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
     },
-    trackTerminalTheme: (following: boolean): void => {
-      trackCalls.push(following)
-    },
-    onTerminalThemeChange: (listener: (scheme: 'dark' | 'light') => void): (() => void) => {
-      report = listener
-      return noop
-    },
-    applyTheme: (value: string): void => {
-      applied.push(value)
-    },
-    noteThemeSelection: (value: string): void => {
-      intent = value
-    },
-    themeFollowsTerminal: (): boolean => intent === 'auto',
-  } as unknown as TuiApp
+  }) as unknown as Terminal
+  const app = new TuiApp(terminal, { onSubmit: noop, onExit: noop, runOwned })
+  app.start()
+  startedApps.add(app)
+  const doc = {
+    theme: options.theme ?? 'auto',
+    homeEndKeys: 'viewport',
+    wheelScrollLines: '1',
+    fullscreen: 'off',
+    ...options.doc,
+  }
   const deps: SettingsRuntimeDeps = {
     surface: {
       app,
@@ -77,152 +88,236 @@ function mountThemeRuntime(): ThemeHarness {
     },
     signal: new AbortController().signal,
     tuiSettings: {
-      get: () => ({
-        theme,
-        homeEndKeys: 'viewport',
-        wheelScrollLines: '1',
-        fullscreen,
-      }),
+      get: () => doc,
+      replace: () => Promise.resolve(),
     } as never,
     settingsForms: undefined,
     isCleanedUp: () => false,
-    backend: { config: {} } as never,
+    backend: {
+      config: {
+        footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
+        footerCommandTrust: { command: undefined, userFooterMode: 'default' },
+        configReadiness: () => 'ready',
+        footerCustomItemsResolved: { items: [], invalidCount: 0 },
+      },
+    } as never,
     diag: { debug: noop, info: noop, warn: noop, error: noop, dispose: noop } as never,
     status: { refresh: noop },
     extensions: () => undefined,
   }
   const runtime = createSettingsRuntime(deps)
   return {
+    app,
+    vt,
+    writes,
+    doc,
     runtime,
-    applied,
-    detectCalls,
-    trackCalls,
-    fullscreenCalls,
-    setFullscreenPreference: (value) => { fullscreen = value },
-    report: (scheme) => report?.(scheme),
-    // Changing the persisted preference IS a deliberate selection in production (the
-    // legacy editor, the reload re-apply, the workspace), so the helper records the
-    // runtime owner's intent exactly like those sites do.
-    setTheme: (value) => { theme = value; intent = value },
-    /** Record ONLY the runtime owner's intent: a deliberate selection whose write is
-     *  still in flight, so the persisted document still reads the previous value. */
-    noteSelection: (value) => { intent = value },
+    boot: () => { runtime.applyBootDisplay() },
   }
 }
 
-test('display and fullscreen persist through the semantic settings port without Direct forms', async () => {
-  const writes: unknown[] = []
-  let doc = { displayPreset: 'regular', fullscreen: 'off' }
-  const runtime = createSettingsRuntime({
-    surface: {
-      app: {
-        setDisplayPreset: () => ({ kind: 'applied' }),
-        notify: (message: string) => { assert.fail(message) },
-      } as never,
-      status: { snapshot: () => ({}) as never, subscribe: () => noop },
-    },
-    signal: new AbortController().signal,
-    tuiSettings: {
-      get: () => doc,
-      replace: (next: typeof doc) => { writes.push(next); doc = next },
-    } as never,
-    settingsForms: undefined,
-    isCleanedUp: () => false,
-    backend: { config: { footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) } } } as never,
-    diag: { debug: noop, info: noop, warn: noop, error: assert.fail, dispose: noop } as never,
-    status: { refresh: noop },
-    extensions: () => undefined,
-  })
-  runtime.setDisplayPreset('focus')
-  runtime.setFullscreen(true)
-  // Both existing detached writes join the semantic document's FIFO.
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(writes.length, 2)
-  assert.equal(doc.displayPreset, 'focus')
-  assert.equal(doc.fullscreen, 'on')
+async function settle(vt: VirtualTerminal): Promise<void> {
+  await vt.waitForRender()
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  await vt.waitForRender()
+}
+
+/** Wait for a palette fact produced by a REAL observation. The only bounded
+ *  window here is the production 800 ms OSC 11 timeout (the contract under
+ *  test); the bound is the observation deadline plus scheduling slack. */
+async function waitForPalette(expected: typeof darkColors, timeoutMs = 1600): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (currentPalette === expected) return
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+  }
+  assert.equal(currentPalette, expected, 'the palette did not settle within the observation window')
+}
+
+function osc11Queries(writes: readonly string[]): number {
+  return writes.filter(data => data.includes('\x1b]11;?')).length
+}
+
+test('boot samples the terminal once and only toggles Mode 2031 tracking', async () => {
+  const h = mountThemeHarness()
+  h.boot()
+  assert.equal(osc11Queries(h.writes), 1, 'the boot detection is the single sample')
+  const mode = h.writes.filter(data => data === '\x1b[?2031h' || data === '\x1b[?2031l')
+  assert.deepEqual(mode, ['\x1b[?2031h'], 'tracking is enabled without sampling again')
+  await settle(h.vt)
 })
 
-test('the boot wiring samples once through autoDetectTheme and only toggles Mode 2031', () => {
-  const harness = mountThemeRuntime()
-  harness.runtime.applyBootDisplay()
-  assert.equal(harness.detectCalls.length, 1, 'the boot detection is the single sample')
-  assert.deepEqual(harness.trackCalls, [true], 'tracking is enabled without sampling again')
+test('a live light report re-queries the real dark background and keeps the dark palette', async () => {
+  const h = mountThemeHarness()
+  h.boot()
+  h.vt.sendInput('\x1b]11;#111111\x07')
+  await settle(h.vt)
+  assert.equal(currentPalette, darkColors, 'precondition: the boot observation is dark')
+  const beforeReport = h.writes.length
+  h.vt.sendInput('\x1b[?997;2n') // tmux/Ghostty report the wrong light appearance
+  await settle(h.vt)
+  assert.equal(osc11Queries(h.writes.slice(beforeReport)), 1,
+    'the report must trigger ONE narrow OSC 11 observation')
+  assert.equal(currentPalette, darkColors,
+    'the report alone must never repaint the surface light before a real reply')
+  h.vt.sendInput('\x1b]11;#282A36\x07')
+  await settle(h.vt)
+  assert.equal(currentPalette, darkColors, 'the real dark background keeps the dark palette')
+  // A real light background still follows: same-value reports are change hints.
+  h.vt.sendInput('\x1b[?997;2n')
+  await settle(h.vt)
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
+  await settle(h.vt)
+  assert.equal(currentPalette, lightColors, 'a real light background selects the light palette')
+  h.vt.sendInput('\x1b[?997;2n')
+  await settle(h.vt)
+  h.vt.sendInput('\x1b]11;#282A36\x07')
+  await settle(h.vt)
+  assert.equal(currentPalette, darkColors, 'the next real dark reply returns to the dark palette')
 })
 
-test('a live scheme report only changes the theme while the latest selection follows the terminal', () => {
-  const harness = mountThemeRuntime()
-  harness.runtime.applyBootDisplay()
-  harness.report('light')
-  assert.deepEqual(harness.applied, ['light'], 'auto follows the reported scheme')
-  harness.setTheme('dark')
-  harness.applied.length = 0
-  harness.report('light')
-  assert.deepEqual(harness.applied, [], 'an explicit selection ignores live reports')
+test('a timeout after a confirmed background retains it instead of trusting a contradicting hint', async () => {
+  const h = mountThemeHarness()
+  h.boot()
+  h.vt.sendInput('\x1b]11;#111111\x07')
+  await settle(h.vt)
+  assert.equal(currentPalette, darkColors, 'precondition: a confirmed dark background')
+  h.vt.sendInput('\x1b[?997;2n') // contradicting hint, then a silent (timeout) observation
+  await settle(h.vt)
+  // The renewed observation really has to time out before the retention claim
+  // is observable; 1 s covers the production 800 ms deadline plus slack.
+  await new Promise<void>((resolve) => { setTimeout(resolve, 1000) })
+  assert.equal(currentPalette, darkColors,
+    'an unconfirmed hint may never override a confirmed background after a timeout')
 })
 
-test('a live scheme report is fenced on the selection INTENT, not on a document a pending write has not updated', () => {
-  // The regression this locks: gating the listener on the persisted document would let a
-  // report colour over a choice that applied runtime-first while its write is in flight.
-  const harness = mountThemeRuntime()
-  harness.runtime.applyBootDisplay()
-  harness.applied.length = 0
-  harness.noteSelection('dark')
-  harness.report('light')
-  assert.deepEqual(harness.applied, [],
-    'the intent already left auto although the document still reads auto')
-})
-
-test('a runtime switch from a manual theme to auto follows live reports', () => {
-  const harness = mountThemeRuntime()
-  harness.setTheme('dark')
-  harness.runtime.applyBootDisplay()
-  assert.deepEqual(harness.applied, ['dark'], 'the persisted manual theme wins at boot')
-  harness.applied.length = 0
-  // /settings or a reload switches to auto at runtime: it samples once and
-  // enables Mode 2031, so the live listener must already exist.
-  harness.setTheme('auto')
-  harness.report('light')
-  assert.deepEqual(harness.applied, ['light'], 'a runtime switch to auto must follow live reports')
-})
-
-test('a live scheme report cannot bypass the colour opt-out', () => {
-  const previous = process.env.NO_COLOR
-  process.env.NO_COLOR = '1'
+test('a scheme-only Auto tenure (no confirmed background) follows its latest report after a timeout', async () => {
+  const previous = process.env.COLORFGBG
+  delete process.env.COLORFGBG
   try {
-    const harness = mountThemeRuntime()
-    harness.runtime.applyBootDisplay()
-    harness.report('light')
-    assert.deepEqual(harness.applied, [], 'NO_COLOR must keep the palette untouched')
+    const h = mountThemeHarness()
+    h.boot() // silent: the boot observation times out with no background or hint
+    await settle(h.vt)
+    h.vt.sendInput('\x1b[?997;2n')
+    await waitForPalette(lightColors, 2400)
+    assert.equal(currentPalette, lightColors, 'the latest report decides when no background was ever confirmed')
+    h.vt.sendInput('\x1b[?997;1n')
+    await waitForPalette(darkColors, 2400)
+    assert.equal(currentPalette, darkColors, 'a later report is the new latest hint')
   } finally {
-    if (previous === undefined) delete process.env.NO_COLOR
-    else process.env.NO_COLOR = previous
+    if (previous === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = previous
   }
 })
 
-test('a manual persisted theme applies itself and does not track', () => {
-  const harness = mountThemeRuntime()
-  harness.setTheme('light')
-  harness.runtime.applyBootDisplay()
-  assert.deepEqual(harness.applied, ['light'], 'the persisted palette is applied')
-  assert.deepEqual(harness.trackCalls, [false], 'a manual theme stops tracking')
-  assert.equal(harness.detectCalls.length, 0, 'a manual theme never samples the terminal')
+test('a same-value report burst coalesces onto ONE committable observation and never flashes light', async () => {
+  const h = mountThemeHarness()
+  h.boot()
+  h.vt.sendInput('\x1b]11;#111111\x07')
+  await settle(h.vt)
+  const applied: string[] = []
+  h.app.onThemeChanged(() => applied.push(h.app.currentTheme()))
+  const before = h.writes.length
+  h.vt.sendInput('\x1b[?997;2n')
+  h.vt.sendInput('\x1b[?997;2n')
+  await settle(h.vt)
+  assert.equal(osc11Queries(h.writes.slice(before)), 1,
+    'the burst shares ONE app-owned observation, not one query per report')
+  h.vt.sendInput('\x1b]11;#282A36\x07')
+  await settle(h.vt)
+  // The superseded flight committed nothing; answer the ONE follow-up sample.
+  h.vt.sendInput('\x1b]11;#282A36\x07')
+  await settle(h.vt)
+  assert.deepEqual(applied, [], 'no wrong light frame may be committed during the burst')
+  assert.equal(currentPalette, darkColors, 'the real background keeps the dark palette')
 })
 
-// Regression: C2-R2 acceptance R2-08 (the "next app mount" clause).
-test('a stored fullscreen preference is restored by the boot application, and an off/absent one is not', () => {
-  // The persisted preference the Settings workspace verified is what a LATER
-  // mount applies: this is the clause a refused post-close hand-off relies on.
-  const on = mountThemeRuntime()
-  on.setFullscreenPreference('on')
-  on.runtime.applyBootDisplay()
-  assert.deepEqual(on.fullscreenCalls, [true], 'a stored `on` mounts the alt screen at boot')
-  assert.equal(on.trackCalls.length, 1, 'and the rest of the boot display step still runs once')
+test('a manual override during a pending Auto observation wins over its late answer', async () => {
+  const h = mountThemeHarness()
+  h.boot()
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07') // a real light background: an observable boot commit
+  await waitForPalette(lightColors)
+  await settle(h.vt)
+  const before = h.writes.length
+  const pending = h.app.autoDetectTheme()
+  assert.equal(osc11Queries(h.writes.slice(before)), 1, 'the explicit Auto request samples once')
+  // The user confirms a fixed theme while OSC 11 is still in flight.
+  h.app.noteThemeSelection('dark')
+  h.app.applyTheme('dark', { value: 'dark' })
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
+  await pending
+  await settle(h.vt)
+  assert.equal(h.app.currentTheme(), 'dark', 'the late Auto answer must not colour the fixed choice')
+  assert.equal(currentPalette, darkColors, 'the fixed dark palette stays installed')
+})
 
-  for (const stored of ['off', undefined] as const) {
-    const other = mountThemeRuntime()
-    other.setFullscreenPreference(stored as string)
-    other.runtime.applyBootDisplay()
-    assert.deepEqual(other.fullscreenCalls, [],
-      `a stored ${JSON.stringify(stored)} fullscreen preference never requests the alt screen`)
+test('a stop releases the observation as a cancellation, never as an environment fallback', async () => {
+  const previous = process.env.COLORFGBG
+  process.env.COLORFGBG = '0;15' // would select LIGHT if it were treated as a timeout
+  try {
+    const h = mountThemeHarness()
+    setTheme('dark')
+    h.boot() // the boot observation is still in flight
+    h.app.stop()
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    assert.equal(currentPalette, darkColors,
+      'a released observation is a cancellation: its undefined never reads COLORFGBG')
+    h.app.start()
+    await settle(h.vt)
+    h.vt.sendInput('\x1b]11;#111111\x07')
+    await settle(h.vt)
+    assert.equal(currentPalette, darkColors, 'the restarted surface re-samples and applies its real reply')
+  } finally {
+    if (previous === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = previous
   }
+})
+
+test('an A→B→A hand-off cannot commit the observation resolved before it', async () => {
+  const h = mountThemeHarness()
+  h.boot()
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
+  await waitForPalette(lightColors)
+  await settle(h.vt)
+  h.app.applyTheme('dark') // a known dark runtime palette to observe any stale commit
+  const pending = h.app.autoDetectTheme() // observation on the main screen
+  // The reply RESOLVES in this tick, then the screen is handed off twice before
+  // its continuation may commit: A(main) -> B(alt) -> A(main).
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
+  h.app.setFullscreen(true)
+  h.app.setFullscreen(false)
+  await pending
+  await settle(h.vt)
+  assert.equal(currentPalette, darkColors, 'a released observation can never colour the restored screen')
+  // The one fresh observation on the restored screen supplies the real answer.
+  h.vt.sendInput('\x1b]11;#111111\x07')
+  await settle(h.vt)
+  assert.equal(currentPalette, darkColors, 'the fresh reply applies on the restored screen')
+})
+
+test('a manual persisted theme applies itself and neither queries nor tracks', async () => {
+  const h = mountThemeHarness({ theme: 'light' })
+  h.boot()
+  assert.equal(osc11Queries(h.writes), 0, 'a manual theme never samples the terminal')
+  assert.deepEqual(h.writes.filter(data => data === '\x1b[?2031h' || data === '\x1b[?2031l'), [],
+    'a manual theme does not subscribe to scheme reports')
+  assert.equal(currentPalette, lightColors, 'the persisted palette is applied')
+  await settle(h.vt)
+})
+
+test('a live report under a manual selection changes nothing', async () => {
+  const h = mountThemeHarness({ theme: 'dark' })
+  h.boot()
+  const before = h.writes.length
+  h.vt.sendInput('\x1b[?997;2n')
+  await settle(h.vt)
+  assert.equal(osc11Queries(h.writes.slice(before)), 0, 'a fixed theme admits no observation')
+  assert.equal(currentPalette, darkColors, 'a fixed theme keeps its palette')
+})
+
+test('a stored fullscreen preference is restored by the boot application', async () => {
+  const h = mountThemeHarness({ theme: 'dark', doc: { fullscreen: 'on' } })
+  h.boot()
+  assert.equal(h.app.isFullscreen?.(), true, 'a stored `on` mounts the alt screen at boot')
+  await settle(h.vt)
 })

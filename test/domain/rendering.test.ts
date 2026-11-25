@@ -88,6 +88,34 @@ function startAppWithWrites(width = 100, height = 24): { vt: VirtualTerminal; ap
   startedApps.add(app)
   return { vt, app, writes }
 }
+/** A write-recording app with the app-owned task entry the live-report route
+ *  uses (report/hand-off follow-ups run through `runOwned`, never a bare void). */
+function startAppWithWritesAndOwned(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp; writes: string[] } {
+  const vt = new VirtualTerminal(width, height)
+  const writes: string[] = []
+  const spy = new Proxy(vt, {
+    get(target, prop) {
+      if (prop === 'write') {
+        return (data: string): void => { writes.push(data); target.write(data) }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as unknown as Terminal
+  const runOwned = ((_label: string, task: () => unknown, options: {
+    onResult?: (value: unknown) => void
+    onError?: (error: unknown) => void
+  }) => {
+    Promise.resolve().then(task).then(
+      (result) => { options.onResult?.(result) },
+      (error) => { options.onError?.(error) },
+    )
+  }) as never
+  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {}, runOwned })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, writes }
+}
 /** A started app whose user-activity signal is observable (the input boundary). */
 function startAppWithEvents(): { vt: VirtualTerminal; app: TuiApp; userInputs: () => number } {
   const vt = new VirtualTerminal(100, 24)
@@ -1754,6 +1782,7 @@ test('footer preset hides the stats line in compact mode', async () => {
 
 test('autoDetectTheme observes only the OSC 11 background', async () => {
   const { vt, app, writes } = startAppWithWrites()
+  app.noteThemeSelection('auto')
   const before = writes.length
   const pending = app.autoDetectTheme()
   assert.deepEqual(writes.slice(before), ['\x1b]11;?\x07'], 'one narrow OSC 11 query')
@@ -1767,6 +1796,7 @@ test('autoDetectTheme observes only the OSC 11 background', async () => {
 
 test('autoDetectTheme maps a dark background to the dark palette', async () => {
   const { vt, app } = startApp()
+  app.noteThemeSelection('auto')
   const pending = app.autoDetectTheme()
   vt.sendInput('\x1b]11;#111111\x07') // dark background -> dark
   await pending
@@ -1775,6 +1805,7 @@ test('autoDetectTheme maps a dark background to the dark palette', async () => {
 
 test('autoDetectTheme resolves without changing the theme when the terminal is silent', async () => {
   const { vt, app } = startApp()
+  app.noteThemeSelection('auto')
   const before = currentPalette
   await app.autoDetectTheme() // VirtualTerminal never answers OSC 11
   assert.equal(currentPalette, before, 'silent terminal must not change the palette')
@@ -1786,6 +1817,7 @@ test('autoDetectTheme falls back to COLORFGBG when the terminal never answers', 
   try {
     const { app } = startApp()
     setTheme('dark')
+    app.noteThemeSelection('auto')
     await app.autoDetectTheme()
     assert.equal(currentPalette, lightColors, 'COLORFGBG decides when the terminal is silent')
   } finally {
@@ -1796,6 +1828,7 @@ test('autoDetectTheme falls back to COLORFGBG when the terminal never answers', 
 
 test('autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode', async () => {
   const { vt, app } = startApp()
+  app.noteThemeSelection('auto')
   app.setFullscreen(true)
   await viewport(vt)
   // The alt screen owns the terminal input handler: the OSC 11 reply must
@@ -1810,6 +1843,7 @@ test('autoDetectTheme applies the detected theme through the ACTIVE screen in fu
 
 test('autoDetectTheme drops an observation that resolves before a screen switch', async () => {
   const { vt, app } = startApp()
+  app.noteThemeSelection('auto')
   setTheme('dark')
   const pending = app.autoDetectTheme()
   // The observation RESOLVES with a value and the swap happens in the same tick,
@@ -1823,6 +1857,7 @@ test('autoDetectTheme drops an observation that resolves before a screen switch'
 
 test('a late background reply across a Main/Fullscreen switch is not user input', async () => {
   const { vt, app, userInputs } = startAppWithEvents()
+  app.noteThemeSelection('auto')
   setTheme('dark')
   const pending = app.autoDetectTheme() // the observation belongs to the main screen
   app.setFullscreen(true) // the main screen stops; the alt screen owns the terminal
@@ -1836,6 +1871,7 @@ test('a late background reply across a Main/Fullscreen switch is not user input'
 
 test('a late background reply across a Fullscreen/Main switch is not user input', async () => {
   const { vt, app, userInputs } = startAppWithEvents()
+  app.noteThemeSelection('auto')
   setTheme('dark')
   app.setFullscreen(true)
   await viewport(vt)
@@ -1848,20 +1884,24 @@ test('a late background reply across a Fullscreen/Main switch is not user input'
   assert.equal(currentPalette, darkColors, 'and it must not colour the screen the user returned to')
 })
 
-test('a full stop/start keeps receiving live scheme reports', async () => {
-  const { vt, app } = startApp()
-  const received: string[] = []
-  app.onTerminalThemeChange((theme) => { received.push(theme) })
-  vt.sendInput('\x1b[?997;2n')
-  assert.deepEqual(received, ['light'], 'a report reaches the listener while the app is running')
+test('a full stop/start keeps the app-owned live scheme route alive', async () => {
+  const { vt, app, writes } = startAppWithWritesAndOwned()
+  app.noteThemeSelection('auto')
   app.stop()
   app.start()
-  vt.sendInput('\x1b[?997;1n')
-  assert.deepEqual(received, ['light', 'dark'], 'a restarted app must still receive scheme reports')
+  const before = writes.length
+  vt.sendInput('\x1b[?997;2n')
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 1,
+    'a restarted surface still turns a live report into the ONE narrow observation')
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(currentPalette, lightColors, 'and the real reply drives the palette')
 })
 
 test('autoDetectTheme coalesces concurrent calls onto one shared observation', async () => {
   const { vt, app, writes } = startAppWithWrites()
+  app.noteThemeSelection('auto')
   const before = writes.length
   const first = app.autoDetectTheme()
   const second = app.autoDetectTheme()
@@ -1872,17 +1912,21 @@ test('autoDetectTheme coalesces concurrent calls onto one shared observation', a
   assert.equal(currentPalette, lightColors, 'the shared observation result must apply once')
 })
 
-test('autoDetectTheme drops the settled result when shouldApply returns false', async () => {
+test('a superseded detection never colours a newer explicit selection', async () => {
   const { vt, app } = startApp()
-  const before = currentPalette
-  const pending = app.autoDetectTheme({ shouldApply: () => false })
+  setTheme('dark')
+  app.noteThemeSelection('auto')
+  const pending = app.autoDetectTheme()
+  // A newer deliberate choice lands while OSC 11 is still in flight.
+  app.noteThemeSelection('dark')
   vt.sendInput('\x1b]11;#eeeeee\x07')
   await pending
-  assert.equal(currentPalette, before, 'a refused result must not change the palette')
+  assert.equal(currentPalette, darkColors, 'the superseded result must not colour the explicit theme')
 })
 
 test('a late colour reply never reaches the editor', async () => {
   const { vt, app } = startApp()
+  app.noteThemeSelection('auto')
   setTheme('dark')
   await app.autoDetectTheme() // silent: the observation times out
   vt.sendInput('\x1b]11;#eeeeee\x07') // stray reply with nothing pending
@@ -1900,6 +1944,7 @@ test('autoDetectTheme honours the colour opt-out without querying', async () => 
   try {
     const { app, writes } = startAppWithWrites()
     setTheme('dark')
+    app.noteThemeSelection('auto')
     const before = writes.length
     await app.autoDetectTheme()
     assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 0,
@@ -1913,6 +1958,7 @@ test('autoDetectTheme honours the colour opt-out without querying', async () => 
 
 test('autoDetectTheme still detects after returning from fullscreen', async () => {
   const { vt, app } = startApp()
+  app.noteThemeSelection('auto')
   app.setFullscreen(true)
   await viewport(vt)
   app.setFullscreen(false)
@@ -1925,8 +1971,6 @@ test('autoDetectTheme still detects after returning from fullscreen', async () =
 
 test('trackTerminalTheme toggles Mode 2031 without sampling the terminal', async () => {
   const { vt, app, writes } = startAppWithWrites()
-  const received: string[] = []
-  app.onTerminalThemeChange((theme) => { received.push(theme) })
   app.trackTerminalTheme(true)
   app.trackTerminalTheme(true) // idempotent
   assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h'], 'enabling tracking writes ?2031h once')
@@ -1937,7 +1981,9 @@ test('trackTerminalTheme toggles Mode 2031 without sampling the terminal', async
   app.trackTerminalTheme(true)
   assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'], 're-enabling writes ?2031h again')
   vt.sendInput('\x1b[?997;2n')
-  assert.deepEqual(received, ['light'], 'reports still fan out to the listeners')
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(writes.filter(data => data.includes('\x1b]11;?')).length, 0,
+    'a report without a recorded Auto intent admits no observation')
 })
 
 test('Mode 2031 follows the tracking choice across a Main/Fullscreen switch', async () => {
@@ -1963,14 +2009,19 @@ test('Mode 2031 follows the tracking choice across a Main/Fullscreen switch', as
     'a newly started screen must not re-enable a disabled mode')
 })
 
-test('scheme reports reach listeners while the alt screen owns input', async () => {
-  const { vt, app } = startApp()
-  const received: string[] = []
-  app.onTerminalThemeChange((theme) => { received.push(theme) })
+test('a live scheme report on the alt screen triggers the app-owned observation there', async () => {
+  const { vt, app, writes } = startAppWithWritesAndOwned()
+  app.noteThemeSelection('auto')
   app.setFullscreen(true)
   await viewport(vt)
-  vt.sendInput('\x1b[?997;2n') // light — consumed by the alt screen
-  assert.deepEqual(received, ['light'], 'reports must fan out from the active screen')
+  const before = writes.length
+  vt.sendInput('\x1b[?997;2n') // consumed by the alt screen
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 1,
+    'the active alt screen turns the report into the ONE narrow observation')
+  vt.sendInput('\x1b]11;#111111\x07')
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(currentPalette, darkColors, 'the real dark background keeps the dark palette')
   app.stop()
 })
 

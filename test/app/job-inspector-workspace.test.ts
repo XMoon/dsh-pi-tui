@@ -1908,7 +1908,7 @@ test('entering the Job workspace re-samples the observation its predecessor lost
 
     // A boot-shaped observation for the screen that owns the terminal right now.
     app.noteThemeSelection('auto')
-    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    const pending = app.autoDetectTheme()
     assert.equal(queries(), 1, 'the observation is issued on the main screen')
 
     // Entering the Job workspace stops that screen, so its probe is released.

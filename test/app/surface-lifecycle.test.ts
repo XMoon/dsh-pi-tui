@@ -374,7 +374,7 @@ test('a terminal observation released by stop() is re-sampled by the restarted s
     const queries = (): number => writes.join('').split('\x1b]11;?\x07').length - 1
 
     app.noteThemeSelection('auto')
-    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    const pending = app.autoDetectTheme()
     assert.equal(queries(), 1, 'the observation is issued on the live screen')
 
     // A plain stop/start round trip: the same surface generation, the SAME screen object,

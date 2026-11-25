@@ -688,24 +688,25 @@ function themeExtensions(paletteForSelectable: (value: string) => typeof darkCol
   return { themes: { paletteForSelectable }, settings: new SettingsRegistry() } as unknown as NonNullable<TuiCommandRunner['extensions']>
 }
 
-test('/reload theme autodetect rechecks the latest persisted choice before applying', async () => {
-  let settingsReads = 0
-  const t = setup({
-    tuiSettings: reloadSettings('auto', count => { settingsReads = count }),
-  })
-  let resolveBackground!: (value: { red: number; green: number; blue: number } | undefined) => void
-  const pending = new Promise<{ red: number; green: number; blue: number } | undefined>(resolve => { resolveBackground = resolve })
-  t.app.autoDetectTheme = async (options) => {
-    assert.equal(options?.shouldApply?.(), true)
-    // Simulate the settings panel changing the choice while OSC 11 is in flight.
-    t.app.applyTheme('light')
-    assert.equal(options?.shouldApply?.(), false)
-    await pending
-  }
+test('/reload restores Auto from a live manual override and an old sample cannot colour it', async () => {
+  const t = setup({ tuiSettings: reloadSettings('auto') })
+  // A live manual override the persisted document does not carry yet.
+  t.app.noteThemeSelection('dark')
+  t.app.applyTheme('dark')
+  const writes: string[] = []
+  const originalWrite = t.vt.write.bind(t.vt)
+  t.vt.write = (data: string): void => { writes.push(data); originalWrite(data) }
   const result = await t.runCommand('reload') as { kind: string }
   assert.equal(result.kind, 'success')
-  assert.ok(settingsReads >= 2, 'the late guard must read settings again')
-  resolveBackground(undefined)
+  assert.equal(t.app.themeFollowsTerminal(), true, 'reload restores the persisted Auto intent')
+  assert.ok(writes.join('').includes('\x1b]11;?'), 'Auto reload requests a fresh observation')
+  // A settings panel commit lands while the Auto observation is in flight.
+  t.app.noteThemeSelection('dark')
+  t.app.applyTheme('dark')
+  t.vt.sendInput('\x1b]11;#eeeeee\x07')
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(t.app.currentTheme(), 'dark',
+    'the superseded Auto sample must not colour the newer explicit selection')
   t.app.stop()
 })
 
@@ -769,12 +770,27 @@ test('/reload plugin theme failure records and later success clears its health',
     recordExtensionError: (ref) => recorded.push(ref.id),
     clearExtensionError: (ref) => cleared.push(ref.id),
   })
-  t.app.applyPalette = () => { throw new Error('plugin palette failed') }
+  t.app.applyPluginPalette = () => { throw new Error('plugin palette failed') }
   await t.runCommand('reload')
   assert.deepEqual(recorded, [id], 'plugin palette failure must record its contribution')
-  t.app.applyPalette = () => {}
+  t.app.applyPluginPalette = () => {}
   await t.runCommand('reload')
   assert.deepEqual(cleared, [id], 'a later plugin palette success must clear its contribution')
+  t.app.stop()
+})
+
+test('/reload with a missing custom source keeps a legal Auto tenure', async () => {
+  const name = `reload-missing-auto-${randomUUID()}`
+  const t = setup({
+    tuiSettings: reloadSettings(`custom:${name}`),
+    extensions: themeExtensions(() => undefined),
+  })
+  t.app.noteThemeSelection('auto')
+  t.app.trackTerminalTheme(true)
+  const result = await t.runCommand('reload') as { kind: string }
+  assert.equal(result.kind, 'success')
+  assert.equal(t.app.themeFollowsTerminal(), true,
+    'an invalid custom candidate must not cancel the current Auto intent')
   t.app.stop()
 })
 
