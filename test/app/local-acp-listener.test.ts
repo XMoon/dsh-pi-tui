@@ -376,7 +376,11 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
         protocolVersion: number
         agentInfo: { name: string; version: string }
         authMethods: unknown[]
-        agentCapabilities: { loadSession: boolean; sessionCapabilities: Record<string, unknown> }
+        agentCapabilities: {
+          loadSession: boolean
+          mcpCapabilities: { http: boolean; sse: boolean }
+          sessionCapabilities: Record<string, unknown>
+        }
       }
     }
     assert.equal(response.id, 1)
@@ -385,6 +389,8 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
     assert.equal(response.result?.agentInfo.version, '9.9.9-test')
     assert.deepEqual(response.result?.authMethods, [])
     assert.equal(response.result?.agentCapabilities.loadSession, false)
+    assert.deepEqual(response.result?.agentCapabilities.mcpCapabilities, { http: false, sse: false },
+      'a listener with no Host Session View must not advertise HTTP MCP')
     assert.deepEqual(response.result?.agentCapabilities.sessionCapabilities, {},
       'a listener with no Host Session View must not advertise resume/close')
   } finally {
@@ -1589,6 +1595,49 @@ test('a second ACP connection cannot attach an already-held Session; invalid req
   }
 })
 
+test('malformed HTTP declarations are refused before dispatch for new, resume and load', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    sessionRead: true,
+    sessionHistory: sessionId => ({ header: { sessionId, cwd: '/host/proj' }, events: [] }),
+  })
+  fake.seed('http-invalid-target', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    const malformed = {
+      name: 'bad-http',
+      type: 'http',
+      url: 'https://example.test/mcp',
+      headers: [{ name: 'Bad Header', value: 'not-sent' }],
+    }
+    for (const [id, method, params] of [
+      [2, 'session/new', { cwd: '/host/proj', mcpServers: [malformed] }],
+      [3, 'session/resume', { sessionId: 'http-invalid-target', cwd: '/host/proj', mcpServers: [malformed] }],
+      [4, 'session/load', { sessionId: 'http-invalid-target', cwd: '/host/proj', mcpServers: [malformed] }],
+    ]) {
+      client.send({ jsonrpc: '2.0', id, method, params })
+      const refused = (await client.next()) as { id?: number; error?: { code?: number; data?: { code?: string } } }
+      assert.equal(refused.id, id)
+      assert.equal(refused.error?.code, -32602)
+      assert.equal(refused.error?.data?.code, 'LOCAL_ACP_MCP_INVALID_DECLARATION')
+    }
+    assert.deepEqual(fake.resolveCalls(), [], 'malformed HTTP never resolves a target Agent')
+    assert.deepEqual(fake.sessionHistoryReads(), [], 'malformed HTTP load never reads history')
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: { sessionId: 'http-invalid-target', cwd: '/host/proj' } })
+    const legal = (await client.next()) as { result?: unknown }
+    assert.deepEqual(legal.result, {})
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId: 'http-invalid-target' } })
+    const closed = (await client.next()) as { result?: unknown }
+    assert.deepEqual(closed.result, {})
+  } finally {
+    client.close()
+  }
+})
+
 test('one ACP socket routes concurrent prompts and close to their exact Session', async t => {
   const { scope } = newScope(t)
   const fake = makeFakeAccess()
@@ -2143,7 +2192,7 @@ test('session/new carries the authoritative created session id in JSON-RPC error
   }
 })
 
-test('session/new passes the standard stdio MCP declarations to the View and returns the Host Session id', async t => {
+test('session/new advertises HTTP MCP only with a View and forwards stdio+HTTP declarations unchanged', async t => {
   const { scope } = newScope(t)
   const mounted: Array<{ readonly servers: readonly unknown[] }> = []
   const { access } = makeFakeAccess({
@@ -2157,8 +2206,19 @@ test('session/new passes the standard stdio MCP declarations to the View and ret
   const client = await RawClient.open(listener.socketPath)
   try {
     initialize(client, 1)
-    await client.next()
-    const mcpServers = [{ name: 'mcp one', command: '/bin/true', args: [], env: [{ name: 'SAFE', value: 'value' }] }]
+    const initialized = (await client.next()) as {
+      result?: { agentCapabilities?: { mcpCapabilities?: { http?: boolean; sse?: boolean } } }
+    }
+    assert.deepEqual(initialized.result?.agentCapabilities?.mcpCapabilities, { http: true, sse: false })
+    const mcpServers = [
+      { name: 'mcp one', command: '/bin/true', args: [], env: [{ name: 'SAFE', value: 'value' }] },
+      {
+        name: 'http-one',
+        type: 'http',
+        url: 'http://127.0.0.1:8765/mcp',
+        headers: [{ name: 'Authorization', value: 'Bearer value' }],
+      },
+    ]
     client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host', mcpServers } })
     const response = (await client.next()) as { result?: { sessionId?: string }; error?: unknown }
     assert.equal(typeof response.result?.sessionId, 'string', JSON.stringify(response))

@@ -500,6 +500,41 @@ test('session/new rejects an invalid cwd and an unsupported MCP server before an
   assert.equal(registry.phaseOf(conn), 'idle')
 })
 
+test('session lifecycle HTTP declaration failures are refused before any Host create, resolve, mount or replay', async () => {
+  const malformed: unknown[][] = [
+    [{ name: 's', type: 'http', url: 'ftp://example.test/mcp', headers: [] }],
+    [{ name: 's', type: 'http', url: 'https://example.test/mcp', headers: [{ name: 'X-Test', value: 'a\r\nb' }] }],
+    [{ name: 's', type: 'http', url: 'https://example.test/mcp', headers: [{ name: 'X-Test', value: '1' }, { name: 'x-test', value: '2' }] }],
+    [{ name: 's', type: 'sse', url: 'https://example.test/mcp', headers: [] }],
+    [
+      { name: 'same', command: '/bin/true', args: [], env: [] },
+      { name: 'same', type: 'http', url: 'https://example.test/mcp', headers: [] },
+    ],
+  ]
+  for (const mcpServers of malformed) {
+    for (const lifecycle of ['new', 'resume', 'load'] as const) {
+      const access = new FakeAccess()
+      const agent = makeAgent(`S-http-${String(access.createSessionCalls.length)}`, '/work/http')
+      access.seed(agent)
+      const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+      const conn = registry.createConnection()
+      const run = lifecycle === 'new'
+        ? registry.newSession(conn, access, { cwd: '/work/http', mcpServers })
+        : lifecycle === 'resume'
+          ? registry.resumeSession(conn, access, { sessionId: agent.id, cwd: '/work/http', mcpServers })
+          : registry.loadSession(conn, access, { sessionId: agent.id, cwd: '/work/http', mcpServers })
+      await assert.rejects(run, isViewError('LOCAL_ACP_MCP_INVALID_DECLARATION'))
+      assert.deepEqual(access.createWorkspaceCalls, [], `${lifecycle}: no workspace effect`)
+      assert.deepEqual(access.createSessionCalls, [], `${lifecycle}: no session effect`)
+      assert.deepEqual(access.resolveCalls, [], `${lifecycle}: no agent resolve`)
+      assert.deepEqual(access.mountScopedMcpCalls, [], `${lifecycle}: no MCP mount`)
+      assert.deepEqual(access.historyCalls, [], `${lifecycle}: no history replay`)
+      assert.equal(registry.claimCount(), 0, `${lifecycle}: no claim`)
+      assert.equal(registry.phaseOf(conn), 'idle', `${lifecycle}: connection stays idle`)
+    }
+  }
+})
+
 test('session lifecycle requests carrying an unadvertised systemPrompt are refused before any Host side effect', async () => {
   const prompt = { mode: 'append', content: [{ type: 'text', text: 'b3-unannounced-system-prompt' }] }
   {
