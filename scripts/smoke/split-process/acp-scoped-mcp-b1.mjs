@@ -347,12 +347,12 @@ export async function runAcpScopedMcpB1(context) {
   const closeAcp = async client => {
     await client.close().catch(() => {})
   }
-  const resumeWhenAttachable = async (handle, params, label = 'resume') => {
+  const lifecycleWhenAttachable = async (handle, method, params, label) => {
     const client = handle.client ?? handle
     const started = Date.now()
     for (;;) {
       try {
-        return await client.request(acp.methods.agent.session.resume, params)
+        return await client.request(method, params)
       } catch (error) {
         if (error?.data?.code !== 'LOCAL_ACP_VIEW_ALREADY_ATTACHED') throw error
         if (Date.now() - started > 30_000) throw error
@@ -360,6 +360,10 @@ export async function runAcpScopedMcpB1(context) {
       }
     }
   }
+  const resumeWhenAttachable = async (handle, params, label = 'resume') =>
+    await lifecycleWhenAttachable(handle, acp.methods.agent.session.resume, params, label)
+  const loadWhenAttachable = async (handle, params, label = 'load') =>
+    await lifecycleWhenAttachable(handle, acp.methods.agent.session.load, params, label)
   const waitToolAbsent = async (sessionId, label, timeoutMs = 60_000) => {
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
@@ -769,11 +773,11 @@ export async function runAcpScopedMcpB1(context) {
     const httpH3 = await startHttpFixture('h3')
     const acpH3 = await openAcp('H3 http load')
     const h3LoadAt = Date.now()
-    await acpH3.client.request(acp.methods.agent.session.load, {
+    await loadWhenAttachable(acpH3, {
       sessionId: sessionA,
       cwd: hostCwd,
       mcpServers: [httpDeclaration('b1scope', httpH3.url)],
-    })
+    }, 'H3 HTTP load')
     await httpH3.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list' && event.time >= h3LoadAt,
       'H3 HTTP load tools/list')
     await acpH3.client.close()
