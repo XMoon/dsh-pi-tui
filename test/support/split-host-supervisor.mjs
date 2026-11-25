@@ -6516,13 +6516,18 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     argv = [...scene.installation.dshInvocation.slice(1), ...built.argv]
   }
   const env = {
-    ...scene.installation.base.env,
+    ...scene.installation.env,
     ...(backend === undefined ? {} : { DSH_PI_TUI_BACKEND: backend }),
     ...(loaderDumpPath === undefined ? {} : { M62A_LOADER_DUMP: loaderDumpPath }),
     ...(herdr === undefined ? {} : herdr.env),
     ...(message.replayCommand === undefined ? {} : {
-      PATH: `${join(launchDir, 'bin')}:${scene.installation.base.env.PATH ?? ''}`,
+      PATH: `${join(launchDir, 'bin')}:${scene.installation.env.PATH ?? ''}`,
     }),
+  }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('SPLIT_PROCESS_')) {
+      throw new Error(`START_PUBLIC_DAEMON: the public entry environment carries the internal ${key}`)
+    }
   }
   const handle = {
     launchId: `public-daemon-${String(sequence)}-${String(Date.now().toString(36))}`,
@@ -7095,6 +7100,11 @@ async function handlePublicDaemonStop(message) {
   const host = handle.host
   if (host === undefined) throw new Error('PUBLIC_DAEMON_STOP: this public launch owns no Host')
   if (host.reclaimed === true) return publicDaemonHostFacts(host)
+  if (!publicHostStillLive(host)) {
+    throw new Error('PUBLIC_DAEMON_STOP: the captured public Host is already dead before daemon stop')
+  }
+  await bindLatePublicHostRegistry(host, 'PUBLIC_DAEMON_STOP')
+  assertPublicHostOwnership(host, 'PUBLIC_DAEMON_STOP:before')
   const helper = await runTrackedOnce(scene.installation.dshInvocation,
     ['--profile', handle.profile, 'daemon', 'stop'],
     scene.installation.profileDir,
@@ -7103,6 +7113,10 @@ async function handlePublicDaemonStop(message) {
     180_000)
   if (helper.exitResult?.code !== 0 || helper.exitResult?.signal !== null) {
     throw new Error(`PUBLIC_DAEMON_STOP: the public daemon stop failed: exit=${JSON.stringify(helper.exitResult)} output=${JSON.stringify((helper.outputText ?? '').slice(-1200))}`)
+  }
+  const stoppedFields = parseDaemonStatusFields(helper.outputText ?? '')
+  if (stoppedFields.host !== 'stopped') {
+    throw new Error(`PUBLIC_DAEMON_STOP: the public daemon stop did not report host=stopped: ${JSON.stringify(stoppedFields)}`)
   }
   await waitForPublicHostTerminal(host, 'PUBLIC_DAEMON_STOP', 60_000)
   const registryPath = join(processScope.dir, 'instance.json')
@@ -7162,7 +7176,11 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
   if (observation.kind !== 'alive') throw new Error(`${reason}: the public Host is not a live kernel process`)
   const birth = serializeKernelIdentity(observation.identity)
   if (birth !== host.birth) throw new Error(`${reason}: the public Host kernel birth changed`)
-  if (birth !== expectedBirth) throw new Error(`${reason}: the public Host birth does not match the expected admission identity`)
+  if (birth !== expectedBirth) {
+    const error = new Error(`${reason}: the public Host birth does not match the expected admission identity`)
+    error.code = 'PUBLIC_HOST_BIRTH_MISMATCH'
+    throw error
+  }
   const identity = observation.identity
   if (identity.pgid !== host.pid || identity.sid !== host.pid) {
     throw new Error(`${reason}: the public Host is not its own detached group/session leader`)
@@ -7185,6 +7203,56 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
   return { birth, identity }
 }
 
+/**
+ * A pre-registry abort can let the detached Host finish booting before the
+ * Supervisor reclaims it. Absorb that late publication only after the exact
+ * captured PID/birth/scope/build/profile material and the official Host
+ * authentication agree; a partial, foreign or mismatched record still fails.
+ */
+async function bindLatePublicHostRegistry(host, reason) {
+  if (host.instanceId !== undefined) return
+  const registryPath = join(processScope.dir, 'instance.json')
+  const launchPath = join(processScope.dir, 'launch.json')
+  if (!existsSync(registryPath) || !existsSync(launchPath)) return
+  const registry = readJson(registryPath, `${reason}: late public Host registry`)
+  const launch = readJson(launchPath, `${reason}: late public Host launch`)
+  assertPublicHostRecord(host, registry, launch)
+  const handle = publicLaunches.find(candidate => candidate.host === host)
+  if (handle === undefined) throw new Error(`${reason}: the late public Host has no owning launch`)
+  const authentication = await waitForPublicHostAuthentication(handle, registry, launch, 120_000)
+  host.instanceId = registry.instanceId
+  host.origin = registry.origin
+  host.protocol = registry.protocol
+  host.buildId = registry.buildId
+  host.bundleVersion = registry.bundleVersion
+  host.dshVersion = registry.dshVersion
+  host.schema = registry.schema
+  host.registryPath = registryPath
+  host.launchPath = launchPath
+  host.authenticatedAt = authentication.authenticatedAt
+  host.identity = authentication.identity
+  syncPublicLaunchReceipt()
+  appendNote('public-daemon-late-registry-bound', {
+    launchId: handle.launchId,
+    pid: host.pid,
+    birth: host.birth,
+    instanceId: host.instanceId,
+    authenticatedAt: host.authenticatedAt,
+  })
+}
+
+async function waitForProbeRegistryRelease() {
+  const releasePath = process.env.SPLIT_VITEST_PUBLIC_REGISTRY_RELEASE
+  if (releasePath === undefined || releasePath === '') return
+  const started = Date.now()
+  while (!existsSync(releasePath)) {
+    if (Date.now() - started >= 120_000) {
+      throw new Error('public-daemon-before-registry: the external probe never released the late publication')
+    }
+    await sleep(50)
+  }
+}
+
 /** Reclaim one public Host this Scene captured (normal stop or compensation). */
 async function reclaimPublicHost(host, reason) {
   if (host.reclaimed === true) return
@@ -7195,15 +7263,23 @@ async function reclaimPublicHost(host, reason) {
     syncPublicLaunchReceipt()
     return
   }
+  if (process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'public-daemon-before-registry'
+    && host.instanceId === undefined) {
+    await waitForProbeRegistryRelease()
+    await bindLatePublicHostRegistry(host, 'reclaimPublicHost:pre-registry')
+  }
   if (process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'public-daemon-ownership-refused'
     && publicOwnershipRefusal === undefined) {
     const wrongBirth = `${host.birth}-mismatch`
-    let refusal
+    let refusalCode = 'UNEXPECTED_PASS'
+    let refusalDetail = 'the mismatched ownership proof unexpectedly passed'
     try {
       assertPublicHostOwnership(host, 'public ownership refusal', wrongBirth)
-      refusal = 'the mismatched ownership proof unexpectedly passed'
     } catch (error) {
-      refusal = boundedError(error)
+      refusalCode = typeof error === 'object' && error !== null && 'code' in error
+        ? String(error.code)
+        : 'UNCODED'
+      refusalDetail = redactText(error instanceof Error ? error.message : String(error))
     }
     const targetLive = publicIdentityState({ pid: host.pid, birth: host.birth, entry: 'local-host.mjs' }) === 'alive'
     publicOwnershipRefusal = {
@@ -7211,7 +7287,8 @@ async function reclaimPublicHost(host, reason) {
       pid: host.pid,
       birth: host.birth,
       expectedBirth: wrongBirth,
-      refusal,
+      refusalCode,
+      refusal: refusalDetail,
       targetLiveAtRefusal: targetLive,
       signalSent: false,
       rootRetainedAtRefusal: existsSync(scene.workDir),
@@ -7220,10 +7297,15 @@ async function reclaimPublicHost(host, reason) {
     }
     appendNote('public-daemon-ownership-refused', publicOwnershipRefusal)
     writeReceipt({
-      phase: 'NOT_QUIESCED',
-      errorName: 'PUBLIC_DAEMON_OWNERSHIP_REFUSED',
+      phase: refusalCode === 'PUBLIC_HOST_BIRTH_MISMATCH' ? 'NOT_QUIESCED' : 'FAILED',
+      errorName: refusalCode === 'PUBLIC_HOST_BIRTH_MISMATCH'
+        ? 'PUBLIC_DAEMON_OWNERSHIP_REFUSED'
+        : 'PUBLIC_DAEMON_OWNERSHIP_GUARD_DID_NOT_REFUSE',
       publicOwnershipRefused: publicOwnershipRefusal,
     })
+    if (refusalCode !== 'PUBLIC_HOST_BIRTH_MISMATCH') {
+      throw new Error(`public-daemon-ownership-refused: the birth-mismatch guard returned ${refusalCode}/${refusalDetail}`)
+    }
     // The external probe must independently observe the refused admission while
     // the same-birth Host is still live. The handshake is probe-owned, so this
     // path never invents a delay or signals before the release exists.
@@ -7257,15 +7339,24 @@ async function reclaimPublicHost(host, reason) {
   const remaining = kernelGroupLiveMemberPids(processKernelReaders(), host.pid, 'public Host group')
   if (remaining.length > 0) throw new Error(`reclaimPublicHost:${reason}: the public Host group still has live members: ${JSON.stringify(remaining)}`)
   await assertSceneHostSeatFree(`reclaimPublicHost:${reason}`)
-  if (existsSync(registryPath)) {
-    const after = readJson(registryPath, 'public Host registry after stop')
-    if (after.hostPid === host.pid && after.instanceId === host.instanceId) {
-      throw new Error(`reclaimPublicHost:${reason}: the stopped public Host left its own registry record`)
-    }
-  }
   const launchPath = join(processScope.dir, 'launch.json')
-  if (existsSync(launchPath)) {
-    throw new Error(`reclaimPublicHost:${reason}: the stopped public Host left its one-shot launch material`)
+  if (existsSync(registryPath) || existsSync(launchPath)) {
+    if (!existsSync(registryPath) || !existsSync(launchPath)) {
+      throw new Error(`reclaimPublicHost:${reason}: the stopped public Host left incomplete registry/launch material`)
+    }
+    const after = readJson(registryPath, 'public Host registry after stop')
+    const launch = readJson(launchPath, 'public Host launch after stop')
+    if (host.instanceId === undefined || after.hostPid !== host.pid || after.instanceId !== host.instanceId) {
+      throw new Error(`reclaimPublicHost:${reason}: the stopped public Host left material naming another instance`)
+    }
+    assertPublicHostRecord(host, after, launch)
+    unlinkSync(registryPath)
+    unlinkSync(launchPath)
+    appendNote('public-daemon-owned-material-removed', {
+      launchId: publicLaunches.find(candidate => candidate.host === host)?.launchId ?? null,
+      hostPid: host.pid,
+      instanceId: host.instanceId,
+    })
   }
   host.reclaimed = true
   host.stoppedAt = now()

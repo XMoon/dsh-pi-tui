@@ -127,6 +127,7 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
     expect(status.fields.host, `public daemon status host (${JSON.stringify(status.fields)})`).toBe('ready')
     expect(status.fields.manager).toBe('process')
     expect(status.fields.unit).toBe('none')
+    expect(status.fields['user-manager'], `public daemon user-manager (${JSON.stringify(status.fields)})`).toBe('not-checked')
 
     const before = new Set(await scene.sessionIds())
     await launch.submit('public cold start')
@@ -141,10 +142,14 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
       'public cold assistant answer')
     await waitForFrame(launch, 'stub answer', 'public cold painted answer')
 
+    const beforeExitHost = await launch.kernelState()
+    await exitPublicLaunch(launch, 'public cold launch')
+    const afterExitHost = await launch.kernelState()
+    expect(afterExitHost.hostPid, 'the same Host PID survives the Client /exit').toBe(beforeExitHost.hostPid)
+    expect(afterExitHost.hostState, 'the captured Host kernel identity survives the Client /exit').toBe('alive')
     const stillRunning = await launch.daemonStatus()
     expect(stillRunning.fields.host, 'the Host survives the Client /exit').toBe('ready')
 
-    await exitPublicLaunch(launch, 'public cold launch')
     await launch.stopHost()
     const stopped = await launch.daemonStatus()
     expect(stopped.fields.host, `public daemon host after stop (${JSON.stringify(stopped.fields)})`).toBe('stopped')
@@ -234,6 +239,10 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
       expect(launch.refused, `${label}: the invalid backend was accepted`).toBe(true)
       expect(launch.exit, `${label}: the invalid backend produced a real exit`).not.toBeNull()
       expect(launch.exit?.code, `${label}: the invalid backend exit code`).not.toBe(0)
+      const refusalText = await launch.text({ full: true })
+      expect(refusalText, `${label}: the actual backend diagnostic (${refusalText})`).toMatch(
+        label === 'refuse-wire-local' ? /wire-local|invalid.*backend|backend.*invalid/iu : /DSH_PI_TUI_BACKEND|invalid|empty/iu,
+      )
       expect(launch.host, `${label}: the invalid backend started a Host`).toBeNull()
       expect(launch.client, `${label}: the invalid backend started a Client`).toBeNull()
       expect(existsSync(join(scene.scopeDir, 'instance.json')),
@@ -244,7 +253,9 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
 
     const headless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless', backend: 'daemon' })
     expect(headless.exit.code, 'the non-TTY daemon launch exit code').not.toBe(0)
-    expect(headless.text, `the non-TTY daemon refusal text (${headless.text})`).toMatch(/daemon|TTY|interactive/iu)
+    expect(headless.text, `the non-TTY daemon refusal text (${headless.text})`).toMatch(
+      /not a (?:TTY|terminal)|non-interactive|requires (?:an? )?(?:TTY|terminal)|interactive terminal/iu,
+    )
     expect(existsSync(join(scene.scopeDir, 'instance.json')),
       'the non-TTY daemon launch published no Host registry').toBe(false)
 
@@ -259,6 +270,10 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
     })
     expect(launch.refused, '--session and -c together must be refused by the product').toBe(true)
     expect(launch.exit?.code, 'the mutually exclusive launch exit code').not.toBe(0)
+    const mutualText = await launch.text({ full: true })
+    expect(mutualText, `the actual mutual-exclusion diagnostic (${mutualText})`).toMatch(
+      /--session.*(?:-c|--continue)|(?:-c|--continue).*--session|mutually exclusive/iu,
+    )
     expect(launch.host, 'the mutually exclusive launch started a Host').toBeNull()
     expect(existsSync(join(scene.scopeDir, 'instance.json')),
       'the mutually exclusive launch published a Host registry').toBe(false)
@@ -298,6 +313,7 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
   try {
     const seed = await scene.startPublicDaemon({ label: 'session-seed', backend: 'daemon' })
     launches.push(seed)
+    const seedHost = seed.host
     await waitForFrame(seed, '❯', 'public session seed composer')
     const before = new Set(await scene.sessionIds())
     await seed.submit('public session seed')
@@ -317,6 +333,8 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     })
     launches.push(full)
     await waitForFrame(full, 'public session seed', '--session full id history')
+    expect(full.host?.instanceId, '--session full id reused the authenticated Host').toBe(seedHost?.instanceId)
+    expect(full.host?.pid).toBe(seedHost?.pid)
     expect([...(await scene.sessionIds())].sort(), '--session full id created no Session').toEqual(expectedSessions)
     await exitPublicLaunch(full, 'public session full id')
 
@@ -328,6 +346,8 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     })
     launches.push(prefixed)
     await waitForFrame(prefixed, 'public session seed', '--session unique prefix resumed the exact history')
+    expect(prefixed.host?.instanceId, 'the unique prefix reused the authenticated Host').toBe(seedHost?.instanceId)
+    expect(prefixed.host?.pid).toBe(seedHost?.pid)
     expect([...(await scene.sessionIds())].sort(), 'the unique prefix created no Session').toEqual(expectedSessions)
     await exitPublicLaunch(prefixed, 'public session unique prefix')
 
@@ -357,6 +377,8 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     })
     launches.push(continued)
     await waitForFrame(continued, 'public session seed', '-c resumed the same workspace history')
+    expect(continued.host?.instanceId, '-c reused the authenticated Host').toBe(seedHost?.instanceId)
+    expect(continued.host?.pid).toBe(seedHost?.pid)
     expect([...(await scene.sessionIds())].sort(), '-c created no Session').toEqual(expectedSessions)
     await exitPublicLaunch(continued, 'public session continue')
     await continued.stopHost()
@@ -492,24 +514,35 @@ test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after t
     expect((await second.kernelState()).hostState, 'the shared Host is live').toBe('alive')
 
     await first.signalCli()
-    let cliGoneAt: number | undefined
-    let clientGoneAt: number | undefined
+    let cliGone = false
+    let clientGone = false
+    let clientFirst = false
+    const trace: Array<{ cli: string; client: string }> = []
     const started = Date.now()
     for (;;) {
       const state = await first.kernelState()
-      if (cliGoneAt === undefined && (state.cliState === 'gone' || state.cliState === 'reused')) {
-        cliGoneAt = Date.now()
+      const cliTerminal = state.cliState === 'gone' || state.cliState === 'reused'
+      const clientTerminal = state.clientState === 'gone' || state.clientState === 'reused'
+      trace.push({ cli: state.cliState, client: state.clientState })
+      if (clientTerminal && !cliTerminal) clientFirst = true
+      if (cliTerminal && !clientTerminal) {
+        throw new Error(`the foreground Client was observed alive after its CLI settled: ${JSON.stringify(trace.slice(-5))}`)
       }
-      if (clientGoneAt === undefined && (state.clientState === 'gone' || state.clientState === 'reused')) {
-        clientGoneAt = Date.now()
-      }
-      if (cliGoneAt !== undefined && clientGoneAt !== undefined) break
+      cliGone = cliGone || cliTerminal
+      clientGone = clientGone || clientTerminal
+      if (cliGone && clientGone) break
       if (Date.now() - started >= 120_000) {
-        throw new Error(`the TERM'd public CLI/Client did not reach terminal facts: ${JSON.stringify(state)}`)
+        throw new Error(`the TERM'd public CLI/Client did not reach terminal facts: ${JSON.stringify(trace.slice(-5))}`)
       }
       await sleep(50)
     }
-    expect(clientGoneAt, 'the foreground Client exits no later than its CLI settles').toBeLessThanOrEqual(cliGoneAt)
+    expect(clientGone, `the foreground Client reached a terminal fact (${JSON.stringify(trace.slice(-5))})`).toBe(true)
+    expect(cliGone, `the foreground CLI reached a terminal fact (${JSON.stringify(trace.slice(-5))})`).toBe(true)
+    // clientFirst === true is a strict client-first observation. When both
+    // processes disappear between two 50ms reads the trace cannot order them;
+    // in that case the loop above has still rejected any observation of a live
+    // Client after the CLI was gone. No local Date.now() fiction is used.
+    if (!clientFirst) expect(trace.length).toBeGreaterThan(0)
     const surviving = await second.kernelState()
     expect(surviving.hostState, 'the Host survives the peer CLI TERM').toBe('alive')
     expect(surviving.clientState, 'the surviving Client stays live').toBe('alive')

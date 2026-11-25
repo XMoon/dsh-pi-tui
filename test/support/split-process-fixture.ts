@@ -1495,6 +1495,7 @@ class ProcessScene implements SplitProcessScene {
     const auditRunId = process.env[PARALLEL_AUDIT_ENV]
     if (auditRunId === undefined || auditRunId === '') return
     const pair = process.env[PARALLEL_AUDIT_PAIR_ENV]
+    if (pair === undefined || pair === '') return
     if (pair !== 'public-daemon-entry') {
       throw new Error('publicDaemonParallelReady: SPLIT_VITEST_PARALLEL_AUDIT_PAIR must be public-daemon-entry')
     }
@@ -1554,7 +1555,9 @@ class ProcessScene implements SplitProcessScene {
   async publicDaemonParallelRelease(): Promise<void> {
     const auditRunId = process.env[PARALLEL_AUDIT_ENV]
     if (auditRunId === undefined || auditRunId === '') return
-    if (process.env[PARALLEL_AUDIT_PAIR_ENV] !== 'public-daemon-entry') {
+    const pair = process.env[PARALLEL_AUDIT_PAIR_ENV]
+    if (pair === undefined || pair === '') return
+    if (pair !== 'public-daemon-entry') {
       throw new Error('publicDaemonParallelRelease: SPLIT_VITEST_PARALLEL_AUDIT_PAIR must be public-daemon-entry')
     }
     await this.report('parallel-released', { label: 'public-daemon-entry', activeEndedAt: new Date().toISOString() })

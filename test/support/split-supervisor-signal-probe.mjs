@@ -667,6 +667,13 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
     }
   }
   if (receipt.publicOwnershipRefused !== undefined) {
+    if (receipt.publicOwnershipRefused.refusalCode !== 'PUBLIC_HOST_BIRTH_MISMATCH') {
+      problems.push(`the public ownership refusal did not name the birth-mismatch guard: ${String(receipt.publicOwnershipRefused.refusalCode)}`)
+    }
+    if (typeof receipt.publicOwnershipRefused.refusal !== 'string'
+      || receipt.publicOwnershipRefused.refusal === '') {
+      problems.push('the public ownership refusal carries no concrete diagnostic')
+    }
     if (receipt.publicOwnershipRefused.signalSent !== false) {
       problems.push('the public ownership refusal claims a signal was sent')
     }
@@ -879,6 +886,11 @@ const publicRefusalReleaseFile = join(tmpBase, `split-public-refusal-release-${S
 if (processMode && at === 'public-daemon-ownership-refused') {
   if (existsSync(publicRefusalReleaseFile)) unlinkSync(publicRefusalReleaseFile)
   env.SPLIT_VITEST_PUBLIC_REFUSAL_RELEASE = publicRefusalReleaseFile
+}
+const publicRegistryReleaseFile = join(tmpBase, `split-public-registry-release-${String(process.pid)}.flag`)
+if (processMode && at === 'public-daemon-before-registry') {
+  if (existsSync(publicRegistryReleaseFile)) unlinkSync(publicRegistryReleaseFile)
+  env.SPLIT_VITEST_PUBLIC_REGISTRY_RELEASE = publicRegistryReleaseFile
 }
 if (mode === 'worker-kill') env.SPLIT_VITEST_WORKER_KILL_POINT = at
 if (mode === 'upgrade-worker-kill' && (at === 'new-host-spawned-before-ack' || at === 'qualification-client-active'
@@ -1363,14 +1375,28 @@ try {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
       }
       deadline = Date.now() + 180_000
+      if (at === 'public-daemon-before-registry') {
+        const note = processNote(receipt, 'process-probe-hold', at)
+        const registryPath = note?.detail?.registryPath
+        if (typeof registryPath !== 'string' || registryPath === '') {
+          fail('public-daemon-before-registry: the hold carries no registry path')
+        }
+        await waitUntil(() => existsSync(registryPath) ? true : undefined,
+          'the real public Host registry publication after the trigger', 120_000)
+        writeFileSync(publicRegistryReleaseFile, 'release\n', { mode: 0o600 })
+      }
       if (at === 'public-daemon-ownership-refused') {
         const refused = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
+          if (current?.phase === 'FAILED' && current.publicOwnershipRefused !== undefined) return current
           return current?.publicOwnershipRefused !== undefined
             && current.publicOwnershipRefused.compensationCompleted !== true
             && current.phase === 'NOT_QUIESCED' ? current : undefined
         }, 'the real public ownership refusal checkpoint', 120_000)
         const refusal = refused.publicOwnershipRefused
+        if (refusal.refusalCode !== 'PUBLIC_HOST_BIRTH_MISMATCH') {
+          fail(`public-daemon-ownership-refused: the guard did not refuse the mismatched birth (${String(refusal.refusalCode)}: ${String(refusal.refusal)})`)
+        }
         const refusedHost = (refused.publicHosts ?? []).find(host => host.pid === refusal.pid)
         if (refusedHost === undefined) fail('public-daemon-ownership-refused: no public Host row at the refusal')
         if (identityLiveness(kernel, refusedHost.pid, refusedHost.birth) !== 'live') {

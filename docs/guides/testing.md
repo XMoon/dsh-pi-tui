@@ -696,7 +696,9 @@ select the project's files together and use a fresh private run root per round:
 ```sh
 SPLIT_VITEST_RUN_ID=process-overlap-r1 \
 SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=process-overlap-r1 \
-mise exec -- pnpm test:split:process
+mise exec -- pnpm test:split:process -- \
+  test/integration/split-process/business/host-file-completion.vitest.ts \
+  test/integration/split-process/business/preset-defaults.vitest.ts
 ```
 
 The installed-public-entry anchor
@@ -738,7 +740,9 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 `terminal-owner-client-opened-before-ack`, `clients-ready`, `fallback-host-ready`,
 `host-contenders-spawned`,
 `qualification-client-spawned`, `host-artifact-absent-started`,
-`identity-witness-spawned` (Linux only) and `finalize-compensation-started`.
+`identity-witness-spawned` (Linux only), `finalize-compensation-started`,
+`public-daemon-before-registry`, `public-daemon-before-ready-ack` and
+`public-daemon-ownership-refused` (the last three Linux only).
 Each installed-entry window binds one exact business test and only holds after
 the Supervisor registered the real live child identities. `host-contenders-spawned`
 is the batch of concurrent Host contenders, `qualification-client-spawned` a
@@ -764,6 +768,21 @@ already live at its authenticated checkpoint when the target is signalled,
 held across the target's reclaim, then released to continue its own business
 path and finalize. A checkpoint reached without an external signal fails; an
 unrun window is `NOT_RUN`, never a pass.
+
+The three public windows bind the cold installed-public positive test. The
+`public-daemon-before-registry` hold is after the detached Host/CLI/Client are
+real but before the product registry is published; the external probe waits for
+the real `instance.json`/`launch.json` to appear after the Worker SIGKILL and
+only then releases cleanup, so the Supervisor must verify and authenticate that
+late material before reaching `ABORTED_CLEAN`.
+`public-daemon-before-ready-ack` holds after registry/authentication/surface but
+before the Client start acknowledgement. The ownership-refused negative control
+supplies a mismatched Host birth: the Supervisor must reject it with the
+birth-mismatch guard without sending a signal, the external probe must observe
+the same live target, then the probe releases compensation; the final receipt is
+`NOT_QUIESCED` with a retained diagnostic root and a completed compensation.
+A receipt that claims a signal, loses the live target, or does not complete the
+compensation is not this negative control's pass.
 
 This Project is not the release full lane. `smoke:split-process` and
 `smoke:macos-split` remain the separate distribution-boundary lanes described
