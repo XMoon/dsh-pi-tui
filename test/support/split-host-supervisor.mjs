@@ -6131,8 +6131,8 @@ async function waitForPublicHostChildOrUsableSurface(handle, existing, label, su
         surface: await waitForPublicUsableSurface(handle, `${label} reused daemon surface`),
       }
     }
-    if (Date.now() - started >= 180_000) {
-      throw new Error(`${label}: the public Client neither started a Host nor reached a usable surface within 180000ms`)
+    if (Date.now() - started >= 30_000) {
+      throw new Error(`${label}: the public Client neither started a Host nor reached a usable surface within 30000ms; last=${JSON.stringify(frame.slice(-1200))}`)
     }
     await sleep(50)
   }
