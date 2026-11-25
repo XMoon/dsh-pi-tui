@@ -6050,9 +6050,9 @@ test('F2 opens the SAME admitted Inspector page, scrolls its own body and return
   await h.paint()
   assert.ok(h.view().includes('Session Inspector · other-se'), 'the page is readable again after the resize')
   assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the restored page re-reports the SAME target')
-  h.vt.sendInput('\x1b')
-  await h.paint()
-  // Removing the admitted target exits the page and clears the target.
+  // The page is STILL OPEN when the accepted roster removes its target: this is
+  // the revocation path, not a manual Esc followed by a list refresh.
+  assert.ok(h.view().includes('Session Inspector · other-se'), 'the page is open before the target removal')
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' })],
     workspace,
@@ -6371,8 +6371,15 @@ test('F4: a wrapper-matching but nested-mismatched Inspector stays loading', () 
   assert.match(view.freshness, /^Updated /u)
 })
 
-test('F4: the Sessionless chooser never offers or opens the Inspector', async () => {
-  const h = harness({ columns: 44, rows: 20, initialDirectoryChooser: true })
+test('F4: the Sessionless chooser keeps Choose but never offers or opens the Inspector', async () => {
+  const used: Array<readonly [string, string]> = []
+  const h = harness({
+    columns: 44,
+    rows: 20,
+    currentSessionId: null,
+    initialDirectoryChooser: true,
+    onUseDirectory: (workspaceId, path) => { used.push([workspaceId, path]) },
+  })
   h.handle.setSnapshot(snapshot({
     rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
   }))
@@ -6384,8 +6391,14 @@ test('F4: the Sessionless chooser never offers or opens the Inspector', async ()
   h.vt.sendInput('\x1bOQ')
   await h.paint()
   assert.ok(!h.view().includes('Session Inspector'), 'F2 is inert in the chooser')
-  h.vt.sendInput('\x1b')
+  // The SAME chooser still paints and admits its pre-existing Choose action.
+  h.vt.sendInput('\x1b[H')
   await h.paint()
+  assert.ok(/^> .*Alpha/m.test(h.view()), `Home selects the official Folder:\n${h.view()}`)
+  assert.ok(h.view().includes('Choose [Enter]'), `the chooser keeps its Choose verb:\n${h.view()}`)
+  h.vt.sendInput('\r')
+  await h.paint()
+  assert.deepEqual(used, [['ws-alpha', '/ws/alpha']], 'Choose admits the same official Workspace intent')
 })
 
 test('PR3 visual checklist: the Inspector holds the frozen size matrix and palettes', async () => {

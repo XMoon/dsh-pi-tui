@@ -1,5 +1,5 @@
 /** Test-only controlled SessionReader routed through the production TSP Browser Presenter. */
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, unlinkSync } from 'node:fs'
 import { connect, type Key, type Node, type ScrollTo, type TspEvent } from '@stencil-hq/tern'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
 import type { SessionScope } from '../src/app/session/scope.ts'
@@ -201,18 +201,18 @@ const inspectorSeed = (sessionId: string): { readonly seq: number; readonly turn
   }
 }
 
-const inspectorData = (sessionId: string) => {
+const inspectorData = (sessionId: string, bump = 0) => {
   const seed = inspectorSeed(sessionId)
   return {
     sessionId,
     asOfSeq: seed.seq,
-    stats: { turns: seed.turns, steps: seed.steps, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+    stats: { turns: seed.turns + bump, steps: seed.steps + bump, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
     usage: {
       uncachedInputTokens: 184_200,
       outputTokens: 96_400,
       cacheReadTokens: 4_820_000,
       cacheWriteTokens: 12_000,
-      totalTokens: seed.total,
+      totalTokens: seed.total + bump,
       cacheHitPct: 96.1,
     },
     context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
@@ -231,14 +231,27 @@ const sessionWorkspaceFacts: SessionWorkspaceFactsPort = {
   openInspector: (sessionId, onInvalidated) => {
     note({ inspector: { open: sessionId } })
     let disposed = 0
+    let reads = 0
+    // Test-only control for the native active-reading refresh: the flow writes
+    // `inspector-invalidate` into this run directory, and the REAL source
+    // invalidation callback starts the owner's trailing read. No production
+    // polling or second reader.
+    const trigger = setInterval(() => {
+      const path = `${dir}/inspector-invalidate`
+      if (!existsSync(path)) return
+      unlinkSync(path)
+      onInvalidated('changed')
+    }, 100)
     return {
       async read(signal) {
         signal.throwIfAborted()
-        note({ inspector: { read: sessionId } })
-        return { kind: 'ready' as const, data: inspectorData(sessionId) }
+        reads += 1
+        note({ inspector: { read: sessionId, reads } })
+        return { kind: 'ready' as const, data: inspectorData(sessionId, reads - 1) }
       },
       dispose() {
         disposed += 1
+        clearInterval(trigger)
         note({ inspector: { dispose: sessionId, disposed } })
       },
     }

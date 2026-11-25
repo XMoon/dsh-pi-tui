@@ -8,7 +8,7 @@
  * `sessionWorkspaceFacts`, and Folders are Picker ITEMS (`workspace:<id>`), not
  * PickerGroups. Nothing here asserts the retired flat 54/56-row tree.
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { containedX, containedXY, rect } from './tern-pane-geometry.mjs'
 
@@ -20,6 +20,7 @@ const caps = (h) => records(h).find((entry) => entry.caps)?.caps
 const notices = (h) => records(h).filter((entry) => entry.notice).map((entry) => entry.notice)
 const addDirectoryRecords = (h) => records(h).filter((entry) => entry.addDirectory).map((entry) => entry.addDirectory)
 const addSettlements = (h) => records(h).filter((entry) => entry.addDirectorySettlement).map((entry) => entry.addDirectorySettlement)
+const scrollOps = (h) => records(h).filter((entry) => entry.nativeScroll).map((entry) => entry.nativeScroll)
 const classTokens = (node) => String(node.class ?? '').split(/\s+/u).filter(Boolean)
 const hasClass = (node, token) => classTokens(node).includes(token)
 const nodesWith = (snap, token) => snap.nodes.filter((node) => hasClass(node, token))
@@ -72,6 +73,19 @@ const disclosure = (row) => row === undefined ? undefined : findClass(row, 'pk-c
 const sessionRow = (h, snap, title) => sessionRows(snap)
   .find((node) => h.descendantsText(node).includes(title))
 const detailBodyId = (frame) => String(frame?.readerBodyKey ?? '')
+const clientFact = (h, snap, label) => {
+  const item = h.classNodes(snap, 'sf-kv-item')
+    .find((node) => h.descendantsText(node).startsWith(label))
+  const value = item?.children?.find((node) => classTokens(node).includes('sf-kv-v'))
+  return value === undefined ? undefined : String(value.text ?? '')
+}
+const waitNativeFact = async (h, label, value, limit = 60) => {
+  for (let step = 0; step < limit; step += 1) {
+    if (clientFact(h, h.snapshot(), label) === value) return true
+    await h.sleep(100)
+  }
+  return false
+}
 const tailPosition = (h) => {
   const snap = h.snapshot()
   // Tern's tree view truncates long text values, while retaining the full laid-out rect.
@@ -134,18 +148,19 @@ export default async function (h) {
     JSON.stringify({ selected: frame?.selected, current: frame?.current }))
 
   // ── 1b. The selected Session's native side Inspector summary ──────────────
-  const previewReady = await waitFrame(h, (value) => value?.page === 'browse'
-    && (value?.texts ?? []).some((entry) => String(entry.text) === 'deepseek/deepseek-v4-flash'),
+  const previewReady = await waitFrame(h, (value) => value?.page === 'browse' && value?.state === 'ready',
     'the selected Session Inspector preview')
-  const previewTexts = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
-  // `describe` records each KV value as its own text entry, so the assertion
-  // reads the actual painted values, not a concatenated display line.
-  h.check('the selected CURRENT Session paints ITS OWN exact cut (not a fixture-wide value)',
-    previewReady && previewTexts.includes('3') && previewTexts.includes('12k')
-    && previewTexts.includes('deepseek/deepseek-v4-flash'),
-    JSON.stringify({ preview: previewTexts.filter((text) => /^3$|12\.3k|deepseek/u.test(text)).slice(0, 8) }))
+  await h.sleep(300)
   const previewSnap = h.snapshot()
   const previewGrid = h.classNodes(previewSnap, 'sf-kv')[0]
+  // Read the ACTUAL native grid value nodes, not the subject's describe text.
+  const previewTurns = clientFact(h, previewSnap, 'Turns')
+  const previewTotal = clientFact(h, previewSnap, 'Total')
+  const previewModel = clientFact(h, previewSnap, 'Model')
+  h.check('the selected CURRENT Session paints ITS OWN exact native cut (not a fixture-wide value)',
+    previewReady && previewTurns === '3' && previewTotal === '12k'
+    && previewModel === 'deepseek/deepseek-v4-flash',
+    JSON.stringify({ turns: previewTurns, total: previewTotal, model: previewModel }))
   h.check('the side Inspector grid is fully inside its real ancestor clip',
     previewGrid !== undefined && containedXY(previewSnap.chains, previewGrid),
     JSON.stringify({ grid: previewGrid === undefined ? 'missing' : rect(previewGrid) }))
@@ -361,29 +376,42 @@ export default async function (h) {
   let snap = h.snapshot()
   const readerOverlay = overlayNode(snap)
   const readerBody = overlayBody(snap)
-  const longReaderText = (frame?.texts ?? []).map((entry) => String(entry.text))
   h.check('the real footer Details action opens one native scrolling Reader for the selected Session',
     footerFocused && detailsOpened && pickerNode(snap) === undefined
     && readerOverlay !== undefined && readerBody !== undefined
     && detailBodyId(frame).startsWith('session-browser-details-body-')
     && containedXY(snap.chains, readerBody),
     JSON.stringify({ page: frame?.page, body: frame?.readerBodyKey, overlay: readerOverlay !== undefined, body: readerBody !== undefined }))
-  h.check('the Reader carries the complete long Host title as one grid value, not a truncated row',
-    longReaderText.some((text) => text.startsWith('Needle long session title') && text.includes('unicode 資料 🚀'))
-    && longReaderText.includes('session-long')
-    && longReaderText.includes('Persisted session'),
-    `textCount=${longReaderText.length}`)
-  const inspectorFacts = await waitFrame(h, (value) => (value?.texts ?? []).some((entry) => String(entry.text) === 'Whole session')
-    && (value?.texts ?? []).some((entry) => String(entry.text) === 'deepseek/deepseek-v4-pro'),
-  'the complete Inspector groups inside Details')
-  const detailsInspectorTexts = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
-  h.check('Details paints the complete shared Inspector groups and exact cut facts',
-    inspectorFacts && detailsInspectorTexts.includes('Token usage')
-    && detailsInspectorTexts.includes('Performance')
-    && detailsInspectorTexts.includes('Workspace & dates')
-    && detailsInspectorTexts.includes('Goal & todo')
-    && detailsInspectorTexts.includes('21') && detailsInspectorTexts.includes('2.3M'),
-    JSON.stringify({ groups: detailsInspectorTexts.filter((text) => /Whole session|Token usage|Performance|Workspace|Goal|deepseek/u.test(text)) }))
+  const nativeTitle = h.classNodes(snap, 'sf-kv-v')
+    .map((node) => h.descendantsText(node))
+    .find((text) => text.startsWith('Needle long session title'))
+  h.check('the Reader carries the complete long Host title as one native grid value, not a truncated row',
+    nativeTitle !== undefined && nativeTitle.includes('unicode 資料 🚀')
+    && clientFact(h, snap, 'Session ID') === 'session-long'
+    && clientFact(h, snap, 'State') === 'Persisted session',
+    JSON.stringify({ title: nativeTitle?.slice(0, 120), id: clientFact(h, snap, 'Session ID'), state: clientFact(h, snap, 'State') }))
+  await h.sleep(300)
+  snap = h.snapshot()
+  const nativeGroups = h.texts(snap)
+  const nativeTurns = clientFact(h, snap, 'Turns')
+  const nativeTotal = clientFact(h, snap, 'Total')
+  h.check('Details paints the complete shared Inspector groups and its OWN native cut facts',
+    nativeGroups.includes('Whole session') && nativeGroups.includes('Token usage')
+    && nativeGroups.includes('Performance') && nativeGroups.includes('Workspace & dates')
+    && nativeGroups.includes('Goal & todo')
+    && nativeTurns === '21' && nativeTotal === '2.3M',
+    JSON.stringify({ turns: nativeTurns, total: nativeTotal, groups: nativeGroups.filter((text) => /Whole session|Token usage|Performance|Workspace|Goal/u.test(text)) }))
+  const longBodyKey = detailBodyId(frame)
+  writeFileSync(join(h.root, 'inspector-invalidate'), '1')
+  const refreshed = await waitNativeFact(h, 'Turns', '22')
+  frame = lastFrame(h)
+  snap = h.snapshot()
+  h.check('a same-id active-reading refresh paints the NEW native value on the same body',
+    refreshed && frame?.page === 'details' && detailBodyId(frame) === longBodyKey
+    && clientFact(h, snap, 'Turns') === '22' && overlayBody(snap) !== undefined,
+    JSON.stringify({ page: frame?.page, body: detailBodyId(frame), before: longBodyKey, turns: clientFact(h, snap, 'Turns') }))
+  h.capture('session-browser-reader-refreshed-1280x800',
+    'Details Reader: same-id invalidation refreshed the visible native cut')
   // The grid really wraps: the long title value is taller than the client's own
   // Back-row line height, and every grid keeps its full width inside the body.
   const backRow = h.classNodes(snap, 'sf-t-accent').find((node) => h.descendantsText(node).includes('Back'))
@@ -419,6 +447,37 @@ export default async function (h) {
   h.capture('session-browser-tree-after-reader-1280x800',
     'After the Reader: the same Browser, selection and Folder expansion')
 
+  // The frozen narrow pane (400x600) can still reach, scroll and leave Details.
+  await h.resize(400, 600)
+  const narrowTree = await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree'
+    && value?.selected === 'session:session-long', 'the 400x600 tree with the same selection')
+  await h.key('Tab', 500)
+  const narrowFooter = await waitFrame(h, (value) => Array.isArray(value?.actions)
+    && value.actions.some((action) => String(action.label) === 'Details [Enter]'), '400x600 Footer Details')
+  await h.key('Return', 900)
+  const narrowDetails = await waitFrame(h, (value) => value?.page === 'details'
+    && value?.readerBodyKey !== undefined, '400x600 Details')
+  const narrowFrame = lastFrame(h)
+  const narrowSnap = h.snapshot()
+  const narrowBody = overlayBody(narrowSnap)
+  h.check('400x600: Details is reachable, its body is contained and its native grid remains readable',
+    narrowTree && narrowFooter && narrowDetails && narrowBody !== undefined
+    && containedXY(narrowSnap.chains, narrowBody)
+    && h.classNodes(narrowSnap, 'sf-kv').length > 0,
+    JSON.stringify({ page: narrowFrame?.page, body: narrowFrame?.readerBodyKey, grid: h.classNodes(narrowSnap, 'sf-kv').length }))
+  const narrowScrollBefore = scrollOps(h).length
+  await h.key('End', 800)
+  const narrowScrolled = scrollOps(h).length > narrowScrollBefore
+  h.check('400x600: the Reader scroll reaches its own tail and keeps the same body identity',
+    narrowScrolled && String(scrollOps(h).at(-1)?.id).endsWith(detailBodyId(narrowFrame)),
+    JSON.stringify({ before: narrowScrollBefore, last: scrollOps(h).at(-1), body: narrowFrame?.readerBodyKey }))
+  h.capture('session-browser-reader-narrow-400x600',
+    'Details Reader at the frozen 400x600 pane after the tail scroll')
+  await h.key('Escape', 900)
+  await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree', '400x600 Back')
+  await h.resize(1280, 800)
+  await waitFrame(h, (value) => value?.page === 'browse' && value?.layout === 'tree', 'back to 1280x800')
+
   // ── 6. Search: global Cards, the Host-only content hit, then the same tree ─
   await keyText(h, 'needle')
   const searched = await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle'
@@ -451,6 +510,22 @@ export default async function (h) {
     JSON.stringify({ rows: sessionRows(cardSnap).map((node) => h.descendantsText(node).slice(0, 80)) }))
   h.capture('session-browser-workspace-search-1280x800',
     'Global Cards: both the metadata+content card and the Host-only content hit are listed')
+  // The content-only hit has its OWN native side facts, not the long row's.
+  const contentClicked = clientContentCard !== undefined && await h.click(cardSnap.chains, clientContentCard)
+  const contentSelected = await waitFrame(h, (value) => value?.selected === 'session:session-content', 'select the content-only card')
+  const contentPainted = await waitNativeFact(h, 'Turns', '38')
+  const contentPreviewSnap = h.snapshot()
+  const contentTurns = clientFact(h, contentPreviewSnap, 'Turns')
+  const contentTotal = clientFact(h, contentPreviewSnap, 'Total')
+  h.check('the content-only card paints ITS OWN native side facts (38 / 5.1M)',
+    contentClicked && contentSelected && contentPainted && contentTurns === '38' && contentTotal === '5.1M',
+    JSON.stringify({ clicked: contentClicked, selected: contentSelected, turns: contentTurns, total: contentTotal }))
+  h.capture('session-browser-inspector-content-preview-1280x800',
+    'Content-only global Card: its own native side Inspector facts')
+  const longSnap = h.snapshot()
+  const longNode = sessionRow(h, longSnap, 'Needle long session title')
+  if (longNode !== undefined) await h.click(longSnap.chains, longNode)
+  await waitFrame(h, (value) => value?.selected === 'session:session-long', 'return to the long card for Details')
 
   for (const size of TREE_SIZES) {
     await h.resize(size.w, size.h)

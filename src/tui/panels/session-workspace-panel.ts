@@ -3561,7 +3561,7 @@ export class SessionWorkspacePanel implements Component {
       const selectedPainted = this.selectedSearchSessionId !== undefined && painted.has(this.selectedSearchSessionId)
       const segments: SessionBarSegment[] = []
       if (painted.size >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
-      if (selectedPainted && !this.snapshot.resumePending && !this.chooserMode()) {
+      if (selectedPainted && !this.snapshot.resumePending) {
         // The second Enter on a result is the one explicit resume; on the
         // Session this Browser was opened from it returns instead.
         if (this.selectedSearchSessionId === this.options.currentSessionId) {
@@ -3570,7 +3570,9 @@ export class SessionWorkspacePanel implements Component {
           segments.push({ text: 'Open [Enter]', priority: 8, short: 'Open', action: 'open', ink: 'primary', targetId: this.selectedSearchSessionId })
         }
         segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary', targetId: this.selectedSearchSessionId })
-        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId: this.selectedSearchSessionId })
+        if (!this.chooserMode()) {
+          segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId: this.selectedSearchSessionId })
+        }
       }
       segments.push({ text: 'Back [Esc]', priority: 9, short: 'Back', action: 'close', ink: 'secondary' })
       return segments
@@ -3602,7 +3604,7 @@ export class SessionWorkspacePanel implements Component {
       segments.push({ text: `${SESSION_WORKSPACE_CHORDS.folderCycle.label} Workspace`, priority: 3, short: 'Tab' })
     }
     if (paintedRows.length >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
-    if (selected !== undefined && selectedPainted && !this.chooserMode()
+    if (selected !== undefined && selectedPainted
       && !(selected.kind === 'session' && this.snapshot.resumePending)) {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
         // Enter on the opened Session returns to it. The bar advertises that
@@ -3612,7 +3614,9 @@ export class SessionWorkspacePanel implements Component {
         const targetId = selected.sessionId
         segments.push({ text: enter.text, priority: 8, short: enter.short, action: 'activate-row', ink: 'secondary', targetId })
         segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary', targetId })
-        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId })
+        if (!this.chooserMode()) {
+          segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId })
+        }
       } else if (selected.kind === 'folder' || selected.kind === 'session') {
         const enter = this.enterAction(selected)
         const targetId = selected.kind === 'session' ? selected.sessionId : selected.id
@@ -3620,7 +3624,9 @@ export class SessionWorkspacePanel implements Component {
         segments.push({ text: enter.text, priority, short: enter.short, action: 'activate-row', ink: 'primary', targetId })
         if (selected.kind === 'session') {
           segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary', targetId })
-          segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId })
+          if (!this.chooserMode()) {
+            segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId })
+          }
         }
       } else {
         // New / Add / More: the painted ROOT ROW already runs that explicit

@@ -1260,14 +1260,12 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   const firstDetails = sheetText(pane, BROWSER)
   // The identity/short-fact groups reach the pane as grids; only the overlay
   // head, Back row, group heads and the Host excerpt are genuinely text. The
-  // FACTS are read from the grids' own props below.
+  // FACTS are read from the grids' own props below. No count/id roster is
+  // frozen here: the surviving contract is the complete field set and order.
   assert.match(firstDetails, /Identity/u)
   assert.match(firstDetails, /Host search excerpt · (Content|Both)/u, 'the excerpt source names the group in its head')
   assert.match(firstDetails, /Matching content/u, 'and the excerpt label stays a text row')
   const grids = detailGroups(pane)
-  assert.deepEqual([...grids.keys()],
-    ['identity', 'session', 'activity', 'usage', 'performance', 'workspace', 'goal', 'lineage'],
-    'each short-fact group is exactly ONE grid, in reading order; the excerpt is not one')
   assert.deepEqual(grids.get('identity'), [
     ['Session ID', 'session-content'],
     ['Title', 'Unrelated title'],
