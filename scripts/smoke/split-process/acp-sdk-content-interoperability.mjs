@@ -415,10 +415,12 @@ async function runScene(context, kind, env, operation, prime) {
     requireFact(capabilities.loadSession === true && capabilities.sessionCapabilities?.list !== undefined,
       'session/load and session/list are advertised when their read seams are bound')
     const resumed = await sdk.request(acp.methods.agent.session.resume, { sessionId, cwd: workspace })
-    // Current contract: the attached View answers the connection-owned model
-    // options; no business payload of the Session may ride along.
-    requireFact(isDeepStrictEqual(Object.keys(resumed ?? {}).filter(key => key !== 'configOptions'), []),
-      `resume must not carry a business payload (got ${JSON.stringify(resumed)})`)
+    // Current contract: the attached View answers the connection-owned display
+    // config (`modes` legacy list and/or `configOptions`); no Session business
+    // payload (history, message, item, identity) may ride along.
+    requireFact(isDeepStrictEqual(
+      Object.keys(resumed ?? {}).filter(key => key !== 'configOptions' && key !== 'modes'), []),
+    `resume must not carry a business payload beyond its connection config (got ${JSON.stringify(resumed)})`)
     const session = { context, scene, sdk, sessionId, workRoot, identity, workspace, primed }
     result = await operation(session)
     sdk.assertWindow()
