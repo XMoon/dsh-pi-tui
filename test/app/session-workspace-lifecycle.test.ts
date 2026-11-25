@@ -3356,3 +3356,48 @@ test('PR2: the REAL PiTUI panel reports its painted typed selection into the ONE
   assert.equal(finalSource.reads, reads, 'closing the workspace starts no replacement read')
   assert.equal(h.facts.readActivityCalls.count, 0, 'the Browser never takes a whole-roster Activity sample')
 })
+
+test('PR3: the full Inspector page reuses the SAME admitted source and a held cut never paints on a newer target', async () => {
+  const h = harness({ currentSessionId: CURRENT, inspector: true })
+  await h.runSessions('')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('Current session'), 'the roster titles paint')
+
+  await waitUntil(() => h.facts.inspectorSources.length === 1, 'the initial typed row reaches the owner')
+  const first = h.facts.inspectorSources[0]!
+  await waitUntil(() => first.reads === 1, 'the initial source performs its one read')
+  first.resolveNext(inspectorCut(CURRENT, 1))
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.facts.inspectorSources.at(-1)?.sessionId === OTHER, 'OTHER reaches the owner')
+  const other = h.facts.inspectorSources.at(-1)!
+  await waitUntil(() => other.reads === 1, 'OTHER performs its one read')
+  // Move on WHILE OTHER's read is held: THIRD becomes the latest intent but the
+  // owner's ONE physical slot still belongs to OTHER.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.facts.inspectorSources.at(-1)?.sessionId === THIRD, 'THIRD reaches the owner')
+  const third = h.facts.inspectorSources.at(-1)!
+  // Resolve the superseded OTHER cut AFTER THIRD became current: its promise is
+  // still held but its identity is stale, so it must never repaint THIRD.
+  other.resolveNext(inspectorCut(OTHER, 99))
+  await waitUntil(() => third.reads === 1, 'the latest intent starts the one trailing read')
+  third.resolveNext(inspectorCut(THIRD, 2))
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('Turns 2'), 'the latest cut paints its visible facts')
+  assert.ok(!h.view().includes('Turns 99'), 'a held earlier cut never paints on the newer target')
+
+  // F2 opens the SAME id's read-only page without a second source or read.
+  const sources = h.facts.inspectorSources.length
+  const reads = third.reads
+  h.vt.sendInput('\x1bOQ')
+  await h.vt.waitForRender()
+  await waitUntil(() => h.view().includes('Session Inspector'), 'F2 opens the full Inspector page')
+  assert.equal(h.facts.inspectorSources.length, sources, 'the page reuses the SAME admitted source')
+  assert.equal(third.reads, reads, 'opening the page starts no second read')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await waitUntil(() => /^> .*Third session/m.test(h.view()), 'Back restores the same typed list selection')
+  assert.equal(h.facts.inspectorSources.length, sources, 'returning to the list reopens no source either')
+})

@@ -19,6 +19,12 @@ import {
   type SessionWorkspaceRowFact,
   type WorkspaceBrowserRow,
 } from '../presentation/session-workspace-view.ts'
+import {
+  buildSessionInspectorView,
+  type SessionInspectorFact,
+  type SessionInspectorGroup,
+  type SessionInspectorView,
+} from '../presentation/session-inspector-view.ts'
 import { formatSessionAge, sanitizeTerminalText, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 
 const DETAILS_BODY_KEY_PREFIX = 'session-browser-details-body-'
@@ -236,6 +242,64 @@ function selectedSessionRow(panel: SessionBrowserPanel): SessionBrowserRow | und
   // target. A Folder/Show-more item is never a Session action target.
   if (panel.selectedItem !== undefined && panel.selectedItem !== `session:${panel.selected}`) return undefined
   return rowFor(panel, panel.selected)
+}
+
+/** The SAME shared Inspector display projection the PiTUI presenter consumes.
+ *  It is built from the already-admitted typed selection, the matching cut and
+ *  the accepted Search excerpt only; it never reads, retains or writes. */
+function inspectorView(panel: SessionBrowserPanel): SessionInspectorView | undefined {
+  const row = selectedSessionRow(panel)
+  if (row === undefined) return undefined
+  const result = queryMode(panel)
+    ? panel.snapshot.searchResults.find(candidate => candidate.row.id === row.id)
+    : undefined
+  return buildSessionInspectorView({
+    row,
+    fact: workspaceModel(panel)?.rowsById.get(row.id),
+    inspector: panel.snapshot.inspector?.sessionId === row.id ? panel.snapshot.inspector : undefined,
+    workspaces: panel.snapshot.workspace?.facts ?? [],
+    workspaceBaselineProven: panel.snapshot.workspace?.baselineProven === true,
+    currentSessionId: panel.request.subject.currentSessionId,
+    ...(result === undefined || result.snippet === undefined
+      ? {}
+      : { excerpt: { source: result.source, snippet: result.snippet } }),
+  })
+}
+
+/** The selected preview's compact fact rows (identity/status stay text lines). */
+function previewFacts(panel: SessionBrowserPanel, facts: readonly SessionInspectorFact[], nativeKv: boolean): Node[] {
+  if (facts.length === 0) return []
+  if (nativeKv) {
+    return [ui.kv({
+      key: `session-browser-preview-kv-${panel.serial}`,
+      layout: 'grid',
+      items: facts.map(fact => ({ k: sanitizeTerminalText(fact.label), v: sanitizeTerminalText(fact.value) })),
+    })]
+  }
+  return facts.flatMap(fact => [
+    ui.text(span(sanitizeTerminalText(fact.label), 'muted')),
+    ui.text({ wrap: 'word' }, sanitizeTerminalText(fact.value)),
+  ])
+}
+
+/** The selected Session's quiet native side preview: a short read summary, not
+ *  a second reading page. It is a picker CHILD subtree (never an item payload)
+ *  and exists only while one admitted typed Session row is selected. */
+function previewLayer(panel: SessionBrowserPanel, nativeKv: boolean): Node {
+  const view = inspectorView(panel)
+  if (view === undefined) {
+    return ui.col(
+      { key: `session-browser-preview-empty-${panel.serial}` },
+      ui.text(span('No session selected', 'muted')),
+    )
+  }
+  return ui.col(
+    { key: `session-browser-preview-${panel.serial}`, gap: 'xs' },
+    ui.text(sanitizeTerminalText(view.title)),
+    ui.text(span(sanitizeTerminalText(`${view.shortId} · ${view.stateLabel}`), 'muted')),
+    ...(view.notice === '' ? [] : [ui.text(span(sanitizeTerminalText(view.notice), view.state === 'error' ? 'error' : 'muted'))]),
+    ...previewFacts(panel, view.summary, nativeKv),
+  )
 }
 
 function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): string | undefined {
@@ -503,7 +567,7 @@ function pickerLayerItems(panel: SessionBrowserPanel): readonly PickerItem[] {
   return panel.snapshot.rows.map(row => rowItem(row, 0))
 }
 
-function pickerLayer(panel: SessionBrowserPanel): Node {
+function pickerLayer(panel: SessionBrowserPanel, nativeKv: boolean): Node {
   const pathEntry = panel.directoryEntry
   const searching = !pathEntry && queryMode(panel)
   const searchResults = searching ? visibleSearchResults(panel) : []
@@ -523,7 +587,9 @@ function pickerLayer(panel: SessionBrowserPanel): Node {
     subtitle: pathEntry ? 'Host absolute path · Enter validate · Esc cancel' : pickerSubtitle(panel),
     layout: searching ? 'cards' : 'tree',
     size: 'lg',
-    preview: 'none',
+    // The selected Session's native side preview is a picker CHILD subtree and
+    // never a PickerItem payload. The client owns side/below/hide placement.
+    preview: pathEntry ? 'none' : 'side',
     query: pathEntry ? panel.directoryPath : panel.query,
     cursor: pathEntry ? panel.directoryCursor : panel.cursor,
     placeholder: pathEntry ? '/path/to/project' : 'Search sessions and messages…',
@@ -545,93 +611,45 @@ function pickerLayer(panel: SessionBrowserPanel): Node {
     current,
     actions,
   }
-  return ui.col({ key: `session-browser-layer-${panel.serial}` }, ui.picker(props))
+  return ui.col(
+    { key: `session-browser-layer-${panel.serial}` },
+    pathEntry ? ui.picker(props) : ui.picker(props, previewLayer(panel, nativeKv)),
+  )
 }
-
-function detailResult(panel: SessionBrowserPanel, row: SessionBrowserRow): SessionBrowserSearchResult | undefined {
-  return panel.snapshot.searchResults.find((result) => result.row.id === row.id)
-}
-
-/** The existing Identity `State` value, extended with the Host-authoritative
- * on-disk format state when the Client reported one. `current` and absent add
- * nothing; no new fact group or control is introduced. */
-function rowStateText(panel: SessionBrowserPanel, row: SessionBrowserRow): string {
-  const base = row.id === panel.request.subject.currentSessionId
-    ? 'Current session'
-    : row.live ? 'Live session' : 'Persisted session'
-  return row.formatStatus === 'migration-required' ? `${base} · Migration required` : base
-}
-
-/** The excerpt group's id: the ONE group whose body is Host content the user reads
- *  as prose, so it is never a grid row (see `detailReader`). */
-const EXCERPT_GROUP_ID = 'excerpt'
 
 /**
- * The read-only Session Details Reader.
+ * The read-only Session Details Reader, built from the SAME shared display
+ * groups as the PiTUI Inspector. Identity stays its own first group; every
+ * short-fact group paints as ONE native `kv` grid when the pane negotiated it,
+ * and the complete per-fact text rows otherwise (the client owns value wrapping,
+ * so an unbroken ID or long cwd stays whole). The Host Search excerpt is Host
+ * content read as prose and therefore always keeps a complete wrapped `ui.text`.
  *
- * The four fact groups (Identity / Activity / Lineage / Configuration) are labelled
- * short facts, so on a pane that negotiated `kv` each paints as ONE native grid: the
- * client aligns every label with its value instead of paying a separate line per
- * label, which is what lets a narrow pane show more of the same facts at once. The
- * values are the SAME complete strings the text branch sends and the client owns any
- * wrapping (`KvItem` has no `wrap`), so an unbroken ID or a long cwd stays whole.
- *
- * The Host search excerpt is a different shape: its value is matched CONTENT read as
- * prose, so it keeps its own `Matching content` label plus one complete wrapped
- * `ui.text` at EVERY capability. A pane without `kv` keeps the original per-fact text
- * rows verbatim, in the same order, with the same scroll body and the same Back row.
+ * Same-id Inspector data updates the SAME reading identity (same overlay/body/
+ * scroll key); only a real page/selection change opens a new reading.
  */
 function detailReader(
   panel: SessionBrowserPanel,
   bind: (intent: BrowserIntent) => () => void,
   nativeKv: boolean,
 ): Node {
-  const row = rowFor(panel, panel.selected)
+  const view = inspectorView(panel)
   const scope = `${panel.serial}-${panel.readerEpoch}`
   const bodyKey = `${DETAILS_BODY_KEY_PREFIX}${scope}`
-  const title = row?.title === undefined || row.title.trim() === '' ? row === undefined ? 'Session details' : shortSessionId(row.id) : row.title
-  const result = row === undefined ? undefined : detailResult(panel, row)
-  const activity = row === undefined ? undefined : workspaceModel(panel)?.rowsById.get(row.id)
-  const groups = row === undefined ? [] : [
-    {
-      id: 'identity',
-      head: 'Identity',
-      facts: [
-        ['Session ID', row.id],
-        ['Title', title],
-        ['State', rowStateText(panel, row)],
-        // `row.cwd` is the immutable Session-header creation directory, NOT
-        // the Session's current working directory and NOT a Workspace identity.
-        ['Created in', row.cwd === undefined ? 'Unknown' : row.cwd],
-      ],
-    },
-    {
-      id: 'activity',
-      head: 'Activity',
-      facts: [
-        ['Created', row.createdAt === undefined ? 'Unknown' : new Date(row.createdAt).toISOString()],
-        ['Updated', new Date(row.updatedAt).toISOString()],
-        ['Running', activity?.running === true ? 'Yes' : activity?.running === false ? 'No' : 'Unknown'],
-        ['Pending', activity === undefined ? 'Unknown' : SESSION_PENDING_LABEL[activity.pending]],
-        ['Source', activity === undefined ? 'unknown' : SESSION_SOURCE_LABEL[activity.source]],
-      ],
-    },
-    {
-      id: 'relationship',
-      head: 'Lineage',
-      facts: [['Parent session', row.parentSession ?? 'No parent session']],
-    },
-    {
-      id: 'configuration',
-      head: 'Configuration',
-      facts: [['Agent preset', row.preset ?? 'Unknown preset']],
-    },
-    ...(result?.snippet === undefined ? [] : [{
-      id: EXCERPT_GROUP_ID,
-      head: `Host search excerpt · ${result.source}`,
-      facts: [['Matching content', result.snippet]],
-    }]),
-  ]
+  const groups: readonly SessionInspectorGroup[] = view === undefined
+    ? []
+    : [
+        {
+          id: 'identity',
+          head: 'Identity',
+          facts: [
+            { label: 'Session ID', value: view.fullId },
+            { label: 'Title', value: view.title },
+            { label: 'State', value: view.identityState },
+          ],
+        },
+        ...view.groups,
+      ]
   return ui.col(
     { key: `session-browser-reader-layer-${panel.serial}` },
     ui.overlay(
@@ -642,25 +660,32 @@ function detailReader(
       ),
       ui.col(
         { key: bodyKey, gap: 'xs' },
-        ...(row === undefined
+        ...(view === undefined
           ? [ui.text(span('The selected session is no longer available.', 'muted'))]
-          : groups.map((group) => ui.col(
-              { key: `session-browser-group-${group.id}`, gap: 'xs' },
-              ui.text(span(sanitizeTerminalText(group.head), 'muted')),
-              ...(nativeKv && group.id !== EXCERPT_GROUP_ID
-                ? [ui.kv({
-                    key: `session-browser-kv-${group.id}`,
-                    layout: 'grid',
-                    items: group.facts.map(([label, value]) => ({
-                      k: sanitizeTerminalText(label),
-                      v: sanitizeTerminalText(value),
-                    })),
-                  })]
-                : group.facts.flatMap(([label, value]) => [
-                    ui.text(span(label, 'muted')),
-                    ui.text({ wrap: 'word' }, sanitizeTerminalText(value)),
-                  ])),
-            )))
+          : [
+              ui.text(sanitizeTerminalText(view.title)),
+              ui.text(span(sanitizeTerminalText(view.stateLabel), 'muted')),
+              ...(view.notice === ''
+                ? []
+                : [ui.text(span(sanitizeTerminalText(view.notice), view.state === 'error' ? 'error' : 'muted'))]),
+              ...groups.map((group) => ui.col(
+                { key: `session-browser-group-${group.id}`, gap: 'xs' },
+                ui.text(span(sanitizeTerminalText(group.head), 'muted')),
+                ...(nativeKv && group.prose !== true
+                  ? [ui.kv({
+                      key: `session-browser-kv-${group.id}`,
+                      layout: 'grid',
+                      items: group.facts.map((fact) => ({
+                        k: sanitizeTerminalText(fact.label),
+                        v: sanitizeTerminalText(fact.value),
+                      })),
+                    })]
+                  : group.facts.flatMap((fact) => [
+                      ui.text(span(sanitizeTerminalText(fact.label), 'muted')),
+                      ui.text({ wrap: 'word' }, sanitizeTerminalText(fact.value)),
+                    ])),
+              )),
+            ])
       ),
     ),
   )
@@ -671,7 +696,7 @@ function layer(
   bind: (intent: BrowserIntent) => () => void,
   nativeKv: boolean,
 ): Node {
-  return panel.page === 'details' ? detailReader(panel, bind, nativeKv) : pickerLayer(panel)
+  return panel.page === 'details' ? detailReader(panel, bind, nativeKv) : pickerLayer(panel, nativeKv)
 }
 
 export class TspSessionBrowser {
@@ -758,10 +783,13 @@ export class TspSessionBrowser {
       setSnapshot: (snapshot, options) => {
         if (this.current() !== panel) return
         if (options?.inspectorOnly === true) {
-          // PR2 paints no Inspector data: store the full snapshot for the owner/
-          // later consumer, but do not advance the native revision, invalidate a
-          // painted action token, normalize selection or request a rerender.
+          // Presentation-only Inspector data: store the full snapshot and repaint
+          // only when a real visible consumer (the selected native preview or the
+          // Details reading) can show it. Never advance the native revision,
+          // invalidate a painted action token, normalize the selection or create
+          // a new reading identity.
           panel.snapshot = snapshot
+          if (!this.suspended && (panel.page === 'details' || selectedSessionRow(panel) !== undefined)) this.render()
           return
         }
         if (options?.initialQuery !== undefined && !panel.initialQueryApplied) {
@@ -1261,12 +1289,12 @@ export class TspSessionBrowser {
 
   /** The ONE selected-Session report of a committed native layer. It uses the
    *  SAME typed selection the Resume/Details actions use; a browse cursor
-   *  anchored on a Folder is never guessed into a Session. */
+   *  anchored on a Folder is never guessed into a Session. The Details reading
+   *  keeps the SAME admitted id/origin alive (its page paints that identity), so
+   *  entering Details neither clears nor reopens the exact read. */
   private reportInspectorSelection(panel: SessionBrowserPanel): void {
     if (panel.disposed || this.panel !== panel) return
-    const selected = panel.page === 'browse' && !panel.directoryEntry
-      ? selectedSessionRow(panel)
-      : undefined
+    const selected = panel.directoryEntry ? undefined : selectedSessionRow(panel)
     panel.request.onInspectorSelection?.(selected === undefined
       ? undefined
       : { sessionId: selected.id, origin: queryMode(panel) ? 'search' : 'browse' })

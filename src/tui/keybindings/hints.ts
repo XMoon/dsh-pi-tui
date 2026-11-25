@@ -102,17 +102,18 @@ export const QUEUE_CHORDS = {
 export type QueueChordId = keyof typeof QUEUE_CHORDS
 
 /**
- * The Session Workspace tree's FIXED local chord (PR2).
+ * The Session Workspace's FIXED local chords (PR2 tree cycle, PR3 Inspect).
  *
  * The fullscreen PiTUI tree is a per-surface COMPONENT contract, not a Host
- * command: Tab/Shift+Tab step between Workspace Folder titles and have no
- * keymap action or remap. Keeping the handler and painted label in this ONE
- * key-label authority means a footer hint and the admitted keys cannot drift
- * into two authorities — the same category as the History/Delivered-files
- * fixed chords.
+ * command: Tab/Shift+Tab step between Workspace Folder titles and F2 opens the
+ * read-only Inspector, so none of them has a keymap action or remap. Keeping
+ * the handler and painted label in this ONE key-label authority means a footer
+ * hint and the admitted keys cannot drift into two authorities — the same
+ * category as the History/Delivered-files fixed chords.
  */
 export const SESSION_WORKSPACE_CHORDS = {
   folderCycle: { keys: ['tab', 'shift+tab'], label: 'Tab/Shift+Tab' },
+  inspect: { keys: ['f2'], label: 'F2' },
 } as const
 
 /** The display name of a bare (unmodified) key id. */

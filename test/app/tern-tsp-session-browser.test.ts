@@ -290,6 +290,10 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     presentedInitialDirectoryPath: () => presentedInitialDirectoryPath,
     presentedHandleDisposed: () => presentedHandleDisposed,
     presentedHandleIsDisposed: () => latestPresentedHandle?.isDisposed(),
+    publishSnapshot: (
+      snapshot: SessionBrowserReadSnapshot,
+      options?: { readonly initialQuery?: string; readonly inspectorOnly?: boolean },
+    ) => { latestPresentedHandle?.setSnapshot(snapshot, options) },
     inspectorSelections,
     moveSubject: () => { current = false },
   }
@@ -1254,34 +1258,47 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   assert.equal(layerNodes(pane, BROWSER).filter((node) => node.k === 'overlay').length, 1)
   assert.ok(detailBody(pane))
   const firstDetails = sheetText(pane, BROWSER)
-  // The four fact groups reach the pane as grids, so the text sheet carries only
-  // what is genuinely text here: the overlay head, the Back row, each group head
-  // and the Host excerpt. The FACTS are read from the grids' own props below.
+  // The identity/short-fact groups reach the pane as grids; only the overlay
+  // head, Back row, group heads and the Host excerpt are genuinely text. The
+  // FACTS are read from the grids' own props below.
   assert.match(firstDetails, /Identity/u)
-  assert.match(firstDetails, /Host content excerpt/u, 'the excerpt source names the group in its head')
+  assert.match(firstDetails, /Host search excerpt · (Content|Both)/u, 'the excerpt source names the group in its head')
   assert.match(firstDetails, /Matching content/u, 'and the excerpt label stays a text row')
   const grids = detailGroups(pane)
-  assert.deepEqual([...grids.keys()], ['identity', 'activity', 'relationship', 'configuration'],
-    'each group is exactly ONE grid, in the reading order, and the excerpt is not one')
+  assert.deepEqual([...grids.keys()],
+    ['identity', 'session', 'activity', 'usage', 'performance', 'workspace', 'goal', 'lineage'],
+    'each short-fact group is exactly ONE grid, in reading order; the excerpt is not one')
   assert.deepEqual(grids.get('identity'), [
     ['Session ID', 'session-content'],
     ['Title', 'Unrelated title'],
     ['State', 'Persisted session'],
-    ['Created in', '/workspace/other'],
-  ], 'Identity carries the row\'s own complete facts in order')
+  ], 'Identity carries the row\'s own complete identity in order')
+  assert.deepEqual(grids.get('session'), [
+    ['Model', '—'],
+    ['Effort', '—'],
+    ['Preset', 'reviewer (roster)'],
+    ['Context', '—'],
+  ], 'a missing Inspector cut leaves roster-only facts explicitly unknown')
   assert.deepEqual(grids.get('activity'), [
-    ['Created', new Date(10).toISOString()],
-    ['Updated', new Date(100).toISOString()],
+    ['Turns', '—'],
+    ['Steps', '—'],
     ['Running', 'Unknown'],
     ['Pending', 'Unknown'],
     ['Source', 'unknown'],
-  ], 'Activity is the ISO stamps plus the complete, unproven-by-default activity facts')
-  assert.deepEqual(grids.get('relationship'), [['Parent session', 'session-other']],
+  ], 'Activity is the complete, unproven-by-default activity truth')
+  assert.deepEqual(grids.get('workspace'), [
+    ['Workspace', 'Unknown'],
+    ['Created in', '/workspace/other'],
+    ['Effective cwd', 'Unknown'],
+    ['Created', new Date(10).toISOString()],
+    ['Updated', new Date(100).toISOString()],
+  ], 'Workspace/dates keep the header cwd, the ISO stamps and no membership guess')
+  assert.deepEqual(grids.get('lineage'), [['Parent session', 'session-other']],
     'Lineage is the projection\'s own parent')
-  assert.deepEqual(grids.get('configuration'), [['Agent preset', 'reviewer']],
-    'Configuration is the projected preset')
-  for (const [, value] of [...grids.get('identity')!, ...grids.get('activity')!]) {
-    assert.doesNotMatch(value, /\u001b/u, `no grid value carries a control sequence: ${value}`)
+  for (const group of grids.values()) {
+    for (const [, value] of group) {
+      assert.doesNotMatch(value, /\u001b/u, `no grid value carries a control sequence: ${value}`)
+    }
   }
   // The excerpt is matched CONTENT, so it is one complete wrapped text node and not
   // a grid pair — even on a pane that negotiated `kv`.
@@ -1410,12 +1427,9 @@ test('Details reports Unknown rather than inferring an absent createdAt', async 
   sendPickerAction(pane, 'details', BROWSER)
   await waitUntil('Details opens for row without createdAt', () => details(pane) !== undefined)
   const grids = detailGroups(pane)
-  assert.deepEqual(grids.get('activity'), [
+  assert.deepEqual(grids.get('workspace')?.filter(([label]) => label === 'Created' || label === 'Updated'), [
     ['Created', 'Unknown'],
     ['Updated', new Date(3_000).toISOString()],
-    ['Running', 'Unknown'],
-    ['Pending', 'Unknown'],
-    ['Source', 'unknown'],
   ], `the absent stamp stays Unknown while the real one keeps its full ISO value: ${JSON.stringify([...grids])}`)
 })
 
@@ -1553,10 +1567,13 @@ test('native Session: a pane WITHOUT the kv kind still opens the complete text D
   // Every original fact, in the original order, complete — the pre-`kv` shape.
   for (const fact of [
     'Identity', 'Session ID', 'session-current', 'Title', 'Current title',
-    'State', 'Current session', 'Created in', '/workspace/project',
-    'Activity', 'Created', new Date(10).toISOString(), 'Updated', new Date(100).toISOString(),
-    'Lineage', 'Parent session', 'No parent session',
-    'Configuration', 'Agent preset', 'reviewer',
+    'State', 'Current session',
+    'Whole session', 'Preset', 'reviewer (roster)',
+    'Activity', 'Running', 'Unknown', 'Pending', 'Source', 'unknown',
+    'Token usage', 'Performance',
+    'Workspace & dates', 'Created in', '/workspace/project', 'Created', new Date(10).toISOString(),
+    'Updated', new Date(100).toISOString(),
+    'Goal & todo', 'Lineage', 'Parent session', 'No parent session',
   ]) {
     assert.ok(runs.includes(fact), `the degraded Details still carries ${JSON.stringify(fact)}: ${JSON.stringify(runs)}`)
   }
@@ -1588,7 +1605,7 @@ test('native Session: a KV re-render and a resize never remount the Reader body'
     ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>).some(action => String(action.label).includes('Details [Enter]')))
   pane.key('\r')
   await waitUntil('Details opens', () => details(pane) !== undefined)
-  assert.equal(kvNodes(pane).length, 4, 'each of the four fact groups is one grid')
+  assert.equal(kvNodes(pane).length, 8, 'each short-fact group is exactly one grid')
   const bodyId = detailBody(pane)!.id
   const gridIds = kvNodes(pane).map((node) => node.id)
   const factsBefore = detailGroups(pane)
@@ -1616,7 +1633,7 @@ test('native Session: a KV re-render and a resize never remount the Reader body'
 
 // ── Session Workspace PR2: the real native Presenter selection report ───────
 
-test('TSP PR2: the real presenter reports only its typed Session row and clears on Folder/Details', async (t) => {
+test('TSP PR3: the real presenter reports its typed Session row and keeps it through Details', async (t) => {
   const facts: SessionWorkspaceFactsPort = {
     readActivity: async () => [],
     observeActivity: () => inertActivityObservation(),
@@ -1658,8 +1675,8 @@ test('TSP PR2: the real presenter reports only its typed Session row and clears 
       .some(action => String(action.label).includes('Details [Enter]')))
   pane.key('\r')
   await waitUntil('the Details Reader opens', () => details(pane) !== undefined)
-  assert.equal(m.inspectorSelections.at(-1), undefined,
-    'the full-width Details Reader has no selectable Session target')
+  assert.deepEqual(m.inspectorSelections.at(-1), { sessionId: 'session-other', origin: 'browse' },
+    'Details keeps the SAME admitted typed Session alive; it neither clears nor reopens it')
   pane.key('\x1b')
   await waitUntil('the Details Reader closes', () => details(pane) === undefined && picker(pane) !== undefined)
   await waitUntil('the restored native selection report', () => m.inspectorSelections.at(-1)?.sessionId === 'session-other')
@@ -1802,4 +1819,60 @@ test('TSP PR2: suspend clears the reported target before hiding; the next resume
   presenter.renderLayer()
   assert.equal(reports.at(-1)?.sessionId, 'session-current', 'the resumed frame re-reports the same typed Session')
   presenter.retire()
+})
+
+test('TSP PR3: an accepted Search result removal exits Details and a late exact cut stays inert', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  pane.key('needle')
+  await waitUntil('global cards search is ready', () => props(pane).layout === 'cards' && props(pane).state === 'ready')
+  sendSelect(pane, 'session:session-content', picker(pane)!.id)
+  await waitUntil('content hit selected', () => props(pane).selected === 'session:session-content')
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('Details opens', () => details(pane) !== undefined)
+  assert.deepEqual(m.inspectorSelections.at(-1), { sessionId: 'session-content', origin: 'search' },
+    'Details keeps the same admitted Search target')
+
+  // The owner accepts a page with NO matching result while the roster row still
+  // exists: the Details reading must exit and clear the vanished target.
+  const rows = [row('session-current', { live: true }), row('session-content', { cwd: '/workspace/other' })]
+  m.publishSnapshot({
+    listState: 'ready',
+    rows,
+    query: 'needle',
+    resumePending: false,
+    searchState: 'ready',
+    searchResults: [],
+    hasMore: false,
+    listRevision: 2,
+  })
+  await waitUntil('the removed accepted result exits Details', () => details(pane) === undefined)
+  await waitUntil('the vanished target is cleared', () => m.inspectorSelections.at(-1) === undefined)
+
+  // A late exact cut for the vanished result is stored but paints nowhere.
+  m.publishSnapshot({
+    listState: 'ready',
+    rows,
+    query: 'needle',
+    resumePending: false,
+    searchState: 'ready',
+    searchResults: [],
+    hasMore: false,
+    listRevision: 2,
+    inspector: {
+      sessionId: 'session-content',
+      state: 'ready',
+      data: {
+        sessionId: 'session-content',
+        asOfSeq: 9,
+        stats: { turns: 9, steps: 9, llmMs: 1, toolMs: 0 },
+      },
+      refreshing: false,
+    },
+  }, { inspectorOnly: true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(details(pane), undefined, 'the late cut opens no reading')
+  assert.equal(m.inspectorSelections.at(-1), undefined, 'the late cut revives no target')
+  assert.ok(!sheetText(pane, BROWSER).includes('Turns'), 'the late cut paints no fact on the emptied page')
+  assert.equal(m.fatals.length, 0)
 })

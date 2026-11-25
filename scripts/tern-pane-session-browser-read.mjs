@@ -133,6 +133,19 @@ export default async function (h) {
     && JSON.stringify(frame?.current) === JSON.stringify(['session:session-current']),
     JSON.stringify({ selected: frame?.selected, current: frame?.current }))
 
+  // ── 1b. The selected Session's native side Inspector summary ──────────────
+  const previewReady = await waitFrame(h, (value) => value?.page === 'browse'
+    && (value?.texts ?? []).some((entry) => String(entry.text) === 'deepseek/deepseek-v4-pro'),
+    'the selected Session Inspector preview')
+  const previewTexts = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
+  // `describe` records each KV value as its own text entry, so the assertion
+  // reads the actual painted values, not a concatenated display line.
+  h.check('the selected Session paints the native side Inspector summary from the exact cut',
+    previewReady && previewTexts.includes('38') && previewTexts.includes('5.1M'),
+    JSON.stringify({ preview: previewTexts.filter((text) => /38|216|5\.1M|deepseek/u.test(text)).slice(0, 8) }))
+  h.capture('session-browser-inspector-preview-1280x800',
+    'Session Browser: the selected Session native side Inspector summary')
+
   // The client animates an entered list row (class `arr-a`): let the layout settle
   // before a rect is used as a visibility/containment proof.
   await h.sleep(600)
@@ -187,6 +200,13 @@ export default async function (h) {
     otherSelected && lastFrame(h)?.layout === 'tree'
     && itemById(lastFrame(h), 'workspace:ws-other')?.open === false,
     JSON.stringify({ selected: lastFrame(h)?.selected, other: itemById(lastFrame(h), 'workspace:ws-other') }))
+  await waitFrame(h, (value) => (value?.texts ?? []).some((entry) => String(entry.text) === 'No session selected'),
+    'the quiet empty preview for a Folder')
+  const folderPreviewTexts = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
+  h.check('a Folder selection paints a quiet empty preview, never the previous Session facts',
+    folderPreviewTexts.includes('No session selected')
+    && !folderPreviewTexts.includes('deepseek/deepseek-v4-pro'),
+    JSON.stringify({ preview: folderPreviewTexts.filter((text) => /session selected|Turns/u.test(text)) }))
   h.capture('session-browser-workspace-folders-1280x800',
     'After: keyboard selection reaches the other official Folder; both Folder items are visible')
 
@@ -346,6 +366,17 @@ export default async function (h) {
     && longReaderText.includes('session-long')
     && longReaderText.includes('Persisted session'),
     `textCount=${longReaderText.length}`)
+  const inspectorFacts = await waitFrame(h, (value) => (value?.texts ?? []).some((entry) => String(entry.text) === 'Whole session')
+    && (value?.texts ?? []).some((entry) => String(entry.text) === 'deepseek/deepseek-v4-pro'),
+  'the complete Inspector groups inside Details')
+  const detailsInspectorTexts = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
+  h.check('Details paints the complete shared Inspector groups and exact cut facts',
+    inspectorFacts && detailsInspectorTexts.includes('Token usage')
+    && detailsInspectorTexts.includes('Performance')
+    && detailsInspectorTexts.includes('Workspace & dates')
+    && detailsInspectorTexts.includes('Goal & todo')
+    && detailsInspectorTexts.includes('38'),
+    JSON.stringify({ groups: detailsInspectorTexts.filter((text) => /Whole session|Token usage|Performance|Workspace|Goal|deepseek/u.test(text)) }))
   // The grid really wraps: the long title value is taller than the client's own
   // Back-row line height, and every grid keeps its full width inside the body.
   const backRow = h.classNodes(snap, 'sf-t-accent').find((node) => h.descendantsText(node).includes('Back'))
@@ -438,7 +469,7 @@ export default async function (h) {
   const excerptTexts = (frame?.texts ?? []).map((entry) => String(entry.text))
   const negotiatedKv = (caps(h)?.kinds ?? []).includes('kv')
   h.check('the Reader from the search card carries the complete Host excerpt tail as wrapped prose',
-    cardDetailsOpened && negotiatedKv && cardGrids.length === 4
+    cardDetailsOpened && negotiatedKv && cardGrids.length === 8
     && excerptTexts.some((text) => text.includes('END-OF-DETAILS-TAIL'))
     && excerptTexts.some((text) => text === 'Matching content'),
     JSON.stringify({ page: frame?.page, grids: cardGrids.length, excerpt: excerptTexts.filter((text) => text.includes('END-OF-DETAILS-TAIL')).length }))

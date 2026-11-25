@@ -82,6 +82,12 @@ import {
   projectPiTuiWorkspaceTree,
   type PiTuiWorkspaceTreeRow,
 } from '../presentation/session-workspace-tree.ts'
+import {
+  buildSessionInspectorView,
+  type SessionInspectorFact,
+  type SessionInspectorGroup,
+  type SessionInspectorView,
+} from '../presentation/session-inspector-view.ts'
 import { SESSION_WORKSPACE_CHORDS } from '../keybindings/hints.ts'
 import { color, HOST_MARKDOWN_OPTIONS, markdownTheme } from '../theme/runtime.ts'
 import { formatSessionAge, sessionBrowserErrorNotice, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
@@ -95,8 +101,9 @@ import {
 
 /** The logical focus of one Session Workspace frame. `search` is the raw
  * global query editor; `search-results` is the Host+metadata result list;
- * `reader` is the full-width read-only committed-transcript Reader. */
-export type SessionWorkspaceFocus = 'search' | 'list' | 'search-results' | 'reader' | 'directory'
+ * `reader` is the full-width read-only committed-transcript Reader;
+ * `inspector` is the full-width read-only Session Inspector page. */
+export type SessionWorkspaceFocus = 'search' | 'list' | 'search-results' | 'reader' | 'inspector' | 'directory'
 
 /** What the ONE PiTUI Session Workspace Presentation needs from `TuiApp`.
  *  Everything is read live; the panel never receives the app object. */
@@ -164,11 +171,15 @@ const EMPTY_SNAPSHOT: SessionBrowserReadSnapshot = {
   listRevision: 0,
 }
 
-/** The two-column layout threshold (frozen by the U-D product contract). */
-const WIDE_MIN_COLUMNS = 112
+/** The two-column layout threshold (frozen by the PR3 product contract). */
+const WIDE_MIN_COLUMNS = 80
 const WIDE_MIN_ROWS = 12
-/** The smallest left column of the two-column layout. */
+/** The smallest left column and the smallest right Inspector column. */
 const WIDE_LEFT_MIN_CELLS = 44
+const WIDE_RIGHT_MIN_CELLS = 34
+/** From this terminal width the right Inspector may paint two complete facts
+ *  per row; below it every fact owns its own full-width label/value rows. */
+const WIDE_TWO_FACT_MIN_COLUMNS = 120
 /** The two plain cells that make a Session a CHILD of its Folder row. `> ` stays
  *  in the fixed tree gutter, so the bullet and the identity move together. */
 const SESSION_TREE_INDENT = 2
@@ -207,6 +218,16 @@ interface SessionTranscriptReader {
     | { readonly kind: 'unavailable' }
     | { readonly kind: 'too-large' }
     | { readonly kind: 'error'; readonly message: string }
+  scrollRow: number
+}
+
+/** ONE full-width read-only Inspector reading of a painted typed Session row.
+ *  Its identity is the same id+origin the list already reported; opening it
+ *  never changes the selection, resumes a Session or starts a second read. */
+interface SessionInspectorPage {
+  readonly sessionId: string
+  readonly origin: 'browse' | 'search'
+  readonly returnFocus: 'list' | 'search-results'
   scrollRow: number
 }
 
@@ -412,12 +433,12 @@ function foldWorkspaceFrame(projection: WorkspaceProjection, frame: WorkspaceFac
 
 /** One clickable Action Bar verb of the LAST painted frame. Every id maps onto
  *  an EXISTING panel method; the bar never grows a second navigation state. */
-type SessionBarAction = 'close' | 'open' | 'peek' | 'results' | 'verify' | 'cancel' | 'activate-row'
+type SessionBarAction = 'close' | 'open' | 'peek' | 'inspect' | 'results' | 'verify' | 'cancel' | 'activate-row'
 
 /** A wheel-only viewport row. It carries no id/action and is never a click
  *  target; the panel routes it to the EXISTING selection or scroll method of
  *  its pane. */
-type WheelZoneKind = 'wheel-browse' | 'wheel-results' | 'wheel-reader'
+type WheelZoneKind = 'wheel-browse' | 'wheel-results' | 'wheel-reader' | 'wheel-inspector'
 
 /** One painted mouse target of the LAST frame. `xEnd` is inclusive and every
  *  range is the REAL painted cell range: a truncated/omitted target has none. */
@@ -432,7 +453,7 @@ interface HitRegion {
 
 /** Whether one painted region is a wheel-only viewport row (never a click). */
 function isWheelZone(kind: HitRegion['kind']): kind is WheelZoneKind {
-  return kind === 'wheel-browse' || kind === 'wheel-results' || kind === 'wheel-reader'
+  return kind === 'wheel-browse' || kind === 'wheel-results' || kind === 'wheel-reader' || kind === 'wheel-inspector'
 }
 
 /** One pane render: the painted lines plus the regions in pane coordinates. */
@@ -534,6 +555,18 @@ export class SessionWorkspacePanel implements Component {
   private resultScroll = 0
   /** The ONE read-only `Space` Transcript Reader of a painted row. */
   private reader: SessionTranscriptReader | undefined
+  /** The ONE full-width read-only Inspector reading; `undefined` = list mode. */
+  private inspectorPage: SessionInspectorPage | undefined
+  /** Whether THIS frame really painted the Inspector page's own identity/body.
+   *  A frame too short to paint it reports no target and advertises no scroll. */
+  private inspectorPagePainted = false
+  /** The selected Session whose inline Inspector this frame really painted (the
+   *  two-column right pane). Used only for presentation-only repaint admission. */
+  private lastPaintedInlineInspectorSessionId: string | undefined
+  /** The inline right Inspector's own scroll offset and the id it belongs to:
+   *  switching id starts at the top, same-id refresh/resize clamps in place. */
+  private inlineInspectorScroll = 0
+  private inlineInspectorScrollId: string | undefined
   /** The per-open mouse gesture: one press identity, cleared by ANY content
    *  change of the last committed frame. */
   private pressed:
@@ -589,11 +622,21 @@ export class SessionWorkspacePanel implements Component {
     return frame
   }
 
-  /** The exact typed Session target of the frame being published: only a real
-   *  painted main-Session row in Browse/Search results. Folder, Show more, New,
-   *  Add, Reader, the inline directory editor and any unpainted id are absent. */
+  /** The exact typed Session target of the frame being published: a real
+   *  painted main-Session row in Browse/Search results, or the SAME admitted
+   *  id while its read-only Inspector identity page is really painted. Folder,
+   *  Show more, New, Add, Reader, the inline directory editor, a page too short
+   *  to paint its own body and any unpainted id are absent. */
   private inspectorTargetOfFrame(): SessionInspectorSelection | undefined {
     if (this.directoryEntryActive || this.focus === 'reader') return undefined
+    if (this.focus === 'inspector') {
+      const page = this.inspectorPage
+      if (page === undefined || !this.inspectorPagePainted) return undefined
+      const listed = page.origin === 'search'
+        ? this.snapshot.searchResults.some(result => result.row.id === page.sessionId)
+        : this.snapshot.rows.some(row => row.id === page.sessionId)
+      return listed ? { sessionId: page.sessionId, origin: page.origin } : undefined
+    }
     if (this.searchMode) {
       const selected = this.selectedSearchSessionId
       return selected !== undefined && this.lastPaintedResultIds.includes(selected)
@@ -636,9 +679,13 @@ export class SessionWorkspacePanel implements Component {
   }): void {
     if (this.disposed) return
     if (options?.inspectorOnly === true) {
-      // PR2 paints nothing from the Inspector: keep the data, do not re-render
-      // or disturb the current editor/focus/activity revision.
+      // Presentation-only data publication: never normalize the selection,
+      // restart the editor/Activity revisions or advance any semantic target.
+      // Repaint only when a real visible consumer (the inline Inspector or the
+      // full-width page) may show this id's data — including a cleared/revoked
+      // cut, so the previous id's numbers cannot linger on screen.
       this.snapshot = snapshot
+      if (this.focus === 'inspector' || this.lastPaintedInlineInspectorSessionId !== undefined) this.host.requestRender()
       return
     }
     if (snapshot.listRevision !== this.activitySampleRevision) {
@@ -933,6 +980,16 @@ export class SessionWorkspacePanel implements Component {
       if (this.focus === 'reader') this.focus = returnFocus
       this.host.requestRender()
     }
+    // The full-width Inspector page pins the SAME admitted id. If it leaves the
+    // accepted roster/search state, leave the page and run the normal selection
+    // fallback — never keep reading a vanished target and never silently swap
+    // the page to whatever row the fallback selects.
+    const inspectorPage = this.inspectorPage
+    if (inspectorPage !== undefined
+      && !(inspectorPage.origin === 'search' ? resultIds : view.listIds).includes(inspectorPage.sessionId)) {
+      this.inspectorPage = undefined
+      if (this.focus === 'inspector') this.focus = inspectorPage.returnFocus
+    }
     if (this.searchMode) {
       // The visible rows ARE the Host+metadata results; the browse selection
       // and anchor stay untouched until the user leaves the search.
@@ -993,6 +1050,10 @@ export class SessionWorkspacePanel implements Component {
       this.handleReaderInput(data)
       return
     }
+    if (this.focus === 'inspector') {
+      this.handleInspectorInput(data)
+      return
+    }
     if (this.focus === 'search-results') {
       this.handleResultsInput(data)
       return
@@ -1002,6 +1063,10 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private handleEscape(): void {
+    if (this.focus === 'inspector') {
+      this.closeInspector()
+      return
+    }
     if (this.focus === 'reader') {
       this.closeReader()
       return
@@ -1127,6 +1192,61 @@ export class SessionWorkspacePanel implements Component {
     const reader = this.reader
     if (reader === undefined) return
     reader.scrollRow = Math.max(0, reader.scrollRow + delta)
+    this.host.requestRender()
+  }
+
+  /** `F2`/the painted Inspect verb opens the ONE read-only Inspector page for
+   *  the SAME typed Session row the list already reported. It changes no
+   *  selection, starts no read of its own and never resumes a Session. */
+  private openInspector(): void {
+    if (this.focus !== 'list' && this.focus !== 'search-results') return
+    if (this.snapshot.resumePending || this.newSessionPending !== undefined) return
+    const target = this.focus === 'search-results' ? this.selectedSearchSessionId : this.selectedBrowseSessionId()
+    if (target === undefined) return
+    const painted = this.focus === 'search-results' ? this.lastPaintedResultIds : this.lastPaintedBrowseIds
+    if (!painted.includes(target)) return
+    const page: SessionInspectorPage = {
+      sessionId: target,
+      origin: this.searchMode ? 'search' : 'browse',
+      returnFocus: this.focus === 'search-results' ? 'search-results' : 'list',
+      scrollRow: 0,
+    }
+    this.inspectorPage = page
+    this.focus = 'inspector'
+    this.host.requestRender()
+  }
+
+  private closeInspector(): void {
+    const page = this.inspectorPage
+    if (page === undefined) return
+    this.inspectorPage = undefined
+    this.focus = page.returnFocus
+    this.host.requestRender()
+  }
+
+  /** The Inspector page scrolls its OWN reading body. Enter/Space/F2 are inert:
+   *  this page never resumes, returns or writes a Session. */
+  private handleInspectorInput(data: string): void {
+    const page = this.inspectorPage
+    if (page === undefined) return
+    if (matchesKey(data, Key.up)) return this.scrollInspectorPage(-1)
+    if (matchesKey(data, Key.down)) return this.scrollInspectorPage(1)
+    if (matchesKey(data, Key.pageUp)) return this.scrollInspectorPage(-Math.max(1, this.lastPaintedListRows - 1))
+    if (matchesKey(data, Key.pageDown)) return this.scrollInspectorPage(Math.max(1, this.lastPaintedListRows - 1))
+    if (matchesKey(data, Key.home)) {
+      page.scrollRow = 0
+      return this.host.requestRender()
+    }
+    if (matchesKey(data, Key.end)) {
+      page.scrollRow = Number.MAX_SAFE_INTEGER
+      return this.host.requestRender()
+    }
+  }
+
+  private scrollInspectorPage(delta: number): void {
+    const page = this.inspectorPage
+    if (page === undefined) return
+    page.scrollRow = Math.max(0, page.scrollRow + delta)
     this.host.requestRender()
   }
 
@@ -1304,6 +1424,10 @@ export class SessionWorkspacePanel implements Component {
     if (matchesKey(data, Key.right)) return this.expandSelectedFolder()
     if (matchesKey(data, Key.left)) return this.collapseOrParent()
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) return this.activateSelectedBrowseRow()
+    if (matchesKey(data, SESSION_WORKSPACE_CHORDS.inspect.keys[0])) {
+      this.openInspector()
+      return
+    }
     if (data === ' ' || matchesKey(data, Key.space)) {
       this.openReader()
       return
@@ -1380,6 +1504,10 @@ export class SessionWorkspacePanel implements Component {
     }
     if (data === ' ' || matchesKey(data, Key.space)) {
       this.openReader()
+      return
+    }
+    if (matchesKey(data, SESSION_WORKSPACE_CHORDS.inspect.keys[0])) {
+      this.openInspector()
       return
     }
     if (matchesKey(data, Key.backspace)) {
@@ -1739,6 +1867,13 @@ export class SessionWorkspacePanel implements Component {
         this.pressed = undefined
         this.scrollReader(delta)
         return consumed
+      case 'wheel-inspector':
+        this.pressed = undefined
+        if (this.focus === 'inspector' && this.inspectorPage !== undefined) this.scrollInspectorPage(delta)
+        // The inline Inspector never steals the list's keyboard focus: the wheel
+        // scrolls only its own painted body while the typed selection stays put.
+        else if (this.focus === 'list' || this.focus === 'search-results') this.scrollInlineInspector(delta)
+        return consumed
     }
   }
 
@@ -1786,6 +1921,7 @@ export class SessionWorkspacePanel implements Component {
           case 'close': return this.handleEscape()
           case 'open': return this.resumeSelected()
           case 'peek': return this.openReader()
+          case 'inspect': return this.openInspector()
           case 'results': return this.handleSearchInput('\r') // the keyboard Enter byte, same entry
           case 'verify': return this.handleDirectorySubmit()
           case 'cancel': return this.closeDirectoryChooser()
@@ -1856,6 +1992,8 @@ export class SessionWorkspacePanel implements Component {
     this.lastPaintedBrowseIds = []
     this.lastPaintedTreeIds = []
     this.lastPaintedResultIds = []
+    this.lastPaintedInlineInspectorSessionId = undefined
+    this.inspectorPagePainted = false
     this.directoryEditorPainted = false
     this.paintedDirectorySuggestionPaths = []
     this.directoryInputDisplaySafe = true
@@ -1945,6 +2083,14 @@ export class SessionWorkspacePanel implements Component {
   }
 
   private renderHeader(width: number): { readonly line: string; readonly regions: readonly HitRegion[] } {
+    if (this.focus === 'inspector') {
+      // The full-width read-only Inspector names the SAME target it reads and
+      // never advertises a second / Search entry behind that page.
+      const shortId = this.inspectorPage === undefined
+        ? ''
+        : ` · ${sanitizedPhysicalLine(shortSessionId(this.inspectorPage.sessionId))}`
+      return { line: fit(`${color.textStrong('Session Inspector')}${color.textMuted(shortId)}`, width), regions: [] }
+    }
     const title = this.chooserMode() ? 'Choose workspace' : 'Sessions'
     const left = `${color.textStrong(title)}${color.textMuted(` · ${this.snapshot.rows.length}`)}`
     if (this.directoryEntryActive || this.focus === 'reader') {
@@ -2012,18 +2158,23 @@ export class SessionWorkspacePanel implements Component {
   /** Compose one body frame: single column, or the wide two-column layout. */
   private renderBody(width: number, budget: number): PaneRender {
     if (budget <= 0) return { lines: [], regions: [] }
-    // The Reader occupies the WHOLE real body width in every layout. It has no
-    // Browse column, right Preview, Search editor or local action row.
+    // The Reader and the full-width Inspector page own the WHOLE real body
+    // width in every layout: no Browse column, right pane or local action row.
     if (this.focus === 'reader') return this.renderReaderPane(width, budget)
+    if (this.focus === 'inspector') return this.renderInspectorPage(width, budget)
+    // The inline Host directory editor owns the keyboard and its status/error
+    // lines: it keeps the FULL body width instead of being squeezed into the
+    // list column. It is a transient editor, not the two-column Browse reading.
+    if (this.directoryEntryActive) return this.renderSingleColumn(width, budget)
     if (this.host.rows() < WIDE_MIN_ROWS || width < WIDE_MIN_COLUMNS) {
       return this.renderSingleColumn(width, budget)
     }
     const leftWidth = Math.min(
       Math.max(WIDE_LEFT_MIN_CELLS, Math.floor(width * 0.55)),
-      width - 2 - 20,
+      width - 2 - WIDE_RIGHT_MIN_CELLS,
     )
     const rightWidth = width - leftWidth - 2
-    if (rightWidth < 20) return this.renderSingleColumn(width, budget)
+    if (rightWidth < WIDE_RIGHT_MIN_CELLS) return this.renderSingleColumn(width, budget)
     // The wide layout's FRAME-LEVEL facts (the search editor and the
     // status/error lines) span the whole frame: a long Host refusal must never
     // be truncated to the list column and hand the user half an error.
@@ -2036,11 +2187,13 @@ export class SessionWorkspacePanel implements Component {
     }
     head.push(...this.renderStatusLines(width))
     const paneBudget = budget - head.length
-    if (paneBudget <= 0) return { lines: head.slice(0, budget), regions: headRegions }
+    // Two columns need a real Inspector identity line plus at least one fact
+    // row; a frame squeezed by status lines keeps the plain list.
+    if (paneBudget < 2) return this.renderSingleColumn(width, budget)
     const left = this.searchMode
       ? this.renderSearchPane(leftWidth, paneBudget, false)
       : this.renderListPane(leftWidth, paneBudget, false)
-    const right = this.renderPreviewPane(rightWidth, paneBudget)
+    const right = this.renderPreviewPane(rightWidth, paneBudget, width)
     const lines: string[] = [...head]
     const regions: HitRegion[] = [...headRegions, ...left.regions].map(region => ({
       ...region,
@@ -2524,35 +2677,46 @@ export class SessionWorkspacePanel implements Component {
     return { lines: lines.slice(0, budget), regions }
   }
 
-  /** The wide layout's right-hand read-only preview of the TYPED selection. */
-  private renderPreviewPane(width: number, budget: number): PaneRender {
+  /** The wide layout's right-hand read-only Inspector of the TYPED Session. */
+  private renderPreviewPane(width: number, budget: number, terminalWidth: number): PaneRender {
     const lines: string[] = []
     if (this.searchMode) {
       const result = this.selectedSearchSessionId === undefined
         ? undefined
         : this.snapshot.searchResults.find(candidate => candidate.row.id === this.selectedSearchSessionId)
-      const row = result?.row
-      if (row === undefined) {
+      if (result === undefined) {
         lines.push(color.textMuted('No result selected'))
         return { lines: lines.slice(0, budget), regions: [] }
       }
-      lines.push(...this.sessionPreviewLines(row, this.frameView().rowsById.get(row.id), width))
-      if (result !== undefined) {
-        // Read-only provenance of the SAME current search hit; no Host read is
-        // triggered by selecting it.
-        lines.push(`${color.textDim('Match: ')}${color.text(result.source)}`)
-        if (result.snippet !== undefined) {
-          lines.push(color.textDim('Excerpt:'))
-          const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(result.snippet), width)
-          for (let index = 0; index < Math.min(3, wrapped.length); index += 1) {
-            const excerptLine = index === 2 && wrapped.length > 3
-              ? `${truncateToWidth(wrapped[index]!, Math.max(0, width - 1), '', false)}…`
-              : truncateToWidth(wrapped[index]!, width, '…', false)
-            lines.push(color.text(excerptLine))
-          }
+      const row = result.row
+      // Keep the accepted Host hit's provenance beside the SAME Inspector read:
+      // the excerpt is display-only and never starts another read.
+      const provenance: string[] = [`${color.textDim('Match: ')}${color.text(result.source)}`]
+      if (result.snippet !== undefined) {
+        provenance.push(color.textDim('Excerpt:'))
+        const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(result.snippet), width)
+        for (let index = 0; index < Math.min(3, wrapped.length); index += 1) {
+          const excerptLine = index === 2 && wrapped.length > 3
+            ? `${truncateToWidth(wrapped[index]!, Math.max(0, width - 1), '', false)}…`
+            : truncateToWidth(wrapped[index]!, width, '…', false)
+          provenance.push(color.text(excerptLine))
         }
       }
-      return { lines: lines.slice(0, budget), regions: [] }
+      // Keep at most the provenance plus the fixed Inspector identity; a tiny
+      // pane never slices the excerpt into an unreadable fragment first.
+      const reserve = Math.min(provenance.length, Math.max(0, budget - 2))
+      const inspector = this.renderInspectorPaneLines(
+        row.id,
+        'search',
+        width,
+        Math.max(1, budget - reserve),
+        terminalWidth,
+        false,
+      )
+      return {
+        lines: [...inspector.lines, ...provenance].slice(0, budget),
+        regions: inspector.regions,
+      }
     }
     const row = this.selectedBrowseRow()
     if (row === undefined) {
@@ -2627,40 +2791,186 @@ export class SessionWorkspacePanel implements Component {
         return { lines: lines.slice(0, budget), regions: [] }
       }
       case 'session': {
-        const sessionRow = this.rowById(row.sessionId)
-        if (sessionRow === undefined) {
-          lines.push(color.textMuted('Session unavailable'))
-          return { lines: lines.slice(0, budget), regions: [] }
-        }
-        return {
-          lines: this.sessionPreviewLines(sessionRow, this.frameView().rowsById.get(row.sessionId), width).slice(0, budget),
-          regions: [],
-        }
+        return this.renderInspectorPaneLines(row.sessionId, 'browse', width, budget, terminalWidth, true)
       }
     }
   }
 
-  private rowById(sessionId: string): SessionBrowserRow | undefined {
-    return this.snapshot.rows.find(row => row.id === sessionId)
-      ?? this.snapshot.searchResults.find(result => result.row.id === sessionId)?.row
+  /** The shared display view of ONE admitted Inspector target. The row comes
+   *  from the SAME accepted Browse roster/Search results the selection uses, and
+   *  a cut for another id is never presented as this target's data. */
+  private inspectorViewFor(sessionId: string, origin: 'browse' | 'search'): SessionInspectorView | undefined {
+    const result = origin === 'search'
+      ? this.snapshot.searchResults.find(candidate => candidate.row.id === sessionId)
+      : undefined
+    const row = result?.row
+      ?? (origin === 'browse' ? this.snapshot.rows.find(candidate => candidate.id === sessionId) : undefined)
+    if (row === undefined) return undefined
+    return buildSessionInspectorView({
+      row,
+      fact: this.frameView().rowsById.get(sessionId),
+      inspector: this.snapshot.inspector?.sessionId === sessionId ? this.snapshot.inspector : undefined,
+      workspaces: this.workspaceFacts(),
+      workspaceBaselineProven: this.workspaces.proven,
+      currentSessionId: this.options.currentSessionId,
+      ...(result === undefined || result.snippet === undefined
+        ? {}
+        : { excerpt: { source: result.source, snippet: result.snippet } }),
+    })
   }
 
-  /** The existing read-only Session preview (one typed Session row). */
-  private sessionPreviewLines(
-    row: SessionBrowserRow,
-    fact: SessionWorkspaceRowFact | undefined,
+  /** The ONE fixed status sentence of a loading/refreshing/failed Inspector. */
+  private inspectorNotice(view: SessionInspectorView, width: number): string {
+    const text = truncateToWidth(view.notice, width, '…', false)
+    return view.state === 'error' ? color.error(text) : color.textMuted(text)
+  }
+
+  /** Paint one fact block: its muted label then the complete wrapped value. */
+  private inspectorFactBlock(fact: SessionInspectorFact, width: number): string[] {
+    const label = truncateToWidth(fact.label, Math.max(1, width - 2), '…', false)
+    const labelCells = visibleWidth(label)
+    const valueWidth = Math.max(1, width - labelCells - 1)
+    const wrapped = wrapTextWithAnsi(fact.value, valueWidth)
+    if (wrapped.length === 0) return [fit(color.textMuted(label), width)]
+    return wrapped.map((line, index) => index === 0
+      ? fit(`${color.textMuted(label)} ${color.text(line)}`, width)
+      : fit(`${' '.repeat(labelCells + 1)}${color.text(line)}`, width))
+  }
+
+  /** Paint a group's facts one per row, or two COMPLETE facts side by side when
+   *  both fit their half untouched; a fact that must wrap takes the full width. */
+  private inspectorFactLines(
+    facts: readonly SessionInspectorFact[],
     width: number,
+    twoPerRow: boolean,
   ): string[] {
-    return [
-      color.textStrong(truncateToWidth(sanitizedPhysicalLine(row.title ?? shortSessionId(row.id)), width, '…', false)),
-      color.textDim(truncateToWidth(sanitizedPhysicalLine(shortSessionId(row.id)), width, '…', false)),
-      color.textMuted(truncateToWidth(fact === undefined ? 'Activity unknown' : this.statusLabel(fact), width, '…', false)),
-      color.textDim(truncateToWidth(`Workspace: ${this.membershipLabel(fact)}`, width, '…', false)),
-      color.textDim(truncateToWidth(`Updated: ${formatSessionAge(row.updatedAt)}`, width, '…', false)),
-      ...(this.snapshot.resumePending
-        ? []
-        : [color.textMuted(truncateToWidth('Space to read committed transcript', width, '…', false))]),
+    if (!twoPerRow) return facts.flatMap(fact => this.inspectorFactBlock(fact, width))
+    const lines: string[] = []
+    const half = Math.max(1, Math.floor((width - 3) / 2))
+    for (let index = 0; index < facts.length; index += 2) {
+      const first = facts[index]!
+      const second = facts[index + 1]
+      if (second === undefined) {
+        lines.push(...this.inspectorFactBlock(first, width))
+        continue
+      }
+      const left = this.inspectorFactBlock(first, half)
+      const right = this.inspectorFactBlock(second, half)
+      if (left.length === 1 && right.length === 1) {
+        lines.push(`${padColumn(left[0]!, half)}   ${right[0]!}`)
+        continue
+      }
+      lines.push(...this.inspectorFactBlock(first, width))
+      lines.push(...this.inspectorFactBlock(second, width))
+    }
+    return lines
+  }
+
+  /** The complete reading lines of the shared Inspector groups. */
+  private inspectorGroupLines(
+    groups: readonly SessionInspectorGroup[],
+    width: number,
+    twoPerRow: boolean,
+    includeExcerpt: boolean,
+  ): string[] {
+    const lines: string[] = []
+    for (const group of groups) {
+      if (group.id === 'excerpt' && !includeExcerpt) continue
+      lines.push(color.textMuted(truncateToWidth(group.head, width, '…', false)))
+      if (group.prose === true) {
+        for (const fact of group.facts) {
+          lines.push(color.textDim(truncateToWidth(fact.label, width, '…', false)))
+          for (const line of wrapTextWithAnsi(fact.value, Math.max(1, width))) {
+            lines.push(color.text(truncateToWidth(line, width, '…', false)))
+          }
+        }
+        continue
+      }
+      lines.push(...this.inspectorFactLines(group.facts, width, twoPerRow))
+    }
+    return lines
+  }
+
+  /** The inline right-pane Inspector: a FIXED identity/status region plus the
+   *  scrollable fact groups. The list keeps keyboard focus; the wheel scrolls
+   *  only this painted body. */
+  private renderInspectorPaneLines(
+    sessionId: string,
+    origin: 'browse' | 'search',
+    width: number,
+    budget: number,
+    terminalWidth: number,
+    includeExcerpt: boolean,
+  ): PaneRender {
+    const view = this.inspectorViewFor(sessionId, origin)
+    if (view === undefined) {
+      return { lines: [color.textMuted(fit('Session unavailable', width))].slice(0, budget), regions: [] }
+    }
+    const fixed = [
+      fit(color.textStrong(truncateToWidth(view.title, width, '…', false)), width),
+      fit(color.textDim(truncateToWidth(`${view.shortId} · ${view.stateLabel}`, width, '…', false)), width),
+      ...(view.notice === '' ? [] : [fit(this.inspectorNotice(view, width), width)]),
     ]
+    const bodyBudget = Math.max(0, budget - fixed.length)
+    const all = bodyBudget <= 0
+      ? []
+      : this.inspectorGroupLines(view.groups, width, terminalWidth >= WIDE_TWO_FACT_MIN_COLUMNS, includeExcerpt)
+    if (this.inlineInspectorScrollId !== sessionId) {
+      this.inlineInspectorScrollId = sessionId
+      this.inlineInspectorScroll = 0
+    }
+    const maxScroll = Math.max(0, all.length - bodyBudget)
+    this.inlineInspectorScroll = Math.min(Math.max(0, this.inlineInspectorScroll), maxScroll)
+    const body = all.slice(this.inlineInspectorScroll, this.inlineInspectorScroll + bodyBudget)
+    this.lastPaintedInlineInspectorSessionId = sessionId
+    const regions: HitRegion[] = body.length === 0
+      ? []
+      : this.wheelZoneRegions('wheel-inspector', fixed.length, fixed.length + body.length, width)
+    return { lines: [...fixed, ...body].slice(0, budget), regions }
+  }
+
+  /** The full-width Inspector page: fixed identity/status lines and the ONE
+   *  scrollable reading body. The header/action bar stay the shared surface. */
+  private renderInspectorPage(width: number, budget: number): PaneRender {
+    const page = this.inspectorPage
+    if (page === undefined || budget <= 0) return { lines: [], regions: [] }
+    const view = this.inspectorViewFor(page.sessionId, page.origin)
+    if (view === undefined) {
+      return { lines: [color.textMuted(fit('Session unavailable', width))].slice(0, budget), regions: [] }
+    }
+    const suffix = ` · ${view.stateLabel}`
+    const titleBudget = Math.max(1, width - visibleWidth(suffix))
+    const identity = `${color.textStrong(truncateToWidth(view.title, titleBudget, '…', false))}${color.textMuted(truncateToWidth(suffix, width, '…', false))}`
+    const fixed = [
+      fit(identity, width),
+      ...(view.notice === '' ? [] : [fit(this.inspectorNotice(view, width), width)]),
+    ]
+    // The page's real object identity is painted: from here its body target is
+    // reportable. A 0/1-row frame never reaches this method.
+    this.inspectorPagePainted = true
+    const bodyBudget = Math.max(0, budget - fixed.length)
+    const all = bodyBudget <= 0
+      ? []
+      : this.inspectorGroupLines(view.groups, width, width >= WIDE_TWO_FACT_MIN_COLUMNS, true)
+    const maxScroll = Math.max(0, all.length - bodyBudget)
+    page.scrollRow = Math.min(Math.max(0, page.scrollRow), maxScroll)
+    const body = all.slice(page.scrollRow, page.scrollRow + bodyBudget)
+    this.lastPaintedListRows = Math.max(1, body.length)
+    const regions: HitRegion[] = body.length === 0
+      ? []
+      : this.wheelZoneRegions('wheel-inspector', fixed.length, fixed.length + body.length, width)
+    return { lines: [...fixed, ...body].slice(0, budget), regions }
+  }
+
+  private scrollInlineInspector(delta: number): void {
+    const sessionId = this.lastPaintedInlineInspectorSessionId
+    if (sessionId === undefined) return
+    if (this.inlineInspectorScrollId !== sessionId) {
+      this.inlineInspectorScrollId = sessionId
+      this.inlineInspectorScroll = 0
+    }
+    this.inlineInspectorScroll = Math.max(0, this.inlineInspectorScroll + delta)
+    this.host.requestRender()
   }
 
   /** The Reader's ONE scrollable body. The global Action Bar is the only exit
@@ -2739,28 +3049,6 @@ export class SessionWorkspacePanel implements Component {
   /** The ONE truthful status text of one classified row. */
   private statusLabel(fact: SessionWorkspaceRowFact): string {
     return workspaceRowStatusLabel(fact)
-  }
-
-  private membershipLabel(fact: SessionWorkspaceRowFact | undefined): string {
-    if (fact === undefined) return 'Unknown'
-    switch (fact.membership.kind) {
-      case 'unknown':
-        return 'Unknown'
-      case 'unassigned':
-        return 'Unassigned'
-      case 'ambiguous':
-        return `Ambiguous (${fact.membership.workspaceIds.map(id => sanitizedPhysicalLine(id)).join(', ')})`
-      case 'assigned':
-        // The official Workspace id is the authoritative identity; the Host
-        // title is display text that may repeat or be empty. The read-only
-        // preview keeps the FULL sanitized id so identity is unambiguous.
-        return fact.membership.workspaceIds
-          .map(id => {
-            const title = sanitizedPhysicalLine(this.workspaces.byId.get(id)?.title ?? '')
-            return `${title === '' ? 'Workspace' : title} (${sanitizedPhysicalLine(id)})`
-          })
-          .join(' · ')
-    }
   }
 
   /** The compact row's fixed status group. `workspaceRowStatusLabel` stays the
@@ -3064,6 +3352,17 @@ export class SessionWorkspacePanel implements Component {
       segments.push({ text: 'Cancel [Esc]', priority: 9, short: 'Cancel', action: 'cancel', ink: 'secondary' })
       return segments
     }
+    if (this.focus === 'inspector') {
+      // The full-width Inspector keeps the ONE real Back verb and advertises
+      // scroll keys only when it really painted its reading body.
+      const segments: SessionBarSegment[] = []
+      if (this.inspectorPagePainted) {
+        segments.push({ text: 'Up/Down scroll', priority: 6, short: 'Scroll' })
+        segments.push({ text: 'PgUp/PgDn page', priority: 5, short: 'Page' })
+      }
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Back', action: 'close', ink: 'secondary' })
+      return segments
+    }
     if (this.focus === 'reader') {
       // Reader Enter is not an action. Only ready content advertises its
       // scroll keys; every Reader state keeps the ONE real Back verb.
@@ -3072,7 +3371,7 @@ export class SessionWorkspacePanel implements Component {
         segments.push({ text: 'Up/Down scroll', priority: 6, short: 'Scroll' })
         segments.push({ text: 'PgUp/PgDn page', priority: 5, short: 'Page' })
       }
-      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Back', action: 'close', ink: 'secondary' })
       return segments
     }
     if (this.focus === 'search-results') {
@@ -3084,13 +3383,14 @@ export class SessionWorkspacePanel implements Component {
         // The second Enter on a result is the one explicit resume; on the
         // Session this Browser was opened from it returns instead.
         if (this.selectedSearchSessionId === this.options.currentSessionId) {
-          segments.push({ text: 'Return [Enter]', priority: 7, short: 'Return', action: 'open', ink: 'secondary' })
+          segments.push({ text: 'Return [Enter]', priority: 8, short: 'Return', action: 'open', ink: 'secondary' })
         } else {
-          segments.push({ text: 'Open [Enter]', priority: 7, short: 'Open', action: 'open', ink: 'primary' })
+          segments.push({ text: 'Open [Enter]', priority: 8, short: 'Open', action: 'open', ink: 'primary' })
         }
-        segments.push({ text: 'Read [Space]', priority: 4, short: 'Read', action: 'peek', ink: 'secondary' })
+        segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary' })
+        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary' })
       }
-      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Back', action: 'close', ink: 'secondary' })
       return segments
     }
     if (this.focus === 'search') {
@@ -3098,7 +3398,7 @@ export class SessionWorkspacePanel implements Component {
       if (this.snapshot.searchResults.length > 0) {
         segments.push({ text: 'Results [Enter]', priority: 5, short: 'Results', action: 'results', ink: 'primary' })
       }
-      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
+      segments.push({ text: 'Back [Esc]', priority: 9, short: 'Back', action: 'close', ink: 'secondary' })
       return segments
     }
     if (this.newSessionPending !== undefined) {
@@ -3124,14 +3424,19 @@ export class SessionWorkspacePanel implements Component {
       && !(selected.kind === 'session' && this.snapshot.resumePending)) {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
         // Enter on the opened Session returns to it. The bar advertises that
-        // real action (secondary navigation ink) and keeps the read-only Reader.
+        // real action (secondary navigation ink) and keeps the read-only Reader
+        // plus the SAME read-only Inspector page.
         const enter = this.enterAction(selected)
-        segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'secondary' })
-        segments.push({ text: 'Read [Space]', priority: 4, short: 'Read', action: 'peek', ink: 'secondary' })
+        segments.push({ text: enter.text, priority: 8, short: enter.short, action: 'activate-row', ink: 'secondary' })
+        segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary' })
+        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary' })
       } else if (selected.kind === 'folder' || selected.kind === 'session') {
         const enter = this.enterAction(selected)
         segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'primary' })
-        if (selected.kind === 'session') segments.push({ text: 'Read [Space]', priority: 4, short: 'Read', action: 'peek', ink: 'secondary' })
+        if (selected.kind === 'session') {
+          segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary' })
+          segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary' })
+        }
       } else {
         // New / Add / More: the painted ROOT ROW already runs that explicit
         // action, so the bar keeps only its historical keyboard hint (key-first
@@ -3142,7 +3447,7 @@ export class SessionWorkspacePanel implements Component {
       }
     }
     segments.push({ text: '/ search', priority: 5, short: '/' })
-    segments.push({ text: 'Close [Esc]', priority: 9, short: 'Esc', action: 'close', ink: 'secondary' })
+    segments.push({ text: 'Close [Esc]', priority: 9, short: 'Close', action: 'close', ink: 'secondary' })
     return segments
   }
 }

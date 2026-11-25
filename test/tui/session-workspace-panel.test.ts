@@ -927,8 +927,8 @@ test('the frozen size matrix keeps the Esc row reachable and every painted cell 
     assert.ok(panel !== null && panel !== undefined, `${columns}x${rows}: the workspace panel owns the keyboard`)
     const painted = panel.render(columns)
     assert.ok(painted.length <= rows, `${columns}x${rows}: the frame never exceeds the row budget (${painted.length} > ${rows})`)
-    assert.ok(stripTerminalSequences(painted[painted.length - 1]!).includes('Esc'),
-      `${columns}x${rows}: the Esc row stays reachable`)
+    assert.match(stripTerminalSequences(painted[painted.length - 1]!), /\b(Close|Back|Esc)\b/u,
+      `${columns}x${rows}: the ONE exit row stays reachable`)
     for (const line of painted) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: a row overflows its width: ${JSON.stringify(line)}`)
     }
@@ -1134,7 +1134,9 @@ function lineIndexOf(frame: readonly string[], needle: string): number {
 /** The Folder's OWN painted row (never a preview line that happens to repeat
  *  the title). */
 function folderLineIndexOf(frame: readonly string[], title: string): number {
-  const index = frame.findIndex(line => line.includes(title) && /[▾▸]/.test(line))
+  // The inline Inspector may repeat the selected Folder's title in the right
+  // column; the disclosure glyph only exists on the LEFT tree row.
+  const index = frame.findIndex(line => line.includes(`▾ ${title}`) || line.includes(`▸ ${title}`))
   assert.ok(index >= 0, `the frame paints the ${JSON.stringify(title)} Folder row:\n${frame.join('\n')}`)
   return index
 }
@@ -1161,15 +1163,6 @@ function bodyTopRow(h: Harness): number {
   const separator = panelFrame(h).findIndex(line => line.startsWith('─'))
   assert.ok(separator >= 0, `the frame paints its body separator:\n${h.view()}`)
   return separator + 1
-}
-
-/** The right-hand wide Preview column, anchored on its own Host text. */
-function previewColumn(h: Harness): string {
-  const frame = panelFrame(h)
-  const anchor = frame.findIndex(line => line.includes('Host directories · read only'))
-  assert.ok(anchor >= 0, `the wide preview paints its Host header:\n${frame.join('\n')}`)
-  const start = frame[anchor]!.indexOf('Host directories · read only')
-  return frame.slice(anchor).map(line => line.slice(start)).join('\n')
 }
 
 async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_000): Promise<void> {
@@ -1340,7 +1333,7 @@ test('selection and Preview never read; Space starts one loading read and then s
   h.vt.sendInput('\x1b[B')
   await h.paint()
   assert.equal(calls.length, 0, 'changing the typed selection and repainting the Preview never reads Markdown')
-  assert.ok(h.view().includes('Space to read committed transcript'), 'the Preview keeps the explicit Read cue')
+  assert.ok(h.view().includes('Whole session'), 'the wide Inspector reads the selected Session data')
   h.vt.sendInput(' ')
   await h.paint()
   assert.equal(calls.length, 1, 'Space starts exactly ONE official read')
@@ -1669,7 +1662,7 @@ test('duplicate Workspace titles are disambiguated by the official id, never gue
   assert.ok(folders.some(line => line.includes('Same title (two)')), `each duplicate keeps its own label:\n${view}`)
 })
 
-test('the wide layout paints the read-only preview beside the list; a narrow one stays single-column', async () => {
+test('the frozen two-column ladder paints the inline Inspector from 80x12 and stays single below', async () => {
   const h = harness({ columns: 120, rows: 24 })
   h.handle.setSnapshot(snapshot())
   h.handle.setActivityFacts({
@@ -1679,15 +1672,22 @@ test('the wide layout paints the read-only preview beside the list; a narrow one
   })
   await h.paint()
   const wide = panelFrame(h).join('\n')
-  assert.ok(wide.includes('Space to read committed transcript'), `the wide layout paints a preview pane:\n${wide}`)
-  assert.ok(wide.includes('Sessions · 2'), 'the list pane stays beside the preview')
+  assert.ok(wide.includes('Whole session'), `the wide layout paints the inline Inspector:\n${wide}`)
+  assert.ok(wide.includes('Sessions · 2'), 'the list pane stays beside the Inspector')
+  // 80 is the frozen two-column floor: left 44 + two-cell gap + right 34.
   h.vt.resize(80, 24)
   await h.paint()
-  assert.ok(!panelFrame(h).join('\n').includes('Space to read committed transcript'),
-    'a narrow terminal never splits into two columns')
+  assert.ok(panelFrame(h).join('\n').includes('Whole session'),
+    '80x24 is the start of the two-column ladder')
+  h.vt.resize(79, 24)
+  await h.paint()
+  assert.ok(!panelFrame(h).join('\n').includes('Whole session'),
+    '79 columns stays single-column (the Inspector needs F2)')
   // A short narrow frame still opens Reader and keeps its ONE Esc exit usable.
   h.vt.resize(80, 10)
   await h.paint()
+  assert.ok(!panelFrame(h).join('\n').includes('Whole session'),
+    'a 10-row frame has no room for the identity-plus-fact Inspector')
   h.vt.sendInput('\x1b[B')
   await h.paint()
   h.vt.sendInput(' ')
@@ -1915,8 +1915,11 @@ test('compact Working rows omit unknown pending spam', async () => {
   })
   await h.paint()
   const view = h.view()
-  assert.equal(view.split('‣ Working').length - 1, 3, `all three running rows retain the Working summary:\n${view}`)
-  assert.ok(!view.includes('Pending denied') && !view.includes('Pending unknown') && !view.includes('Pending unavailable'),
+  // The compact LEFT rows are the spam budget; the inline Inspector may show
+  // the complete Pending/Source facts (that is its reading job).
+  const compact = panelFrame(h).map(line => line.slice(0, 55)).join('\n')
+  assert.equal(compact.split('‣ Working').length - 1, 3, `all three running rows retain the Working summary:\n${view}`)
+  assert.ok(!compact.includes('Pending denied') && !compact.includes('Pending unknown') && !compact.includes('Pending unavailable'),
     `compact rows do not repeat unknown/unanswerable pending state:\n${view}`)
 })
 
@@ -2264,7 +2267,7 @@ test('the typed selection drives Preview, Enter and Space; Folder selection neve
   let view = h.view()
   assert.ok(/^> .*Beta/m.test(view), `the Folder click selects it:\n${view}`)
   assert.ok(view.includes('Sessions: 1'), 'the preview follows the Folder target')
-  assert.ok(!view.includes('Space to read committed transcript'), 'a Folder has no Session preview')
+  assert.ok(!view.includes('Whole session'), 'a Folder has no Session Inspector')
   h.vt.sendInput(' ')
   await h.paint()
   assert.ok(!h.view().includes('Transcript ·'), 'Space on a Folder never opens a stale Session Reader')
@@ -2276,7 +2279,7 @@ test('the typed selection drives Preview, Enter and Space; Folder selection neve
   await clickCell(h, 8, otherLine)
   view = h.view()
   assert.ok(/^> .*Other session/m.test(view), 'a Session click selects only')
-  assert.ok(view.includes('Space to read committed transcript'), 'the preview follows the Session target')
+  assert.ok(view.includes('Whole session'), 'the inline Inspector follows the Session target')
   assert.deepEqual(h.resumes, [], 'a Session click never resumes')
   h.vt.sendInput('\r')
   await h.paint()
@@ -2501,7 +2504,8 @@ test('CJK titles and long Host ids keep every action reachable at the frozen siz
     await h.paint()
     const painted = h.app.focusedComponentForTest()!.render(columns)
     assert.ok(painted.length <= rows, `${columns}x${rows}: the frame fits its budget`)
-    assert.ok(stripTerminalSequences(painted[painted.length - 1]!).includes('Esc'), `${columns}x${rows}: Esc survives CJK`)
+    assert.match(stripTerminalSequences(painted[painted.length - 1]!), /\b(Close|Back|Esc)\b/u,
+      `${columns}x${rows}: the exit verb survives CJK`)
     for (const line of painted) {
       assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: CJK never overflows: ${JSON.stringify(line)}`)
     }
@@ -3009,7 +3013,10 @@ test('Return stays readable, clickable and inside the frame at the frozen sizes'
     // The existing whole-segment layout may fall back to its short form on a
     // narrow bar; the segment must still be a complete, real Return verb.
     assert.ok(/\bReturn\b/u.test(bar), `${columns}x${rows}: Return is painted:\n${bar}`)
-    assert.ok(bar.includes('Close [Esc]'), `${columns}x${rows}: Esc stays last:\n${bar}`)
+    // Below the 80-column ladder the bar keeps complete compact verbs
+    // (`Close`), never a truncated word; the Esc key itself stays last.
+    assert.ok(/\bClose\b/u.test(bar), `${columns}x${rows}: Close stays last:\n${bar}`)
+    assert.ok(!bar.includes('…'), `${columns}x${rows}: no painted verb is truncated:\n${bar}`)
     const x = bar.indexOf('Return') + 1
     await clickCell(h, x, frame.length - 1)
     assert.equal(h.closes, 1, `${columns}x${rows}: the painted Return really closes once`)
@@ -3080,8 +3087,10 @@ test('the inline Host path editor and the global search never coexist', async ()
   assert.ok(editing[0]!.includes('Sessions'), 'the header still names the workspace')
   assert.ok(!editing[0]!.includes('/ Search'), 'the Search target is not painted while the path editor owns the keyboard')
   assert.ok(h.view().includes('Host directory: /host/add'), 'the inline editor stays visible')
-  assert.ok(!h.view().includes('Enter Add directory'), 'the Preview does not advertise the already-open Add verb')
-  assert.ok(h.view().includes('Enter Verify directory · Esc Cancel'), 'the Preview states the editor verbs')
+  assert.ok(!h.view().includes('Enter Add directory'), 'the editor never advertises the already-open Add verb')
+  const editingBar = panelFrame(h).at(-1)!
+  assert.ok(editingBar.includes('Verify [Enter]') && editingBar.includes('Cancel [Esc]'),
+    `the ONE bar states the editor verbs:\n${editingBar}`)
   // The old header cell is now inert: it can never enter a search presentation
   // behind the editor.
   await clickCell(h, editing[0]!.indexOf('Search') < 0 ? 110 : editing[0]!.indexOf('Search') + 1, 0)
@@ -3228,11 +3237,11 @@ test('Preview and Reader keep one truthful pending admission', async () => {
   browse.handle.setSnapshot(snapshot({ resumePending: true }))
   await browse.paint()
   let view = browse.view()
-  assert.ok(!view.includes('Space to read committed transcript'), `the Preview hides the blocked Reader cue:\n${view}`)
+  assert.ok(view.includes('Whole session'), `the inline Inspector stays readable while the writer pends:\n${view}`)
   assert.ok(!view.includes('Open [Enter]') && !view.includes('Read [Space]'), 'the Footer hides both blocked verbs')
   browse.handle.setSnapshot(snapshot())
   await browse.paint()
-  assert.ok(browse.view().includes('Space to read committed transcript'), 'the Preview cue returns after settlement')
+  assert.ok(browse.view().includes('Read [Space]'), 'the Reader verb returns after settlement')
   browse.app.dispose()
   started.delete(browse.app)
 
@@ -3330,7 +3339,9 @@ test('the pending path verification blocks mouse tree actions and inert editor v
   outcomes[0]!({ kind: 'failed', message: 'not a directory on Host' })
   await h.paint()
   view = h.view()
-  assert.ok(view.includes('Enter Verify directory · Esc Cancel'), 'the editor verbs return after the refusal')
+  const restoredBar = panelFrame(h).at(-1)!
+  assert.ok(restoredBar.includes('Verify [Enter]') && restoredBar.includes('Cancel [Esc]'),
+    `the editor verbs return after the refusal:\n${restoredBar}`)
   assert.deepEqual(requested, [], 'no tree action ran during or after the pending verification')
 })
 
@@ -3415,8 +3426,6 @@ test('the inline Add editor prefills the Host home, paints official candidates a
   assert.ok(opened.includes('Suggestions (Host)'), `the Host source owns the block label:\n${opened}`)
   assert.ok(opened.includes('> project-a/'), `the first candidate is the painted active row:\n${opened}`)
   assert.ok(opened.includes('project-b/') && opened.includes('.config/'), 'every child directory is painted; hidden entries are not filtered')
-  assert.ok(opened.includes('Host home: /host/home'), 'the wide preview states the official Host home')
-  assert.ok(opened.includes('Host directories · read only'), 'the preview never claims a writable browser')
   assert.ok(!opened.includes('/client/home'), 'no Client directory may enter the Host suggestion projection')
   assert.deepEqual(listCalls, [undefined], 'the Home read is reused; list(home) is not issued twice')
   assert.deepEqual(submitted, [], 'browsing registers nothing')
@@ -3865,7 +3874,7 @@ test('Host-controlled path bytes never reach the terminal while the raw value st
 
 // ── PR3 external-review fixes ───────────────────────────────────────────────
 
-test('the wide Add preview advertises the SAME painted Esc ladder as the body and footer', async () => {
+test('the full-width Add editor advertises the SAME painted Esc ladder in the one bar', async () => {
   const outcomes: Array<(outcome: import('../../src/app/command/session-browser-presentation.ts').SessionBrowserDirectorySettlement) => void> = []
   const h = harness({
     columns: 120,
@@ -3882,16 +3891,15 @@ test('the wide Add preview advertises the SAME painted Esc ladder as the body an
   h.vt.sendInput('\r')
   await h.paint()
   await waitUntil(() => h.view().includes('project-a/'), 'Home candidates paint')
-  assert.match(previewColumn(h), /Enter Verify directory · Esc Hide suggestions/,
-    'the expanded Preview promises the real first Esc step')
-  assert.doesNotMatch(previewColumn(h), /Esc Cancel/u)
-  assert.match(panelFrame(h).at(-1)!, /Hide suggestions \[Esc\]/u, 'the footer agrees with the Preview Esc step')
+  assert.match(panelFrame(h).at(-1)!, /Hide suggestions \[Esc\]/u,
+    'the ONE bar promises the real first Esc step')
+  assert.doesNotMatch(panelFrame(h).at(-1)!, /Cancel \[Esc\]/u, 'the first step is not mislabelled as Cancel')
 
   h.vt.sendInput('\x1b')
   await h.paint()
-  assert.match(previewColumn(h), /Enter Verify directory · Esc Cancel/,
-    'after the fold the Preview promises the real close step')
-  assert.doesNotMatch(previewColumn(h), /Esc Hide suggestions/u)
+  assert.match(panelFrame(h).at(-1)!, /Cancel \[Esc\]/u,
+    'after the fold the ONE bar promises the real close step')
+  assert.doesNotMatch(panelFrame(h).at(-1)!, /Hide suggestions \[Esc\]/u)
   assert.match(panelFrame(h).at(-1)!, /Cancel \[Esc\]/u)
 
   h.vt.sendInput('\x1b')
@@ -3905,9 +3913,9 @@ test('the wide Add preview advertises the SAME painted Esc ladder as the body an
   await waitUntil(() => h.view().includes('project-a/'), 'the reopened editor paints candidates')
   h.vt.sendInput('\r')
   await h.paint()
-  const pendingPreview = previewColumn(h)
-  assert.match(pendingPreview, /Verifying directory…/)
-  assert.doesNotMatch(pendingPreview, /Enter Verify directory|Esc Cancel|Esc Hide suggestions/u,
+  const pendingFrame = h.view()
+  assert.match(pendingFrame, /Verifying directory…/)
+  assert.doesNotMatch(pendingFrame, /Enter Verify directory|Cancel \[Esc\]|Hide suggestions \[Esc\]/u,
     'a pending verification advertises only the pending state')
   outcomes[0]!({ kind: 'failed', message: 'refused after the probe' })
   await h.paint()
@@ -4267,7 +4275,10 @@ test('G01: a Session child row indents two cells inside its Folder and keeps eve
   const historyLine = lineIndexOf(frame, 'History 0')
   assert.equal(frame[historyLine]!.indexOf(shortSessionId('session-g01-history-0')), 4,
     `a non-current Session identity starts at column 4:\n${view}`)
-  const currentLine = lineIndexOf(frame, 'Current title')
+  // Anchor the LEFT tree row: the inline Inspector repeats the same title in
+  // the right column, which is not a list row and owns no cursor.
+  const currentLine = frame.findIndex(line => line.includes('●') && line.includes(shortSessionId(CURRENT)))
+  assert.ok(currentLine >= 0, `the Current Session row is painted:\n${view}`)
   assert.equal(frame[currentLine]!.indexOf('●'), 4, `the Current bullet follows the Session indent at column 4:\n${view}`)
   assert.equal(frame[currentLine]!.indexOf(shortSessionId(CURRENT)), 6,
     `the Current identity follows its bullet at column 6:\n${view}`)
@@ -4356,7 +4367,8 @@ test('M02: the disclosure and the blank title area are the same one-shot Folder 
   await h.paint()
   await clickCell(h, 2, folderLineIndexOf(panelFrame(h), 'Alpha'))
   assert.ok(!h.view().includes('Other title'), 'the disclosure collapses the Folder')
-  await clickCell(h, 90, folderLineIndexOf(panelFrame(h), 'Alpha'))
+  // The left column owns the Folder row; x=90 would be the right Inspector.
+  await clickCell(h, 50, folderLineIndexOf(panelFrame(h), 'Alpha'))
   assert.ok(h.view().includes('Other title'), 'the blank tail of the same row expands it')
   assert.ok(/^> .*▾ Alpha/m.test(h.view()), 'one blank click toggles once, never twice')
   assert.deepEqual(h.resumes, [], 'Folder clicks never resume a Session')
@@ -4631,13 +4643,16 @@ test('H04: Show more reveals one painted page from the current watermark and kee
     { workspaceId: 'ws-b', path: '/ws/b', title: 'Beta', sessionIds: other.map(item => item.id) },
   ] })
   await h.paint()
-  const count = (): number => panelFrame(h).filter(line => /H04 \d+/.test(line)).length
+  // The inline Inspector repeats the selected title in the right column; the
+  // watermark fact is the LEFT tree only (100 columns => 55-cell left pane).
+  const count = (): number => panelFrame(h).map(line => line.slice(0, 55)).filter(line => /H04 \d+/.test(line)).length
   const automatic = count()
   assert.ok(automatic > 20 && automatic < 45, `the automatic watermark fills the real viewport, not a fixed cap: ${automatic}`)
-  const firstMore = panelFrame(h).find(line => line.includes('Show more sessions'))
+  const firstMore = panelFrame(h).find(line => line.includes('Show more sessions') && line.includes('remaining'))
   assert.ok(firstMore !== undefined, `the remaining history stays behind Show more:\n${h.view()}`)
   const remaining = Number(/· (\d+) remaining/.exec(firstMore)?.[1])
-  await clickCell(h, 8, lineIndexOf(panelFrame(h), 'Show more sessions'))
+  const moreLine = (): number => panelFrame(h).findIndex(line => line.includes('Show more sessions') && line.includes('remaining'))
+  await clickCell(h, 8, moreLine())
   const grown = count()
   assert.ok(grown > automatic, `Show more reveals the next painted page: ${automatic} -> ${grown}`)
   assert.ok(grown <= 45, `the reveal is bounded by the real roster: ${automatic} -> ${grown}`)
@@ -4678,11 +4693,12 @@ test('H04B: two consecutive Show more pages each select their own first new row 
   }
   h.vt.sendInput('\x1b[F')
   await h.paint()
-  await clickCell(h, 8, lineIndexOf(panelFrame(h), 'Show more sessions'))
+  const moreLine = (): number => panelFrame(h).findIndex(line => line.includes('Show more sessions') && line.includes('remaining'))
+  await clickCell(h, 8, moreLine())
   const first = selectedIndex()
   h.vt.sendInput('\x1b[F')
   await h.paint()
-  await clickCell(h, 12, lineIndexOf(panelFrame(h), 'Show more sessions'))
+  await clickCell(h, 12, moreLine())
   const second = selectedIndex()
   assert.ok(second > first, `each page lands on its own first new history row: ${first} -> ${second}`)
   assert.deepEqual(h.resumes, [], 'Show more never resumes or opens a Session')
@@ -4722,7 +4738,10 @@ test('Needs attention and Working stay complete right-aligned status groups acro
     assert.equal((needsLine.match(/‣/g) ?? []).length, 1, `${width} columns: one status group uses one marker:\n${needsLine}`)
     assert.ok(needsLine.includes('status-n'), `${width} columns: the stable short id survives the status:\n${needsLine}`)
     assert.ok(needsLine.includes('修复流水'), `${width} columns: a recognisable CJK title prefix survives:\n${needsLine}`)
-    assert.equal(needsLine.includes('Working'), width >= 72,
+    // The frozen left column is 44 cells at 44/80/120 (55% of 80/120 capped by
+    // the 44-cell list minimum), so the optional Working segment fits only in
+    // the single-column 72 frame and once the split gives the list >= 66 cells.
+    assert.equal(needsLine.includes('Working'), width === 72 || width >= 120,
       `${width} columns: Working is kept whole when it fits and dropped whole when it does not:\n${needsLine}`)
     const workingLine = frame.find(line => line.includes('status-w'))
     assert.ok(workingLine?.includes('‣ Working'), `${width} columns: the Working group is complete:\n${workingLine}`)
@@ -4785,7 +4804,9 @@ test('a 50/52-column CJK row drops the optional Working segment before the title
 })
 
 test('a collapsed Folder keeps complete Needs/Working counts that follow same-frame reclassification', async () => {
-  const h = harness({ columns: 80, rows: 24 })
+  // 120 columns gives the left tree 66 cells: both counts fit whole beside the
+  // Folder identity. The 80-column floor intentionally drops the second count.
+  const h = harness({ columns: 120, rows: 24 })
   const rows = [
     row(CURRENT, 3_000, { title: 'Current session' }),
     row('session-folder-needs', 2_500, { title: 'Needs title' }),
@@ -5009,8 +5030,10 @@ test('H08: the wide two-column list spends its own pane budget on history', asyn
   ] })
   await h.paint()
   let frame = panelFrame(h)
-  assert.ok(frame.join('\n').includes('Workspace: Alpha (ws-a)'),
-    `the wide layout paints the read-only preview:\n${frame.join('\n')}`)
+  assert.ok(frame.join('\n').includes('Whole session'),
+    `the wide layout paints the inline Inspector:\n${frame.join('\n')}`)
+  assert.ok(frame.join('\n').includes('Alpha · /ws'),
+    'the Inspector names the official Workspace fact, never a cwd guess')
   let visible = frame.map(line => line.slice(0, 66)).filter(line => /H08 \d+/.test(line)).length
   assert.equal(visible, 17,
     `the wide pane budget grows to exactly 17 ordinary rows:\n${frame.join('\n')}`)
@@ -5192,14 +5215,17 @@ test('F2/W02: a 44x20 long list keeps the wheel-selected typed row painted and n
   ] })
   settleActivity(more)
   await more.paint()
-  const moreRow = lineIndexOf(panelFrame(more), 'Show more sessions')
+  // The left row owns the `remaining` count; the right Show-more preview does
+  // not repeat it.
+  const moreLine = (): number => panelFrame(more).findIndex(line => line.includes('Show more sessions') && line.includes('remaining'))
+  const moreRow = moreLine()
   const remaining = Number(/· (\d+) remaining/.exec(panelFrame(more)[moreRow]!)?.[1])
   const visibleMore = panelFrame(more).filter(line => /More \d+/.test(line)).length
   more.vt.sendInput('\x1b[F')
   await more.paint()
   assert.ok(/^> .*Show more sessions/m.test(more.view()), `the wheel selects the painted Show more row:\n${more.view()}`)
   await wheelCell(more, 5, moreRow, 'down')
-  const afterMore = panelFrame(more)[lineIndexOf(panelFrame(more), 'Show more sessions')]!
+  const afterMore = panelFrame(more)[moreLine()]!
   assert.equal(Number(/· (\d+) remaining/.exec(afterMore)?.[1]), remaining,
     'a wheel over Show more never invokes the reveal or changes the watermark')
   assert.equal(panelFrame(more).filter(line => /More \d+/.test(line)).length, visibleMore,
@@ -5212,31 +5238,66 @@ test('F2/W02: a 44x20 long list keeps the wheel-selected typed row painted and n
   more.dispose()
 })
 
-test('F2/W03: the wide left list takes the wheel while the right Preview and the column gap stay inert', async () => {
-  const h = harness({ columns: 120, rows: 40 })
-  h.handle.setSnapshot(snapshot({ rows: [
-    row(CURRENT, 3_000, { title: 'Current session' }),
-    row(OTHER, 2_000, { title: 'Other session' }),
-    row(THIRD, 1_000, { title: 'Third session' }),
-  ] }))
+test('F2/W03: the right Inspector takes its OWN wheel while the list selection and gap stay inert', async () => {
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(snapshot({
+    rows: [
+      row(CURRENT, 3_000, { title: 'Current session' }),
+      row(OTHER, 2_000, { title: 'Other session' }),
+      row(THIRD, 1_000, { title: 'Third session' }),
+    ],
+    inspector: {
+      sessionId: OTHER,
+      state: 'ready',
+      refreshing: false,
+      data: {
+        sessionId: OTHER,
+        asOfSeq: 9,
+        stats: { turns: 38, steps: 216, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+        usage: {
+          uncachedInputTokens: 184_200,
+          outputTokens: 96_400,
+          cacheReadTokens: 4_820_000,
+          cacheWriteTokens: 12_000,
+          totalTokens: 5_112_600,
+          cacheHitPct: 96.1,
+        },
+        context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true },
+        model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
+        preset: 'coding',
+        effectiveCwd: '/ws/alpha',
+        title: 'Other session',
+        goal: { objective: 'Finish the workspace UX', phase: 'active' },
+        todos: { pending: 2, inProgress: 1, completed: 3 },
+      },
+    },
+  }))
   h.handle.updateWorkspaces({ type: 'baseline', items: [
     { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, OTHER] },
     { workspaceId: 'ws-beta', path: '/ws/beta', title: 'Beta', sessionIds: [THIRD] },
   ] })
   settleActivity(h)
   await h.paint()
-  assert.ok(h.view().includes('Space to read committed transcript'), 'the wide frame paints its read-only right Preview')
   const top = bodyTopRow(h)
   await wheelCell(h, 5, top, 'down')
   assert.ok(/^> .*Other session/m.test(h.view()), `the left column wheel moves the tree selection:\n${h.view()}`)
   const selected = h.view()
+  const left = selected.split('\n').map(line => line.slice(0, 66)).join('\n')
   // The wide frame is 120 cells: left 0..65, a two-cell gap 66..67, right 68+.
-  await wheelCell(h, 80, top + 1, 'down')
-  assert.equal(h.view(), selected, 'the right read-only Preview is not a wheel sink')
+  await wheelCell(h, 80, top + 3, 'down')
+  const scrolled = h.view()
+  assert.notEqual(scrolled, selected, 'the right Inspector scrolls its own fact body')
+  assert.equal(scrolled.split('\n').map(line => line.slice(0, 66)).join('\n'), left,
+    'the Inspector wheel never scrolls, reorders or re-selects the left list')
+  assert.ok(/^> .*Other session/m.test(scrolled), 'the list keyboard selection is unchanged')
+  // The wheel never steals the list seat: the next real Down still moves it.
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  assert.ok(/^> .*Beta/m.test(h.view()), `the list keeps keyboard focus after the Inspector wheel:\n${h.view()}`)
   await wheelCell(h, 66, top + 1, 'down')
-  assert.equal(h.view(), selected, 'the two-cell column gap is inert')
-  await wheelCell(h, 80, top, 'up')
-  assert.equal(h.view(), selected, 'the wide Preview never scrolls or re-selects the tree')
+  const gapFrame = h.view()
+  await wheelCell(h, 66, top + 2, 'down')
+  assert.equal(h.view(), gapFrame, 'the two-cell column gap is inert')
   assert.deepEqual(h.resumes, [])
   assert.equal(h.closes, 0)
 })
@@ -5373,14 +5434,14 @@ test('F2/W06+W07: Reader wheel scrolls only its real body; chrome and Preview st
   await wheelCell(h, 80, top + 1, 'up')
   assert.ok(h.view().includes('item 00'), 'wheel-up returns to the top of the same official body')
 
-  // Closing the Reader restores the ordinary read-only Preview, which is not a
-  // scroll sink either.
+  // Closing the Reader restores the inline Inspector; its own wheel body may
+  // scroll, but the closed Reader content can never come back.
   h.vt.sendInput('\x1b')
   await h.paint()
   const browse = h.view()
-  assert.ok(browse.includes('Space to read committed transcript'), 'Esc restores the ordinary Preview')
+  assert.ok(browse.includes('Whole session'), 'Esc restores the inline Inspector')
   await wheelCell(h, 80, top + 1, 'down')
-  assert.equal(h.view(), browse, 'the ordinary Preview never scrolls the closed Reader')
+  assert.ok(!h.view().includes('item 00'), 'the closed Reader content never returns')
   assert.ok(/^> .*Other session/m.test(h.view()), 'the typed Browse selection survives the Reader round trip')
   h.dispose()
 
@@ -5655,19 +5716,24 @@ test('F2/W13: wheel hit zones follow the 110/112 column threshold and tiny frame
   await h.paint()
   await wheelCell(h, 5, bodyTopRow(h), 'down')
   assert.ok(/^> .*Threshold 0/m.test(h.view()), `the wide left column navigates:\n${h.view()}`)
-  // 110x12 is BELOW the 112 threshold: one full-width body scrolls.
-  h.vt.resize(110, 12)
+  // 79x12 is BELOW the 80-column floor: one full-width body scrolls.
+  h.vt.resize(79, 12)
   await h.paint()
   await wheelCell(h, 60, bodyTopRow(h), 'down')
-  assert.ok(/^> .*Threshold 1/m.test(h.view()), `110x12 is one column and its whole body navigates:\n${h.view()}`)
-  // 112x12 crosses the threshold: only the left column navigates.
-  h.vt.resize(112, 12)
+  assert.ok(/^> .*Threshold 1/m.test(h.view()), `79x12 is one column and its whole body navigates:\n${h.view()}`)
+  // 80x12 is the frozen two-column floor: only the left column navigates.
+  h.vt.resize(80, 12)
   await h.paint()
   await wheelCell(h, 5, bodyTopRow(h), 'down')
-  assert.ok(/^> .*Threshold 2/m.test(h.view()), `112x12 splits and its left column navigates:\n${h.view()}`)
+  assert.ok(/^> .*Threshold 2/m.test(h.view()), `80x12 splits and its left column navigates:\n${h.view()}`)
   const splitFrame = h.view()
-  await wheelCell(h, 100, bodyTopRow(h), 'down')
-  assert.equal(h.view(), splitFrame, 'the right Preview is inert at the exact two-column threshold')
+  const splitLeft = splitFrame.split('\n').map(line => line.slice(0, 44)).join('\n')
+  // The split's right cell is the Inspector's OWN wheel: it may scroll its fact
+  // body but never moves the left tree selection.
+  await wheelCell(h, 70, bodyTopRow(h) + 3, 'down')
+  assert.equal(h.view().split('\n').map(line => line.slice(0, 44)).join('\n'), splitLeft,
+    'the right Inspector never scrolls or re-selects the left column')
+  assert.ok(/^> .*Threshold 2/m.test(h.view()), 'the left selection stays on Threshold 2')
   // Shrink -> grow: the left column is live again, but the old press is not.
   h.vt.resize(120, 40)
   await h.paint()
@@ -5780,7 +5846,9 @@ test('the real panel reports ONLY its painted typed Session target across tree/R
     },
   })
   await h.paint()
-  assert.equal(h.view(), before, 'receiving the same-id Inspector snapshot changes no painted frame')
+  assert.notEqual(h.view(), before, 'matching same-id Inspector data repaints the visible facts')
+  assert.ok(h.view().includes('Whole session'), 'the settled cut paints its reading groups')
+  assert.ok(!h.view().includes('Loading statistics…'), 'a settled cut replaces the loading status region')
   assert.deepEqual(reports.at(-1), { sessionId: CURRENT, origin: 'browse' }, 'the same-id Inspector snapshot changes no selection')
 })
 
@@ -5821,4 +5889,148 @@ test('the real panel reports a Search result target and reports no target in the
   await directory.paint()
   assert.equal(directoryReports.at(-1), undefined,
     'the inline directory editor owns the keyboard and reports no Session target')
+})
+
+// ── Session Workspace PR3: the inline/full Inspector ───────────────────────
+
+test('F2 opens the SAME admitted Inspector page, scrolls its own body and returns to the list', async () => {
+  const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
+  const longPath = `/工作区/${'很长的路径/'.repeat(12)}end`
+  const data = {
+    sessionId: OTHER,
+    asOfSeq: 9,
+    stats: { turns: 38, steps: 216, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+    usage: {
+      uncachedInputTokens: 184_200,
+      outputTokens: 96_400,
+      cacheReadTokens: 4_820_000,
+      cacheWriteTokens: 12_000,
+      totalTokens: 5_112_600,
+      cacheHitPct: 96.1,
+    },
+    context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
+    model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
+    preset: 'coding',
+    effectiveCwd: longPath,
+    title: 'Other Session Title',
+    goal: { objective: 'Finish the workspace UX', phase: 'active' as const },
+    todos: { pending: 2, inProgress: 1, completed: 3 },
+  }
+  const workspace = {
+    revision: 1,
+    state: 'ready' as const,
+    facts: [{ workspaceId: 'ws-a', path: '/ws/a', title: 'Alpha', sessionIds: [CURRENT, OTHER] }],
+    baselineProven: true,
+    answerEligibility: undefined,
+  }
+  const base = snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+    workspace,
+    inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data },
+  })
+  const h = harness({ columns: 80, rows: 24, onInspectorSelection: selection => reports.push(selection) })
+  h.handle.setSnapshot(base)
+  await h.paint()
+  // A Folder target has no Inspector page: F2 is inert on it.
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  assert.ok(/^> .*Alpha/m.test(h.view()), `Home selects the Folder:\n${h.view()}`)
+  h.vt.sendInput('\x1bOQ')
+  await h.paint()
+  assert.ok(!h.view().includes('Session Inspector'), 'F2 on a Folder opens no Inspector page')
+  // Select OTHER (Folder, New session and Current precede it) and open the page
+  // through the real F2 sequence.
+  for (let step = 0; step < 6 && !/^> .*other-se/m.test(h.view()); step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+  }
+  assert.ok(/^> .*other-se/m.test(h.view()), `the Other row is selectable:\n${h.view()}`)
+  h.vt.sendInput('\x1bOQ')
+  await h.paint()
+  let page = h.view()
+  assert.ok(page.includes('Session Inspector · other-se'), `F2 opens the full-width page:\n${page}`)
+  assert.ok(page.includes('Whole session') && page.includes('Token usage'), 'the complete groups paint')
+  assert.ok(page.includes('Model deepseek/deepseek-v4-pro'), 'the exact Inspector cut is visible')
+  assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the page reports the SAME target')
+  // A matching data-only refresh repaints the SAME page/identity.
+  h.handle.setSnapshot({
+    ...base,
+    inspector: {
+      sessionId: OTHER,
+      state: 'ready',
+      refreshing: false,
+      data: { ...data, stats: { ...data.stats, turns: 42 } },
+    },
+  }, { inspectorOnly: true })
+  await h.paint()
+  assert.ok(h.view().includes('Turns 42'), 'a matching data-only cut repaints the visible facts')
+  assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the data-only cut keeps the target')
+  // A cut for ANOTHER id is never presented as this target's data.
+  h.handle.setSnapshot({
+    ...base,
+    inspector: {
+      sessionId: CURRENT,
+      state: 'ready',
+      refreshing: false,
+      data: { sessionId: CURRENT, asOfSeq: 1, stats: { turns: 77, steps: 1, llmMs: 1, toolMs: 0 } },
+    },
+  }, { inspectorOnly: true })
+  await h.paint()
+  assert.ok(h.view().includes('Loading statistics…'), 'a mismatched cut falls back to the loading state')
+  assert.ok(!h.view().includes('Turns 77'), 'no other id\'s cut leaks into the visible target')
+  // Restore the matching cut for the scroll/exit assertions below.
+  h.handle.setSnapshot(base, { inspectorOnly: true })
+  await h.paint()
+  assert.ok(h.view().includes('Turns 38'), 'the matching cut is restored')
+  // The page's own body scrolls; its fixed identity/header do not. Scan the
+  // scrolled window for the long CJK path tail (never assert one fixed offset).
+  const top = h.view()
+  let sawLongPath = false
+  for (let step = 0; step < 40 && !sawLongPath; step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+    sawLongPath = h.view().includes('很长的路径') || h.view().includes('end')
+  }
+  assert.ok(sawLongPath, 'the long CJK path becomes readable by scrolling the page body')
+  page = h.view()
+  assert.notEqual(page, top, 'the page body scrolls')
+  assert.ok(page.includes('Session Inspector · other-se'), 'the page header stays fixed')
+  assert.ok(page.includes('Back [Esc]'), 'the ONE real Back verb stays painted')
+  // Esc returns to the exact list selection, query and expansion.
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  const restored = h.view()
+  assert.ok(restored.includes('Sessions · 2'), `Esc returns to the list:\n${restored}`)
+  assert.ok(/^> .*other-se/m.test(restored), 'the typed list selection is unchanged')
+  assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the restored list reports the same target')
+  // The painted Inspect verb is the SAME pointer admission as F2.
+  const bar = panelFrame(h).at(-1)!
+  const x = bar.indexOf('Inspect [F2]') + 1
+  assert.ok(x > 0, `the bar paints Inspect [F2]:\n${bar}`)
+  await clickCell(h, x, panelFrame(h).length - 1)
+  assert.ok(h.view().includes('Session Inspector · other-se'), 'the painted Inspect verb opens the same page')
+  // A 0-2 row frame cannot paint the page's own identity: it reports no target
+  // and advertises no scroll, but the page survives the shrink and is readable
+  // again after the resize.
+  h.vt.resize(80, 2)
+  await h.paint()
+  assert.equal(reports.at(-1), undefined, 'a frame too short to paint the page reports no target')
+  assert.ok(!h.view().includes('Whole session'), 'the unpainted body keeps no hidden facts')
+  assert.ok(panelFrame(h).at(-1)!.includes('Back'), 'the real Back verb survives the tiny frame')
+  h.vt.resize(80, 24)
+  await h.paint()
+  assert.ok(h.view().includes('Session Inspector · other-se'), 'the page is readable again after the resize')
+  assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the restored page re-reports the SAME target')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  // Removing the admitted target exits the page and clears the target.
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' })],
+    workspace,
+    inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data },
+  }))
+  await h.paint()
+  assert.ok(!h.view().includes('Session Inspector'), 'a removed target exits the full-width page')
+  assert.ok(!h.view().includes('Other Session Title'), 'no stale old-target identity is painted')
+  assert.notDeepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the removed target is never reported')
 })

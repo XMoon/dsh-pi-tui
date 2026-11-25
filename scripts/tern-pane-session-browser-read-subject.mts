@@ -187,9 +187,50 @@ const controlledActivityObservation = (): ActivityObservation => {
   }
 }
 
+/**
+ * The controlled exact Inspector cut of this fixture: PR3's visible statistics
+ * come from this ONE source, never from the roster or a local transcript. The
+ * read is resolved immediately; the pane proves presentation, not Host latency.
+ */
+const inspectorData = (sessionId: string) => ({
+  sessionId,
+  asOfSeq: 12,
+  stats: { turns: 38, steps: 216, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+  usage: {
+    uncachedInputTokens: 184_200,
+    outputTokens: 96_400,
+    cacheReadTokens: 4_820_000,
+    cacheWriteTokens: 12_000,
+    totalTokens: 5_112_600,
+    cacheHitPct: 96.1,
+  },
+  context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
+  model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
+  preset: 'reviewer',
+  title: projections.get(sessionId)?.title ?? sessionId,
+  effectiveCwd: `/workspace/${sessionId === contentId ? 'other' : 'project'}`,
+  goal: { objective: 'Finish the Session Workspace Inspector', phase: 'active' as const },
+  todos: { pending: 2, inProgress: 1, completed: 3 },
+})
+
 const sessionWorkspaceFacts: SessionWorkspaceFactsPort = {
   readActivity: async () => [],
   observeActivity: () => controlledActivityObservation(),
+  openInspector: (sessionId, onInvalidated) => {
+    note({ inspector: { open: sessionId } })
+    let disposed = 0
+    return {
+      async read(signal) {
+        signal.throwIfAborted()
+        note({ inspector: { read: sessionId } })
+        return { kind: 'ready' as const, data: inspectorData(sessionId) }
+      },
+      dispose() {
+        disposed += 1
+        note({ inspector: { dispose: sessionId, disposed } })
+      },
+    }
+  },
   followWorkspaces: (signal): WorkspaceFactsHandle => ({
     dispose() {},
     async *[Symbol.asyncIterator]() {

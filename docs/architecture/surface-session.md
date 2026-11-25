@@ -373,10 +373,30 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   the same-source trailing refresh, and the identity/epoch fences. A roster
   removal clears the selection at the roster-acceptance boundary; closing the
   panel, entering the Reader/directory editor or suspending the native
-  presenter clears it, and every late result is inert. This is a DATA seam
-  only: it adds no visible statistics, loading row, action or layout, and it
-  never changes the Current marker, the typed selection, the
-  query, Resume or Return authority.
+  presenter clears it, and every late result is inert. The SAME admitted id is
+  what the read-only Inspector presents, so the data is never a second read or
+  a write authority:
+  the Inspector changes no Current marker, typed selection, query, Resume or
+  Return authority. Its presentation and lifecycle are owned here (PiTUI) and
+  in [tsp/session-browser.md](../tsp/session-browser.md) (native).
+- **The Inspector is ONE read-only reading of the SAME admitted target.** The
+  inline right pane is the default at wide/mid sizes; `F2` (the painted
+  `Inspect [F2]` verb) opens the SAME id's full-width Inspector page, and
+  `Esc`/the painted Back returns to the exact previous focus, typed selection,
+  query, expansion and scroll anchors. Opening Inspect never changes the
+  selection, starts no second read and never resumes/returns/writes a Session.
+  The page's fixed identity region shows the row's own title/full identity and
+  truthful Current/Live/Persisted/Migration/Running/Pending facts; its
+  scrollable body groups Whole session / Activity / Token usage / Performance /
+  Workspace & dates / Goal & todo / Lineage (+ an accepted Search excerpt).
+  A missing exact cut is `Loading statistics…` with roster facts still shown; a
+  failed/denied/unavailable/migration state says so and never fabricates zero.
+  The full page paints `↑↓ Scroll`, `PgUp/PgDn Page` and `Back [Esc]`; a frame
+  too short to paint the page's own identity reports no target and offers only
+  the real Back. Data-only Inspector publications repaint a visible Inspector
+  (including a cleared/revoked cut) without normalizing the selection or
+  advancing the Browser's action/target revision. The Inspector title is its
+  own display; the roster title is never rewritten.
 - **Header, Preview and navigation.** The header is ONE row: `Sessions · <listed
   count>` (or `Choose workspace` in the chooser) with the real `/ Search` target
   on the right. It never repeats the Current Session id or an `All workspaces`
@@ -385,17 +405,26 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   New and Show more; from Add they start at the first/last Folder; zero Folders
   is a no-op), and never enter a second focus ring. `Up`/`Down`, `Home`/`End`
   and `PageUp`/`PageDown` move within the actually visible rows. The wide
-  read-only Preview follows the typed node (Folder facts, New, Add, Show more or
-  the Session detail) and the action bar advertises only the selected row's real
-  `Enter` verb. From `112x12` the frame is two columns: the list keeps at least
-  44 cells, a two-cell gap, and the rest is the read-only preview; below that it
-  is one column. The Reader is the exception: in every layout it takes the whole
-  body width and paints no Browse column or right preview. Frame-level facts
-  (search editor, status and Host error
-  lines) span the full width; the Esc action bar is always the last physical
-  row, and a short frame withholds activation instead of opening a row it did
-  not paint. The inline Add editor consumes the keyboard while it is open; Tab
-  never changes the Workspace cursor and `Esc` cancels back to the tree.
+  read-only right pane follows the typed node (Folder facts, New, Add, Show more
+  or the selected Session's Inspector); the action bar advertises only the
+  selected row's real `Enter` verb. From `80x12` the frame is two columns when
+  the body really grants an Inspector identity plus at least one fact row: the
+  list keeps at least 44 cells, a two-cell gap, and a right Inspector of at
+  least 34 cells (55% left, capped so both minimums hold). Below `80` columns or
+  `12` rows it is one column. From `120` columns the Inspector may paint two
+  complete facts per row; below that every fact keeps its own full-width
+  label/value rows. The Inspector identity is fixed; its fact body scrolls
+  independently with the wheel and never moves the list selection or keyboard
+  focus. The other right-pane branches keep their existing Folder/New/Add/
+  Show-more facts and are inert to the wheel. The Reader and the full-width
+  Inspector are the exceptions: in every layout they take the whole body width
+  and paint no Browse column or right pane. Frame-level facts (search editor,
+  status and Host error lines) span the full width; the Esc action bar is
+  always the last physical row, and a short frame withholds activation instead
+  of opening a row it did not paint. The inline Add editor keeps the FULL body
+  width while it owns the keyboard (its status/error lines are never squeezed
+  into a list column); Tab never changes the Workspace cursor and `Esc` cancels
+  back to the tree.
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
   the REAL painted cell ranges of every tree row plus the Folder disclosure,
   search results and the physical Action Bar's action segments. A click acts
@@ -411,12 +440,18 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   Resume is the guarded `Enter` verb and the Current row's `Enter` is its Return.
   The ONE physical Action Bar is
   pointer-capable for its complete painted `Verb [Key]` segments only
-  (`Return [Enter]`, `Open [Enter]`, `Read [Space]`, `Close [Esc]`, `Back [Esc]`,
-  `Results [Enter]`, `Verify [Enter]`, `Cancel [Esc]`, and the selected row's
-  real Enter verb); each runs the existing method (`resumeSelected`,
-  `openReader`, `handleEscape`, `handleSearchInput`, `handleDirectorySubmit`,
+  (`Return [Enter]`, `Open [Enter]`, `Read [Space]`, `Inspect [F2]`,
+  `Close [Esc]`, `Back [Esc]`, `Results [Enter]`, `Verify [Enter]`,
+  `Cancel [Esc]`, and the selected row's real Enter verb); each runs the
+  existing method (`resumeSelected`, `openReader`, `openInspector`,
+  `handleEscape`, `handleSearchInput`, `handleDirectorySubmit`,
   `handleDirectoryCancel`, `activateSelectedBrowseRow`) and never starts a
-  second navigation state machine. The Reader pane paints NO local action line:
+  second navigation state machine. A painted selected ordinary Session row
+  advertises the four core segments `Open`/`Return`, `Read [Space]`,
+  `Inspect [F2]`, `Close [Esc]` (plus `Move`/`/ search`/`Tab` hints where they
+  fit); whole-segment drop is by ascending priority, so the compact four
+  survive at 44 columns and the `Close` verb survives alone at the shortest
+  legal bar. The Reader pane paints NO local action line:
   the global bar is its only navigation row, and `Back [Esc]` is the only
   Reader action; the Reader never paints `Open [Enter]` or `Return [Enter]`. A press records the LIVE terminal grant beside the frame
   revision, so a resize that has not repainted yet also drops the gesture. A
@@ -426,16 +461,19 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   the ordinary Browse typed selection over the painted list viewport (painted
   rows and their trailing blank), the Search result selection over the real
   painted result rows (a wheel there moves focus from the Search editor to that
-  result list), and the Reader body over its actual painted Markdown rows.
-  It uses the fork's already-computed signed line count — the Wheel Lines
+  result list), the Reader body over its actual painted Markdown rows, and the
+  selected Session Inspector body over its own fixed-identity scroll region.
+  The inline Inspector wheel leaves the list keyboard focus and typed selection
+  untouched; the full-width Inspector wheel scrolls its own body only. It uses
+  the fork's already-computed signed line count — the Wheel Lines
   setting and the Alt acceleration are never applied a second time — and only
   acts on zones derived from the LAST painted frame and its live terminal
   grant. Header, Reader context, status, the Search Input, the column gap, the
-  ordinary read-only Preview, the Action Bar and the inline Host-directory
-  editor are inert; a wheel never activates, resumes, queries, expands or writes. The
-  leased root consumes every wheel, so an inert wheel never scrolls the
-  background Transcript; a real navigation hit retires an old press while an
-  inert wheel leaves a legal press intact.
+  other right-pane branches, the Action Bar and the inline Host-directory
+  editor are inert; a wheel never activates, resumes, queries, expands or
+  writes. The leased root consumes every wheel, so an inert wheel never scrolls
+  the background Transcript; a real navigation hit retires an old press while
+  an inert wheel leaves a legal press intact.
 - **One lifecycle.** Each open keeps exactly one Workspace follow, one roster
   read owner, one incremental Activity observation and one fullscreen lease. The
   close path aborts list/search, disposes the observation and the follow once,
@@ -451,10 +489,13 @@ visible tree), `buildSessionWorkspaceView` (the ONE pure classifier),
 `SessionBrowserReadOwner`, `SessionWorkspaceFactsPort` and the Client-root
 forwarded-answer eligibility view; sink: the leased fullscreen screen.
 
-Must-not: add a second Session roster, a second Activity or Session-Markdown
-reader, a Host pending store, a Workspace registry or a persisted Workspace
-table, re-filter Host search results, infer membership from a cwd, treat
-`attention` as answer authority, expose an answer form in the Reader, give a row
-a hit region the frame did not paint, read or prefetch a transcript before the
-explicit Space/Read gesture, retain the Markdown after the Reader closes, or
-treat an accepted Resume intent as a committed switch.
+Must-not: add a second Session roster, a second Activity, Session-Markdown or
+Inspector reader, a Host pending store, a Workspace registry or a persisted
+Workspace table, re-filter Host search results, infer membership from a cwd,
+treat `attention` as answer authority, expose an answer form in the Reader,
+give a row a hit region the frame did not paint, read or prefetch a transcript
+before the explicit Space/Read gesture, retain the Markdown after the Reader
+closes, treat an accepted Resume intent as a committed switch, treat the
+Inspector (inline or full page) as a write/Resume authority, let its wheel
+change the list selection or focus, or open Inspect from an unpainted/forbidden
+target.

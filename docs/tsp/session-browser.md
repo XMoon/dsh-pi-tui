@@ -103,26 +103,45 @@ production default; TSP keeps the experimental opt-in described in
   fact group, control or page exists. The label is a statement, never a veto: the
   normal Resume/open path stays, and the official Host `Session.open` owns any
   migration it performs.
-- Details is one read-only native Overlay Reader. Back or Esc returns to the same Picker and retains query/selection. Each reading owns a distinct Reader/
-  body/scroll identity; no Resume action is offered from Details.
+- Details is one read-only native Overlay Reader. Back or Esc returns to the same Picker and retains query/selection. Each OPEN reading owns a distinct Reader/
+  body/scroll identity; a same-id data-only Inspector refresh keeps that SAME
+  identity (it opens no second page), while a real page/selection change opens a
+  new reading. No Resume action is offered from Details.
 - The native Browser reports its typed Session-row selection (Browse and
-  Search-results rows only; a Folder, Show more, Details page, directory editor
-  or suspended Browser reports none) to the SAME shared
+  Search-results rows, plus the SAME admitted id while its read-only Details
+  reading is painted; a Folder, Show more, directory editor or suspended
+  Browser reports none) to the SAME shared
   [`SessionBrowserReadOwner` selected-Session Inspector seam](../architecture/host-client.md#selected-session-inspector-exact-projection-read).
   The owner owns the debounce, exact read, fences and teardown; TSP performs no
   read of its own and paints no Inspector data of its own. It reports Browse
   versus Search from the actual query-mode layer. An Inspector-only publication
-  stores detached data without advancing the native revision, invalidating a
-  painted action token or requesting a rerender; normal semantic snapshots keep
-  the existing action admission. The Details Reader, Action Bar, query and
-  Resume semantics are unchanged.
-- Details presents the Identity, Activity, Lineage and Configuration groups in
-  reading order. Where the pane negotiated the `kv` kind each of those groups is
-  one aligned grid; where it did not, the same facts are the original muted-label
-  line over the complete value line. The layout is a display choice only: the fact
-  set, order, fallback wording and `State` value are identical either way, a value
-  reaches the client complete (the client owns any wrapping), and the absence of
-  `kv` never removes a fact, refuses the Reader or changes any other behavior.
+  stores detached data and repaints ONLY a visible consumer (the selected
+  Picker preview child or the Details reading) without advancing the native
+  revision, invalidating a painted action token, rebinding the source or
+  normalizing the selection; a suspended/hidden Browser keeps the data without a
+  repaint. Normal semantic snapshots keep the existing action admission. The
+  Details Reader, Action Bar, query and Resume semantics are unchanged.
+- The selected Session's native side preview is a Picker CHILD subtree, never a
+  `PickerItem` payload: identity/status plus a short read summary (Model /
+  Effort / Preset, Context, Turns/Steps, Total/Cache hit, freshness). The client
+  owns `side`/`below`/`hide` placement, so no pixel position is promised. A
+  non-Session selection paints a quiet empty preview and never the previous
+  Session's facts. The complete facts always remain one `Details` step away.
+- Details presents the shared display groups in reading order: Identity, Whole
+  session, Activity, Token usage, Performance, Workspace & dates, Goal & todo,
+  Lineage and, only for the accepted Search result, the Host search excerpt.
+  The groups come from the SAME pure display projection the PiTUI Inspector
+  consumes; the exact Inspector cut, roster, Activity fact, Workspace membership
+  and accepted excerpt remain their own authorities. A missing cut keeps the
+  roster/Activity/Workspace/Lineage facts and marks the cut-owned values
+  unknown; legal zero, null goal and null todo record stay distinct from
+  `Unknown`. Where the pane negotiated the `kv` kind each short-fact group is one
+  aligned grid; where it did not, the same facts are the original muted-label
+  line over the complete value line. The layout is a display choice only: the
+  fact set, order, fallback wording and `State` value are identical either way,
+  a value reaches the client complete (the client owns any wrapping), and the
+  absence of `kv` never removes a fact, refuses the Reader or changes any other
+  behavior.
 - A Host search excerpt is not a grid row at any capability: it keeps its
   `Host search excerpt · <source>` head, its `Matching content` label and one
   complete wrapped text value. With no excerpt the group does not exist.
@@ -229,7 +248,11 @@ physical G8 acceptance. The unreadable disabled-Resume hover is an
 Owner-accepted client limitation; G8 visual acceptance is not claimed as complete.
 Physical GUI, IME, wheel, the real OS window's theme/chrome and physical
 PageUp/PageDown are outside this contract and are not claimed. Remote TSP
-Resume is not claimed; no Remote L5/L6 success is established.
+Resume is not claimed; no Remote L5/L6 success is established. A same-id
+data-only refresh keeps the reading identity; the exact native viewport position
+after a content change is not a contract (Owner-scoped deferral for a later TSP
+UX specialisation). A refresh that makes the page unscrollable, breaks Back,
+shows the wrong Session or lets a stale event act remains a correctness defect.
 
 ## Regression lanes
 

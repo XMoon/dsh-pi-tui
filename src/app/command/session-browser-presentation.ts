@@ -60,10 +60,10 @@ export interface SessionInspectorSelection {
   readonly origin: 'browse' | 'search'
 }
 
-/** The ONE selected-Session Inspector state of an open renderer. PR2 delivers
- *  the data/state only (no paint); a consumer must match `sessionId` against
- *  the CURRENT typed selection before presenting it, and an old exact cut is
- *  `refreshing` rather than a current-live claim. */
+/** The ONE selected-Session Inspector state of an open renderer. A presenter
+ *  must match `sessionId` against the CURRENT typed selection before presenting
+ *  it; an old exact cut is `refreshing` rather than a current-live claim. The
+ *  data is display-only: it never supplies write, Resume or lifecycle authority. */
 export type SessionInspectorSnapshot =
   | { readonly sessionId: string; readonly state: 'loading' }
   | { readonly sessionId: string; readonly state: 'ready'; readonly data: SessionInspectorData; readonly refreshing: boolean }
@@ -139,10 +139,11 @@ export interface SessionBrowserPanelRequest {
    *  completion; an absent callback is not wrapped into a fake reader. The
    *  TSP native presentation never receives it. */
   readonly onListDirectory?: HostDirectoryBrowsePort['list']
-  /** Session Workspace PR2: the renderer's ONE real typed selection report,
-   *  emitted from a committed frame's painted rows only, with Browse/Search
-   *  provenance. `undefined` clears. Optional solely for presenters/fixtures
-   *  without the seam; both production renderers forward it. */
+  /** The renderer's ONE real typed selection report, emitted from a committed
+   *  frame's painted rows only, with Browse/Search provenance. The SAME admitted
+   *  id stays reported while its read-only Inspector identity page is painted;
+   *  `undefined` clears. Optional solely for presenters/fixtures without the
+   *  seam; both production renderers forward it. */
   readonly onInspectorSelection?: (selection: SessionInspectorSelection | undefined) => void
   readonly onClose: () => void
 }
@@ -151,8 +152,9 @@ export interface SessionBrowserPanelHandle {
   isDisposed(): boolean
   /** Ordinary snapshots update results; only this one-shot option may seed
    *  editor text. `inspectorOnly` marks a publication whose ONLY changed field
-   *  is the selected-Session Inspector data (PR2 paints none): presenters store
-   *  it but must not advance native action/target revision or request a render. */
+   *  is the selected-Session Inspector data: a presenter with a visible consumer
+   *  repaints presentation-only (no semantic target/action revision); a presenter
+   *  with nothing visibly affected need not render. */
   setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: {
     readonly initialQuery?: string
     readonly inspectorOnly?: boolean
