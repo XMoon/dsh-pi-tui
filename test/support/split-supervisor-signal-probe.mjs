@@ -1758,6 +1758,9 @@ try {
           const current = latestProcessReceipt(tmpBase, runId)
           return current?.phase === 'NOT_QUIESCED'
             && current?.publicOwnershipRefused?.compensationCompleted === true
+            && current?.cleanup?.completedAt !== undefined
+            && current?.cleanup?.hostSeatFree === true
+            && current?.cleanup?.qualificationSeatFree === true
             ? current
             : undefined
         }, 'public ownership refusal compensation terminal', Math.max(1, deadline - Date.now()))
