@@ -2649,16 +2649,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           return false
         }
         if (message === undefined) return false
-        // A file-bearing live message is bounded BEFORE its Store reads; an
-        // oversize event loses this ONE read-only message (never the View).
-        try {
-          assertFileBudget(filesOf(message.content), claim.maxOutputFrameBytes)
-        } catch (error) {
-          this.reportProjectionFailure(error)
-          return false
-        }
-        await this.projectSessionMessage(claim, access, replay, message)
-        return true
+        // Lineage, the legalization budget and the association all live in the
+        // one shared session-message path: an unproven author must NOT be
+        // charged (or diagnosed) for a file the Client can never be shown.
+        return await this.projectSessionMessage(claim, access, replay, message)
       }
       default:
         return false
@@ -2686,13 +2680,25 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     replay: ViewReplay | undefined,
     message: AcpHistoryAgentMessage,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const lineage = await this.sessionMessageLineage(claim, access, message.senderSessionId)
     if (lineage === 'unproven') {
       this.diag.warn('local-acp.projection.session-message-unverified', { key: 'session_message' })
-      return
+      return false
     }
-    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return
+    // A PROVEN inter-agent message is ONE ACP update: charge its files after
+    // lineage is real and before the child association or any Store read. An
+    // unproven author therefore costs no budget, diagnostic or read.
+    try {
+      assertFileBudget(filesOf(message.content), claim.maxOutputFrameBytes, true)
+    } catch (error) {
+      // Canonical history is fail-closed; a live projection only loses this
+      // one read-only message and keeps the View.
+      if (replay !== undefined) throw error
+      this.reportProjectionFailure(error)
+      return false
+    }
+    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return false
     const blocks: AcpWireContentBlock[] = []
     for (const part of message.content) {
       if (part.type === 'text') {
@@ -2711,10 +2717,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // complete replay. A live projection only loses this one message.
         if (replay !== undefined) throw error
         this.diag.warn('local-acp.projection.attachment-failed', { key: 'session_message' })
-        return
+        return false
       }
     }
-    if (blocks.length === 0) return
+    if (blocks.length === 0) return false
     await this.sendProjection(claim, {
       sessionUpdate: 'session_message',
       messageId: message.messageId,
@@ -2722,6 +2728,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       recipientSessionId: claim.sessionId,
       content: blocks,
     })
+    return true
   }
 
   /**
@@ -6104,9 +6111,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return undefined
     }
     // ONE event equals ONE materialization budget, checked synchronously
-    // before this event's Store reads are queued.
+    // before this event's Store reads are queued. Each committed assistant
+    // block is its own ACP chunk, so only each blob (not their sum) must fit
+    // one JS string.
     try {
-      assertFileBudget(files, claim.maxOutputFrameBytes)
+      assertFileBudget(files, claim.maxOutputFrameBytes, false)
     } catch {
       this.failPrompt(claim, flight, outputFrameTooLarge())
       return undefined
@@ -6232,10 +6241,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       this.failPrompt(claim, flight, unsupportedContent())
       return
     }
-    // The whole tool result is ONE event for the materialization budget and is
-    // refused BEFORE any of its Store reads starts.
+    // The whole tool result is ONE ACP update for the materialization budget
+    // and is refused BEFORE any of its Store reads starts; its blobs must share
+    // one JSON string as well as fit the frame budget.
     try {
-      assertFileBudget(files, claim.maxOutputFrameBytes)
+      assertFileBudget(files, claim.maxOutputFrameBytes, true)
     } catch {
       this.failPrompt(claim, flight, outputFrameTooLarge())
       return
@@ -6734,7 +6744,7 @@ function attachmentReadFailed(): LocalAcpViewError {
 function outputFrameTooLarge(): LocalAcpViewError {
   return promptError(
     'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
-    'a committed event file payload exceeds the connection output frame budget',
+    'a committed event file payload cannot be represented in one output frame',
     JSONRPC_INTERNAL_ERROR,
   )
 }
@@ -6765,7 +6775,7 @@ async function readVerifiedFileBytes(
   stream: AsyncIterable<Uint8Array>,
   ref: AcpStoredFileRef,
   signal: AbortSignal,
-): Promise<Uint8Array> {
+): Promise<Buffer> {
   signal.throwIfAborted()
   const chunks: Uint8Array[] = []
   let total = 0
@@ -6786,12 +6796,13 @@ async function readVerifiedFileBytes(
  * is never a Host path, a download URL or a token, and it carries no guessed
  * MIME type because the Store's generic file has none.
  */
-function fileResourceBlock(ref: AcpStoredFileRef, bytes: Uint8Array): AcpWireContentBlock {
+function fileResourceBlock(ref: AcpStoredFileRef, bytes: Buffer): AcpWireContentBlock {
   return {
     type: 'resource',
     resource: {
       uri: `dsh-attachment://sha256/${ref.attachmentId.slice('sha256:'.length)}/${encodeURIComponent(ref.name)}`,
-      blob: Buffer.from(bytes).toString('base64'),
+      // The concatenated verified Buffer IS the Base64 source: no extra copy.
+      blob: bytes.toString('base64'),
     },
   }
 }

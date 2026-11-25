@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { constants as bufferConstants } from 'node:buffer'
 import test from 'node:test'
 import {
   ACP_SESSION_LIST_CURSOR_MAX,
@@ -517,4 +518,52 @@ test('the per-event file budget is exact, counts every occurrence and requires a
     projectSessionHistory([assistantEvent(0, 'a1', [{ type: 'text', text: 'no files' }])], NO_CAPABILITIES),
     [{ kind: 'update', update: { sessionUpdate: 'agent_message_chunk', messageId: 'a1', content: { type: 'text', text: 'no files' } } }],
   )
+})
+
+test('PR4D R1: an encoded blob above the runtime single-string capacity is refused before any read', () => {
+  // 400 MiB has a canonical Base64 length of 559,240,536, above V8's
+  // MAX_STRING_LENGTH (536,870,888) but below the image-derived frame budget.
+  // Nothing is allocated: this is the declared metadata preflight.
+  const declaredBytes = 400 * 1024 * 1024
+  assert.ok(4 * Math.ceil(declaredBytes / 3) > bufferConstants.MAX_STRING_LENGTH)
+  assert.throws(
+    () => projectSessionHistory(
+      [assistantEvent(0, 'a-big', [fileBlock(FILE_ID, 'big.bin', declaredBytes)])],
+      NO_CAPABILITIES, '', 2_000_000_000,
+    ),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+})
+
+test('PR4D R1: one single-frame tool result charges the SUM of its representable blobs', () => {
+  // Each blob alone fits one JS string; a tool result puts both in ONE update.
+  const each = 300_000_000
+  assert.ok(4 * Math.ceil(each / 3) < bufferConstants.MAX_STRING_LENGTH)
+  const blocks = [fileBlock(FILE_ID, 'one.bin', each), fileBlock(FILE_ID_B, 'two.bin', each)]
+  // Separate assistant chunks are separate frames: each blob is representable.
+  assert.equal(projectSessionHistory(
+    [assistantEvent(0, 'a-two', blocks)], NO_CAPABILITIES, '', 2_000_000_000,
+  ).length, 2)
+  // The tool result serializes both blobs into ONE string and must be refused.
+  assert.throws(
+    () => projectSessionHistory(
+      [{ seq: 0, type: 'tool/result', data: { message: { toolCallId: 'c1', isError: false, content: blocks } } }],
+      NO_CAPABILITIES, '', 2_000_000_000,
+    ),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+})
+
+test('PR4D R2: an inter-agent file is never charged before official lineage is proven', () => {
+  // The pure conversion cannot prove lineage, so it must not charge the file:
+  // the View does that after the official header proof. A forged author with a
+  // huge file therefore yields a structural unit, not a size rejection.
+  const declaredBytes = 400 * 1024 * 1024
+  const units = projectSessionHistory(
+    [userEvent(0, 'am-big', { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, [
+      fileBlock(FILE_ID, 'big.bin', declaredBytes),
+    ])],
+    ALL_CAPABILITIES, '', 8,
+  )
+  assert.deepEqual(units.map(unit => unit.kind), ['session-message'])
 })

@@ -1479,7 +1479,7 @@ const SDK_INTEROP_OUTPUT_EVIDENCE = Object.freeze([
   'acpErrorCode', 'tuiFile', 'assistantFileTurn', 'assistantFileMessageId',
   'assistantFileAttachmentId', 'assistantFileSha256', 'assistantFileBytes',
   'toolFileTurn', 'toolFileCallId', 'toolFileAttachmentId', 'toolFileSha256',
-  'toolFileBytes', 'loadFileResourceCount', 'missingFileCode',
+  'toolFileBytes', 'loadFileResourceCount', 'loadFileSha256', 'missingFileCode',
   'missingFileAcpErrorCode', 'healthyTurn', 'hostIdentityKept',
 ])
 
@@ -1569,6 +1569,7 @@ function sdkInteropVerdict() {
         toolFileSha256: 'd'.repeat(64),
         toolFileBytes: 73_739,
         loadFileResourceCount: 3,
+        loadFileSha256: ['f'.repeat(64), 'e'.repeat(64), 'd'.repeat(64)],
         missingFileCode: 'ATTACHMENT_NOT_FOUND',
         missingFileAcpErrorCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
         healthyTurn: 16,
@@ -1595,6 +1596,8 @@ test('the ACP SDK content-interoperability verdict rejects every unproved outcom
     assertSdkInteropRejected(result => { delete result[field] })
     assertSdkInteropRejected(result => { result[field] = false })
   }
+  assertSdkInteropRejected(result => { result.evidence.output.loadFileSha256 = [] })
+  assertSdkInteropRejected(result => { result.evidence.output.loadFileSha256[1] = 'a'.repeat(64) })
   assertSdkInteropRejected(result => { delete result.status })
   assertSdkInteropRejected(result => { result.status = 'NOT_VERIFIED' })
   assertSdkInteropRejected(result => { result.status = 'FAIL' })

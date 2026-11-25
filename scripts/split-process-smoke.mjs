@@ -962,6 +962,12 @@ export function assertSelectedVerdict(caseId, result) {
       && Number.isInteger(output?.toolFileBytes)
       && output.toolFileBytes > 0
       && output?.loadFileResourceCount === 3
+      && Array.isArray(output?.loadFileSha256)
+      && output.loadFileSha256.length === 3
+      && output.loadFileSha256.every(isDigest)
+      && output.loadFileSha256[0] === output.tuiFile.sha256
+      && output.loadFileSha256[1] === output.assistantFileSha256
+      && output.loadFileSha256[2] === output.toolFileSha256
       && output?.missingFileCode === 'ATTACHMENT_NOT_FOUND'
       && output?.missingFileAcpErrorCode === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
       && isTurn(output?.healthyTurn)

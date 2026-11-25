@@ -403,12 +403,22 @@ profile's independent `autoStart` preference enables it (see below).
       ONE committed event, the adapter sums the canonical Base64 length
       (`4 * ceil(bytes / 3)`) of every file occurrence in wire order — a repeated
       reference costs its payload again — and requires the total to fit the
-      connection's frozen single-frame output budget. An event above that budget,
-      or a file-bearing event on a connection/View without a valid budget, is
-      refused as `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE` before any Store read, never
-      read as an unbounded stream and never confused with malformed/unsupported
-      content. The budget is checked per event, not per chunk; a text-only event
-      does not need it.
+      connection's frozen single-frame output budget. It also enforces the
+      runtime representation boundary: each declared file must fit a Node Buffer,
+      each canonical Base64 blob must fit one JS string
+      (`buffer.constants.MAX_STRING_LENGTH`), and a tool result or negotiated
+      inter-agent message — ONE ACP update — must fit ALL its blobs in one string;
+      separate message-chunk events are charged per blob and are not summed. An
+      event above the frame budget, above the runtime representation boundary, or
+      on a connection/View without a valid budget is refused as
+      `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE` before any Store read, never read as an
+      unbounded stream and never confused with malformed/unsupported content. The
+      budget is checked per event, not per chunk; a text-only event does not need
+      it. For a negotiated inter-agent `user/message`, this check runs in the
+      shared session-message path only AFTER official header lineage is proven and
+      BEFORE the child association and the first Store read: an unproven author
+      produces no output, no size diagnostic and no read regardless of the file
+      length.
     - **Unsupported committed blocks.** A committed block type with no standard
       ACP projection (e.g. `audio`/`tool-addition`) still fails
       `LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT` instead of being silently dropped.
@@ -468,13 +478,14 @@ profile's independent `autoStart` preference enables it (see below).
     cap is written in 64 KiB chunks under the same unwritten-backlog bound,
     waiting at most 30 seconds per kernel drain.
     - **The same budget bounds one event's generic files.** The connection's
-      single-frame budget is also the ONLY input to the per-event file
-      materialization check above; the file Base64 sum is compared against it
-      BEFORE the first Store read. A text-only or image-only connection keeps
-      its existing behavior; a file-bearing event with no valid frozen budget is
-      refused rather than read. This is not a second file size policy: the
-      official Attachment Store remains the authority for what may be stored,
-      and the adapter never shrinks, drops or re-encodes a committed file.
+      single-frame budget and the runtime string/Buffer representation boundary
+      are the ONLY inputs to the per-event file materialization check above; the
+      file Base64 sum and each encoded blob are checked BEFORE the first Store
+      read. A text-only or image-only connection keeps its existing behavior; a
+      file-bearing event with no valid frozen budget is refused rather than read.
+      This is not a second file size policy: the official Attachment Store
+      remains the authority for what may be stored, and the adapter never
+      shrinks, drops or re-encodes a committed file.
     - **Accepted upstream limitation.** The official localization may store a
       normalized image whose bytes exceed both `maxImageBytes` and the
       normalization byte target (when every quality-ladder output misses the

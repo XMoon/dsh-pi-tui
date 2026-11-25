@@ -356,22 +356,29 @@ async function createPo4cOutputProbe(ctx, record) {
 async function createPo4dFileProbe(ctx, record) {
   const store = async (name, seed) => {
     const data = deterministicFileBytes(seed)
+    // The source digest is computed from the bytes this fixture OWNS, before
+    // the Store read. The readback digest must equal it independently, so the
+    // later wire assertion compares source bytes to saved/read bytes instead of
+    // trusting a digest that the readback alone produced.
+    const sourceSha256 = createHash('sha256').update(data).digest('hex')
     const stored = await ctx.attachments.saveFile({ data, name })
     const chunks = []
     for await (const chunk of ctx.attachments.readFileStream(stored)) chunks.push(Buffer.from(chunk))
     const verified = Buffer.concat(chunks)
-    const digest = createHash('sha256').update(verified).digest('hex')
-    if (stored.attachmentId !== `sha256:${digest}` || stored.bytes !== verified.byteLength
-      || verified.byteLength !== data.byteLength) {
+    const readSha256 = createHash('sha256').update(verified).digest('hex')
+    if (stored.attachmentId !== `sha256:${sourceSha256}` || stored.bytes !== verified.byteLength
+      || verified.byteLength !== data.byteLength || readSha256 !== sourceSha256) {
       throw new Error(`m4-c1-host-work: PO-4D stored file ${name} did not verify against its durable reference`)
     }
     record('po4d-file-stored', {
       name: stored.name,
       attachmentId: stored.attachmentId,
       bytes: stored.bytes,
-      sha256: digest,
+      sha256: sourceSha256,
+      sourceSha256,
+      readSha256,
     })
-    return { attachmentId: stored.attachmentId, name: stored.name, bytes: stored.bytes, sha256: digest }
+    return { attachmentId: stored.attachmentId, name: stored.name, bytes: stored.bytes, sha256: sourceSha256 }
   }
   const assistant = await store('PR4D 附件 assistant.bin', 11)
   const tool = await store('PR4D tool data.bin', 29)

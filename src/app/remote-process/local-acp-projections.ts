@@ -24,6 +24,7 @@
  * @module app/remote-process/local-acp-projections
  */
 
+import { constants as bufferConstants } from 'node:buffer'
 import type { PlanEntry, PlanEntryStatus, SessionUpdate } from '@agentclientprotocol/sdk'
 import type { AcpStoredFileRef, AcpStoredImageRef } from './local-acp-session-view.ts'
 
@@ -254,6 +255,7 @@ function projectHistoryEvent(
   maxOutputFrameBytes: number | undefined,
 ): void {
   const files: AcpStoredFileRef[] = []
+  const firstUnit = units.length
   switch (event.type) {
     case 'user/message':
       projectUserMessage(event.data, capabilities, units, files)
@@ -294,8 +296,12 @@ function projectHistoryEvent(
       break
   }
   // ONE event equals ONE budget: every file occurrence of this event, in wire
-  // order, counts (a repeated reference is two payload occurrences).
-  assertFileBudget(files, maxOutputFrameBytes)
+  // order, counts (a repeated reference is two payload occurrences). Tool
+  // results and inter-agent messages become ONE ACP update, so their blobs must
+  // also fit one JS string; message-chunk events remain separate frames.
+  const singleFrame = units.slice(firstUnit).some(unit =>
+    unit.kind === 'tool-result' || unit.kind === 'session-message')
+  assertFileBudget(files, maxOutputFrameBytes, singleFrame)
 }
 
 /**
@@ -327,9 +333,11 @@ function projectUserMessage(
   if (!capabilities.subagents) return
   const agentMessage = durableAgentMessageOf(data)
   if (agentMessage === undefined) return
-  for (const part of agentMessage.content) {
-    if (part.type === 'file') files.push(part.ref)
-  }
+  // An inter-agent message's files are NOT charged here: the View first has to
+  // prove the author from official headers. An unproven message must produce
+  // no diagnostic and no Store read regardless of its file size; a proven one
+  // is charged by the shared session-message path before its association and
+  // first read.
   units.push({ kind: 'session-message', message: agentMessage })
 }
 
@@ -887,13 +895,22 @@ function fileRef(block: unknown): AcpStoredFileRef {
  * overflows. A file-bearing event without a valid positive budget is refused
  * instead of reading an unbounded stream.
  *
+ * The budget alone is not sufficient: it derives from the official image
+ * limits and may exceed Node's single-string capacity. Every raw Buffer and
+ * every encoded blob must be representable, and a `singleFrame` event (one
+ * tool result or one inter-agent message) serializes all its blobs into ONE
+ * JSON string, so their total must be representable too. Separate
+ * message-chunk frames are checked per blob and do not sum.
+ *
  * @param files - every file occurrence of one event, in wire order.
  * @param maxOutputFrameBytes - the connection's frozen frame budget.
+ * @param singleFrame - whether this event's file blobs share one ACP update.
  * @throws {AcpProjectionError} with `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`.
  */
 export function assertFileBudget(
   files: readonly AcpStoredFileRef[],
   maxOutputFrameBytes: number | undefined,
+  singleFrame: boolean,
 ): void {
   if (files.length === 0) return
   if (maxOutputFrameBytes === undefined
@@ -901,11 +918,18 @@ export function assertFileBudget(
     throw frameTooLarge()
   }
   let remaining = maxOutputFrameBytes
+  let encodedTotal = 0
   for (const file of files) {
     const encoded = 4 * Math.ceil(file.bytes / 3)
-    if (!Number.isSafeInteger(encoded) || encoded > remaining) throw frameTooLarge()
+    if (!Number.isSafeInteger(encoded) || encoded > remaining
+      || file.bytes > bufferConstants.MAX_LENGTH
+      || encoded > bufferConstants.MAX_STRING_LENGTH) {
+      throw frameTooLarge()
+    }
     remaining -= encoded
+    encodedTotal += encoded
   }
+  if (singleFrame && encodedTotal > bufferConstants.MAX_STRING_LENGTH) throw frameTooLarge()
 }
 
 /** Preserve malformed model tool arguments as opaque input instead of dropping them. */
@@ -929,6 +953,6 @@ function unsupportedBlock(): AcpProjectionError {
 function frameTooLarge(): AcpProjectionError {
   return new AcpProjectionError(
     'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
-    'a committed event file payload exceeds the connection output frame budget',
+    'a committed event file payload cannot be represented in one output frame',
   )
 }

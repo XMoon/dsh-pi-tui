@@ -668,6 +668,9 @@ async function outputScene(context) {
     requireFact(assistantFileProof.attachmentId === assistantFileRef.attachmentId
       && assistantFileProof.bytes === assistantFileRef.bytes,
     'the assistant file block carries the exact Store-committed reference')
+    requireFact(assistantFileProof.sha256 === assistantFileProof.sourceSha256
+      && assistantFileProof.readSha256 === assistantFileProof.sourceSha256,
+    'the assistant Store readback digest equals the fixture-owned source bytes')
     requireFact(assistantFileFlight.updates.length === 3
       && assistantFileFlight.updates.every(params => params.update.sessionUpdate === 'agent_message_chunk'),
     'two streamed text deltas plus one durable file residual')
@@ -703,6 +706,9 @@ async function outputScene(context) {
     const toolFileProof = await fileStoreProof(toolFileRef.name)
     requireFact(toolFileProof.attachmentId === toolFileRef.attachmentId && toolFileProof.bytes === toolFileRef.bytes,
       'the tool file block carries the exact Store-committed reference')
+    requireFact(toolFileProof.sha256 === toolFileProof.sourceSha256
+      && toolFileProof.readSha256 === toolFileProof.sourceSha256,
+    'the tool Store readback digest equals the fixture-owned source bytes')
     const toolFileUpdate = toolFileFlight.updates[1].update
     requireFact(toolFileUpdate.toolCallId === toolFileCall.callId && toolFileUpdate.status === 'completed'
       && toolFileUpdate.content.length === 3, 'complete successful tool update')
@@ -738,16 +744,22 @@ async function outputScene(context) {
     const loadTui = resourceUpdates[0].update
     requireFact(loadTui.sessionUpdate === 'user_message_chunk' && loadTui.messageId === tuiFile.messageId,
       'the load replays the real TUI-uploaded user file under its durable message id')
-    assertFileResource(loadTui.content, tuiFile, 'load TUI generic file')
+    const loadTuiBytes = assertFileResource(loadTui.content, tuiFile, 'load TUI generic file')
     const loadAssistant = resourceUpdates[1].update
     requireFact(loadAssistant.sessionUpdate === 'agent_message_chunk'
       && loadAssistant.messageId === assistantFileMessage.id,
     'the load replays the assistant file under its durable message id')
-    assertFileResource(loadAssistant.content, assistantFileExpected, 'load assistant generic file')
+    const loadAssistantBytes = assertFileResource(loadAssistant.content, assistantFileExpected, 'load assistant generic file')
     const loadTool = resourceUpdates[2].update
     requireFact(loadTool.sessionUpdate === 'tool_call_update' && loadTool.toolCallId === toolFileCall.callId,
       'the load replays the tool file under its real call id')
-    assertFileResource(loadTool.content[1].content, toolFileExpected, 'load tool generic file')
+    const loadToolBytes = assertFileResource(loadTool.content[1].content, toolFileExpected, 'load tool generic file')
+    // The order and occurrence are measured on the ACTUAL decoded content of
+    // the SDK updates, not just on the number of outer update objects.
+    const loadFileSha256 = [hash(loadTuiBytes), hash(loadAssistantBytes), hash(loadToolBytes)]
+    requireFact(isDeepStrictEqual(loadFileSha256, [
+      tuiFile.sha256, assistantFileExpected.sha256, toolFileExpected.sha256,
+    ]), 'load replay order and bytes equal the three durable source files')
 
     const missing = await run('po4c:missing-image:v1', 'missing verified Store object', 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED')
     const missingRef = imageRef(assistantMessage(missing).content[0])
@@ -778,7 +790,7 @@ async function outputScene(context) {
       toolFileTurn: toolFileFlight.turn, toolFileCallId: toolFileCall.callId,
       toolFileAttachmentId: toolFileProof.attachmentId, toolFileSha256: toolFileProof.sha256,
       toolFileBytes: toolFileProof.bytes,
-      loadFileResourceCount: resourceUpdates.length, loadFileReplayVerified: true,
+      loadFileResourceCount: resourceUpdates.length, loadFileSha256, loadFileReplayVerified: true,
       missingObjectCode: missingProof.code, missingFileCode: missingFileProof.code,
       acpErrorCode: missing.rejection.data.code, missingFileAcpErrorCode: missingFile.rejection.data.code,
       healthyTurn: healthy.turn,
