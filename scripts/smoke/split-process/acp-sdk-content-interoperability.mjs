@@ -249,6 +249,90 @@ function imageRef(block) {
   return block.attachment
 }
 
+/** Deterministic verbatim file bytes: NUL and non-UTF8 for every seed. */
+function deterministicFileBytes(seed, length = 70 * 1024 + 13) {
+  const bytes = Buffer.alloc(length)
+  for (let index = 0; index < length; index += 1) bytes[index] = (index * 37 + seed) % 256
+  return bytes
+}
+
+/** Wait until the PAINTED composer box text contains `needle`. */
+async function waitForComposer(tui, needle, label, timeoutMs = 30_000) {
+  const deadlineAt = Date.now() + timeoutMs
+  while (Date.now() < deadlineAt) {
+    const composer = await tui.composerText()
+    if (composer !== undefined && composer.includes(needle)) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label}: composer never contained ${needle}: ${JSON.stringify(await tui.composerText())}`)
+}
+
+/** One committed file block of a durable user message. */
+function durableFileOf(message) {
+  const file = message.content.find(block => block.type === 'file' && /^sha256:[0-9a-f]{64}$/u.test(block.attachment?.attachmentId ?? ''))
+  return file?.attachment
+}
+
+/**
+ * PR4D TUI-local intake: before any SDK View exists, a REAL TUI `/attach`
+ * uploads a Client-local deterministic binary through the official raw upload
+ * receipt and submits it with one unique marker. The durable committed
+ * user/message therefore names the real Host Store reference this load must
+ * later replay; the smoke never fabricates a Session event.
+ */
+async function primeOutputTuiFile(session) {
+  const { context, tui, sessionId } = session
+  const dir = join(context.workDir, 'sdk-output-client-files')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const bytes = deterministicFileBytes(41)
+  const digest = hash(bytes)
+  const name = 'PR4D 附件 input.bin'
+  const path = join(dir, name)
+  writeFileSync(path, bytes, { mode: 0o600 })
+  const marker = `po4d-tui-file-${String(process.pid)}`
+  const before = (hostSessionEvents(context.dshHome, sessionId) ?? []).length
+  tui.send(`/attach "${path}"`)
+  tui.send('\r')
+  await waitForComposer(tui, '[file #', 'PR4D TUI attach staged the Client-local file')
+  tui.send(` ${marker}`)
+  await waitForComposer(tui, marker, 'PR4D TUI attach marker draft')
+  tui.send('\r')
+  const durable = await waitForHostSessionEventAfter(context.dshHome, sessionId, before,
+    event => event.type === 'user/message' && event.data.source?.kind === 'user'
+      && authoredText(event.data).includes(marker) && durableFileOf(event.data) !== undefined,
+    'PR4D TUI durable user/message with an official file ref')
+  const ref = durableFileOf(durable.data)
+  requireFact(ref !== undefined, 'the durable TUI message carries the official file ref')
+  requireFact(ref.attachmentId === `sha256:${digest}` && ref.bytes === bytes.length,
+    'the durable TUI file ref is the exact uploaded bytes and size')
+  const events = hostSessionEvents(context.dshHome, sessionId)
+  const userIndex = events.findIndex((event, index) => index >= before && event.type === 'user/message'
+    && event.data.id === durable.data.id)
+  requireFact(userIndex >= before, 'the durable TUI message belongs to this prime window')
+  const turnStart = events.slice(before, userIndex).findLast(event => event.type === 'turn/start')
+  const turn = turnStart?.data.turn
+  requireFact(Number.isInteger(turn), 'the TUI file message was claimed into a real turn')
+  await waitForHostSessionEventAfter(context.dshHome, sessionId, userIndex,
+    event => event.type === 'turn/end' && event.data.turn === turn && event.data.reason.kind === 'completed',
+    'PR4D TUI file turn completes')
+  context.trace('acp-sdk/pr4d-tui-file', {
+    sessionId, messageId: durable.data.id, turn, attachmentId: ref.attachmentId, bytes: ref.bytes, sha256: digest,
+  })
+  return {
+    result: {
+      tuiFile: {
+        messageId: durable.data.id,
+        turn,
+        attachmentId: ref.attachmentId,
+        name: ref.name,
+        bytes: ref.bytes,
+        sha256: digest,
+        uri: `dsh-attachment://sha256/${digest}/${encodeURIComponent(ref.name)}`,
+      },
+    },
+  }
+}
+
 function assertImage(content, ref, probe) {
   requireFact(content.type === 'image' && typeof content.data === 'string', 'typed SDK image content')
   const bytes = Buffer.from(content.data, 'base64')
@@ -261,8 +345,21 @@ function assertImage(content, ref, probe) {
   return bytes
 }
 
+/** One standard embedded `resource` block of a typed SDK content position. */
+function assertFileResource(content, expected, label) {
+  requireFact(content?.type === 'resource' && typeof content.resource?.uri === 'string'
+    && typeof content.resource?.blob === 'string', `${label}: typed SDK embedded resource`)
+  requireFact(!('mimeType' in content.resource), `${label}: generic file carries no guessed MIME`)
+  const bytes = Buffer.from(content.resource.blob, 'base64')
+  requireFact(content.resource.blob === bytes.toString('base64'), `${label}: canonical complete file encoding`)
+  requireFact(content.resource.uri === expected.uri, `${label}: opaque URI is the exact digest and stored leaf name`)
+  requireFact(bytes.length === expected.bytes && hash(bytes) === expected.sha256,
+    `${label}: complete SDK bytes match the durable ref size and digest`)
+  return bytes
+}
+
 /** Each invocation owns one real Host, TUI, control peer and SDK connection. */
-async function runScene(context, kind, env, operation) {
+async function runScene(context, kind, env, operation, prime) {
   const input = kind === 'input'
   const scene = createC1Scene(context, { imageProbe: true, ...(input ? { markdownProbe: true } : {}) })
   const workRoot = scene.c1WorkRoot(`acp-sdk-${kind}`)
@@ -295,6 +392,11 @@ async function runScene(context, kind, env, operation) {
       && typeof record.openSessionId === 'string' && record.surfaceMounted === true && record.transport === 'connected',
     `SDK ${kind} TUI Session open`)
     const sessionId = surface.openSessionId
+    // An optional TUI-local prime turn runs BEFORE any SDK View attaches, so
+    // its durable facts are real shared-Session history rather than SDK input.
+    const primed = prime === undefined
+      ? undefined
+      : await prime({ context, scene, tui, sessionId, workRoot, workspace, identity })
     sdk = await openSdkClient(join(context.dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId))
     const initialized = await sdk.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} })
     assert.equal(initialized.protocolVersion, 1)
@@ -317,7 +419,7 @@ async function runScene(context, kind, env, operation) {
     // options; no business payload of the Session may ride along.
     requireFact(isDeepStrictEqual(Object.keys(resumed ?? {}).filter(key => key !== 'configOptions'), []),
       `resume must not carry a business payload (got ${JSON.stringify(resumed)})`)
-    const session = { context, scene, sdk, sessionId, workRoot, identity, workspace }
+    const session = { context, scene, sdk, sessionId, workRoot, identity, workspace, primed }
     result = await operation(session)
     sdk.assertWindow()
     assert.deepEqual(await sdk.request(acp.methods.agent.session.close, { sessionId }), {})
@@ -343,7 +445,7 @@ async function runScene(context, kind, env, operation) {
     await scene.assertHostIdentityKept(host, identity, `SDK ${kind} close retains Host`)
     await sdk.dispose()
     sdk = undefined
-    result = { ...result, hostPid: identity.hostPid, hostInstanceId: identity.instanceId, sessionId, hostIdentityKept: true, tuiAfterCloseTurn: tuiTurn }
+    result = { ...result, ...(primed?.result ?? {}), hostPid: identity.hostPid, hostInstanceId: identity.instanceId, sessionId, hostIdentityKept: true, tuiAfterCloseTurn: tuiTurn }
   } catch (error) {
     failure = error
   } finally {
@@ -459,10 +561,14 @@ async function outputScene(context) {
     writeFileSync(join(pngDir, `${name}.png`), bytes, { mode: 0o600 })
   }
   return await runScene(context, 'output', { C1_PO4C_IMAGE_DIR: pngDir, DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8' }, async session => {
-    const { sessionId, workRoot, identity } = session
+    const { sdk, sessionId, workRoot, identity, workspace, primed } = session
+    const tuiFile = primed?.result?.tuiFile
+    requireFact(tuiFile !== undefined, 'the pre-SDK TUI file turn is part of this scene')
     const run = (text, label, code) => prompt(session, [{ type: 'text', text }], value => authoredText(value) === text, label, code)
     const storeProof = async name => await waitForC1WorkEvent(workRoot, event => event.kind === 'po4c-image-stored'
       && event.name === name && event.pid === identity.hostPid, `SDK official Store ${name}`)
+    const fileStoreProof = async name => await waitForC1WorkEvent(workRoot, event => event.kind === 'po4d-file-stored'
+      && event.name === name && event.pid === identity.hostPid, `SDK official Store generic file ${name}`)
     const mixed = await run('po4c:assistant-mixed:v1', 'assistant mixed')
     const message = assistantMessage(mixed)
     requireFact(isDeepStrictEqual(message.content.map(block => block.type), ['text', 'image', 'text']), 'committed assistant text/image/text')
@@ -522,21 +628,132 @@ async function outputScene(context) {
       && failed.updates[1].update.toolCallId === failedResult.toolCallId && failed.updates[1].update.status === 'failed', 'official failure becomes standard failed status')
     assertTextChunks(failed.updates.slice(2), assistantMessage(failed), sessionId)
 
+    // PR4D: two REAL committed generic files from the controlled model/tool,
+    // each verified through the official Store before the View may read it.
+    const assistantFileFlight = await run('po4d:assistant-file:v1', 'assistant generic file')
+    const assistantFileMessage = assistantMessage(assistantFileFlight)
+    requireFact(isDeepStrictEqual(assistantFileMessage.content.map(block => block.type), ['text', 'file', 'text']),
+      'committed assistant text/file/text')
+    const assistantFileRef = assistantFileMessage.content[1].attachment
+    const assistantFileProof = await fileStoreProof(assistantFileRef.name)
+    requireFact(assistantFileProof.attachmentId === assistantFileRef.attachmentId
+      && assistantFileProof.bytes === assistantFileRef.bytes,
+    'the assistant file block carries the exact Store-committed reference')
+    requireFact(assistantFileFlight.updates.length === 3
+      && assistantFileFlight.updates.every(params => params.update.sessionUpdate === 'agent_message_chunk'),
+    'two streamed text deltas plus one durable file residual')
+    requireFact(new Set(assistantFileFlight.updates.map(params => params.update.messageId)).size === 1,
+      'the file residual shares the one attempt message id')
+    for (const index of [0, 2]) {
+      assertTextChunks([assistantFileFlight.updates[index]],
+        { content: [assistantFileMessage.content[index === 0 ? 0 : 2]] },
+        sessionId, assistantFileFlight.updates[0].update.messageId)
+    }
+    const assistantFileExpected = {
+      uri: `dsh-attachment://sha256/${assistantFileProof.sha256}/${encodeURIComponent(assistantFileProof.name)}`,
+      bytes: assistantFileProof.bytes,
+      sha256: assistantFileProof.sha256,
+    }
+    assertFileResource(assistantFileFlight.updates[1].update.content, assistantFileExpected, 'assistant generic file')
+
+    const toolFileFlight = await run('po4d:tool-file:v1', 'ordered generic file tool result')
+    const toolFileCalls = toolFileFlight.turnEvents.filter(event => event.type === 'tool/call')
+    const toolFileResults = toolFileFlight.turnEvents.filter(event => event.type === 'tool/result')
+    requireFact(toolFileCalls.length === 1 && toolFileResults.length === 1, 'one real tool call and result')
+    const toolFileCall = toolFileCalls[0].data
+    const toolFileResult = toolFileResults[0].data.message
+    requireFact(toolFileResult.isError === false && toolFileResult.toolCallId === toolFileCall.callId,
+      'real successful tool result attribution')
+    requireFact(isDeepStrictEqual(toolFileResult.content.map(block => block.type), ['text', 'file', 'text']),
+      'ordered committed tool text/file/text content')
+    requireFact(isDeepStrictEqual(toolFileFlight.updates.map(params => params.update.sessionUpdate),
+      ['tool_call', 'tool_call_update', 'agent_message_chunk']),
+    'one tool start, one complete file result and one final assistant chunk')
+    const toolFileRef = toolFileResult.content[1].attachment
+    const toolFileProof = await fileStoreProof(toolFileRef.name)
+    requireFact(toolFileProof.attachmentId === toolFileRef.attachmentId && toolFileProof.bytes === toolFileRef.bytes,
+      'the tool file block carries the exact Store-committed reference')
+    const toolFileUpdate = toolFileFlight.updates[1].update
+    requireFact(toolFileUpdate.toolCallId === toolFileCall.callId && toolFileUpdate.status === 'completed'
+      && toolFileUpdate.content.length === 3, 'complete successful tool update')
+    const toolFileExpected = {
+      uri: `dsh-attachment://sha256/${toolFileProof.sha256}/${encodeURIComponent(toolFileProof.name)}`,
+      bytes: toolFileProof.bytes,
+      sha256: toolFileProof.sha256,
+    }
+    assertFileResource(toolFileUpdate.content[1].content, toolFileExpected, 'tool generic file')
+    requireFact(isDeepStrictEqual(toolFileUpdate.content[0], { type: 'content', content: toolFileResult.content[0] }),
+      'opaque leading tool text bytes remain complete and ordered')
+    requireFact(isDeepStrictEqual(toolFileUpdate.content[2], { type: 'content', content: toolFileResult.content[2] }),
+      'opaque trailing tool text bytes remain complete and ordered')
+
+    // A `session/load` on the SAME connection and Session must replay the
+    // complete canonical history INCLUDING all three committed generic files,
+    // while the already-committed outputs stay live-only closed.
+    await sdk.request(acp.methods.agent.session.close, { sessionId })
+    const loadFrom = sdk.updates.length
+    const loaded = await sdk.request(acp.methods.agent.session.load, { sessionId, cwd: workspace, mcpServers: [] })
+    requireFact(loaded !== undefined, 'session/load answered the same real Session')
+    const loadWindow = sdk.finishWindow(loadFrom, sdk.updates.length, sessionId)
+    const resourceUpdates = loadWindow.filter(params => {
+      const update = params.update
+      if (update.sessionUpdate === 'user_message_chunk' || update.sessionUpdate === 'agent_message_chunk') {
+        return update.content?.type === 'resource'
+      }
+      return update.sessionUpdate === 'tool_call_update'
+        && update.content.some(content => content.content?.type === 'resource')
+    })
+    requireFact(resourceUpdates.length === 3,
+      `load replays exactly the three committed generic files (got ${String(resourceUpdates.length)})`)
+    const loadTui = resourceUpdates[0].update
+    requireFact(loadTui.sessionUpdate === 'user_message_chunk' && loadTui.messageId === tuiFile.messageId,
+      'the load replays the real TUI-uploaded user file under its durable message id')
+    assertFileResource(loadTui.content, tuiFile, 'load TUI generic file')
+    const loadAssistant = resourceUpdates[1].update
+    requireFact(loadAssistant.sessionUpdate === 'agent_message_chunk'
+      && loadAssistant.messageId === assistantFileMessage.id,
+    'the load replays the assistant file under its durable message id')
+    assertFileResource(loadAssistant.content, assistantFileExpected, 'load assistant generic file')
+    const loadTool = resourceUpdates[2].update
+    requireFact(loadTool.sessionUpdate === 'tool_call_update' && loadTool.toolCallId === toolFileCall.callId,
+      'the load replays the tool file under its real call id')
+    assertFileResource(loadTool.content[1].content, toolFileExpected, 'load tool generic file')
+
     const missing = await run('po4c:missing-image:v1', 'missing verified Store object', 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED')
     const missingRef = imageRef(assistantMessage(missing).content[0])
     const missingProof = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4c-missing-image-rejected'
       && event.attachmentId === missingRef.attachmentId && event.pid === identity.hostPid, 'SDK official missing object rejection')
     requireFact(missingProof.code === 'ATTACHMENT_NOT_FOUND' && missing.updates.length === 0, 'absent Store object sends no image or partial assistant event')
-    const healthy = await run('po4c:health', 'healthy after missing Store object')
+
+    // The SAME installed Store read failure for a structurally valid generic
+    // file reference that was never committed: no resource, no partial event.
+    const missingFile = await run('po4d:missing-file:v1', 'missing verified Store generic file', 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED')
+    const missingFileRef = assistantMessage(missingFile).content[0].attachment
+    const missingFileProof = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4d-missing-file-rejected'
+      && event.attachmentId === missingFileRef.attachmentId && event.pid === identity.hostPid,
+    'SDK official missing generic file rejection')
+    requireFact(missingFileProof.code === 'ATTACHMENT_NOT_FOUND' && missingFile.updates.length === 0,
+      'absent Store file object sends no resource or partial assistant event')
+
+    const healthy = await run('po4c:health', 'healthy after missing Store objects')
     assertTextChunks(healthy.updates, assistantMessage(healthy), sessionId)
     return {
       assistantTurn: mixed.turn, assistantMessageId: message.id, assistantAttachmentId: ref.attachmentId,
       assistantImageSha256: hash(mixedBytes), assistantImageBytes: mixedBytes.length, imageOnlyTurn: imageOnly.turn,
       toolTurn: tool.turn, toolCallId: call.callId, toolAttachmentId: toolRef.attachmentId, toolStatus: update.status,
       failedToolTurn: failed.turn, failedToolCallId: failedResult.toolCallId, failedStatus: failed.updates[1].update.status,
-      missingObjectCode: missingProof.code, acpErrorCode: missing.rejection.data.code, healthyTurn: healthy.turn,
+      assistantFileTurn: assistantFileFlight.turn, assistantFileMessageId: assistantFileMessage.id,
+      assistantFileAttachmentId: assistantFileProof.attachmentId, assistantFileSha256: assistantFileProof.sha256,
+      assistantFileBytes: assistantFileProof.bytes,
+      toolFileTurn: toolFileFlight.turn, toolFileCallId: toolFileCall.callId,
+      toolFileAttachmentId: toolFileProof.attachmentId, toolFileSha256: toolFileProof.sha256,
+      toolFileBytes: toolFileProof.bytes,
+      loadFileResourceCount: resourceUpdates.length, loadFileReplayVerified: true,
+      missingObjectCode: missingProof.code, missingFileCode: missingFileProof.code,
+      acpErrorCode: missing.rejection.data.code, missingFileAcpErrorCode: missingFile.rejection.data.code,
+      healthyTurn: healthy.turn,
     }
-  })
+  }, primeOutputTuiFile)
 }
 
 export async function runAcpSdkContentInteroperability(context) {
@@ -553,6 +770,8 @@ export async function runAcpSdkContentInteroperability(context) {
     markdownBlocksExact: true, workspaceLocalityProven: true, negativeAdmissionNoHostMessage: true,
     assistantBlocksOrdered: true, outputImageVerified: true, imageOnlyAccepted: true,
     toolResultOrdered: true, toolFailedStatusVerified: true, missingStoreObjectFailedClosed: true,
+    tuiFileCommitted: true, assistantFileProjected: true, toolFileProjected: true,
+    loadFileReplayVerified: true, missingStoreFileFailedClosed: true,
     healthyAfterFailure: true, tuiHostSurvivedClientClose: true,
     evidence: { candidateSha256: context.candidateSha256, sdkVersion: SDK_VERSION, protocolVersion: acp.PROTOCOL_VERSION, input, output },
   }

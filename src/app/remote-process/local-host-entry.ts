@@ -596,6 +596,15 @@ interface AttachmentServiceLike {
     },
     signal?: AbortSignal,
   ): Promise<{ readonly ref: { readonly mediaType: string }; readonly data: Uint8Array }>
+  /**
+   * Read one committed generic file back verbatim in bounded chunks. The
+   * Store verifies the leaf/byte count/digest and rejects the iteration after
+   * the final chunk; a provider without verbatim file storage rejects here.
+   */
+  readFileStream(
+    ref: { readonly attachmentId: string; readonly name: string; readonly bytes: number },
+    signal?: AbortSignal,
+  ): AsyncIterable<Uint8Array>
 }
 
 interface LlmServiceLike {
@@ -1242,6 +1251,16 @@ export function createHostAcpSessionAccess(
       }
       const stored = await attachments.readImage(ref, signal)
       return { data: stored.data, mediaType: stored.ref.mediaType }
+    },
+    // The SAME official Store reads the committed generic file verbatim. The
+    // bound method is returned on its original receiver so its private
+    // streaming/verification state stays intact; a missing Store rejects at
+    // the first iteration instead of fabricating bytes.
+    readOutputFile: (ref, signal) => {
+      if (attachments === undefined) {
+        throw new Error('local host entry: no official attachment store can read a committed output file')
+      }
+      return attachments.readFileStream(ref, signal)
     },
     supportsImagePrompts: async () => {
       if (attachments === undefined || llm === undefined || agentDefaultModel === undefined) return false

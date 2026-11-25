@@ -240,9 +240,10 @@ profile's independent `autoStart` preference enables it (see below).
   connection at `initialize`. Every image prompt is checked again against the
   exact attached Agent's current model route and is refused before Host dispatch
   unless that route explicitly declares image support. That capability governs
-  CLIENT-to-Agent prompt images only: committed assistant/tool OUTPUT images come
-  from the durable Session content and are never filtered by it. The View is a
-  BORROW of the Host's own Agent and Session, never a second owner:
+  CLIENT-to-Agent prompt images only: committed assistant/tool OUTPUT images and
+  generic files come from the durable Session content and are never filtered by
+  it. The View is a BORROW of the Host's own Agent and Session, never a second
+  owner:
   - One physical ACP connection may borrow **up to eight** Host Sessions (one
     View per Session), and one Host Session carries **at most one** ACP View at
     a time across all connections, while any number of human Split TUI Clients
@@ -265,8 +266,9 @@ profile's independent `autoStart` preference enables it (see below).
     order. Adjacent text and resource links become ordered text content using the
     standard `[resource_link name=<JSON string> uri=<JSON string>]` literal;
     a resource URI is descriptive text, not authorization, and is never fetched
-    or dereferenced by the Host. Embedded `resource`, `audio`, private file/upload
-    blocks and unknown content fail closed. A prompt may contain non-whitespace
+    or dereferenced by the Host. Embedded `resource` inputs, `audio` inputs,
+    private file/upload blocks and unknown content fail closed on the prompt
+    input path. A prompt may contain non-whitespace
     text, an image, or both. A negotiated image must use a supported raster MIME;
     wire bytes, canonical Base64, actual media, count/size/pixel limits and durable
     references are validated by the official Host Session Controller and its
@@ -315,7 +317,8 @@ profile's independent `autoStart` preference enables it (see below).
       and the EXACT durable `seq` of that append may join; the committed
       text/thought blocks must then equal what was already delivered, block for
       block. A joined message adds only the durable blocks that were never
-      streamed (images), under the same ACP message id, and never re-sends text.
+      streamed (images and generic files), under the same ACP message id, and
+      never re-sends text.
       An attempt that delivered nothing falls back to the ordinary committed
       projection. Everything else — a mismatch, a missing `end` at `turn/end`, a
       replaced attempt, a retry, a provider that rewrites a block it already
@@ -340,15 +343,15 @@ profile's independent `autoStart` preference enables it (see below).
       await. A reconciliation whose blocks were all streamed reserves nothing —
       it only owns a tail position — while a message whose blocks were never
       streamed reserves every block (and a joined message reserves its durable
-      images) before the first Store read.
+      images/files) before the first Store read.
     - **Wire order and identity of a joined message.** One attempt's streamed
       text/thought chunks and the residual durable blocks added at the join
       share ONE stable opaque ACP message id (the durable message id is used only
       for a message that was never streamed). Because ACP output is append-only,
-      a durable block that could not be streamed — an image between two text
-      blocks — is appended AFTER the text chunks that were already delivered, so
-      the wire order of such a mixed message can differ from its committed block
-      order. The committed order itself stays the durable log's and is never
+      a durable block that could not be streamed — an image or generic file
+      between two text blocks — is appended AFTER the text chunks that were
+      already delivered, so the wire order of such a mixed message can differ
+      from its committed block order. The committed order itself stays the durable log's and is never
       rewritten by this projection.
     - **Append-only limitation.** ACP v1 `agent_message_chunk` cannot be
       retracted. Provisional bytes already handed to the client stay delivered
@@ -359,23 +362,55 @@ profile's independent `autoStart` preference enables it (see below).
       the v1 protocol and is NOT claimed.
     - **Committed assistant/tool content.** An `assistant/message` keeps block
       order: non-empty text becomes `agent_message_chunk` text, reasoning becomes
-      `agent_thought_chunk`, and an image becomes a standard `image` content
-      block. An assistant `tool-call` block is never projected — the dedicated
-      durable `tool/call` event is the only start update (with the committed
-      `callId`/name and the parsed arguments, or the raw string when the model
-      arguments are malformed). ONE committed `tool/result` becomes exactly ONE
-      `tool_call_update` whose ordered `content` keeps every non-empty text and
-      image and whose status is the official `isError ? failed : completed`;
-      structured tool text such as a JSON payload sample is forwarded as its
-      committed bytes, and the Host parses no domain JSON.
+      `agent_thought_chunk`, an image becomes a standard `image` content block,
+      and a committed generic file becomes a standard embedded `resource` blob
+      (see below). An assistant `tool-call` block is never projected — the
+      dedicated durable `tool/call` event is the only start update (with the
+      committed `callId`/name and the parsed arguments, or the raw string when
+      the model arguments are malformed). ONE committed `tool/result` becomes
+      exactly ONE `tool_call_update` whose ordered `content` keeps every
+      non-empty text, image and generic file and whose status is the official
+      `isError ? failed : completed`; structured tool text such as a JSON payload
+      sample is forwarded as its committed bytes, and the Host parses no domain
+      JSON.
     - **Verified images only.** Every committed image is re-read through the SAME
       official Host `AttachmentStore.readImage(ref, signal)`. The wire `data` is
       exactly the verified stored bytes in canonical Base64 and `mimeType` is the
       verified stored media type; a stored `ref` is never trusted on its own. A
       missing Store, an absent object or a corrupt raster fails the flight with
       `LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED`: the event is never partially
-      sent and no placeholder image is fabricated. A committed block type with no
-      standard ACP projection (e.g. `file`/`tool-addition`) still fails
+      sent and no placeholder image is fabricated.
+    - **Verified generic files only.** Every committed generic file — in a
+      `user/message` (including the TUI's own `/attach` upload), an
+      `assistant/message`, a `tool/result` or a negotiated inter-agent
+      `session_message` — is re-read through the SAME official Host
+      `AttachmentStore.readFileStream(ref, signal)` and materialized to the
+      standard embedded `resource { resource: { uri, blob } }` content. The
+      stream is iterated to its natural EOF, because the Store completes its
+      leaf/byte/digest verification only after the final chunk; a read that ends
+      early, yields more bytes than the durable `bytes`, or fails verification
+      keeps the same `LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED` /
+      `LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED` classification instead of a
+      partial event or guessed bytes. The `blob` is exactly the verified stored
+      bytes in canonical Base64. The `uri` is this adapter's opaque stable
+      identity `dsh-attachment://sha256/<digest>/<percent-encoded stored leaf
+      name>`; it is never a Host filesystem path, download URL, token or
+      capability, and the Store's sanitized leaf name is used as-is. Generic
+      files carry no media type, so no `mimeType` is fabricated. This is OUTPUT
+      projection only: it adds no prompt `embeddedContext` capability, no client
+      filesystem/terminal route and no second Attachment Store.
+    - **Per-event file materialization budget.** Before the first Store read of
+      ONE committed event, the adapter sums the canonical Base64 length
+      (`4 * ceil(bytes / 3)`) of every file occurrence in wire order — a repeated
+      reference costs its payload again — and requires the total to fit the
+      connection's frozen single-frame output budget. An event above that budget,
+      or a file-bearing event on a connection/View without a valid budget, is
+      refused as `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE` before any Store read, never
+      read as an unbounded stream and never confused with malformed/unsupported
+      content. The budget is checked per event, not per chunk; a text-only event
+      does not need it.
+    - **Unsupported committed blocks.** A committed block type with no standard
+      ACP projection (e.g. `audio`/`tool-addition`) still fails
       `LOCAL_ACP_PROMPT_UNSUPPORTED_CONTENT` instead of being silently dropped.
     - **One async ordered tail per flight.** The synchronous committed-event
       callback appends the event's already shape-validated conversion to the
@@ -432,6 +467,14 @@ profile's independent `autoStart` preference enables it (see below).
     derived from `initialize.promptCapabilities.image`. A frame above the legacy
     cap is written in 64 KiB chunks under the same unwritten-backlog bound,
     waiting at most 30 seconds per kernel drain.
+    - **The same budget bounds one event's generic files.** The connection's
+      single-frame budget is also the ONLY input to the per-event file
+      materialization check above; the file Base64 sum is compared against it
+      BEFORE the first Store read. A text-only or image-only connection keeps
+      its existing behavior; a file-bearing event with no valid frozen budget is
+      refused rather than read. This is not a second file size policy: the
+      official Attachment Store remains the authority for what may be stored,
+      and the adapter never shrinks, drops or re-encodes a committed file.
     - **Accepted upstream limitation.** The official localization may store a
       normalized image whose bytes exceed both `maxImageBytes` and the
       normalization byte target (when every quality-ladder output misses the
@@ -628,8 +671,12 @@ profile's independent `autoStart` preference enables it (see below).
     on the exact Host identity proves there was no inserted message. The
     Session, Agent and writer keep their Host authority; a pending
     create/resume whose connection closed never publishes an attached View.
-  - MCP prompts and ACP file/artifact transfer are NOT provided by this View and
-    fail closed with their stable `LOCAL_ACP_*` code. `session/list` is served by
+  - MCP prompts, ACP client filesystem/terminal routes and client-to-Agent
+    file/artifact INPUT transfer are NOT provided by this View and fail closed
+    with their stable `LOCAL_ACP_*` code. A generic file already COMMITTED in the
+    durable Session is still replayed/output as a standard embedded `resource`
+    blob under the contract above; that is output projection, not an input
+    capability. `session/list` is served by
     the local ACP front door when the official authorized roster read seam is
     bound (see “Official session facts on the stable v1 wire” below); without
     that seam it is not advertised and fails closed with
@@ -978,10 +1025,15 @@ The replay is fenced and ordered:
    replay barrier opens and live durable events of that Session are buffered
    under a bounded window.
 3. The complete canonical history is read, validated and converted BEFORE any
-   notification is sent: `seq` must be strictly increasing, and a committed
-   block with no standard ACP v1 projection fails the whole load closed.
+   notification is sent: `seq` must be strictly increasing, a committed block
+   with no standard ACP v1 projection fails the whole load closed, and every
+   event's generic-file Base64 total is checked against the connection's frozen
+   frame budget BEFORE its Store read.
 4. The history is handed to the claim's single ordered output tail; every image
-   is re-read and verified by the official Attachment Store inside that tail.
+   and generic file is re-read and verified by the official Attachment Store
+   inside that tail. A generic file is materialized to the standard embedded
+   `resource` blob described above, under its original durable message id (or
+   tool call id) and the committed order.
 5. Buffered live events are joined by their official `seq`: the window is
    sorted ascending, a repeated seq is projected exactly once, `seq <= cut` is a
    duplicate of the snapshot and is dropped, and `seq > cut` follows the history.
@@ -992,8 +1044,10 @@ The replay is fenced and ordered:
 Failure and lifecycle rules: a new prompt on a still-replaying View is
 `LOCAL_ACP_VIEW_BUSY`; an unrepresentable block is
 `LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT`; a broken seq order is
-`LOCAL_ACP_LOAD_INVALID_HISTORY`; an unreadable committed image is
-`LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED`; an over-budget live window is
+`LOCAL_ACP_LOAD_INVALID_HISTORY`; an unreadable committed image or generic file
+is `LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED`; an event whose file Base64 total
+exceeds the connection budget is `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE` and is
+refused before any Store read; an over-budget live window is
 `LOCAL_ACP_LOAD_BACKPRESSURE`. Every one of them releases ONLY that View — the
 Host Session, Agent, Writer and TUI are untouched — and no partial history is
 ever reported as a complete load. Close, physical disconnect, runtime Off and

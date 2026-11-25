@@ -891,6 +891,11 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.missingStoreObjectFailedClosed === true
       && result?.healthyAfterFailure === true
       && result?.tuiHostSurvivedClientClose === true
+      && result?.tuiFileCommitted === true
+      && result?.assistantFileProjected === true
+      && result?.toolFileProjected === true
+      && result?.loadFileReplayVerified === true
+      && result?.missingStoreFileFailedClosed === true
       && isDigest(evidence?.candidateSha256)
       && evidence?.sdkVersion === pinnedSdkVersion()
       && evidence?.protocolVersion === 1
@@ -932,6 +937,33 @@ export function assertSelectedVerdict(caseId, result) {
       && output?.failedStatus === 'failed'
       && output?.missingObjectCode === 'ATTACHMENT_NOT_FOUND'
       && output?.acpErrorCode === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
+      && isName(output?.tuiFile?.messageId)
+      && isTurn(output?.tuiFile?.turn)
+      && isRef(output?.tuiFile?.attachmentId)
+      && isName(output?.tuiFile?.name)
+      && isDigest(output?.tuiFile?.sha256)
+      && output.tuiFile.attachmentId === `sha256:${output.tuiFile.sha256}`
+      && Number.isInteger(output?.tuiFile?.bytes)
+      && output.tuiFile.bytes > 0
+      && output?.tuiFile?.uri
+        === `dsh-attachment://sha256/${output.tuiFile.sha256}/${encodeURIComponent(output.tuiFile.name)}`
+      && isTurn(output?.assistantFileTurn)
+      && isName(output?.assistantFileMessageId)
+      && isRef(output?.assistantFileAttachmentId)
+      && isDigest(output?.assistantFileSha256)
+      && output.assistantFileAttachmentId === `sha256:${output.assistantFileSha256}`
+      && Number.isInteger(output?.assistantFileBytes)
+      && output.assistantFileBytes > 0
+      && isTurn(output?.toolFileTurn)
+      && isName(output?.toolFileCallId)
+      && isRef(output?.toolFileAttachmentId)
+      && isDigest(output?.toolFileSha256)
+      && output.toolFileAttachmentId === `sha256:${output.toolFileSha256}`
+      && Number.isInteger(output?.toolFileBytes)
+      && output.toolFileBytes > 0
+      && output?.loadFileResourceCount === 3
+      && output?.missingFileCode === 'ATTACHMENT_NOT_FOUND'
+      && output?.missingFileAcpErrorCode === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
       && isTurn(output?.healthyTurn)
       && output?.hostIdentityKept === true,
     `selected ${caseId}: the independent SDK content verdict ended as ${String(result?.status ?? 'missing')}/${String(result?.scope ?? 'missing')}`)

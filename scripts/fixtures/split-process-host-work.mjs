@@ -203,6 +203,28 @@ const PO4C_A2UI_TEXT = 'A2UI_JSON={"version":"popo.a2ui/1","components":[{"kind"
 const PO4C_TOOL_ANSWER = 'tool completed\n'
 const PO4C_TOOL_FAILED_ANSWER = 'tool failed\n'
 
+/**
+ * PO-4D generic-file qualification samples. The markers only select fixture
+ * behaviour; the committed file blocks carry REAL `ctx.attachments.saveFile`
+ * references whose bytes are verified through the same official Store stream.
+ */
+const PO4D_MARKERS = Object.freeze({
+  assistantFile: 'po4d:assistant-file:v1',
+  toolFile: 'po4d:tool-file:v1',
+  missingFile: 'po4d:missing-file:v1',
+})
+const PO4D_TOOL_NAME = 'po4d_output_tool'
+const PO4D_TEXT_BEFORE = 'file-before\r\n'
+const PO4D_TEXT_AFTER = 'file-after 中文🙂\n'
+const PO4D_TOOL_TAIL = 'tool-file-tail\n'
+
+/** Deterministic verbatim file bytes: NUL and non-UTF8 for every seed. */
+function deterministicFileBytes(seed, length = 72 * 1024 + 11) {
+  const bytes = Buffer.alloc(length)
+  for (let index = 0; index < length; index += 1) bytes[index] = (index * 37 + seed) % 256
+  return bytes
+}
+
 /** Quote one token for the Host shell used by the harmless fixture commands. */
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
@@ -323,6 +345,55 @@ async function createPo4cOutputProbe(ctx, record) {
   }
   record('po4c-missing-image-rejected', { attachmentId: missing.attachmentId, code: missingCode })
   return { mixed, tool, missing, missingCode }
+}
+
+/**
+ * PO-4D: commit two deterministic generic files through the ONE official Host
+ * Attachment Store and verify each one through the SAME official read stream.
+ * The returned references are exactly the durable ones the committed assistant
+ * and tool content carry; no bytes or private Store paths enter an event.
+ */
+async function createPo4dFileProbe(ctx, record) {
+  const store = async (name, seed) => {
+    const data = deterministicFileBytes(seed)
+    const stored = await ctx.attachments.saveFile({ data, name })
+    const chunks = []
+    for await (const chunk of ctx.attachments.readFileStream(stored)) chunks.push(Buffer.from(chunk))
+    const verified = Buffer.concat(chunks)
+    const digest = createHash('sha256').update(verified).digest('hex')
+    if (stored.attachmentId !== `sha256:${digest}` || stored.bytes !== verified.byteLength
+      || verified.byteLength !== data.byteLength) {
+      throw new Error(`m4-c1-host-work: PO-4D stored file ${name} did not verify against its durable reference`)
+    }
+    record('po4d-file-stored', {
+      name: stored.name,
+      attachmentId: stored.attachmentId,
+      bytes: stored.bytes,
+      sha256: digest,
+    })
+    return { attachmentId: stored.attachmentId, name: stored.name, bytes: stored.bytes, sha256: digest }
+  }
+  const assistant = await store('PR4D 附件 assistant.bin', 11)
+  const tool = await store('PR4D tool data.bin', 29)
+  // A FORMAT-VALID content-addressed reference that was never stored: the real
+  // official Store must reject it (never a fake or absent Store).
+  const missing = {
+    attachmentId: `sha256:${createHash('sha256').update('po4d:missing-file:v1').digest('hex')}`,
+    name: 'missing file.bin',
+    bytes: 4096,
+  }
+  let missingCode
+  try {
+    for await (const chunk of ctx.attachments.readFileStream(missing)) {
+      void chunk
+      throw new Error('m4-c1-host-work: the PO-4D absent file reference resolved in the official Store')
+    }
+  } catch (error) {
+    if (typeof error?.code !== 'string') throw error
+    missingCode = error.code
+  }
+  record('po4d-missing-file-rejected', { attachmentId: missing.attachmentId, code: missingCode })
+  return { assistant, tool, missing, missingCode }
 }
 
 function textOf(value) {
@@ -1256,7 +1327,7 @@ const PR1_FOREGROUND_COMMAND = [
 const PR1_BACKGROUND_COMMAND = 'dsh-pr1-user-probe'
 
 class C1Model extends LlmAdapter {
-  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry, subprocessProbe) {
+  constructor(scenario, proof, root, agentStatusOf, neverSetup, imageProbe, markdownFileProbe, po4c, po4d, probeRegistry, subprocessProbe) {
     super()
     this.scenario = scenario
     this.proof = proof
@@ -1266,6 +1337,7 @@ class C1Model extends LlmAdapter {
     this.imageProbe = imageProbe
     this.markdownFileProbe = markdownFileProbe
     this.po4c = po4c
+    this.po4d = po4d
     this.probeRegistry = probeRegistry
     this.subprocessProbe = subprocessProbe
     this.toolIssued = new Set()
@@ -1500,6 +1572,48 @@ class C1Model extends LlmAdapter {
         { type: 'block-start', index, blockType: 'image' },
         { type: 'block-end', index, block: { type: 'image', attachment: ref } },
       ]
+      const fileBlocks = (ref, index) => [
+        { type: 'block-start', index, blockType: 'file' },
+        { type: 'block-end', index, block: { type: 'file', attachment: ref } },
+      ]
+      if (authoredText.includes(PO4D_MARKERS.assistantFile)) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: PO4D_TEXT_BEFORE }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: PO4D_TEXT_BEFORE } }
+        yield* fileBlocks(this.po4d.assistant, 1)
+        yield { type: 'block-start', index: 2, blockType: 'text' }
+        yield { type: 'text-delta', index: 2, text: PO4D_TEXT_AFTER }
+        yield { type: 'block-end', index: 2, block: { type: 'text', text: PO4D_TEXT_AFTER } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (authoredText.includes(PO4D_MARKERS.missingFile)) {
+        yield* fileBlocks(this.po4d.missing, 0)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (authoredText.includes(PO4D_MARKERS.toolFile)) {
+        if (afterTool) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: PO4C_TOOL_ANSWER }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: PO4C_TOOL_ANSWER } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: {
+            type: 'tool-call',
+            id: 'po4d-tool-file',
+            name: PO4D_TOOL_NAME,
+            arguments: JSON.stringify({ file: true }),
+          },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
       if (authoredText.includes(PO4C_MARKERS.assistantMixed)) {
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text: PO4C_TEXT_BEFORE }
@@ -2830,6 +2944,9 @@ export async function apply(ctx) {
   const po4c = scenario === 'acp-po4c'
     ? await createPo4cOutputProbe(ctx, record)
     : undefined
+  const po4d = scenario === 'acp-po4c'
+    ? await createPo4dFileProbe(ctx, record)
+    : undefined
 
   const watchSession = process.env.C1_WATCH_SESSION
   const probeRegistry = watchSession === undefined || watchSession === ''
@@ -2873,7 +2990,7 @@ export async function apply(ctx) {
   const model = new C1Model(scenario, proof, root, sessionId => {
     const agent = ctx.agents.get(sessionId)
     return agent === undefined ? undefined : agent.status
-  }, neverSetup, imageProbe, markdownFileProbe, po4c, probeRegistry, subprocessProbe)
+  }, neverSetup, imageProbe, markdownFileProbe, po4c, po4d, probeRegistry, subprocessProbe)
 
   ctx.effect(() => ctx.llm.registerAdapter(['c1-qualification'], model))
 
@@ -2942,6 +3059,33 @@ export async function apply(ctx) {
         })
         if (args?.fail === true) throw new Error('po4c tool failure')
         return 'po4c-tool-ok'
+      },
+    })))
+    // PO-4D: one real tool whose rendered model-facing content is the ordered
+    // [text, verified generic file, text] batch the Host commits to tool/result.
+    ctx.effect(() => ctx.tools.register(defineTool({
+      name: PO4D_TOOL_NAME,
+      description: 'PO-4D qualification tool emitting one ordered text/file/text result batch.',
+      parameters: {
+        file: { type: 'boolean', description: 'Return the ordered file batch for the qualification marker.' },
+      },
+      output: {
+        schema: { type: 'string' },
+        render: args => (args?.file === true
+          ? [
+            { type: 'text', text: 'tool-file-before\n' },
+            { type: 'file', attachment: po4d.tool },
+            { type: 'text', text: PO4D_TOOL_TAIL },
+          ]
+          : [{ type: 'text', text: 'no file\n' }]),
+      },
+      async execute(args, exec) {
+        record('po4d-tool-executed', {
+          callId: String(exec.callId),
+          sessionId: exec.agent === undefined ? undefined : String(exec.agent.id),
+          hasFile: args?.file === true,
+        })
+        return 'po4d-tool-ok'
       },
     })))
   }
