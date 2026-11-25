@@ -267,6 +267,69 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
   }
 })
 
+test.skipIf(!linuxOnly)('applies --preset minimal to the first public Session header', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  let testError: unknown
+  try {
+    const minimal = await scene.startPublicDaemon({
+      label: 'preset-minimal',
+      backend: 'daemon',
+      args: { preset: 'minimal' },
+    })
+    launches.push(minimal)
+    await waitForFrame(minimal, '❯', 'minimal preset composer')
+    const beforeMinimal = new Set(await scene.sessionIds())
+    await minimal.submit('minimal preset prompt')
+    const minimalSession = await scene.waitForNewSessionId(beforeMinimal, 'minimal preset Session')
+    const minimalHeader = await scene.waitForHostSessionHeader(minimalSession, 'minimal preset header')
+    const minimalHeaderText = JSON.stringify(minimalHeader)
+    expect(minimalHeaderText, `the durable minimal header (${minimalHeaderText})`).toContain('"agentPreset":"minimal"')
+    expect([...(await scene.sessionIds())].sort(), 'the minimal launch created exactly one Session')
+      .toEqual([...beforeMinimal, minimalSession].sort())
+    await exitPublicLaunch(minimal, 'minimal preset launch')
+
+    const standard = await scene.startPublicDaemon({ label: 'preset-default', backend: 'daemon' })
+    launches.push(standard)
+    await waitForFrame(standard, '❯', 'default preset composer')
+    const beforeStandard = new Set(await scene.sessionIds())
+    await standard.submit('default preset prompt')
+    const standardSession = await scene.waitForNewSessionId(beforeStandard, 'default preset Session')
+    const standardHeader = await scene.waitForHostSessionHeader(standardSession, 'default preset header')
+    const standardHeaderText = JSON.stringify(standardHeader)
+    expect(standardHeaderText, `the durable default header (${standardHeaderText})`).toContain('"agentPreset":"standard"')
+    expect([...(await scene.sessionIds())].sort(), 'the default launch created exactly one Session')
+      .toEqual([...beforeStandard, standardSession].sort())
+    await exitPublicLaunch(standard, 'default preset launch')
+    await standard.stopHost()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the preset test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the preset test cleanup failed')
+    }
+  }
+})
+
 test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
