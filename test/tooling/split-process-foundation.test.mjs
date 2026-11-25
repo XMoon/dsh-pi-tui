@@ -12,8 +12,9 @@
  */
 
 import assert from 'node:assert/strict'
+import { waitForEntryClose } from '../support/entry-close.mjs'
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   copyFileSync,
@@ -359,3 +360,112 @@ test('the shared official-record reader keeps complete-line strictness and only 
     /client record line 2 is invalid JSON/u,
   )
 })
+
+test('the installed-entry qualification operations are refused before any process Scene exists', async () => {
+  const supervisor = new SupervisorClient({ runId: `split-process-entry-admission-${String(process.pid)}` })
+  try {
+    for (const [type, payload] of [
+      ['START_HOST_ATTEMPTS', { mode: 'seat-race', count: 2 }],
+      ['SET_INSTALLATION_FAULT', { fault: 'host-runtime-absent' }],
+      ['SIGNAL_ENTRY', { entryId: 'probe', signal: 'SIGTERM' }],
+    ]) {
+      await assert.rejects(
+        supervisor.request(type, payload, { timeoutMs: 30_000 }),
+        /no process scene/u,
+      )
+    }
+  } finally {
+    await supervisor.close({ timeoutMs: 30_000, allowKill: false })
+  }
+})
+
+test('the real close waiter ignores exitCode until the inherited stdout closes', async t => {
+  const life = testLifecycle(t)
+  const directory = realpathSync(life.tempDir('close-authority-'))
+  const release = join(directory, 'release')
+  const released = join(directory, 'released')
+  const grandchild = [
+    "const fs = require('node:fs')",
+    'const release = process.env.CLOSE_RELEASE',
+    'const released = process.env.CLOSE_RELEASED',
+    'const check = () => { if (fs.existsSync(release)) { fs.writeFileSync(released, "released\\n"); fs.unwatchFile(release); process.exit(0) } }',
+    'fs.watchFile(release, { interval: 100 }, check)',
+    'setTimeout(() => process.exit(2), 10_000)', // bounded fail-safe window: a stuck control cannot leak
+    'check()',
+  ].join(';')
+  const child = spawn(process.execPath, ['-e', [
+    "const { spawn } = require('node:child_process')",
+    `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: ['ignore', 'inherit', 'ignore'], env: process.env })`,
+    'process.exit(0)',
+  ].join(';')], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, CLOSE_RELEASE: release, CLOSE_RELEASED: released },
+  })
+  let closeFired = false
+  let settleClose
+  const closePromise = new Promise(resolve => { settleClose = resolve })
+  const handle = { closePromise, exited: false }
+  child.once('close', (code, signal) => {
+    closeFired = true
+    handle.exited = true
+    settleClose({ code, signal })
+  })
+  let waiter
+  let primaryError
+  try {
+    await bounded(new Promise((resolve, reject) => {
+      child.once('exit', resolve)
+      child.once('error', reject)
+    }), 5_000, 'the safe child exit')
+    assert.equal(closeFired, false, 'close already fired before the inherited stdout was released')
+    let settled = false
+    waiter = waitForEntryClose(handle, 'close authority control', 5_000).then(value => {
+      settled = true
+      return value
+    })
+    waiter.catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(settled, false, 'the close waiter settled before the real close event')
+    writeFileSync(release, 'release\n', { mode: 0o600 })
+    assert.deepEqual(await waiter, { code: 0, signal: null })
+    assert.equal(closeFired, true)
+    assert.equal(existsSync(released), true, 'the release watchdog, not the actual marker, settled the control')
+  } catch (error) {
+    primaryError = error
+    throw error
+  } finally {
+    // Release even on the intended early-waiter regression, then bounded-join
+    // the registered close so the inherited stdout cannot leak. Cleanup errors
+    // surface together with the primary failure instead of being swallowed.
+    let cleanupError
+    try { writeFileSync(release, 'release\n', { mode: 0o600 }) } catch (error) { cleanupError = error }
+    if (!closeFired) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      try {
+        await bounded(handle.closePromise, 5_000, 'the close control join')
+      } catch (error) {
+        cleanupError = cleanupError ?? error
+      }
+    }
+    if (cleanupError !== undefined) {
+      if (primaryError !== undefined) {
+        throw new AggregateError([primaryError, cleanupError], 'the close control failed and its cleanup also failed')
+      }
+      throw cleanupError
+    }
+  }
+})
+
+function bounded(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${String(timeoutMs)}ms`)), timeoutMs)
+    Promise.resolve(promise).then(value => {
+      clearTimeout(timer)
+      resolve(value)
+    }, error => {
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+}

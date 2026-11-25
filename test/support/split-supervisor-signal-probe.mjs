@@ -42,7 +42,46 @@ import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './spli
 const PILOT_MODES = ['main-signal', 'foreground-group-sigint', 'worker-kill', 'bootstrap-main-sigterm']
 const UPGRADE_ATS = ['old-host-ready', 'between-host-generations', 'new-host-spawned-before-ack', 'side-build-install', 'bootstrap-install', 'reload-child-active', 'reload-child-started-before-report', 'qualification-client-active', 'qualification-pre-spawn']
 const UPGRADE_MODES = ['upgrade-sequential-hosts', 'upgrade-live-profile-refusal', 'upgrade-live-host-exit', 'upgrade-qualification-host-death', 'upgrade-worker-kill']
-const PROCESS_ATS = ['bootstrap-install', 'host-spawned-before-ack', 'client-reserved-before-spawn', 'client-opened-before-ack', 'clients-ready', 'fallback-host-ready']
+const PROCESS_ATS = [
+  'bootstrap-install',
+  'host-spawned-before-ack',
+  'client-reserved-before-spawn',
+  'client-opened-before-ack',
+  'clients-ready',
+  'fallback-host-ready',
+  'host-contenders-spawned',
+  'qualification-client-spawned',
+  'host-artifact-absent-started',
+  'identity-witness-spawned',
+  'finalize-compensation-started',
+]
+/**
+ * The three installed-entry windows bind ONE exact business test so the probe
+ * can never land on an unrelated earlier test in the same file. The historical
+ * windows keep the complete target file, unchanged.
+ */
+const PROCESS_AT_TARGETS = new Map([
+  ['host-contenders-spawned', {
+    file: 'test/integration/split-process/business/host-seat.vitest.ts',
+    title: 'admits exactly one Host when the same installed profile is started concurrently',
+  }],
+  ['qualification-client-spawned', {
+    file: 'test/integration/split-process/business/transport-authentication.vitest.ts',
+    title: 'settles qualification Client startup and exit failures without taking down the authenticated Host',
+  }],
+  ['host-artifact-absent-started', {
+    file: 'test/integration/split-process/business/host-bootstrap.vitest.ts',
+    title: 'refuses a missing installed Host Runtime artifact and authenticates after restoring the same bytes',
+  }],
+  ['identity-witness-spawned', {
+    file: 'test/integration/split-process/business/host-seat.vitest.ts',
+    title: 'treats a same-birth Linux zombie as dead and never as a signal target',
+  }],
+  ['finalize-compensation-started', {
+    file: 'test/integration/split-process/business/host-bootstrap.vitest.ts',
+    title: 'compensates a failed finalization without leaking a live Client or witness',
+  }],
+])
 const PROCESS_MODES = ['process-worker-kill', 'process-main-signal']
 const VITEST_ENTRY = 'node_modules/vitest/vitest.mjs'
 const PROCESS_TARGET_FILE = 'test/integration/split-process/business/host-file-completion.vitest.ts'
@@ -479,7 +518,7 @@ function installerProcessRunning(receipt) {
     && /\b(?:pnpm|npm|install)\b/u.test(row.command))
 }
 
-function checkProcessReceiptResources(receipt, kernel) {
+function checkProcessReceiptResources(receipt, kernel, options = {}) {
   const problems = []
   if (!Number.isInteger(receipt.worker?.ppid) || receipt.worker.ppid <= 0) {
     problems.push('the receipt Worker has no real PPID')
@@ -489,7 +528,7 @@ function checkProcessReceiptResources(receipt, kernel) {
   } else if (receipt.worker?.pid !== undefined && receipt.supervisor.ppid !== receipt.worker.pid) {
     problems.push('the receipt Supervisor PPID is not the Scene Worker')
   }
-  if (receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
+  if (options.allowRemainingRoot !== true && receipt.sceneRoot !== undefined && existsSync(receipt.sceneRoot)) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) problems.push('install is still marked in progress')
@@ -519,6 +558,40 @@ function checkProcessReceiptResources(receipt, kernel) {
         problems.push(`process Client ${String(client.label)} business PID is ${state}: ${String(business.pid)}`)
       }
     }
+  }
+  for (const client of receipt.qualificationClients ?? []) {
+    if (client.kind !== 'qualification-client') continue
+    if (client.exited !== true) {
+      problems.push(`qualification Client ${String(client.label)} did not record its terminal state`)
+    }
+    const state = identityLiveness(kernel, client.pid, client.birth)
+    if (state !== 'gone' && state !== 'foreign') {
+      problems.push(`qualification Client ${String(client.label)} PID is ${state}: ${String(client.pid)}`)
+    }
+    if (Number.isInteger(client.pgid)) {
+      const groupState = processGroupTerminalState(kernel, client.pgid)
+      if (groupState !== 'terminal') {
+        problems.push(`qualification Client ${String(client.label)} group is ${groupState}: ${String(client.pgid)}`)
+      }
+    }
+  }
+  for (const helper of receipt.qualificationHelpers ?? []) {
+    if (helper.exited !== true) {
+      problems.push(`${String(helper.kind)} ${String(helper.label)} did not record its terminal state`)
+    }
+    const state = identityLiveness(kernel, helper.pid, helper.birth)
+    if (state !== 'gone' && state !== 'foreign') {
+      problems.push(`${String(helper.kind)} ${String(helper.label)} PID is ${state}: ${String(helper.pid)}`)
+    }
+    if (Number.isInteger(helper.pgid)) {
+      const groupState = processGroupTerminalState(kernel, helper.pgid)
+      if (groupState !== 'terminal') {
+        problems.push(`${String(helper.kind)} ${String(helper.label)} group is ${groupState}: ${String(helper.pgid)}`)
+      }
+    }
+  }
+  if (receipt.installationMutation !== undefined) {
+    problems.push(`the scoped installation mutation ${String(receipt.installationMutation.fault)} was not restored`)
   }
   for (const fallback of receipt.fallbackHosts ?? []) {
     if (fallback.reclaimed !== true) {
@@ -811,6 +884,7 @@ if (upgradeMode) {
       stdio: 'inherit',
     })
   }
+  const target = PROCESS_AT_TARGETS.get(at)
   child = spawn(process.execPath, [
     VITEST_ENTRY,
     'run',
@@ -818,7 +892,8 @@ if (upgradeMode) {
     'vitest.split.config.ts',
     '--project',
     'split-process-business',
-    PROCESS_TARGET_FILE,
+    target === undefined ? PROCESS_TARGET_FILE : target.file,
+    ...(target === undefined ? [] : ['-t', target.title]),
   ], {
     cwd: process.cwd(),
     env,
@@ -934,6 +1009,16 @@ try {
         if (mode === 'process-worker-kill' && at === 'clients-ready') {
           siblingSnapshot = await waitProcessSiblingCheckpoint(tmpBase, siblingRunId, kernel, receipt)
         }
+      } else if (at === 'finalize-compensation-started') {
+        receipt = await waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          if (processNote(current, 'process-probe-hold', at) === undefined) return undefined
+          const note = processNote(current, 'finalize-compensation-started')
+          const live = [...(note?.detail?.liveClients ?? []), ...(note?.detail?.liveHelpers ?? [])]
+          if (live.length === 0) return undefined
+          return live.every(entry => identityLiveness(kernel, entry.pid, entry.birth) === 'live')
+            ? current : undefined
+        }, 'a failed-FINALIZE compensation holding a live registered entry', 900_000)
       } else if (at === 'fallback-host-ready') {
         receipt = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
@@ -975,6 +1060,51 @@ try {
             fail('client-opened-before-ack: the registered shell is not the live kernel process')
           }
           if (client.readyAt !== undefined) fail('client-opened-before-ack: the Client already reached ready')
+        } else if (at === 'host-contenders-spawned') {
+          const contenders = (receipt.hosts ?? []).filter(value => value.mode === 'seat-race')
+          if (contenders.length < 2) fail('host-contenders-spawned: fewer than two registered contenders')
+          const live = contenders.filter(value => identityLiveness(kernel, value.pid, value.birth) === 'live')
+          if (live.length === 0) fail('host-contenders-spawned: no contender is the live kernel process')
+          const liveGroups = live.filter(value => Number.isInteger(value.pgid) && groupAlive(value.pgid))
+          if (liveGroups.length === 0) fail('host-contenders-spawned: no live contender group is registered')
+          if (receipt.host !== undefined) fail('host-contenders-spawned: a winner was already accepted before the signal')
+        } else if (at === 'qualification-client-spawned') {
+          const clients = (receipt.qualificationClients ?? []).filter(value => value.kind === 'qualification-client')
+          if (clients.length === 0) fail('qualification-client-spawned: no registered qualification Client')
+          const live = clients.filter(value => identityLiveness(kernel, value.pid, value.birth) === 'live')
+          if (live.length === 0) fail('qualification-client-spawned: the qualification Client is not the live kernel process')
+          if (!live.some(value => Number.isInteger(value.pgid) && groupAlive(value.pgid))) {
+            fail('qualification-client-spawned: the qualification Client group is not alive')
+          }
+          const host = receipt.host
+          if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
+            fail('qualification-client-spawned: the authenticated Host is not live at the checkpoint')
+          }
+        } else if (at === 'identity-witness-spawned') {
+          const helper = (receipt.qualificationHelpers ?? []).find(value => value.kind === 'identity-witness')
+          if (helper === undefined) fail('identity-witness-spawned: no registered identity-witness holder')
+          if (identityLiveness(kernel, helper.pid, helper.birth) !== 'live') {
+            fail('identity-witness-spawned: the registered holder is not the live kernel process')
+          }
+          if (!Number.isInteger(helper.pgid) || !groupAlive(helper.pgid)) {
+            fail('identity-witness-spawned: the registered holder group is not alive')
+          }
+        } else if (at === 'host-artifact-absent-started') {
+          const attempt = (receipt.hosts ?? []).find(value => value.mode === 'host-runtime-absent')
+          if (attempt === undefined) fail('host-artifact-absent-started: no registered artifact-absence attempt')
+          if (identityLiveness(kernel, attempt.pid, attempt.birth) !== 'live') {
+            fail('host-artifact-absent-started: the registered Host attempt is not the live kernel process')
+          }
+          if (receipt.installationMutation?.fault !== 'host-runtime-absent') {
+            fail('host-artifact-absent-started: the scoped installation mutation is not registered')
+          }
+          if (typeof receipt.installationMutation.target !== 'string'
+            || existsSync(receipt.installationMutation.target)) {
+            fail('host-artifact-absent-started: the installed artifact is not absent at the checkpoint')
+          }
+          if (receipt.candidate?.sha256 !== sha256(requireEnv('SPLIT_VITEST_CANDIDATE_TGZ'))) {
+            fail('host-artifact-absent-started: the receipt candidate SHA256 changed under the mutation')
+          }
         }
       }
       if (at === 'bootstrap-install') {
@@ -1372,7 +1502,14 @@ try {
     await waitForPidGone(killedWorkerPid, Math.max(1, deadline - Date.now()))
   }
   const receipt = processMode
-    ? await waitProcessTerminal(tmpBase, runId, Math.max(1, deadline - Date.now()))
+    ? await (at === 'finalize-compensation-started'
+      ? waitUntil(() => {
+        const current = latestProcessReceipt(tmpBase, runId)
+        return current?.phase === 'NOT_QUIESCED' && current?.compensation?.completed === true
+          ? current
+          : undefined
+      }, 'failed FINALIZE compensation terminal', Math.max(1, deadline - Date.now()))
+      : waitProcessTerminal(tmpBase, runId, Math.max(1, deadline - Date.now())))
     : await waitUntil(() => {
       const current = latestReceipt(tmpBase, runId)
       return current?.phase === 'ABORTED_CLEAN' ? current : undefined
@@ -1381,6 +1518,9 @@ try {
     // The exact kernel Host seat this Scene published must be free again.
     if (!(await hostSeatFree(receipt.scope?.hostSeat))) {
       fail('the process Scene Host seat is still held after the terminal receipt')
+    }
+    if (!(await hostSeatFree(receipt.scope?.qualificationSeat))) {
+      fail('the process Scene qualification Client seat is still held after the terminal receipt')
     }
     if (mode === 'process-worker-kill' && at === 'clients-ready') {
       if (siblingSnapshot === undefined) fail('the clients-ready sibling snapshot is missing')
@@ -1409,10 +1549,12 @@ try {
   }
   await sleep(Math.min(300, Math.max(1, deadline - Date.now())))
   const problems = processMode
-    ? checkProcessReceiptResources(receipt, kernel)
+    ? checkProcessReceiptResources(receipt, kernel, {
+      allowRemainingRoot: at === 'finalize-compensation-started',
+    })
     : checkReceiptResources(receipt)
   if (problems.length > 0) fail(problems.join('; '))
-  checkNoLingeringPaths(receipt)
+  if (at !== 'finalize-compensation-started') checkNoLingeringPaths(receipt)
   if (Date.now() > deadline) fail('probe exceeded its single fixed post-trigger deadline')
   const sentinelState = processMode && sentinelIdentity !== undefined
     ? identityLiveness(kernel, sentinelIdentity.pid, sentinelIdentity.birth)

@@ -26,11 +26,14 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
+
+import { waitForEntryClose } from './entry-close.mjs'
 
 import {
   allowNativeMutation,
@@ -102,6 +105,8 @@ let processClientSequence = 0
  */
 let processNativeOperation
 let qualificationClientSequence = 0
+/** The one in-flight bootstrap-CLI profile patch obligation, if any. */
+let processBootstrapCliPatch
 let receiptPath
 let receipt
 /** Once the terminal phase is recorded, a late handler may not rewrite it. */
@@ -179,24 +184,26 @@ process.on('disconnect', () => {
     process.exit(0)
     return
   }
-  if (preserveRoot) {
-    process.exit(1)
-    return
-  }
-  void closeLifecycle('worker-ipc-disconnect').then(
-    result => { process.exit(result.clean ? 0 : 1) },
+  // preserveRoot only decides whether the diagnostic directory survives. It
+  // never permits leaving an in-flight compensation (or a not-yet-started one)
+  // without joining its real terminal.
+  const settle = cleanupPromise !== undefined
+    ? cleanupPromise
+    : closeLifecycle('worker-ipc-disconnect')
+  void settle.then(
+    result => { process.exit(result.clean && !preserveRoot ? 0 : 1) },
     () => { process.exit(1) },
   )
 })
 
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    if (preserveRoot) {
-      process.exit(1)
-      return
-    }
-    void closeLifecycle(`supervisor-${signal}`).then(
-      result => { process.exit(result.clean ? 0 : 1) },
+    lifecycleClosed = true
+    const settle = cleanupPromise !== undefined
+      ? cleanupPromise
+      : closeLifecycle(`supervisor-${signal}`)
+    void settle.then(
+      result => { process.exit(result.clean && !preserveRoot ? 0 : 1) },
       () => { process.exit(1) },
     )
   })
@@ -204,11 +211,11 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 
 process.on('uncaughtException', error => {
   writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(error) })
-  if (preserveRoot) {
-    process.exit(1)
-    return
-  }
-  void closeLifecycle('uncaught-exception').then(() => process.exit(1), () => process.exit(1))
+  lifecycleClosed = true
+  const settle = cleanupPromise !== undefined
+    ? cleanupPromise
+    : closeLifecycle('uncaught-exception')
+  void settle.then(() => process.exit(1), () => process.exit(1))
 })
 
 // Keep the IPC channel and message loop alive until FINALIZE or disconnect.
@@ -303,6 +310,13 @@ function codedInputError(code, message) {
   return error
 }
 
+/** Remove credential-looking substrings from diagnostic text. */
+function redactText(text) {
+  return String(text)
+    .replace(/([?&](?:token|cookie)=)[^&\s"'`]+/giu, '$1[redacted]')
+    .replace(/((?:token|cookie|authorization)["']?\s*[:=]\s*["']?)[^\s,"'}]+/giu, '$1[redacted]')
+}
+
 function boundedError(error) {
   const name = error instanceof Error ? error.name : 'Error'
   const code = error !== null && typeof error === 'object' && 'code' in error ? String(error.code) : undefined
@@ -330,9 +344,8 @@ function appendNote(event, detail = {}) {
 
 function writeReceipt(update) {
   if (receiptPath === undefined) return
-  if (receiptTerminal && update.phase !== undefined && update.phase !== receipt.phase) {
-    const { phase: _latePhase, ...fields } = update
-    update = fields
+  if (receiptTerminal) {
+    if (update.phase === undefined || update.phase !== receipt.phase) return
   }
   receipt = { ...receipt, ...update, updatedAt: now() }
   // Publish one complete snapshot: the sibling Scene, the external probe and
@@ -404,7 +417,7 @@ function reply(requestId, payload) {
 }
 
 function fail(requestId, code, error) {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = redactText(error instanceof Error ? error.message : String(error))
   send({ type: 'ERROR', requestId, code, message })
 }
 
@@ -587,6 +600,15 @@ function hostSeatDescriptor(scopeId) {
   throw new Error(`no Host seat descriptor is implemented for ${process.platform}`)
 }
 
+/** The qualification-only Client seat of one scope (Linux abstract / Darwin file). */
+function qualificationSeatDescriptor(scopeId, dshHome) {
+  if (process.platform === 'linux') return { kind: 'linux-abstract', name: `\0dsh-pi-tui-c-${scopeId.slice(0, 40)}` }
+  if (process.platform === 'darwin') {
+    return { kind: 'darwin-file', path: join(dshHome, 'run', 'dsh-pi-tui', scopeId, `seat-qualification-client-${scopeId}.lock`) }
+  }
+  throw new Error(`no qualification Client seat descriptor is implemented for ${process.platform}`)
+}
+
 /**
  * The serialized kernel birth captured when this generation was spawned. It is
  * a durable fact: re-reading after the child exits would erase the evidence the
@@ -601,8 +623,12 @@ function publicHostFacts(handle) {
   return {
     id: handle.hostId,
     hostId: handle.hostId,
+    entryId: handle.entryId ?? handle.hostId,
+    kind: handle.kind ?? 'host',
+    mode: handle.mode ?? null,
+    expected: handle.expected ?? null,
     generation: handle.generation,
-    source: handle.source,
+    source: handle.source ?? 'profile',
     pid: handle.child.pid ?? null,
     birth: hostKernelBirth(handle),
     pgid: hostPgid(handle),
@@ -618,6 +644,8 @@ function publicHostFacts(handle) {
     exitCode: handle.exitResult?.code ?? null,
     exitSignal: handle.exitResult?.signal ?? null,
     exited: handle.exited,
+    finished: handle.finished === true,
+    terminal: handle.terminal ?? null,
   }
 }
 
@@ -627,24 +655,34 @@ function hostLedger() {
 
 function syncHostReceipt() {
   const update = { hosts: hostLedger() }
-  const latest = hosts[hosts.length - 1]
-  if (latest !== undefined) update.host = publicHostFacts(latest)
+  // The receipt's `host` row is the ONE accepted live Host, never the latest
+  // contender: concurrent attempts are a ledger, not the Scene owner.
+  if (activeHost !== undefined) update.host = publicHostFacts(activeHost)
   writeReceipt(update)
 }
 
 function publicQualificationClientFacts(handle) {
   return {
+    entryId: handle.entryId ?? null,
+    kind: handle.kind ?? 'qualification-one-shot',
+    label: handle.label ?? null,
+    mode: handle.mode ?? null,
+    expected: handle.expected ?? null,
     pid: handle.child.pid ?? null,
-    pgid: hostPgid(handle),
+    birth: handle.birth ?? null,
+    pgid: handle.pgid ?? hostPgid(handle),
     starttime: handle.starttime,
     scratch: handle.scratch,
-    hostId: handle.hostId,
-    generation: handle.generation,
+    hostId: handle.hostId ?? handle.expectedHostId ?? null,
+    generation: handle.generation ?? null,
     startedAt: handle.startedAt,
     closedAt: handle.closedAt,
     exitCode: handle.exitResult?.code ?? null,
     exitSignal: handle.exitResult?.signal ?? null,
+    signalIntent: handle.signalIntent ?? null,
     exited: handle.exited,
+    finished: handle.finished === true,
+    terminal: handle.terminal ?? null,
   }
 }
 
@@ -687,6 +725,102 @@ async function terminateQualificationClientHandle(handle, reason) {
   await reclaimClientFallbackHosts(`qualification Client ${String(handle.child.pid)} ${reason}`)
 }
 
+/**
+ * Bounded TERM -> KILL reclaim of ONE process qualification entry. Every signal
+ * re-proves the exact captured kernel birth; there is no bare-PID fallback.
+ */
+async function terminateOwnedEntry(handle, reason) {
+  if (handle.termination !== undefined) return await handle.termination
+  handle.termination = (async () => {
+    const signal = value => {
+      assertKernelGroupSignalOwnership(processKernelReaders(), handle.child.pid, handle.birth, `${reason}: ${value}`)
+      try {
+        process.kill(-handle.child.pid, value)
+      } catch (error) {
+        if (error?.code !== 'ESRCH') {
+          throw new Error(`${reason}: the owned entry group ${String(handle.child.pid)} could not be signalled (${String(error?.code ?? 'unknown')})`)
+        }
+      }
+    }
+    if (!handle.exited) {
+      const osExited = handle.child.exitCode !== null || handle.child.signalCode !== null
+      if (osExited) {
+        await waitForEntryClose(handle, `${reason}: pending close`, TERM_GRACE_MS)
+        await assertHostGroupGone(handle, reason)
+        if (handle === activeQualificationClient) activeQualificationClient = undefined
+        syncQualificationClientReceipt?.()
+        syncQualificationHelpersReceipt?.()
+        return
+      }
+      try {
+        signal('SIGTERM')
+      } catch (error) {
+        try {
+          await waitForEntryClose(handle, `${reason}: refused the SIGTERM as an exited leader`, TERM_GRACE_MS)
+        } catch {
+          throw error
+        }
+        await assertHostGroupGone(handle, reason)
+        if (handle === activeQualificationClient) activeQualificationClient = undefined
+        syncQualificationClientReceipt?.()
+        syncQualificationHelpersReceipt?.()
+        return
+      }
+      try {
+        await waitForEntryClose(handle, `${reason}: SIGTERM`, TERM_GRACE_MS)
+      } catch {
+        if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
+          try {
+            signal('SIGKILL')
+          } catch (error) {
+            try {
+              await waitForEntryClose(handle, `${reason}: refused the SIGKILL as an exited leader`, TERM_GRACE_MS)
+            } catch {
+              throw error
+            }
+          }
+        }
+        await waitForEntryClose(handle, `${reason}: SIGKILL`, KILL_GRACE_MS)
+      }
+    }
+    await assertHostGroupGone(handle, reason)
+    if (handle === activeQualificationClient) activeQualificationClient = undefined
+    syncQualificationClientReceipt()
+    syncQualificationHelpersReceipt()
+  })()
+  return await handle.termination
+}
+
+async function terminateAllProcessEntries(reason) {
+  const problems = []
+  const reclaim = async (handle, label) => {
+    try {
+      if (!handle.exited) await terminateOwnedEntry(handle, label)
+      else await assertHostGroupGone(handle, label)
+      if (handle.witnessKind === 'linux-zombie' && Number.isInteger(handle.witnessPid)) {
+        const observation = readKernelProcess(handle.witnessPid)
+        if (observation.kind === 'unknown') {
+          throw new Error(`${label}: the zombie witness identity is unverifiable`)
+        }
+        if (observation.kind === 'alive' && observation.identity.state !== 'Z' && observation.identity.state !== 'X'
+          && (handle.witnessBirth === undefined || serializeKernelIdentity(observation.identity) === handle.witnessBirth)) {
+          throw new Error(`${label}: the zombie witness ${String(handle.witnessPid)} is still live`)
+        }
+      }
+    } catch (error) {
+      problems.push({ entryId: handle.entryId, kind: handle.kind ?? null, error: boundedError(error) })
+    }
+  }
+  for (const handle of [...qualificationClients].reverse()) {
+    if (handle.kind !== 'qualification-client') continue
+    await reclaim(handle, `${reason}: qualification Client`)
+  }
+  for (const handle of [...qualificationHelpers].reverse()) {
+    await reclaim(handle, `${reason}: ${entryKindLabel(handle)}`)
+  }
+  return problems
+}
+
 /** The Darwin qualification-Client seat is an O_EXLOCK file inside the scope. */
 async function assertClientSeatFree(installation, scopeId, reason) {
   if (process.platform === 'linux') {
@@ -723,7 +857,7 @@ async function waitForQualificationRecord(handle, predicate, label, timeoutMs) {
     if (record !== undefined) return record
     const failure = handle.records.find(value => value?.m4a0 === 'failure' || value?.m4a0 === 'control-failure' || value?.m4a0 === 'control-error')
     if (failure !== undefined) {
-      throw new Error(`${label}: the qualification Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
+      throw new Error(`${label}: the qualification Client reported ${String(failure.m4a0)} (code=${String(failure.code ?? 'none')}, phase=${String(failure.phase ?? 'none')})`)
     }
     if (handle.spawnError !== undefined) throw new Error(`${label}: qualification Client spawn failed (${boundedError(handle.spawnError)})`)
     if (handle.exited) throw new Error(`${label}: qualification Client exited before the record`)
@@ -891,7 +1025,7 @@ async function waitForProcessClientRecord(handle, predicate, label, timeoutMs) {
     if (record !== undefined) return record
     const failure = records.find(value => value?.m4a0 === 'failure' || value?.m4a0 === 'control-failure')
     if (failure !== undefined) {
-      throw new Error(`${label}: the Client reported ${String(failure.m4a0)}${failure.code === undefined ? '' : ` [${String(failure.code)}]`}: ${String(failure.error ?? failure.op ?? '')}`)
+      throw new Error(`${label}: the Client reported ${String(failure.m4a0)} (code=${String(failure.code ?? 'none')}, phase=${String(failure.phase ?? 'none')})`)
     }
     if (handle.exited) throw new Error(`${label}: the Client exited before the record`)
     if (lifecycleClosed) throw new Error(`${label}: the Supervisor lifecycle closed while the record was awaited`)
@@ -947,11 +1081,15 @@ function assertHostIdentityMatchesKernel(hostFacts, hostPid, label) {
  * Worker death releases it. After release the handler always fails: no probe
  * mode may return a PASS by itself.
  */
-async function processProbeHold(point, detail) {
+async function processProbeHold(point, detail, options = {}) {
   if (process.env.SPLIT_VITEST_PROCESS_PROBE_POINT !== point) return
   appendNote('process-probe-hold', { point, ...detail })
   writeReceipt({ phase: `PROCESS_PROBE_${point.toUpperCase().replaceAll('-', '_')}_HOLD` })
   await waitForWorkerKillBarrier()
+  if (options.continueAfterKill === true) {
+    appendNote('process-probe-continued', { point })
+    return
+  }
   throw new Error(`the worker was killed at the ${point} probe point`)
 }
 
@@ -1348,18 +1486,31 @@ async function assertSceneHostSeatFree(reason) {
 }
 
 /** Test-only fault injection: simulate an abrupt old-Host crash in one window. */
+async function waitForHostClose(handle, label, timeoutMs) {
+  if (handle.closePromise === undefined) {
+    // A spawn that produced no PID has no close event; its failure is committed
+    // by the spawn-error path, never invented here.
+    throw new Error(`${label}: the Host has no registered close event`)
+  }
+  return await waitForEntryClose(handle, label, timeoutMs)
+}
+
 async function crashHost(handle, reason) {
   if (handle.exited) return
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} pending close`, KILL_GRACE_MS)
+    await assertHostGroupGone(handle, reason)
+    if (activeHost === handle) activeHost = undefined
+    syncHostReceipt()
+    return
+  }
   if (scene?.kind === 'process') killProcessHost(handle, 'SIGKILL', `crashHost:${reason}`)
   else killOwnedHost(handle, 'SIGKILL')
   try {
-    await waitForChildClose(handle.child, KILL_GRACE_MS)
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason}`, KILL_GRACE_MS)
   } catch (error) {
-    throw new Error(`Host ${String(handle.child.pid)} did not die after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`Host ${String(handle.child.pid)} did not close after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
   }
-  handle.exited = true
-  handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
-  handle.closedAt = now()
   await assertHostGroupGone(handle, reason)
   if (activeHost === handle) activeHost = undefined
   syncHostReceipt()
@@ -1371,24 +1522,47 @@ async function terminateHost(handle, reason) {
     await assertHostGroupGone(handle, reason)
     return handle.exitResult ?? { code: handle.child.exitCode, signal: handle.child.signalCode }
   }
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} pending close`, KILL_GRACE_MS)
+    await assertHostGroupGone(handle, reason)
+    return handle.exitResult ?? { code: null, signal: null }
+  }
   const kill = signal => {
     if (scene?.kind === 'process') killProcessHost(handle, signal, `terminateHost:${reason}`)
     else killOwnedHost(handle, signal)
   }
-  kill('SIGTERM')
   try {
-    await waitForChildClose(handle.child, TERM_GRACE_MS)
-  } catch {
-    kill('SIGKILL')
+    kill('SIGTERM')
+  } catch (error) {
     try {
-      await waitForChildClose(handle.child, KILL_GRACE_MS)
+      await waitForHostClose(handle, `Host ${String(handle.child.pid)} refused the SIGTERM as an exited leader`, TERM_GRACE_MS)
+    } catch {
+      throw error
+    }
+    await assertHostGroupGone(handle, reason)
+    syncHostReceipt()
+    return handle.exitResult
+  }
+  try {
+    await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason}`, TERM_GRACE_MS)
+  } catch {
+    if (!handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
+      try {
+        kill('SIGKILL')
+      } catch (error) {
+        try {
+          await waitForHostClose(handle, `Host ${String(handle.child.pid)} refused the SIGKILL as an exited leader`, TERM_GRACE_MS)
+        } catch {
+          throw error
+        }
+      }
+    }
+    try {
+      await waitForHostClose(handle, `Host ${String(handle.child.pid)} after ${reason} SIGKILL`, KILL_GRACE_MS)
     } catch (error) {
-      throw new Error(`Host ${String(handle.child.pid)} did not exit after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
+      throw new Error(`Host ${String(handle.child.pid)} did not close after ${reason}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  handle.exited = true
-  handle.exitResult = { code: handle.child.exitCode, signal: handle.child.signalCode }
-  handle.closedAt = now()
   await assertHostGroupGone(handle, reason)
   syncHostReceipt()
   return handle.exitResult
@@ -1404,12 +1578,19 @@ async function officialStopHost(handle = activeHost) {
     }
     return result
   }
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) {
+    const result = await waitForHostClose(handle, 'STOP_HOST pending close', KILL_GRACE_MS)
+    await assertHostGroupGone(handle, 'STOP_HOST')
+    if (result.code !== 0 || result.signal !== null) {
+      throw new Error(`STOP_HOST: official shutdown was abnormal: ${JSON.stringify(result)}`)
+    }
+    if (activeHost === handle) activeHost = undefined
+    syncHostReceipt()
+    return result
+  }
   try {
     handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
-    const result = await waitForChildClose(handle.child, HOST_SHUTDOWN_GRACE_MS)
-    handle.exited = true
-    handle.exitResult = result
-    handle.closedAt = now()
+    const result = await waitForHostClose(handle, 'STOP_HOST', HOST_SHUTDOWN_GRACE_MS)
     await assertHostGroupGone(handle, 'STOP_HOST')
     if (activeHost === handle) activeHost = undefined
     syncHostReceipt()
@@ -1538,11 +1719,13 @@ function assertLifecycleOpen(label) {
  */
 async function closeLifecycle(reason) {
   lifecycleClosed = true
+  if (cleanupPromise !== undefined) return await cleanupPromise
   await Promise.race([queue.catch(() => undefined), sleep(5_000)])
   return await cleanup(reason)
 }
 
-async function cleanup(reason) {
+async function cleanup(reason, options = {}) {
+  const preserve = options.preserveRoot === true
   lifecycleClosed = true
   if (finalized) return { clean: true }
   if (cleanupPromise !== undefined) return await cleanupPromise
@@ -1562,10 +1745,32 @@ async function cleanup(reason) {
       phase: 'CLEANUP_STARTED',
       notes: [...(receipt?.notes ?? []), { event: 'cleanup-started', detail: { reason }, at: now() }],
     })
+    if (options.failure !== undefined && scene?.kind === 'process') {
+      const liveClients = qualificationClients.filter(handle => !handle.exited).map(handle => ({
+        entryId: handle.entryId, pid: handle.child.pid, birth: handle.birth,
+      }))
+      const liveHelpers = qualificationHelpers.filter(handle => !handle.exited).map(handle => ({
+        entryId: handle.entryId, pid: handle.child.pid, birth: handle.birth,
+      }))
+      appendNote('finalize-compensation-started', { liveClients, liveHelpers, reason })
+      await processProbeHold('finalize-compensation-started', { liveClients, liveHelpers }, { continueAfterKill: true })
+    }
     try {
       // The one-shot qualification Client is a Supervisor-owned process group:
       // reclaim it BEFORE the Host generations and before the scene root.
       await terminateQualificationClient(reason)
+      if (scene?.kind === 'process') {
+        try {
+          const problems = await terminateAllProcessEntries(reason)
+          if (problems.length > 0) {
+            clean = false
+            for (const problem of problems) appendNote('process-entry-termination-failed', problem)
+          }
+        } catch (error) {
+          clean = false
+          appendNote('process-entry-termination-failed', { reason: boundedError(error) })
+        }
+      }
       // A process Scene's native Clients are owned by THIS process. Let the ONE
       // in-flight native operation reach its real settlement first, then close
       // every handle; a root is never removed while a native call still owns it.
@@ -1612,14 +1817,24 @@ async function cleanup(reason) {
       }
       for (const handle of [...hosts].reverse()) {
         try {
-          if (handle.exited) await assertHostGroupGone(handle, reason)
-          else await terminateHost(handle, reason)
+          // A leader whose OS process already exited is not a live target: its
+          // registered close must settle before the group/seat audit.
+          if (!handle.exited && (handle.child.exitCode !== null || handle.child.signalCode !== null)) {
+            await waitForHostClose(handle, `${reason}: pending close`, KILL_GRACE_MS)
+          }
+          if (handle.exited) {
+            await waitForGroupGone(hostPgid(handle), 15_000)
+            await assertHostGroupGone(handle, reason)
+          } else {
+            await terminateHost(handle, reason)
+          }
         } catch (error) {
           clean = false
           appendNote('host-termination-failed', {
             hostId: handle.hostId,
             generation: handle.generation,
             reason: boundedError(error),
+            detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 400),
           })
           if (scene?.kind !== 'process') throw error
         }
@@ -1652,14 +1867,73 @@ async function cleanup(reason) {
         }
         await reclaimClientFallbackHosts(`cleanup:${reason}:post-host`)
         await assertSceneHostSeatFree(`cleanup:${reason}`)
+        if (scene.kind === 'process') {
+          await assertClientSeatFree(scene.installation, processScope.scopeId, `cleanup:${reason}`)
+        }
+        // Both seats are terminal before the scoped input is restored, so no
+        // live consumer and no owner of the seat observes a half-restored copy.
+        if (scene.kind === 'process' && processInstallationMutation !== undefined && clean) {
+          try {
+            await restoreInstallationMutation({ compensating: true })
+          } catch (error) {
+            clean = false
+            appendNote('installation-mutation-restore-failed', {
+              fault: processInstallationMutation?.fault ?? null,
+              reason: boundedError(error),
+              detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 400),
+            })
+          }
+        }
+        if (processBootstrapCliPatch !== undefined && clean) {
+          const patch = processBootstrapCliPatch
+          try {
+            if (patch.previous === undefined) rmSync(patch.path, { force: true })
+            else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
+            processBootstrapCliPatch = undefined
+          } catch (error) {
+            clean = false
+            appendNote('bootstrap-cli-patch-restore-failed', {
+              path: patch.path,
+              reason: boundedError(error),
+              detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 300),
+            })
+          }
+        }
+        const compensation = options.failure === undefined ? undefined : {
+          attempted: true,
+          completed: clean,
+          failure: boundedError(options.failure),
+          attemptedAt: now(),
+        }
         if (!clean) {
+          writeReceipt({
+            phase: 'NOT_QUIESCED',
+            ...(compensation === undefined ? {} : { compensation }),
+            cleanup: { ...(receipt?.cleanup ?? {}), reason, completedAt: now(), sceneRootRemoved: false },
+          })
           throw new Error(`${reason}: the Scene is not quiesced; the root is preserved for diagnosis`)
         }
-        await cleanupSceneRoot(reason)
+        if (!preserve) await cleanupSceneRoot(reason)
+        writeReceipt({
+          phase: preserve ? 'NOT_QUIESCED' : 'ABORTED_CLEAN',
+          ...(compensation === undefined ? {} : { compensation }),
+          ...(options.failure === undefined ? {} : { errorName: boundedError(options.failure), errorDetail: String(boundedError(options.failure)).slice(0, 600) }),
+          cleanup: {
+            ...(receipt?.cleanup ?? {}),
+            reason,
+            completedAt: now(),
+            hostsExited: hosts.every(handle => handle.exited),
+            hostSeatFree: true,
+            qualificationSeatFree: scene.kind === 'process' ? true : undefined,
+            sceneRootRemoved: scene === undefined ? undefined : !existsSync(scene.workDir),
+          },
+        })
+        receiptTerminal = true
+        return { clean: true, compensation }
       }
       installInProgress = false
       writeReceipt({
-        phase: clean ? 'ABORTED_CLEAN' : 'NOT_QUIESCED',
+        phase: preserve || !clean ? 'NOT_QUIESCED' : 'ABORTED_CLEAN',
         cleanup: {
           ...(receipt?.cleanup ?? {}),
           reason,
@@ -2582,6 +2856,8 @@ async function handleBootstrapProcess(message) {
     installFacts: undefined,
     processClients: [],
     processNativeOperation: undefined,
+    qualificationHelpers: [],
+    installationMutation: undefined,
   })
   let root
   let installation
@@ -2660,6 +2936,7 @@ async function handleBootstrapProcess(message) {
         bundleVersion: scope.bundleVersion,
         dshVersion: scope.dshVersion,
         hostSeat: hostSeatDescriptor(scope.scopeId),
+        qualificationSeat: qualificationSeatDescriptor(scope.scopeId, installation.dshHome),
       },
       installFacts,
     })
@@ -2703,6 +2980,7 @@ async function handleBootstrapProcess(message) {
       bundleVersion: scope.bundleVersion,
       dshVersion: scope.dshVersion,
       hostSeat: hostSeatDescriptor(scope.scopeId),
+      qualificationSeat: qualificationSeatDescriptor(scope.scopeId, installation.dshHome),
     },
   }
 }
@@ -3333,6 +3611,7 @@ async function handleStartHost(message) {
   }
   if (activeHost !== undefined) throw new Error('START_HOST: one active Host per scene is supported')
   if (scene.kind === 'pilot' && hosts.length > 0) throw new Error('START_HOST: one Host per scene is supported')
+  if (scene.kind === 'process') assertNoBootstrapCliPatch('START_HOST')
 
   let source = 'profile'
   let entry
@@ -3350,13 +3629,41 @@ async function handleStartHost(message) {
       throw new Error('START_HOST: a process scene does not accept arbitrary extra environment')
     }
     // A next generation is allowed only after the previous one is provably
-    // stopped: clean exit code/signal, whole group gone, exact kernel seat free.
+    // stopped: a finished qualification attempt with its declared terminal, or
+    // an ordinary generation with a clean exit. A bare `finished` flag is not
+    // enough — the attempt's terminal contract was already validated against
+    // its real records, exit and group.
     for (const previous of hosts) {
       if (!previous.exited) throw new Error('START_HOST: the previous Host generation has not stopped')
-      if (previous.exitResult?.code !== 0 || previous.exitResult?.signal !== null) {
+      await assertHostGroupGone(previous, 'START_HOST: previous generation')
+      const cleanExit = previous.exitResult?.code === 0 && previous.exitResult?.signal === null
+      if (previous.acceptedHost === true) {
+        // The ONE explicit qualification exception: ACCEPT_HOST_WINNER validated
+        // the ready identity/seat/terminal owner before setting this flag.
+        if (!cleanExit) {
+          throw new Error(`START_HOST: the accepted Host exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
+        }
+        continue
+      }
+      if (previous.finished === true) {
+        // FINISH_ENTRY validated this attempt's whole terminal contract. A
+        // finished attempt (including a declared refusal or a stopped window)
+        // is a legal predecessor; only an UN-finished mode-bearing contender is
+        // not, regardless of its exit code.
+        if (previous.terminal === undefined) {
+          throw new Error('START_HOST: the previous attempt has no validated terminal facts')
+        }
+        continue
+      }
+      if (previous.mode !== undefined) {
+        throw new Error('START_HOST: an un-finished Host attempt cannot become a previous generation')
+      }
+      if (!cleanExit) {
         throw new Error(`START_HOST: the previous Host generation exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
       }
-      await assertHostGroupGone(previous, 'START_HOST: previous generation')
+    }
+    if (processInstallationMutation !== undefined) {
+      throw codedInputError('INPUT_INSTALLATION_MUTATED', 'START_HOST is not allowed under a mutated installation')
     }
     await assertSceneHostSeatFree('START_HOST: previous generation')
     const facts = assertProcessInstalledFacts('START_HOST')
@@ -3440,6 +3747,8 @@ async function handleStartHost(message) {
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: true,
   })
+  let settleClose
+  const closePromise = new Promise(resolve => { settleClose = resolve })
   const records = []
   let stderr = ''
   createInterface({ input: child.stdout }).on('line', line => {
@@ -3479,6 +3788,7 @@ async function handleStartHost(message) {
         return undefined
       }
     })(),
+    closePromise,
     closedAt: undefined,
     exited: false,
     exitResult: undefined,
@@ -3497,6 +3807,7 @@ async function handleStartHost(message) {
     handle.exited = true
     handle.exitResult = { code, signal }
     handle.closedAt = now()
+    settleClose({ code, signal })
     syncHostReceipt()
   })
   appendNote('host-spawned', {
@@ -3544,7 +3855,7 @@ async function handleStartHost(message) {
     ready = await waitForHostRecord(handle, record => record.m4a0 === 'ready' || record.m4a0 === 'failure',
       `${hostLabel} Host ready`, HOST_READY_TIMEOUT_MS)
   } catch (error) {
-    if (handle.spawnError !== undefined) {
+    if (handle.spawnError !== undefined && child.pid === undefined) {
       handle.exited = true
       handle.exitResult = { code: null, signal: null }
       handle.closedAt = now()
@@ -4078,6 +4389,7 @@ function registerProcessFallbackHost(handle, hostFacts, label) {
 async function handleStartProcessClient(message) {
   requireProcessScene('START_PROCESS_CLIENT')
   assertLifecycleOpen('START_PROCESS_CLIENT')
+  assertNoBootstrapCliPatch('START_PROCESS_CLIENT')
   const label = message.label
   if (typeof label !== 'string' || label === '') {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT requires a non-empty label')
@@ -4641,6 +4953,44 @@ async function auditProcessClientLedger(reason) {
 }
 
 async function handleFinalize(message) {
+  if (scene?.kind === 'process') {
+    const preconditions = []
+    for (const handle of qualificationClients) {
+      if (handle.kind !== 'qualification-client') continue
+      if (!handle.exited) preconditions.push(`the qualification Client ${String(handle.label)} is still live`)
+      else if (handle.finished !== true) preconditions.push(`the qualification Client ${String(handle.label)} is not finished`)
+    }
+    for (const handle of qualificationHelpers) {
+      if (!handle.exited) preconditions.push(`the ${entryKindLabel(handle)} ${String(handle.label)} is still live`)
+      else if (handle.finished !== true) preconditions.push(`the ${entryKindLabel(handle)} ${String(handle.label)} is not finished`)
+    }
+    for (const handle of processClients) {
+      if (!handle.closed) preconditions.push(`the process Client ${String(handle.label)} is not closed`)
+      if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+        preconditions.push(`the process Client ${String(handle.label)} exited abnormally: ${JSON.stringify(handle.exitResult ?? null)}`)
+      }
+    }
+    if (processClients.length > 0 && !preconditions.some(value => value.includes('process Client'))) {
+      try {
+        await auditProcessClientLedger('FINALIZE: pre-stop')
+      } catch (error) {
+        preconditions.push(`the process Client ledger is not terminal (${boundedError(error)})`)
+      }
+    }
+    if (processInstallationMutation !== undefined) {
+      preconditions.push(`the installed-copy mutation ${String(processInstallationMutation.fault)} is not restored`)
+    }
+    if (processBootstrapCliPatch !== undefined) preconditions.push('the inherited profile patch is not restored')
+    if (message.clientsClosed !== true) preconditions.push('the Worker did not confirm its Clients closed')
+    for (const handle of hosts) {
+      if (handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true) {
+        preconditions.push(`the Host attempt ${String(handle.label)} is not finished`)
+      }
+    }
+    if (preconditions.length > 0) {
+      throw new Error(`FINALIZE: Process terminal preconditions failed before Host stop: ${preconditions.join('; ')}`)
+    }
+  }
   let hostStopError
   // The one-shot qualification Client must already be gone on the normal path;
   // a still-live one is reclaimed so FINALIZE never leaks, then fails closed.
@@ -4652,30 +5002,59 @@ async function handleFinalize(message) {
     }
   }
   for (const handle of qualificationClients) {
+    if (handle.kind === 'qualification-client') {
+      // A process qualification entry carries its OWN declared terminal
+      // (success or a pre-registered refusal); forgetting to finish it is a
+      // failed finalization, never silently reclaimed as clean.
+      if (handle.finished !== true) {
+        hostStopError = hostStopError ?? new Error(
+          `FINALIZE: the qualification Client ${String(handle.label)} was not finished by the Worker`)
+      }
+      if (!handle.exited) {
+        hostStopError = hostStopError ?? new Error(
+          `FINALIZE: the qualification Client ${String(handle.label)} is still live`)
+      }
+      continue
+    }
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
       hostStopError = hostStopError ?? new Error(
         `FINALIZE: qualification Client PID ${String(handle.child.pid)} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
     }
   }
-  // Process Clients are Supervisor-owned native sessions. A Client the Worker
-  // did not close is compensated here AND reported as a failed finalization:
-  // forgetting a close is never a silent success.
-  for (const handle of processClients) {
-    if (handle.closed) continue
-    try {
-      await settleProcessClientHandler(handle, 'FINALIZE')
-      await settleProcessClientClose(handle, 'FINALIZE')
-      await reclaimProcessClient(handle, 'FINALIZE')
-    } catch (error) {
-      hostStopError = hostStopError ?? error
-    }
-    hostStopError = hostStopError ?? new Error(
-      `FINALIZE: the process Client ${handle.label} was not closed by the Worker`)
-  }
-  for (const handle of processClients) {
-    if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+  for (const handle of qualificationHelpers) {
+    if (handle.finished !== true || !handle.exited) {
       hostStopError = hostStopError ?? new Error(
-        `FINALIZE: process Client ${handle.label} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
+        `FINALIZE: the ${entryKindLabel(handle)} ${String(handle.label)} was not finished by the Worker`)
+    }
+  }
+  if (processInstallationMutation !== undefined) {
+    hostStopError = hostStopError ?? new Error(
+      `FINALIZE: the installed-copy mutation ${String(processInstallationMutation.fault)} was not restored by the Worker`)
+  }
+  if (scene?.kind !== 'process') {
+    for (const handle of processClients) {
+      if (handle.closed) continue
+      try {
+        await settleProcessClientHandler(handle, 'FINALIZE')
+        await settleProcessClientClose(handle, 'FINALIZE')
+        await reclaimProcessClient(handle, 'FINALIZE')
+      } catch (error) {
+        hostStopError = hostStopError ?? error
+      }
+      hostStopError = hostStopError ?? new Error(
+        `FINALIZE: the process Client ${handle.label} was not closed by the Worker`)
+    }
+    for (const handle of processClients) {
+      if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+        hostStopError = hostStopError ?? new Error(
+          `FINALIZE: process Client ${handle.label} did not exit normally: ${JSON.stringify(handle.exitResult ?? null)}`)
+      }
+    }
+    for (const handle of hosts) {
+      if (handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true) {
+        hostStopError = hostStopError ?? new Error(
+          `FINALIZE: the Host attempt ${String(handle.label)} was not finished by the Worker`)
+      }
     }
   }
   // Native leftover Clients/shells are reclaimed BEFORE any Host stop, using
@@ -4710,9 +5089,8 @@ async function handleFinalize(message) {
       }
     }
   }
-  if (message.clientsClosed !== true) {
-    writeReceipt({ phase: 'NOT_QUIESCED', errorName: 'FINALIZE_CLIENTS_NOT_CLOSED' })
-    throw new Error('FINALIZE: worker did not confirm Clients closed')
+  if (scene?.kind !== 'process' && message.clientsClosed !== true) {
+    hostStopError = hostStopError ?? new Error('FINALIZE: worker did not confirm Clients closed')
   }
   if (isNativeScene()) {
     const nativeCleanup = await cleanupNativeManagedService('FINALIZE')
@@ -4720,17 +5098,42 @@ async function handleFinalize(message) {
       hostStopError = hostStopError ?? new Error(`FINALIZE: the native managed service is not reclaimed (${String(nativeCleanup.reason)})`)
     }
   } else {
-    auditClientLedger('FINALIZE')
+    try {
+      auditClientLedger('FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
   }
-  if (scene?.kind === 'process') await auditProcessClientLedger('FINALIZE')
   if (hostStopError !== undefined) throw hostStopError
   for (const handle of hosts) {
+    if (handle.finished === true) continue
     if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
       throw new Error(`FINALIZE: Host generation ${String(handle.generation)} did not exit normally: ${JSON.stringify(handle.exitResult)}`)
     }
   }
-  await reclaimClientFallbackHosts('FINALIZE')
-  await assertSceneHostSeatFree('FINALIZE')
+  for (const handle of hosts) {
+    if (handle.finished === true && handle.terminal?.outcome === undefined) {
+      throw new Error(`FINALIZE: Host generation ${String(handle.generation)} has an unvalidated terminal record`)
+    }
+  }
+  try {
+    await reclaimClientFallbackHosts('FINALIZE')
+  } catch (error) {
+    hostStopError = hostStopError ?? error
+  }
+  try {
+    await assertSceneHostSeatFree('FINALIZE')
+  } catch (error) {
+    hostStopError = hostStopError ?? error
+  }
+  if (scene?.kind === 'process') {
+    try {
+      await assertClientSeatFree(scene.installation, processScope.scopeId, 'FINALIZE')
+    } catch (error) {
+      hostStopError = hostStopError ?? error
+    }
+  }
+  if (hostStopError !== undefined) throw hostStopError
   if (scene !== undefined) {
     await cleanupSceneRoot('FINALIZE')
   }
@@ -4824,6 +5227,2156 @@ async function handleReport(message) {
   writeReceipt({})
 }
 
+// ── process Scene: installed-entry qualification seams ───────────────────
+//
+// The process Project needs bounded observation of real installed entry
+// processes that are NOT the normal ready Host/Client pair: concurrent Host
+// contenders, one-shot qualification Clients, the installed regular CLI and
+// real identity witnesses. Every one of them is a real detached child this
+// Supervisor created; the Worker only holds an opaque entry id and the facts
+// this process proves. There is no second process manager.
+
+const HOST_ATTEMPT_MODES = new Set([
+  'seat-race',
+  'seat-conflict',
+  'host-runtime-disabled',
+  'tui-row-enabled',
+  'connection-disabled',
+  'session-controller-disabled',
+  'workspace-controller-disabled',
+  'host-runtime-absent',
+  'host-bootstrap-absent',
+  'scratch-removal-failure',
+  'early-exit',
+  'stop-during-publication',
+  'stop-during-initial-liveness',
+])
+
+const QUALIFICATION_CLIENT_MODES = new Set([
+  'attach',
+  'seat-race',
+  'omit-cookie',
+  'startup-fatal',
+  'refresh-unresponsive-once',
+  'bootstrap-failure',
+  'client-bootstrap-drift',
+  'discover-after-host-death',
+  'discover-with-pre-profile-failure',
+  'discovery-refusal',
+  'identity-changed',
+])
+
+/**
+ * The fixed discovery-refusal classes the Worker may pre-declare. Each maps to
+ * the exact official product classification; the test still performs the real
+ * private-file mutation and observes the real Client terminal.
+ */
+const DISCOVERY_REFUSALS = new Map([
+  ['registry-symlink', 'LOCAL_FILE_UNSAFE'],
+  ['launch-symlink', 'LOCAL_FILE_UNSAFE'],
+  ['forged-instance', 'HOST_IDENTITY_MISMATCH'],
+  ['forged-pid', 'HOST_IDENTITY_MISMATCH'],
+  ['forged-build', 'HOST_IDENTITY_MISMATCH'],
+  ['forged-origin', 'HOST_UNRESPONSIVE'],
+  ['unresponsive-dummy-origin', 'HOST_UNRESPONSIVE'],
+  ['protocol', 'HOST_PROTOCOL_INCOMPATIBLE'],
+  ['wrong-token', 'HOST_AUTH_FAILED'],
+  // Darwin: the scope directory is also the qualification-seat directory, so a
+  // group/other-accessible scope is a real seat refusal, never a fake mode.
+  ['scope-directory', 'SCOPE_DIRECTORY_UNSAFE'],
+])
+
+const ENTRY_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGKILL'])
+
+const HOST_ATTEMPT_PATCHES = new Map([
+  ['host-runtime-disabled', '- id: split-host-pi-tui-runtime\n  disabled: true\n'],
+  ['tui-row-enabled', '- id: tui-app\n  disabled: false\n'],
+  ['connection-disabled', '- id: split-host-connection\n  disabled: true\n'],
+  ['session-controller-disabled', '- id: split-host-session-controller\n  disabled: true\n'],
+  ['workspace-controller-disabled', '- id: workspace-controller\n  disabled: true\n'],
+])
+
+/** The bounded set of secret/path fields never carried into a Worker fact. */
+const ENTRY_REDACTED_KEYS = new Set([
+  'token', 'cookie', 'setCookie', 'authorization', 'connectUrl', 'launch',
+  'env', 'environment', 'secret', 'profileRealpath', 'profileDir', 'harnessDir',
+  'stack', 'cause',
+])
+
+/** The real detached helper processes this Scene owns beyond Host/Client. */
+const qualificationHelpers = []
+let qualificationHelperSequence = 0
+/**
+ * The ONE scoped installed-copy mutation of a process Scene, or undefined.
+ * It records only what is needed to undo the change this Scene made.
+ */
+let processInstallationMutation
+
+function entryKindLabel(handle) {
+  switch (handle.kind) {
+    case 'host-attempt': return 'Host attempt'
+    case 'qualification-client': return 'qualification Client'
+    case 'bootstrap-cli': return 'installed CLI'
+    case 'identity-witness': return 'identity witness'
+    default: return 'entry'
+  }
+}
+
+function findEntryById(entryId, label) {
+  if (typeof entryId !== 'string' || entryId === '') {
+    throw new Error(`INPUT_UNQUALIFIED: ${label} requires a non-empty entryId`)
+  }
+  const host = hosts.find(handle => handle.hostId === entryId)
+  if (host !== undefined) return host
+  const client = qualificationClients.find(handle => handle.entryId === entryId)
+  if (client !== undefined) return client
+  const helper = qualificationHelpers.find(handle => handle.entryId === entryId)
+  if (helper !== undefined) return helper
+  throw new Error(`INPUT_UNQUALIFIED: ${label}: unknown entryId ${JSON.stringify(entryId)}`)
+}
+
+function findHostAttemptById(entryId, label) {
+  const handle = findEntryById(entryId, label)
+  if (handle.kind !== undefined && handle.kind !== 'host-attempt') {
+    throw new Error(`INPUT_UNQUALIFIED: ${label}: entry ${entryId} is not a Host attempt`)
+  }
+  return handle
+}
+
+function findQualificationClientById(entryId, label) {
+  const handle = findEntryById(entryId, label)
+  if (handle.kind !== 'qualification-client' && handle.kind !== 'bootstrap-cli' && handle.kind !== 'identity-witness') {
+    throw new Error(`INPUT_UNQUALIFIED: ${label}: entry ${entryId} is not a qualification Client`)
+  }
+  return handle
+}
+
+function captureEntryBirth(child, label) {
+  if (!Number.isInteger(child.pid) || child.pid <= 0) return undefined
+  try {
+    const observation = readKernelProcess(child.pid)
+    return observation.kind === 'alive' ? serializeKernelIdentity(observation.identity) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function publicEntryFacts(handle) {
+  const child = handle.child ?? handle.pid
+  const pid = typeof child === 'object' ? child?.pid ?? null : child
+  return {
+    entryId: handle.entryId,
+    kind: handle.kind,
+    label: handle.label ?? null,
+    mode: handle.mode ?? null,
+    refusal: handle.refusal ?? null,
+    expected: handle.expected ?? null,
+    pid: pid ?? null,
+    birth: handle.birth ?? null,
+    pgid: handle.pgid ?? pid ?? null,
+    starttime: handle.starttime ?? null,
+    workRoot: handle.workRoot ?? null,
+    scratch: handle.scratch ?? null,
+    barriers: handle.barriers ?? {},
+    signalIntent: handle.signalIntent ?? null,
+    coStarted: handle.coStarted ?? null,
+    ready: handle.readyRecord === undefined ? undefined : sanitizeEntryRecord(handle.readyRecord).value,
+    exited: handle.exited === true,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    finished: handle.finished === true,
+    terminal: handle.terminal === undefined ? null : sanitizeEntryRecord(handle.terminal),
+    recordCount: handle.records?.length ?? 0,
+  }
+}
+
+/**
+ * Persist the raw stderr of one refused entry as 0600 private evidence inside
+ * its own work directory. The receipt carries only the path and markers; raw
+ * diagnostics never enter a Worker fact or the Vitest transcript.
+ */
+function writeEntryStderrEvidence(directory, text, label) {
+  if (typeof directory !== 'string' || directory === '' || text === '') return undefined
+  const path = join(directory, `${label}-stderr.log`)
+  writeFileSync(path, text, { mode: 0o600 })
+  chmodSync(path, 0o600)
+  return path
+}
+
+function syncQualificationHelpersReceipt() {
+  writeReceipt({ qualificationHelpers: qualificationHelpers.map(publicEntryFacts) })
+}
+
+function sanitizeEntryRecord(record) {
+  const walk = (value, depth) => {
+    if (value === null || value === undefined) return value
+    if (typeof value === 'string') {
+      if (typeof scene?.installation?.profileDir === 'string' && value.includes(scene.installation.profileDir)) {
+        return '[scene-path]'
+      }
+      const redacted = redactText(value)
+      return redacted.length > 2_000 ? `${redacted.slice(0, 2_000)}…` : redacted
+    }
+    if (typeof value !== 'object') return value
+    if (depth >= 6) return '[depth-limit]'
+    if (Array.isArray(value)) return value.slice(0, 200).map(item => walk(item, depth + 1))
+    const result = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (ENTRY_REDACTED_KEYS.has(key)) continue
+      result[key] = walk(item, depth + 1)
+    }
+    if ((value.m4a0 === 'failure' || value.m4a0 === 'control-failure' || value.m4a0 === 'control-error')
+      && 'error' in result) {
+      // The raw failure text is private Supervisor evidence. Only the one
+      // stable business conflict code is a Worker-visible fact.
+      if (result.error === 'HOST_ALREADY_OWNED') result.error = 'HOST_ALREADY_OWNED'
+      else delete result.error
+    }
+    return result
+  }
+  return walk(record, 0)
+}
+
+function entryRecordsOf(handle) {
+  const records = (handle.records ?? []).map(record => sanitizeEntryRecord(record))
+  const stderrMarkers = entryStderrMarkers(handle)
+  return {
+    entryId: handle.entryId,
+    kind: handle.kind,
+    mode: handle.mode ?? null,
+    exited: handle.exited === true,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    stderrMarkers,
+    stderrBytes: (handle.stderrText ?? '').length,
+    records,
+  }
+}
+
+/** The fixed, non-secret stderr observations the qualification modes need. */
+function entryStderrMarkers(handle) {
+  const text = handle.stderrText ?? ''
+  return {
+    loaderImportFailed: /split-host-pi-tui-runtime \(@xmoon76\/dsh-pi-tui\/host-runtime\): failed to import/u.test(text),
+    moduleNotFound: /ERR_MODULE_NOT_FOUND/u.test(text),
+    requiredTuiSurfaceMissing: /required TUI surface did not mount/u.test(text)
+      || /required TUI surface did not mount/u.test(handle.outputText ?? ''),
+  }
+}
+
+function recordMatches(record, match) {
+  if (record === null || typeof record !== 'object') return false
+  for (const key of ['m4a0', 'm4b2hf', 'requestId', 'phase', 'signal', 'op']) {
+    if (match[key] !== undefined && record[key] !== match[key]) return false
+  }
+  return true
+}
+
+/** Strict known-field admission for one new qualification IPC operation. */
+function requireKnownFields(message, allowed, label) {
+  for (const key of Object.keys(message)) {
+    if (key === 'type' || key === 'requestId') continue
+    if (!allowed.includes(key)) {
+      throw codedInputError('INPUT_UNEXPECTED_FIELD', `${label} rejects the field ${JSON.stringify(key)}`)
+    }
+  }
+}
+
+function requireEntryMatch(match, label) {
+  if (match === null || typeof match !== 'object' || Array.isArray(match)) {
+    throw new Error(`INPUT_UNQUALIFIED: ${label} requires a record match object`)
+  }
+  const allowed = new Set(['m4a0', 'm4b2hf', 'requestId', 'phase', 'signal', 'op'])
+  const keys = Object.keys(match)
+  if (keys.length === 0 || keys.some(key => !allowed.has(key))) {
+    throw new Error(`INPUT_UNQUALIFIED: ${label} rejects that record match shape`)
+  }
+  for (const [key, value] of Object.entries(match)) {
+    if (typeof value !== 'string' || value === '') {
+      throw new Error(`INPUT_UNQUALIFIED: ${label} requires non-empty string ${key}`)
+    }
+  }
+  return match
+}
+
+/**
+ * Await ONE official record of a registered entry. The wait is close-aware and
+ * lifecycle-aware; an unrelated failure/control failure fails immediately so a
+ * negative is never decided by the wrong terminal.
+ */
+async function waitForEntryRecord(handle, match, label, timeoutMs) {
+  const started = Date.now()
+  for (;;) {
+    const record = (handle.records ?? []).find(value => recordMatches(value, match))
+    if (record !== undefined) {
+      if (record.m4a0 === 'ready') {
+        handle.readyRecord = record
+        if (handle.kind === 'qualification-client' && handle.mode === 'discover-after-host-death') {
+          if (record.host === undefined || record.host === null) {
+            throw new Error(`${label}: the discovered Host ready record carries no Host facts`)
+          }
+          if (activeHost === undefined) registerProcessFallbackHost(handle, record.host, `${label} discovered Host`)
+        }
+      }
+      return sanitizeEntryRecord(record)
+    }
+    const control = (handle.records ?? []).find(value => value?.m4a0 === 'control-failure' || value?.m4a0 === 'control-error')
+    if (control !== undefined) {
+      throw new Error(`${label}: the entry reported ${String(control.m4a0)} (code=${String(control.code ?? 'none')}, phase=${String(control.phase ?? 'none')})`)
+    }
+    const failure = (handle.records ?? []).find(value => value?.m4a0 === 'failure')
+    if (failure !== undefined && !recordMatches(failure, match)) {
+      throw new Error(`${label}: the entry failed before the awaited record (code=${String(failure.code ?? 'none')}, phase=${String(failure.phase ?? 'none')})`)
+    }
+    if (handle.spawnError !== undefined) throw new Error(`${label}: the entry spawn failed (${boundedError(handle.spawnError)})`)
+    if (handle.exited) throw new Error(`${label}: the entry exited before the awaited record`)
+    if (lifecycleClosed) throw new Error(`${label}: the Supervisor lifecycle closed while the record was awaited`)
+    if (Date.now() - started >= timeoutMs) throw new Error(`${label}: timed out after ${String(timeoutMs)}ms`)
+    await sleep(25)
+  }
+}
+
+/** The exact live-env observation of one registered entry, bounded. */
+async function waitForEntryEnvironment(handle, target, label, timeoutMs = 30_000) {
+  const started = Date.now()
+  for (;;) {
+    if (handle.exited) throw new Error(`${label}: the entry exited before its environment could be observed`)
+    const present = processEnvironmentContains(handle.child.pid, `SPLIT_PROCESS_SCRATCH=${target}`)
+    if (present === true) return
+    if (present === false && Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: the entry never carried the exact SPLIT_PROCESS_SCRATCH input`)
+    }
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: the entry environment could not be observed within ${String(timeoutMs)}ms`)
+    }
+    await sleep(25)
+  }
+}
+
+function requireSceneBarrier(raw, name) {
+  if (typeof raw !== 'string' || raw === '' || !isAbsolute(raw)) {
+    throw new Error(`INPUT_UNQUALIFIED: ${name} must be an absolute path`)
+  }
+  const relativePath = relative(scene.workDir, raw)
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`)) {
+    throw new Error(`INPUT_UNQUALIFIED: ${name} must be a contained Scene path`)
+  }
+  // Every caller requires an EXISTING directory. Resolve the real parent
+  // before any side effect: a Scene-local symlink alias to the outside is
+  // rejected by the canonical containment check without creating anything.
+  const parentPath = dirname(raw)
+  const parent = realpathSync(parentPath)
+  const parentRel = relative(scene.workDir, parent)
+  if (parentRel === '..' || parentRel.startsWith(`..${sep}`)) {
+    throw new Error(`INPUT_UNQUALIFIED: ${name} must stay inside the Scene root`)
+  }
+  return { path: raw, parent }
+}
+
+function composeExtraPatch(attemptDir, mode) {
+  const mutation = HOST_ATTEMPT_PATCHES.get(mode)
+  if (mutation === undefined) return undefined
+  // Keep the real offline LLM prerequisite and append the row mutation AFTER
+  // it, the same overlay order the profile itself applies.
+  const base = readFileSync(scene.installation.surfaceLlm.patchPath, 'utf8')
+  const path = join(attemptDir, 'entry-mutation.patch.yml')
+  writeFileSync(path, `${base.endsWith('\n') ? base : `${base}\n`}${mutation}`, { mode: 0o600 })
+  return path
+}
+
+function hostAttemptEnv(mode, attemptDir, scratch) {
+  const env = {
+    ...scene.installation.base.env,
+    DSH_PI_TUI_ENTRY_RECORDS: '1',
+    SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
+    SPLIT_PROCESS_PROFILE: 'pi-tui',
+    SPLIT_PROCESS_SCRATCH: scratch,
+  }
+  const patchPath = composeExtraPatch(attemptDir, mode)
+  if (patchPath !== undefined) env.SPLIT_PROCESS_EXTRA_PATCH = patchPath
+  if (mode === 'scratch-removal-failure') env.SPLIT_PROCESS_HOST_FORCE_SCRATCH_REMOVE_FAILURE = '1'
+  if (mode === 'early-exit') env.SPLIT_PROCESS_HOST_FORCE_EARLY_EXIT = '1'
+  return env
+}
+
+/** The real installed Host entry of this Scene, independent of a live fault. */
+function pristineHostEntry() {
+  if (scene?.installFacts?.entries?.host === undefined) {
+    throw new Error('the process Scene install facts have no Host entry')
+  }
+  return realpathSync(scene.installFacts.entries.host)
+}
+
+function pristineClientEntry() {
+  if (scene?.installFacts?.entries?.client === undefined) {
+    throw new Error('the process Scene install facts have no Client entry')
+  }
+  return realpathSync(scene.installFacts.entries.client)
+}
+
+function assertNoOtherUnfinishedHost(label, except) {
+  for (const handle of hosts) {
+    if (handle === except) continue
+    if (!handle.exited) throw new Error(`${label}: Host/attempt ${String(handle.entryId ?? handle.hostId)} is still live`)
+    if (handle.finished === true && handle.terminal?.outcome === 'signal') continue
+    if (handle.mode !== undefined && handle.acceptedHost !== true) {
+      if (handle.finished !== true) {
+        throw new Error(`${label}: Host/attempt ${String(handle.entryId)} has not finished its declared terminal contract`)
+      }
+    } else if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
+      throw new Error(`${label}: the previous Host generation exited abnormally: ${JSON.stringify(handle.exitResult ?? null)}`)
+    }
+  }
+}
+
+function requirePristineInstalledFacts(label) {
+  if (processInstallationMutation !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED',
+      `${label}: the installed copy is under the registered mutation ${processInstallationMutation.fault}`)
+  }
+  return assertProcessInstalledFacts(label)
+}
+
+async function handleStartHostAttempts(message) {
+  requireKnownFields(message, ['mode', 'count', 'scratchTarget', 'signal'], 'START_HOST_ATTEMPTS')
+  requireProcessScene('START_HOST_ATTEMPTS')
+  assertLifecycleOpen('START_HOST_ATTEMPTS')
+  assertNoBootstrapCliPatch('START_HOST_ATTEMPTS')
+  const mode = message.mode
+  if (!HOST_ATTEMPT_MODES.has(mode)) {
+    throw codedInputError('INPUT_HOST_ATTEMPT_MODE', `START_HOST_ATTEMPTS: unknown Host attempt mode ${JSON.stringify(mode)}`)
+  }
+  if (mode === 'seat-conflict') {
+    // The conflict contender is the real negative of the LIVE winner; it is an
+    // owned entry, not a new generation, and must not displace the winner.
+    requireReadyHost('START_HOST_ATTEMPTS seat-conflict')
+  } else {
+    if (activeHost !== undefined) throw new Error('START_HOST_ATTEMPTS: an accepted Host is already active')
+    assertNoOtherUnfinishedHost('START_HOST_ATTEMPTS')
+  }
+  const signal = message.signal
+  if (mode === 'stop-during-publication' || mode === 'stop-during-initial-liveness') {
+    if (!ENTRY_SIGNALS.has(signal) || signal === 'SIGKILL') {
+      throw codedInputError('INPUT_HOST_ATTEMPT_SIGNAL', `START_HOST_ATTEMPTS: ${mode} requires SIGTERM or SIGINT`)
+    }
+  } else if (signal !== undefined) {
+    throw codedInputError('INPUT_HOST_ATTEMPT_SIGNAL', `START_HOST_ATTEMPTS: ${mode} does not accept a signal`)
+  }
+  const faultRequired = mode === 'host-runtime-absent' || mode === 'host-bootstrap-absent'
+  if (faultRequired && processInstallationMutation?.fault !== mode) {
+    throw codedInputError('INPUT_INSTALLATION_FAULT', `START_HOST_ATTEMPTS: ${mode} requires its registered installation fault`)
+  }
+  if (!faultRequired && processInstallationMutation !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED', `START_HOST_ATTEMPTS: ${mode} is not allowed under a mutated installation`)
+  }
+  let count = 1
+  if (mode === 'seat-race') {
+    count = message.count ?? 16
+    if (!Number.isInteger(count) || count < 2 || count > 16) {
+      throw codedInputError('INPUT_HOST_ATTEMPT_COUNT', 'START_HOST_ATTEMPTS: seat-race count must be 2..16')
+    }
+  } else if (message.count !== undefined) {
+    throw codedInputError('INPUT_HOST_ATTEMPT_COUNT', `START_HOST_ATTEMPTS: ${mode} always starts exactly one contender`)
+  }
+  let scratchTarget
+  if (mode === 'seat-conflict') {
+    scratchTarget = requireSceneBarrier(message.scratchTarget, 'scratchTarget').path
+    let targetReal
+    try {
+      targetReal = realpathSync(scratchTarget)
+    } catch (error) {
+      throw codedInputError('INPUT_HOST_ATTEMPT_SCRATCH', `START_HOST_ATTEMPTS: scratchTarget does not exist (${boundedError(error)})`)
+    }
+    if (targetReal !== scratchTarget) {
+      throw codedInputError('INPUT_HOST_ATTEMPT_SCRATCH', 'START_HOST_ATTEMPTS: scratchTarget must be a canonical path')
+    }
+    if (!statSync(targetReal).isDirectory()) {
+      throw codedInputError('INPUT_HOST_ATTEMPT_SCRATCH', 'START_HOST_ATTEMPTS: scratchTarget must be a directory')
+    }
+    scratchTarget = targetReal
+  } else if (message.scratchTarget !== undefined) {
+    throw codedInputError('INPUT_HOST_ATTEMPT_SCRATCH', `START_HOST_ATTEMPTS: ${mode} does not accept a scratchTarget`)
+  }
+
+  const pristine = faultRequired ? undefined : requirePristineInstalledFacts('START_HOST_ATTEMPTS')
+  const entry = pristineHostEntry()
+  const buildId = pristine?.buildId ?? processScope.buildId
+  const expectedScopeId = processScope.scopeId
+  const attempts = []
+  for (let index = 0; index < count; index += 1) {
+    const generation = hosts.length + 1
+    const label = mode === 'seat-race' ? `seat-contender-${String(index + 1)}` : `host-attempt-${String(generation)}`
+    const attemptDir = join(scene.workDir, `host-attempts`, `${String(generation)}-${String(index + 1)}`)
+    mkdirSync(attemptDir, { recursive: true, mode: 0o700 })
+    const scratch = join(attemptDir, 'scratch')
+    mkdirSync(scratch, { recursive: true, mode: 0o700 })
+    const env = hostAttemptEnv(mode, attemptDir, scratchTarget ?? scratch)
+    const barriers = {}
+    if (mode === 'stop-during-publication') {
+      barriers.publish = join(attemptDir, 'publication.barrier')
+      barriers.stop = join(attemptDir, 'shutdown.barrier')
+      env.SPLIT_PROCESS_HOST_PUBLISH_BARRIER = barriers.publish
+      env.SPLIT_PROCESS_HOST_STOP_BARRIER = barriers.stop
+    }
+    if (mode === 'stop-during-initial-liveness') {
+      barriers.liveness = join(attemptDir, 'liveness.barrier')
+      env.SPLIT_PROCESS_HOST_LIVENESS_BARRIER = barriers.liveness
+    }
+    if (scratchTarget !== undefined) env.SPLIT_PROCESS_SCRATCH = scratchTarget
+    assertLifecycleOpen('START_HOST_ATTEMPTS before spawn')
+    const child = spawn(process.execPath, [entry], {
+      cwd: scene.installation.base.cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    })
+    const records = []
+    const stderr = { text: '' }
+    createInterface({ input: child.stdout }).on('line', line => {
+      const trimmed = line.trim()
+      if (trimmed === '') return
+      try {
+        records.push(JSON.parse(trimmed))
+      } catch {
+        stderr.text += `${trimmed}\n`
+      }
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => {
+      if (stderr.text.length < 64_000) stderr.text += chunk
+    })
+    const entryId = `host-attempt-${String(generation)}-${String(child.pid)}-${String(Date.now())}`
+    let settleClose
+    const closePromise = new Promise(resolve => { settleClose = resolve })
+    const handle = {
+      entryId,
+      hostId: entryId,
+      kind: 'host-attempt',
+      label,
+      mode,
+      declaredSignal: signal,
+      signalIntent: undefined,
+      expected: mode,
+      child,
+      records,
+      get stderrText() { return stderr.text },
+      workRoot: attemptDir,
+      entryRealpath: entry,
+      buildId,
+      expectedScopeId,
+      generation,
+      scratch: scratchTarget ?? scratch,
+      barriers,
+      startedAt: now(),
+      starttime: readHostStarttime(child.pid),
+      birth: captureEntryBirth(child, label),
+      closePromise,
+      closedAt: undefined,
+      exited: false,
+      exitResult: undefined,
+      spawnError: undefined,
+      pgid: child.pid ?? null,
+      ready: undefined,
+      businessPid: null,
+      finished: false,
+      terminal: undefined,
+    }
+    hosts.push(handle)
+    attempts.push(handle)
+    child.once('error', error => {
+      handle.spawnError = error
+      writeReceipt({ phase: 'ENTRY_SPAWN_ERROR', errorName: boundedError(error), entryId })
+    })
+    child.once('close', (code, signalValue) => {
+      handle.exited = true
+      handle.exitResult = { code, signal: signalValue }
+      handle.closedAt = now()
+      settleClose({ code, signal: signalValue })
+      appendNote('host-attempt-closed', {
+        entryId,
+        pid: child.pid ?? null,
+        exitCode: code,
+        exitSignal: signalValue,
+        recordCount: records.length,
+        recordTail: records.slice(-4).map(record => sanitizeEntryRecord(record)),
+        stderrMarkers: entryStderrMarkers(handle),
+        stderrEvidence: writeEntryStderrEvidence(attemptDir, stderr.text, 'host-attempt'),
+      })
+      syncHostReceipt()
+    })
+    appendNote('host-attempt-spawned', {
+      entryId,
+      mode,
+      label,
+      generation,
+      pid: child.pid ?? null,
+      birth: handle.birth ?? null,
+      scratch: handle.scratch,
+      workerPid: receipt.worker?.pid,
+      workerPpid: receipt.worker?.ppid,
+    })
+    if (handle.birth === undefined) {
+      // A spawn that never produced a readable kernel identity cannot later
+      // authorize a signal; fail closed and let the normal reclaim own it.
+      throw new Error(`START_HOST_ATTEMPTS: ${label} produced no readable kernel identity at spawn`)
+    }
+  }
+  syncHostReceipt()
+  writeReceipt({ phase: count > 1 ? 'HOST_CONTENDERS_SPAWNED' : 'HOST_ATTEMPT_SPAWNED' })
+  if (mode === 'seat-conflict') {
+    await waitForEntryEnvironment(attempts[0], scratchTarget, 'START_HOST_ATTEMPTS')
+    attempts[0].observedScratchEnv = scratchTarget
+  }
+  if (mode === 'seat-race') {
+    // The batch spawn is synchronous; read the real kernel liveness right after
+    // it so at least two contenders are proven to have actually co-started
+    // before any wait. A sequential start loop cannot produce this fact.
+    const coStarted = attempts.filter(handle => {
+      try {
+        return readKernelProcess(handle.child.pid).kind === 'alive'
+      } catch {
+        return false
+      }
+    }).length
+    for (const handle of attempts) handle.coStarted = coStarted
+    appendNote('host-contenders-spawned', {
+      count,
+      coStarted,
+      attempts: attempts.map(handle => ({
+        entryId: handle.entryId,
+        pid: handle.child.pid,
+        birth: handle.birth,
+        pgid: handle.pgid,
+        workRoot: handle.workRoot,
+      })),
+    })
+    if (coStarted < 2) {
+      throw new Error(`START_HOST_ATTEMPTS: only ${String(coStarted)} contender(s) were really alive at the batch boundary`)
+    }
+  }
+  await processProbeHold('host-contenders-spawned', {
+    count,
+    attempts: attempts.map(handle => ({ entryId: handle.entryId, pid: handle.child.pid, birth: handle.birth })),
+  })
+  if (mode === 'host-runtime-absent') {
+    appendNote('host-artifact-absent-started', {
+      entryId: attempts[0].entryId,
+      pid: attempts[0].child.pid,
+      birth: attempts[0].birth,
+      fault: processInstallationMutation?.fault ?? null,
+      candidateSha256: processCandidate?.candidateSha256 ?? null,
+    })
+    writeReceipt({ phase: 'HOST_ARTIFACT_ABSENT_STARTED' })
+    await processProbeHold('host-artifact-absent-started', {
+      entryId: attempts[0].entryId,
+      pid: attempts[0].child.pid,
+      birth: attempts[0].birth,
+      fault: processInstallationMutation?.fault ?? null,
+    })
+  }
+  return { attempts: attempts.map(publicEntryFacts) }
+}
+
+function qualificationClientEnv(mode, clientDir, scratch, barrierPath) {
+  const env = {
+    ...scene.installation.base.env,
+    DSH_PI_TUI_ENTRY_RECORDS: '1',
+    SPLIT_PROCESS_CLIENT_MODE: 'qualification',
+    SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
+    SPLIT_PROCESS_PROFILE: 'pi-tui',
+    SPLIT_PROCESS_SCRATCH: scratch,
+  }
+  if (mode === 'omit-cookie') env.SPLIT_PROCESS_CLIENT_OMIT_COOKIE = '1'
+  if (mode === 'startup-fatal') env.SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL = '1'
+  if (mode === 'refresh-unresponsive-once') env.SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE = '1'
+  if (mode === 'bootstrap-failure') env.SPLIT_PROCESS_CLIENT_FORCE_FAILURE = 'client-bootstrap'
+  if (mode === 'discover-with-pre-profile-failure') env.SPLIT_PROCESS_HOST_FORCE_BOOT_FAILURE = 'before-profile'
+  if (barrierPath !== undefined) env.SPLIT_PROCESS_HOST_FOUNDATION_BARRIER = barrierPath
+  return env
+}
+
+function qualificationClientLabel(mode, index) {
+  return mode === 'seat-race' ? `qualification-contender-${String(index + 1)}` : `qualification-${mode}`
+}
+
+function requireReadyHost(label) {
+  const host = activeHost
+  if (host === undefined) throw new Error(`${label}: no accepted Host exists in this Scene`)
+  if (host.exited || host.child.exitCode !== null || host.child.signalCode !== null
+    || !pidAlive(host.child.pid) || !processGroupAlive(hostPgid(host))) {
+    throw new Error(`${label}: the accepted Host is not alive`)
+  }
+  if (host.ready === undefined) throw new Error(`${label}: the accepted Host is not ready`)
+  return host
+}
+
+/**
+ * The Host a qualification Client may attach to: the ONE accepted generation,
+ * or the ONE live discovery-fallback Host this Scene registered and verified.
+ */
+function requireAttachableHost(label) {
+  if (activeHost !== undefined) return activeHost
+  const candidates = fallbackHosts.filter(record => record.reclaimed !== true)
+  if (candidates.length !== 1) {
+    throw new Error(`${label}: no accepted Host exists in this Scene`)
+  }
+  const record = candidates[0]
+  let observation
+  try {
+    observation = readKernelProcess(record.pid)
+  } catch (error) {
+    throw new Error(`${label}: the discovered Host kernel identity is unreadable (${boundedError(error)})`)
+  }
+  if (classifyKernelLiveness(observation).state !== 'alive'
+    || serializeKernelIdentity(observation.identity) !== record.birth) {
+    throw new Error(`${label}: the registered discovered Host is not the live kernel process`)
+  }
+  if (record.scopeId !== processScope.scopeId) {
+    throw new Error(`${label}: the registered discovered Host names another scope`)
+  }
+  return record
+}
+
+function assertDiscoveredStaleHost(label) {
+  if (activeHost !== undefined) throw new Error(`${label}: the stale-Host recovery must start without a live Host`)
+  const killed = [...hosts].reverse().find(handle => handle.exited && handle.exitResult?.signal === 'SIGKILL')
+  if (killed === undefined) {
+    throw new Error(`${label}: no real SIGKILLed Host generation provides the stale registry premise`)
+  }
+  const registry = join(processScope.dir, 'instance.json')
+  if (!existsSync(registry)) throw new Error(`${label}: the stale registry does not exist`)
+  return killed
+}
+
+async function handleStartQualificationClients(message) {
+  requireKnownFields(message, ['mode', 'count', 'refusal', 'foundationBarrier'], 'START_QUALIFICATION_CLIENTS')
+  requireProcessScene('START_QUALIFICATION_CLIENTS')
+  assertLifecycleOpen('START_QUALIFICATION_CLIENTS')
+  assertNoBootstrapCliPatch('START_QUALIFICATION_CLIENTS')
+  const mode = message.mode
+  if (!QUALIFICATION_CLIENT_MODES.has(mode)) {
+    throw codedInputError('INPUT_QUALIFICATION_CLIENT_MODE',
+      `START_QUALIFICATION_CLIENTS: unknown qualification Client mode ${JSON.stringify(mode)}`)
+  }
+  let refusal
+  if (mode === 'discovery-refusal') {
+    refusal = message.refusal
+    if (!DISCOVERY_REFUSALS.has(refusal)) {
+      throw codedInputError('INPUT_DISCOVERY_REFUSAL',
+        `START_QUALIFICATION_CLIENTS: discovery-refusal requires one of ${[...DISCOVERY_REFUSALS.keys()].join(', ')}`)
+    }
+  } else if (message.refusal !== undefined) {
+    throw codedInputError('INPUT_DISCOVERY_REFUSAL', `START_QUALIFICATION_CLIENTS: ${mode} does not accept a refusal class`)
+  }
+  let count = 1
+  if (mode === 'seat-race') {
+    if (message.count !== undefined && message.count !== 2) {
+      throw codedInputError('INPUT_QUALIFICATION_CLIENT_COUNT', 'START_QUALIFICATION_CLIENTS: seat-race starts exactly two Clients')
+    }
+    count = 2
+  } else if (message.count !== undefined) {
+    throw codedInputError('INPUT_QUALIFICATION_CLIENT_COUNT', `START_QUALIFICATION_CLIENTS: ${mode} starts exactly one Client`)
+  }
+  const discovered = mode === 'discover-after-host-death'
+  const preProfile = mode === 'discover-with-pre-profile-failure'
+  let expectedBuildId
+  if (discovered || preProfile) {
+    if (discovered) assertDiscoveredStaleHost('START_QUALIFICATION_CLIENTS')
+    else if (activeHost !== undefined) throw new Error('START_QUALIFICATION_CLIENTS: the pre-profile failure requires no live Host')
+    expectedBuildId = processScope.buildId
+  } else {
+    requireAttachableHost('START_QUALIFICATION_CLIENTS')
+    if (mode === 'client-bootstrap-drift') {
+      if (processInstallationMutation?.fault !== 'client-bootstrap-drift') {
+        throw codedInputError('INPUT_INSTALLATION_FAULT',
+          'START_QUALIFICATION_CLIENTS: client-bootstrap-drift requires its registered installation fault')
+      }
+    } else if (processInstallationMutation !== undefined) {
+      throw codedInputError('INPUT_INSTALLATION_MUTATED',
+        `START_QUALIFICATION_CLIENTS: ${mode} is not allowed under a mutated installation`)
+    }
+    expectedBuildId = processScope.buildId
+  }
+  if (message.foundationBarrier !== undefined && message.foundationBarrier !== true) {
+    throw codedInputError('INPUT_FOUNDATION_BARRIER', 'START_QUALIFICATION_CLIENTS: foundationBarrier must be the boolean true')
+  }
+  const clients = []
+  for (let index = 0; index < count; index += 1) {
+    const sequence = ++qualificationClientSequence
+    const clientDir = join(scene.workDir, 'qualification-clients', `${String(sequence)}-${String(index + 1)}`)
+    mkdirSync(clientDir, { recursive: true, mode: 0o700 })
+    const scratch = join(clientDir, 'scratch')
+    mkdirSync(scratch, { recursive: true, mode: 0o700 })
+    const barrierPath = message.foundationBarrier === true ? join(clientDir, 'foundation.barrier') : undefined
+    const entry = pristineClientEntry()
+    assertLifecycleOpen('START_QUALIFICATION_CLIENTS before spawn')
+    const child = spawn(process.execPath, [entry], {
+      cwd: scene.installation.base.cwd,
+      env: qualificationClientEnv(mode, clientDir, scratch, barrierPath),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    })
+    const records = []
+    const stderr = { text: '' }
+    createInterface({ input: child.stdout }).on('line', line => {
+      const trimmed = line.trim()
+      if (trimmed === '') return
+      try {
+        records.push(JSON.parse(trimmed))
+      } catch {
+        stderr.text += `${trimmed}\n`
+      }
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => {
+      if (stderr.text.length < 64_000) stderr.text += chunk
+    })
+    const entryId = `qualification-${mode}-${String(sequence)}-${String(child.pid)}-${String(Date.now())}`
+    let settleClose
+    const closePromise = new Promise(resolve => { settleClose = resolve })
+    const handle = {
+      entryId,
+      clientId: entryId,
+      kind: 'qualification-client',
+      label: qualificationClientLabel(mode, index),
+      mode,
+      refusal,
+      expected: mode,
+      child,
+      records,
+      get stderrText() { return stderr.text },
+      scratch,
+      clientDir,
+      barriers: barrierPath === undefined ? {} : { foundation: barrierPath },
+      expectedBuildId,
+      expectedHostId: discovered ? null : activeHost?.hostId ?? null,
+      startedAt: now(),
+      starttime: readHostStarttime(child.pid),
+      birth: captureEntryBirth(child, 'qualification Client'),
+      closePromise,
+      closedAt: undefined,
+      exited: false,
+      exitResult: undefined,
+      spawnError: undefined,
+      finished: false,
+      terminal: undefined,
+      signalIntent: undefined,
+      recordsSeen: 0,
+    }
+    qualificationClients.push(handle)
+    clients.push(handle)
+    child.once('error', error => {
+      handle.spawnError = error
+      writeReceipt({ phase: 'ENTRY_SPAWN_ERROR', errorName: boundedError(error), entryId })
+    })
+    child.once('close', (code, signalValue) => {
+      handle.exited = true
+      handle.exitResult = { code, signal: signalValue }
+      handle.closedAt = now()
+      settleClose({ code, signal: signalValue })
+      appendNote('qualification-client-closed', {
+        entryId,
+        label: handle.label,
+        exitCode: code,
+        exitSignal: signalValue,
+        recordCount: records.length,
+        recordTail: records.slice(-4).map(record => sanitizeEntryRecord(record)),
+        stderrMarkers: entryStderrMarkers(handle),
+        stderrEvidence: writeEntryStderrEvidence(clientDir, stderr.text, 'qualification-client'),
+      })
+      syncQualificationClientReceipt()
+    })
+    appendNote('qualification-client-spawned', {
+      entryId,
+      mode,
+      label: handle.label,
+      pid: child.pid ?? null,
+      birth: handle.birth ?? null,
+      scratch,
+      hostId: handle.expectedHostId,
+      workerPid: receipt.worker?.pid,
+      workerPpid: receipt.worker?.ppid,
+    })
+    if (handle.birth === undefined) {
+      throw new Error(`START_QUALIFICATION_CLIENTS: ${handle.label} produced no readable kernel identity at spawn`)
+    }
+  }
+  syncQualificationClientReceipt()
+  writeReceipt({ phase: 'QUALIFICATION_CLIENTS_SPAWNED' })
+  await processProbeHold('qualification-client-spawned', {
+    count,
+    clients: clients.map(handle => ({
+      entryId: handle.entryId,
+      pid: handle.child.pid,
+      birth: handle.birth,
+      hostId: handle.expectedHostId,
+    })),
+  })
+  return { clients: clients.map(publicEntryFacts) }
+}
+
+async function handleQualificationClientControl(message) {
+  requireKnownFields(message, ['entryId', 'control'], 'QUALIFICATION_CLIENT_CONTROL')
+  requireProcessScene('QUALIFICATION_CLIENT_CONTROL')
+  const handle = findQualificationClientById(message.entryId, 'QUALIFICATION_CLIENT_CONTROL')
+  if (handle.kind !== 'qualification-client') {
+    throw new Error('QUALIFICATION_CLIENT_CONTROL: the entry is not a qualification Client')
+  }
+  if (handle.exited) throw new Error('QUALIFICATION_CLIENT_CONTROL: the qualification Client already exited')
+  const control = message.control
+  if (control === null || typeof control !== 'object' || Array.isArray(control)) {
+    throw new Error('INPUT_UNQUALIFIED: QUALIFICATION_CLIENT_CONTROL requires a control object')
+  }
+  const op = control.op
+  if (op !== 'qualification-host-foundation' && op !== 'qualification-drop-websocket') {
+    throw codedInputError('INPUT_QUALIFICATION_CONTROL', `QUALIFICATION_CLIENT_CONTROL: unsupported op ${JSON.stringify(op)}`)
+  }
+  const requestId = control.requestId
+  if (typeof requestId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,79}$/u.test(requestId)) {
+    throw codedInputError('INPUT_QUALIFICATION_CONTROL', 'QUALIFICATION_CLIENT_CONTROL requires a business requestId')
+  }
+  const allowed = new Set(['op', 'requestId', 'workspacePath', 'workspaceResume', 'schedule'])
+  for (const key of Object.keys(control)) {
+    if (!allowed.has(key)) {
+      throw codedInputError('INPUT_QUALIFICATION_CONTROL', `QUALIFICATION_CLIENT_CONTROL rejects the field ${key}`)
+    }
+  }
+  const body = { op, requestId }
+  if (op === 'qualification-drop-websocket') {
+    if (control.workspacePath !== undefined || control.workspaceResume !== undefined || control.schedule !== undefined) {
+      throw codedInputError('INPUT_QUALIFICATION_CONTROL', 'QUALIFICATION_CLIENT_CONTROL: drop-websocket accepts no extra fields')
+    }
+  }
+  if (control.workspacePath !== undefined) {
+    const path = requireSceneBarrier(control.workspacePath, 'workspacePath').path
+    let real
+    try {
+      real = realpathSync(path)
+    } catch (error) {
+      throw codedInputError('INPUT_QUALIFICATION_CONTROL', `QUALIFICATION_CLIENT_CONTROL: workspacePath does not exist (${boundedError(error)})`)
+    }
+    if (real !== path || !statSync(real).isDirectory()) {
+      throw codedInputError('INPUT_QUALIFICATION_CONTROL', 'QUALIFICATION_CLIENT_CONTROL: workspacePath must be a canonical Scene directory')
+    }
+    body.workspacePath = real
+  }
+  if (control.workspaceResume !== undefined) {
+    if (control.workspaceResume !== true || control.workspacePath === undefined) {
+      throw codedInputError('INPUT_QUALIFICATION_CONTROL', 'QUALIFICATION_CLIENT_CONTROL: workspaceResume requires workspacePath and the boolean true')
+    }
+    body.workspaceResume = true
+  }
+  if (control.schedule !== undefined) {
+    if (control.schedule !== true) {
+      throw codedInputError('INPUT_QUALIFICATION_CONTROL', 'QUALIFICATION_CLIENT_CONTROL: schedule must be the boolean true')
+    }
+    body.schedule = true
+  }
+  handle.child.stdin.write(`${JSON.stringify(body)}\n`)
+  if (op === 'qualification-host-foundation') appendNote('qualification-control-sent', { entryId: handle.entryId, requestId })
+  return { sent: true, op, requestId }
+}
+
+async function handleQualificationClientStatus(message) {
+  requireKnownFields(message, ['entryId'], 'QUALIFICATION_CLIENT_STATUS')
+  requireProcessScene('QUALIFICATION_CLIENT_STATUS')
+  const handle = findQualificationClientById(message.entryId, 'QUALIFICATION_CLIENT_STATUS')
+  if (handle.kind !== 'qualification-client') {
+    throw new Error('QUALIFICATION_CLIENT_STATUS: the entry is not a qualification Client')
+  }
+  if (handle.exited) throw new Error('QUALIFICATION_CLIENT_STATUS: the qualification Client already exited')
+  const requestId = `qualification-status-${String(++hostStatusSequence)}`
+  handle.child.stdin.write(`${JSON.stringify({ op: 'status', requestId })}\n`)
+  const record = await waitForEntryRecord(handle,
+    { m4a0: 'status', requestId }, 'QUALIFICATION_CLIENT_STATUS', 60_000)
+  return record
+}
+
+async function handleSignalEntry(message) {
+  requireKnownFields(message, ['entryId', 'signal'], 'SIGNAL_ENTRY')
+  requireProcessScene('SIGNAL_ENTRY')
+  assertLifecycleOpen('SIGNAL_ENTRY')
+  const handle = findEntryById(message.entryId, 'SIGNAL_ENTRY')
+  const signal = message.signal
+  if (!ENTRY_SIGNALS.has(signal)) {
+    throw codedInputError('INPUT_ENTRY_SIGNAL', `SIGNAL_ENTRY: unsupported signal ${JSON.stringify(signal)}`)
+  }
+  if (handle.exited) throw new Error('SIGNAL_ENTRY: the entry already exited')
+  if (handle.birth === undefined) throw new Error('SIGNAL_ENTRY: the entry has no captured kernel birth')
+  if (handle.declaredSignal !== undefined && handle.declaredSignal !== signal) {
+    throw codedInputError('INPUT_ENTRY_SIGNAL',
+      `SIGNAL_ENTRY: the Host attempt declared ${String(handle.declaredSignal)}, not ${String(signal)}`)
+  }
+  if (handle.declaredSignal === undefined && handle.kind === 'host-attempt') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL', 'SIGNAL_ENTRY: this Host attempt declared no stop signal')
+  }
+  if (handle.kind === 'qualification-client' && handle.mode !== 'attach') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL',
+      `SIGNAL_ENTRY: qualification Client mode ${String(handle.mode)} has a declared non-signal terminal`)
+  }
+  if (handle.kind === 'bootstrap-cli' || handle.kind === 'identity-witness') {
+    throw codedInputError('INPUT_ENTRY_SIGNAL', `SIGNAL_ENTRY: ${entryKindLabel(handle)} is not a signal target`)
+  }
+  if (handle.signalIntent !== undefined && handle.signalIntent !== signal) {
+    throw new Error(`SIGNAL_ENTRY: the entry already declared ${String(handle.signalIntent)}`)
+  }
+  assertKernelGroupSignalOwnership(processKernelReaders(), handle.child.pid, handle.birth, `SIGNAL_ENTRY ${signal}`)
+  handle.signalIntent = signal
+  try {
+    process.kill(-handle.child.pid, signal)
+  } catch (error) {
+    if (error?.code !== 'ESRCH') {
+      throw new Error(`SIGNAL_ENTRY: the owned entry group ${String(handle.child.pid)} could not be signalled (${String(error?.code ?? 'unknown')})`)
+    }
+  }
+  appendNote('entry-signalled', {
+    entryId: handle.entryId,
+    kind: handle.kind,
+    mode: handle.mode ?? null,
+    pid: handle.child.pid,
+    birth: handle.birth,
+    signal,
+  })
+  writeReceipt({})
+  return { entryId: handle.entryId, signal, pid: handle.child.pid, birth: handle.birth }
+}
+
+async function validateHostAttemptTerminal(handle, exit) {
+  const label = `FINISH_ENTRY ${handle.label ?? handle.entryId}`
+  const ready = (handle.records ?? []).find(record => record?.m4a0 === 'ready')
+  const failure = (handle.records ?? []).find(record => record?.m4a0 === 'failure')
+  const conflict = (handle.records ?? []).find(record => record?.m4a0 === 'host-seat-conflict')
+  const cleanupCompleted = (handle.records ?? []).filter(record => record?.m4a0 === 'cleanup' && record.status === 'completed')
+  const cleanupFailures = (handle.records ?? []).filter(record => record?.m4a0 === 'cleanup-failure')
+  const stopRequests = (handle.records ?? []).filter(record => record?.m4a0 === 'stop-requested')
+  const repeatIgnored = (handle.records ?? []).filter(record => record?.m4a0 === 'stop-repeat-ignored')
+  const mode = handle.mode
+  const expect = (condition, message) => {
+    if (!condition) throw new Error(`${label}: ${message}; exit=${JSON.stringify(exit)}`)
+  }
+  if (mode === undefined) {
+    if (handle.signalIntent === 'SIGKILL') {
+      expect(exit.code === null && exit.signal === 'SIGKILL', 'the exact owned Host group was not killed by SIGKILL')
+      return { outcome: 'signal', signal: 'SIGKILL', readyEmitted: ready !== undefined }
+    }
+    if (handle.signalIntent === 'SIGTERM') {
+      expect(exit.code === 0 && exit.signal === null, 'a SIGTERM Host must exit 0 with no signal')
+      expect(failure === undefined, 'a SIGTERM Host reported a failure record')
+      return { outcome: 'signal', signal: 'SIGTERM', readyEmitted: ready !== undefined }
+    }
+    expect(exit.code === 0 && exit.signal === null, 'the normal Host did not exit 0 with no signal')
+    return { outcome: 'normal-exit', readyEmitted: ready !== undefined }
+  }
+  if (mode === 'seat-race' || mode === 'seat-conflict') {
+    if (handle.readyRecord !== undefined || ready !== undefined) {
+      throw new Error(`${label}: a seat contender reached Ready; it must be accepted through ACCEPT_HOST_WINNER`)
+    }
+    expect(exit.code === 0 && exit.signal === null, 'a seat conflict must exit 0 with no signal')
+    expect(conflict !== undefined && conflict.error === 'HOST_ALREADY_OWNED', 'the seat-conflict record is missing or names another refusal')
+    expect(failure === undefined, 'a seat conflict must not report a failure record')
+    return { outcome: 'seat-conflict', conflictError: conflict.error, readyEmitted: false }
+  }
+  if (mode === 'scratch-removal-failure') {
+    expect(ready !== undefined, 'the faulted attempt never reached Ready, so its shutdown cleanup is not the declared contract')
+    expect(exit.code === 1 && exit.signal === null, 'a failed scratch cleanup must exit 1 with no signal')
+    const scratchFailure = cleanupFailures.find(record => record.step === 'scratch-remove')
+    expect(scratchFailure !== undefined, 'no cleanup-failure record names the scratch-remove step')
+    expect(cleanupCompleted.length === 0, 'a failed scratch cleanup must not claim a completed cleanup')
+    expect(ready.services?.piTuiHostReady === true, 'the ready attempt did not own the private Host Runtime service')
+    return {
+      outcome: 'cleanup-failure',
+      step: scratchFailure.step,
+      cleanupFailureCount: cleanupFailures.length,
+      readyEmitted: true,
+    }
+  }
+  if (mode === 'stop-during-publication' || mode === 'stop-during-initial-liveness') {
+    const expectedCode = handle.signalIntent === 'SIGINT' ? 130 : 0
+    expect(exit.code === expectedCode && exit.signal === null,
+      `a ${String(handle.signalIntent)} stop must exit ${String(expectedCode)} with no signal`)
+    expect(ready === undefined, 'a stopped qualification Host must never emit Ready')
+    expect(failure === undefined, 'a stop-requested Host must not report a failure record')
+    expect(stopRequests.length === 1, 'exactly one stop-requested record is required')
+    expect(cleanupCompleted.length === 1, 'exactly one completed cleanup record is required')
+    if (mode === 'stop-during-publication') {
+      expect(repeatIgnored.length === 2, 'the repeated publication/shutdown signals were not both admitted and ignored')
+      const phases = repeatIgnored.map(record => record.phase).sort()
+      expect(phases[0] === 'publication' && phases[1] === 'shutdown', `the repeated signals did not cover both windows: ${JSON.stringify(phases)}`)
+    }
+    return {
+      outcome: 'signal-stop',
+      signal: handle.signalIntent,
+      stopRequested: stopRequests.length,
+      repeatIgnored: repeatIgnored.length,
+      readyEmitted: false,
+    }
+  }
+  if (mode === 'early-exit') {
+    expect(exit.code === 1 && exit.signal === null, 'the forced early exit must exit 1 with no signal')
+    expect(ready === undefined, 'the forced early exit emitted Ready')
+    expect(failure === undefined, 'the synchronous forced exit must not be rewritten as a reported failure')
+    return { outcome: 'early-exit', readyEmitted: false }
+  }
+  // Every remaining attempt mode is a declared startup refusal.
+  expect(exit.code === 1 && exit.signal === null, 'a refused Host startup must exit 1 with no signal')
+  expect(ready === undefined, 'a refused Host startup emitted Ready')
+  expect(failure !== undefined, 'a refused Host startup reported no official failure record')
+  expect(failure.services?.piTuiHostReady !== true, 'a refused Host startup published piTuiHostReady')
+  const errorText = String(failure.error ?? '')
+  if (mode === 'host-runtime-disabled') {
+    expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
+  } else if (mode === 'tui-row-enabled') {
+    expect(/forbidden TUI\/Client-UI rows are (?:active|not disabled): tui-app/u.test(errorText), 'the real product failure did not match its declared startup class')
+  } else if (mode === 'connection-disabled') {
+    expect(/connection owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
+  } else if (mode === 'session-controller-disabled') {
+    expect(/sessionController owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
+  } else if (mode === 'workspace-controller-disabled') {
+    expect(/expected exactly one active workspaceController owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
+    expect(failure.services?.workspaceController !== true, 'the refused Host reported a live workspaceController service')
+  } else if (mode === 'host-runtime-absent') {
+    expect(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(errorText), 'the real product failure did not match its declared startup class')
+    const markers = entryStderrMarkers(handle)
+    expect(markers.loaderImportFailed && markers.moduleNotFound,
+      'the real Loader module-absence markers are missing from the Host stderr')
+  } else if (mode === 'host-bootstrap-absent') {
+    expect(failure.phase === 'after-boot', `expected an after-boot failure, got ${String(failure.phase)}`)
+    expect(cleanupCompleted.length === 1, 'the missing bootstrap chunk did not produce one completed cleanup')
+    expect(cleanupFailures.length === 0, 'the missing bootstrap chunk reported an unexpected cleanup failure')
+  } else {
+    throw new Error(`${label}: no terminal contract is implemented for mode ${String(mode)}`)
+  }
+  return {
+    outcome: 'startup-refusal',
+    mode,
+    errorClass: 'declared-startup-refusal',
+    code: failure.code ?? null,
+    phase: failure.phase ?? null,
+    cleanupCompleted: cleanupCompleted.length,
+    stderrMarkers: entryStderrMarkers(handle),
+  }
+}
+
+const QUALIFICATION_SUCCESS_MODES = new Set([
+  'attach',
+  'refresh-unresponsive-once',
+  'client-bootstrap-drift',
+  'discover-after-host-death',
+])
+
+async function validateQualificationClientTerminal(handle, exit) {
+  const label = `FINISH_ENTRY ${handle.label}`
+  const ready = (handle.records ?? []).find(record => record?.m4a0 === 'ready')
+  const failure = (handle.records ?? []).find(record => record?.m4a0 === 'failure')
+  const cleanupCompleted = (handle.records ?? []).filter(record => record?.m4a0 === 'cleanup' && record.status === 'completed')
+  const cleanupFailures = (handle.records ?? []).filter(record => record?.m4a0 === 'cleanup-failure')
+  const expect = (condition, message) => {
+    if (!condition) throw new Error(`${label}: ${message}; exit=${JSON.stringify(exit)}`)
+  }
+  const signalIntent = handle.signalIntent
+  if (signalIntent === 'SIGKILL') {
+    expect(exit.code === null && exit.signal === 'SIGKILL', 'the exact owned Client group was not killed by SIGKILL')
+    return { outcome: 'signal', signal: 'SIGKILL', readyEmitted: ready !== undefined }
+  }
+  if (signalIntent === 'SIGTERM') {
+    expect(exit.code === 0 && exit.signal === null, 'a SIGTERM qualification Client must exit 0 with no signal')
+    expect(failure === undefined, 'a SIGTERM qualification Client reported a failure record')
+    return { outcome: 'signal', signal: 'SIGTERM', readyEmitted: ready !== undefined }
+  }
+  const mode = handle.mode
+  if (mode === 'seat-race') {
+    if (failure !== undefined) {
+      expect(exit.code === 1 && exit.signal === null, 'the qualification seat loser must exit 1 with no signal')
+      expect(failure.code === 'CLIENT_ALREADY_ACTIVE',
+        `the qualification seat loser reported code=${String(failure.code ?? 'none')} phase=${String(failure.phase ?? 'none')}`)
+      return { outcome: 'startup-refusal', mode, code: failure.code, readyEmitted: false }
+    }
+    expect(ready !== undefined, 'the qualification seat winner never reached Ready')
+    expect(exit.code === 0 && exit.signal === null, 'the qualification seat winner did not exit 0 with no signal')
+    return { outcome: 'normal-exit', readyEmitted: true, generationId: ready.generationId ?? null }
+  }
+  if (QUALIFICATION_SUCCESS_MODES.has(mode)) {
+    expect(exit.code === 0 && exit.signal === null, 'the live qualification Client did not exit 0 with no signal')
+    expect(failure === undefined, 'the live qualification Client reported a failure record')
+    if (mode === 'client-bootstrap-drift' || mode === 'refresh-unresponsive-once'
+      || mode === 'attach' || mode === 'discover-after-host-death') {
+      expect(ready !== undefined, 'the successful qualification Client never reached Ready')
+    }
+    return { outcome: 'normal-exit', readyEmitted: ready !== undefined, generationId: ready?.generationId ?? null }
+  }
+  if (mode === 'identity-changed') {
+    expect(ready !== undefined, 'the identity-changed Client never reached its first Ready')
+    expect(exit.code === 1 && exit.signal === null, 'a fatal identity change must exit 1 with no signal')
+    expect(failure !== undefined && failure.code === 'HOST_IDENTITY_MISMATCH',
+      `the identity change was not classified as HOST_IDENTITY_MISMATCH (code=${String(failure?.code ?? 'none')}, phase=${String(failure?.phase ?? 'none')})`)
+    expect(cleanupCompleted.length === 1, 'the fatal identity change did not report one completed cleanup')
+    expect(cleanupFailures.length === 0, 'the fatal identity change reported an unexpected cleanup failure')
+    return { outcome: 'startup-refusal', code: failure.code, readyEmitted: true, cleanupCompleted: 1 }
+  }
+  if (mode === 'bootstrap-failure') {
+    expect(exit.code === 1 && exit.signal === null, 'the after-context bootstrap failure must exit 1 with no signal')
+    expect(failure !== undefined && failure.phase === 'after-context',
+      `the client-bootstrap failure was not an after-context failure (phase=${String(failure?.phase)})`)
+    expect(cleanupCompleted.length === 1, 'the after-context failure did not report one completed cleanup')
+    expect(cleanupFailures.length === 0, 'the after-context failure reported an unexpected cleanup failure')
+    expect(failure.activeWrappers === 0 && failure.liveSockets === 0,
+      `the after-context failure retained transport resources (activeWrappers=${String(failure.activeWrappers)}, liveSockets=${String(failure.liveSockets)})`)
+    return { outcome: 'startup-refusal', code: failure.code ?? null, phase: failure.phase, readyEmitted: false }
+  }
+  // Every remaining mode is a declared official Client refusal.
+  expect(ready === undefined, 'a refused qualification Client emitted Ready')
+  expect(exit.code === 1 && exit.signal === null, 'a refused qualification Client must exit 1 with no signal')
+  expect(failure !== undefined, 'a refused qualification Client reported no official failure record')
+  let expectedCode
+  if (mode === 'omit-cookie') expectedCode = 'HOST_UNRESPONSIVE'
+  else if (mode === 'startup-fatal') expectedCode = 'HOST_IDENTITY_MISMATCH'
+  else if (mode === 'discover-with-pre-profile-failure') expectedCode = 'HOST_START_TIMEOUT'
+  else if (mode === 'discovery-refusal') expectedCode = DISCOVERY_REFUSALS.get(handle.refusal)
+  else throw new Error(`${label}: no terminal contract is implemented for mode ${String(mode)}`)
+  expect(failure.code === expectedCode,
+    `expected ${String(expectedCode)} but the Client reported code=${String(failure.code ?? 'none')} phase=${String(failure.phase ?? 'none')}`)
+  return {
+    outcome: 'startup-refusal',
+    mode,
+    refusal: handle.refusal ?? null,
+    code: failure.code,
+    phase: failure.phase ?? null,
+    cleanupCompleted: cleanupCompleted.length,
+    cleanupFailureCount: cleanupFailures.length,
+    readyEmitted: false,
+  }
+}
+
+async function finishHostAttempt(handle) {
+  if (handle.signalIntent !== undefined) return await waitForEntryClose(handle, 'FINISH_ENTRY')
+  if (handle.mode === 'scratch-removal-failure') {
+    // The faulted Host is expected to become Ready and then fail its own
+    // shutdown cleanup; drive the official shutdown only after the real Ready
+    // record exists.
+    await waitForEntryRecord(handle, { m4a0: 'ready' }, 'FINISH_ENTRY scratch-removal-ready', 180_000)
+    handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
+  } else if (handle.mode === 'seat-race' && handle.readyRecord !== undefined) {
+    throw new Error('FINISH_ENTRY: a seat winner must be accepted through ACCEPT_HOST_WINNER')
+  }
+  return await waitForEntryClose(handle, 'FINISH_ENTRY')
+}
+
+async function finishQualificationClient(handle) {
+  if (handle.signalIntent !== undefined) return await waitForEntryClose(handle, 'FINISH_ENTRY')
+  if (handle.mode === 'identity-changed') return await waitForEntryClose(handle, 'FINISH_ENTRY')
+  const ready = (handle.records ?? []).some(record => record?.m4a0 === 'ready')
+  if (ready && !handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
+    // The one-shot qualification Client owns the official stdin shutdown op.
+    handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
+  }
+  return await waitForEntryClose(handle, 'FINISH_ENTRY')
+}
+
+async function handleFinishEntry(message) {
+  requireKnownFields(message, ['entryId'], 'FINISH_ENTRY')
+  requireProcessScene('FINISH_ENTRY')
+  assertLifecycleOpen('FINISH_ENTRY')
+  const handle = findEntryById(message.entryId, 'FINISH_ENTRY')
+  if (handle.finished) {
+    return handle.terminal ?? { entryId: handle.entryId, outcome: 'already-finished' }
+  }
+  let exit
+  const isHostEntry = hosts.includes(handle)
+  if (isHostEntry) exit = await finishHostAttempt(handle)
+  else if (handle.kind === 'qualification-client') exit = await finishQualificationClient(handle)
+  else throw new Error(`FINISH_ENTRY: ${entryKindLabel(handle)} does not use finishEntry`)
+  await assertHostGroupGone(handle, `FINISH_ENTRY ${handle.label ?? handle.hostId ?? handle.entryId}`)
+  const terminal = isHostEntry
+    ? await validateHostAttemptTerminal(handle, exit)
+    : await validateQualificationClientTerminal(handle, exit)
+  if (handle === activeHost) activeHost = undefined
+  if (isHostEntry && handle.readyRecord !== undefined && terminal.outcome === 'startup-refusal') {
+    throw new Error('FINISH_ENTRY: a ready attempt cannot be accepted as a refusal')
+  }
+  if (handle.kind === 'qualification-client') {
+    const liveOthers = qualificationClients.some(other => other !== handle && !other.exited)
+    if (!liveOthers) await assertClientSeatFree(scene.installation, processScope.scopeId, 'FINISH_ENTRY')
+  } else {
+    const liveOthers = hosts.some(other => other !== handle && !other.exited)
+    if (!liveOthers) await assertSceneHostSeatFree('FINISH_ENTRY')
+  }
+  handle.finished = true
+  handle.terminal = {
+    ...terminal,
+    entryId: handle.entryId,
+    kind: handle.kind,
+    mode: handle.mode ?? null,
+    exit: { code: exit.code, signal: exit.signal },
+    records: entryRecordsOf(handle).records,
+    stderrMarkers: entryStderrMarkers(handle),
+  }
+  if (handle.kind === 'qualification-client') syncQualificationClientReceipt()
+  else syncHostReceipt()
+  writeReceipt({ phase: 'ENTRY_FINISHED' })
+  return handle.terminal
+}
+
+async function handleAcceptHostWinner(message) {
+  requireKnownFields(message, ['entryId'], 'ACCEPT_HOST_WINNER')
+  requireProcessScene('ACCEPT_HOST_WINNER')
+  assertLifecycleOpen('ACCEPT_HOST_WINNER')
+  const handle = findHostAttemptById(message.entryId, 'ACCEPT_HOST_WINNER')
+  if (handle.mode !== 'seat-race') throw new Error('ACCEPT_HOST_WINNER: only a seat-race contender can be accepted')
+  if (activeHost !== undefined) throw new Error('ACCEPT_HOST_WINNER: a Host is already active')
+  handle.readyRecord = handle.readyRecord ?? (handle.records ?? []).find(record => record?.m4a0 === 'ready')
+  if (handle.readyRecord === undefined) throw new Error('ACCEPT_HOST_WINNER: the contender has no ready record')
+  if (handle.exited) throw new Error('ACCEPT_HOST_WINNER: the contender is not live')
+  const localHost = handle.readyRecord.localHost
+  if (localHost === undefined || localHost === null) throw new Error('ACCEPT_HOST_WINNER: the ready record carries no Host identity')
+  if (localHost.buildId !== handle.buildId) {
+    throw new Error(`ACCEPT_HOST_WINNER: the ready build ${String(localHost.buildId)} is not the installed ${String(handle.buildId)}`)
+  }
+  if (localHost.scopeId !== handle.expectedScopeId) {
+    throw new Error('ACCEPT_HOST_WINNER: the ready Host published another scope')
+  }
+  assertHostIdentityMatchesKernel(localHost, handle.child.pid, 'ACCEPT_HOST_WINNER')
+  if (!pidAlive(handle.child.pid) || !processGroupAlive(hostPgid(handle))) {
+    throw new Error('ACCEPT_HOST_WINNER: the ready contender is not alive')
+  }
+  const winners = hosts.filter(candidate => candidate.readyRecord !== undefined)
+  if (winners.length !== 1 || winners[0] !== handle) {
+    throw new Error(`ACCEPT_HOST_WINNER: ${String(winners.length)} contenders reached Ready; exactly one is required`)
+  }
+  const liveOthers = hosts.filter(candidate => candidate !== handle && !candidate.exited)
+  if (liveOthers.length > 0) {
+    throw new Error('ACCEPT_HOST_WINNER: a non-winner contender is still live')
+  }
+  for (const candidate of hosts) {
+    if (candidate === handle) continue
+    if (candidate.finished !== true) {
+      throw new Error(`ACCEPT_HOST_WINNER: contender ${String(candidate.entryId)} has not finished its declared conflict terminal`)
+    }
+    if (candidate.terminal?.outcome !== 'seat-conflict') {
+      throw new Error(`ACCEPT_HOST_WINNER: contender ${String(candidate.entryId)} did not report a seat conflict`)
+    }
+  }
+  handle.ready = handle.readyRecord
+  handle.businessPid = handle.readyRecord.localHost.hostPid ?? null
+  handle.acceptedHost = true
+  activeHost = handle
+
+  syncHostReceipt()
+  writeReceipt({ phase: 'HOST_READY' })
+  return {
+    hostId: handle.hostId,
+    entryId: handle.entryId,
+    generation: handle.generation,
+    ready: handle.readyRecord,
+    workRoot: handle.workRoot,
+    source: 'profile',
+    buildId: handle.buildId,
+    scopeId: handle.expectedScopeId,
+    pgid: hostPgid(handle),
+    entryRealpath: handle.entryRealpath,
+  }
+}
+
+async function handleEntryRecords(message) {
+  requireKnownFields(message, ['entryId'], 'ENTRY_RECORDS')
+  requireProcessScene('ENTRY_RECORDS')
+  const handle = findEntryById(message.entryId, 'ENTRY_RECORDS')
+  const facts = entryRecordsOf(handle)
+  // Re-reading a closed entry is the complete ledger fact; a live entry's
+  // records are only a current snapshot and this operation never waits.
+  return facts
+}
+
+async function handleWaitEntryRecord(message) {
+  requireKnownFields(message, ['entryId', 'match', 'timeoutMs'], 'WAIT_ENTRY_RECORD')
+  requireProcessScene('WAIT_ENTRY_RECORD')
+  const handle = findEntryById(message.entryId, 'WAIT_ENTRY_RECORD')
+  const match = requireEntryMatch(message.match, 'WAIT_ENTRY_RECORD')
+  const timeoutMs = message.timeoutMs ?? 180_000
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
+    throw codedInputError('INPUT_WAIT_BOUND', 'WAIT_ENTRY_RECORD timeoutMs must be 1..600000')
+  }
+  const record = await waitForEntryRecord(handle, match, `WAIT_ENTRY_RECORD ${handle.label ?? handle.entryId}`, timeoutMs)
+  syncHostReceipt()
+  syncQualificationClientReceipt()
+  return record
+}
+
+const BOOTSTRAP_CLI_MODES = new Set(['inherited-host-role', 'direct-help'])
+const IDENTITY_WITNESS_KINDS = new Set(['live-non-host', 'linux-zombie'])
+
+/** Mutation admission: no live Client/helper/fallback may consume the target. */
+async function assertNoLiveMutationConsumers({ allowStableHost, label }) {
+  const stableHost = allowStableHost ? activeHost : undefined
+  if (!allowStableHost && activeHost !== undefined) {
+    throw new Error(`${label}: a live Host still consumes the installed copy`)
+  }
+  for (const handle of hosts) {
+    if (handle === stableHost) continue
+    if (!handle.exited) throw new Error(`${label}: a Host attempt is still live`)
+    await assertHostGroupGone(handle, label)
+  }
+  for (const handle of qualificationClients) {
+    if (!handle.exited || handle.finished !== true) {
+      throw new Error(`${label}: a qualification Client is not terminal`)
+    }
+    await assertHostGroupGone(handle, label)
+  }
+  for (const handle of qualificationHelpers) {
+    if (!handle.exited || handle.finished !== true) {
+      throw new Error(`${label}: a qualification helper is not terminal`)
+    }
+    await assertHostGroupGone(handle, label)
+  }
+  if (processClients.some(client => !client.closed)) {
+    throw new Error(`${label}: a process Client is still live`)
+  }
+  if (processClients.length > 0) await auditProcessClientLedger(label)
+  if (fallbackHosts.some(record => record.reclaimed !== true)) {
+    throw new Error(`${label}: a discovered Host fallback is still live`)
+  }
+  // Refuse before returning permission to perform the synchronous side effect.
+  assertLifecycleOpen(label)
+}
+
+function installedChunk(prefix) {
+  const packageRoot = realpathSync(scene.installation.profilePackage)
+  const file = readdirSync(join(packageRoot, 'dist')).find(name => name.startsWith(prefix) && name.endsWith('.mjs'))
+  if (file === undefined) throw new Error(`the installed package has no ${prefix} chunk`)
+  return join(packageRoot, 'dist', file)
+}
+
+function registerHelperHandle({ entryId, kind, label, child, dir, extra = {} }) {
+  const records = []
+  const stderr = { text: '' }
+  if (child.stdout !== null) {
+    createInterface({ input: child.stdout }).on('line', line => {
+      const trimmed = line.trim()
+      if (trimmed === '') return
+      try {
+        records.push(JSON.parse(trimmed))
+      } catch {
+        stderr.text += `${trimmed}\n`
+      }
+    })
+  }
+  if (child.stderr !== null) {
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => {
+      if (stderr.text.length < 64_000) stderr.text += chunk
+    })
+  }
+  let settleClose
+  const closePromise = new Promise(resolve => { settleClose = resolve })
+  const handle = {
+    entryId,
+    kind,
+    label,
+    child,
+    records,
+    get stderrText() { return stderr.text },
+    get outputText() { return handle.rawOutput ?? '' },
+    dir,
+    startedAt: now(),
+    starttime: readHostStarttime(child.pid),
+    birth: captureEntryBirth(child, label),
+    pgid: child.pid ?? null,
+    closePromise,
+    exited: false,
+    exitResult: undefined,
+    closedAt: undefined,
+    finished: false,
+    terminal: undefined,
+    ...extra,
+  }
+  qualificationHelpers.push(handle)
+  child.once('error', error => {
+    handle.spawnError = error
+    writeReceipt({ phase: 'ENTRY_SPAWN_ERROR', errorName: boundedError(error), entryId })
+  })
+  child.once('close', (code, signalValue) => {
+    handle.exited = true
+    handle.exitResult = { code, signal: signalValue }
+    handle.closedAt = now()
+    settleClose({ code, signal: signalValue })
+    syncQualificationHelpersReceipt()
+  })
+  syncQualificationHelpersReceipt()
+  return handle
+}
+
+async function runTrackedOnce(invocation, args, cwd, env, label, timeoutMs) {
+  const child = spawn(invocation[0], [...invocation.slice(1), ...args], {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  })
+  const entryId = `installed-cli-${String(++qualificationHelperSequence)}-${String(child.pid)}-${String(Date.now())}`
+  const handle = registerHelperHandle({ entryId, kind: 'bootstrap-cli', label, child, dir: cwd })
+  const output = { stdout: '', stderr: '' }
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => { if (output.stdout.length < 64_000) output.stdout += chunk })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => { if (output.stderr.length < 64_000) output.stderr += chunk })
+  const exit = await waitForEntryClose(handle, label, timeoutMs)
+  handle.rawOutput = `${output.stdout}\n${output.stderr}`
+  await assertHostGroupGone(handle, label)
+  handle.finished = true
+  handle.terminal = {
+    outcome: 'cli',
+    exit: { code: exit.code, signal: exit.signal },
+    markers: entryStderrMarkers(handle),
+    stdoutBytes: output.stdout.length,
+    stderrBytes: output.stderr.length,
+  }
+  syncQualificationHelpersReceipt()
+  return handle
+}
+
+function assertNoBootstrapCliPatch(label) {
+  if (processBootstrapCliPatch !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED', `${label}: an inherited profile patch is still unresolved`)
+  }
+}
+
+async function handleRunBootstrapCli(message) {
+  requireKnownFields(message, ['mode'], 'RUN_BOOTSTRAP_CLI')
+  requireProcessScene('RUN_BOOTSTRAP_CLI')
+  assertLifecycleOpen('RUN_BOOTSTRAP_CLI')
+  const mode = message.mode
+  if (!BOOTSTRAP_CLI_MODES.has(mode)) {
+    throw codedInputError('INPUT_BOOTSTRAP_CLI_MODE', `RUN_BOOTSTRAP_CLI: unknown mode ${JSON.stringify(mode)}`)
+  }
+  if (processInstallationMutation !== undefined) {
+    throw codedInputError('INPUT_INSTALLATION_MUTATED', 'RUN_BOOTSTRAP_CLI is not allowed under a mutated installation')
+  }
+  assertNoBootstrapCliPatch('RUN_BOOTSTRAP_CLI')
+  const installation = scene.installation
+  const profilePatchPath = join(installation.profileDir, 'cordis.patch.yml')
+  let response
+  if (mode === 'inherited-host-role') {
+    await assertNoLiveMutationConsumers({ allowStableHost: false, label: 'RUN_BOOTSTRAP_CLI inherited-host-role' })
+    const helpersBefore = qualificationHelpers.length
+    let primaryError
+    const previous = existsSync(profilePatchPath)
+      ? { bytes: readFileSync(profilePatchPath), mode: statSync(profilePatchPath).mode & 0o777 }
+      : undefined
+    processBootstrapCliPatch = { path: profilePatchPath, previous }
+    try {
+      atomicReplaceFile(profilePatchPath, Buffer.from('- id: tui-app\n  disabled: true\n'), 0o600, 'bootstrap CLI patch write')
+      const env = { ...installation.env, DSH_PI_TUI_ROLE: 'host' }
+      delete env.DSH_PI_TUI_HOST_ENTRY
+      const handle = await runTrackedOnce(installation.dshInvocation, ['--profile', 'pi-tui'],
+        installation.profileDir, env, 'installed regular CLI with an inherited Host role', 180_000)
+      const markers = entryStderrMarkers(handle)
+      if (handle.terminal.exit.code === 0) {
+        throw new Error('RUN_BOOTSTRAP_CLI: an inherited DSH_PI_TUI_ROLE=host must not turn a missing TUI into success')
+      }
+      if (!markers.requiredTuiSurfaceMissing) {
+        throw new Error('RUN_BOOTSTRAP_CLI: the real CLI never reported the missing required TUI surface')
+      }
+      response = { mode, entryId: handle.entryId, exit: handle.terminal.exit, markers }
+    } catch (error) {
+      primaryError = error
+      throw error
+    } finally {
+      const spawned = qualificationHelpers.slice(helpersBefore)
+        .filter(handle => handle.kind === 'bootstrap-cli')
+      const helper = spawned.at(-1)
+      // No helper was spawned: the private patch is the only effect. Once a
+      // helper exists, only its validated finished state (real close + exact
+      // group audit) permits restoration; otherwise keep the obligation for
+      // the joined compensation.
+      const mayRestore = helper === undefined || helper.finished === true
+      if (mayRestore && processBootstrapCliPatch !== undefined) {
+        const patch = processBootstrapCliPatch
+        try {
+          if (patch.previous === undefined) rmSync(patch.path, { force: true })
+          else atomicReplaceFile(patch.path, patch.previous.bytes, patch.previous.mode, 'bootstrap CLI patch restore')
+          processBootstrapCliPatch = undefined
+        } catch (error) {
+          if (primaryError !== undefined) {
+            throw new AggregateError([primaryError, error], 'the inherited CLI failed and its private patch restore also failed')
+          }
+          throw error
+        }
+      } else if (!mayRestore) {
+        appendNote('bootstrap-cli-patch-restore-deferred', { path: profilePatchPath })
+      }
+    }
+  } else {
+    const handle = await runTrackedOnce(installation.dshInvocation, ['--profile', 'pi-tui', '--help'],
+      installation.profileDir, installation.env, 'installed Direct help', 180_000)
+    if (handle.terminal.exit.code !== 0 || handle.terminal.exit.signal !== null) {
+      throw new Error(`RUN_BOOTSTRAP_CLI: the Direct --help positive exited ${JSON.stringify(handle.terminal.exit)}`)
+    }
+    response = { mode, entryId: handle.entryId, exit: handle.terminal.exit, markers: handle.terminal.markers }
+  }
+  return { ...response, profilePatchRestored: processBootstrapCliPatch === undefined }
+}
+
+function assertPristineInstalledCopy(label) {
+  const facts = installedPackageFacts(
+    scene.installation.profilePackage,
+    processCandidate.manifest?.version,
+    processCandidate.targetDshVersion,
+    label,
+  )
+  if (facts.payloadHash !== scene.installFacts.payloadHash || facts.buildId !== scene.installFacts.buildId) {
+    throw codedInputError('INPUT_CANDIDATE_CHANGED', `${label}: the installed package payload is not pristine`)
+  }
+  return facts
+}
+
+/** Atomic private replacement: never follows or writes through a hardlink. */
+function atomicReplaceFile(path, bytes, mode, label) {
+  const temp = join(dirname(path), `.split-process-${String(process.pid)}-${String(Date.now())}-${Math.random().toString(16).slice(2)}`)
+  try {
+    writeFileSync(temp, bytes, { mode, flag: 'wx' })
+    renameSync(temp, path)
+  } catch (error) {
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // The primary replacement error is the failure that must surface.
+    }
+    throw new Error(`${label}: the atomic private replacement failed (${boundedError(error)})`)
+  }
+}
+
+async function handleSetInstallationFault(message) {
+  requireKnownFields(message, ['fault'], 'SET_INSTALLATION_FAULT')
+  requireProcessScene('SET_INSTALLATION_FAULT')
+  assertLifecycleOpen('SET_INSTALLATION_FAULT')
+  assertNoBootstrapCliPatch('SET_INSTALLATION_FAULT')
+  if (processInstallationMutation !== undefined) {
+    throw new Error('SET_INSTALLATION_FAULT: a scoped installation mutation is already active')
+  }
+  const fault = message.fault
+  if (fault !== 'host-runtime-absent' && fault !== 'host-bootstrap-absent' && fault !== 'client-bootstrap-drift') {
+    throw codedInputError('INPUT_INSTALLATION_FAULT', `SET_INSTALLATION_FAULT: unknown fault ${JSON.stringify(fault)}`)
+  }
+  if (processCandidate === undefined || scene.installFacts === undefined) {
+    throw new Error('SET_INSTALLATION_FAULT: the process install facts are missing')
+  }
+  assertPristineInstalledCopy('SET_INSTALLATION_FAULT')
+  assertImmutableSplitCandidateUnchanged(processCandidate)
+  const installation = scene.installation
+  const packageRoot = realpathSync(installation.profilePackage)
+  const base = {
+    fault,
+    candidateSha256: processCandidate.candidateSha256,
+    payloadHashBefore: scene.installFacts.payloadHash,
+    buildIdBefore: scene.installFacts.buildId,
+    startedAt: now(),
+  }
+  if (fault === 'host-runtime-absent') {
+    await assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-runtime-absent' })
+    const artifact = join(packageRoot, 'dist', 'host-runtime.mjs')
+    const absent = `${artifact}.artifact-absent`
+    const packageScopeBarrier = join(installation.dshHome, 'package.json')
+    const barrierBody = '{"name":"dsh-split-process-package-scope-barrier","private":true}\n'
+    const profilesManifest = join(dirname(installation.profileDir), 'package.json')
+    if (existsSync(profilesManifest)) {
+      const manifest = readJson(profilesManifest, 'profiles package.json')
+      if (manifest.name === '@xmoon76/dsh-pi-tui') {
+        throw new Error('SET_INSTALLATION_FAULT: an enclosing profiles manifest carries the candidate package name')
+      }
+    }
+    const profileRequire = createRequire(join(installation.profileDir, 'package.json'))
+    if (profileRequire.resolve('@xmoon76/dsh-pi-tui/host-runtime') !== realpathSync(artifact)) {
+      throw new Error('SET_INSTALLATION_FAULT: the profile copy is not the normal resolvable Host Runtime artifact')
+    }
+    const ancestorCopies = []
+    for (let directory = dirname(installation.profileDir); ; directory = dirname(directory)) {
+      const candidateCopy = join(directory, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+      if (existsSync(candidateCopy)) ancestorCopies.push(candidateCopy)
+      if (dirname(directory) === directory) break
+    }
+    const harnessCopy = join(installation.harnessDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+    if (existsSync(harnessCopy)) ancestorCopies.push(harnessCopy)
+    if (ancestorCopies.length > 0) {
+      throw new Error(`SET_INSTALLATION_FAULT: another installed package copy is reachable: ${ancestorCopies.join(', ')}`)
+    }
+    const previousBarrier = existsSync(packageScopeBarrier)
+      ? { bytes: readFileSync(packageScopeBarrier), mode: statSync(packageScopeBarrier).mode & 0o777 }
+      : undefined
+    // Register the rollback obligation BEFORE the first side effect. A failure
+    // between the rename and the post-check is still owned by this mutation.
+    const mutation = {
+      ...base,
+      target: artifact,
+      absentPath: absent,
+      barrier: { path: packageScopeBarrier, previous: previousBarrier },
+      barrierWritten: false,
+      artifactRenamed: false,
+      restore: async () => {
+        if (mutation.artifactRenamed) {
+          renameSync(absent, artifact)
+          mutation.artifactRenamed = false
+        }
+        if (mutation.barrierWritten) {
+          if (previousBarrier === undefined) rmSync(packageScopeBarrier, { force: true })
+          else atomicReplaceFile(packageScopeBarrier, previousBarrier.bytes, previousBarrier.mode, 'install barrier restore')
+          mutation.barrierWritten = false
+        }
+      },
+    }
+    processInstallationMutation = mutation
+    try {
+      mutation.barrierWritten = true
+      atomicReplaceFile(packageScopeBarrier, Buffer.from(barrierBody), 0o600, 'install barrier write')
+      renameSync(artifact, absent)
+      mutation.artifactRenamed = true
+      let resolutionError
+      try {
+        profileRequire.resolve('@xmoon76/dsh-pi-tui/host-runtime')
+      } catch (error) {
+        resolutionError = error
+      }
+      if (resolutionError === undefined) {
+        throw new Error('SET_INSTALLATION_FAULT: the renamed artifact is still resolvable from the profile anchor')
+      }
+      writeReceipt({ installationMutation: { fault, target: artifact, recordedAt: now() } })
+      appendNote('installation-mutation-committed', { fault, target: artifact, candidateSha256: processCandidate.candidateSha256 })
+      return {
+        ...base,
+        target: artifact,
+        barrierPath: packageScopeBarrier,
+        resolverRefused: true,
+      }
+    } catch (error) {
+      try {
+        await mutation.restore()
+        processInstallationMutation = undefined
+      } catch (restoreError) {
+        appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+      }
+      throw error
+    }
+  }
+  if (fault === 'host-bootstrap-absent') {
+    await assertNoLiveMutationConsumers({ allowStableHost: false, label: 'SET_INSTALLATION_FAULT host-bootstrap-absent' })
+    const chunkPath = installedChunk('host-bootstrap-')
+    const absent = `${chunkPath}.absent`
+    const mutation = {
+      ...base,
+      target: chunkPath,
+      absentPath: absent,
+      renamed: false,
+      restore: async () => {
+        if (mutation.renamed) {
+          renameSync(absent, chunkPath)
+          mutation.renamed = false
+        }
+      },
+    }
+    processInstallationMutation = mutation
+    try {
+      renameSync(chunkPath, absent)
+      mutation.renamed = true
+      if (!existsSync(join(packageRoot, 'dist', 'local-host.mjs'))) {
+        throw new Error('SET_INSTALLATION_FAULT: the real Host entry disappeared with the bootstrap chunk')
+      }
+      writeReceipt({ installationMutation: { fault, target: chunkPath, recordedAt: now() } })
+      appendNote('installation-mutation-committed', { fault, target: chunkPath })
+      return { ...base, target: chunkPath, hostEntryPresent: true }
+    } catch (error) {
+      try {
+        await mutation.restore()
+        processInstallationMutation = undefined
+      } catch (restoreError) {
+        appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+      }
+      throw error
+    }
+  }
+  // client-bootstrap-drift: a stable live Host and no other qualification Client.
+  requireReadyHost('SET_INSTALLATION_FAULT client-bootstrap-drift')
+  await assertNoLiveMutationConsumers({ allowStableHost: true, label: 'SET_INSTALLATION_FAULT client-bootstrap-drift' })
+  const chunkPath = installedChunk('client-bootstrap-')
+  const canonicalChunk = realpathSync(chunkPath)
+  if (canonicalChunk !== chunkPath) {
+    throw new Error('SET_INSTALLATION_FAULT: the installed bootstrap chunk is not a canonical package file')
+  }
+  const chunkStat = statSync(canonicalChunk)
+  if (!chunkStat.isFile() || chunkStat.uid !== process.getuid()) {
+    throw new Error('SET_INSTALLATION_FAULT: the installed bootstrap chunk is not an owned regular file')
+  }
+  const original = { bytes: readFileSync(canonicalChunk), mode: chunkStat.mode & 0o777 }
+  const drift = Buffer.concat([original.bytes, Buffer.from('\n// split-process qualification installed-copy drift\n')])
+  // The replacement is a private atomic rename, so a pnpm store hardlink can
+  // never be mutated in place; the rollback obligation exists before the write.
+  const mutation = {
+    ...base,
+    target: canonicalChunk,
+    original,
+    restore: async () => {
+      atomicReplaceFile(canonicalChunk, original.bytes, original.mode, 'installed-copy restore')
+    },
+  }
+  processInstallationMutation = mutation
+  try {
+    atomicReplaceFile(canonicalChunk, drift, original.mode, 'installed-copy drift')
+    const driftFacts = installedPackageFacts(packageRoot, processCandidate.manifest?.version,
+      processCandidate.targetDshVersion, 'SET_INSTALLATION_FAULT drift')
+    if (driftFacts.payloadHash === scene.installFacts.payloadHash) {
+      throw new Error('SET_INSTALLATION_FAULT: the installed-copy drift did not change the payload hash')
+    }
+    if (driftFacts.buildId === processScope.buildId || driftFacts.buildId === activeHost.buildId) {
+      throw new Error('SET_INSTALLATION_FAULT: the drift did not change the build identity away from the live Host')
+    }
+    mutation.payloadHashAfter = driftFacts.payloadHash
+    mutation.buildIdAfter = driftFacts.buildId
+    writeReceipt({
+      installationMutation: {
+        fault,
+        target: chunkPath,
+        buildIdBefore: processScope.buildId,
+        buildIdAfter: driftFacts.buildId,
+        recordedAt: now(),
+      },
+    })
+    appendNote('installation-mutation-committed', {
+      fault,
+      target: chunkPath,
+      buildIdBefore: processScope.buildId,
+      buildIdAfter: driftFacts.buildId,
+    })
+    return {
+      ...base,
+      target: chunkPath,
+      payloadHashAfter: driftFacts.payloadHash,
+      buildIdAfter: driftFacts.buildId,
+      liveHostBuildId: activeHost.buildId,
+    }
+  } catch (error) {
+    try {
+      await mutation.restore()
+      processInstallationMutation = undefined
+    } catch (restoreError) {
+      appendNote('installation-mutation-rollback-failed', { fault, reason: boundedError(restoreError) })
+    }
+    throw error
+  }
+}
+
+/** Restore the ONE registered installed-copy mutation. */
+async function restoreInstallationMutation({ compensating = false } = {}) {
+  const mutation = processInstallationMutation
+  if (mutation === undefined) throw new Error('RESTORE_INSTALLATION: no scoped installation mutation is active')
+  if (mutation.fault !== 'client-bootstrap-drift' && activeHost !== undefined) {
+    throw new Error('RESTORE_INSTALLATION: the Host artifact mutation cannot be restored under a live Host')
+  }
+  if (!compensating) {
+    if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true)) {
+      throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
+    }
+    const allowStableHost = mutation.fault === 'client-bootstrap-drift'
+    await assertNoLiveMutationConsumers({ allowStableHost, label: 'RESTORE_INSTALLATION' })
+    await assertClientSeatFree(scene.installation, processScope.scopeId, 'RESTORE_INSTALLATION')
+    if (!allowStableHost) await assertSceneHostSeatFree('RESTORE_INSTALLATION')
+    // The seat probes are real async operations; re-check admission at the
+    // actual commit boundary immediately before the synchronous fs effect.
+    assertLifecycleOpen('RESTORE_INSTALLATION')
+  }
+  // Compensation is the cleanup owner: it already audited every owned group,
+  // PTY ledger, fallback and both seats before calling this restore.
+  await mutation.restore()
+  const restored = installedPackageFacts(scene.installation.profilePackage,
+    processCandidate.manifest?.version, processCandidate.targetDshVersion, 'RESTORE_INSTALLATION')
+  if (restored.payloadHash !== scene.installFacts.payloadHash || restored.buildId !== scene.installFacts.buildId) {
+    throw new Error('RESTORE_INSTALLATION: the restored payload does not match the pristine installed facts')
+  }
+  assertImmutableSplitCandidateUnchanged(processCandidate)
+  const fault = mutation.fault
+  processInstallationMutation = undefined
+  writeReceipt({ installationMutation: undefined })
+  appendNote('installation-mutation-restored', { fault, payloadHash: restored.payloadHash, buildId: restored.buildId })
+  return {
+    fault,
+    payloadHash: restored.payloadHash,
+    buildId: restored.buildId,
+    candidateSha256: processCandidate.candidateSha256,
+  }
+}
+
+async function handleRestoreInstallation() {
+  requireProcessScene('RESTORE_INSTALLATION')
+  assertLifecycleOpen('RESTORE_INSTALLATION')
+  return await restoreInstallationMutation()
+}
+
+async function handleStartIdentityWitness(message) {
+  requireKnownFields(message, ['kind'], 'START_IDENTITY_WITNESS')
+  requireProcessScene('START_IDENTITY_WITNESS')
+  assertLifecycleOpen('START_IDENTITY_WITNESS')
+  const kind = message.kind
+  if (!IDENTITY_WITNESS_KINDS.has(kind)) {
+    throw codedInputError('INPUT_IDENTITY_WITNESS', `START_IDENTITY_WITNESS: unknown kind ${JSON.stringify(kind)}`)
+  }
+  const witnessDir = join(scene.workDir, 'identity-witnesses', `${kind}-${String(++qualificationHelperSequence)}`)
+  mkdirSync(witnessDir, { recursive: true, mode: 0o700 })
+  if (kind === 'linux-zombie') {
+    if (process.platform !== 'linux') {
+      throw codedInputError('INPUT_IDENTITY_WITNESS', 'START_IDENTITY_WITNESS: the same-birth zombie is Linux-only')
+    }
+    // The holder keeps the dead child unreaped: it becomes the holder's zombie
+    // child and no code in this repository waits for it.
+    const holder = spawn('/bin/sh', ['-c', 'sleep 300 >/dev/null 2>&1 & echo $!; exec sleep 300'], {
+      cwd: witnessDir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      detached: true,
+    })
+    const entryId = `identity-witness-zombie-${String(holder.pid)}-${String(Date.now())}`
+    // Register the holder synchronously, BEFORE awaiting its first output: a
+    // Worker death in this window must reclaim the holder, never leave it
+    // outside the ledger while cleanup removes the scene root.
+    const handle = registerHelperHandle({
+      entryId,
+      kind: 'identity-witness',
+      label: `linux-zombie-holder-${String(holder.pid)}`,
+      child: holder,
+      dir: witnessDir,
+      extra: { witnessKind: kind, witnessPid: undefined },
+    })
+    await processProbeHold('identity-witness-spawned', { entryId, holderPid: holder.pid })
+    let zombiePid
+    try {
+      zombiePid = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('START_IDENTITY_WITNESS: the holder never published its zombie child')), 30_000)
+        const lines = createInterface({ input: holder.stdout })
+        const fence = setInterval(() => {
+          if (!lifecycleClosed) return
+          clearInterval(fence)
+          clearTimeout(timer)
+          lines.close()
+          reject(new Error('START_IDENTITY_WITNESS: the Supervisor lifecycle closed while the holder registration window was open'))
+        }, 50)
+        lines.once('line', line => {
+          clearTimeout(timer)
+          clearInterval(fence)
+          lines.close()
+          const pid = Number(line.trim())
+          if (!Number.isInteger(pid) || pid <= 0) reject(new Error('START_IDENTITY_WITNESS: the holder published no real PID'))
+          else resolve(pid)
+        })
+      })
+    } catch (error) {
+      // The holder is already registered, so this path reclaims it even when the
+      // Worker disappears before the child identity exists.
+      await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS registration failure').catch(() => undefined)
+      throw error
+    }
+    assertLifecycleOpen('START_IDENTITY_WITNESS after holder output')
+    const before = readKernelProcess(zombiePid)
+    if (before.kind !== 'alive' || before.identity.state === 'Z' || before.identity.state === 'X'
+      || before.identity.ppid !== holder.pid || before.identity.pgid !== holder.pid || before.identity.sid !== holder.pid) {
+      await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS child ownership failure').catch(() => undefined)
+      throw new Error('START_IDENTITY_WITNESS: the published PID is not a live child in the holder\'s owned group/session')
+    }
+    const preSignalBirth = serializeKernelIdentity(before.identity)
+    assertLifecycleOpen('START_IDENTITY_WITNESS before child signal')
+    const recheck = readKernelProcess(zombiePid)
+    if (recheck.kind !== 'alive' || serializeKernelIdentity(recheck.identity) !== preSignalBirth
+      || recheck.identity.ppid !== holder.pid || recheck.identity.pgid !== holder.pid) {
+      await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS child identity changed before signal').catch(() => undefined)
+      throw new Error('START_IDENTITY_WITNESS: the child identity changed before its individual signal')
+    }
+    // The individual signal is authorized by the exact captured birth and the
+    // holder/group/session membership just re-read; a group signal would kill
+    // the holder that must keep the zombie unreaped.
+    process.kill(zombiePid, 'SIGKILL')
+    const started = Date.now()
+    let zombieObservation
+    for (;;) {
+      if (Date.now() - started >= 30_000) {
+        await terminateOwnedEntry(handle, 'START_IDENTITY_WITNESS zombie timeout').catch(() => undefined)
+        throw new Error('START_IDENTITY_WITNESS: the real child never became a readable zombie with the captured birth')
+      }
+      try {
+        zombieObservation = readKernelProcess(zombiePid)
+      } catch {
+        zombieObservation = undefined
+      }
+      if (zombieObservation?.kind === 'alive' && zombieObservation.identity.state === 'Z'
+        && serializeKernelIdentity(zombieObservation.identity) === preSignalBirth) break
+      await sleep(25)
+    }
+    handle.witnessPid = zombiePid
+    handle.witnessIdentity = zombieObservation.identity
+    handle.witnessBirth = preSignalBirth
+    handle.witnessStarttime = readHostStarttime(zombiePid)
+    syncQualificationHelpersReceipt()
+    appendNote('identity-witness-live', {
+      entryId,
+      kind,
+      witnessPid: zombiePid,
+      holderPid: holder.pid,
+      witnessBirth: handle.witnessBirth,
+    })
+    return {
+      entryId,
+      kind,
+      pid: zombiePid,
+      holderPid: holder.pid,
+      birth: handle.witnessBirth,
+      starttime: handle.witnessStarttime ?? null,
+      kernelIdentity: zombieObservation.identity,
+    }
+  }
+  const dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    cwd: witnessDir,
+    stdio: 'ignore',
+    detached: true,
+  })
+  const entryId = `identity-witness-live-${String(dummy.pid)}-${String(Date.now())}`
+  const handle = registerHelperHandle({
+    entryId,
+    kind: 'identity-witness',
+    label: `live-non-host-${String(dummy.pid)}`,
+    child: dummy,
+    dir: witnessDir,
+    extra: { witnessKind: kind, witnessPid: dummy.pid },
+  })
+  const started = Date.now()
+  let observation
+  for (;;) {
+    if (Date.now() - started >= 30_000) throw new Error('START_IDENTITY_WITNESS: the live dummy never produced a readable kernel identity')
+    try {
+      observation = readKernelProcess(dummy.pid)
+    } catch {
+      observation = undefined
+    }
+    if (observation?.kind === 'alive') break
+    await sleep(25)
+  }
+  handle.witnessIdentity = observation.identity
+  handle.witnessBirth = serializeKernelIdentity(observation.identity)
+  handle.witnessStarttime = readHostStarttime(dummy.pid)
+  syncQualificationHelpersReceipt()
+  appendNote('identity-witness-live', {
+    entryId,
+    kind,
+    witnessPid: dummy.pid,
+    witnessBirth: handle.witnessBirth,
+  })
+  return {
+    entryId,
+    kind,
+    pid: dummy.pid,
+    holderPid: null,
+    birth: handle.witnessBirth,
+    starttime: handle.witnessStarttime ?? null,
+    kernelIdentity: observation.identity,
+  }
+}
+
+async function handleFinishIdentityWitness(message) {
+  requireKnownFields(message, ['entryId'], 'FINISH_IDENTITY_WITNESS')
+  requireProcessScene('FINISH_IDENTITY_WITNESS')
+  assertLifecycleOpen('FINISH_IDENTITY_WITNESS')
+  const handle = findEntryById(message.entryId, 'FINISH_IDENTITY_WITNESS')
+  if (handle.kind !== 'identity-witness') throw new Error('FINISH_IDENTITY_WITNESS: the entry is not an identity witness')
+  if (handle.finished) return handle.terminal ?? { outcome: 'already-finished' }
+  if (!handle.exited) {
+    assertKernelGroupSignalOwnership(processKernelReaders(), handle.child.pid, handle.birth, 'FINISH_IDENTITY_WITNESS')
+    try {
+      process.kill(-handle.child.pid, 'SIGKILL')
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw new Error(`FINISH_IDENTITY_WITNESS: the owned witness group could not be killed (${String(error?.code ?? 'unknown')})`)
+    }
+    await waitForEntryClose(handle, 'FINISH_IDENTITY_WITNESS')
+  }
+  await assertHostGroupGone(handle, 'FINISH_IDENTITY_WITNESS')
+  if (handle.witnessKind === 'linux-zombie') {
+    const started = Date.now()
+    for (;;) {
+      const observation = (() => {
+        try { return readKernelProcess(handle.witnessPid) } catch { return undefined }
+      })()
+      if (observation === undefined || observation.kind !== 'alive' || observation.identity.state !== 'Z') break
+      if (Date.now() - started >= 10_000) {
+        throw new Error('FINISH_IDENTITY_WITNESS: the real zombie identity survived its holder')
+      }
+      await sleep(25)
+    }
+  }
+  handle.finished = true
+  handle.terminal = { outcome: 'witness-finished', kind: handle.witnessKind, pid: handle.witnessPid };
+  syncQualificationHelpersReceipt()
+  appendNote('identity-witness-finished', { entryId: handle.entryId, witnessPid: handle.witnessPid })
+  return handle.terminal
+}
+
+async function handleReclaimDiscoveredHost(message) {
+  requireKnownFields(message, ['entryId'], 'RECLAIM_DISCOVERED_HOST')
+  requireProcessScene('RECLAIM_DISCOVERED_HOST')
+  assertLifecycleOpen('RECLAIM_DISCOVERED_HOST')
+  const client = findQualificationClientById(message.entryId, 'RECLAIM_DISCOVERED_HOST')
+  if (client.kind !== 'qualification-client') throw new Error('RECLAIM_DISCOVERED_HOST: the entry is not a qualification Client')
+  if (!client.exited) throw new Error('RECLAIM_DISCOVERED_HOST: the attached qualification Client is still live')
+  const record = fallbackHosts.find(entry => entry.clientId === client.clientId || entry.scratch === client.scratch)
+  if (record === undefined) throw new Error('RECLAIM_DISCOVERED_HOST: this Client registered no discovered Host')
+  if (record.reclaimed === true) throw new Error('RECLAIM_DISCOVERED_HOST: the discovered Host is already reclaimed')
+  const claimed = await reclaimFallbackHost(record.pid, record.origin, record.scratch,
+    'RECLAIM_DISCOVERED_HOST', true)
+  const registryPath = join(processScope.dir, 'instance.json')
+  if (existsSync(registryPath)) {
+    const registry = readJson(registryPath, 'discovered Host registry after reclaim')
+    if (registry.hostPid === record.pid) {
+      throw new Error('RECLAIM_DISCOVERED_HOST: the product registry still names the reclaimed Host')
+    }
+  }
+  const scratchEntries = readdirSync(processScope.dir).filter(name => name.startsWith('host-scratch-'))
+  appendNote('discovered-host-reclaimed', {
+    pid: record.pid,
+    birth: record.birth ?? record.starttime,
+    clientId: client.clientId,
+  })
+  writeReceipt({})
+  return {
+    pid: record.pid,
+    birth: claimed.birth ?? claimed.starttime ?? null,
+    reclaimed: true,
+    registryRemoved: !existsSync(registryPath),
+    scratchEntries,
+  }
+}
+
+async function handleAssertEntrySeatsFree() {
+  requireProcessScene('ASSERT_ENTRY_SEATS_FREE')
+  assertLifecycleOpen('ASSERT_ENTRY_SEATS_FREE')
+  for (const handle of hosts) {
+    if (!handle.exited) throw new Error(`ASSERT_ENTRY_SEATS_FREE: Host/attempt ${String(handle.entryId)} is still live`)
+    await assertHostGroupGone(handle, 'ASSERT_ENTRY_SEATS_FREE')
+  }
+  for (const handle of qualificationClients) {
+    if (!handle.exited) throw new Error(`ASSERT_ENTRY_SEATS_FREE: qualification Client ${handle.label} is still live`)
+    await assertHostGroupGone(handle, 'ASSERT_ENTRY_SEATS_FREE')
+  }
+  for (const handle of qualificationHelpers) {
+    if (!handle.exited) throw new Error(`ASSERT_ENTRY_SEATS_FREE: ${entryKindLabel(handle)} ${handle.label} is still live`)
+    await assertHostGroupGone(handle, 'ASSERT_ENTRY_SEATS_FREE')
+  }
+  const unfinishedHost = hosts.find(handle => handle.mode !== undefined
+    && handle.finished !== true && handle.acceptedHost !== true)
+  if (unfinishedHost !== undefined) {
+    throw new Error(`ASSERT_ENTRY_SEATS_FREE: Host/attempt ${String(unfinishedHost.entryId)} was never finished`)
+  }
+  const unfinishedClient = qualificationClients.find(handle => handle.kind === 'qualification-client' && handle.finished !== true)
+  if (unfinishedClient !== undefined) {
+    throw new Error(`ASSERT_ENTRY_SEATS_FREE: qualification Client ${unfinishedClient.label} was never finished`)
+  }
+  const liveFallback = sceneLocalHostCandidates()
+  if (liveFallback.length > 0) {
+    throw new Error(`ASSERT_ENTRY_SEATS_FREE: unowned local Host process(es) are still live: ${JSON.stringify(liveFallback)}`)
+  }
+  await assertSceneHostSeatFree('ASSERT_ENTRY_SEATS_FREE')
+  await assertClientSeatFree(scene.installation, processScope.scopeId, 'ASSERT_ENTRY_SEATS_FREE')
+  return { hostSeatFree: true, qualificationClientSeatFree: true, entries: hosts.length + qualificationClients.length + qualificationHelpers.length }
+}
+
 function readHostStarttimeOrUndefined(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return undefined
   return readHostStarttime(pid)
@@ -4910,6 +7463,86 @@ async function dispatch(message) {
         if (requestId !== undefined) reply(requestId, payload)
         break
       }
+      case 'START_HOST_ATTEMPTS': {
+        const payload = await handleStartHostAttempts(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'START_QUALIFICATION_CLIENTS': {
+        const payload = await handleStartQualificationClients(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'ENTRY_RECORDS': {
+        const payload = await handleEntryRecords(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'WAIT_ENTRY_RECORD': {
+        const payload = await handleWaitEntryRecord(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'QUALIFICATION_CLIENT_STATUS': {
+        const payload = await handleQualificationClientStatus(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'QUALIFICATION_CLIENT_CONTROL': {
+        const payload = await handleQualificationClientControl(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'SIGNAL_ENTRY': {
+        const payload = await handleSignalEntry(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'FINISH_ENTRY': {
+        const payload = await handleFinishEntry(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'ACCEPT_HOST_WINNER': {
+        const payload = await handleAcceptHostWinner(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'RUN_BOOTSTRAP_CLI': {
+        const payload = await handleRunBootstrapCli(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'SET_INSTALLATION_FAULT': {
+        const payload = await handleSetInstallationFault(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'RESTORE_INSTALLATION': {
+        const payload = await handleRestoreInstallation()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'START_IDENTITY_WITNESS': {
+        const payload = await handleStartIdentityWitness(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'FINISH_IDENTITY_WITNESS': {
+        const payload = await handleFinishIdentityWitness(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'RECLAIM_DISCOVERED_HOST': {
+        const payload = await handleReclaimDiscoveredHost(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'ASSERT_ENTRY_SEATS_FREE': {
+        const payload = await handleAssertEntrySeatsFree()
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
       case 'UPGRADE_RELEASE_HELD_TURN': {
         const payload = await handleUpgradeReleaseHeldTurn(message)
         if (requestId !== undefined) reply(requestId, payload)
@@ -4957,6 +7590,11 @@ async function dispatch(message) {
       }
       case 'STOP_HOST': {
         if (activeHost === undefined || activeHost.hostId !== message.hostId) throw new Error('STOP_HOST: unknown hostId')
+        if (scene?.kind === 'process') {
+          const blocking = qualificationClients.some(handle => handle.kind === 'qualification-client'
+            && (!handle.exited || handle.finished !== true))
+          if (blocking) throw new Error('STOP_HOST: a live or un-finished qualification Client owns the Host')
+        }
         const stopped = activeHost
         const result = await officialStopHost(stopped)
         if (requestId !== undefined) reply(requestId, { code: result.code, signal: result.signal, generation: stopped.generation })
@@ -4967,11 +7605,26 @@ async function dispatch(message) {
           await handleFinalize(message)
         } catch (error) {
           preserveRoot = true
+          // ONE joined owner path: explicit failed FINALIZE uses the same
+          // compound cleanup as a disconnect/main signal, but preserves the
+          // root for the primary test failure. Compensation success never
+          // turns the failed finalization into a success.
+          let compensation
+          try {
+            compensation = await cleanup('FINALIZE', { preserveRoot: true, failure: error })
+          } catch (compensationError) {
+            appendNote('finalize-compensation-failed', { reason: boundedError(compensationError) })
+          }
           const detail = error instanceof Error ? error.message : String(error)
           writeReceipt({
             phase: 'NOT_QUIESCED',
             errorName: boundedError(error),
-            errorDetail: detail.slice(0, 600),
+            errorDetail: redactText(detail).slice(0, 600),
+            compensation: compensation?.compensation ?? receipt.compensation ?? {
+              attempted: true,
+              completed: false,
+              failure: boundedError(error),
+            },
             cleanup: {
               ...(receipt.cleanup ?? {}),
               reason: 'FINALIZE',
@@ -4981,17 +7634,17 @@ async function dispatch(message) {
             },
           })
           if (requestId !== undefined) fail(requestId, 'SUPERVISOR_FINALIZE_FAILED', error)
-          process.disconnect()
+          if (process.connected) process.disconnect()
           setTimeout(() => process.exit(1), 10)
           break
         }
         if (requestId !== undefined) {
           send({ type: 'RESPONSE', requestId, ok: true, payload: { cleaned: true } }, () => {
-            process.disconnect()
+            if (process.connected) process.disconnect()
             setTimeout(() => process.exit(0), 10)
           })
         } else {
-          process.disconnect()
+          if (process.connected) process.disconnect()
           setTimeout(() => process.exit(0), 10)
         }
         break

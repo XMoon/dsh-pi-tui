@@ -634,6 +634,15 @@ not part of `mise run test`, `mise run check` or `verify:release`. The package
 script always passes `--project`; invoking this config without one runs every
 configured project and is not an entry point.
 
+The project carries two distinct kinds of evidence. The PTY anchors drive the
+real terminal surface; the non-PTY installed-entry qualification drives the
+product's own packed Host/Client entries as real processes for bootstrap
+admission, kernel seat ownership, authenticated HTTP/WebSocket transport and
+stale-Host recovery. Non-PTY qualification is not a substitute for the surface
+user journey and never claims a real GUI. The same-birth Linux zombie
+classification is a Linux-only case (explicit `N/A` on Darwin); Darwin uses the
+real dead-Host schema-2 recovery path instead of fabricating `/proc` state.
+
 It requires two private inputs:
 
 - `SPLIT_VITEST_TMP_BASE`: an existing absolute canonical directory outside this
@@ -671,9 +680,22 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 ```
 
 `<window>` is one of `bootstrap-install`, `host-spawned-before-ack`,
-`client-reserved-before-spawn`, `client-opened-before-ack`, `clients-ready` and
-`fallback-host-ready`. The probe passes only with the terminal `ABORTED_CLEAN`
-receipt, the exact Host seat free, the registered kernel identities gone or
+`client-reserved-before-spawn`, `client-opened-before-ack`, `clients-ready`,
+`fallback-host-ready`, `host-contenders-spawned`,
+`qualification-client-spawned`, `host-artifact-absent-started`,
+`identity-witness-spawned` (Linux only) and `finalize-compensation-started`.
+Each installed-entry window binds one exact business test and only holds after
+the Supervisor registered the real live child identities. `host-contenders-spawned`
+is the batch of concurrent Host contenders, `qualification-client-spawned` a
+registered live qualification Client against the authenticated Host,
+`host-artifact-absent-started` a committed scoped installed-copy mutation with a
+live Host attempt, `identity-witness-spawned` the Linux holder registration
+window before its zombie child identity exists, and
+`finalize-compensation-started` the joined compensation of an intentionally
+failed FINALIZE while a registered Client/helper is still live. The last window
+expects the compensated `NOT_QUIESCED` receipt and a retained diagnostic root;
+the other windows pass only with the terminal `ABORTED_CLEAN` receipt, the
+exact Host seat free, the registered kernel identities gone or
 provably reused, and — for `clients-ready` — a separate real sibling Scene
 already live at its authenticated checkpoint when the target is signalled,
 held across the target's reclaim, then released to continue its own business
