@@ -373,6 +373,7 @@ test('exits only on the second real Ctrl+C/Ctrl+D chord and preserves the Sessio
     await ctrlC.submit('t63 prompt')
     const sessionId = await scene.waitForNewSessionId(before, 'T63 Session')
     await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 'T63 settled Turn')
+    await waitFrame(ctrlC, 't63 prompt', 'T63 settled surface')
     await ctrlC.press('Ctrl+C')
     await waitFrame(ctrlC, 'again to exit', 'T63 Ctrl+C armed')
     await waitFrameGone(ctrlC, 'again to exit', 'T63 Ctrl+C expired')
