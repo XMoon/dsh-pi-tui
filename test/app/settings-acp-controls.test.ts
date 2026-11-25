@@ -1181,6 +1181,33 @@ test('a queued Backend decision is fenced at the REAL Remote queue head and reco
   assert.equal(call.revision, 6)
   assert.equal(call.destination, 'B')
   assert.deepEqual(h.backendTransitions(), [undefined], 'the fresh verified direct→daemon clears the exit intent')
+
+  // The verified transition offers its ONE follow-up; dismiss it (zero admin IO).
+  await settle(h, 'the install follow-up', frame => /Optional OS supervision/u.test(frame))
+  await key(h, '\x1b')
+  await settle(h, 'the follow-up retirement', frame => !/Optional OS supervision/u.test(frame))
+
+  // Confirming the CURRENT Daemon again is a verified no-op: no NEW follow-up
+  // and no new transition intent.
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await settle(h, 'the same-value Backend verification', frame => /Status\s+Verified/u.test(frame))
+  assert.doesNotMatch(h.view(), /Optional OS supervision|Install service|Not now/u,
+    'a same-value save never repaints the follow-up')
+  assert.deepEqual(h.backendTransitions(), [undefined], 'a same-value save records no new intent')
+
+  // A fresh verified Daemon -> Direct records exactly ONE exit intent and
+  // performs no Host stop.
+  await key(h, ENTER)
+  await key(h, '\x1b[A')
+  await key(h, ENTER)
+  await settle(h, 'the reverse Backend verification', frame => /Status\s+Verified/u.test(frame))
+  assert.deepEqual(h.backendTransitions(), [undefined, 'daemon-to-direct'],
+    'the fresh verified Daemon -> Direct records ONE exit intent')
+  const mutations = h.remote!.calls().filter(entry => entry.ns === 'tui-startup')
+  assert.equal(mutations.length, 3, 'three real B mutations: Daemon, same-value Daemon, Direct')
+  assert.deepEqual(mutations.map(entry => entry.destination), ['B', 'B', 'B'])
+  assert.deepEqual(mutations.at(-1)!.ops, [{ op: 'set', path: ['backend'], value: 'direct' }])
   h.dispose()
 })
 
@@ -1272,7 +1299,7 @@ test('an accepted Visual tools write whose readback belongs to B is Unverified',
   h.dispose()
 })
 
-test('an unknown Web receipt is Outcome unconfirmed even when B matches the request', async () => {
+test('an unknown Web receipt keeps B\'s own Off value and stays Outcome unconfirmed', async () => {
   const h = setup({ columns: 200, rows: 44, remoteConfig: true })
   await h.remote!.ready
   await stageWebPreferenceConfirm(h)
@@ -1281,15 +1308,22 @@ test('an unknown Web receipt is Outcome unconfirmed even when B matches the requ
   await key(h, ENTER)
   await forwarded
   await received
-  h.remote!.advanceB(true, 7, { web: { autoStart: true, revision: 4 } })
+  // B keeps the ORIGINAL Off value at the same revision: an old classifier
+  // reading B's value would call this a refusal, but the receipt is unknown.
+  h.remote!.advanceB(false, 7, { web: { autoStart: false, revision: 4 } })
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown Web receipt', frame => /Status\s+Outcome unconfirmed/u.test(frame))
   assert.doesNotMatch(h.view(), /Status\s+Not saved/u)
-  assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 1)
+  assert.doesNotMatch(h.view(), /Status\s+Verified/u)
+  const calls = h.remote!.calls().filter(call => call.ns === 'pi-tui-web-preferences')
+  assert.equal(calls.length, 1, 'exactly the A request, never replayed')
+  assert.equal(calls[0]!.destination, 'A')
+  assert.equal(calls[0]!.revision, 4)
+  assert.deepEqual(calls[0]!.ops, [{ op: 'set', path: ['autoStart'], value: true }])
   h.dispose()
 })
 
-test('an unknown Backend receipt is painted Outcome unknown and never claimed saved', async () => {
+test('an unknown Backend receipt keeps B\'s own Direct value and stays Outcome unknown', async () => {
   const h = setup({ columns: 200, rows: 44, remoteConfig: true })
   await h.remote!.ready
   await openBackendChoice(h)
@@ -1299,16 +1333,21 @@ test('an unknown Backend receipt is painted Outcome unknown and never claimed sa
   await key(h, ENTER)
   await forwarded
   await received
-  h.remote!.advanceB(false, 7, { backend: { backend: 'daemon', revision: 6 } })
+  h.remote!.advanceB(false, 7, { backend: { backend: 'direct', revision: 6 } })
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown Backend receipt', frame => /Status\s+Outcome unknown/u.test(frame))
   assert.doesNotMatch(h.view(), /Status\s+Not saved/u)
+  assert.doesNotMatch(h.view(), /Status\s+Verified/u)
   assert.deepEqual(h.backendTransitions(), [], 'an unknown outcome records no exit intent')
-  assert.equal(scalarCalls(h, 'tui-startup'), 1)
+  const calls = h.remote!.calls().filter(call => call.ns === 'tui-startup')
+  assert.equal(calls.length, 1, 'exactly the A request, never replayed')
+  assert.equal(calls[0]!.destination, 'A')
+  assert.equal(calls[0]!.revision, 6)
+  assert.deepEqual(calls[0]!.ops, [{ op: 'set', path: ['backend'], value: 'daemon' }])
   h.dispose()
 })
 
-test('an unknown Visual tools receipt is painted Outcome unknown and never claimed saved', async () => {
+test('an unknown Visual tools receipt keeps B\'s own On value and stays Outcome unknown', async () => {
   const h = setup({ columns: 200, rows: 44, remoteConfig: true })
   await h.remote!.ready
   await openVisualChoice(h)
@@ -1318,11 +1357,16 @@ test('an unknown Visual tools receipt is painted Outcome unknown and never claim
   await key(h, ENTER)
   await forwarded
   await received
-  h.remote!.advanceB(false, 7, { visual: { enabled: false, revision: 3 } })
+  h.remote!.advanceB(false, 7, { visual: { enabled: true, revision: 3 } })
   h.remote!.releaseReceipt()
   await settle(h, 'the unknown Visual tools receipt', frame => /Status\s+Outcome unknown/u.test(frame))
   assert.doesNotMatch(h.view(), /Status\s+Not saved/u)
-  assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 1)
+  assert.doesNotMatch(h.view(), /Status\s+Verified/u)
+  const calls = h.remote!.calls().filter(call => call.ns === 'pi-tui-visual-tools')
+  assert.equal(calls.length, 1, 'exactly the A request, never replayed')
+  assert.equal(calls[0]!.destination, 'A')
+  assert.equal(calls[0]!.revision, 3)
+  assert.deepEqual(calls[0]!.ops, [{ op: 'set', path: ['enabled'], value: false }])
   h.dispose()
 })
 
@@ -1342,5 +1386,75 @@ test('a matching Host B never grants daemon→direct exit intent from an accepte
   assert.deepEqual(h.backendTransitions(), [],
     'the matching B direct value never records a daemon-to-direct intent for the A request')
   assert.equal(scalarCalls(h, 'tui-startup'), 1, 'A is never replayed')
+  h.dispose()
+})
+
+test('an accepted but unapplied write is Unverified on all three real scalar branches', async () => {
+  const cases = [
+    {
+      ns: 'pi-tui-web-preferences',
+      prepare: async (h: Harness) => { await stageWebPreferenceConfirm(h) },
+      expected: /Status\s+Unverified/u,
+    },
+    {
+      ns: 'tui-startup',
+      prepare: async (h: Harness) => { await openBackendChoice(h); await key(h, DOWN) },
+      expected: /Commit accepted · verification unavailable/u,
+    },
+    {
+      ns: 'pi-tui-visual-tools',
+      prepare: async (h: Harness) => { await openVisualChoice(h); await key(h, DOWN) },
+      expected: /Commit accepted · verification unavailable/u,
+    },
+  ] as const
+  for (const item of cases) {
+    const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+    await h.remote!.ready
+    await item.prepare(h)
+    // The genuine accepted receipt, no Host replacement: the readback simply
+    // still carries the base value.
+    h.remote!.acceptWithoutApply()
+    await key(h, ENTER)
+    await settle(h, `the unapplied ${item.ns} settlement`, frame => item.expected.test(frame))
+    assert.doesNotMatch(h.view(), /Status\s+Not saved/u, 'an accepted mismatch is never a refusal')
+    assert.doesNotMatch(h.view(), /Status\s+Verified/u)
+    const calls = h.remote!.calls().filter(call => call.ns === item.ns)
+    assert.equal(calls.length, 1, 'one invocation on the same authority')
+    assert.equal(calls[0]!.destination, 'A')
+    if (item.ns === 'tui-startup') {
+      assert.deepEqual(h.backendTransitions(), [], 'an unverified Backend save records no side effect')
+    }
+    h.dispose()
+  }
+})
+
+test('a pending Web preference Back does not revive or replay after its late completion', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await stageWebPreferenceConfirm(h)
+
+  const received = h.remote!.holdReceipt()
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(true, 7, { web: { autoStart: true, revision: 4 } })
+  const write = h.remote!.lastWrite()
+  assert.ok(write !== undefined)
+  await key(h, '\x1b') // Back is allowed for a pending CONFIG write
+  await settle(h, 'the Host Rows after Web Back', frame => /Settings · Host · Rows/u.test(frame))
+  h.remote!.releaseReceipt()
+  const late = await write
+  assert.equal(late.kind, 'accepted', 'the late A receipt is known-accepted')
+  await waitForFrame(
+    () => h.diagnostics.join('\n'),
+    text => /web ui preference write/u.test(text) && /outcome=unverified/u.test(text),
+    () => h.vt.waitForRender(),
+    'the retired Web page late-owner diagnostic',
+  )
+  assert.match(h.view(), /Settings · Host · Rows/u, 'Rows stays current after settlement')
+  assert.doesNotMatch(h.view(), /Settings · Host · Web UI/u, 'the retired page never revives')
+  assert.equal(h.remote!.calls().filter(call => call.ns === 'pi-tui-web-preferences').length, 1,
+    'late completion neither replays A nor issues a B write')
   h.dispose()
 })

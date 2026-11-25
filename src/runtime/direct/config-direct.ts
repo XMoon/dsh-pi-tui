@@ -2291,7 +2291,7 @@ class DirectVisualToolsConfig implements VisualToolsConfig {
     const revision = descriptor.revision
     // Without the read revision the decision cannot be submitted conditionally;
     // report the section unreadable rather than allowing a silent overwrite.
-    if (typeof revision !== 'number') return undefined
+    if (!validSettingsRevision(revision)) return undefined
     const user = descriptor.user
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
@@ -2358,7 +2358,7 @@ class DirectWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
     const revision = descriptor.revision
     // Without the read revision the decision cannot be submitted conditionally;
     // report the section unreadable rather than allowing a silent overwrite.
-    if (typeof revision !== 'number') return undefined
+    if (!validSettingsRevision(revision)) return undefined
     const user = descriptor.user
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
@@ -2417,7 +2417,7 @@ class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     const backend = value?.backend
     if (!isPublicBackendValue(backend)) return undefined
     const revision = descriptor.revision
-    if (typeof revision !== 'number') return undefined
+    if (!validSettingsRevision(revision)) return undefined
     const user = descriptor.user
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>

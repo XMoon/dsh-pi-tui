@@ -268,12 +268,17 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(backendSaved?.backend === 'daemon',
       `the Backend save must persist the official tui-startup.backend field, got ${JSON.stringify(backendSaved)}`)
     // An optional service-install follow-up may be offered after a verified
-    // direct -> daemon save. It must be DISMISSED, never installed, and the
-    // running Host must stay untouched either way.
+    // direct -> daemon save. BOTH forms (installable actions and the
+    // local-Linux/macOS-only status line) paint the `Optional OS supervision`
+    // heading, and Root Esc withdraws the follow-up in either phase. It must be
+    // DISMISSED, never installed; the running Host must stay untouched either
+    // way. A blind extra Esc would instead leave the Detail and break the Back
+    // ladder below.
     const backendAfter = await frameOf(clientA)
-    if (/Install service|Not now/u.test(backendAfter)) {
+    const followUpPresent = /Optional OS supervision/u.test(backendAfter)
+    if (followUpPresent) {
       clientA.send('\x1b') // withdraw the follow-up; zero management IO
-      await sleep(220)
+      await waitForNoPattern(clientA, /Optional OS supervision/u, 'FR5-B Backend follow-up retired')
     }
     clientA.send('\x1b') // Backend Detail -> Host Rows
     await waitForPattern(clientA, /Settings · Host · Rows/u, 'FR5-B Backend row retired')
@@ -281,8 +286,7 @@ export async function runHostNumericSettingsFr5B(context) {
       seededDirectRead: true,
       savedDaemon: true,
       verifiedReadback: true,
-      followUpDismissed: true,
-      currentHostUnchanged: true,
+      followUp: followUpPresent ? 'dismissed' : 'not-offered',
     })
 
     // The seeded Web USER value is read on the page that OWNS it and written

@@ -14073,3 +14073,68 @@ test('AltScreen pointer journey edits and resets a persisted extension setting (
     h.dispose()
   }
 })
+
+test('a silent Config authority replacement refuses the painted Web Change and admits a fresh pointer gesture', async () => {
+  const h = setup({ columns: 200, rows: 44, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  await highlightPageRow(h, 'Start automatically')
+  await settle(h)
+  const row = rowOf(h, 'Change…')
+  const col = cellIndexOf(h, row, 'Change…')
+  press(h, row, col)
+  await h.vt.waitForRender()
+  // The replacement exposes the SAME revision and value; only its Config
+  // authority identity moved. The press belongs to the old frame.
+  h.replaceConfigAuthority({})
+  release(h, row, col)
+  await settle(h)
+  assert.doesNotMatch(webUiPlain(h), /Choose the value/u,
+    'the old pointer press cannot seed a choice against the replacement')
+  assert.equal(h.webAutoStartWrites().length, 0, 'the stale release dispatches no preference write')
+  // The fork withholds a second click on the same cell inside its multi-click
+  // window; wait that window out before the FRESH gesture.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  // The repainted frame admits a FRESH gesture, which completes the real save.
+  await clickPainted(h, 'Change…')
+  assert.match(webUiPlain(h), /Choose the value/u, 'the fresh explicit gesture is admitted')
+  await key(h, '\r') // stage the opposite candidate
+  await key(h, '\r') // Confirm save
+  await settle(h)
+  assert.deepEqual(h.webAutoStartWrites(), [true], 'the fresh gesture performs the ONE real write')
+  assert.match(webUiPlain(h), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('a silent Config authority replacement refuses the painted Root Backend Change through the real pointer route', async () => {
+  const saved = process.env.DSH_PI_TUI_BACKEND
+  delete process.env.DSH_PI_TUI_BACKEND
+  try {
+    const h = setup({ columns: 200, rows: 44 })
+    await openStartupBackendRow(h)
+    const row = rowOf(h, 'Change…')
+    const col = cellIndexOf(h, row, 'Change…')
+    press(h, row, col)
+    await h.vt.waitForRender()
+    h.replaceConfigAuthority({})
+    release(h, row, col)
+    await settle(h)
+    assert.doesNotMatch(h.view(), /Choose value/u,
+      'the old Root gesture cannot seed a choice against the replacement authority')
+    assert.deepEqual(h.backendStartupWrites(), [], 'the stale release dispatches zero writes')
+    // The fork withholds a second click on the same cell inside its multi-click
+    // window; wait that window out before the FRESH gesture.
+    await new Promise<void>(resolve => setTimeout(resolve, 650))
+    // A fresh pointer gesture against the repainted row is admitted.
+    await clickPainted(h, 'Change…')
+    assert.match(h.view(), /Choose value/u)
+    await key(h, '\x1b[B') // Direct -> Daemon
+    await key(h, '\r')
+    await settle(h)
+    assert.deepEqual(h.backendStartupWrites(), ['daemon'], 'the fresh gesture performs the ONE real write')
+    assert.match(h.view(), /Status\s+Verified/u)
+    h.dispose()
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PI_TUI_BACKEND
+    else process.env.DSH_PI_TUI_BACKEND = saved
+  }
+})

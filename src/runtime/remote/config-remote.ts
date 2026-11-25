@@ -2057,7 +2057,7 @@ class RemoteVisualToolsConfig implements VisualToolsConfig {
     const revision = view.revision
     // Without the read revision the decision cannot be submitted conditionally;
     // report the section unreadable rather than allowing a silent overwrite.
-    if (typeof revision !== 'number') return undefined
+    if (!validRemoteSettingsRevision(revision)) return undefined
     const user = plainRecord(view.user)
     // The value/revision may be the last-known projection of a stale mirror;
     // only a CURRENT committed read owns a writable Host authority identity.
@@ -2121,7 +2121,7 @@ class RemoteWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
     const revision = view.revision
     // Without the read revision the decision cannot be submitted conditionally;
     // report the section unreadable rather than allowing a silent overwrite.
-    if (typeof revision !== 'number') return undefined
+    if (!validRemoteSettingsRevision(revision)) return undefined
     const user = plainRecord(view.user)
     // The value/revision may be the last-known projection of a stale mirror;
     // only a CURRENT committed read owns a writable Host authority identity.
@@ -2187,7 +2187,7 @@ class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     const backend = value?.backend
     if (!isPublicBackendValue(backend)) return undefined
     const revision = view.revision
-    if (typeof revision !== 'number') return undefined
+    if (!validRemoteSettingsRevision(revision)) return undefined
     const user = plainRecord(view.user)
     // The value/revision may be the last-known projection of a stale mirror;
     // only a CURRENT committed read owns a writable Host authority identity.

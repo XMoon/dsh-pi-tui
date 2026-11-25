@@ -802,29 +802,6 @@ test('a Host rollover retires a staged choice even when the new mirror keeps the
   h.close()
 })
 
-test('a silent same-revision Config replacement refuses the painted Change without a fresh gesture', async () => {
-  const h = await mount({ status: { state: 'enabled' } })
-  await focusPaintedRow(h, 'Start automatically')
-  const changeRow = rowOfPlain(h, 'Change…')
-  const changeCol = colOfPlain(h, changeRow, 'Change…')
-  pressCell(h, changeRow, changeCol)
-  await h.flush()
-  // A replaced Host exposes the SAME revision/value; only its authority
-  // identity (the generation) moved. The press belongs to the old frame.
-  h.replaceConfigAuthority()
-  releaseCell(h, changeRow, changeCol)
-  await h.flush()
-  assert.doesNotMatch(h.frame(), /Choose the value the next Host start applies:/u,
-    'the old Change cannot seed a choice against the replacement Host')
-  assert.equal(h.commits().length, 0)
-  // A FRESH gesture against the repainted frame opens the choice normally.
-  await clickCell(h, changeRow, changeCol)
-  await h.flush()
-  assert.match(h.frame(), /Choose the value the next Host start applies:/u,
-    'the fresh explicit Change after the repaint is admitted')
-  h.close()
-})
-
 test('a silent same-revision Config replacement retires a staged confirm with zero writes', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   await focusPaintedRow(h, 'Start automatically')

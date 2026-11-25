@@ -4116,25 +4116,6 @@ test('a replaced Host generation with the SAME revision refuses Confirm with zer
   assert.match(plain(h), /Not saved/u)
 })
 
-test('a replaced Host generation with the SAME revision refuses the old Change and admits a fresh one', () => {
-  let generation: object = {}
-  const revision = 5
-  const h = setup({ columns: 120, rows: 40, snapshot: () => scalarSnapshot({ revision, generation }) })
-  plain(h)
-  walkTo(h, 'tools')
-  h.panel.handleInput('\r') // categories -> rows
-  // A silent Host replacement keeps the revision/value; the painted Change
-  // belongs to the previous authority.
-  generation = {}
-  h.panel.handleInput('\r') // the stale Change
-  const staleFrame = plain(h)
-  assert.doesNotMatch(staleFrame, /Choose value/u, 'the old gesture never seeds a choice against the replacement')
-  assert.equal(h.commits(), 0)
-  // The repainted row needs a NEW explicit Change, which then opens normally.
-  h.panel.handleInput('\r')
-  assert.match(plain(h), /Choose value/u, 'the fresh gesture against the current authority is admitted')
-})
-
 test('the confirmation warning is scrollable in L2 and must be read before Confirm', () => {
   const warning = 'Risk: May send chat content to DeepSeek API'
   // ONE stable Host authority across reads: the row's generation is its

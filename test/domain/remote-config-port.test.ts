@@ -2353,3 +2353,15 @@ test('a queued Remote reset is refused when the deployment default moved before 
   assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0)
   assert.equal(state.namespaces.get(WEB_NS)?.base?.searchProvider, 'deepseek-official')
 })
+
+test('the three Remote scalar reads reject a malformed numeric revision', async () => {
+  const { port } = createBackend(current => {
+    current.namespaces.set('pi-tui-visual-tools', { ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: -1 })
+    current.namespaces.set('pi-tui-web-preferences', { ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: -1 })
+    current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'direct' }, revision: -1 })
+  })
+  await port.describe()
+  assert.equal(port.visualTools.read(), undefined)
+  assert.equal(port.webStartupPreference.read(), undefined)
+  assert.equal(port.backendStartupPreference.read(), undefined)
+})

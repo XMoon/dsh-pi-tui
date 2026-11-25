@@ -124,17 +124,33 @@ test('the Direct startup-backend write is ONE path-level set at the decision rev
 })
 
 test('the Direct startup-backend write refuses a replaced Host authority before any write', async () => {
-  const calls: unknown[] = []
-  const authority = settingsDoc('tui-startup', { backend: 'direct' }, {
+  const callsA: number[] = []
+  const callsB: number[] = []
+  const authorityA = settingsDoc('tui-startup', { backend: 'direct' }, {
     revision: 12,
-    mutate: async (...args: unknown[]) => { calls.push(args) },
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { callsA.push(revision ?? -1) },
   })
-  const config = directPort({ settings: authority }).backendStartupPreference
+  const authorityB = settingsDoc('tui-startup', { backend: 'direct' }, {
+    revision: 12,
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { callsB.push(revision ?? -1) },
+  })
+  const services: Record<string, unknown> = { settings: authorityA }
+  const config = directPort(services).backendStartupPreference
+  const decision = config.read()
+  assert.ok(decision !== undefined && decision.generation === authorityA)
+  // A REAL service replacement behind the same `ctx.get`, same revision/value.
+  services.settings = authorityB
   assert.deepEqual(
-    await config.setBackend('daemon', 12, { ...authority }),
+    await config.setBackend('daemon', decision.revision, decision.generation),
     { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' },
   )
-  assert.deepEqual(calls, [], 'a replaced authority receives ZERO writes')
+  assert.deepEqual(callsA, [], 'the replaced authority receives ZERO A writes')
+  assert.deepEqual(callsB, [], 'the replacement receives ZERO old-decision writes')
+  const fresh = config.read()
+  assert.ok(fresh !== undefined && fresh.generation === authorityB)
+  assert.deepEqual(await config.setBackend('daemon', fresh.revision, fresh.generation), { kind: 'accepted' })
+  assert.deepEqual(callsA, [], 'the fresh decision never reaches A')
+  assert.deepEqual(callsB, [12], 'the fresh decision writes B at the exact read revision')
 })
 
 test('a stale Direct decision is refused and the ORIGINAL read revision is the fence', async () => {

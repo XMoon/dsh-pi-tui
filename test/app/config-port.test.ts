@@ -1136,22 +1136,34 @@ test('visualTools.setEnabled writes the exact namespace path with the decision r
 })
 
 test('visualTools.setEnabled refuses a replaced Host authority before any write', async () => {
-  const writes: Array<{ revision?: number }> = []
-  const authority = {
+  const writesA: number[] = []
+  const writesB: number[] = []
+  const authorityA = {
     describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
-    mutate: async (_ns: string, _ops: unknown, revision?: number) => {
-      writes.push({ revision })
-    },
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesA.push(revision ?? -1) },
   }
-  const replaced = { ...authority }
-  const config = port({ settings: authority }).visualTools
+  const authorityB = {
+    describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesB.push(revision ?? -1) },
+  }
+  const services: Record<string, unknown> = { settings: authorityA }
+  const config = port(services).visualTools
+  const decision = config.read()
+  assert.ok(decision !== undefined && decision.generation === authorityA)
+  // A REAL service replacement behind the same `ctx.get`, exposing the same
+  // revision/value: the captured decision still addresses A.
+  services.settings = authorityB
   assert.deepEqual(
-    await config.setEnabled(false, 11, replaced),
+    await config.setEnabled(false, decision.revision, decision.generation),
     { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' },
   )
-  assert.deepEqual(writes, [], 'a replaced authority receives ZERO writes')
-  assert.deepEqual(await config.setEnabled(false, 11, authority), { kind: 'accepted' })
-  assert.deepEqual(writes, [{ revision: 11 }])
+  assert.deepEqual(writesA, [], 'the replaced authority receives ZERO A writes')
+  assert.deepEqual(writesB, [], 'the replacement receives ZERO old-decision writes')
+  const fresh = config.read()
+  assert.ok(fresh !== undefined && fresh.generation === authorityB)
+  assert.deepEqual(await config.setEnabled(false, fresh.revision, fresh.generation), { kind: 'accepted' })
+  assert.deepEqual(writesA, [], 'the fresh decision never reaches A')
+  assert.deepEqual(writesB, [11], 'the fresh decision writes B at the exact read revision')
 })
 
 test('visualTools.setEnabled submits the decision revision, so an external edit is a conflict', async () => {
@@ -1258,17 +1270,32 @@ test('webStartupPreference.setAutoStart writes the exact namespace path, decisio
 })
 
 test('webStartupPreference.setAutoStart refuses a replaced Host authority before any write', async () => {
-  const writes: unknown[] = []
-  const authority = {
+  const writesA: number[] = []
+  const writesB: number[] = []
+  const authorityA = {
     describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
-    mutate: async (...args: unknown[]) => { writes.push(args) },
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesA.push(revision ?? -1) },
   }
-  const config = port({ settings: authority }).webStartupPreference
+  const authorityB = {
+    describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesB.push(revision ?? -1) },
+  }
+  const services: Record<string, unknown> = { settings: authorityA }
+  const config = port(services).webStartupPreference
+  const decision = config.read()
+  assert.ok(decision !== undefined && decision.generation === authorityA)
+  services.settings = authorityB
   assert.deepEqual(
-    await config.setAutoStart(true, 12, { ...authority }),
+    await config.setAutoStart(true, decision.revision, decision.generation),
     { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' },
   )
-  assert.deepEqual(writes, [], 'a replaced authority receives ZERO writes')
+  assert.deepEqual(writesA, [], 'the replaced authority receives ZERO A writes')
+  assert.deepEqual(writesB, [], 'the replacement receives ZERO old-decision writes')
+  const fresh = config.read()
+  assert.ok(fresh !== undefined && fresh.generation === authorityB)
+  assert.deepEqual(await config.setAutoStart(true, fresh.revision, fresh.generation), { kind: 'accepted' })
+  assert.deepEqual(writesA, [], 'the fresh decision never reaches A')
+  assert.deepEqual(writesB, [12], 'the fresh decision writes B at the exact read revision')
 })
 
 test('webStartupPreference submits the decision revision, so an external edit is a conflict', async () => {
@@ -1297,4 +1324,24 @@ test('webStartupPreference submits the decision revision, so an external edit is
   )
   assert.deepEqual(writes, [{ revision: 31 }], 'the ORIGINAL read revision is the fence')
   assert.equal(config.read()?.revision, 32)
+})
+
+test('the three Direct scalar reads reject a malformed numeric revision instead of advertising an invalid CAS', () => {
+  const malformed = (ns: string, value: Record<string, unknown>) => ({
+    describe: () => [{ ns, value, user: value, revision: -1 }],
+    mutate: async () => {},
+  })
+  assert.equal(port({ settings: malformed('pi-tui-visual-tools', { enabled: true }) }).visualTools.read(), undefined)
+  assert.equal(port({ settings: malformed('pi-tui-web-preferences', { autoStart: false }) }).webStartupPreference.read(), undefined)
+  assert.equal(port({ settings: malformed('tui-startup', { backend: 'direct' }) }).backendStartupPreference.read(), undefined)
+
+  // A legal revision 0 is still readable: the guard rejects malformed values,
+  // never a real Host revision.
+  const zero = (ns: string, value: Record<string, unknown>) => ({
+    describe: () => [{ ns, value, user: {}, revision: 0 }],
+    mutate: async () => {},
+  })
+  assert.equal(port({ settings: zero('pi-tui-visual-tools', { enabled: true }) }).visualTools.read()?.revision, 0)
+  assert.equal(port({ settings: zero('pi-tui-web-preferences', { autoStart: false }) }).webStartupPreference.read()?.revision, 0)
+  assert.equal(port({ settings: zero('tui-startup', { backend: 'direct' }) }).backendStartupPreference.read()?.revision, 0)
 })
