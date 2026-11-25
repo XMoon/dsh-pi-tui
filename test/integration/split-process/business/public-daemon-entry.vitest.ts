@@ -200,18 +200,29 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
     await exitPublicLaunch(full, 'public session full id')
 
     const prefix = sessionId.slice(0, 'session-'.length + 8)
-    const browser = await scene.startPublicDaemon({
-      label: 'session-prefix-browser',
+    const prefixed = await scene.startPublicDaemon({
+      label: 'session-unique-prefix',
       backend: 'daemon',
       args: { session: prefix },
+    })
+    launches.push(prefixed)
+    await waitForFrame(prefixed, 'public session seed', '--session unique prefix resumed the exact history')
+    expect([...(await scene.sessionIds())].sort(), 'the unique prefix created no Session').toEqual(expectedSessions)
+    await exitPublicLaunch(prefixed, 'public session unique prefix')
+
+    // A non-unique query really keeps the Session Browser open; Escape is the
+    // product's real dismissal and must not resume a Session or create one.
+    const browser = await scene.startPublicDaemon({
+      label: 'session-browser',
+      backend: 'daemon',
+      args: { session: 'session-' },
       surface: 'workspace',
     })
     launches.push(browser)
     await browser.press('Escape')
     await waitForFrame(browser, '❯', 'the Session browser returned to the chat')
-    await waitForFrame(browser, 'public session seed', 'the Session browser opened the exact history')
-    expect([...(await scene.sessionIds())].sort(), 'the prefix browser created no Session').toEqual(expectedSessions)
-    await exitPublicLaunch(browser, 'public session prefix browser')
+    expect([...(await scene.sessionIds())].sort(), 'the Session browser created no Session').toEqual(expectedSessions)
+    await exitPublicLaunch(browser, 'public session browser')
 
     const continued = await scene.startPublicDaemon({
       label: 'session-continue',
