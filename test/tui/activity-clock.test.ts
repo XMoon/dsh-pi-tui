@@ -1135,3 +1135,56 @@ test('a CACHED Activity card freezes at a real command boundary (production comp
     `the frozen Activity must not grow after later events:\n${thirdView}`)
   app.stop()
 })
+
+test('a carried complete catalog update never becomes the Activity close boundary', () => {
+  const catalogMessage = (update: boolean) => ({
+    id: update ? 'clock-catalog-update' : 'clock-catalog-initial',
+    role: 'user',
+    content: [{ type: 'text', text: update ? 'CLOCK_CATALOG_UPDATE' : 'CLOCK_CATALOG_INITIAL' }],
+    source: update
+      ? { kind: 'skill-catalog', form: 'catalog', update: true, entries: [{ name: 'clock-skill', description: 'clock' }] }
+      : { kind: 'skill-catalog', form: 'catalog', entries: [{ name: 'clock-skill', description: 'clock' }] },
+  })
+  const events = (update: boolean): SessionEvent[] => [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('catalog-clock-a', 'read', T0 + 1_000, 1),
+    toolResult('catalog-clock-a', T0 + 2_000, 2),
+    eventAt('user/message', catalogMessage(update), T0 + 3_000, 3),
+    toolCall('catalog-clock-b', 'bash', T0 + 4_000, 4),
+    toolResult('catalog-clock-b', T0 + 5_000, 5),
+    eventAt('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'catalog-clock-final',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'clock final' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, T0 + 7_000, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 8_000, 7),
+  ]
+
+  const carried = analyze(foldEvents(events(true)))
+  assert.equal(carried.spans.length, 1, 'the complete update stays inside the one real Activity')
+  const carriedSpan = carried.spans[0]!
+  assert.equal(carriedSpan.members.some(member => member.kind === 'system' && member.text === 'CLOCK_CATALOG_UPDATE'), true)
+  assert.equal(summarizeWorkSpan(carriedSpan).timing?.endedAt, T0 + 5_000,
+    'the catalog point never widens member timing')
+  const carriedLifetime = carried.lifetimes.get(carriedSpan.owner)!
+  assert.equal(carriedLifetime.endedAt, T0 + 7_000,
+    'the carried update is not a boundary: the later assistant closes the Activity')
+  assert.equal(carriedLifetime.open, false)
+
+  const independent = analyze(foldEvents(events(false)))
+  assert.equal(independent.spans.length, 2, 'the initial catalog splits the Activity as before')
+  const first = independent.spans[0]!
+  const second = independent.spans[1]!
+  const firstLifetime = independent.lifetimes.get(first.owner)!
+  const secondLifetime = independent.lifetimes.get(second.owner)!
+  assert.equal(firstLifetime.endedAt, T0 + 3_000,
+    'an independent catalog closes the preceding Activity at its own first visible point')
+  assert.equal(secondLifetime.startedAt, T0 + 4_000)
+  assert.equal(secondLifetime.endedAt, T0 + 7_000)
+})

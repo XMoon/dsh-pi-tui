@@ -348,3 +348,118 @@ test('Compact and Focus fold the proven relay AND settlement while Full keeps ev
   assert.deepEqual(folder.messages().map(message => message.kind), before,
     'the three presets consume the same untouched raw window')
 })
+
+/** One real window with an initial catalog and a complete update inside the
+ * same real Activity. The update is a direct pre-step append (no inbox claim). */
+function catalogWindow(): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    presetEvent('turn/start', { turn: 0 }, 0),
+    presetEvent('user/message', {
+      id: MessageId('preset-catalog-initial'), role: 'user',
+      content: [{ type: 'text', text: 'CATALOG_INITIAL_BODY' }],
+      source: { kind: 'skill-catalog', form: 'catalog', entries: [{ name: 'alpha', description: 'first skill' }] },
+    }, 1),
+    presetEvent('tool/call', { turn: 0, step: 0, callId: 'preset-catalog-c1', name: 'read', arguments: '{}' }, 2),
+    presetEvent('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('preset-catalog-r1'), role: 'tool', toolCallId: 'preset-catalog-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'preset-catalog-c1' } },
+    }, 3),
+    presetEvent('user/message', {
+      id: MessageId('preset-catalog-update'), role: 'user',
+      content: [{ type: 'text', text: 'CATALOG_UPDATE_BODY' }],
+      source: {
+        kind: 'skill-catalog', form: 'catalog', update: true,
+        entries: [{ name: 'alpha', description: 'first skill' }, { name: 'beta', description: 'second skill' }],
+      },
+    }, 4),
+    presetEvent('tool/call', { turn: 0, step: 1, callId: 'preset-catalog-c2', name: 'bash', arguments: '{}' }, 5),
+    presetEvent('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('preset-catalog-r2'), role: 'tool', toolCallId: 'preset-catalog-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'preset-catalog-c2' } },
+    }, 6),
+    presetEvent('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('preset-catalog-final'), role: 'assistant', content: [{ type: 'text', text: 'PRESET_CATALOG_FINAL_ANSWER' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 7),
+    presetEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 8),
+  ])
+  return folder
+}
+
+test('a complete catalog update folds with the Activity while the initial catalog stays independent', async () => {
+  const folder = catalogWindow()
+  const rows = folder.messages()
+  const initial = rows.find(message => message.kind === 'system' && message.text === 'CATALOG_INITIAL_BODY')
+  const update = rows.find(message => message.kind === 'system' && message.text === 'CATALOG_UPDATE_BODY')
+  assert.ok(initial !== undefined && initial.kind === 'system')
+  assert.ok(update !== undefined && update.kind === 'system')
+  assert.equal(initial.contextPresentation?.completeCatalogUpdate, undefined, 'fixture: initial publication')
+  assert.equal(update.contextPresentation?.completeCatalogUpdate, true, 'fixture: complete replacement')
+  assert.equal(update.contextPresentation?.sameTurnNextStep, undefined, 'fixture: direct pre-step append')
+  const before = rows.map(message => message.kind)
+  const render = async (preset: DisplayState['preset']): Promise<{ view: string; vt: VirtualTerminal; app: TuiApp }> => {
+    const vt = new VirtualTerminal(120, 40)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset } })
+    app.start()
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    return {
+      vt,
+      app,
+      view: vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'),
+    }
+  }
+
+  const compact = await render('compact')
+  try {
+    assert.equal(compact.view.split('Context injection skill-catalog').length - 1, 1,
+      `Compact keeps only the initial catalog visible as its own boundary:\n${compact.view}`)
+    assert.ok(!compact.view.includes('CATALOG_UPDATE_BODY'),
+      `Compact hides the complete update inside the Activity:\n${compact.view}`)
+    compact.vt.sendInput('\x0f') // Ctrl+O: the regular transcript disclosure master
+    await compact.vt.waitForRender()
+    const expanded = compact.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    assert.equal(expanded.split('Context injection skill-catalog').length - 1, 2,
+      `opening the Work restores the update row exactly once:\n${expanded}`)
+    const firstCatalog = expanded.indexOf('Context injection skill-catalog')
+    const secondCatalog = expanded.indexOf('Context injection skill-catalog', firstCatalog + 1)
+    assert.ok(secondCatalog > firstCatalog && secondCatalog < expanded.indexOf('PRESET_CATALOG_FINAL_ANSWER'),
+      'the restored update keeps its raw chronology before the final answer')
+  } finally {
+    compact.app.dispose()
+  }
+
+  const focus = await render('focus')
+  try {
+    assert.equal(focus.view.split('Context injection skill-catalog').length - 1, 1,
+      `Focus keeps the opening initial catalog visible before the Thought:\n${focus.view}`)
+    assert.ok(!focus.view.includes('CATALOG_UPDATE_BODY'),
+      `Focus hides the complete update inside the Thought:\n${focus.view}`)
+    focus.vt.sendInput('\x0f')
+    await focus.vt.waitForRender()
+    const expanded = focus.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    assert.equal(expanded.split('Context injection skill-catalog').length - 1, 2,
+      `opening the Thought restores the update row exactly once:\n${expanded}`)
+    const firstCatalog = expanded.indexOf('Context injection skill-catalog')
+    const secondCatalog = expanded.indexOf('Context injection skill-catalog', firstCatalog + 1)
+    assert.ok(secondCatalog > firstCatalog && secondCatalog < expanded.indexOf('PRESET_CATALOG_FINAL_ANSWER'))
+  } finally {
+    focus.app.dispose()
+  }
+
+  const full = await render('full')
+  try {
+    assert.equal(full.view.split('Context injection skill-catalog').length - 1, 2,
+      `Full keeps both catalog cards in raw order:\n${full.view}`)
+    const firstCatalog = full.view.indexOf('Context injection skill-catalog')
+    const secondCatalog = full.view.indexOf('Context injection skill-catalog', firstCatalog + 1)
+    assert.ok(firstCatalog < secondCatalog && secondCatalog < full.view.indexOf('PRESET_CATALOG_FINAL_ANSWER'),
+      'Full keeps the raw catalog chronology')
+  } finally {
+    full.app.dispose()
+  }
+
+  assert.deepEqual(folder.messages().map(message => message.kind), before,
+    'the three presets consume the same untouched raw window')
+})

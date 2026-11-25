@@ -19,6 +19,7 @@ import { getCapabilities, setCapabilities, stripTerminalSequences, visibleWidth 
 import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import {
   disposeContext,
   event,
@@ -1901,7 +1902,7 @@ test('runner search: a folded same-turn subagent settlement is ONE card target a
   await fixture.settleRender()
   assert.match(fullTitle(fixture), /1\/1/, `the settlement owns ONE navigation target:\n${fullTitle(fixture)}`)
   const target = fixture.app.transcriptSearchPresentationForTest()
-  assert.equal(target?.revealGranted, true, 'Full grants the temporary reveal for the folded owner')
+  assert.equal(target?.revealGranted, true, 'Compact grants the temporary reveal for the folded owner')
   assert.ok(view().includes('FOLDED_SETTLED_NEEDLE'),
     `the reveal opens the owning Work and locates the settlement body:\n${view()}`)
   const selection = target?.message === undefined ? undefined : mountedSearchSelection(fixture.app, target.message)
@@ -2146,4 +2147,238 @@ test('runner search: ordinary paint after a jump does not expire navigation qual
   await fixture.settleRender()
   assert.notEqual(fixture.app.searchQualificationEpochForRuntime(), epochBefore,
     'a terminal resize invalidates the stale qualification epoch')
+})
+
+test('runner search: a carried complete catalog update reveals its owning Work and promotes it on dismiss', async (t) => {
+  const needle = 'CATALOG_SEARCH_NEEDLE'
+  const catalogMessage = {
+    id: MessageId('runner-catalog-update'),
+    role: 'user',
+    content: [{ type: 'text', text: `${needle} complete catalog payload` }],
+    source: {
+      kind: 'skill-catalog', form: 'catalog', update: true,
+      entries: [{ name: 'runner-skill', description: 'runner skill' }],
+    },
+  } as never
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('catalog-search-c1'), name: 'read', arguments: '{}' }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('catalog-search-r1'), role: 'tool', toolCallId: ToolCallId('catalog-search-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('catalog-search-c1') },
+      },
+    }, 2),
+    event('user/message', catalogMessage, 3),
+    event('tool/call', { turn: 0, step: 1, callId: ToolCallId('catalog-search-c2'), name: 'bash', arguments: '{}' }, 4),
+    event('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('catalog-search-r2'), role: 'tool', toolCallId: ToolCallId('catalog-search-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('catalog-search-c2') },
+      },
+    }, 5),
+    event('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('catalog-search-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 6),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], needle, events)
+  const view = (): string => fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  fixture.app.setDisplayPreset('compact')
+  await fixture.settleRender()
+  assert.ok(!view().includes(needle),
+    `precondition: Compact folds the complete catalog update under its Work:\n${view()}`)
+
+  fixture.app.startTranscriptSearch()
+  await fixture.settleRender()
+  typeQuery(fixture, needle)
+  await fixture.settleRender()
+  assert.match(fullTitle(fixture), /1\/1/, `the carried catalog owns ONE navigation target:\n${fullTitle(fixture)}`)
+  const target = fixture.app.transcriptSearchPresentationForTest()
+  assert.equal(target?.revealGranted, true, 'Compact grants the temporary reveal for the folded catalog')
+  assert.ok(view().includes(needle),
+    `the reveal opens the owning Work and locates the catalog body:\n${view()}`)
+
+  fixture.input('\x1b')
+  await fixture.settleRender()
+  assert.equal(fixture.app.transcriptSearchPresentationForTest(), undefined,
+    'closing Search retires the temporary target')
+  assert.ok(view().includes(needle),
+    'the Compact dismiss promotes the revealed Work and keeps the matched catalog visible')
+})
+
+
+test('runner Focus search: a post-fence raw catalog reveals its own card, never an unmaterialized Work/root', async (t) => {
+  const T0 = 1_700_000_000_000
+  const rawCatalogMarker = 'FENCED_CATALOG_BODY_MARKER'
+  const processMarker = 'FENCED_PROCESS_BODY_MARKER'
+  const settlement = (turn: number, step: number, id: string, text: string, seq: number): SessionEvent =>
+    event('assistant/message', {
+      turn,
+      step,
+      stream: [{ type: 'text-chunks', time0: T0 + (seq - 3) * 1000, index: 0, dt: [], texts: [text] }],
+      message: {
+        id: MessageId(id), role: 'assistant',
+        content: [{ type: 'text', text }], source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, seq)
+  const toolPair = (turn: number, step: number, callId: string, resultText: string, seq: number): SessionEvent[] => [
+    event('tool/call', { turn, step, callId: ToolCallId(callId), name: 'read', arguments: '{}' }, seq),
+    event('tool/result', {
+      turn, step,
+      message: {
+        id: MessageId(`${callId}-result`), role: 'tool', toolCallId: ToolCallId(callId),
+        content: [{ type: 'text', text: resultText }], source: { kind: 'tool', callId: ToolCallId(callId) },
+      },
+    }, seq + 1),
+  ]
+  const events: SessionEvent[] = [
+    // A real committed pre-steer answer establishes the PR1 fence. The steer is
+    // claimed/admitted, then a real Work runs; its complete catalog update stays
+    // RAW-VISIBLE in collapsed Focus because it arrives after the committed
+    // answer. Canonical structure still makes it a Work member (D3).
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 1 }, 1),
+    event('user/message', {
+      id: MessageId('fenced-initial'), role: 'user',
+      content: [{ type: 'text', text: 'start a fenced turn' }], source: { kind: 'user' },
+    }, 2),
+    event('agent/inbox/spliced', {
+      target: 'next-step', start: 0, inserted: [{
+        id: MessageId('fenced-steer'), role: 'user',
+        content: [{ type: 'text', text: 'fenced steer' }], source: { kind: 'user' },
+      }],
+    }, 3),
+    settlement(0, 1, 'fenced-answer-a', 'answer A before the steer', 4),
+    event('step/end', { turn: 0, step: 1 }, 5),
+    event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 6),
+    event('step/start', { turn: 0, step: 2 }, 7),
+    event('user/message', {
+      id: MessageId('fenced-steer'), role: 'user',
+      content: [{ type: 'text', text: 'fenced steer' }], source: { kind: 'user' },
+    }, 8),
+    ...toolPair(0, 2, 'fenced-a', processMarker, 9),
+    event('user/message', {
+      id: MessageId('fenced-catalog'), role: 'user',
+      content: [{ type: 'text', text: rawCatalogMarker }],
+      source: {
+        kind: 'skill-catalog', form: 'catalog', update: true,
+        entries: [{ name: 'fenced-search-skill', description: 'fenced search fixture' }],
+      },
+    }, 11),
+    ...toolPair(0, 2, 'fenced-b', 'fenced work b result', 12),
+    settlement(0, 2, 'fenced-final', 'fenced final answer', 14),
+    event('step/end', { turn: 0, step: 2 }, 15),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 16),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'unused', events)
+  const { app } = fixture
+  app.setDisplayPreset('focus')
+  await fixture.settleRender()
+  const view = (): string => fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.equal(app.isFullscreen(), true)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'precondition: the logical Turn starts collapsed')
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const canonicalSpan = projectTranscriptStructure(folder.messages())
+    .flatMap(block => block.kind === 'work' ? [block.span] : [])
+    .find(span => span.members.some(member => member.kind === 'system' && member.text.includes(rawCatalogMarker)))
+  assert.ok(canonicalSpan !== undefined, 'precondition: the catalog has a real canonical Work membership')
+  assert.ok(view().includes('Context injection skill-catalog'),
+    `precondition: the post-fence catalog is a raw-visible card:\n${view()}`)
+  assert.ok(!view().includes(rawCatalogMarker), 'precondition: its body is folded behind the card')
+
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  typeQuery(fixture, rawCatalogMarker)
+  await fixture.settleRender()
+  const target = app.transcriptSearchPresentationForTest()?.message
+  assert.ok(target !== undefined && target.kind === 'system', 'the post-fence catalog is the target')
+  assert.ok(view().includes(rawCatalogMarker), `the card body is revealed:\n${view()}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no Focus root is opened for a raw-visible row')
+  assert.equal(countFocusHeaders(view(), true), 0, 'the painted root remains collapsed')
+
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'dismissing never promotes a root for a raw row')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
+    'dismissing never promotes the unmaterialized canonical Work')
+  assert.ok(view().includes(rawCatalogMarker), 'the dismiss keeps the owned card open')
+
+  // Return to the REGULAR surface: the promoted card is the only visible owner.
+  // Ctrl+O must close that real card instead of opening the Thought root.
+  app.setFullscreen(false)
+  await fixture.settleRender()
+  assert.ok(view().includes(rawCatalogMarker), `the promoted card survives the surface switch:\n${view()}`)
+  fixture.input('\x0f')
+  await fixture.settleRender()
+  assert.equal(countFocusHeaders(view(), true), 0, 'Ctrl+O keeps the Thought root collapsed')
+  assert.ok(!view().includes(rawCatalogMarker), `Ctrl+O closes the raw card:\n${view()}`)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'Ctrl+O creates no latent Work owner')
+
+  // The NEXT press uses the existing master expansion path (the card no longer
+  // consumes it).
+  fixture.input('\x0f')
+  await fixture.settleRender()
+  assert.ok(countFocusHeaders(view(), true) > 0, `the existing root master expands next:\n${view()}`)
+})
+
+test('runner Focus search: a hidden catalog keeps the root -> Work -> card reveal', async (t) => {
+  const marker = 'HIDDEN_CATALOG_BODY_MARKER'
+  const events: SessionEvent[] = [
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('hidden-initial'), role: 'user',
+      content: [{ type: 'text', text: 'start a hidden catalog turn' }], source: { kind: 'user' },
+    }, 1),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('hidden-a'), name: 'read', arguments: '{}' }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('hidden-a-result'), role: 'tool', toolCallId: ToolCallId('hidden-a'), content: [{ type: 'text', text: 'hidden work a result' }], source: { kind: 'tool', callId: ToolCallId('hidden-a') } },
+    }, 3),
+    event('user/message', {
+      id: MessageId('hidden-catalog'), role: 'user',
+      content: [{ type: 'text', text: marker }],
+      source: {
+        kind: 'skill-catalog', form: 'catalog', update: true,
+        entries: [{ name: 'hidden-search-skill', description: 'hidden search fixture' }],
+      },
+    }, 4),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('hidden-b'), name: 'bash', arguments: '{}' }, 5),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('hidden-b-result'), role: 'tool', toolCallId: ToolCallId('hidden-b'), content: [{ type: 'text', text: 'hidden work b result' }], source: { kind: 'tool', callId: ToolCallId('hidden-b') } },
+    }, 6),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('hidden-final'), role: 'assistant', content: [{ type: 'text', text: 'hidden final answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 7),
+    event('step/end', { turn: 0, step: 1 }, 8),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ]
+  const fixture = await mountSearchRunner(t, 1, [], 'unused', events)
+  const { app } = fixture
+  app.setDisplayPreset('focus')
+  await fixture.settleRender()
+  const view = (): string => fixture.vt.getViewport().map(stripTerminalSequences).join('\n')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0)
+  assert.ok(!view().includes(marker), 'the hidden catalog body is not painted while collapsed')
+  app.startTranscriptSearch('full')
+  await fixture.settleRender()
+  typeQuery(fixture, marker)
+  await fixture.settleRender()
+  const target = app.transcriptSearchPresentationForTest()?.message
+  assert.ok(target !== undefined && target.kind === 'system')
+  assert.ok(view().includes(marker), `the hidden catalog body is revealed through its real ancestry:\n${view()}`)
+  assert.ok(countFocusHeaders(view(), true) > 0, 'the hidden catalog is inside the really expanded Thought root')
+  app.closeTranscriptSearch()
+  await fixture.settleRender()
+  assert.ok(app.focusExpandedTurnsForTest().has(0), 'the dismiss promotes the necessary root')
+  assert.ok(app.expandedWorkOwnersForTest().size > 0, 'the dismiss promotes the real Work')
+  assert.ok(view().includes(marker), 'the promoted path keeps the hidden catalog visible')
 })

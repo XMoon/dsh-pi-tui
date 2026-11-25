@@ -34,6 +34,8 @@ import {
   projectPresentationSnapshot,
   RemotePresentationReadShadow,
 } from './support/presentation-read-shadow.ts'
+import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
+import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
 
 function installModuleLoader() {
   const nodeRequire = createRequire(import.meta.url)
@@ -134,6 +136,22 @@ const NUMERIC_COMPACTION_ERROR = 'numeric fixture failure'
 const STANDALONE_AFTER_TURN = 57
 const STANDALONE_COMPACTION_ID = 'presentation-standalone-compaction'
 const STANDALONE_COMPACTION_ERROR = 'standalone fixture failure'
+/** An ordinary early turn proving both sides of the same-turn delivery split:
+ * a complete catalog update inside an established Work, and a claimed
+ * non-whitelist Notice that stays independent. Placed far from the paged tail
+ * so the existing 50-message opening-page tuning is untouched; the absolute
+ * facts are asserted after full coverage on BOTH readers. */
+const CONTEXT_TURN = 1
+const CONTEXT_NOTICE_ID = 'presentation-context-claimed-notice'
+const CONTEXT_NOTICE_TEXT = 'fixture claimed goal notice'
+const CONTEXT_CATALOG_ID = 'presentation-context-catalog-update'
+const CONTEXT_CATALOG_TEXT = 'fixture complete skill catalog update'
+const CONTEXT_CATALOG_ENTRIES = Object.freeze([
+  { name: 'parity-alpha-skill', description: 'first parity skill' },
+  { name: 'parity-beta-skill', description: 'second parity skill' },
+])
+const CONTEXT_TOOL_A = 'presentation-context-work-a'
+const CONTEXT_TOOL_B = 'presentation-context-work-b'
 
 /**
  * Deterministic fixture clock for the durable seed. `Session.append` stamps
@@ -177,7 +195,61 @@ function appendTurn(session, turn, text, context = false) {
     content: [{ type: 'text', text }],
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
+  if (turn === CONTEXT_TURN) {
+    // This claimed non-whitelist Notice is real same-turn delivery provenance,
+    // but it is an independent boundary BEFORE the Work starts: it must stay
+    // visible and must not mask the catalog carriage that follows it.
+    const claimedNotice = createUserMessage({
+      content: [{ type: 'text', text: CONTEXT_NOTICE_TEXT }],
+      source: { kind: 'tool-goal', form: 'notice', summary: 'fixture goal notice' },
+    })
+    session.append('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [claimedNotice] })
+    session.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] })
+    session.append('user/message', claimedNotice, { surfaceOp: 'append' })
+  }
   session.append('step/start', { turn, step: 0 })
+  if (turn === CONTEXT_TURN) {
+    // Process A (a genuine Work member before any Context).
+    session.append('tool/call', { turn, step: 0, callId: CONTEXT_TOOL_A, name: 'read', arguments: '{"path":"a.txt"}' })
+    session.append('tool/result', {
+      turn, step: 0,
+      message: {
+        id: `${CONTEXT_TOOL_A}-result`, role: 'tool', toolCallId: CONTEXT_TOOL_A,
+        content: [{ type: 'text', text: 'work a result' }], source: { kind: 'tool', callId: CONTEXT_TOOL_A },
+      },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 0 })
+    // A separate later step: the complete catalog replacement is a direct
+    // pre-step append (no inbox claim) carried by the established Work.
+    session.append('step/start', { turn, step: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: CONTEXT_CATALOG_TEXT }],
+      source: { kind: 'skill-catalog', form: 'catalog', update: true, entries: CONTEXT_CATALOG_ENTRIES },
+    }), { surfaceOp: 'append' })
+    // Process B continues the SAME launch Work after the update.
+    session.append('tool/call', { turn, step: 1, callId: CONTEXT_TOOL_B, name: 'bash', arguments: '{"command":"work-b"}' })
+    session.append('tool/result', {
+      turn, step: 1,
+      message: {
+        id: `${CONTEXT_TOOL_B}-result`, role: 'tool', toolCallId: CONTEXT_TOOL_B,
+        content: [{ type: 'text', text: 'work b result' }], source: { kind: 'tool', callId: CONTEXT_TOOL_B },
+      },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 1 })
+    session.append('assistant/message', {
+      turn,
+      step: 2,
+      message: {
+        id: MessageId(`presentation-assistant-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: `answer ${turn}` }],
+        source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+      },
+      stream: [],
+    }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    return
+  }
   if (turn === COMMAND_TURN) {
     // A real Process member BEFORE the command, so the target Work's Activity
     // lifetime is proven: the tool settles first and the command run is its
@@ -605,6 +677,50 @@ async function main() {
       const numeric = compactionRows.find(message => message.error === NUMERIC_COMPACTION_ERROR)
       assert.ok(numeric !== undefined, `${label}: the numeric compaction card is visible`)
       assert.equal(numeric.turn, NUMERIC_TURN, `${label}: the numeric card keeps its real in-turn owner`)
+      // Same-turn delivery split on ONE absolute durable slice: a claimed
+      // non-whitelist Notice proves delivery but stays independent; a direct
+      // complete catalog replacement is carried by the real established Work.
+      const claimedNotice = projection.messages.find(message => message.kind === 'system'
+        && message.text === CONTEXT_NOTICE_TEXT)
+      const catalogUpdate = projection.messages.find(message => message.kind === 'system'
+        && message.text === CONTEXT_CATALOG_TEXT)
+      assert.ok(claimedNotice !== undefined && catalogUpdate !== undefined,
+        `${label}: both same-turn Context rows survived the reader path`)
+      assert.equal(claimedNotice.contextPresentation?.sameTurnNextStep, true,
+        `${label}: a real same-turn claim proves delivery even for a non-whitelist producer`)
+      assert.equal(claimedNotice.contextPresentation?.completeCatalogUpdate, undefined)
+      assert.equal(catalogUpdate.contextPresentation?.completeCatalogUpdate, true,
+        `${label}: the complete catalog replacement is one source fact`)
+      assert.equal(catalogUpdate.contextPresentation?.sameTurnNextStep, undefined,
+        `${label}: the direct pre-step catalog is not an inbox claim`)
+      const contextStructure = projectTranscriptStructure(projection.messages)
+      const contextSpans = contextStructure.filter(block => block.kind === 'work' && block.span.turn === CONTEXT_TURN)
+      assert.equal(contextSpans.length, 1, `${label}: the catalog update does not split the real Work`)
+      const contextSpan = contextSpans[0]
+      assert.ok(contextSpan !== undefined && contextSpan.kind === 'work')
+      assert.ok(contextSpan.span.members.includes(catalogUpdate),
+        `${label}: the catalog replacement is carried by the real Work`)
+      assert.equal(contextSpan.span.members.includes(claimedNotice), false,
+        `${label}: the claimed non-whitelist Notice stays an independent boundary`)
+      assert.equal(summarizeWorkSpan(contextSpan.span).actionStats.total, 2,
+        `${label}: the catalog adds no Action`)
+      const catalogIndex = contextSpan.span.members.indexOf(catalogUpdate)
+      const firstToolIndex = contextSpan.span.members.findIndex(member => member.kind === 'tool'
+        && member.name === 'read' && member.args.includes('a.txt'))
+      const secondToolIndex = contextSpan.span.members.findIndex(member => member.kind === 'tool'
+        && member.name === 'bash' && member.args.includes('work-b'))
+      assert.ok(firstToolIndex >= 0 && secondToolIndex > firstToolIndex
+        && catalogIndex > firstToolIndex && catalogIndex < secondToolIndex,
+        `${label}: the carried catalog keeps its raw position between the two real Process rows`)
+      const contextRoot = projection.focus.find(block => block.kind === 'activity'
+        && block.activity.turn === CONTEXT_TURN)
+      assert.ok(contextRoot !== undefined, `${label}: the same-turn Work owns one Focus summary`)
+      assert.equal(projection.focus.some(block => block.kind === 'message'
+        && block.message.kind === 'system' && block.message.text === CONTEXT_CATALOG_TEXT), false,
+        `${label}: collapsed Focus hides the carried catalog`)
+      assert.equal(projection.focus.some(block => block.kind === 'message'
+        && block.message.kind === 'system' && block.message.text === CONTEXT_NOTICE_TEXT), true,
+        `${label}: the claimed non-whitelist Notice stays visible outside the Thought`)
     }
     assert.equal(commandSeqs[0], commandSeqs[1],
       'both readers observe the SAME command lifecycle event')

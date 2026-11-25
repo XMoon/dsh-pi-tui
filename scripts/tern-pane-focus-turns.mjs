@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { arch, cpus, platform, release, type } from 'node:os'
 import { join } from 'node:path'
-import { rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
+import { ancestorsOf, rect, visibleBox, visibleSpan } from './tern-pane-geometry.mjs'
 
 const IS_GUI = process.env.TERN_FOCUS_GUI === '1'
 const SCENARIO = process.env.TERN_FOCUS_CASE ?? 'svg'
@@ -538,6 +538,283 @@ export default async function (h) {
     h.check('the closed Work A duration never grows as time advances',
       workAAfterAdvance !== undefined && h.descendantsText(workAAfterAdvance) === commandWorkAHeadText,
       JSON.stringify({ before: commandWorkAHeadText ?? null, after: workAAfterAdvance === undefined ? null : h.descendantsText(workAAfterAdvance) }))
+    // The complete skill-catalog replacement is a Work A member (never a
+    // standalone boundary): its body is unreachable while Work A is collapsed.
+    const catalogMarker = 'TERN-CATALOG-BODY-MARKER'
+    const catalogVisible = () => h.texts(h.snapshot()).some(line => line.includes(catalogMarker))
+    const catalogInjectedRow = records(h).find(row => row.kind === 'catalog.injected')
+    h.check('the complete catalog update is a durable same-turn source row',
+      catalogInjectedRow !== undefined, JSON.stringify(catalogInjectedRow ?? null))
+    h.check('the fixture clock keeps the catalog point strictly before the command boundary',
+      typeof catalogInjectedRow?.time === 'number' && typeof commandInjected?.time === 'number'
+        && catalogInjectedRow.time < commandInjected.time,
+      JSON.stringify({ catalog: catalogInjectedRow?.time, command: commandInjected?.time }))
+    h.check('the catalog body is folded while Work A is collapsed', !catalogVisible())
+
+    const workACatalogHead = snapshot => mainNodes(snapshot).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).startsWith('Activity')
+      && h.descendantsText(node).includes('focus_command_a'))
+    const catalogHeadIn = snapshot => mainNodes(snapshot).find(node =>
+      String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+      && h.descendantsText(node).trim() === 'skill-catalog')
+    const nextToggle = before => eventRows(h).length > before ? eventRows(h).at(-1) : undefined
+    const scrollNodeIntoMain = async (find) => {
+      // The client owns smooth scrolling. Use its real viewport/dock geometry
+      // and feed back on the actually observed movement instead of guessing a
+      // direction from PageUp/PageDown page granularity.
+      const viewport = () => h.ctl('stats').viewport ?? [1280, 800]
+      let wheelSign = 1
+      let step = 80
+      let lastY
+      for (let attempt = 0; attempt < 26; attempt += 1) {
+        const snapshot = h.snapshot()
+        const node = find(snapshot)
+        if (node === undefined) return undefined
+        const box = visibleBox(snapshot.chains, node)
+        const dock = snapshot.nodes.find(candidate => String(candidate.class ?? '').split(/\s+/u).includes('tv-dock'))
+        const dockTop = dock === undefined ? viewport()[1] - 8 : rect(dock)[1]
+        const visibleTop = 24
+        const visibleBottom = Math.max(visibleTop + 8, dockTop - 8)
+        const clickable = box.span.x >= 4 && box.span.y >= 4
+          && box.start.y >= visibleTop && box.start.y + box.span.y <= visibleBottom
+        if (clickable) return { snapshot, node, box, dockTop, attempts: attempt }
+        const nodeRect = rect(node)
+        const wantIncrease = nodeRect[1] < visibleTop
+        const point = {
+          x: Math.max(1, Math.min(viewport()[0] - 1, viewport()[0] / 2)),
+          y: Math.max(visibleTop + 12, Math.min(visibleBottom - 12, (visibleTop + visibleBottom) / 2)),
+        }
+        const beforeY = nodeRect[1]
+        h.send('move', point.x, point.y)
+        h.send('wheel', 0, wheelSign * step)
+        const after = h.snapshot()
+        const afterNode = find(after)
+        const afterY = afterNode === undefined ? undefined : rect(afterNode)[1]
+        if (afterY === undefined || lastY === afterY) {
+          wheelSign = -wheelSign
+        } else {
+          const movedDown = afterY > beforeY
+          if (movedDown !== wantIncrease) {
+            wheelSign = -wheelSign
+            step = Math.max(8, Math.floor(step / 2))
+          } else if ((beforeY < visibleTop && afterY > visibleBottom)
+            || (beforeY + nodeRect[3] > visibleBottom && afterY + nodeRect[3] < visibleTop)) {
+            step = Math.max(8, Math.floor(step / 2))
+          }
+        }
+        lastY = afterY
+      }
+      return undefined
+    }
+
+    const workAOpenSnap = h.snapshot()
+    const workAHeadForCatalog = workACatalogHead(workAOpenSnap)
+    const workACatalogId = workIds(liveNodes(h), rootIdForCommand)
+      .find(id => subtreeText(liveNodes(h), id).includes('focus_command_a'))
+    h.check('the seeded catalog journey resolves the exact native Work A id',
+      typeof workACatalogId === 'string' && workAHeadForCatalog !== undefined,
+      JSON.stringify({ workACatalogId: workACatalogId ?? null }))
+    h.check('Work A opens through its real native header pointer',
+      workAHeadForCatalog !== undefined && await h.click(workAOpenSnap.chains, workAHeadForCatalog),
+      JSON.stringify(workAHeadForCatalog === undefined ? null : h.descendantsText(workAHeadForCatalog)))
+    if (!await waitFor(h, 'the Work A header reports its own open state',
+      () => workAHeadForCatalog !== undefined
+        && liveNodes(h).get(workACatalogId ?? '')?.p.collapsed === false)) {
+      finish(h, extra)
+      return
+    }
+    // The catalog head is now visible, but its own body is still hidden: Work A
+    // opening must never reveal a member behind its own card disclosure.
+    h.check('opening Work A exposes the catalog card but not its body', !catalogVisible())
+    const catalogOpenSnap = h.snapshot()
+    const catalogHead = catalogHeadIn(catalogOpenSnap)
+    h.check('the carried catalog exposes its own native header',
+      catalogHead !== undefined,
+      JSON.stringify(catalogHead === undefined ? null : { text: h.descendantsText(catalogHead) }))
+    if (catalogHead === undefined) {
+      finish(h, extra)
+      return
+    }
+    const beforeCatalogOpen = eventRows(h).length
+    h.check('the catalog Section opens through its own native header pointer',
+      await h.click(catalogOpenSnap.chains, catalogHead),
+      JSON.stringify({ head: h.descendantsText(catalogHead) }))
+    if (!await waitFor(h, 'the catalog body appears after its own native toggle', catalogVisible)) {
+      finish(h, extra)
+      return
+    }
+    const catalogOpenEvent = nextToggle(beforeCatalogOpen)
+    const catalogSectionId = catalogOpenEvent?.id
+    const catalogOpenLive = catalogSectionId === undefined ? undefined : liveNodes(h).get(catalogSectionId)
+    h.check('the catalog toggle addresses the exact Section id and reports collapsed=false',
+      typeof catalogSectionId === 'string' && catalogOpenEvent?.collapsed === false
+        && catalogOpenLive?.k === 'section' && catalogOpenLive.p.head === 'skill-catalog',
+      JSON.stringify({ event: catalogOpenEvent ?? null, section: catalogOpenLive?.p ?? null }))
+    if (typeof catalogSectionId !== 'string') {
+      finish(h, extra)
+      return
+    }
+    h.check('the exact catalog Section is open in the native tree',
+      catalogOpenLive !== undefined && catalogOpenLive.p.collapsed === false,
+      JSON.stringify(catalogOpenLive?.p ?? null))
+    const catalogOpenStateSnap = h.snapshot()
+    const catalogBodyNode = mainNodes(catalogOpenStateSnap).find(node =>
+      String(node.text ?? '').includes(catalogMarker))
+    const catalogBodySpan = catalogBodyNode === undefined ? { x: 0, y: 0 } : {
+      x: visibleSpan(catalogOpenStateSnap.chains, catalogBodyNode, 'x'),
+      y: visibleSpan(catalogOpenStateSnap.chains, catalogBodyNode, 'y'),
+    }
+    h.check('the opened catalog body has visible fragments on both axes at 1280x800',
+      catalogBodySpan.x >= 4 && catalogBodySpan.y >= 4,
+      JSON.stringify({ catalogBodySpan, rect: rect(catalogBodyNode ?? {}) }))
+    const catalogBodyIds = [...liveNodes(h).entries()]
+      .filter(([id]) => subtreeText(liveNodes(h), id).includes(catalogMarker))
+      .map(([id]) => id)
+    h.check('the catalog body belongs to Work A, not the Turn root or a synthetic container',
+      typeof workACatalogId === 'string'
+        && catalogBodyIds.some(id => id.startsWith(`${workACatalogId}.`)),
+      JSON.stringify({ workACatalogId, catalogBodyIds }))
+    h.check('opening Work A never mints a second Focus summary', rootIds(liveNodes(h)).length === 1,
+      JSON.stringify(rootIds(liveNodes(h))))
+    h.capture('focus-command-catalog-work-a-open-1280x800-dark',
+      'Work A opens through the native header and restores the carried complete catalog body')
+
+    const catalogCloseSnap = h.snapshot()
+    const catalogCloseHead = catalogHeadIn(catalogCloseSnap)
+    const beforeCatalogClose = eventRows(h).length
+    h.check('the SAME catalog Section closes through its exact native header',
+      catalogCloseHead !== undefined && await h.click(catalogCloseSnap.chains, catalogCloseHead),
+      JSON.stringify({ catalogSectionId, head: catalogCloseHead?.id ?? null }))
+    if (!await waitFor(h, 'the catalog body disappears after the same exact toggle', () => !catalogVisible())) {
+      finish(h, extra)
+      return
+    }
+    const catalogCloseEvent = nextToggle(beforeCatalogClose)
+    h.check('the closing toggle addresses the same Section id and reports collapsed=true',
+      catalogCloseEvent?.id === catalogSectionId && catalogCloseEvent.collapsed === true,
+      JSON.stringify(catalogCloseEvent ?? null))
+    const catalogClosedLive = liveNodes(h).get(catalogSectionId)
+    h.check('the exact catalog Section is closed in the native tree',
+      catalogClosedLive !== undefined && catalogClosedLive.p.collapsed === true,
+      JSON.stringify(catalogClosedLive?.p ?? null))
+    h.check('closing the catalog Section keeps the one Root and both canonical Works intact',
+      liveNodes(h).get(rootIdForCommand)?.p.collapsed === false
+        && workIds(liveNodes(h), rootIdForCommand).length === 2,
+      JSON.stringify({ root: liveNodes(h).get(rootIdForCommand)?.p.collapsed }))
+
+    const closeWorkASnap = h.snapshot()
+    const closeWorkAHead = workACatalogHead(closeWorkASnap)
+    h.check('Work A closes through the same real native header pointer',
+      closeWorkAHead !== undefined && await h.click(closeWorkASnap.chains, closeWorkAHead))
+    if (!await waitFor(h, 'the catalog body stays folded with Work A closed', () => !catalogVisible())) {
+      finish(h, extra)
+      return
+    }
+    h.check('closing Work A keeps the one Root open and both canonical Works intact',
+      liveNodes(h).get(rootIdForCommand)?.p.collapsed === false
+        && workIds(liveNodes(h), rootIdForCommand).length === 2,
+      JSON.stringify({ root: liveNodes(h).get(rootIdForCommand)?.p.collapsed }))
+
+    // The SAME catalog journey at the narrow/short sizes: real resize, real
+    // native header click, exact Section toggle, body two-axis visibility and
+    // clipping ancestors; no new sleeps or relaxed geometry thresholds.
+    const catalogViewports = [{ width: 400, height: 600, appearance: 'dark' }, { width: 900, height: 360, appearance: 'light' }]
+    for (const viewport of catalogViewports) {
+      await h.resize(viewport.width, viewport.height)
+      h.send('appearance', viewport.appearance)
+      if (!await waitFor(h, `the client resolves ${viewport.appearance} at ${viewport.width}x${viewport.height}`,
+        () => h.ctl('state').theme === viewport.appearance)) {
+        finish(h, extra)
+        return
+      }
+      // Restore the open root at this viewport, then scroll its Work A header
+      // into the normal Main viewport before clicking.
+      const narrowWork = await scrollNodeIntoMain(workACatalogHead)
+      if (narrowWork === undefined) {
+        h.check(`Work A is reachable through normal scrolling at ${viewport.width}x${viewport.height}`, false, 'unreachable')
+        finish(h, extra)
+        return
+      }
+      h.check(`Work A is reachable through normal scrolling at ${viewport.width}x${viewport.height}`,
+        true, JSON.stringify({ rect: rect(narrowWork.node), box: narrowWork.box, dockTop: narrowWork.dockTop }))
+      const beforeNarrowWorkOpen = eventRows(h).length
+      h.check(`Work A opens at ${viewport.width}x${viewport.height}`,
+        await h.click(narrowWork.snapshot.chains, narrowWork.node))
+      if (!await waitFor(h, `Work A reports open at ${viewport.width}x${viewport.height}`,
+        () => liveNodes(h).get(workACatalogId ?? '')?.p.collapsed === false)) {
+        finish(h, extra)
+        return
+      }
+      h.check(`the Work A toggle addresses the exact Work id at ${viewport.width}x${viewport.height}`,
+        eventRows(h).length > beforeNarrowWorkOpen
+          && eventRows(h).at(-1)?.id === workACatalogId && eventRows(h).at(-1)?.collapsed === false,
+        JSON.stringify(eventRows(h).at(-1) ?? null))
+      h.check(`the catalog body stays hidden before its own toggle at ${viewport.width}x${viewport.height}`, !catalogVisible())
+      const narrowCatalog = await scrollNodeIntoMain(catalogHeadIn)
+      h.check(`the catalog header is reachable through normal scrolling at ${viewport.width}x${viewport.height}`,
+        narrowCatalog !== undefined,
+        JSON.stringify(narrowCatalog === undefined ? null : { rect: rect(narrowCatalog.node), box: narrowCatalog.box, dockTop: narrowCatalog.dockTop }))
+      if (narrowCatalog === undefined) {
+        finish(h, extra)
+        return
+      }
+      const narrowCatalogSnap = narrowCatalog.snapshot
+      const narrowCatalogHead = narrowCatalog.node
+      h.check(`the exact catalog Section id stays attached at ${viewport.width}x${viewport.height}`,
+        liveNodes(h).get(catalogSectionId)?.k === 'section',
+        JSON.stringify({ expected: catalogSectionId, section: liveNodes(h).get(catalogSectionId)?.p ?? null }))
+      const beforeNarrowOpen = eventRows(h).length
+      h.check(`the catalog Section opens at ${viewport.width}x${viewport.height}`,
+        await h.click(narrowCatalogSnap.chains, narrowCatalogHead))
+      if (!await waitFor(h, `the catalog body appears at ${viewport.width}x${viewport.height}`, catalogVisible)) {
+        finish(h, extra)
+        return
+      }
+      const narrowOpenEvent = nextToggle(beforeNarrowOpen)
+      h.check(`the narrow catalog toggle keeps the exact Section id at ${viewport.width}x${viewport.height}`,
+        narrowOpenEvent?.id === catalogSectionId && narrowOpenEvent.collapsed === false,
+        JSON.stringify(narrowOpenEvent ?? null))
+      const narrowOpenSnap = h.snapshot()
+      const narrowBody = mainNodes(narrowOpenSnap).find(node => String(node.text ?? '').includes(catalogMarker))
+      const narrowSpan = narrowBody === undefined ? { x: 0, y: 0 } : {
+        x: visibleSpan(narrowOpenSnap.chains, narrowBody, 'x'),
+        y: visibleSpan(narrowOpenSnap.chains, narrowBody, 'y'),
+      }
+      const clippingAncestors = narrowBody === undefined
+        ? []
+        : ancestorsOf(narrowOpenSnap.chains, narrowBody)
+          .map(node => ({ id: node.id, class: node.class, rect: rect(node) }))
+      h.check(`the opened catalog body has visible fragments on both axes at ${viewport.width}x${viewport.height}`,
+        narrowSpan.x >= 4 && narrowSpan.y >= 4,
+        JSON.stringify({ narrowSpan, body: rect(narrowBody ?? {}), clippingAncestors }))
+      h.capture(`focus-command-catalog-${viewport.width}x${viewport.height}-${viewport.appearance}`,
+        'the carried complete catalog opens by its exact native Section at the narrow/short viewport')
+      const narrowCloseSnap = h.snapshot()
+      const narrowCloseHead = catalogHeadIn(narrowCloseSnap)
+      const beforeNarrowClose = eventRows(h).length
+      h.check(`the same catalog Section closes at ${viewport.width}x${viewport.height}`,
+        narrowCloseHead !== undefined && await h.click(narrowCloseSnap.chains, narrowCloseHead))
+      if (!await waitFor(h, `the catalog body folds again at ${viewport.width}x${viewport.height}`, () => !catalogVisible())) {
+        finish(h, extra)
+        return
+      }
+      const narrowCloseEvent = nextToggle(beforeNarrowClose)
+      h.check(`the narrow closing toggle keeps the exact Section id at ${viewport.width}x${viewport.height}`,
+        narrowCloseEvent?.id === catalogSectionId && narrowCloseEvent.collapsed === true,
+        JSON.stringify(narrowCloseEvent ?? null))
+      const narrowWorkClose = await scrollNodeIntoMain(workACatalogHead)
+      h.check(`Work A closes again at ${viewport.width}x${viewport.height}`,
+        narrowWorkClose !== undefined && await h.click(narrowWorkClose.snapshot.chains, narrowWorkClose.node))
+      await waitFor(h, `Work A reports closed at ${viewport.width}x${viewport.height}`,
+        () => liveNodes(h).get(workACatalogId ?? '')?.p.collapsed === true)
+    }
+    await h.resize(1280, 800)
+    h.send('appearance', 'dark')
+    if (!await waitFor(h, 'the client restores dark at 1280x800', () => h.ctl('state').theme === 'dark')) {
+      finish(h, extra)
+      return
+    }
     const commandId = expandedCommand[0]?.[0]
     h.check('the command is a top-level Root child, never wrapped by a Work container',
       commandId !== undefined && !worksAfterOpen.some(work => commandId.startsWith(`${work}.`)))
@@ -1053,9 +1330,14 @@ export default async function (h) {
     // The seeded standalone maintenance card after the closed turn: it must be
     // one top-level native row AFTER the official final, own its detail toggle,
     // and never mint a Focus root or re-open the real Turn.
-    if (!await waitFor(h, 'the standalone compaction card lands after the official final', () =>
-      records(h).some(row => row.kind === 'standalone.injected')
-        && h.texts(h.snapshot()).some(text => text.includes('Compaction failed')))) {
+    if (!await waitFor(h, 'the standalone compaction card lands after the official final', () => {
+      if (!records(h).some(row => row.kind === 'standalone.injected')) return false
+      // Require the REAL main-region head, not only the dock echo: the dock
+      // notification paints the failure title before the transcript commit.
+      return mainNodes(h.snapshot()).some(node =>
+        String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
+        && h.descendantsText(node).includes('Compaction failed'))
+    })) {
       finish(h, extra)
       return
     }

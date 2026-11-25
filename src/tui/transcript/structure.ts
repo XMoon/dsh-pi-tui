@@ -17,14 +17,15 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Six
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Seven
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
  * cluster, a `tool-jobs` Notice, an `agent-message` relay, a
  * `subagent-settled` Notice, a `repeat-tool-reminder` Notice and an
  * image-bearing `ptc-mode` Context, each of the last five with durable
- * same-turn `next-step` delivery evidence. A mixed
- * `instructions`/`catalog`/`snapshot` cluster and every other Notice/relay form
- * stay independent Context boundaries.
+ * same-turn `next-step` delivery evidence, plus a complete `skill-catalog`
+ * replacement that may only TRAIL an already-established same-turn Work. A
+ * mixed `instructions`/`catalog`/`snapshot` cluster and every other
+ * Notice/relay form stay independent Context boundaries.
  *
  * The projector is a single forward pass plus the linear ambient-clustering
  * pass (O(n)); wrappers are freshly allocated each call, but their
@@ -152,145 +153,54 @@ export function isFoldableSnapshotContext(
 }
 
 /**
- * Whether one row is a Working `tool-jobs` completion Notice with durable
- * same-turn `next-step` delivery evidence.
+ * The narrow display-layer carriage decision: what does this Context row do to
+ * the surrounding same-turn Work?
  *
- * This is a NARROW exception, never a generic notice rule: the producer-declared
- * `sourceKind === 'tool-jobs'` AND `form === 'notice'` are both required, plus
- * the fold's presentation-only `sameTurnNextStep` flag derived from the durable
- * `agent/inbox/spliced` insert/claim identity chain. A `next-turn` wakeup, a
- * foreign/legacy log, a different producer (including `subagent-settled`) or a
- * missing claim carries no flag and therefore stays an independent Context
- * boundary.
- */
-export function isWorkingToolJobsNotice(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  if (!isSurfacedContext(message)) return false
-  const presentation = message.contextPresentation
-  return presentation !== undefined
-    && presentation.sameTurnNextStep === true
-    && presentation.form === 'notice'
-    && presentation.sourceKind === 'tool-jobs'
-}
-
-/**
- * Whether one row is a same-turn delivered Agent relay (`agent-message` +
- * `relay`) with durable next-step delivery evidence.
+ * - `thought`: the row may join the Work/Thought, and collapsed Focus keeps its
+ *   existing Thought-only recoverability exception (a foldable Snapshot or a
+ *   proven Working `tool-jobs` Notice);
+ * - `work`: the row may join the Work AND collapsed Focus additionally requires
+ *   the real Process membership of this group's canonical Work span (Agent
+ *   relay, subagent settlement Notice, repeat reminder, image-bearing PTC
+ *   Context);
+ * - `trailing-work`: a complete skill-catalog replacement may only TRAIL an
+ *   already-established same-turn real Work run (never create a Work, never
+ *   prefix one, never bridge two);
+ * - `undefined`: independent Context boundary.
  *
- * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
- * producer-declared `sourceKind === 'agent-message'` AND `form === 'relay'`
- * are both required, plus the fold's presentation-only `sameTurnNextStep`
- * flag derived from the durable `agent/inbox/spliced` insert/claim identity
- * chain. A `next-turn` wakeup, a foreign/legacy log, a crossed source/form
- * pair or a missing claim carries no flag and therefore stays an independent
- * Context boundary.
+ * The `sameTurnNextStep` flag is only delivery provenance; the exact
+ * source/form controls below decide this PRESENTATION question. PTC requires
+ * its real formless producer shape; a declared form fails open. A catalog
+ * update must be a raw singleton: a mixed/multi-row ambient cluster stays one
+ * indivisible boundary.
+ * @param message - one raw transcript row.
+ * @param clusterByMember - raw-adjacency membership for the SAME window.
  */
-export function isWorkingAgentRelay(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  if (!isSurfacedContext(message)) return false
-  const presentation = message.contextPresentation
-  return presentation !== undefined
-    && presentation.sameTurnNextStep === true
-    && presentation.sourceKind === 'agent-message'
-    && presentation.form === 'relay'
-}
+export type WorkContextCarriage = 'thought' | 'work' | 'trailing-work'
 
-/**
- * Whether one row is a same-turn delivered subagent settlement Notice
- * (`subagent-settled` + `notice`) with durable next-step delivery evidence.
- *
- * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
- * producer-declared `sourceKind === 'subagent-settled'` AND `form === 'notice'`
- * are both required, plus the fold's presentation-only `sameTurnNextStep` flag
- * derived from the durable `agent/inbox/spliced` insert/claim identity chain.
- * The settlement's textual outcome (`completed` / `error` / `aborted` / …) is
- * deliberately NOT inspected: every settlement that arrived through the same
- * proven delivery is carried the same way, and its raw body is never rewritten.
- * A `next-turn` wakeup, a foreign/legacy log, a crossed source/form pair or a
- * missing claim carries no flag and therefore stays an independent Context
- * boundary.
- */
-export function isWorkingSubagentSettledNotice(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  if (!isSurfacedContext(message)) return false
-  const presentation = message.contextPresentation
-  return presentation !== undefined
-    && presentation.sameTurnNextStep === true
-    && presentation.sourceKind === 'subagent-settled'
-    && presentation.form === 'notice'
-}
-
-/**
- * Whether one row is a same-turn delivered repeat-tool-reminder Notice
- * (`repeat-tool-reminder` + `notice`) with durable next-step delivery
- * evidence.
- *
- * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
- * producer-declared `sourceKind === 'repeat-tool-reminder'` AND
- * `form === 'notice'` are both required, plus the fold's presentation-only
- * `sameTurnNextStep` flag derived from the durable `agent/inbox/spliced`
- * insert/claim identity chain. The reminder's text (gentle or detailed) and
- * its `tool × count` summary are deliberately NOT inspected: wording is never
- * an identity. A `next-turn` wakeup, a foreign/legacy log, a crossed
- * source/form pair or a missing claim carries no flag and therefore stays an
- * independent Context boundary.
- */
-export function isWorkingRepeatToolReminderNotice(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  if (!isSurfacedContext(message)) return false
-  const presentation = message.contextPresentation
-  return presentation !== undefined
-    && presentation.sameTurnNextStep === true
-    && presentation.form === 'notice'
-    && presentation.sourceKind === 'repeat-tool-reminder'
-}
-
-/**
- * Whether one row is a same-turn delivered image-bearing PTC Context with
- * durable next-step delivery evidence.
- *
- * Two INDEPENDENT facts are required: the structured media question answered
- * by {@link isPtcImageContext} (surfaced Context + `ptc-mode` + a real image
- * block) and the fold's presentation-only `sameTurnNextStep` flag derived
- * from the durable `agent/inbox/spliced` insert/claim identity chain. The
- * producer has no form, so no form is required or invented; a source that
- * DECLARES a form is foreign/malformed and fails open, as do a text-only
- * ptc-mode Spill/Reset Context, a foreign image Context, a cross-turn claim
- * and a missing claim.
- */
-export function isWorkingPtcImageContext(
-  message: TranscriptMessage,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true; content: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] } {
-  if (!isPtcImageContext(message)) return false
-  const presentation = message.contextPresentation
-  return presentation !== undefined
-    && presentation.form === undefined
-    && presentation.formDeclared !== true
-    && presentation.sameTurnNextStep === true
-}
-
-/**
- * The complete narrow display-layer eligibility: may this Context row be
- * carried by the same-turn Work/Thought instead of ending it? Only a foldable
- * Snapshot, a proven Working `tool-jobs` Notice, a proven same-turn Agent
- * relay, a proven same-turn subagent settlement Notice, a proven same-turn
- * repeat-tool-reminder Notice or a proven same-turn image-bearing PTC Context
- * qualifies; every other surfaced Context remains a boundary.
- */
-export function isFoldableWorkContext(
+export function workContextCarriageOf(
   message: TranscriptMessage,
   clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>,
-): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  return isFoldableSnapshotContext(message, clusterByMember)
-    || isWorkingToolJobsNotice(message)
-    || isWorkingAgentRelay(message)
-    || isWorkingSubagentSettledNotice(message)
-    || isWorkingRepeatToolReminderNotice(message)
-    || isWorkingPtcImageContext(message)
+): WorkContextCarriage | undefined {
+  if (!isSurfacedContext(message)) return undefined
+  const presentation = message.contextPresentation
+  if (isFoldableSnapshotContext(message, clusterByMember)) return 'thought'
+  if (presentation?.sameTurnNextStep === true) {
+    const sourceKind = presentation.sourceKind
+    const form = presentation.form
+    if (sourceKind === 'tool-jobs' && form === 'notice') return 'thought'
+    if ((sourceKind === 'agent-message' && form === 'relay')
+      || (sourceKind === 'subagent-settled' && form === 'notice')
+      || (sourceKind === 'repeat-tool-reminder' && form === 'notice')
+      || (sourceKind === 'ptc-mode'
+        && form === undefined
+        && presentation.formDeclared !== true
+        && isPtcImageContext(message))) return 'work'
+  }
+  if (presentation?.completeCatalogUpdate === true && clusterByMember.get(message) === undefined) {
+    return 'trailing-work'
+  }
+  return undefined
 }
 
 /**
@@ -378,17 +288,34 @@ export function projectTranscriptStructure(messages: readonly TranscriptMessage[
       pushPending([{ kind: 'context-cluster', cluster }], cluster.members, cluster.turn)
       continue
     }
-    if (isFoldableWorkContext(message, clustering.byMember)) {
-      if (runMembers.length > 0) {
-        if (runTurn === message.turn) {
+    if (isSurfacedContext(message)) {
+      const carriage = workContextCarriageOf(message, clustering.byMember)
+      if (carriage === 'thought' || carriage === 'work') {
+        if (runMembers.length > 0) {
+          if (runTurn === message.turn) {
+            runParts.push({ kind: 'message', message })
+            runMembers.push(message)
+            continue
+          }
+          flush()
+        }
+        pushPending([{ kind: 'message', message }], [message], message.turn)
+        continue
+      }
+      if (carriage === 'trailing-work') {
+        // A complete catalog replacement may only TRAIL an already-established
+        // same-turn real Process run. It never waits as a pending prefix, never
+        // opens a Work and never bridges two runs: without that exact run it
+        // stays the ordinary standalone Context boundary it already was.
+        if (runMembers.length > 0 && runTurn === message.turn) {
           runParts.push({ kind: 'message', message })
           runMembers.push(message)
           continue
         }
         flush()
+        out.push({ kind: 'message', message })
+        continue
       }
-      pushPending([{ kind: 'message', message }], [message], message.turn)
-      continue
     }
     if (isSurfacedInteractionTool(message)) {
       flush()

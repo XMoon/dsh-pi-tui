@@ -23,6 +23,8 @@
 
 ### 修复
 
+- **完整技能目录刷新不再打断同一段 Activity**：当真实工具执行已经建立连续 Activity 后，完整替换的技能目录（`update`、没有 `incomplete`）会随该 Work 一起折叠，展开后仍按原位置显示完整目录行，不再单独成行或提前切断 Activity 计时。首次目录、发现不完整、混合集群以及重要通知仍保持独立可见。
+- **同轮投递证据更可靠、且不会误折叠**：只有真实插入、官方整批 claim 并在同一开放 Turn 实际落地的消息才获得 same-turn 投递事实；部分移除、越界片段、跨 Turn、取消或被拒绝的 claim 都不再留下可复用的投递证据。投递事实与“能否折叠”分离：真实投递但来源未获准的通知仍保持独立显示。
 - **Daemon Host 能发现常见工具**：由 systemd、launchd 或 detached 启动的 Host 在官方启动前会把已存在的常见用户工具目录补到继承的 `PATH` 后面（如 `~/.local/bin`、mise/asdf shims、Cargo/Go/Volta/Bun/pnpm 的 bin 目录以及平台包管理器目录），因此在继承的 `PATH` 未覆盖这些目录、且工具已正确安装时，Agent 的 Shell、后台 Job 和子进程可以避免反复 `mise exec` 或修改 `.zshrc`。原有 `PATH` 顺序保持不变，同名系统工具仍可能优先；在 Host 的实际环境中设置 `DSH_PI_TUI_HOST_PATH_MODE=inherit` 可完全关闭补充。该设置只影响冷启动，已有的 managed Host 升级后执行 `daemon restart` 生效。
 - **命令边界正确冻结 Activity 时长**：真实命令出现时（包括与手动压缩融合后的代表卡片），它前面的 Activity 时长会停在命令自身真实的首次出现时间，不再被之后的完成事件或后续 Work 延长，也不会丢失。命令本身仍不是 Work、Action 或 token/usage 输入。
 - **空闲压缩不再借用上一轮 Turn**：独立压缩（含无命令的空闲压缩）不再被归到上一轮或当前打开 Turn，不会产生虚假的历史 Thought、额外摘要或错误的 Turn 统计；完整 Turn 内的自动压缩仍保留其真实归属。

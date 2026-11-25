@@ -21,7 +21,7 @@ import {
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
 import { projectFocus } from '../../src/tui/transcript/focus-projection.ts'
-import { clusterByMemberOf, isWorkingAgentRelay, isWorkingPtcImageContext, isWorkingRepeatToolReminderNotice, isWorkingSubagentSettledNotice, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, projectTranscriptStructure, workContextCarriageOf } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../../src/tui/components/transcript/compact-process-preview.ts'
@@ -401,6 +401,115 @@ test('notice/relay/recall/unknown Context still ends a snapshot-carrying Work', 
     assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'system', 'work'],
       `${form ?? 'unknown'} must remain a Work boundary`)
   }
+})
+
+// --- Complete skill-catalog refresh follows an established Work (D3) -------
+
+const CATALOG_ENTRY = { name: 'alpha', description: 'first skill' }
+
+/** A producer-shaped complete catalog update source (D3 facts only). */
+function catalogSource(
+  entries: readonly unknown[] = [CATALOG_ENTRY],
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { kind: 'skill-catalog', form: 'catalog', update: true, entries, ...extra }
+}
+
+/** Fold one producer-shaped complete catalog update into its Context row. */
+function catalogUpdate(entries: readonly unknown[] = [CATALOG_ENTRY]): TranscriptMessage {
+  return foldContext(catalogSource(entries), 'CATALOG_UPDATE_BODY')
+}
+
+test('a complete catalog update is one source fact, not a carriage flag', () => {
+  assert.deepEqual(contextPresentation(catalogSource()), {
+    form: 'catalog', formDeclared: true, sourceKind: 'skill-catalog', completeCatalogUpdate: true, role: 'inject',
+  })
+  assert.deepEqual(contextPresentation(catalogSource([])).completeCatalogUpdate, true,
+    'an empty replacement catalog is a valid complete update')
+  const notComplete: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ['initial publication (no update)', { kind: 'skill-catalog', form: 'catalog', entries: [CATALOG_ENTRY] }],
+    ['declared incomplete', catalogSource([CATALOG_ENTRY], { incomplete: true })],
+    ['update not true', { kind: 'skill-catalog', form: 'catalog', update: 'yes', entries: [CATALOG_ENTRY] }],
+    ['missing entries', { kind: 'skill-catalog', form: 'catalog', update: true }],
+    ['non-array entries', catalogSource('not-an-array' as unknown as readonly unknown[])],
+    ['malformed entry', catalogSource([{ name: '', description: 'x' }])],
+    ['missing description', catalogSource([{ name: 'alpha' }])],
+    ['foreign source kind', { kind: 'plugin', form: 'catalog', update: true, entries: [CATALOG_ENTRY] }],
+  ]
+  for (const [label, source] of notComplete) {
+    assert.equal(contextPresentation(source).completeCatalogUpdate, undefined, label)
+  }
+})
+
+test('a complete catalog update is carried only after a real Process run', () => {
+  const catalog = catalogUpdate()
+  const messages = [thinking(0), tool(0), catalog, tool(0, 'read'), assistant(0, 'done')]
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = structure[0]
+  assert.ok(span !== undefined && span.kind === 'work')
+  assert.deepEqual(span.span.members, [messages[0], messages[1], catalog, messages[3]],
+    'the catalog keeps its raw position between the two real Process rows')
+  assert.equal(summarizeWorkSpan(span.span).actionStats.total, 2, 'the catalog adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'Compact folds it under the Activity instead of splitting the turn')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'thinking', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores the catalog row once in raw order')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === catalog).length, 1)
+
+  // No real Process owner: the same complete update stays standalone.
+  assert.deepEqual(projectTranscriptStructure([catalog]).map(block => block.kind), ['message'])
+  assert.deepEqual(kindsOf(projectCompact([catalog], noOptions)), ['system'])
+  assert.deepEqual(projectTranscriptStructure([user(0, 'go'), catalog, thinking(0), tool(0)]).map(block => block.kind),
+    ['message', 'message', 'work'], 'an opening catalog never becomes the first Work owner')
+
+  // A hard boundary ends the run: the update cannot bridge two Activities.
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), assistant(0, 'answer'), catalog, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'message', 'work'],
+    'the update starts nothing and bridges nothing after a Conversation boundary',
+  )
+
+  // A fresh run after the catalog can carry it, and a later Process continues
+  // the same Work only when there is a real preceding owner.
+  assert.deepEqual(projectTranscriptStructure([user(0, 'go'), thinking(0), catalog, tool(0)]).map(block => block.kind),
+    ['message', 'work'])
+})
+
+test('only a raw singleton complete catalog update can be carried', () => {
+  // An incomplete update keeps the existing independent boundary.
+  const incomplete = foldContext(catalogSource([CATALOG_ENTRY], { incomplete: true }), 'INCOMPLETE_CATALOG')
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), incomplete, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'], 'an incomplete discovery attempt stays independent')
+
+  // A mixed raw-adjacent ambient cluster is indivisible: neither the catalog
+  // nor the instructions may be torn out of it.
+  const instructions = contextRow(0, 'instructions', 'AGENTS.md')
+  const catalog = catalogUpdate()
+  const mixed = projectTranscriptStructure([instructions, catalog, thinking(0), tool(0)])
+  assert.deepEqual(mixed.map(block => block.kind), ['context-cluster', 'work'])
+  const cluster = mixed[0]
+  assert.ok(cluster !== undefined && cluster.kind === 'context-cluster')
+  assert.deepEqual(cluster.cluster.members, [instructions, catalog])
+  assert.ok(!(mixed[1]?.kind === 'work' && mixed[1].span.members.includes(catalog)))
+
+  // Two consecutive complete refreshes form one raw ambient cluster: no
+  // individual row may be carried out of it.
+  const first = catalogUpdate()
+  const second = catalogUpdate([{ name: 'beta', description: 'second skill' }])
+  assert.deepEqual(projectTranscriptStructure([thinking(0), tool(0), first, second, tool(0)]).map(block => block.kind),
+    ['work', 'context-cluster', 'work'],
+    'consecutive catalog refreshes stay one indivisible cluster')
+
+  // A catalog-shaped row with unreadable entries is not a complete update.
+  const malformed = foldContext(catalogSource([{ name: 7, description: 'x' }]), 'MALFORMED_CATALOG')
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), malformed, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'])
 })
 
 test('expanding a Work materializes its nested snapshot cluster under the Work path', () => {
@@ -798,8 +907,8 @@ test('a proven Working tool-jobs notice is carried by the same Work', () => {
   assert.equal(notice.contextPresentation?.sourceKind, 'tool-jobs')
   assert.equal(notice.contextPresentation?.sameTurnNextStep, true,
     'the fold records the durable same-turn next-step provenance')
-  assert.equal(isWorkingToolJobsNotice(notice), true)
   const structure = projectTranscriptStructure(messages)
+  assert.equal(workContextCarriageOf(notice, clusterByMemberOf(structure)), 'thought')
   assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
   const span = onlySpan(structure)
   assert.deepEqual(span.members, [messages[0], notice, messages[2]],
@@ -904,8 +1013,8 @@ test('other notice producers never qualify, even through a next-step claim', () 
   ])
   const notice = folder.messages().find(message => message.kind === 'system')
   assert.ok(notice !== undefined && notice.kind === 'system')
-  assert.equal(notice.contextPresentation?.sameTurnNextStep, undefined,
-    'the durable claim is not enough: a foreign producer never qualifies')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, true,
+    'the durable claim is pure delivery provenance, even for a foreign producer')
   assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
     ['work', 'message', 'work'])
 })
@@ -972,8 +1081,8 @@ test('a proven same-turn Agent relay is carried by the same Work on the real fol
   assert.equal(relay.contextPresentation?.sourceKind, 'agent-message')
   assert.equal(relay.contextPresentation?.sameTurnNextStep, true,
     'the fold records the durable same-turn next-step provenance')
-  assert.equal(isWorkingAgentRelay(relay), true)
   const structure = projectTranscriptStructure(messages)
+  assert.equal(workContextCarriageOf(relay, clusterByMemberOf(structure)), 'work')
   assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
   const span = onlySpan(structure)
   assert.deepEqual(span.members, [messages[0], relay, messages[2]],
@@ -1103,10 +1212,12 @@ test('a next-step claim never qualifies a crossed or foreign source pair', () =>
     ])
     const row = folder.messages().find(candidate => candidate.kind === 'system')
     assert.ok(row !== undefined && row.kind === 'system', label)
-    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
-      `${label}: only the exact Working pairs qualify`)
-    assert.equal(isWorkingAgentRelay(row), false, label)
-    assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+    assert.equal(row.contextPresentation?.sameTurnNextStep, true,
+      `${label}: the durable claim is pure delivery provenance`)
+    const structure = projectTranscriptStructure(folder.messages())
+    assert.equal(workContextCarriageOf(row, clusterByMemberOf(structure)), undefined,
+      `${label}: carriage stays source-specific`)
+    assert.deepEqual(structure.map(block => block.kind),
       ['work', 'message', 'work'], `${label}: the row stays an independent boundary`)
   }
 })
@@ -1227,9 +1338,9 @@ test('a proven same-turn repeat-tool-reminder is carried by the same Work on the
   assert.equal(reminder.contextPresentation?.form, 'notice')
   assert.equal(reminder.contextPresentation?.sameTurnNextStep, true,
     'the fold records the durable same-turn next-step provenance')
-  assert.equal(isWorkingRepeatToolReminderNotice(reminder), true)
-  assert.equal(reminder.text, 'REMINDER_BODY', 'the producer body is untouched')
   const structure = projectTranscriptStructure(messages)
+  assert.equal(workContextCarriageOf(reminder, clusterByMemberOf(structure)), 'work')
+  assert.equal(reminder.text, 'REMINDER_BODY', 'the producer body is untouched')
   assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
   const span = onlySpan(structure)
   assert.deepEqual(span.members, [messages[0], reminder, messages[2]],
@@ -1274,7 +1385,7 @@ test('a repeat-tool-reminder only qualifies through the exact same-turn source/f
   const missingReminder = missing.messages().find(message => message.kind === 'system')
   assert.ok(missingReminder !== undefined && missingReminder.kind === 'system')
   assert.equal(missingReminder.contextPresentation?.sameTurnNextStep, undefined)
-  assert.equal(isWorkingRepeatToolReminderNotice(missingReminder), false)
+  assert.equal(workContextCarriageOf(missingReminder, new Map()), undefined)
   assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
     ['work', 'message', 'work'], 'an unqualified reminder still splits the Work')
 
@@ -1295,8 +1406,8 @@ test('a repeat-tool-reminder only qualifies through the exact same-turn source/f
   ])
   const wrongFormReminder = wrongForm.messages().find(message => message.kind === 'system')
   assert.ok(wrongFormReminder !== undefined && wrongFormReminder.kind === 'system')
-  assert.equal(wrongFormReminder.contextPresentation?.sameTurnNextStep, undefined,
-    'the durable claim is not enough: the exact source/form pair decides')
+  assert.equal(wrongFormReminder.contextPresentation?.sameTurnNextStep, true,
+    'the durable claim proves delivery independently of the crossed form')
 
   // Cross-turn claim: inserted during turn 1, claimed in turn 2.
   const crossMessage = {
@@ -1395,10 +1506,10 @@ test('a proven same-turn image-bearing PTC Context is carried by the same Work',
   assert.ok(context !== undefined && context.kind === 'system')
   assert.equal(context.contextPresentation?.sameTurnNextStep, true,
     'the fold records the durable same-turn next-step provenance')
-  assert.equal(isWorkingPtcImageContext(context), true)
+  const structure = projectTranscriptStructure(messages)
+  assert.equal(workContextCarriageOf(context, clusterByMemberOf(structure)), 'work')
   assert.deepEqual(context.content?.map(block => block.type), ['text', 'image', 'text'])
   assert.equal(context.content?.[1]?.type === 'image' && context.content[1].attachment.attachmentId, 'ptc-compact-att-1')
-  const structure = projectTranscriptStructure(messages)
   assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
   const span = onlySpan(structure)
   assert.deepEqual(span.members, [messages[0], context, messages[2]],
@@ -1465,8 +1576,8 @@ test('a PTC image Context never qualifies without the exact same-turn claim and 
   ])
   const textRow = textOnly.messages().find(message => message.kind === 'system')
   assert.ok(textRow !== undefined && textRow.kind === 'system')
-  assert.equal(textRow.contextPresentation?.sameTurnNextStep, undefined,
-    'text-only PTC (Spill/Reset) never carries the Working flag')
+  assert.equal(textRow.contextPresentation?.sameTurnNextStep, true,
+    'text-only PTC proves delivery but has no image-carriage route')
   assert.deepEqual(projectTranscriptStructure(textOnly.messages()).map(block => block.kind),
     ['work', 'message', 'work'], 'the PTC reset stays independent even through a claim')
 
@@ -1514,9 +1625,10 @@ test('a PTC image Context never qualifies without the exact same-turn claim and 
   const formedRow = formed.messages().find(message => message.kind === 'system')
   assert.ok(formedRow !== undefined && formedRow.kind === 'system')
   assert.equal(formedRow.contextPresentation?.form, 'notice')
-  assert.equal(formedRow.contextPresentation?.sameTurnNextStep, undefined,
+  assert.equal(formedRow.contextPresentation?.sameTurnNextStep, true,
+    'the claim is delivery provenance even for the malformed form')
+  assert.equal(workContextCarriageOf(formedRow, new Map()), undefined,
     'a declared form on the formless ptc producer fails open')
-  assert.equal(isWorkingPtcImageContext(formedRow), false)
   assert.equal(formedRow.content !== undefined, true, 'the media projection itself is form-neutral')
   assert.deepEqual(projectTranscriptStructure(formed.messages()).map(block => block.kind),
     ['work', 'message', 'work'], 'the malformed ptc row stays an independent Context boundary')
@@ -1540,8 +1652,8 @@ test('a PTC image Context never qualifies without the exact same-turn claim and 
   ])
   const foreignRow = foreign.messages().find(message => message.kind === 'system')
   assert.ok(foreignRow !== undefined && foreignRow.kind === 'system')
-  assert.equal(foreignRow.contextPresentation?.sameTurnNextStep, undefined,
-    'only the ptc-mode producer may qualify by image content')
+  assert.equal(foreignRow.contextPresentation?.sameTurnNextStep, true,
+    'delivery is proven, but only the ptc-mode producer has an image-carriage route')
 })
 
 test('an unknown or non-string declared PTC form stays an independent Context even with image and claim', () => {
@@ -1566,9 +1678,10 @@ test('an unknown or non-string declared PTC form stays an independent Context ev
     assert.ok(row !== undefined && row.kind === 'system', label)
     assert.equal(row.contextPresentation?.form, undefined, `${label}: no semantic form is invented`)
     assert.equal(row.contextPresentation?.formDeclared, true, `${label}: the raw declaration is retained`)
-    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
-      `${label}: a declared form fails the formless-PTC carriage contract`)
-    assert.equal(isWorkingPtcImageContext(row), false, label)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, true,
+      `${label}: the claim is delivery provenance even for the declared form`)
+    assert.equal(workContextCarriageOf(row, new Map()), undefined,
+      `${label}: the declared form fails the formless-PTC carriage contract`)
     assert.equal(row.content !== undefined, true, `${label}: structured media projection survives independently`)
     assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
       ['work', 'message', 'work'], `${label}: the malformed PTC row remains a boundary`)
@@ -1610,8 +1723,8 @@ test('a declared-form PTC Context cannot borrow either Snapshot carriage route',
     assert.ok(row !== undefined && row.kind === 'system', `claimed=${claimed}`)
     assert.equal(row.contextPresentation?.form, 'snapshot')
     assert.equal(row.contextPresentation?.formDeclared, true)
-    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
-      `claimed=${claimed}: the PTC no-form gate rejects the snapshot form`)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, claimed ? true : undefined,
+      `claimed=${claimed}: the snapshot form never gains PTC carriage`)
     assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
       ['work', 'message', 'work'], `claimed=${claimed}: the forged snapshot cannot be carried`)
     assert.deepEqual(kindsOf(projectCompact(folder.messages(), noOptions)),
@@ -1717,10 +1830,10 @@ test('a proven same-turn subagent settlement Notice is carried by the same Work 
   assert.equal(notice.contextPresentation?.sourceKind, 'subagent-settled')
   assert.equal(notice.contextPresentation?.sameTurnNextStep, true,
     'the fold records the durable same-turn next-step provenance')
-  assert.equal(isWorkingSubagentSettledNotice(notice), true)
+  const structure = projectTranscriptStructure(messages)
+  assert.equal(workContextCarriageOf(notice, clusterByMemberOf(structure)), 'work')
   assert.equal(notice.text, 'SETTLED_BODY', 'the producer body is untouched')
   assert.equal(notice.summary, 'child completed', 'the producer summary is untouched')
-  const structure = projectTranscriptStructure(messages)
   assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
   const span = onlySpan(structure)
   assert.equal(span.members.includes(notice), true,
@@ -1896,6 +2009,33 @@ test('a settlement Notice only qualifies through the exact same-turn next-step c
   ])
   const crossedNotice = crossed.messages().find(message => message.kind === 'system')
   assert.ok(crossedNotice !== undefined && crossedNotice.kind === 'system')
-  assert.equal(crossedNotice.contextPresentation?.sameTurnNextStep, undefined,
-    'a crossed source/form pair is never the settlement delivery')
+  assert.equal(crossedNotice.contextPresentation?.sameTurnNextStep, true,
+    'delivery is proven, but a crossed source/form pair is never carried')
+})
+
+test('a complete catalog update never bridges a hard boundary or mints a Work', () => {
+  const boundaries: ReadonlyArray<readonly [string, TranscriptMessage]> = [
+    ['user steer', user(0, 'steer')],
+    ['settled interaction', { kind: 'tool', turn: 0, name: 'ask_user_question', args: '{}', result: 'ok', status: 'ok' }],
+    ['compaction', { kind: 'compaction', turn: 0, text: 'compaction summary', items: 1, tokens: 10 }],
+    ['command', {
+      kind: 'command',
+      commandId: 'catalog-fence-command' as never,
+      seq: 1 as never,
+      time: 1000,
+      name: 'model',
+      args: 'switch',
+      outcome: { kind: 'success', text: 'ok' },
+    }],
+    ['assistant', assistant(0, 'intermediate answer')],
+  ]
+  for (const [label, boundary] of boundaries) {
+    const catalog = catalogUpdate()
+    const structure = projectTranscriptStructure([thinking(0), tool(0), boundary, catalog, tool(0)])
+    assert.deepEqual(structure.map(block => block.kind), ['work', 'message', 'message', 'work'],
+      `${label}: the update starts nothing and bridges nothing`)
+    for (const block of structure) {
+      if (block.kind === 'work') assert.equal(block.span.members.includes(catalog), false, `${label}: never a Work member`)
+    }
+  }
 })
