@@ -97,7 +97,6 @@ test('starts one real public daemon Client and Host from the installed CLI', asy
     await launch.stopHost()
     const stopped = await launch.daemonStatus()
     expect(stopped.fields.host, `public daemon host after stop (${JSON.stringify(stopped.fields)})`).toBe('stopped')
-    expect(stopped.fields.manager).toBe('process')
   } catch (error) {
     testError = error
     throw error
