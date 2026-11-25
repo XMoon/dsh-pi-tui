@@ -282,16 +282,16 @@ function durableFileOf(message) {
  */
 async function primeOutputTuiFile(session) {
   const { context, tui, sessionId } = session
-  const dir = join(context.workDir, 'sdk-output-client-files')
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
   const bytes = deterministicFileBytes(41)
   const digest = hash(bytes)
-  const name = 'PR4D 附件 input.bin'
-  const path = join(dir, name)
+  const path = join(session.workspace, 't.bin')
   writeFileSync(path, bytes, { mode: 0o600 })
   const marker = `po4d-tui-file-${String(process.pid)}`
   const before = (hostSessionEvents(context.dshHome, sessionId) ?? []).length
-  tui.send(`/attach "${path}"`)
+  await waitForComposer(tui, '❯', 'PR4D TUI composer ready')
+  // A short Client-cwd-relative path keeps the real editor line visible; the
+  // official intake still stores the sanitized leaf name.
+  tui.send('/attach t.bin')
   tui.send('\r')
   await waitForComposer(tui, '[file #', 'PR4D TUI attach staged the Client-local file')
   tui.send(` ${marker}`)
