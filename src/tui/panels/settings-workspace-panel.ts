@@ -3831,9 +3831,11 @@ export class SettingsWorkspacePanel implements Component {
             lines.push(line)
           }
           if (status.reason !== undefined) {
+            const reason = escapedPhysicalLine(status.reason).trim()
+            const sentence = /[.!?]$/u.test(reason) ? reason : `${reason}.`
             const detail = status.unknown === true
-              ? `The change may have been saved. Refresh and check. ${escapedPhysicalLine(status.reason)}`
-              : escapedPhysicalLine(status.reason)
+              ? `The change may have been saved. Refresh and check. ${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}`
+              : reason
             for (const line of wrapTextWithAnsi(color.textDim(detail), Math.max(1, width))) lines.push(line)
           }
         } else {

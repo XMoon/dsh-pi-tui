@@ -355,6 +355,7 @@ test('a lost toggle receipt is Could not confirm change and is never retried', a
   assert.deepEqual(h.writes(), [true], 'exactly one dispatch')
   assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.match(h.frame(), /the Host may have applied the request/u)
+  assert.match(h.frame(), /The connection dropped after dispatch; the Host may have applied the request\. Refresh and check\./u)
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'no automatic retry')
   h.close()
@@ -593,7 +594,7 @@ test('a throwing commit is an honest unconfirmed outcome', async () => {
   await h.key('\r') // Confirm save
   await h.flush()
   assert.match(h.frame(), /Status\s+Could not confirm save/u)
-  assert.match(h.frame(), /the writer crashed/u)
+  assert.match(h.frame(), /the writer crashed/iu)
   h.close()
 })
 

@@ -1315,6 +1315,8 @@ test('an unknown Web receipt keeps B\'s own Off value and stays Could not confir
   await settle(h, 'the unknown Web receipt', frame => /Status\s+Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Status\s+Could not save/u)
   assert.doesNotMatch(h.view(), /Status\s+Saved/u)
+  assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
+  assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1)
   const calls = h.remote!.calls().filter(call => call.ns === 'pi-tui-web-preferences')
   assert.equal(calls.length, 1, 'exactly the A request, never replayed')
   assert.equal(calls[0]!.destination, 'A')
@@ -1338,6 +1340,9 @@ test('an unknown Backend receipt keeps B\'s own Direct value and stays Could not
   await settle(h, 'the unknown Backend receipt', frame => /Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Could not save/u)
   assert.doesNotMatch(h.view(), /\bSaved\b/u)
+  assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
+  assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1)
+  assert.doesNotMatch(h.view(), /Status\s+Could not confirm save/u, 'the Root scalar has no Status label')
   assert.deepEqual(h.backendTransitions(), [], 'an unknown outcome records no exit intent')
   const calls = h.remote!.calls().filter(call => call.ns === 'tui-startup')
   assert.equal(calls.length, 1, 'exactly the A request, never replayed')
@@ -1362,6 +1367,9 @@ test('an unknown Visual tools receipt keeps B\'s own On value and stays Could no
   await settle(h, 'the unknown Visual tools receipt', frame => /Could not confirm save/u.test(frame))
   assert.doesNotMatch(h.view(), /Could not save/u)
   assert.doesNotMatch(h.view(), /\bSaved\b/u)
+  assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
+  assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1)
+  assert.doesNotMatch(h.view(), /Status\s+Could not confirm save/u, 'the Root scalar has no Status label')
   const calls = h.remote!.calls().filter(call => call.ns === 'pi-tui-visual-tools')
   assert.equal(calls.length, 1, 'exactly the A request, never replayed')
   assert.equal(calls[0]!.destination, 'A')
@@ -1419,6 +1427,12 @@ test('an accepted but unapplied write is Could not confirm save on all three rea
     assert.doesNotMatch(h.view(), /Status\s+Could not save/u, 'an accepted mismatch is never a refusal')
     assert.doesNotMatch(h.view(), /Status\s+Saved/u)
     const calls = h.remote!.calls().filter(call => call.ns === item.ns)
+    assert.match(h.view(), /The change may have been saved\. Refresh and check\./u)
+    assert.equal((h.view().match(/The change may have been saved\. Refresh and check\./gu) ?? []).length, 1,
+      'the recovery sentence is projected once')
+    if (item.ns !== 'pi-tui-web-preferences') {
+      assert.doesNotMatch(h.view(), /Status\s+Could not confirm save/u, 'the Root scalar has no Status label')
+    }
     assert.equal(calls.length, 1, 'one invocation on the same authority')
     assert.equal(calls[0]!.destination, 'A')
     if (item.ns === 'tui-startup') {

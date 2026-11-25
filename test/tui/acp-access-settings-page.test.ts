@@ -428,7 +428,7 @@ test('a Host replacement DURING the preflight is a definitive zero-write Not cha
   assert.deepEqual(h.writes(), [], 'ZERO Host writes were invoked before the preflight settled')
   assert.match(h.frame(), /Status\s+Not changed/u, 'a pre-dispatch abort is definitive, never unconfirmed')
   assert.match(h.frame(), /the Host changed before the request was sent/u)
-  assert.doesNotMatch(h.frame(), /Outcome unconfirmed/u)
+  assert.doesNotMatch(h.frame(), /Could not confirm change/u)
   // The stale preflight reply is discarded and the CURRENT Host is read.
   h.resolveRead(0, { state: 'disabled' })
   await h.flush()
@@ -637,7 +637,7 @@ test('a throwing preference writer is an honest unconfirmed outcome', async () =
   await h.key('\r')
   await h.flush()
   assert.match(h.frame(), /Status\s+Could not confirm save/u)
-  assert.match(h.frame(), /the writer crashed/u)
+  assert.match(h.frame(), /the writer crashed/iu)
   h.close()
 })
 
@@ -843,7 +843,7 @@ test('a preference write accepted without an agreeing readback is Could not conf
   await h.key('\r')
   await h.flush()
   assert.match(h.frame(), /Status\s+Could not confirm save/u)
-  assert.match(h.frame(), /the readback disagrees/u)
+  assert.match(h.frame(), /the readback disagrees/iu)
   h.close()
 })
 

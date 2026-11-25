@@ -1196,6 +1196,8 @@ test('a real Settings Confirm drives the Host registry and the next model reques
     () => ui.vt.waitForRender(),
     'the Settings Confirm Off must settle as Verified',
   )
+  assert.doesNotMatch(ui.vt.getViewport().join('\n'), /Status\s+Saved/u,
+    'the Root scalar paints the short feedback without the Status label')
 
   // The UI decision reached the real Host configuration and registry.
   assert.equal(port.visualTools.read()?.enabled, false)
@@ -1227,6 +1229,8 @@ test('a real Settings Confirm drives the Host registry and the next model reques
     () => ui.vt.waitForRender(),
     'the Settings Confirm On must settle as Verified',
   )
+  assert.doesNotMatch(ui.vt.getViewport().join('\n'), /Status\s+Saved/u,
+    'the Root scalar paints the short feedback without the Status label')
   assert.equal(port.visualTools.read()?.enabled, true)
   assert.equal(port.visualTools.read()?.applied, true)
   assert.notEqual(ctx.tools.get(CHART_TOOL_NAME), undefined)

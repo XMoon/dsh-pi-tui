@@ -217,7 +217,7 @@ function configOutcomeNote(outcome: SettingsWorkspaceCommitOutcome): OutcomeNote
       return {
         word: 'Could not confirm save',
         tone: 'warning',
-        detail: outcome.reason === undefined ? recovery : `${recovery} ${outcome.reason}`,
+        detail: outcome.reason === undefined ? recovery : `${recovery} ${asSentence(outcome.reason)}`,
       }
     }
   }
@@ -226,7 +226,15 @@ function configOutcomeNote(outcome: SettingsWorkspaceCommitOutcome): OutcomeNote
 /** A dispatched RUNTIME change whose settlement cannot be attributed. It is
  *  never a `Saved`/`Not saved` claim: the Host may have applied it. */
 function unconfirmedChange(detail: string): OutcomeNote {
-  return { word: 'Could not confirm change', tone: 'warning', detail: `${detail} Refresh and check.` }
+  return { word: 'Could not confirm change', tone: 'warning', detail: `${asSentence(detail)} Refresh and check.` }
+}
+
+/** Join an external/error reason as a complete sentence before appending the
+ *  fixed recovery line, so the two never form a run-on. */
+function asSentence(text: string): string {
+  const trimmed = text.trim()
+  const ended = /[.!?]$/u.test(trimmed) ? trimmed : `${trimmed}.`
+  return ended.charAt(0).toUpperCase() + ended.slice(1)
 }
 
 function fit(text: string, width: number): string {
