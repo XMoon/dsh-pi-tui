@@ -301,6 +301,22 @@ export interface PublicDaemonState {
   rows?: number
 }
 
+export interface PublicDaemonKernelState {
+  launchId: string
+  label: string
+  exited: boolean
+  closed: boolean
+  exitCode: number | null
+  exitSignal: string | null
+  cliState: string
+  clientState: string
+  hostState: string
+  cliPid: number | null
+  clientPid: number | null
+  hostPid: number | null
+  hostInstanceId: string | null
+}
+
 export interface PublicDaemonStatusFacts {
   exit: { code: number | null; signal: string | null }
   fields: Record<string, string>
@@ -330,6 +346,8 @@ export interface PublicDaemonLaunch {
   submit(text?: string): Promise<void>
   text(options?: { full?: boolean }): Promise<string>
   state(): Promise<PublicDaemonState>
+  /** Kernel-only identity states, readable after the native terminal died. */
+  kernelState(): Promise<PublicDaemonKernelState>
   waitForExit(timeoutMs?: number): Promise<{ code: number | null; signal: string | null; text: string }>
   close(): Promise<PublicDaemonLaunchFacts>
   /** Failure teardown: close the native PTY and prove the kernel terminal. */
@@ -995,6 +1013,10 @@ class PublicDaemon implements PublicDaemonLaunch {
 
   async state(): Promise<PublicDaemonState> {
     return await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_STATE', {}) as PublicDaemonState
+  }
+
+  async kernelState(): Promise<PublicDaemonKernelState> {
+    return await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_KERNEL_STATE', {}) as PublicDaemonKernelState
   }
 
   async waitForExit(timeoutMs = 120_000): Promise<{ code: number | null; signal: string | null; text: string }> {

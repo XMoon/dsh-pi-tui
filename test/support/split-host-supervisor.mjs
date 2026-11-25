@@ -6805,6 +6805,26 @@ async function handlePublicDaemonInput(message) {
   return { ok: true }
 }
 
+async function handlePublicDaemonKernelState(message) {
+  requireProcessScene('PUBLIC_DAEMON_KERNEL_STATE')
+  const handle = publicLaunchById(message.launchId, 'PUBLIC_DAEMON_KERNEL_STATE')
+  return {
+    launchId: handle.launchId,
+    label: handle.label,
+    exited: handle.exited === true,
+    closed: handle.closed === true,
+    exitCode: handle.exitResult?.code ?? null,
+    exitSignal: handle.exitResult?.signal ?? null,
+    cliState: publicIdentityState(handle.cli),
+    clientState: publicIdentityState(handle.client),
+    hostState: handle.host === undefined ? 'unknown' : publicIdentityState(handle.host),
+    cliPid: handle.cli?.pid ?? null,
+    clientPid: handle.client?.pid ?? null,
+    hostPid: handle.host?.pid ?? null,
+    hostInstanceId: handle.host?.instanceId ?? null,
+  }
+}
+
 async function handlePublicDaemonText(message) {
   const handle = requirePublicDaemonRequest(message, 'PUBLIC_DAEMON_TEXT')
   const full = message.full === true
@@ -9993,6 +10013,11 @@ async function dispatch(message) {
       }
       case 'PUBLIC_DAEMON_INPUT': {
         const payload = await handlePublicDaemonInput(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PUBLIC_DAEMON_KERNEL_STATE': {
+        const payload = await handlePublicDaemonKernelState(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }

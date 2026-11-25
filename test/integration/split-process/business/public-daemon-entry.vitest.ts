@@ -352,6 +352,120 @@ test.skipIf(!linuxOnly)('applies --preset minimal to the first public Session he
   }
 })
 
+test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after the other Client leaves', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  let testError: unknown
+  try {
+    const first = await scene.startPublicDaemon({ label: 'peer-first', backend: 'daemon' })
+    launches.push(first)
+    await waitForFrame(first, '❯', 'first peer composer')
+    const before = new Set(await scene.sessionIds())
+    await first.submit('peer session seed')
+    const sessionId = await scene.waitForNewSessionId(before, 'peer Session')
+    await scene.waitForSessionEvent(sessionId, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'peer seed answer')
+    await scene.waitForSessionEvent(sessionId, 0, event => event.type === 'turn/end', 'peer seed turn end')
+    const seededEvents = scene.sessionEvents(sessionId) ?? []
+    const seededTurns = seededEvents
+      .filter(event => event.type === 'turn/end')
+      .map(event => Number(event.data?.turn))
+      .filter(Number.isInteger)
+    const lastTurn = seededTurns.length === 0 ? 1 : Math.max(...seededTurns)
+    const expectedSessions = [...before, sessionId].sort()
+
+    const second = await scene.startPublicDaemon({
+      label: 'peer-second',
+      backend: 'daemon',
+      args: { session: sessionId },
+    })
+    launches.push(second)
+    await waitForFrame(second, 'peer session seed', 'the second peer opened the same Session')
+    expect(second.host?.instanceId, 'both public Clients authenticate one Host').toBe(first.host?.instanceId)
+    expect(second.host?.pid).toBe(first.host?.pid)
+    expect((await second.kernelState()).hostState, 'the shared Host is live').toBe('alive')
+
+    await first.signalCli()
+    let cliGoneAt: number | undefined
+    let clientGoneAt: number | undefined
+    const started = Date.now()
+    for (;;) {
+      const state = await first.kernelState()
+      if (cliGoneAt === undefined && (state.cliState === 'gone' || state.cliState === 'reused')) {
+        cliGoneAt = Date.now()
+      }
+      if (clientGoneAt === undefined && (state.clientState === 'gone' || state.clientState === 'reused')) {
+        clientGoneAt = Date.now()
+      }
+      if (cliGoneAt !== undefined && clientGoneAt !== undefined) break
+      if (Date.now() - started >= 120_000) {
+        throw new Error(`the TERM'd public CLI/Client did not reach terminal facts: ${JSON.stringify(state)}`)
+      }
+      await sleep(50)
+    }
+    expect(clientGoneAt, 'the foreground Client exits no later than its CLI settles').toBeLessThanOrEqual(cliGoneAt)
+    const surviving = await second.kernelState()
+    expect(surviving.hostState, 'the Host survives the peer CLI TERM').toBe('alive')
+    expect(surviving.clientState, 'the surviving Client stays live').toBe('alive')
+    expect(surviving.hostInstanceId).toBe(first.host?.instanceId)
+    await first.reclaim()
+    await waitForFrame(second, 'peer session seed', 'the surviving peer keeps the Session history')
+
+    const eventBoundary = (scene.sessionEvents(sessionId) ?? []).length
+    await second.submit('peer survives the detach')
+    await scene.waitForSessionEvent(sessionId, eventBoundary,
+      event => event.type === 'user/message' && JSON.stringify(event.data ?? {}).includes('peer survives the detach'),
+      'the surviving peer committed exactly one user prompt')
+    await scene.waitForSessionEvent(sessionId, eventBoundary,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'the surviving peer completed the new Turn')
+    await scene.waitForSessionEvent(sessionId, eventBoundary,
+      event => event.type === 'turn/end' && event.data?.turn === lastTurn + 1,
+      'the surviving peer settled the next Turn')
+    await waitForFrame(second, 'peer survives the detach', 'the surviving peer painted the new prompt')
+    await waitForFrame(second, 'stub answer', 'the surviving peer painted the new answer')
+
+    const newEvents = (scene.sessionEvents(sessionId) ?? []).slice(eventBoundary)
+    expect(newEvents.filter(event => event.type === 'user/message'
+      && JSON.stringify(event.data ?? {}).includes('peer survives the detach')),
+    'the new prompt is committed exactly once').toHaveLength(1)
+    expect(newEvents.filter(event => event.type === 'turn/start' && event.data?.turn === lastTurn + 1),
+      'the new Turn starts exactly once').toHaveLength(1)
+    expect(newEvents.filter(event => event.type === 'turn/end' && event.data?.turn === lastTurn + 1),
+      'the new Turn ends exactly once').toHaveLength(1)
+    expect([...(await scene.sessionIds())].sort(), 'the peer turn created no other Session').toEqual(expectedSessions)
+
+    await exitPublicLaunch(second, 'surviving peer')
+    await second.stopHost()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the public peer test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the public peer test cleanup failed')
+    }
+  }
+})
+
 test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
