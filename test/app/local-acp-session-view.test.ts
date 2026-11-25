@@ -5850,6 +5850,7 @@ function projectionView(
     readonly history?: AcpSessionHistory
     readonly mcpServers?: readonly unknown[]
     readonly channels?: Partial<AcpViewChannels>
+    readonly diag?: Diag
   } = {},
 ): {
   access: FakeAccess
@@ -5871,7 +5872,7 @@ function projectionView(
   const agent = makeAgent(sessionId, '/w')
   access.seed(agent)
   access.sessionHistory = options.history ?? { header: { sessionId, cwd: '/w' }, events: [] }
-  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const registry = new AcpSessionViewRegistry(options.diag ?? QUIET_DIAG)
   registry.bindAccess(access)
   const conn = registry.createConnection()
   const notifications: SessionUpdate[] = []
@@ -8211,7 +8212,6 @@ test('PR4D: a NON-COOPERATIVE late prompt-file success never reaches the closed 
       if (update.sessionUpdate !== 'available_commands_update') next.push(update)
     },
   })
-  await new Promise(resolve => setTimeout(resolve, 10))
   assert.deepEqual(next, [], 'the new claim receives no late old-flight content')
   await view.registry.closeSession(nextConn, view.access, 'PF17')
 })
@@ -8306,7 +8306,15 @@ test('PR4D R2: a proven child file is charged after lineage and before associati
 })
 
 test('PR4D R2: a live oversize child message drops without association, then a legal message still works', async () => {
-  const view = projectionView('PF-R2L', { channels: { maxOutputFrameBytes: 8 } })
+  const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    debug: () => {},
+    info: () => {},
+    warn: (message, fields) => { warnings.push({ message, fields }) },
+    error: () => {},
+    dispose: () => {},
+  }
+  const view = projectionView('PF-R2L', { channels: { maxOutputFrameBytes: 8 }, diag })
   await view.resume()
   view.notifications.length = 0
   view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF-R2L', cwd: '/w' }
@@ -8317,7 +8325,8 @@ test('PR4D R2: a live oversize child message drops without association, then a l
     content: [fileBlock(FILE_ID, 'big.bin', 30)],
     role: 'user',
   })
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await waitUntil(() => warnings.some(warning => warning.message === 'local-acp.projection.failed'
+    && warning.fields?.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'), 'the budget failure is reported safely')
   assert.equal(view.notifications.length, 0, 'the oversize live message announces no child and sends nothing')
   assert.equal(view.access.fileReadCalls.length, 0)
   view.commit('user/message', {
@@ -8378,4 +8387,62 @@ test('PR4D R3: a file-bearing tool result that fails only at EOF fails the promp
   assert.equal(view.notifications.some(update => updateKind(update) === 'tool_call_update'), false,
     'no partial tool_call_update escapes before EOF verification')
   assert.equal(view.access.fileReadCalls.length, 1)
+})
+
+test('PR4D R3 A5: an ordinary-live child file EOF drops only that message, reports a safe diagnostic, and the View keeps working', async () => {
+  const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    debug: () => {},
+    info: () => {},
+    warn: (message, fields) => { warnings.push({ message, fields }) },
+    error: () => {},
+    dispose: () => {},
+  }
+  const view = projectionView('PF-LIVE-EOF', { channels: { maxOutputFrameBytes: 64 }, diag })
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF-LIVE-EOF', cwd: '/w' }
+  const defaultRead = view.access.fileReadImpl
+  // Natural EOF, not close/abort: the bytes look complete, then the Store's
+  // final verification throws. The live path must drop only this message.
+  view.access.fileReadImpl = () => (async function* brokenLiveFile() {
+    yield FILE_BYTES
+    throw new Error('private store verification detail')
+  })()
+  view.commit('user/message', {
+    id: 'am-live-eof',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'this one fails' }, fileBlock()],
+    role: 'user',
+  })
+  await waitUntil(() => warnings.some(warning => warning.message === 'local-acp.projection.attachment-failed'
+    && warning.fields?.key === 'session_message'), 'the live EOF failure is reported safely')
+  assert.equal(JSON.stringify(warnings).includes('private store verification detail'), false,
+    'the safe diagnostic never carries the raw exception')
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'the failed live message is not partially emitted')
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'subagent_update'), true,
+    'the already-proven child association is allowed before the failed read')
+
+  // The ordered successor proves the View and its claim survived: a later legal
+  // child file through the SAME View must arrive with its exact identity.
+  view.access.fileReadImpl = defaultRead
+  const okBytes = Uint8Array.of(9, 8, 7)
+  view.access.storedFiles.set(FILE_ID_B, okBytes)
+  view.commit('user/message', {
+    id: 'am-live-ok-after-eof',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [fileBlock(FILE_ID_B, 'ok.bin', okBytes.byteLength)],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.some(update => update.sessionUpdate === 'session_message'
+    && (update as { messageId?: string }).messageId === 'am-live-ok-after-eof'),
+  'the later legal child file reaches the same View')
+  const messages = view.notifications.filter(update => update.sessionUpdate === 'session_message')
+  assert.equal(messages.length, 1, 'only the later legal message is emitted')
+  const content = (messages[0] as { content?: readonly Record<string, unknown>[] }).content
+  const resource = content?.[0]?.resource as { uri?: string; blob?: string } | undefined
+  assert.equal(resource?.uri, `dsh-attachment://sha256/${'b'.repeat(64)}/ok.bin`)
+  assert.equal(resource?.blob, Buffer.from(okBytes).toString('base64'))
+  assert.equal(view.registry.hasClaim('PF-LIVE-EOF'), true, 'the View/claim stays live after the drop')
 })
