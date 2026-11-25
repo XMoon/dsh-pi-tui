@@ -5474,7 +5474,11 @@ async function handleCloseProcessClient(message) {
     try {
       await withProcessNativeOperation('client-close-native', handle.clientId, () => handle.terminal.closeQuiet())
     } catch (error) {
-      failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close and native teardown both failed`)
+      // The native child already reached its declared exit. tui-test may have
+      // removed that session itself; only a still-open session is a cleanup
+      // failure. A missing session is the terminal fact, not a second defect.
+      const stillOpen = new Set(await openTuiSessions()).has(handle.sessionId)
+      if (stillOpen) failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close and native teardown both failed`)
     }
     try {
       await assertProcessClientQuiesced(handle, 'CLOSE_PROCESS_CLIENT')
@@ -5572,7 +5576,8 @@ async function reclaimProcessClient(handle, reason) {
       try {
         await withProcessNativeOperation('client-reclaim', handle.clientId, () => handle.terminal.closeQuiet())
       } catch (error) {
-        failure = error
+        const stillOpen = new Set(await openTuiSessions()).has(handle.sessionId)
+        if (stillOpen) failure = error
       }
     }
     if (handle.terminalMode === 'terminal-owner-loss') {
