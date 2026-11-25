@@ -7001,7 +7001,7 @@ async function handlePublicDaemonHeadless(message) {
   if (message.backend !== 'daemon') throw new Error('INPUT_UNQUALIFIED: PUBLIC_DAEMON_HEADLESS only exercises the daemon backend')
   const built = publicCliArgs({ args: message.args ?? {} }, 'pi-tui')
   const helper = await runTrackedOnce(scene.installation.dshInvocation,
-    [...scene.installation.dshInvocation.slice(1), ...built.argv],
+    built.argv,
     scene.installation.profileDir,
     { ...scene.installation.env, DSH_PI_TUI_BACKEND: 'daemon' },
     `${label} headless daemon refusal`,
