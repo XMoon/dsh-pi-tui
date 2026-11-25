@@ -32,6 +32,10 @@ interface PageHarnessOptions {
   readonly commitFailure?: string
   readonly copy?: boolean
   readonly urlFailure?: string
+  /** The Client opener throws (it may echo the URL). */
+  readonly openerFailure?: string
+  /** The Client clipboard rejects (it may echo the URL). */
+  readonly clipboardFailure?: string
   /** Hold the official URL reply until `releaseUrl()`: the Host-replacement
    *  window between the RPC settling and the Client sink. */
   readonly holdUrl?: boolean
@@ -56,6 +60,9 @@ interface PageHarness {
   readonly commits: () => readonly string[]
   readonly commitRevisions: () => readonly number[]
   readonly diagnoses: () => readonly { label: string; detail: Record<string, unknown> }[]
+  /** Every error the page let escape into the owned-task logger. A
+   *  credential-bearing failure must never appear here. */
+  readonly ownedErrors: () => readonly string[]
   readonly doneCalls: () => number
   readonly generation: { value: object | undefined }
   readonly bumpGeneration: () => void
@@ -92,6 +99,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   const commits: string[] = []
   const commitRevisions: number[] = []
   const diagnoses: { label: string; detail: Record<string, unknown> }[] = []
+  const ownedErrors: string[] = []
   let doneCalls = 0
   let pageRef: WebUiSettingsPage | undefined
   let heldToggle: (() => void) | undefined
@@ -128,8 +136,16 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       if (options.holdUrl === true) await new Promise<void>(resolve => { heldUrl = resolve })
       return { url: 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN' }
     },
-    openUrl: (url) => { opened.push(url); return true },
-    copyToClipboard: async (text) => { copied.push(text); return options.copy ?? true },
+    openUrl: (url) => {
+      if (options.openerFailure !== undefined) throw new Error(options.openerFailure)
+      opened.push(url)
+      return true
+    },
+    copyToClipboard: async (text) => {
+      if (options.clipboardFailure !== undefined) throw new Error(options.clipboardFailure)
+      copied.push(text)
+      return options.copy ?? true
+    },
     readPreference: () => preference,
     configReadiness: () => readiness,
     commitAutostart: async (value, revision) => {
@@ -144,7 +160,10 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       return () => { listeners.delete(listener) }
     },
     runOwned: (_label, task, onError) => {
-      const promise = Promise.resolve().then(task).catch((error: unknown) => { onError(error) })
+      const promise = Promise.resolve().then(task).catch((error: unknown) => {
+        ownedErrors.push(error instanceof Error ? error.message : String(error))
+        onError(error)
+      })
       tasks.push(promise)
     },
     diagnose: (label, detail) => { diagnoses.push({ label, detail }) },
@@ -178,6 +197,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     commits: () => commits,
     commitRevisions: () => commitRevisions,
     diagnoses: () => diagnoses,
+    ownedErrors: () => ownedErrors,
     doneCalls: () => doneCalls,
     generation,
     bumpGeneration: () => {
@@ -253,10 +273,7 @@ test('the Esc ladder cancels a confirmation before leaving, and leaves no write 
 
 test('the next-start candidate ladder stages zero writes and saves only on Confirm save', async () => {
   const h = await mount({ status: { state: 'enabled' } })
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Disable -> Start automatically
-  assert.match(h.frame(), /^> Start automatically/mu)
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidate choice
   assert.match(h.frame(), /Choose the value the next Host start applies:/u)
   assert.match(h.frame(), /Off\s+\[current\]/u, 'the current candidate carries the whole state chip')
@@ -344,11 +361,14 @@ test('the launch URL is requested only by an explicit Open/Copy and never painte
 })
 
 test('a refused URL or clipboard is an honest error, never a fake success', async () => {
-  const refused = await mount({ status: { state: 'enabled' }, urlFailure: 'the Host refused the link' })
+  const refused = await mount({ status: { state: 'enabled' }, urlFailure: 'the Host refused the link for http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN' })
   await refused.key('\r')
   await refused.flush()
   assert.match(refused.frame(), /Status\s+Open failed/u)
-  assert.match(refused.frame(), /the Host refused the link/u)
+  assert.match(refused.frame(), /The access link could not be obtained or handed over\./u,
+    'a credential-bearing failure is a fixed safe fact')
+  assert.doesNotMatch(refused.frame(), /the Host refused the link|SECRET-LAUNCH-TOKEN/u,
+    'the original message, its cause and the URL are never painted')
   refused.close()
   const noClipboard = await mount({ status: { state: 'enabled' }, copy: false })
   await noClipboard.key('\x1b[B')
@@ -380,9 +400,7 @@ test('a short grant keeps ONE scrollable column and the Esc affordance', async (
 
 test('a committed preference re-reads the persisted value, never the requested one', async () => {
   const h = await mount({ status: { state: 'enabled' } })
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates
   await h.key('\r') // confirm step
   await h.key('\r') // Confirm save
@@ -469,9 +487,7 @@ test('a status reply from a superseded generation is never painted as current', 
 test('a Host rollover revokes the next-start edit grant taken from the old Config mirror', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   // Stage the confirmation through the page's own ladder (zero writes so far).
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidate choice
   await h.key('\r') // -> confirm-save
   assert.match(h.frame(), /Save the next Host start preference as On\?/u)
@@ -503,7 +519,7 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
   // fixture writer refuses any other revision.
   for (let step = 0; step < 8 && !/^> Open in browser/mu.test(h.frame()); step += 1) await h.key('\x1b[B')
   assert.match(h.frame(), /^> Open in browser/mu, 'the focus is deterministic before the staged change')
-  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B') // Open -> Copy -> Disable -> Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates: the OPPOSITE of the persisted On is staged (Off)
   await h.key('\r') // -> confirm-save
   await h.key('\r') // Confirm save
@@ -517,9 +533,7 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
 test('a same-generation Config update refuses the staged confirmation instead of rebasing its revision', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   // Stage the confirmation at revision 1.
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates
   await h.key('\r') // -> confirm-save
   assert.match(h.frame(), /Save the next Host start preference as On\?/u)
@@ -535,7 +549,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
   // A NEW choice is opened at the CURRENT revision and succeeds.
   for (let step = 0; step < 8 && !/^> Open in browser/mu.test(h.frame()); step += 1) await h.key('\x1b[B')
-  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B')
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates: the OPPOSITE of On is staged (Off)
   await h.key('\r') // -> confirm-save
   await h.key('\r') // Confirm save
@@ -548,14 +562,217 @@ test('a same-generation Config update refuses the staged confirmation instead of
 
 test('a throwing commit is an honest unconfirmed outcome', async () => {
   const h = await mount({ status: { state: 'enabled' }, commitFailure: 'the writer crashed' })
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates
   await h.key('\r') // confirm step
   await h.key('\r') // Confirm save
   await h.flush()
   assert.match(h.frame(), /Status\s+Outcome unconfirmed/u)
   assert.match(h.frame(), /the writer crashed/u)
+  h.close()
+})
+
+// ── SUX-04: complete-span pointer admission, risk completeness, safe failures ─
+
+/** One painted body row of the page harness (0-based terminal row). */
+function rowOfPlain(h: PageHarness, needle: string): number {
+  const row = h.frame().split('\n').findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the painted frame must contain ${JSON.stringify(needle)}:\n${h.frame()}`)
+  return row
+}
+
+/** The cell column of the first painted occurrence of `needle`. */
+function colOfPlain(h: PageHarness, row: number, needle: string): number {
+  const line = h.frame().split('\n')[row]
+  assert.ok(line !== undefined, `row ${row} must be painted:\n${h.frame()}`)
+  const index = line.indexOf(needle)
+  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}: ${JSON.stringify(line)}`)
+  return index
+}
+
+const pressCell = (h: PageHarness, row: number, col: number): void => {
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+}
+const releaseCell = (h: PageHarness, row: number, col: number): void => {
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+}
+async function clickCell(h: PageHarness, row: number, col: number): Promise<void> {
+  pressCell(h, row, col)
+  await h.flush()
+  releaseCell(h, row, col)
+  await h.flush()
+}
+
+const flat = (text: string): string => text.replace(/\s+/gu, ' ')
+
+/** Move the page cursor onto `label` using the real Down key, stopping on the
+ *  semantic SELECTED row rather than a hardcoded count (Refresh is a real body
+ *  action in every normal ready/settled projection). */
+async function focusPaintedRow(h: PageHarness, label: string): Promise<void> {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  for (let step = 0; step < 16; step += 1) {
+    if (new RegExp(`^> ${escaped}(?:\\s|$)`, 'mu').test(h.frame())) return
+    await h.key('\x1b[B')
+  }
+  assert.fail(`the page row "${label}" never owned the selection:\n${h.frame()}`)
+}
+
+test('a complete verb is the only pointer action; the row padding only selects', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  const row = rowOfPlain(h, 'Copy access link')
+  // The blank tail of the row is a SELECT surface: it moves the cursor and
+  // never requests the link.
+  await clickCell(h, row, 95)
+  assert.match(h.frame(), /^> Copy access link/mu, 'the row click selects')
+  assert.equal(h.urlReads(), 0, 'the padding click never requests the official URL')
+  assert.deepEqual(h.copied(), [])
+  // The COMPLETE verb is the explicit Copy action.
+  await clickCell(h, row, colOfPlain(h, row, 'Copy access link'))
+  await h.flush()
+  assert.equal(h.urlReads(), 1, 'the complete verb requested the URL exactly once')
+  assert.deepEqual(h.copied(), ['http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'])
+  assert.doesNotMatch(h.frame(), /SECRET-LAUNCH-TOKEN/u)
+  h.close()
+})
+
+test('the next-start field row only selects; its complete Change… opens the choice', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  const fieldRow = rowOfPlain(h, 'Start automatically')
+  await clickCell(h, fieldRow, colOfPlain(h, fieldRow, 'Off (default)'))
+  assert.match(h.frame(), /^> Start automatically/mu, 'the field/value click selects')
+  assert.doesNotMatch(h.frame(), /Choose the value the next Host start applies:/u)
+  assert.equal(h.commits().length, 0)
+  const changeRow = rowOfPlain(h, 'Change…')
+  await clickCell(h, changeRow, colOfPlain(h, changeRow, 'Change…'))
+  await h.flush()
+  assert.match(h.frame(), /Choose the value the next Host start applies:/u,
+    'only the complete Change… affordance starts the choice')
+  assert.equal(h.commits().length, 0, 'opening the choice writes nothing')
+  h.close()
+})
+
+test('a short grant never admits the disable confirmation until its complete risk is painted', async () => {
+  const h = await mount({ status: { state: 'enabled' }, columns: 44, rows: 4 })
+  await h.key('\x1b[B') // Open in browser -> Copy access link
+  await h.key('\x1b[B') // -> Disable Web…
+  await h.key('\r') // enter the confirmation
+  // The grant shows only the risk tail/accept line; the necessary copy is NOT
+  // complete in the same frame, so the accept row is blank and inert.
+  assert.doesNotMatch(h.frame(), /Disable Web/u, 'the accept word is not painted')
+  assert.doesNotMatch(h.bar(), /Confirm/u, 'no Enter confirm is advertised')
+  assert.match(h.bar(), /Cancel \[Esc\]/u, 'the safe Cancel/Esc stays reachable')
+  await h.key('\r')
+  assert.equal(h.writes().length, 0, 'Enter on the blank accept performs no write')
+  // A taller grant plus a real scroll home makes the WHOLE risk copy share the
+  // painted viewport with the explicit accept row.
+  h.vt.resize(44, 8)
+  await h.flush()
+  await h.key('\x1b[H')
+  assert.match(flat(h.frame()), /Stop serving the Web UI\? Existing browser credentials and sessions are not revoked\./u)
+  assert.match(h.frame(), /^> Disable Web/mu)
+  await h.key('\r')
+  await h.flush()
+  h.releaseToggle()
+  await h.flush()
+  assert.deepEqual(h.writes(), [false], 'the recovered complete-risk confirmation dispatches exactly once')
+  h.close()
+})
+
+test('a press from one window never completes on a newer painted frame', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  const row = rowOfPlain(h, 'Disable Web…')
+  const col = colOfPlain(h, row, 'Disable Web…')
+  pressCell(h, row, col)
+  await h.flush()
+  // A keyboard gesture retires the armed press AND changes the painted frame.
+  await h.key('\x1b[B')
+  releaseCell(h, row, col)
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Stop serving the Web UI\?/u, 'the stale release never opens the confirmation')
+  assert.equal(h.writes().length, 0)
+  h.close()
+})
+
+test('credential-bearing link failures never reach the owned task logger or a painted cell', async () => {
+  const canary = 'CANARY-URL-LEAK-9f2c'
+  const url = await mount({ status: { state: 'enabled' }, urlFailure: `refused ${canary}` })
+  await url.key('\r')
+  await url.flush()
+  assert.equal(url.ownedErrors().length, 0, 'the raw credential error never reached the owned task logger')
+  assert.equal(url.diagnoses().length, 0)
+  assert.doesNotMatch(url.frame(), new RegExp(canary, 'u'))
+  assert.match(url.frame(), /Status\s+Open failed/u)
+  assert.match(flat(url.frame()), /The access link could not be obtained or handed over\./u)
+  assert.deepEqual(url.opened(), [], 'no URL reached the Client opener')
+  url.close()
+
+  const opener = await mount({ status: { state: 'enabled' }, openerFailure: `opener failed ${canary}` })
+  await opener.key('\r')
+  await opener.flush()
+  assert.equal(opener.ownedErrors().length, 0, 'an opener throw is contained at the credential boundary')
+  assert.doesNotMatch(opener.frame(), new RegExp(canary, 'u'))
+  assert.match(opener.frame(), /Status\s+Open failed/u)
+  opener.close()
+
+  const clipboard = await mount({ status: { state: 'enabled' }, clipboardFailure: `clipboard failed ${canary}` })
+  await clipboard.key('\x1b[B')
+  await clipboard.key('\r')
+  await clipboard.flush()
+  assert.equal(clipboard.ownedErrors().length, 0, 'a clipboard rejection is contained at the credential boundary')
+  assert.doesNotMatch(clipboard.frame(), new RegExp(canary, 'u'))
+  assert.match(clipboard.frame(), /Status\s+Clipboard unavailable/u)
+  assert.match(flat(clipboard.frame()), /The access link could not be obtained or handed over\./u)
+  clipboard.close()
+})
+
+
+test('the save confirmation requires its complete copy in the same frame and recovers by resize', async () => {
+  const h = await mount({ status: { state: 'enabled' }, columns: 44, rows: 30 })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r') // candidate choice
+  await h.key('\r') // stage On -> confirm-save
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  // A grant that cannot paint a required copy line together with the accept
+  // row must not expose the accept word or admit Enter.
+  h.vt.resize(44, 4)
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Confirm save/u, 'the accept word is not painted without its complete copy')
+  assert.doesNotMatch(h.bar(), /Confirm save/u)
+  await h.key('\r')
+  assert.equal(h.commits().length, 0, 'Enter on the gated accept writes nothing')
+  // Clicking the blank accept-line cells where the row WOULD be also writes
+  // nothing: the gated line publishes no target at all.
+  await clickCell(h, 2, 0)
+  assert.equal(h.commits().length, 0, 'a blank-cell click on the gated accept writes nothing')
+  // A sufficient grant plus a real scroll home restores the SAME accept span;
+  // a fresh POINTER accept then dispatches exactly once.
+  h.vt.resize(44, 8)
+  await h.flush()
+  await h.key('\x1b[H')
+  assert.match(h.frame(), /^> Confirm save/mu)
+  const acceptRow = rowOfPlain(h, 'Confirm save')
+  await clickCell(h, acceptRow, colOfPlain(h, acceptRow, 'Confirm save'))
+  await h.flush()
+  assert.deepEqual(h.commits(), ['On'], 'the recovered complete frame dispatches exactly once by pointer')
+  h.close()
+})
+
+test('a Host rollover retires a staged choice even when the new mirror keeps the same revision', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  // The replaced Host's live mirror happens to expose the SAME revision and the
+  // same value: the staged decision is still bound to the OLD authority.
+  h.setAuthority('ready', { autoStart: false, revision: 1, userOverridden: false })
+  h.bumpGeneration()
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Save the next Host start preference|Confirm save/u,
+    'the staged confirmation derived from the old Host is retired')
+  assert.match(h.frame(), /Start automatically\s+Off \(default\) · Change…/u, 'the new authority is adopted for review')
+  await h.key('\r') // Enter now belongs to the fresh page, not the retired intent
+  await h.flush()
+  assert.equal(h.commits().length, 0, 'the old intent never dispatches against the new Host')
   h.close()
 })

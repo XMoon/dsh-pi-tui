@@ -1971,9 +1971,9 @@ export class SettingsWorkspacePanel implements Component {
     // category, so it must be decided before the legacy panes project. While
     // it is mounted its hit map is the picker's own last-painted geometry and
     // the rows/detail panes publish nothing.
-    // SUX-01/02 EXCEPTION: a numeric Detail TENANT is hosted INSIDE the real
-    // Detail pane of the normal projection, so it keeps painting the parent rail
-    // and Rows. It never takes this full-width route.
+    // SUX-01/02/04 EXCEPTION: a Detail TENANT (numeric/Subagent/Web UI) is
+    // hosted INSIDE the real Detail pane of the normal projection, so it keeps
+    // painting the parent rail and Rows. It never takes this full-width route.
     if (this.specialistPage !== undefined && !this.detailTenantActive()) return this.renderSpecialistPage(plan)
     const lines: string[] = []
     const targets: HitTarget[] = []
@@ -3631,7 +3631,9 @@ export class SettingsWorkspacePanel implements Component {
       case 'shell-execution-settings':
         return this.intents.createHostNumericSettingsPage === undefined ? undefined : { label: 'Open…' }
       case 'web-ui':
-        return this.intents.createWebUiPage === undefined ? undefined : { label: 'Open Web UI…' }
+        // SUX-04: the Web UI page is a real Detail TENANT, so its ONE explicit
+        // entry uses the SAME `Open…` wording as the other hosted pages.
+        return this.intents.createWebUiPage === undefined ? undefined : { label: 'Open…' }
       case 'acp-access':
         return this.intents.createAcpAccessPage === undefined ? undefined : { label: 'Open ACP access…' }
     }
@@ -4238,11 +4240,13 @@ export class SettingsWorkspacePanel implements Component {
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
-    // SUX-01/02/03: a Detail tenant is hosted inside the REAL Detail pane, so it
-    // must be entered only when that pane really grants a content row — a body
-    // row that the pane header would consume is not enough.
+    // SUX-01/02/03/04: a Detail tenant is hosted inside the REAL Detail pane,
+    // so it must be entered only when that pane really grants a content row — a
+    // body row that the pane header would consume is not enough. The Web page's
+    // typed `/web` deeplink goes through this SAME floor, so it can never mount
+    // on the old full-width body grant.
     if (row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings'
-      || row.specialist === 'subagent-settings') {
+      || row.specialist === 'subagent-settings' || row.specialist === 'web-ui') {
       const plan = planSettingsChrome(
         this.projectionWidth(),
         this.intents.rows(),
@@ -4252,10 +4256,12 @@ export class SettingsWorkspacePanel implements Component {
       if (chromeGeometry(plan).contentRows < 1) return
     }
     // A grant that cannot paint the page's real content never starts it: the
-    // allowlist picker needs a candidate row and the Web page needs one real row
-    // (its list or its detail) above the single Action Bar. The two C2-R5 pages
-    // may be mounted with ZERO content rows (bar-only) because a command
-    // deeplink must still land on them and their own bar keeps Esc reachable.
+    // allowlist picker needs a candidate row and the Web Search / Fetch page
+    // needs one real row (its list or its detail) above the single Action Bar.
+    // The two C2-R5 pages may be mounted with ZERO content rows (bar-only)
+    // because a command deeplink must still land on them and their own bar keeps
+    // Esc reachable. The Detail tenants (Agent/Shell/Subagent/Web UI) already
+    // required a REAL content row above.
     const floor = row.specialist === 'subagent-settings'
       || row.specialist === 'agent-loop-settings'
       || row.specialist === 'shell-execution-settings'
@@ -4265,6 +4271,12 @@ export class SettingsWorkspacePanel implements Component {
         ? 1
         : 0
     if (this.bodyFloor() < floor) return
+    // SUX-04: a Detail TENANT is mounted into the Detail pane, so the keyboard
+    // focus must actually BE that pane. The row/Enter entry already transferred
+    // it via enterDetail; a typed `/web` deeplink opens the SAME tenant from the
+    // Rows level, so it lands here and must own the active device from its first
+    // frame instead of leaving the passive Rows header focused.
+    if (this.detailTenantRow(row)) this.focus = 'detail'
     let page: EmbeddedSpecialistPage | undefined
     // The page's own `done` closes THIS instance only: a stale late callback of a
     // retired page can never close a newer one (instance-identity fence).
@@ -4428,27 +4440,29 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  // ── the Detail tenants (Agent single / Shell group / Subagent group) ───────
+  // ── the Detail tenants (Agent single / Shell group / Subagent group / Web) ─
 
   /**
    * Whether the ONE mounted specialist is one of the real Detail TENANTS (the
-   * Agent single value, the Shell grouped fields or the Subagent grouped
-   * fields). The authority is the real mounted slot plus its row id — never
-   * the selected-but-not-entered row, the category, the terminal width or the
-   * mere presence of a factory.
+   * Agent single value, the Shell grouped fields, the Subagent grouped fields
+   * or the Web UI page). The authority is the real mounted slot plus its row id
+   * — never the selected-but-not-entered row, the category, the terminal width
+   * or the mere presence of a factory.
    */
   private detailTenantActive(): boolean {
     return this.specialistPage !== undefined
       && (this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution'
-        || this.specialistRow === 'subagent-settings')
+        || this.specialistRow === 'subagent-settings' || this.specialistRow === 'web-ui')
   }
 
   /** Whether this ROW's visible route is a hosted Detail tenant. It is the
    *  ENTRY-side question, while `singleAgentRow` below stays the Agent-only
    *  presentation fact. Each tenant's own factory is its presence proof: the
-   *  Subagent tenant never depends on the numeric factory. */
+   *  Subagent tenant never depends on the numeric factory, and the Web tenant
+   *  never depends on the Web Search / Fetch page's factory. */
   private detailTenantRow(row: SettingsWorkspaceRow | undefined): boolean {
     if (row?.specialist === 'subagent-settings') return this.intents.createSubagentSettingsPage !== undefined
+    if (row?.specialist === 'web-ui') return this.intents.createWebUiPage !== undefined
     if (this.intents.createHostNumericSettingsPage === undefined) return false
     return row?.specialist === 'agent-loop-settings' || row?.specialist === 'shell-execution-settings'
   }
@@ -5088,13 +5102,15 @@ export class SettingsWorkspacePanel implements Component {
         return
       }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
-      // SUX-01: a pure region-focus Tab exit of the clean Agent single value is
-      // the ROOT's own focus transaction, so it runs through the tenant's ONE
-      // leave gate first. A page that keeps the keys (raw input, disclosure,
-      // saving, dirty) refuses and then consumes the key as its own local input.
+      // SUX-01/04: a pure region-focus Tab exit of the clean Agent single value
+      // or the clean Web UI page is the ROOT's own focus transaction, so it
+      // runs through the tenant's ONE leave gate first. A page that keeps the
+      // keys (raw input, disclosure, saving, dirty, an open choice or a pending
+      // write) refuses and then consumes the key as its own local input.
       // SUX-02: the Shell group's Tab is a LOCAL field move and is never taken
       // by the Root — the child receives it (and refuses it at zero body rows).
-      if (this.detailTenantActive() && this.specialistRow === 'agent-loop'
+      if (this.detailTenantActive()
+        && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui')
         && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
         const tabForward = matchesKey(data, 'tab')
         // A narrow frame paints ONE region: there is no second region to focus.

@@ -959,25 +959,35 @@ scientific text are legal, and the browse paints the canonical number).
 ### Web UI page (Host)
 
 `/settings → Host → Web UI` — and the PiTui `/web` deep link — open ONE
-EMBEDDED SPECIALIST PAGE inside this same Settings lease. The page is the ONE
-Web frontend surface on PiTui: there is no separate Web overlay, no second
-screen and no second Settings workspace. The breadcrumb is
-`Settings · Host · Web UI`, the page owns its own body, and the Root keeps the
-shared chrome, the ONE physical last-row Action Bar and the `Esc` pointer
-target.
+EMBEDDED SPECIALIST PAGE inside this same Settings lease, and that page is a
+REAL DETAIL TENANT: it mounts inside the workspace's real Detail pane, so the
+parent Categories/Rows stay painted and readable while it holds the active
+device. The child owns only its Detail body cells; the Root keeps the shared
+chrome, the ONE physical last-row Action Bar and the ONE `Esc` pointer target.
+There is no separate Web overlay, no second screen and no second Settings
+workspace. The breadcrumb is `Settings · Host · Web UI`.
 
-Two authorities are painted side by side and are NEVER merged:
+The tenant and its authority are entered only through the Rows level's
+`Enter`/`Right` or the Detail preview's complete `Open…`; an ordinary row click
+only selects the row and a Detail blank/fact click only transfers the Detail
+column's focus. The mount requires a REAL Detail content row (`contentRows >=
+1`): a `/web` first frame that cannot grant one is a real command error that
+closes the lease — never a silent Rows fallback and never a Host read. A
+terminal resize keeps the SAME mounted page instance and performs no extra Host
+read; a mounted page that later receives a zero-body grant keeps only its own
+painted bar (`Back [Esc]`) and no hidden body action.
+
+Two authorities are painted as two separate reading groups and are NEVER merged:
 
 - `Current Host` is the LIVE listener state of the running Split Host, read
   through the semantic `WebAccessPort` and bound to the Connection generation
-  it was read under. Every runtime action is qualified by a CURRENT
-  observation; a generation change revokes the actions, the link request and
-  the pointer map, paints `Checking…` and re-reads before a new action is
-  offered. The authenticated launch URL is requested only by an explicit
-  `Open in browser` / `Copy access link`, handed straight to the Client-local
-  opener or clipboard, and never painted, stored, logged or attached to a
-  diagnostic. On Direct the page states `Unavailable · Split Host only` and
-  offers no runtime action; it never reads a fake Host.
+  it was read under. Its `Serving` and `Access` facts keep the listener fact
+  distinct from any write settlement. Every runtime action is qualified by a
+  CURRENT observation; a generation change revokes the actions, the staged
+  next-start intent, the link request and the pointer map, paints `Checking…`
+  and re-reads before a new action is offered. On Direct the page states
+  `Unavailable · Split Host only` and offers no runtime action; it never reads
+  a fake Host.
 - `Next Host Start` is the persisted PROFILE preference
   (`pi-tui-web-preferences.autoStart`, default Off) for the NEXT Split Host
   start, read through the ConfigPort and written ONLY by the existing
@@ -989,29 +999,72 @@ Two authorities are painted side by side and are NEVER merged:
 
 The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
 `choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config` or
-`settled`. Only the phase decides what the body and the Action Bar offer:
+`settled`. Only the phase decides what the body and the Action Bar offer. The
+business verbs (`Open in browser`, `Copy access link`, `Enable Web`,
+`Disable Web…`, `Refresh`) and the configuration field (`Start automatically`)
+are different controls: clicking a COMPLETE verb executes it (Disable only
+enters its risk confirmation), the backing padding/blank cells only select the
+row, and `Change…` on the field is the explicit entry into the candidate
+choice. The whole-row blank/padding click is NEVER a business action. `Refresh` is a
+real body action in EVERY `ready`/`settled` projection (not only the
+changing/unavailable one): it performs one authoritative status read, and the
+same painted admission gates the body verb, the bar span and `r`; a
+same-generation external listener change is therefore refreshable without a
+hidden key. The same `Start automatically` flow is: select the field, open the `Change…` choice,
+choose `On`/`Off` (the current one carries `[current]`; staging writes nothing),
+then the ONE explicit `Confirm save`.
+
+Admission is ONE semantic fact shared by the body, the keyboard and the
+delegated last-row spans: only an action whose complete verb/field/answer row
+was really painted in the CURRENT frame may run. A clipped, scrolled-out,
+dropped-wholesale or previous-frame control never writes. The two confirmations
+are gated by the SAME rule and by the complete necessary copy in that frame:
 
 | Phase | Body / actions | Confirm and `Esc` |
 |---|---|---|
-| enabled Host | `Open in browser`, `Copy access link` (`Contains a sign-in token`), `Disable Web…` (`Stops serving; does not revoke access`) | `Esc` returns to the Host Rows |
-| disabled Host | `Enable Web` | `Esc` returns to the Host Rows |
-| changing / unavailable / unreadable | `Refresh` only, never a Host write | `Esc` returns to the Host Rows |
-| `confirm-disable` | the exact sentence `Stop serving the Web UI? Existing browser credentials and sessions are not revoked.` plus `Disable Web` and `Cancel` | only the second confirmation dispatches; `Cancel`/`Esc` performs zero writes |
-| `Next Host Start` edit | the in-page `On`/`Off` candidates (the current one carries `[current]`), then `Confirm save` and `Cancel` | only `Confirm save` calls the writer; `Esc` steps back one stage at a time with zero writes |
-| `pending-*` | `Waiting for the answer…`, no second action | `Esc` leaves the page; the dispatched write settles in its OWN owner and its late result is diagnosed, never cancelled and never repainted |
+| enabled Host | `Open in browser`, `Copy access link` (`Contains a sign-in token`), `Disable Web…` (`Stops serving; does not revoke access`), `Refresh` | `Esc` performs the clean parent leave |
+| disabled Host | `Enable Web`, `Refresh` | `Esc` performs the clean parent leave |
+| changing / unavailable / unreadable | `Refresh` only, never a Host write | `Esc` performs the clean parent leave |
+| `confirm-disable` | the exact sentence `Stop serving the Web UI? Existing browser credentials and sessions are not revoked.` FIRST, then `Disable Web` and `Cancel` | the accept row and the `Confirm [Enter]` bar segment exist ONLY while the whole risk sentence shares the painted viewport; a short grant paints no accept word and Enter is inert, while `Cancel`/`Esc` always performs zero writes. A selected `Cancel` never advertises an Enter confirm |
+| `Next Host Start` choice | `Choose the value the next Host start applies:`, the complete `On`/`Off` candidates and the next-start-only lifetime sentence | choosing/`Select [Enter]` stages only; no write |
+| `confirm-save` | the complete `Save the next Host start preference as On/Off?`, the next-start-only lifetime sentence, `Confirm save` and `Cancel` | only `Confirm save` calls the writer and only while the question and lifetime sentence are complete in the SAME frame; `Esc` steps back with zero writes |
+| `pending-*` | `Waiting for the answer…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
 
 The first focus is the enabled Host's `Open in browser`, the disabled Host's
 `Enable Web`, otherwise the editable `Start automatically` row when a
-preference can really be written, else `Refresh`. A write settlement is
-painted as its own `Status` word: the runtime write reports `Verified` only
-when the authoritative re-read agrees, `Not saved` when the request reported
-success but the Host reads otherwise, and `Outcome unconfirmed` when the
-receipt was lost, the Host changed during the request or the read-back could
-not be performed; it is never retried automatically and never attributed from
-a fresh read. The preference write reports the four existing writer outcomes
-(`Verified`, `Not saved`, `Unverified`, `Outcome unconfirmed`). A short frame
-scrolls ONE column; the page never drops the `Esc` affordance, never paints a
-partial verb and never exposes a pointer target for an unpainted control.
+preference can really be written, else `Refresh`. Label/value cells that do not
+fit are WRAPPED, never truncated into a different writable-looking value; a
+short frame scrolls ONE Detail column and a scroll/resize back to a sufficient
+grant restores the complete confirmation without any automatic confirmation.
+
+Parent navigation is the tenant's ONE guarded leave: `ready`/`settled`/
+`loading` allow it (the read that no longer owns the page is retired);
+`choose-autostart`, `confirm-disable` and `confirm-save` refuse every parent
+route until the user's own local `Cancel`; `pending-runtime`/`pending-config`
+refuse parent clicks/Tab while the explicit page `Back [Esc]` stays the
+documented exit, and the write owner still settles and diagnoses the dispatched
+request. A forced teardown retires the page directly. A settled ambiguous
+outcome keeps its truthful `Outcome unconfirmed` and normal Back never claims a
+rollback. The page's `done` is instance-fenced and always returns to the Host
+Rows level (also for `/web`); re-entering builds a NEW page instance and starts
+exactly ONE new authoritative read.
+
+A write settlement is painted as its own `Status` word: the runtime write
+reports `Verified` only when the authoritative re-read agrees, `Not saved` when
+the request reported success but the Host reads otherwise, and `Outcome
+unconfirmed` when the receipt was lost, the Host changed during the request or
+the read-back could not be performed; it is never retried automatically and
+never attributed from a fresh read. The preference write reports the four
+existing writer outcomes (`Verified`, `Not saved`, `Unverified`, `Outcome
+unconfirmed`) on its own side. The authenticated launch URL is requested only
+by an explicit `Open in browser` / `Copy access link`, handed straight to the
+Client-local opener or clipboard, and never painted, stored, logged or attached
+to a diagnostic. A credential-bearing failure — the URL request, the Client
+opener OR the clipboard throwing — is converted at that boundary to the fixed
+safe word/reason (`Open failed` / `Clipboard unavailable`,
+`The access link could not be obtained or handed over.`): the original error,
+its cause and the URL never reach the owned-task diagnostic, a notice, a
+painted cell or a trace.
 
 ### ACP access page (Host)
 
