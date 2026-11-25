@@ -28,6 +28,8 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { event, fakeSession, fakeAgent } from '../support/runner-harness.ts'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 
+const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 
 interface SinkHarness {
@@ -276,8 +278,8 @@ function setupProof(options: ProofOptions): SinkHarness {
         setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
       },
       acpStartupPreference: {
-        read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
-        setAutoStart: async (_value: boolean, _revision: number) => {},
+        read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: ACP_STARTUP_PREFERENCE_GENERATION }),
+        setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },

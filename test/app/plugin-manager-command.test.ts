@@ -28,6 +28,8 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
+const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
   disposeStartedApps()

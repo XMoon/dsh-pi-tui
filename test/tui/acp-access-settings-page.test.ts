@@ -660,6 +660,9 @@ test('a non-current authority does not scroll the page back to the selected row'
   assert.notEqual(h.frame(), scrolled, 'the repaint reflected the new non-current fact, not a frozen frame')
   assert.match(h.frame(), /Start automatically\s+Unavailable/u)
   assert.equal(h.reads(), reads, 'the repaint performs no extra Host read')
+  await h.key('\x1b[H') // Home returns to a painted action without a write
+  assert.match(h.frame(), /> Copy client command/u)
+  assert.deepEqual(h.commits(), [])
   h.close()
 })
 

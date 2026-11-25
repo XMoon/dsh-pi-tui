@@ -30,6 +30,8 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { bundleVersion } from '../../src/client/launcher/version.ts'
 
+const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

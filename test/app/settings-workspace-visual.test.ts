@@ -518,8 +518,6 @@ interface Harness {
   readonly releaseAcpToggle: () => void
   /** PR-B: release a held ACP next-start settings mutation. */
   readonly releaseAcpConfigWrite: () => void
-  /** PR-B: replace the ACP Generation WITHOUT notifying (a silent replacement). */
-  readonly replaceAcpGenerationSilently: () => void
   /** PR-B: replace the LIVE Connection generation (a Host A -> B replacement). */
   readonly bumpAcpGeneration: () => void
   /** PR-B: set the fake Host ACP listener state (the Host's own answer). */
@@ -1682,11 +1680,6 @@ function setup(options: HarnessOptions = {}): Harness {
       if (acpStartupState !== undefined) acpStartupState = { ...acpStartupState, generation: acpSettingsGeneration }
       for (const listener of [...acpGenerationListeners]) listener()
     },
-    replaceAcpGenerationSilently: () => {
-      acpGeneration = {}
-      acpSettingsGeneration = {}
-      if (acpStartupState !== undefined) acpStartupState = { ...acpStartupState, generation: acpSettingsGeneration }
-    },
     setAcpStatus: (status: AcpAccessStatus) => { acpStatus = status },
     backendStartupWrites: () => backendStartupWrites,
     visualState: () => visualState,
@@ -2039,7 +2032,7 @@ test('200 → 72 → 44 → 200 preserves the category, the row, the level and t
   h.vt.resize(72, 24)
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Settings · Conversation · Transcript d/, 'the level, category and row survive the narrow resize')
-  h.vt.resize(80, 24)
+  h.vt.resize(44, 24)
   await h.vt.waitForRender()
   assert.match(h.rowsPlain()[0]!, /Transcript d/, 'the selected row survives the resize')
   h.vt.resize(200, 40)
@@ -8528,7 +8521,7 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
       visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
       webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
       backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
-      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
+      acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }) },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },
       subagentLimits: { read: () => ({ kind: 'unavailable', reason: 'not mounted' }) },

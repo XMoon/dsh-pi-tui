@@ -1128,8 +1128,9 @@ merged:
   is known accepted, only a CURRENT same-generation authoritative read that
   carries the requested value earns `Verified`; an unreadable, disagreeing or
   different-generation readback is `Unverified` because the mutation may have
-  committed — never `Not saved`. A dispatched request whose receipt/readback is
-  lost is `Outcome unconfirmed` and is never retried. Every actual generation
+  committed — never `Not saved`. A dispatched request whose receipt is
+  lost, or whose dispatch outcome otherwise cannot be attributed, is
+  `Outcome unconfirmed` and is never retried. Every actual generation
   rollover retires a staged choice that has not dispatched, even when the
   replacement exposes the same revision and value; an old-frame `Change…` press
   cannot establish a new choice against the replacement without a fresh frame

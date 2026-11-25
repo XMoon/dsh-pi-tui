@@ -15,6 +15,8 @@
 
 /** The provider/credential/authorization/account seams, as separate groups so
  *  a harness can keep its own answer for one of them. */
+const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+
 export const SETTINGS_DIRECT_PAGE_STUBS = {
   providers: {
     available: () => false,
@@ -73,7 +75,7 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   /** The profile-owned ACP startup preference: the schema default (OFF, no user
    *  override) at revision 1. The `/settings` snapshot reads it on every open. */
   acpStartupPreference: {
-    read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: {} }),
+    read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: ACP_STARTUP_PREFERENCE_GENERATION }),
     setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
   },
   /** FR5-B: the official Agent-loop section is absent in a harness that composes
