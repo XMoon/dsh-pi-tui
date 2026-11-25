@@ -696,7 +696,8 @@ select the project's files together and use a fresh private run root per round:
 ```sh
 SPLIT_VITEST_RUN_ID=process-overlap-r1 \
 SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=process-overlap-r1 \
-mise exec -- pnpm test:split:process -- \
+mise exec -- pnpm exec vitest run --config vitest.split.config.ts \
+  --project split-process-business \
   test/integration/split-process/business/host-file-completion.vitest.ts \
   test/integration/split-process/business/preset-defaults.vitest.ts
 ```
@@ -720,9 +721,10 @@ SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=public-overlap-r1 \
 SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry \
 SPLIT_VITEST_TMP_BASE=/absolute/private/run-root \
 SPLIT_VITEST_CANDIDATE_TGZ=/absolute/immutable/candidate.tgz \
-mise exec -- pnpm test:split:process -- \
-  test/integration/split-process/business/host-file-completion.vitest.ts \
-  test/integration/split-process/business/public-daemon-entry.vitest.ts
+mise exec -- pnpm exec vitest run --config vitest.split.config.ts \
+  --project split-process-business \
+  test/integration/split-process/business/public-daemon-entry.vitest.ts \
+  test/integration/split-process/business/host-file-completion.vitest.ts
 ```
 
 `SPLIT_VITEST_PROCESS_PROBE_POINT` arms the fixed checkpoints the external
