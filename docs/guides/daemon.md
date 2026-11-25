@@ -319,7 +319,8 @@ The Host accepts at most four stdio/HTTP servers per Session in aggregate,
 rejects relative commands, malformed arguments/environment, malformed HTTP
 URLs/headers and duplicate normalized names, and rejects unadvertised
 transports before any Host effect. A stdio child uses the exact Session cwd;
-an HTTP-only declaration does not need a filesystem cwd. The declaration is
+an HTTP-only declaration does not need a stdio child cwd (the ACP request's own
+cwd still has its normal Session/Workspace meaning). The declaration is
 never saved in the Profile or Host-wide MCP settings. Omit `ACP_MCP_COMMAND`
 (and any HTTP declaration) to create a Session with no MCP server. HTTP follows
 the official provider's normal redirect and error behavior; arbitrary
