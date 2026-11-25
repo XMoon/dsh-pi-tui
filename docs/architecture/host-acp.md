@@ -490,7 +490,9 @@ profile's independent `autoStart` preference enables it (see below).
     only the complete config list (never a partial one) and keeps the committed
     Session/View success and the legacy mode list; a policy read that is merely
     unreadable is an unavailable capability, not an absent row, so an initial
-    display may be omitted and writes stay refused until a real read succeeds.
+    display may be omitted and writes stay refused until a real read succeeds;
+    a genuine service absence removes the rows, while a transient live read
+    failure never replaces the last delivered complete list.
     An attached View receives one full `config_option_update` after every
     committed config-policy invalidation (`model/selection`, `plan/mode`,
     `team/mode`, `team/task`, `agent-preset/selected` and the existing

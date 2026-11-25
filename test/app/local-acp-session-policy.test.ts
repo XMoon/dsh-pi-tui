@@ -232,6 +232,44 @@ describe('session policy write admission', () => {
     assert.equal(mode.setCalls.length, 0)
   })
 
+  test('a plan service resolved again at admission is the one used by the setter', async () => {
+    const first = new FakeModeService({ active: false })
+    const second = new FakeModeService({ active: false })
+    const world = makeWorld({ mode: first })
+    let current = first
+    world.authority.planMode = () => current
+    world.agent.beforeTask = () => {
+      current = second
+    }
+    await world.service.select(
+      world.agent,
+      { kind: 'mode', mode: 'plan' },
+      new AbortController().signal,
+      () => 'current',
+    )
+    assert.deepEqual(first.setCalls, [])
+    assert.deepEqual(second.setCalls, [true])
+  })
+
+  test('a root Team service resolved again at admission is the one used by the setter', async () => {
+    const first = new FakeTeamService()
+    const second = new FakeTeamService()
+    const world = makeWorld({ team: first, teamEnabled: true })
+    let current = first
+    world.authority.team = () => current
+    world.agent.beforeTask = () => {
+      current = second
+    }
+    await world.service.select(
+      world.agent,
+      { kind: 'agent-team', enabled: true },
+      new AbortController().signal,
+      () => 'current',
+    )
+    assert.deepEqual(first.setCalls, [])
+    assert.deepEqual(second.setCalls.map(call => call.enabled), [true])
+  })
+
   test('a baseline change during admission is a conflict, not a second write', async () => {
     const mode = new FakeModeService({ active: false })
     const world = makeWorld({ mode })
@@ -245,17 +283,16 @@ describe('session policy write admission', () => {
 })
 
 describe('session policy write settlement', () => {
-  test('mode set is called once and the committed readback is returned', async () => {
+  test('mode set is called once and the committed readback is returned by the authority', async () => {
     const mode = new FakeModeService({ active: false })
     const world = makeWorld({ mode })
-    const result = await world.service.select(
+    await world.service.select(
       world.agent,
       { kind: 'mode', mode: 'plan' },
       new AbortController().signal,
       () => 'current',
     )
     assert.deepEqual(mode.setCalls, [true])
-    assert.deepEqual(result, { mode: 'plan' })
     assert.deepEqual(world.service.read(world.agent), { mode: 'plan' })
   })
 
@@ -340,7 +377,7 @@ describe('session policy write settlement', () => {
     assert.deepEqual(mode.setCalls, [true], 'the setter still ran exactly once')
   })
 
-  test('an identity change after a committed mode write stays STALE, never readback-unavailable', async () => {
+  test('an identity change after a committed mode write is READBACK_UNAVAILABLE, never a pre-write refusal', async () => {
     const mode = new FakeModeService({ active: false })
     const world = makeWorld({ mode })
     const original = world.authority.currentAgent
@@ -358,11 +395,11 @@ describe('session policy write settlement', () => {
         new AbortController().signal,
         () => 'current',
       ),
-      error => codeOf(error) === 'LOCAL_ACP_CONFIG_STALE',
+      error => codeOf(error) === 'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE',
     )
   })
 
-  test('an identity change after a completed Team write stays STALE, never readback-unavailable', async () => {
+  test('an identity change after a completed Team write is READBACK_UNAVAILABLE, never a pre-write refusal', async () => {
     const team = new FakeTeamService()
     const world = makeWorld({ team, teamEnabled: true })
     const original = world.authority.currentAgent
@@ -378,7 +415,7 @@ describe('session policy write settlement', () => {
         new AbortController().signal,
         () => 'current',
       ),
-      error => codeOf(error) === 'LOCAL_ACP_CONFIG_STALE',
+      error => codeOf(error) === 'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE',
     )
   })
 

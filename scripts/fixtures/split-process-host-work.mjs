@@ -2569,11 +2569,14 @@ export async function apply(ctx) {
     const runAction = async action => {
       const agent = action.sessionId === undefined ? undefined : ctx.agents.get(action.sessionId)
       if (action.action === 'arm-team-flush-hold') {
+        // Consume only a team/mode append that happens AFTER this arm.
+        teamModeSeen.delete(String(action.sessionId))
         teamFlushHolds.set(String(action.sessionId), String(action.release))
         record('lifecycle-team-flush-hold-armed', { sessionId: action.sessionId })
         return
       }
       if (action.action === 'arm-team-flush-failure') {
+        teamModeSeen.delete(String(action.sessionId))
         teamFlushFailures.add(String(action.sessionId))
         record('lifecycle-team-flush-failure-armed', { sessionId: action.sessionId })
         return

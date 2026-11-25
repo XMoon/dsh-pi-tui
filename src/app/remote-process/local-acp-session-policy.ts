@@ -307,19 +307,23 @@ export class AcpSessionPolicyService {
   /**
    * Commit ONE policy write through the official runMaintenance admission.
    * The callback performs only synchronous checks plus the official call; the
-   * result is the authority readback AFTER that call. `stillCurrent` re-reads
-   * the owning View claim in the SAME synchronous callback stack.
+   * exact invoked service/target identity is re-read after settlement. The
+   * return is terminal-only: a successful setter does not re-read unrelated
+   * policy rows that the caller would discard.
    */
   async select(
     agent: AcpSessionPolicyAgent,
     request: AcpSessionPolicyRequest,
     signal: AbortSignal,
     stillCurrent: () => 'current' | 'stale',
-  ): Promise<AcpSessionPolicyState> {
+  ): Promise<void> {
     this.assertExact(agent)
     signal.throwIfAborted()
-    if (request.kind === 'mode') return await this.selectMode(agent, request.mode, signal, stillCurrent)
-    return await this.selectTeam(agent, request.enabled, signal, stillCurrent)
+    if (request.kind === 'mode') {
+      await this.selectMode(agent, request.mode, signal, stillCurrent)
+      return
+    }
+    await this.selectTeam(agent, request.enabled, signal, stillCurrent)
   }
 
   private async selectMode(
@@ -327,27 +331,33 @@ export class AcpSessionPolicyService {
     mode: AcpSessionMode,
     signal: AbortSignal,
     stillCurrent: () => 'current' | 'stale',
-  ): Promise<AcpSessionPolicyState> {
+  ): Promise<void> {
     const plan = this.readPlanService(agent)
     if (plan === undefined) throw unavailablePolicy('this Agent has no retained official plan-mode service')
     const baseline = this.readModeFacts(plan, agent)
     if (baseline.pending !== undefined) throw agentBusyPolicy('a plan-mode selection is still waiting for its boundary')
     const intended = mode === 'plan'
     let invoked = false
-    let maintenance: Promise<AcpSessionPolicyState>
+    let maintenance: Promise<void>
     try {
       maintenance = agent.runMaintenance(async maintenanceSignal => {
-        if (signal.aborted || maintenanceSignal.aborted) throw stalePolicy()
+        if (signal.aborted || maintenanceSignal.aborted) {
+          throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_STALE', 'the policy request was cancelled before the official call', JSONRPC_UNAVAILABLE)
+        }
         if (stillCurrent() !== 'current') throw stalePolicy()
         this.assertExact(agent)
+        // Resolve the retained service again at the LAST admission boundary:
+        // an old handle is not proof that the current Agent still owns it.
+        const currentPlan = this.readPlanService(agent)
+        if (currentPlan === undefined) throw unavailablePolicy('the retained plan-mode service disappeared before the write')
         if (!this.authority.noOpenTurn(agent.session)) throw agentBusyPolicy('the session still has an open turn')
-        const current = this.readModeFacts(plan, agent)
+        const current = this.readModeFacts(currentPlan, agent)
         if (current.pending !== undefined) throw agentBusyPolicy('a plan-mode selection is still waiting for its boundary')
         if (current.active !== baseline.active) throw conflictPolicy()
         invoked = true
         let outcome: 'committed' | 'queued' | 'cancelled' | 'noop'
         try {
-          outcome = plan.set(agent, intended)
+          outcome = currentPlan.set(agent, intended)
         } catch {
           // The official append can commit before a later inject throws; the
           // real state is re-read for notification, never reported as no-write.
@@ -357,19 +367,17 @@ export class AcpSessionPolicyService {
           throw indeterminatePolicy('the plan-mode write did not commit synchronously')
         }
         try {
-          const after = this.readModeFacts(plan, agent)
+          const after = this.readModeFacts(currentPlan, agent)
           if (after.active !== intended || after.pending !== undefined) {
             throw indeterminatePolicy('the plan-mode readback does not match the requested mode')
           }
-          return this.read(agent)
+          this.assertExact(agent)
         } catch (error) {
-          // The setter has already settled: a committed selection whose state
-          // cannot be fully re-read is a readback failure, not an unknown
-          // write. The explicit mismatch above keeps WRITE_INDETERMINATE.
+          // The setter already settled. A changed identity or an unreadable
+          // projection after the commit is NOT a pre-write refusal; only the
+          // explicit target mismatch above stays WRITE_INDETERMINATE.
           if (error instanceof AcpSessionPolicyError
-            && (error.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE'
-              || error.code === 'LOCAL_ACP_CONFIG_STALE'
-              || error.code === 'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE')) throw error
+            && error.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE') throw error
           throw readbackUnavailablePolicy('the committed plan-mode state could not be read back')
         }
       })
@@ -378,7 +386,7 @@ export class AcpSessionPolicyService {
       throw agentBusyPolicy('the Agent maintenance admission refused the policy write')
     }
     try {
-      return await maintenance
+      await maintenance
     } catch (error) {
       if (error instanceof AcpSessionPolicyError) throw error
       throw invoked
@@ -392,18 +400,24 @@ export class AcpSessionPolicyService {
     enabled: boolean,
     signal: AbortSignal,
     stillCurrent: () => 'current' | 'stale',
-  ): Promise<AcpSessionPolicyState> {
+  ): Promise<void> {
     const team = this.readTeamService(agent)
     if (team === undefined) throw unavailablePolicy('the Agent Team policy is unavailable for this Session')
     const baseline = this.readTeamEnabled(agent.session)
     if (baseline === undefined) throw unavailablePolicy('the Agent Team projection is unavailable')
     let invoked = false
-    let maintenance: Promise<AcpSessionPolicyState>
+    let maintenance: Promise<void>
     try {
       maintenance = agent.runMaintenance(async maintenanceSignal => {
-        if (signal.aborted || maintenanceSignal.aborted) throw stalePolicy()
+        if (signal.aborted || maintenanceSignal.aborted) {
+          throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_STALE', 'the Team request was cancelled before the official call', JSONRPC_UNAVAILABLE)
+        }
         if (stillCurrent() !== 'current') throw stalePolicy()
         this.assertExact(agent)
+        // The root write seam is resolved again at the final admission; a
+        // retained old handle/setter is not the current root authority.
+        const currentTeam = this.readTeamService(agent)
+        if (currentTeam === undefined) throw unavailablePolicy('the Agent Team service disappeared before the write')
         if (!this.authority.noOpenTurn(agent.session)) throw agentBusyPolicy('the session still has an open turn')
         const current = this.readTeamEnabled(agent.session)
         if (current === undefined) throw unavailablePolicy('the Agent Team projection is unavailable')
@@ -412,7 +426,7 @@ export class AcpSessionPolicyService {
         try {
           // Even selecting the SAME value goes through the official service:
           // its own flush is the durability terminal, not a local no-op.
-          await team.setEnabled(agent, enabled, signal)
+          await currentTeam.setEnabled(agent, enabled, signal)
         } catch {
           throw indeterminatePolicy('the Agent Team write outcome is unconfirmed')
         }
@@ -421,12 +435,12 @@ export class AcpSessionPolicyService {
           if (after !== enabled) {
             throw indeterminatePolicy('the Agent Team readback does not match the requested value')
           }
-          return this.read(agent)
+          this.assertExact(agent)
         } catch (error) {
+          // Post-settlement identity/projection failure is a readback fact, not
+          // a pre-write refusal; a real target mismatch stays indeterminate.
           if (error instanceof AcpSessionPolicyError
-            && (error.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE'
-              || error.code === 'LOCAL_ACP_CONFIG_STALE'
-              || error.code === 'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE')) throw error
+            && error.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE') throw error
           throw readbackUnavailablePolicy('the committed Agent Team state could not be read back')
         }
       })
@@ -435,7 +449,7 @@ export class AcpSessionPolicyService {
       throw agentBusyPolicy('the Agent maintenance admission refused the policy write')
     }
     try {
-      return await maintenance
+      await maintenance
     } catch (error) {
       if (error instanceof AcpSessionPolicyError) throw error
       throw invoked

@@ -1330,9 +1330,8 @@ function makeFakeAccess(options: {
         signal: AbortSignal,
         stillCurrent: () => 'current' | 'stale',
       ) {
-        return options.selectSessionPolicy === undefined
-          ? request.kind === 'mode' ? { mode: request.mode } : { agentTeam: request.enabled }
-          : await options.selectSessionPolicy(agent, session, request, signal, stillCurrent)
+        if (options.selectSessionPolicy === undefined) return
+        await options.selectSessionPolicy(agent, session, request, signal, stillCurrent)
       },
       async prompt(request: AcpSessionPromptRequest) {
         prompts.push(request)
@@ -2084,9 +2083,7 @@ test('session/new carries the authoritative created session id in JSON-RPC error
     readSessionPolicy() {
       return {}
     },
-    async selectSessionPolicy(_agent, _session, request) {
-      return request.kind === 'mode' ? { mode: request.mode } : { agentTeam: request.enabled }
-    },
+    async selectSessionPolicy() {},
     async prompt() {
       return { accepted: true as const }
     },
@@ -3659,12 +3656,14 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
   const { scope } = newScope(t)
   const optionsA = configOptionsFor('["p1","a"]')
   const optionsB = configOptionsFor('["p1","b"]')
+  let currentA = optionsA
   const fake = makeFakeAccess({
-    modelOptions: async () => optionsA,
+    modelOptions: async () => currentA,
     selectModelOnly: async (_agent, _session, request) => {
       if (request.type === 'boolean' || request.configId !== 'model' || request.value !== '["p1","b"]') {
         throw new AcpModelError('LOCAL_ACP_MODEL_INVALID_OPTION', 'invalid model option', -32602)
       }
+      currentA = optionsB
       return optionsB
     },
   })
@@ -3694,13 +3693,8 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     assert.equal(selected.id, 3)
     assert.deepEqual(selected.result?.configOptions, optionsB, 'set_config_option returns the full new option state')
     assert.deepEqual(fake.modelSelections, [{ configId: 'model', value: '["p1","b"]' }])
-    // The successful write itself requests ONE complete refresh (a no-op or
-    // same-value write emits no Session event).
-    const writeRefresh = (await client.next()) as {
-      params?: { sessionId?: string; update?: { sessionUpdate?: string } }
-    }
-    assert.equal(writeRefresh.params?.sessionId, sessionId)
-    assert.equal(writeRefresh.params?.update?.sessionUpdate, 'config_option_update')
+    // A same-value write emits no Session event and must not race a config
+    // notification ahead of its own response; the reply already carries the cut.
 
     const agent = fake.agentOf(sessionId)
     const facts = fake.facts()
@@ -3713,7 +3707,7 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     assert.equal(notification.method, 'session/update')
     assert.equal(notification.params?.sessionId, sessionId)
     assert.equal(notification.params?.update?.sessionUpdate, 'config_option_update')
-    assert.deepEqual(notification.params?.update?.configOptions, optionsA)
+    assert.deepEqual(notification.params?.update?.configOptions, optionsB)
 
     // Wrong Session and invalid option values stay fail-closed with no write.
     client.send({
@@ -3753,7 +3747,7 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
     client.send({ jsonrpc: '2.0', id: 8, method: 'session/resume', params: { sessionId, cwd: '/host/proj' } })
     const resumed = (await client.next()) as { result?: { configOptions?: SessionConfigOption[] } }
-    assert.deepEqual(resumed.result?.configOptions, optionsA)
+    assert.deepEqual(resumed.result?.configOptions, optionsB)
 
     // After close the old View can no longer mutate the Session.
     client.send({ jsonrpc: '2.0', id: 9, method: 'session/close', params: { sessionId } })
@@ -3865,11 +3859,14 @@ test('model options and config updates stay scoped to their Session on one socke
   const optionsA = configOptionsFor('["p1","a"]')
   const optionsB = configOptionsFor('["p1","b"]')
   const selected: Array<{ readonly agent: string; readonly value: string }> = []
+  const current = new Map<string, SessionConfigOption[]>([['session-model-a', optionsA]])
   const fake = makeFakeAccess({
-    modelOptions: async agent => (agent.id === 'session-model-a' ? optionsA : optionsB),
+    modelOptions: async agent => current.get(String(agent.id)) ?? optionsB,
     selectModelOnly: async (agent, _session, request) => {
       selected.push({ agent: String(agent.id), value: String(request.value) })
-      return agent.id === 'session-model-a' ? optionsB : optionsA
+      const next = agent.id === 'session-model-a' ? optionsB : optionsA
+      current.set(String(agent.id), next)
+      return next
     },
   })
   fake.seed('session-model-a', '/host/a')
@@ -3891,16 +3888,10 @@ test('model options and config updates stay scoped to their Session on one socke
     const selectedA = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
     assert.equal(selectedA.id, 4)
     assert.deepEqual(selectedA.result?.configOptions, optionsB)
-    const refreshA = (await client.next()) as { params?: { sessionId?: string; update?: { sessionUpdate?: string } } }
-    assert.equal(refreshA.params?.sessionId, 'session-model-a')
-    assert.equal(refreshA.params?.update?.sessionUpdate, 'config_option_update')
     client.send({ jsonrpc: '2.0', id: 5, method: 'session/set_config_option', params: { sessionId: sessionB, configId: 'model', value: '["p1","b2"]' } })
     const selectedB = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
     assert.equal(selectedB.id, 5)
     assert.deepEqual(selectedB.result?.configOptions, optionsA)
-    const refreshB = (await client.next()) as { params?: { sessionId?: string; update?: { sessionUpdate?: string } } }
-    assert.equal(refreshB.params?.sessionId, sessionB)
-    assert.equal(refreshB.params?.update?.sessionUpdate, 'config_option_update')
     assert.deepEqual(selected, [
       { agent: 'session-model-a', value: '["p1","a2"]' },
       { agent: sessionB, value: '["p1","b2"]' },
@@ -3913,11 +3904,56 @@ test('model options and config updates stay scoped to their Session on one socke
     facts.onSessionEvent(agentA.session, { seq: 41, type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
     const notificationA = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string; configOptions?: SessionConfigOption[] } } }
     assert.equal(notificationA.params?.sessionId, 'session-model-a')
-    assert.deepEqual(notificationA.params?.update?.configOptions, optionsA)
+    assert.deepEqual(notificationA.params?.update?.configOptions, optionsB)
     facts.onSessionEvent(agentB.session, { seq: 42, type: 'model/selection', data: { provider: 'p1', model: 'b2' } })
     const notificationB = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { configOptions?: SessionConfigOption[] } } }
     assert.equal(notificationB.params?.sessionId, sessionB)
-    assert.deepEqual(notificationB.params?.update?.configOptions, optionsB)
+    assert.deepEqual(notificationB.params?.update?.configOptions, optionsA)
+  } finally {
+    client.close()
+  }
+})
+
+test('the initial attach response is submitted before any config notification after an invalidation during its read', async t => {
+  const { scope } = newScope(t)
+  let catalogStarted!: () => void
+  let releaseCatalog!: () => void
+  const started = new Promise<void>(resolveStarted => { catalogStarted = resolveStarted })
+  const catalogGate = new Promise<void>(resolveCatalog => { releaseCatalog = resolveCatalog })
+  let reads = 0
+  const fake = makeFakeAccess({
+    modelOptions: async () => {
+      reads += 1
+      if (reads === 1) {
+        catalogStarted()
+        await catalogGate
+      }
+      return configOptionsFor('["p1","a"]')
+    },
+  })
+  fake.seed('session-attach-order', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-attach-order', cwd: '/host/proj' } })
+    await started
+    const agent = fake.agentOf('session-attach-order')
+    const facts = fake.facts()
+    assert.ok(agent !== undefined && facts !== undefined)
+    facts.onSessionEvent(agent.session, { seq: 1, type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
+    releaseCatalog()
+    const response = (await client.next()) as { id?: number; result?: { configOptions?: SessionConfigOption[] } }
+    assert.equal(response.id, 2, 'the attach response is never preceded by a config notification')
+    assert.deepEqual(response.result?.configOptions, configOptionsFor('["p1","a"]'))
+    // A later real invalidation owns the one refresh — after the baseline response.
+    facts.onSessionEvent(agent.session, { seq: 2, type: 'model/selection', data: { provider: 'p1', model: 'a3' } })
+    const notification = (await client.next()) as { method?: string; params?: { sessionId?: string; update?: { sessionUpdate?: string } } }
+    assert.equal(notification.method, 'session/update')
+    assert.equal(notification.params?.sessionId, 'session-attach-order')
+    assert.equal(notification.params?.update?.sessionUpdate, 'config_option_update')
   } finally {
     client.close()
   }

@@ -61,6 +61,23 @@ function updatesFor(updates, sessionId) {
   return updates.filter(params => params?.sessionId === sessionId).map(params => params.update)
 }
 
+/** The newest config_option_update for one row must carry the exact target value. */
+function configRowValue(updates, sessionId, id) {
+  return updatesFor(updates, sessionId)
+    .filter(update => update?.sessionUpdate === 'config_option_update')
+    .map(update => configOption(update.configOptions, id)?.currentValue)
+    .filter(value => value !== undefined)
+    .at(-1)
+}
+
+function modeUpdateValue(updates, sessionId) {
+  return updatesFor(updates, sessionId)
+    .filter(update => update?.sessionUpdate === 'current_mode_update')
+    .map(update => update.currentModeId)
+    .filter(value => typeof value === 'string')
+    .at(-1)
+}
+
 function configOption(options, id) {
   return (options ?? []).find(option => option?.id === id)
 }
@@ -153,6 +170,7 @@ export async function runAcpSessionConfig(context) {
     await scene.assertInteractionGate(tui.client, 'PR3B TUI')
     const sessionId = await scene.openC1Session(tui.client, 'pr3b-session-config-seed', 'PR3B TUI')
     await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'PR3B seed turn end')
+    const eventMark = () => (hostSessionEvents(dshHome, sessionId) ?? []).length
 
     peer = new EntryProcess('peer', entries.client, {
       ...base,
@@ -202,26 +220,27 @@ export async function runAcpSessionConfig(context) {
 
     // L2: legacy set_mode -> durable plan/mode -> standard notifications and a
     // real TUI observation; the TUI's own /plan off writes the same authority.
-    const modeUpdatesStart = updates.length
+    let mark = eventMark()
     const modeResult = await client.request(acp.methods.agent.session.setMode, { sessionId, modeId: 'plan' })
     assert(JSON.stringify(modeResult ?? {}) === '{}', `PR3B-02: set_mode must answer an empty object (${JSON.stringify(modeResult)})`)
-    const planOn = await waitForHostSessionEvent(dshHome, sessionId,
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'plan/mode' && event.data?.active === true, 'PR3B official plan/mode true')
-    assert(planOn !== undefined, 'PR3B-02: set_mode must commit the official plan/mode record')
-    await waitFor(() => updatesFor(updates.slice(modeUpdatesStart), sessionId)
-      .some(update => update?.sessionUpdate === 'current_mode_update' && update.currentModeId === 'plan') ? true : undefined,
-    'PR3B-02 the standard current_mode_update')
+    await waitFor(() => modeUpdateValue(updates, sessionId) === 'plan'
+      && configRowValue(updates, sessionId, 'mode') === 'plan' ? true : undefined,
+    'PR3B-02 the standard current_mode_update and config row')
     await waitForScreen(tui.client, 'Plan mode', 'PR3B TUI observes the committed plan mode')
+
+    mark = eventMark()
     await submitLine(tui.client, '/plan off', 'PR3B-plan-off')
-    await waitForHostSessionEvent(dshHome, sessionId,
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'plan/mode' && event.data?.active === false, 'PR3B TUI /plan off commits')
-    await waitFor(() => updatesFor(updates.slice(modeUpdatesStart), sessionId)
-      .some(update => update?.sessionUpdate === 'current_mode_update' && update.currentModeId === 'default') ? true : undefined,
-    'PR3B-02 the TUI reverse write reaches the ACP connection')
+    await waitFor(() => modeUpdateValue(updates, sessionId) === 'default'
+      && configRowValue(updates, sessionId, 'mode') === 'default' ? true : undefined,
+    'PR3B-02 the TUI reverse write reaches the ACP connection with the exact mode')
 
     // The config-row form enters the SAME write seat and returns the complete
     // list (model/mode/agent_team), not a partial mode-only snapshot.
-    const modeConfigStart = updates.length
+    mark = eventMark()
     const viaConfig = await client.request(acp.methods.agent.session.setConfigOption, {
       sessionId, configId: 'mode', value: 'plan',
     })
@@ -230,17 +249,17 @@ export async function runAcpSessionConfig(context) {
     assert(configOption(viaConfig?.configOptions, 'model') !== undefined
       && configOption(viaConfig?.configOptions, 'agent_team') !== undefined,
     'PR3B-02: the mode reply must include the other rows')
-    await waitForHostSessionEvent(dshHome, sessionId,
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'plan/mode' && event.data?.active === true, 'PR3B config mode commits plan')
-    await waitFor(() => updatesFor(updates.slice(modeConfigStart), sessionId)
-      .some(update => update?.sessionUpdate === 'plan' || update?.sessionUpdate === 'current_mode_update') ? true : undefined,
-    'PR3B-02 the config-mode notification')
+    await waitFor(() => modeUpdateValue(updates, sessionId) === 'plan'
+      && configRowValue(updates, sessionId, 'mode') === 'plan' ? true : undefined,
+    'PR3B-02 the config-mode notification carries the exact target')
 
     // The REAL official exit review: one ACP prompt makes the scripted Host
     // model call `exit_plan_mode`; the tool asks its question through the ACP
     // View's standard Form; the approval sets the pending selection that the
     // same accepted in-turn pre-step commits back to default.
-    const exitStart = updates.length
+    mark = eventMark()
     const exitPrompt = await client.request(acp.methods.agent.session.prompt, {
       sessionId, prompt: promptText('PR3B_EXIT_PLAN'),
     })
@@ -250,22 +269,23 @@ export async function runAcpSessionConfig(context) {
       `PR3B-02: the official exit review must reach exactly one standard Form (${JSON.stringify(elicitations)})`)
     assert(elicitations[0]?.requestedSchema?.properties?.q0 !== undefined,
       'PR3B-02: the Form must carry the official review choice')
-    await waitForHostSessionEvent(dshHome, sessionId,
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'tool/call' && event.data?.name === 'exit_plan_mode',
       'PR3B official exit_plan_mode call')
-    await waitForHostSessionEvent(dshHome, sessionId,
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'plan/mode' && event.data?.active === false,
       'PR3B accepted pre-step commits the approved exit')
-    await waitFor(() => updatesFor(updates.slice(exitStart), sessionId)
-      .some(update => update?.sessionUpdate === 'current_mode_update' && update.currentModeId === 'default') ? true : undefined,
+    await waitFor(() => modeUpdateValue(updates, sessionId) === 'default'
+      ? true : undefined,
     'PR3B-02 the approved exit notifies current_mode_update default')
     trace('acp-session-config/exit-review', { sessionId, formMessage: elicitations[0]?.message })
     // Re-enter plan for the remaining Team/model/cold assertions through the
     // SAME official setter.
+    mark = eventMark()
     await client.request(acp.methods.agent.session.setConfigOption, {
       sessionId, configId: 'mode', value: 'plan',
     })
-    assert(await waitForHostSessionEvent(dshHome, sessionId,
+    assert(await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'plan/mode' && event.data?.active === true,
       'PR3B plan re-entered') !== undefined, 'PR3B-02: the plan re-entry must commit')
 
@@ -286,6 +306,15 @@ export async function runAcpSessionConfig(context) {
     assert(planEvidence?.planPolicy === true,
       `PR3B-02: the real provider request must carry the official plan policy (${JSON.stringify(planEvidence)})`)
 
+    // An independent B connection/Session stays fully usable while A's Team
+    // policy terminal is held; it is not another View of A.
+    const bClient = await openSdkClient(endpoint, () => {})
+    clients.push(bClient)
+    await bClient.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} })
+    const bCreated = await bClient.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })
+    const bSession = bCreated?.sessionId
+    assert(typeof bSession === 'string' && bSession !== '', 'PR3B-03: the independent B root must attach')
+
     // L3: the official Team flush is held AFTER its committed team/mode append;
     // the reply and the close must both wait for the raw terminal. No second
     // policy write/prompt may start on this View while it is held.
@@ -296,6 +325,7 @@ export async function runAcpSessionConfig(context) {
     // terminal failure; the durable true selection is never rolled back.
     await lifecycleAction('arm-team-flush-failure', sessionId, 'lifecycle-team-flush-failure-armed',
       'PR3B arm Team flush failure')
+    mark = eventMark()
     let teamSettled = false
     let teamError
     const teamRequest = client.request(acp.methods.agent.session.setConfigOption, {
@@ -305,16 +335,25 @@ export async function runAcpSessionConfig(context) {
     const held = await waitForWork('lifecycle-team-flush-held', sessionId,
       'PR3B the Team flush is held', { release: teamHold })
     assert(held?.release === teamHold, `PR3B-03: the held record must name the release path (${JSON.stringify(held)})`)
-    const teamModeOn = await waitForHostSessionEvent(dshHome, sessionId,
+    const teamModeOn = await waitForHostSessionEventAfter(dshHome, sessionId, mark,
       event => event.type === 'team/mode' && event.data?.enabled === true, 'PR3B official team/mode true')
     assert(teamModeOn !== undefined, 'PR3B-03: the Team write must commit its durable event before the held flush')
     assert(teamSettled === false, 'PR3B-03: the ACP reply cannot settle while the official flush is held')
     const concurrent = await client.request(acp.methods.agent.session.setConfigOption, {
       sessionId, configId: 'mode', value: 'default',
     }).then(value => ({ value }), error => ({ error }))
-    assert(concurrent.error?.data?.code === 'LOCAL_ACP_CONFIG_VIEW_BUSY'
-      || concurrent.error?.data?.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE',
-    `PR3B-03: a second policy write must be refused while the first is held (${JSON.stringify(concurrent)})`)
+    assert(concurrent.error?.data?.code === 'LOCAL_ACP_CONFIG_VIEW_BUSY',
+      `PR3B-03: a second policy write must be pre-write VIEW_BUSY with zero invocation (${JSON.stringify(concurrent)})`)
+    const promptBusy = await client.request(acp.methods.agent.session.prompt, {
+      sessionId, prompt: promptText('PR3B_PROMPT_WHILE_HELD'),
+    }).then(value => ({ value }), error => ({ error }))
+    assert(promptBusy.error?.data?.code === 'LOCAL_ACP_PROMPT_IN_FLIGHT',
+      `PR3B-03: a prompt must be refused while the policy terminal is held (${JSON.stringify(promptBusy)})`)
+    const bPrompt = await bClient.request(acp.methods.agent.session.prompt, {
+      sessionId: bSession, prompt: promptText('PR3B_B_WHILE_HELD'),
+    })
+    assert(bPrompt?.stopReason === 'end_turn',
+      `PR3B-03: the independent B Session must keep working while A is held (${JSON.stringify(bPrompt)})`)
     let closeSettled = false
     const closeRequest = client.request(acp.methods.agent.session.close, { sessionId })
       .then(value => { closeSettled = true; return value }, error => { closeSettled = true; throw error })
@@ -329,33 +368,48 @@ export async function runAcpSessionConfig(context) {
       .some(event => event.type === 'team/mode' && event.data?.enabled === true),
     'PR3B-03: the durable Team=true must survive the rejected flush')
     await closeRequest
+    await bClient.request(acp.methods.agent.session.close, { sessionId: bSession })
 
     // Reattach and prove a rejected flush stays an indeterminate write while
     // its already-appended selection is the real readback fact.
     const resumed2 = await client.request(acp.methods.agent.session.resume, { sessionId, cwd: hostCwd })
     assert(configOption(resumed2?.configOptions, 'agent_team')?.currentValue === true,
       'PR3B-04: the reattached View must read the committed Team=true')
+    // The real TUI observes the SAME committed Team projection on its `/model`
+    // Team row; this is a read, not a second authority.
+    await submitLine(tui.client, '/model', 'PR3B-team-model')
+    await waitForScreen(tui.client, 'Agent Team', 'PR3B TUI opens the Agent Team row')
+    tui.client.send('\t')
+    await waitForScreen(tui.client, '[On]', 'PR3B TUI reads the official Team ON projection')
+    mark = eventMark()
+    tui.client.send('\r')
+    await waitForScreen(tui.client, 'Team collaboration will be disabled',
+      'PR3B TUI opens the official Team disable confirmation')
+    tui.client.send('\t')
+    tui.client.send('\r')
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
+      event => event.type === 'team/mode' && event.data?.enabled === false,
+      'PR3B TUI confirmation commits the official Team off')
+    await waitFor(() => configRowValue(updates, sessionId, 'agent_team') === false ? true : undefined,
+      'PR3B TUI Team off reaches the ACP full list')
+    await waitForScreen(tui.client, '[Off]', 'PR3B TUI reads the official Team OFF projection')
+    tui.client.send('\x1b')
+    await waitForScreen(tui.client, 'Tab Team', 'PR3B TUI returns to the model list after Team off')
+    tui.client.send('\x1b')
+    await waitFor(() => frameOf(tui.client).then(frame => frame.includes('Tab Team') ? undefined : true),
+      'PR3B TUI closes the /model picker after Team off')
+    mark = eventMark()
     await lifecycleAction('arm-team-flush-failure', sessionId, 'lifecycle-team-flush-failure-armed',
       'PR3B arm Team flush failure')
-    const failureUpdatesStart = updates.length
     const failedTeam = await client.request(acp.methods.agent.session.setConfigOption, {
-      sessionId, configId: 'agent_team', type: 'boolean', value: false,
+      sessionId, configId: 'agent_team', type: 'boolean', value: true,
     }).then(value => ({ value }), error => ({ error }))
     assert(failedTeam.error?.data?.code === 'LOCAL_ACP_CONFIG_WRITE_INDETERMINATE',
       `PR3B-04: a rejected official flush must stay indeterminate (${JSON.stringify(failedTeam)})`)
-    await waitForHostSessionEvent(dshHome, sessionId,
-      event => event.type === 'team/mode' && event.data?.enabled === false, 'PR3B official team/mode false')
-    await waitFor(() => updatesFor(updates.slice(failureUpdatesStart), sessionId)
-      .some(update => update?.sessionUpdate === 'config_option_update'
-        && configOption(update.configOptions, 'agent_team')?.currentValue === false) ? true : undefined,
-    'PR3B-04 the independent readback notification keeps the real committed value')
-    // Restore the positive cold-read state through the same real setter.
-    await client.request(acp.methods.agent.session.setConfigOption, {
-      sessionId, configId: 'agent_team', type: 'boolean', value: true,
-    })
-    assert(await waitForHostSessionEvent(dshHome, sessionId,
-      event => event.type === 'team/mode' && event.data?.enabled === true, 'PR3B Team restored true') !== undefined,
-    'PR3B-04: the restore must commit the durable Team=true')
+    await waitForHostSessionEventAfter(dshHome, sessionId, mark,
+      event => event.type === 'team/mode' && event.data?.enabled === true, 'PR3B official team/mode true')
+    await waitFor(() => configRowValue(updates, sessionId, 'agent_team') === true ? true : undefined,
+    'PR3B-04 the independent readback notification keeps the real committed true value')
 
     // A connection that did NOT negotiate boolean config options sees no Team
     // row and cannot write it; the same Session's model/mode rows stay intact.
@@ -422,6 +476,15 @@ export async function runAcpSessionConfig(context) {
       })
       assert(configOption(stdioWrite?.configOptions, 'mode')?.currentValue === 'plan',
         'PR3B-07: the stdio standard config write must commit and read back plan')
+      const stdioTeam = await stdio.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: stdioSession, configId: 'agent_team', type: 'boolean', value: true,
+      })
+      assert(configOption(stdioTeam?.configOptions, 'agent_team')?.currentValue === true,
+        'PR3B-07: the stdio bridge must write the negotiated boolean option')
+      await waitFor(() => stdio.updates.some(params => params?.sessionId === stdioSession
+        && params.update?.sessionUpdate === 'config_option_update'
+        && configOption(params.update.configOptions, 'agent_team')?.currentValue === true) ? true : undefined,
+      'PR3B-07 the stdio boolean config update')
       for (const chunk of stdio.rawStdout().toString('utf8').split('\n').filter(Boolean)) {
         assert(JSON.parse(chunk) !== undefined, 'PR3B-07: every stdout line must be JSON-RPC')
       }
@@ -431,6 +494,24 @@ export async function runAcpSessionConfig(context) {
     }
     await waitForHostSessionEvent(dshHome, sessionId,
       event => event.type === 'plan/mode' && event.data?.active === true, 'PR3B main session keeps its committed plan mode')
+
+    // L1 load: with the main ACP View closed, the SAME Host replays the real
+    // history and returns its initial mode/config state through session/load.
+    await client.close()
+    const loader = await openSdkClient(endpoint, () => {})
+    clients.push(loader)
+    await loader.request(acp.methods.agent.initialize, {
+      protocolVersion: 1, clientCapabilities: { session: { configOptions: { boolean: {} } } },
+    })
+    const loaded = await loader.request(acp.methods.agent.session.load, {
+      sessionId, cwd: hostCwd, mcpServers: [],
+    })
+    assert(loaded?.modes?.currentModeId === 'plan',
+      `PR3B-01: session/load must return the committed legacy modes (${JSON.stringify(loaded?.modes)})`)
+    assert(configOption(loaded?.configOptions, 'mode')?.currentValue === 'plan'
+      && configOption(loaded?.configOptions, 'agent_team')?.currentValue === true,
+    'PR3B-01: session/load must return the complete current config rows')
+    await loader.request(acp.methods.agent.session.close, { sessionId })
 
     // Cold readback: stop the first Host, boot a genuine new Host identity in
     // the same private profile and read the committed mode/Team through the

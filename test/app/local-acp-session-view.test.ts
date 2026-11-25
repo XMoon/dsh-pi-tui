@@ -19,6 +19,7 @@ import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sd
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import {
+  AcpSessionPolicyError,
   type AcpSessionPolicyRequest,
   type AcpSessionPolicyState,
 } from '../../src/app/remote-process/local-acp-session-policy.ts'
@@ -319,8 +320,8 @@ class FakeAccess implements HostAcpSessionAccess {
     request: AcpSessionPolicyRequest,
     signal: AbortSignal,
     stillCurrent: () => 'current' | 'stale',
-  ): Promise<AcpSessionPolicyState> {
-    return await this.selectSessionPolicyImpl(agent, session, request, signal, stillCurrent)
+  ): Promise<void> {
+    await this.selectSessionPolicyImpl(agent, session, request, signal, stillCurrent)
   }
 
   observePromptFacts(_listener: AcpPromptFactListener): () => void {
@@ -3852,8 +3853,12 @@ test('config option reads and model selection require the exact attached claim a
   const access = new FakeAccess()
   const agent = makeAgent('S-model', '/w')
   access.seed(agent)
-  access.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
-  access.selectModelImpl = async () => modelOptionsFor('["p1","b"]')
+  let currentModel = '["p1","a"]'
+  access.modelOptionsImpl = async () => modelOptionsFor(currentModel)
+  access.selectModelImpl = async () => {
+    currentModel = '["p1","b"]'
+    return modelOptionsFor(currentModel)
+  }
   const registry = new AcpSessionViewRegistry(QUIET_DIAG)
   const conn = registry.createConnection()
   const signal = new AbortController().signal
@@ -4135,6 +4140,150 @@ test('an invalidation during the SECOND coalesced pass is not dropped by the pas
   await flushOutput()
   assert.equal(reads >= 4, true, 'the invalidation during the second pass must schedule a third pass')
   assert.equal(notifications.at(-1), '["p1","m4"]', 'the newest committed cut must be delivered')
+})
+
+test('a transient live policy failure keeps the last complete list and a genuine absence removes rows', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-refresh-policy', '/w')
+  access.seed(agent)
+  access.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
+  let policy: 'plan' | 'absent' | 'fail' = 'plan'
+  access.readSessionPolicyImpl = () => {
+    if (policy === 'fail') {
+      throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_UNAVAILABLE', 'projection temporarily unavailable', -32042)
+    }
+    if (policy === 'absent') return {}
+    return { mode: 'plan', agentTeam: true }
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const configs: string[][] = []
+  await registry.resumeSession(conn, access, { sessionId: 'S-refresh-policy', cwd: '/w' }, {
+    capabilities: { plan: false, compaction: false, subagents: false, notices: false, booleanConfigOptions: true },
+    notifyConfigUpdate: async (_sessionId, update) => {
+      if (update.kind === 'config') configs.push(update.configOptions.map(option => option.id))
+    },
+  })
+  await registry.sessionConfigState(conn, access, 'S-refresh-policy')
+  assert.equal(configs.length, 0, 'the attach snapshot itself is not a live replacement')
+
+  policy = 'fail'
+  registry.onSessionEvent(agent.session, { seq: 1, type: 'model/selection', data: { provider: 'p1', model: 'a' } })
+  await flushOutput()
+  assert.equal(configs.length, 0, 'a failed live read never replaces the delivered complete list')
+
+  policy = 'absent'
+  registry.onSessionEvent(agent.session, { seq: 2, type: 'model/selection', data: { provider: 'p1', model: 'a2' } })
+  await flushOutput()
+  assert.deepEqual(configs.at(-1), ['model'], 'a genuine absence removes the mode/team rows')
+
+  policy = 'plan'
+  registry.onSessionEvent(agent.session, { seq: 3, type: 'model/selection', data: { provider: 'p1', model: 'a3' } })
+  await flushOutput()
+  assert.deepEqual(configs.at(-1), ['model', 'mode', 'agent_team'], 'recovery delivers the complete current cut')
+})
+
+test('a live mode change still notifies when the model catalog is unavailable, without a partial list', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-mode-model-fail', '/w')
+  access.seed(agent)
+  access.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
+  access.readSessionPolicyImpl = () => ({ mode: 'default' })
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const updates: string[] = []
+  await registry.resumeSession(conn, access, { sessionId: 'S-mode-model-fail', cwd: '/w' }, {
+    notifyConfigUpdate: async (_sessionId, update) => {
+      updates.push(update.kind === 'mode' ? `mode:${update.currentModeId}` : 'config')
+    },
+  })
+  await registry.sessionConfigState(conn, access, 'S-mode-model-fail')
+  access.readSessionPolicyImpl = () => ({ mode: 'plan' })
+  access.modelOptionsImpl = async () => {
+    throw new LocalAcpViewError('LOCAL_ACP_MODEL_UNAVAILABLE', 'catalog unavailable', -32042)
+  }
+  registry.onSessionEvent(agent.session, { seq: 1, type: 'plan/mode', data: { active: true } })
+  await flushOutput()
+  assert.deepEqual(updates, ['mode:plan'], 'the mode update does not depend on the model catalog')
+})
+
+test('a held mode send is fenced against a newer cut before the full list is submitted', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-hold-send', '/w')
+  access.seed(agent)
+  let model = '["p1","a"]'
+  access.modelOptionsImpl = async () => modelOptionsFor(model)
+  let policy: AcpSessionPolicyState = { mode: 'default' }
+  access.readSessionPolicyImpl = () => policy
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const modeStarted = deferred<void>()
+  const releaseMode = deferred<void>()
+  const configs: string[] = []
+  await registry.resumeSession(conn, access, { sessionId: 'S-hold-send', cwd: '/w' }, {
+    notifyConfigUpdate: async (_sessionId, update) => {
+      if (update.kind === 'mode') {
+        modeStarted.resolve()
+        await releaseMode.promise
+        return
+      }
+      configs.push((update.configOptions[0] as { currentValue: string }).currentValue)
+    },
+  })
+  await registry.sessionConfigState(conn, access, 'S-hold-send')
+  policy = { mode: 'plan' }
+  registry.onSessionEvent(agent.session, { seq: 10, type: 'plan/mode', data: { active: true } })
+  await modeStarted.promise
+  // The mode frame is already submitted/held; a newer model cut must prevent
+  // the OLD config list (model a) from being submitted behind it.
+  model = '["p1","b"]'
+  registry.onSessionEvent(agent.session, { seq: 11, type: 'model/selection', data: { provider: 'p1', model: 'b' } })
+  releaseMode.resolve()
+  await flushOutput()
+  await flushOutput()
+  assert.ok(configs.length >= 1, 'the newest cut is delivered after the held mode send')
+  assert.deepEqual(configs.filter(value => value === '["p1","a"]'), [], 'the stale list was never submitted')
+  assert.equal(configs.at(-1), '["p1","b"]')
+})
+
+test('an initial policy read failure omits the optional display without fabricating absence or a failed attach', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-attach-policy', '/w')
+  access.seed(agent)
+  access.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
+  access.readSessionPolicyImpl = () => {
+    throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_UNAVAILABLE', 'projection unavailable', -32042)
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'S-attach-policy', cwd: '/w' })
+  const snapshot = await registry.sessionConfigState(conn, access, 'S-attach-policy')
+  assert.equal(snapshot.modes, undefined)
+  assert.equal(snapshot.configOptions, undefined)
+  assert.equal(snapshot.omitted, 'policy')
+  await assert.rejects(
+    registry.setMode(conn, access, 'S-attach-policy', 'plan', new AbortController().signal),
+    isViewError('LOCAL_ACP_CONFIG_INVALID_OPTION'),
+  )
+})
+
+test('an initial policy lifecycle error still propagates instead of becoming an optional omission', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('S-attach-stale', '/w')
+  access.seed(agent)
+  access.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
+  access.readSessionPolicyImpl = () => {
+    throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_STALE', 'identity changed', -32042)
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'S-attach-stale', cwd: '/w' })
+  await assert.rejects(registry.sessionConfigState(conn, access, 'S-attach-stale'), isViewError('LOCAL_ACP_CONFIG_STALE'))
 })
 
 test('the initial config state uses one policy cut in the fixed model, mode, agent_team order', async () => {

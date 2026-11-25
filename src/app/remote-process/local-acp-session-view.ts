@@ -323,7 +323,7 @@ export interface HostAcpSessionAccess {
     request: AcpSessionPolicyRequest,
     signal: AbortSignal,
     stillCurrent: () => 'current' | 'stale',
-  ): Promise<AcpSessionPolicyState>
+  ): Promise<void>
   /**
    * Whether the exact Host installed the official `userQuestions` service. An
    * absent service is a capability absence: an ACP-owned question then fails
@@ -419,6 +419,21 @@ export interface AcpSessionConfigSnapshot {
   readonly modes?: ReturnType<typeof sessionModeStateOf>
   /** The complete fixed-order config-option list, when the model catalog is readable. */
   readonly configOptions?: readonly SessionConfigOption[]
+  /**
+   * Why an optional display was omitted: a genuine model-catalog absence vs a
+   * failed/unstable policy cut. The listener reports the actual cause; a failed
+   * policy read is never reported as a model-catalog failure.
+   */
+  readonly omitted?: 'model' | 'policy'
+}
+
+/** The config cut's read purpose: initial display, live refresh or write reply. */
+type AcpConfigCutMode = 'attach' | 'refresh' | 'reply'
+
+/** One fenced config cut: the snapshot plus the invalidation generation it proved. */
+interface AcpConfigCut {
+  readonly snapshot: AcpSessionConfigSnapshot
+  readonly epoch: number
 }
 
 /**
@@ -1719,16 +1734,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
     if (request.configId === 'model' || request.configId === 'thought_level') {
       const claim = this.attachedClaim(state, request.sessionId)
-      const epoch = claim.configEpoch ?? 0
-      const modelOptions = await this.setModelOnly(state, access, request, signal)
-      // No Session event is guaranteed for a same-value write: only when the
-      // write did NOT invalidate the config itself does the successful terminal
-      // request the one complete refresh (no duplicate obligation).
-      if ((claim.configEpoch ?? 0) === epoch) this.enqueueConfigUpdate(claim)
-      // The model service's own returned list is its committed readback; only
-      // the exact policy rows are read on top of it, so the reply is a complete
-      // snapshot without a second provider-catalog read.
-      return this.composeConfigReply(claim, access, modelOptions)
+      await this.setModelOnly(state, access, request, signal)
+      // A same-value write emits no Session event and changes no projection, so
+      // it neither needs nor may race a config notification ahead of its reply.
+      // A real model/selection event owns the post-write refresh. The reply is
+      // ONE fenced full cut after the model terminal.
+      return await this.readConfigReply(claim, access)
     }
     throw policyViewError(invalidPolicyOption('unknown session config option'))
   }
@@ -1769,16 +1780,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     sessionId: string,
   ): Promise<AcpSessionConfigSnapshot> {
     const claim = this.attachedClaim(state, sessionId)
-    const snapshot = await this.readConfigSnapshotFenced(claim, access, true)
+    const cut = await this.readConfigSnapshotFenced(claim, access, 'attach')
+    const snapshot = cut.snapshot
     claim.legacyModeAnnounced = snapshot.modes !== undefined
     claim.lastLegacyMode = snapshot.mode
     claim.configReady = true
-    // Invalidation during the initial read was only marked dirty: the ONE
-    // coalesced refresh starts now, after the attach snapshot, never before it.
-    if (claim.configDirty === true) {
-      claim.configDirty = false
-      this.enqueueConfigUpdate(claim)
-    }
+    // The attach snapshot IS the baseline. Any invalidation observed while it
+    // was read was already proven by the fenced cut (or forced the optional
+    // omission); it must never start a notification before the SDK has
+    // submitted the attach response. The next real invalidation refreshes.
+    claim.configDirty = false
     return snapshot
   }
 
@@ -1834,19 +1845,89 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     }
   }
 
-  /** Compose a complete reply from one exact model readback plus the policy cut. */
-  private composeConfigReply(
+  /** The strict complete post-write reply; a partial list is never returned. */
+  private async readConfigReply(claim: ViewClaim, access: HostAcpSessionAccess): Promise<SessionConfigOption[]> {
+    const cut = await this.readConfigSnapshotFenced(claim, access, 'reply')
+    if (cut.snapshot.configOptions === undefined) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE',
+        'the session config state could not be read back completely',
+        -32000,
+      )
+    }
+    return [...cut.snapshot.configOptions]
+  }
+
+  /**
+   * One config cut under the claim's invalidation generation, retried at most
+   * once. `attach` may omit an optional display caused by a genuine model or
+   * policy unavailability; `refresh` and `reply` never return a partial list.
+   * The final attach fallback re-checks the exact View identity and never
+   * performs an unfenced read.
+   */
+  private async readConfigSnapshotFenced(
     claim: ViewClaim,
     access: HostAcpSessionAccess,
-    modelOptions: readonly SessionConfigOption[],
-  ): SessionConfigOption[] {
+    mode: AcpConfigCutMode,
+  ): Promise<AcpConfigCut> {
     const agent = claim.exactAgent as LiveAgentViewIdentity
     const session = claim.exactSession as object
-    let policy: AcpSessionPolicyState
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const epoch = claim.configEpoch ?? 0
+      const snapshot = await this.readConfigSnapshot(claim, access, mode)
+      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_CONFIG_STALE',
+          'the attached session changed during the config read',
+          -32042,
+        )
+      }
+      if ((claim.configEpoch ?? 0) === epoch) return { snapshot, epoch }
+    }
+    if (mode === 'attach') {
+      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_CONFIG_STALE',
+          'the attached session changed during the config read',
+          -32042,
+        )
+      }
+      // No read here: a still-moving cut cannot prove even the policy display.
+      return { snapshot: { omitted: 'policy' }, epoch: claim.configEpoch ?? 0 }
+    }
+    throw readbackUnavailablePolicyView()
+  }
+
+  /**
+   * One config cut: read the model options first (provider I/O outside any
+   * maintenance), then ONE policy snapshot after that await. A failed policy
+   * read is not an absence; only the official UNAVAILABLE classification may
+   * omit the optional attach display, and a live refresh keeps the previously
+   * delivered list instead of sending a partial replacement.
+   */
+  private async readConfigSnapshot(
+    claim: ViewClaim,
+    access: HostAcpSessionAccess,
+    mode: AcpConfigCutMode,
+  ): Promise<AcpSessionConfigSnapshot> {
+    const agent = claim.exactAgent as LiveAgentViewIdentity
+    const session = claim.exactSession as object
+    let modelOptions: SessionConfigOption[] | undefined
     try {
-      policy = access.readSessionPolicy(agent, session)
-    } catch {
-      throw readbackUnavailablePolicyView()
+      modelOptions = await this.callModelAccess(() => access.modelOptions(agent, session))
+    } catch (error) {
+      if (mode === 'reply') {
+        throw readbackUnavailablePolicyView()
+      }
+      if (mode === 'refresh') {
+        // The model list may be temporarily unavailable; the legacy mode fact
+        // is independent and must still be deliverable. The full list is not.
+        modelOptions = undefined
+      } else if (error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MODEL_UNAVAILABLE') {
+        modelOptions = undefined
+      } else {
+        throw error
+      }
     }
     if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
       throw new LocalAcpViewError(
@@ -1855,127 +1936,37 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         -32042,
       )
     }
-    const modeRow = modeConfigOptionOf(policy)
-    const teamRow = agentTeamConfigOptionOf(policy, claim.capabilities?.booleanConfigOptions === true)
-    return [
-      ...modelOptions,
-      ...modeRow === undefined ? [] : [modeRow],
-      ...teamRow === undefined ? [] : [teamRow],
-    ]
-  }
-
-  /** The strict complete post-write reply; a partial list is never returned. */
-  private async readConfigReply(claim: ViewClaim, access: HostAcpSessionAccess): Promise<SessionConfigOption[]> {
-    const snapshot = await this.readConfigSnapshotFenced(claim, access, false)
-    if (snapshot.configOptions === undefined) {
-      throw new LocalAcpViewError(
-        'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE',
-        'the session config state could not be read back completely',
-        -32000,
-      )
-    }
-    return [...snapshot.configOptions]
-  }
-
-  /** One config cut under the claim's invalidation generation, retried at most once. */
-  private async readConfigSnapshotFenced(
-    claim: ViewClaim,
-    access: HostAcpSessionAccess,
-    tolerant: boolean,
-  ): Promise<AcpSessionConfigSnapshot> {
-    const agent = claim.exactAgent as LiveAgentViewIdentity
-    const session = claim.exactSession as object
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const epoch = claim.configEpoch ?? 0
-      const snapshot = await this.readConfigSnapshot(claim, access, tolerant)
-      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
-        throw new LocalAcpViewError(
-          'LOCAL_ACP_CONFIG_STALE',
-          'the attached session changed during the config read',
-          -32042,
-        )
-      }
-      if ((claim.configEpoch ?? 0) === epoch) return snapshot
-    }
-    // A still-moving cut cannot prove one snapshot: the caller treats it as a
-    // readback failure (post-write) or omits the optional display (attach).
-    if (tolerant) {
-      return this.readConfigSnapshot(claim, access, true, true)
-    }
-    throw readbackUnavailablePolicyView()
-  }
-
-  /**
-   * One config cut: the official model options plus a policy snapshot taken
-   * AFTER that await, in the fixed wire order. A tolerant read omits an
-   * unavailable optional display; a strict read turns every data failure into
-   * the stable READBACK classification (the lifecycle fence still propagates).
-   */
-  private async readConfigSnapshot(
-    claim: ViewClaim,
-    access: HostAcpSessionAccess,
-    tolerant: boolean,
-    policyOnly = false,
-  ): Promise<AcpSessionConfigSnapshot> {
-    const agent = claim.exactAgent as LiveAgentViewIdentity
-    const session = claim.exactSession as object
-    let policy = this.readPolicyForConfig(claim, access, tolerant)
-    let modelOptions: SessionConfigOption[] | undefined
-    if (!policyOnly) {
-      try {
-        modelOptions = await this.callModelAccess(() => access.modelOptions(agent, session))
-      } catch (error) {
-        if (error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_MODEL_UNAVAILABLE') {
-          if (!tolerant) throw readbackUnavailablePolicyView()
-          modelOptions = undefined
-        } else {
-          throw error
+    let policy: AcpSessionPolicyState
+    try {
+      policy = access.readSessionPolicy(agent, session)
+    } catch (error) {
+      if (mode === 'attach') {
+        if (error instanceof AcpSessionPolicyError && error.code === 'LOCAL_ACP_CONFIG_UNAVAILABLE') {
+          this.diag.warn('local-acp.config.policy-unavailable', { code: error.code })
+          return { omitted: 'policy' }
         }
+        if (error instanceof AcpSessionPolicyError) throw policyViewError(error)
+        throw error
       }
-      if (!this.isStillAttached(claim.connectionIdentity, claim, agent, session)) {
-        throw new LocalAcpViewError(
-          'LOCAL_ACP_CONFIG_STALE',
-          'the attached session changed during the config read',
-          -32042,
-        )
-      }
-      policy = this.readPolicyForConfig(claim, access, tolerant)
+      throw readbackUnavailablePolicyView()
     }
     const booleanSupported = claim.capabilities?.booleanConfigOptions === true
     const modeRow = modeConfigOptionOf(policy)
     const teamRow = agentTeamConfigOptionOf(policy, booleanSupported)
+    const modes = sessionModeStateOf(policy)
+    if (modelOptions === undefined) {
+      return {
+        ...(policy.mode === undefined ? {} : { mode: policy.mode }),
+        ...(policy.agentTeam === undefined ? {} : { agentTeam: policy.agentTeam }),
+        modes,
+        omitted: 'model',
+      }
+    }
     return {
       ...(policy.mode === undefined ? {} : { mode: policy.mode }),
       ...(policy.agentTeam === undefined ? {} : { agentTeam: policy.agentTeam }),
-      modes: sessionModeStateOf(policy),
-      ...(modelOptions === undefined ? {} : {
-        configOptions: [...modelOptions, ...modeRow === undefined ? [] : [modeRow], ...teamRow === undefined ? [] : [teamRow]],
-      }),
-    }
-  }
-
-  /** Read the exact policy snapshot for a config cut (tolerant only at attach). */
-  private readPolicyForConfig(
-    claim: ViewClaim,
-    access: HostAcpSessionAccess,
-    tolerant: boolean,
-  ): AcpSessionPolicyState {
-    const agent = claim.exactAgent as LiveAgentViewIdentity
-    const session = claim.exactSession as object
-    try {
-      return access.readSessionPolicy(agent, session)
-    } catch (error) {
-      if (error instanceof AcpSessionPolicyError && tolerant && error.code === 'LOCAL_ACP_CONFIG_UNAVAILABLE') {
-        this.diag.warn('local-acp.config.policy-unavailable', { code: error.code })
-        return {}
-      }
-      if (tolerant) {
-        this.diag.warn('local-acp.config.policy-failed', {
-          kind: error instanceof Error ? error.name : typeof error,
-        })
-        return {}
-      }
-      throw readbackUnavailablePolicyView()
+      modes,
+      configOptions: [...modelOptions, ...modeRow === undefined ? [] : [modeRow], ...teamRow === undefined ? [] : [teamRow]],
     }
   }
 
@@ -2035,15 +2026,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       signal,
       stillCurrent,
     ))
-    const currentness = stillCurrent()
-    if (currentness === 'view-busy') {
-      throw new LocalAcpViewError(
-        'LOCAL_ACP_MODEL_VIEW_BUSY',
-        'a prompt is already in flight for this session view',
-        -32046,
-      )
-    }
-    if (currentness !== 'current') throw staleModelSelection()
+    // A completed model terminal is not retroactively refused because an
+    // unrelated policy slot appeared after it. Only a lost View identity makes
+    // the committed readback undeliverable.
+    if (!this.isStillAttached(state, claim, agent, session)) throw staleModelSelection()
     return options
   }
 
@@ -5124,42 +5110,41 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const notify = claim.notifyConfigUpdate
     if (access === undefined || agent === undefined || session === undefined || notify === undefined) return
     if (claim.configReady !== true || claim.replay !== undefined) return
-    let policy: AcpSessionPolicyState | undefined
+    let cut: AcpConfigCut
     try {
-      policy = access.readSessionPolicy(agent, session)
+      cut = await this.readConfigSnapshotFenced(claim, access, 'refresh')
     } catch {
-      // A capability that cannot be read cannot prove a mode change; the
-      // complete read below may still recover the current full list.
-      policy = undefined
-    }
-    if (claim.legacyModeAnnounced === true && policy?.mode !== undefined && claim.lastLegacyMode !== policy.mode) {
-      if (!await this.sendConfigUpdate(claim, notify, { kind: 'mode', currentModeId: wireModeId(policy.mode) })) return
-      claim.lastLegacyMode = policy.mode
-    }
-    if (!this.configSinkCurrent(claim)) return
-    let snapshot: AcpSessionConfigSnapshot
-    try {
-      snapshot = await this.readConfigSnapshotFenced(claim, access, true)
-    } catch {
+      // A live failed/unstable read never replaces a delivered list. Keep the
+      // last complete projection; a later real invalidation retries.
       return
     }
+    const { snapshot, epoch } = cut
     if (!this.configSinkCurrent(claim) || claim.notifyConfigUpdate !== notify) return
-    if (snapshot.configOptions === undefined) return
-    // A mode change that happened during the catalog await is delivered BEFORE
-    // the complete list, on the SAME ordered chain.
+    // A mode change is delivered BEFORE the full list on the same ordered chain.
     if (claim.legacyModeAnnounced === true && snapshot.mode !== undefined && claim.lastLegacyMode !== snapshot.mode) {
-      if (!await this.sendConfigUpdate(claim, notify, { kind: 'mode', currentModeId: wireModeId(snapshot.mode) })) return
+      if (!await this.sendConfigUpdate(claim, notify, epoch, { kind: 'mode', currentModeId: wireModeId(snapshot.mode) })) return
       claim.lastLegacyMode = snapshot.mode
     }
-    await this.sendConfigUpdate(claim, notify, { kind: 'config', configOptions: [...snapshot.configOptions] })
+    if (snapshot.configOptions === undefined) return
+    await this.sendConfigUpdate(claim, notify, epoch, {
+      kind: 'config',
+      configOptions: [...snapshot.configOptions],
+    })
   }
 
-  /** One wire send on the claim's own sink; a failure retires only this sink. */
+  /**
+   * One wire send on the claim's own sink. The exact claim, current epoch and
+   * bound sink are re-checked immediately before submission; a cut invalidated
+   * by a close/replacement/newer event is discarded (never a stale frame).
+   */
   private async sendConfigUpdate(
     claim: ViewClaim,
     notify: AcpConfigUpdateNotifier,
+    epoch: number,
     update: AcpConfigUpdate,
   ): Promise<boolean> {
+    if (!this.configSinkCurrent(claim) || claim.notifyConfigUpdate !== notify
+      || (claim.configEpoch ?? 0) !== epoch) return false
     try {
       await notify(claim.sessionId, update)
       return true

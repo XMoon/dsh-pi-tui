@@ -873,7 +873,12 @@ function buildAgentApp(
     ): Promise<{ modes?: SessionModeState; configOptions?: SessionConfigOption[] }> => {
       try {
         const snapshot = await views.sessionConfigState(view, access, sessionId)
-        if (snapshot.configOptions === undefined) {
+        if (snapshot.configOptions === undefined && snapshot.omitted === 'policy') {
+          context.diag.warn('local-acp.session-policy-unavailable', {
+            code: 'LOCAL_ACP_CONFIG_UNAVAILABLE',
+            reason: 'LOCAL_ACP_CONFIG_UNAVAILABLE',
+          })
+        } else if (snapshot.configOptions === undefined) {
           context.diag.warn('local-acp.model-catalog-unavailable', {
             code: 'LOCAL_ACP_MODEL_CATALOG_UNAVAILABLE',
             reason: 'LOCAL_ACP_MODEL_UNAVAILABLE',
@@ -884,13 +889,9 @@ function buildAgentApp(
           ...(snapshot.configOptions === undefined ? {} : { configOptions: [...snapshot.configOptions] }),
         }
       } catch (error) {
-        // A still-moving config cut cannot prove one initial snapshot. It is an
-        // optional-display omission, never a fabricated empty config; a real
-        // lifecycle failure keeps its typed error and propagates.
-        if (error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_CONFIG_READBACK_UNAVAILABLE') {
-          context.diag.warn('local-acp.config-readback-unavailable', { code: error.code })
-          return {}
-        }
+        // A lifecycle failure (stale identity/replaced View) propagates; an
+        // optional display omission is already represented by the snapshot, so
+        // there is no catch-all that could falsely confirm an attach.
         throw error
       }
     }

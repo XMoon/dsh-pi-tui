@@ -1048,8 +1048,14 @@ export function createHostAcpSessionAccess(
   // The exact official policy authorities are resolved PER CALL: a retained
   // PlanModeController by instance identity and the root Team service by the
   // real subagent registry. Neither is cached as a second authority.
-  const agentTeams = context.reflect.get('agentTeams') as AgentTeamServiceLike | undefined
-  const subagents = context.reflect.get('subagents') as SubagentRegistryLike | undefined
+  // Re-read each official service at the operation boundary; an access-time
+  // capture is not proof that the current root authority still exists.
+  const currentAgentTeams = (): AgentTeamServiceLike | undefined =>
+    context.reflect.get('agentTeams') as AgentTeamServiceLike | undefined
+  const currentSubagents = (): SubagentRegistryLike | undefined =>
+    context.reflect.get('subagents') as SubagentRegistryLike | undefined
+  const currentProjections = (): SessionProjectionServiceLike | undefined =>
+    context.reflect.get('sessionProjections') as SessionProjectionServiceLike | undefined
   const policyService = new AcpSessionPolicyService({
     currentAgent: sessionId => agents.get(sessionId),
     currentSession: sessionId => sessions.get(sessionId),
@@ -1074,7 +1080,10 @@ export function createHostAcpSessionAccess(
       return service as AcpPlanModeService
     },
     team: agent => {
-      if (agentTeams === undefined || subagents === undefined || sessionProjections === undefined) return undefined
+      const agentTeams = currentAgentTeams()
+      const subagents = currentSubagents()
+      const projections = currentProjections()
+      if (agentTeams === undefined || subagents === undefined || projections === undefined) return undefined
       let root: object
       try {
         root = subagents.rootOf(agent)
@@ -1085,7 +1094,9 @@ export function createHostAcpSessionAccess(
       return agentTeams
     },
     teamEnabled: session => {
-      const value = projectionValueOf(sessionProjections, session, 'agentTeam')
+      const projections = currentProjections()
+      if (projections === undefined) return undefined
+      const value = projectionValueOf(projections, session, 'agentTeam')
       if (value === undefined) return undefined
       if (value === null || typeof value !== 'object') {
         throw new Error('local host entry: the official Agent Team projection is malformed')
@@ -1210,7 +1221,7 @@ export function createHostAcpSessionAccess(
       if (agents.get(agent.id) !== agent || sessions.get(agent.id) !== session || agent.session !== session) {
         throw stalePolicy()
       }
-      return await policyService.select(agent as unknown as AcpSessionPolicyAgent, request, signal, stillCurrent)
+      await policyService.select(agent as unknown as AcpSessionPolicyAgent, request, signal, stillCurrent)
     },
     imageLimits: () => attachments?.imageLimits,
     // The ONE official Host Attachment Store reads and verifies the committed
