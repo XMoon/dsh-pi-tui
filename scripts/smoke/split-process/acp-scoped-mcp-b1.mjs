@@ -155,11 +155,15 @@ async function openSdkClient(endpoint) {
   }
   const socketClosed = new Promise(resolve => socket.once('close', resolve))
   const stream = acp.ndJsonStream(Writable.toWeb(socket), Readable.toWeb(socket))
-  const connection = acp.client({ name: 'b1-scoped-mcp-qualification' }).connect(stream)
+  const updates = []
+  const app = acp.client({ name: 'b1-scoped-mcp-qualification' })
+  app.onNotification(acp.methods.client.session.update, ({ params }) => { updates.push(params) })
+  const connection = app.connect(stream)
   return {
     connection,
     socket,
     socketClosed,
+    updates,
     async request(method, params) {
       return await deadline(connection.agent.request(method, params), `ACP ${method}`)
     },
@@ -364,6 +368,15 @@ export async function runAcpScopedMcpB1(context) {
     await lifecycleWhenAttachable(handle, acp.methods.agent.session.resume, params, label)
   const loadWhenAttachable = async (handle, params, label = 'load') =>
     await lifecycleWhenAttachable(handle, acp.methods.agent.session.load, params, label)
+  const waitForClientUpdate = async (client, predicate, label, timeoutMs = 30_000) => {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const found = client.updates.find(predicate)
+      if (found !== undefined) return found
+      await sleep(25)
+    }
+    throw new SplitSmokeAssertionError(`${CASE_ID}: timed out waiting for ${label}`)
+  }
   const waitToolAbsent = async (sessionId, label, timeoutMs = 60_000) => {
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
@@ -725,6 +738,13 @@ export async function runAcpScopedMcpB1(context) {
       `H1: the exact configured HTTP headers must reach the endpoint: ${JSON.stringify(httpListRequest)}`)
     await httpH1.waitForEvent(event => event.kind === 'sse-open', 'H1 HTTP GET stream open')
     await httpH1.waitForEvent(event => event.kind === 'tools/call' && event.name === 'echo', 'H1 HTTP tools/call')
+    const httpCallRequest = await httpH1.waitForEvent(
+      event => event.kind === 'request' && event.rpcMethod === 'tools/call'
+        && event.headerMatches?.Authorization === true && event.headerMatches?.['X-API-Key'] === true,
+      'H1 HTTP tools/call exact headers',
+    )
+    assert(httpCallRequest.headerMatches?.Authorization === true && httpCallRequest.headerMatches?.['X-API-Key'] === true,
+      'H1: the actual HTTP tools/call must carry the exact configured headers')
     await acpH1.client.request(acp.methods.agent.session.close, { sessionId: httpSession })
     await waitToolAbsent(httpSession, 'H1 after HTTP close')
     await httpH1.waitForEvent(event => event.kind === 'sse-close', 'H1 HTTP GET stream close')
@@ -749,7 +769,8 @@ export async function runAcpScopedMcpB1(context) {
     assert(httpH2.requests.filter(request => request.rpcMethod === 'tools/call').length === 0,
       'H2: another Agent must never reach the HTTP endpoint')
     const beforeHttpHold = eventsOf(sessionA).length
-    await sendTuiPrompt(tuiA, `B1_HOLD_A ${digestOf(`http-hold-${runNonce}`).slice(0, 16)}`, 'H2 tui A hold')
+    const h2HoldPrompt = `B1_HOLD_A ${digestOf(`http-hold-${runNonce}`).slice(0, 16)}`
+    await sendTuiPrompt(tuiA, h2HoldPrompt, 'H2 tui A hold')
     const httpHoldCall = await waitForEvent(sessionA, beforeHttpHold,
       event => event.type === 'tool/call' && eventData(event).name === HOLD_TOOL, 'H2 HTTP hold tool/call')
     const httpHoldCallId = toolCallIdOf(httpHoldCall)
@@ -778,6 +799,13 @@ export async function runAcpScopedMcpB1(context) {
       cwd: hostCwd,
       mcpServers: [httpDeclaration('b1scope', httpH3.url)],
     }, 'H3 HTTP load')
+    const h3Replay = await waitForClientUpdate(
+      acpH3.client,
+      update => update.update?.sessionUpdate === 'user_message_chunk'
+        && String(update.update?.content?.text ?? '').includes(h2HoldPrompt),
+      'H3 HTTP load replay of the H2 durable user marker',
+    )
+    assert(h3Replay !== undefined, 'H3: session/load must replay the H2 durable user marker')
     await httpH3.waitForEvent(event => event.kind === 'request' && event.rpcMethod === 'tools/list' && event.time >= h3LoadAt,
       'H3 HTTP load tools/list')
     await acpH3.client.close()
