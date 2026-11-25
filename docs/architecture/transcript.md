@@ -769,17 +769,20 @@ class:
   `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
   one indivisible unit. A Context row that truly precedes the initial user is
   never moved across that user.
-- The PR1 committed-answer fence is a chronology boundary, not a carriage
-  owner. From the first committed pre-steer answer onward, persistent rows keep
-  their raw order: an already-visible Context row stays a standalone card
-  (hidden only by its OWN card disclosure), even when canonical structure
-  assigns it to a Work span. It must not borrow that Work or the Thought as a
-  reveal owner. The `thought` carriage (Snapshot, a proven Working `tool-jobs`
-  Notice) follows the Thought without a Work requirement; the `work` carriage
+- The committed-answer fence is a chronology boundary, not a carriage owner.
+  From the first committed pre-steer answer onward, persistent rows keep their
+  raw order: while a Context row is independently emitted, it stays a standalone
+  card (hidden only by its OWN card disclosure) even when canonical structure
+  assigns it to a Work span, and it must not borrow that Work or the Thought as
+  a reveal owner. If an expanded root actually emits its Work, the current
+  ancestry changes and the Work/card ownership applies from that projection
+  onward. The `thought` carriage (Snapshot, a proven Working `tool-jobs`
+  Notice) follows the Thought without a Work requirement. The `work` carriage
   (same-turn Agent relay / subagent settlement / repeat-tool reminder /
-  image-bearing PTC Context) and a complete catalog replacement require a REAL
-  Work span and stay trailing. Opening or expanding a root never turns an
-  already-visible raw Context row into a Work member for disclosure purposes.
+  image-bearing PTC Context) may be a pending prefix once a REAL Work owner
+  exists; `trailing-work` (a complete catalog replacement) is the only
+  carriage that must trail an already-established Work. Neither is an
+  independent raw card.
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
   `tool-jobs` Notice, same-turn Agent relay, same-turn subagent settlement
   Notice, same-turn repeat-tool reminder, same-turn image-bearing PTC

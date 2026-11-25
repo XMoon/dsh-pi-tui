@@ -1543,6 +1543,62 @@ test('the plan lease and the search reveal COMPOSE (union) and release independe
   app.stop()
 })
 
+test('Focus resolves the independent search + plan reveals once per projection and releases them independently', async () => {
+  const fixture = searchPlanFixture()
+  const filler: TranscriptMessage[] = Array.from({ length: 2000 }, (_, index) =>
+    index % 2 === 0
+      ? { kind: 'user', turn: 0, text: `filler prompt ${index}` }
+      : { kind: 'thinking', turn: 0, text: `filler process ${index}`, running: false })
+  const messages: TranscriptMessage[] = [fixture.messages[0]!, ...filler, ...fixture.messages.slice(1)]
+  const vt = new VirtualTerminal(100, 26)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { present: planDirectPresenter })
+  app.start()
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: SESSION, version: 'test' })
+  app.setDisplayPreset('focus')
+  app.setFullscreen(true)
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  const body = (): string => vt.getViewport().map(line => stripTerminalSequences(line)).join('\n')
+  assert.ok(!body().includes('needle body line'), 'precondition: the collapsed Focus hides the search target')
+  assert.ok(!body().includes('## Scope'), 'precondition: the collapsed Focus hides the plan target')
+
+  app.setTranscriptSearchPresentation(searchTargetFor(fixture.root))
+  await vt.waitForRender()
+  assert.ok(body().includes('needle body line'), `the search request opens its own target:\n${body()}`)
+  const settle = app.askQuestions([{
+    id: 'plan-review', question: 'Approve?', header: 'Plan review', detail: SEARCH_PLAN,
+    options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan-1' },
+  }], undefined, { reviewSessionId: SESSION }, false)
+  await vt.waitForRender()
+  vt.sendInput('\r') // View plan
+  await vt.waitForRender()
+  assert.ok(body().includes('## Scope'), `the plan request opens its own target:\n${body()}`)
+  assert.ok(body().includes('needle body line'),
+    `the plan request must not shadow the search request:\n${body()}`)
+
+  // ONE passive publication with BOTH current requests. The resolver is bounded
+  // by the two requests, never by the 2000 filler rows.
+  app.resetTranscriptPresentationDiagnosticsForTest()
+  app.setTranscript(messages)
+  await vt.waitForRender()
+  const diagnostics = app.transcriptPresentationDiagnosticsForTest()
+  assert.ok(diagnostics.searchOwnerResolutions <= 4,
+    `both independent requests must resolve a small constant number of times per projection, got ${diagnostics.searchOwnerResolutions}`)
+  assert.ok(body().includes('## Scope') && body().includes('needle body line'),
+    'both independent request bodies remain rendered after the bounded projection')
+
+  vt.sendInput('\x1b') // release the plan lease only
+  await vt.waitForRender()
+  assert.ok(!body().includes('## Scope'), 'the plan lease releases independently')
+  assert.ok(body().includes('needle body line'), 'the search request survives the plan release')
+
+  vt.sendInput('\x1b') // official dismiss
+  await settle.then(() => {}, () => {})
+  app.stop()
+})
+
 test('Regular WITH a provable card keeps the frozen ordinary layout (guidance + Keep default)', async () => {
   // Section 3.4's ordinary Regular UI: the plan is the tool card already
   // painted above in terminal history; the decision list names it and offers

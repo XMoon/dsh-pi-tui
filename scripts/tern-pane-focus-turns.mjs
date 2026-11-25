@@ -559,23 +559,51 @@ export default async function (h) {
       String(node.class ?? '').split(/\s+/u).includes('sf-section-head')
       && h.descendantsText(node).trim() === 'skill-catalog')
     const nextToggle = before => eventRows(h).length > before ? eventRows(h).at(-1) : undefined
-    const scrollNodeIntoMain = async (find, label) => {
-      for (let attempt = 0; attempt < 40; attempt += 1) {
+    const scrollNodeIntoMain = async (find) => {
+      // The client owns smooth scrolling. Use its real viewport/dock geometry
+      // and feed back on the actually observed movement instead of guessing a
+      // direction from PageUp/PageDown page granularity.
+      const viewport = () => h.ctl('stats').viewport ?? [1280, 800]
+      let wheelSign = 1
+      let step = 80
+      let lastY
+      for (let attempt = 0; attempt < 26; attempt += 1) {
         const snapshot = h.snapshot()
         const node = find(snapshot)
         if (node === undefined) return undefined
         const box = visibleBox(snapshot.chains, node)
         const dock = snapshot.nodes.find(candidate => String(candidate.class ?? '').split(/\s+/u).includes('tv-dock'))
-        const dockTop = dock === undefined ? Number.POSITIVE_INFINITY : rect(dock)[1]
-        const visible = box.span.x >= 4 && box.span.y >= 4 && box.start.y >= 0
-        if (visible) return { snapshot, node, box, dockTop, attempts: attempt }
-        const nodeTop = rect(node)[1]
-        const main = snapshot.nodes.find(candidate => String(candidate.class ?? '').split(/\s+/u).includes('ph-chat'))
-          ?? snapshot.nodes.find(candidate => String(candidate.class ?? '').split(/\s+/u).includes('sf-main'))
-        if (main === undefined) return undefined
-        const mainRect = rect(main)
-        h.send('move', mainRect[0] + mainRect[2] / 2, Math.max(0, mainRect[1]) + mainRect[3] / 2)
-        h.send('wheel', 0, nodeTop < 0 ? 180 : -180)
+        const dockTop = dock === undefined ? viewport()[1] - 8 : rect(dock)[1]
+        const visibleTop = 24
+        const visibleBottom = Math.max(visibleTop + 8, dockTop - 8)
+        const clickable = box.span.x >= 4 && box.span.y >= 4
+          && box.start.y >= visibleTop && box.start.y + box.span.y <= visibleBottom
+        if (clickable) return { snapshot, node, box, dockTop, attempts: attempt }
+        const nodeRect = rect(node)
+        const wantIncrease = nodeRect[1] < visibleTop
+        const point = {
+          x: Math.max(1, Math.min(viewport()[0] - 1, viewport()[0] / 2)),
+          y: Math.max(visibleTop + 12, Math.min(visibleBottom - 12, (visibleTop + visibleBottom) / 2)),
+        }
+        const beforeY = nodeRect[1]
+        h.send('move', point.x, point.y)
+        h.send('wheel', 0, wheelSign * step)
+        const after = h.snapshot()
+        const afterNode = find(after)
+        const afterY = afterNode === undefined ? undefined : rect(afterNode)[1]
+        if (afterY === undefined || lastY === afterY) {
+          wheelSign = -wheelSign
+        } else {
+          const movedDown = afterY > beforeY
+          if (movedDown !== wantIncrease) {
+            wheelSign = -wheelSign
+            step = Math.max(8, Math.floor(step / 2))
+          } else if ((beforeY < visibleTop && afterY > visibleBottom)
+            || (beforeY + nodeRect[3] > visibleBottom && afterY + nodeRect[3] < visibleTop)) {
+            step = Math.max(8, Math.floor(step / 2))
+          }
+        }
+        lastY = afterY
       }
       return undefined
     }
@@ -702,16 +730,8 @@ export default async function (h) {
       }
       // Restore the open root at this viewport, then scroll its Work A header
       // into the normal Main viewport before clicking.
-      const narrowWork = await scrollNodeIntoMain(workACatalogHead,
-        `Work A is reachable through normal scrolling at ${viewport.width}x${viewport.height}`)
+      const narrowWork = await scrollNodeIntoMain(workACatalogHead)
       if (narrowWork === undefined) {
-        if (viewport.width === 900 && viewport.height === 360) {
-          h.measure('the 900x360 catalog journey is NOT reachable through real page scrolling',
-            JSON.stringify({ viewport, reason: 'page-key granularity skips the clippable Work A header between above-viewport and below-dock states' }))
-          h.capture('focus-command-catalog-900x360-light-unreachable',
-            'the 900x360 frame after real page scrolling: the Work A header never lands in an unoccluded fragment')
-          continue
-        }
         h.check(`Work A is reachable through normal scrolling at ${viewport.width}x${viewport.height}`, false, 'unreachable')
         finish(h, extra)
         return
@@ -731,8 +751,7 @@ export default async function (h) {
           && eventRows(h).at(-1)?.id === workACatalogId && eventRows(h).at(-1)?.collapsed === false,
         JSON.stringify(eventRows(h).at(-1) ?? null))
       h.check(`the catalog body stays hidden before its own toggle at ${viewport.width}x${viewport.height}`, !catalogVisible())
-      const narrowCatalog = await scrollNodeIntoMain(catalogHeadIn,
-        `the catalog header is reachable through normal scrolling at ${viewport.width}x${viewport.height}`)
+      const narrowCatalog = await scrollNodeIntoMain(catalogHeadIn)
       h.check(`the catalog header is reachable through normal scrolling at ${viewport.width}x${viewport.height}`,
         narrowCatalog !== undefined,
         JSON.stringify(narrowCatalog === undefined ? null : { rect: rect(narrowCatalog.node), box: narrowCatalog.box, dockTop: narrowCatalog.dockTop }))
@@ -784,8 +803,7 @@ export default async function (h) {
       h.check(`the narrow closing toggle keeps the exact Section id at ${viewport.width}x${viewport.height}`,
         narrowCloseEvent?.id === catalogSectionId && narrowCloseEvent.collapsed === true,
         JSON.stringify(narrowCloseEvent ?? null))
-      const narrowWorkClose = await scrollNodeIntoMain(workACatalogHead,
-        `Work A is reachable again to close at ${viewport.width}x${viewport.height}`)
+      const narrowWorkClose = await scrollNodeIntoMain(workACatalogHead)
       h.check(`Work A closes again at ${viewport.width}x${viewport.height}`,
         narrowWorkClose !== undefined && await h.click(narrowWorkClose.snapshot.chains, narrowWorkClose.node))
       await waitFor(h, `Work A reports closed at ${viewport.width}x${viewport.height}`,

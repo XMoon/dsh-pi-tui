@@ -806,7 +806,7 @@ test('the composed Focus binding reveals only what each semantic hit really hide
 })
 
 
-test('the composed Focus binding keeps a raw post-fence catalog card-owned while the root stays collapsed', async (t) => {
+test('the composed Focus binding keeps a raw post-fence catalog card-owned across real root transitions', async (t) => {
   const ENTER = '\r'
   const ESCAPE = '\u001b'
   const CATALOG = 'FENCED_RAW_CATALOG_MARKER'
@@ -844,6 +844,27 @@ test('the composed Focus binding keeps a raw post-fence catalog card-owned while
   assert.ok(nodes().some(node => textOfNode(node).includes(CATALOG)), 'the raw catalog body is exported by an attached native node')
   assert.equal(nodes().some(node => node.k === 'section' && /work/u.test(node.id)), false,
     'the raw visible card never mints a Work disclosure owner')
+
+  // The SAME active search: open the exact real Thought root through the native
+  // toggle route, then close it again. The raw card must become Work/card-owned
+  // while the root is open, and return to card-only ownership after the close.
+  const root = nodes().find(node => node.k === 'section' && /focus/u.test(node.id))
+  assert.ok(root !== undefined, 'the real Focus root is observable')
+  h.pane.event({ ev: 'toggle', sf: 's1', id: root.id, collapsed: false, key: root.id.slice(root.id.lastIndexOf('.') + 1), raw: {} })
+  await waitUntil('the exact real root opens with the search active',
+    () => nodes().some(node => node.id === root.id && node.p.collapsed === false))
+  await waitUntil('the catalog body survives the real root transition', () => painted(CATALOG))
+  assert.ok(nodes().some(node => node.k === 'section' && /work/u.test(node.id)),
+    'opening the real root materializes the catalog Work owner')
+  assert.equal(summaryCount(), 1, 'opening the real root keeps one Focus summary')
+
+  h.pane.event({ ev: 'toggle', sf: 's1', id: root.id, collapsed: true, key: root.id.slice(root.id.lastIndexOf('.') + 1), raw: {} })
+  await waitUntil('the same real root closes with the search active',
+    () => nodes().some(node => node.id === root.id && node.p.collapsed === true))
+  await waitUntil('the raw card body remains after the root closes', () => painted(CATALOG))
+  assert.equal(nodes().some(node => node.k === 'section' && /work/u.test(node.id)), false,
+    'closing the root returns the target to card-only ownership')
+  assert.equal(summaryCount(), 1, 'closing the real root mints no summary')
 
   await h.key(ESCAPE)
   await waitUntil('the raw catalog retracts on dismiss', () => !painted(CATALOG))
