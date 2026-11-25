@@ -6235,7 +6235,8 @@ async function waitForPublicHostRegistry(handle, timeoutMs = 180_000) {
     if (existsSync(registryPath) && existsSync(launchPath)) {
       const registry = readJson(registryPath, 'public Host registry')
       const launch = readJson(launchPath, 'public Host launch record')
-      assertPublicHostRecord(handle, registry, launch)
+      if (handle.host === undefined) throw new Error('the public Host row was not bound before its registry')
+      assertPublicHostRecord(handle.host, registry, launch)
       return { registry, launch, registryPath, launchPath }
     }
     const state = await handle.terminal.state().catch(() => undefined)
