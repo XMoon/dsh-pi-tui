@@ -2945,11 +2945,18 @@ export class SessionWorkspacePanel implements Component {
     const suffix = ` · ${view.stateLabel}`
     const titleBudget = Math.max(1, width - visibleWidth(suffix))
     const identity = `${color.textStrong(truncateToWidth(view.title, titleBudget, '…', false))}${color.textMuted(truncateToWidth(suffix, width, '…', false))}`
+    // The full-width page is the complete identity reading: the complete
+    // official Host id wraps onto real rows instead of being silently cut. The
+    // inline pane keeps the short id.
+    const idPrefix = 'ID '
+    const idIndent = ' '.repeat(visibleWidth(idPrefix))
+    const idLines = wrapTextWithAnsi(view.fullId, Math.max(1, width - visibleWidth(idPrefix)))
     const fixed = [
       fit(identity, width),
-      // The full-width page is the complete identity reading: it keeps the
-      // complete official Host id (the inline pane keeps the short id).
-      fit(`${color.textDim('ID ')}${color.text(view.fullId)}`, width),
+      ...idLines.map((line, index) => fit(
+        `${index === 0 ? color.textDim(idPrefix) : idIndent}${color.text(line)}`,
+        width,
+      )),
       ...(view.notice === '' ? [] : [fit(this.inspectorNotice(view, width), width)]),
     ]
     // The page's real object identity is painted: from here its body target is

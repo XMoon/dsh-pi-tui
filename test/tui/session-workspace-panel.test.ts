@@ -6043,3 +6043,32 @@ test('F2 opens the SAME admitted Inspector page, scrolls its own body and return
   assert.ok(!h.view().includes('Other Session Title'), 'no stale old-target identity is painted')
   assert.notDeepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the removed target is never reported')
 })
+
+
+test('the full-width Inspector keeps a complete long Session id readable at 44x20', async () => {
+  const longId = 'session-12345678-1234-1234-1234-1234567890ab'
+  const h = harness({ columns: 44, rows: 20 })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(longId, 3_000, { title: 'Long id session' })],
+    inspector: {
+      sessionId: longId,
+      state: 'ready',
+      refreshing: false,
+      data: { sessionId: longId, asOfSeq: 1, stats: { turns: 1, steps: 1, llmMs: 1, toolMs: 0 } },
+    },
+  }))
+  await h.paint()
+  h.vt.sendInput('\x1bOQ')
+  await h.paint()
+  const page = h.view()
+  assert.ok(page.includes('Session Inspector'), `F2 opens the page at 44x20:\n${page}`)
+  // The complete official id is painted in order across its real wrapped rows;
+  // removing line padding/indentation must not lose any character or add an
+  // ellipsis. This is the §5 P0 "full detail keeps the complete ID" contract.
+  const compact = page.split('\n').map(line => line.replace(/\s+/gu, '')).join('')
+  assert.ok(compact.includes(`ID${longId}`), `the complete long id is painted:\n${page}`)
+  assert.ok(!page.includes('…'), `the full-width identity never truncates the id:\n${page}`)
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(/^> .*12345678/m.test(h.view()), `Esc returns to the same list selection:\n${h.view()}`)
+})
