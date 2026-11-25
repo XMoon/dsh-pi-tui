@@ -298,11 +298,11 @@ specialist-page contract below).
   same-generation readback, typed refusal-vs-unknown distinction, dirty/leave
   guard, Retry policy and business writer are unchanged. A clean browse paints
   no persistent saved/verified banner. A retained historical success never
-  claims currency: the Subagent page demotes it to `Last-known · read-only`
-  with `Previous save completed; refresh to review.`; the numeric and Root
-  pages keep the last settlement as history but also state the current
-  `Last-known`/refresh/read-only fact. No page presents a stale success as a
-  current saved value. The Subagent page keeps each namespace's own prefix
+  claims currency: the numeric, Root and Subagent pages demote it to
+  `Last-known · read-only` with `Previous save completed; refresh to review.`
+  while the internal settlement remains history. No settlement surface presents
+  a stale success as a current saved value.
+  The Subagent page keeps each namespace's own prefix
   (`Limits: Saved` / `Selection: Could not confirm save`), and Copy/Open
   receipts keep their own fixed words.
 - The document-backed rows do NOT share one apply/persist order, and the
@@ -772,14 +772,15 @@ specialist-page contract below).
   SystemPrompt providers read (`ProgressUpdatesState` / `ResponseStyleState`):
   no section is re-registered, no Agent is recomposed and nothing reaches the
   Focus/Compact presentation state.
-- Every write settlement requires a ready read-back with a matching value.
-  Rejected/unknown outcomes are attributed from a fresh read, never guessed. The
-  painted word follows the Host-configuration save feedback above for those
-  scalars and each other row's existing `Status` vocabulary; a refused or
-  unattributable write is never reported as success. For the apply-first fields
-  a failed persistence never rolls the live runtime back, so the screen must
-  keep stating BOTH facts (the applied runtime value and the unchanged stored
-  one); the runtime-only fields carry no document read at all, so they never
+- A verified write settlement (`Verified`, or `Saved` for the
+  Host-configuration scalars above) requires a ready read-back with a matching
+  value. Rejected/unknown outcomes are attributed from a fresh read, never
+  guessed. The painted word follows the Host-configuration save feedback above
+  for those scalars and each other row's existing `Status` vocabulary; a
+  refused or unattributable write is never reported as success. For the
+  apply-first fields a failed persistence never rolls the live runtime back, so
+  the screen must keep stating BOTH facts (the applied runtime value and the
+  unchanged stored one); the runtime-only fields carry no document read at all, so they never
   paint a persistence phase.
 - Theme auto is fenced on the runtime selection intent.
 - `Plugins` is a DIRECT page inside the same lease (see Plugin Manager): the

@@ -382,6 +382,7 @@ test('a lost Host receipt is Could not confirm change and is never replayed', as
   assert.deepEqual(h.writes(), [true], 'exactly one dispatch')
   assert.match(h.frame(), /Status\s+Could not confirm change/u)
   assert.match(h.frame(), /the Host may have applied the request/u)
+  assert.match(h.frame(), /The connection dropped after dispatch; the Host may have applied the request\. Refresh and check\./u)
   await h.flush()
   assert.deepEqual(h.writes(), [true], 'no automatic retry')
   h.close()

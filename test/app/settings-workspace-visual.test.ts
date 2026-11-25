@@ -3666,7 +3666,7 @@ test('the Agent tenant refuses every invalid raw value with zero writes and a re
     await settle(h, 6)
     const frame = h.view()
     assert.match(frame, probe.error, `the real field error for ${JSON.stringify(probe.raw)}\n${frame}`)
-    assert.doesNotMatch(frame, /Verified|No changes|Saving…/u, `${JSON.stringify(probe.raw)} never dispatches or claims success`)
+    assert.doesNotMatch(frame, /Verified|\bSaved\b|No changes|Saving…|Could not (?:confirm )?save/u, `${JSON.stringify(probe.raw)} never dispatches or claims success`)
     // The raw text is retained (exactly what the user typed, still editable).
     assert.equal(h.agentLoopWrites().length, 0, `${JSON.stringify(probe.raw)} wrote nothing`)
   }
@@ -4390,7 +4390,7 @@ test('the Root Shell group refuses stale captures and never claims an accepted r
   await key(stale, 's')
   await settle(stale, 8)
   assert.equal(stale.shellExecutionAttempts(), 0, 'a stale captured read never dispatches')
-  assert.match(stale.view(), /Last-known|Not saved/u)
+  assert.match(stale.view(), /Last-known|\bSaved\b|Could not save/u)
   assert.match(stale.view(), /Command timeout \(ms\)\s+45000 ms/u, 'the draft is retained')
   stale.dispose()
 
@@ -6575,6 +6575,26 @@ test('the profile-wide Visual tools switch confirms through its Host port, verif
   assert.doesNotMatch(h.view(), /Status\s+Saved/u, 'a Root scalar never borrows the Status label')
   assert.match(h.view(), /Runtime\s+Both tools registered/)
   assert.doesNotMatch(h.view(), /not applied/iu)
+  h.dispose()
+})
+
+test('a saved Root scalar demotes to Last-known when its authority goes stale', async () => {
+  const h = setup({ columns: 200, rows: 40 })
+  await h.open('Tools')
+  await key(h, '\r')
+  await key(h, '\r')
+  await key(h, '\x1b[B')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(detailPaneText(h), /\bSaved\b/, 'the verified save starts as a current Saved')
+
+  h.setReadiness('stale')
+  await key(h, 'r')
+  await settle(h)
+  const detail = detailPaneText(h)
+  assert.match(detail, /Last-known · read-only/u, 'a stale verified settlement is no longer painted as Saved')
+  assert.match(detail, /Previous save completed; refresh to review\./u, 'the history is named as history')
+  assert.doesNotMatch(detail, /\bSaved\b/u)
   h.dispose()
 })
 

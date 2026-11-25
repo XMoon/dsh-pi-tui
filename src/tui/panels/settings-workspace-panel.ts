@@ -3698,6 +3698,14 @@ export class SettingsWorkspacePanel implements Component {
     }
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
     if (phase.outcome === 'verified') {
+      if (hostConfig && row.freshness !== 'ready') {
+        return {
+          word: 'Last-known · read-only',
+          reason: 'Previous save completed; refresh to review.',
+          tone: 'warning',
+          plain: true,
+        }
+      }
       return hostConfig
         ? { word: 'Saved', tone: 'success', plain: true }
         : { word: 'Verified', reason: 'the authoritative read agrees', tone: 'success' }

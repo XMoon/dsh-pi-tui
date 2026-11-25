@@ -134,7 +134,7 @@ function fit(text: string, width: number): string {
 
 function statusWord<T extends object>(kind: string | undefined, snapshot: HostNumericSettingsSnapshot<T>): string {
   switch (kind) {
-    case 'verified': return 'Saved'
+    case 'verified': return snapshot.current ? 'Saved' : 'Last-known · read-only'
     case 'not-saved': return 'Could not save'
     case 'unverified':
     case 'outcome-unconfirmed': return 'Could not confirm save'
@@ -1184,13 +1184,15 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     lines.push({ text: this.row('Current value', this.singleValue(snapshot)) })
     if (this.intents.spec.effect !== undefined) lines.push(...this.note(this.intents.spec.effect, width))
     const status = snapshot.status
+    const historicalSuccess = status?.kind === 'verified' && !snapshot.current
     if (status !== undefined) {
       // The settlement is the page's short user-facing result, never the
       // workspace's internal status vocabulary.
-      lines.push({ text: statusInk(status.kind, statusWord(status.kind, snapshot)) })
+      lines.push({ text: historicalSuccess ? color.warning(statusWord(status.kind, snapshot)) : statusInk(status.kind, statusWord(status.kind, snapshot)) })
       if (status.kind === 'unverified' || status.kind === 'outcome-unconfirmed') {
         lines.push(...this.note(MAY_HAVE_BEEN_SAVED, width))
       }
+      if (historicalSuccess) lines.push(...this.note('Previous save completed; refresh to review.', width))
       if (status.kind !== 'verified' && status.kind !== 'saving') lines.push(...this.note(status.text, width, color.textDim))
     } else if (this.feedback === 'no-changes') {
       lines.push({ text: color.textDim('No changes') })
@@ -1201,7 +1203,7 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     }
     if (snapshot.source.kind !== 'ready') {
       lines.push(...this.note(snapshot.source.reason, width, color.error))
-    } else if (!snapshot.current) {
+    } else if (!snapshot.current && !historicalSuccess) {
       lines.push(...this.note('Last-known · the Host has newer state; refresh to review.', width))
     }
     if (snapshot.notice !== undefined) lines.push(...this.note(snapshot.notice, width, color.error))
@@ -1238,14 +1240,16 @@ export class HostNumericSettingsPage<T extends object> implements EmbeddedSpecia
     const heading = sanitizedPhysicalLine(this.intents.spec.sourceHeading(source))
     lines.push(...this.note(stale ? `Last-known · ${heading}` : heading, copyWidth, stale ? color.warning : color.textDim))
     const status = snapshot.status
+    const historicalSuccess = status?.kind === 'verified' && !snapshot.current
     // Settlement state owns the FIRST readable rows: a short grant must not
     // hide the saved/refused/unknown result behind prose. The word is the
     // page's short user feedback, without the internal `Status` label.
     if (status !== undefined) {
-      lines.push({ text: statusInk(status.kind, statusWord(status.kind, snapshot)) })
+      lines.push({ text: historicalSuccess ? color.warning(statusWord(status.kind, snapshot)) : statusInk(status.kind, statusWord(status.kind, snapshot)) })
       if (status.kind === 'unverified' || status.kind === 'outcome-unconfirmed') {
         lines.push(...this.note(MAY_HAVE_BEEN_SAVED, copyWidth))
       }
+      if (historicalSuccess) lines.push(...this.note('Previous save completed; refresh to review.', copyWidth))
       if (status.kind !== 'verified' && status.kind !== 'saving') lines.push(...this.note(status.text, copyWidth, color.textDim))
     } else if (this.feedback === 'no-changes') {
       lines.push({ text: color.textDim('No changes') })

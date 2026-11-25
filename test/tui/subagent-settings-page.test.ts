@@ -990,7 +990,13 @@ function numericShellRig(options: { holdMutation?: boolean; reject?: boolean; un
     { key: 'timeoutMs', label: 'Command timeout (ms)', unit: 'ms', validate: positiveFiniteText, invalidHint: 'Enter a positive finite number.' },
     { key: 'maxOutputBytes', label: 'Output cap per stream (bytes)', unit: 'bytes', validate: positiveFiniteText, invalidHint: 'Enter a positive finite number.' },
   ]
-  return { port, fields, writes, inherited, effective: () => ({ ...effective }), releaseMutation: () => { releaseMutation?.() }, mutationStarted: started }
+  return {
+    port, fields, writes, inherited,
+    effective: () => ({ ...effective }),
+    advanceRevision: () => { revision += 1 },
+    releaseMutation: () => { releaseMutation?.() },
+    mutationStarted: started,
+  }
 }
 
 function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfirmed?: boolean; effectiveTimeout?: number; onRender?: () => void } = {}) {
@@ -1023,6 +1029,7 @@ function numericRig(options: { holdMutation?: boolean; reject?: boolean; unconfi
     page, controller, writes: shell.writes, actions,
     inherited: shell.inherited,
     effective: shell.effective,
+    advanceRevision: shell.advanceRevision,
     releaseMutation: shell.releaseMutation,
     mutationStarted: shell.mutationStarted,
     drain: async () => {
@@ -1180,6 +1187,27 @@ test('a grouped Stage keeps the draft local and ONE Save dispatches the whole pa
   assert.match(plain, /^> Output cap per stream \(bytes\)/mu, 'the SAME group stays mounted with its field selection')
   assert.doesNotMatch(plain, /Save \[S\]|unsaved change/u, 'a verified group advertises no second Save')
   assert.deepEqual(h.actions, [], 'Save never navigates by itself')
+  h.page.dispose()
+})
+
+test('a saved numeric group demotes to Last-known when the served row moves', async () => {
+  const h = await startedNumeric()
+  h.page.handleInput(ENTER)
+  h.page.render(80)
+  h.page.handleInput('\x15')
+  for (const character of '45000') h.page.handleInput(character)
+  h.page.render(80)
+  h.page.handleInput(ENTER) // stage only
+  h.page.render(80)
+  h.page.activateBarSpan('bar:save')
+  await h.drain()
+  assert.match(h.page.render(80).map(strip).join('\n'), /^Saved\s*$/mu, 'the verified save starts as a current Saved')
+
+  h.advanceRevision()
+  const plain = h.page.render(80).map(strip).join('\n')
+  assert.match(plain, /^Last-known · read-only\s*$/mu, 'a stale verified settlement is no longer painted as Saved')
+  assert.match(plain, /Previous save completed; refresh to review\./u, 'the history is named as history')
+  assert.doesNotMatch(plain, /^Saved\s*$/mu)
   h.page.dispose()
 })
 

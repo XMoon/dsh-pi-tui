@@ -1007,7 +1007,7 @@ test('a Host replacement during the live preflight is a definitive zero-write No
   h.bumpGeneration()
   await settle(h, 'the definitive pre-dispatch word', frame => /Status\s+Not changed/u.test(frame))
   assert.match(h.view(), /the Host changed before the request was sent/u)
-  assert.doesNotMatch(h.view(), /Outcome unconfirmed/u)
+  assert.doesNotMatch(h.view(), /Could not confirm change/u)
   assert.deepEqual(h.acp.setEnabledCalls, [], 'no Host write was invoked before the preflight settled')
   h.releaseAcpReads()
   await settle(h, 'the replacement Host fact', frame => /Listener\s+Enabled/u.test(frame))
