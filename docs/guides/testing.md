@@ -723,8 +723,8 @@ window before its zombie child identity exists, and
 failed FINALIZE while a registered Client/helper is still live. The
 `terminal-owner-client-opened-before-ack` window holds after the Supervisor
 registered the real PTY Owner, its native session, exact Owner/shell/business
-kernel identities and before the start acknowledgement; the Owner is the only
-`/dev/ptmx` holder and the Supervisor holds none. Its external Worker kill must
+kernel identities and before the start acknowledgement; the Owner holds the
+`/dev/ptmx` master and the Supervisor holds none. Its external Worker kill must
 reclaim the Owner/helper/shell/business and reach the terminal `ABORTED_CLEAN`
 receipt. The ordinary terminal-owner loss proof is separate: the exact Owner
 SIGKILL leaves the Host PID/birth/instance live, the Client's kernel terminal is

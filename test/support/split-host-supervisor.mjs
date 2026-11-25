@@ -961,6 +961,7 @@ function publicProcessClientFacts(handle) {
     ownerPid: handle.owner?.pid ?? null,
     ownerBirth: handle.owner?.birth ?? null,
     ownerExit: handle.owner?.exit ?? null,
+    ptyOwnerFacts: handle.ptyOwnerFacts ?? null,
     verifiedTerminal: handle.verifiedTerminal ?? null,
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth,
@@ -3705,6 +3706,14 @@ async function handleStartHost(message) {
         throw new Error(`START_HOST: the previous Host generation exited abnormally: ${JSON.stringify(previous.exitResult ?? null)}`)
       }
     }
+    for (const fallback of fallbackHosts) {
+      if (fallback.reclaimed !== true) {
+        throw new Error(`START_HOST: the discovered Host PID ${String(fallback.pid)} has not been normally reclaimed`)
+      }
+      if (fallback.normalStop !== true) {
+        throw new Error(`START_HOST: the discovered Host PID ${String(fallback.pid)} was not stopped through RECLAIM_DISCOVERED_HOST`)
+      }
+    }
     if (processInstallationMutation !== undefined) {
       throw codedInputError('INPUT_INSTALLATION_MUTATED', 'START_HOST is not allowed under a mutated installation')
     }
@@ -5227,7 +5236,7 @@ async function handleProcessClientState(message) {
       shellPid: handle.shellPid,
       businessPids: handle.businessPids,
       exited: Boolean(ownerState.state?.exited),
-      exitCode: ownerState.state?.exited ?? null,
+      exitCode: null,
       exitSignal: ownerState.state?.exit_signal ?? null,
       kind: 'owner-loss',
       terminal: handle.ownerLossTerminal ?? null,
@@ -5707,6 +5716,13 @@ async function handleFinalize(message) {
         await auditProcessClientLedger('FINALIZE: pre-stop')
       } catch (error) {
         preconditions.push(`the process Client ledger is not terminal (${boundedError(error)})`)
+      }
+    }
+    for (const fallback of fallbackHosts) {
+      if (fallback.reclaimed !== true) {
+        preconditions.push(`the discovered Host PID ${String(fallback.pid)} was not reclaimed`)
+      } else if (fallback.normalStop !== true) {
+        preconditions.push(`the discovered Host PID ${String(fallback.pid)} was not normally stopped`)
       }
     }
     if (processInstallationMutation !== undefined) {
@@ -8166,12 +8182,17 @@ async function stopRecoveredProcessHost(record, client) {
     signal: 'SIGTERM',
   })
   writeReceipt({})
+  let registryRemoved = true
+  if (existsSync(instancePath)) {
+    const after = readJson(instancePath, 'recovered Host registry after normal stop')
+    registryRemoved = after?.instanceId !== record.instanceId
+  }
   return {
     pid: record.pid,
     birth: ownership.birth,
     reclaimed: true,
     normalStop: true,
-    registryRemoved: !existsSync(instancePath),
+    registryRemoved,
     scratchEntries: readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-')),
   }
 }

@@ -48,8 +48,8 @@ function composerOf(frame: string): string | undefined {
   const lines = frame.split('\n')
   const rules: number[] = []
   lines.forEach((line, index) => { if (/^─+$/u.test(line.trim())) rules.push(index) })
-  if (rules.length === 0) return undefined
-  const top = rules.length >= 2 ? rules.at(-2)! : rules.at(-1)!
+  if (rules.length < 2) return undefined
+  const top = rules.at(-2)!
   const bottom = rules.at(-1)!
   return lines.slice(top + 1, bottom).join('\n')
 }
@@ -208,6 +208,7 @@ test('ACK-dropped unknown write survives Host death and cold resume without repl
       await sleep(50)
     }
     expect(disposition, 'T66 composer/ACK settled disposition').toBeDefined()
+    expect(client.readRecords().filter(record => record.m4b2s === 'qualification' && record.op === 'prompt-ack-dropped')).toHaveLength(1)
     await scene.signalEntry(host, 'SIGKILL')
     const terminal = await scene.finishEntry(host)
     expect(terminal.exit).toEqual({ code: null, signal: 'SIGKILL' })

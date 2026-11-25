@@ -32,7 +32,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -515,6 +515,13 @@ function isDescendantOf(rows, pid, ancestorPid) {
 }
 
 /** Whether a real installer child of the Supervisor is running for this Scene. */
+/** The real fd links of a live Linux process, read by the external probe. */
+function processFdLinks(pid) {
+  return Object.fromEntries(readdirSync(`/proc/${String(pid)}/fd`).map(name => {
+    try { return [name, readlinkSync(`/proc/${String(pid)}/fd/${name}`)] } catch { return [name, '<unreadable>'] }
+  }))
+}
+
 function installerProcessRunning(receipt) {
   const supervisorPid = Number(receipt?.supervisor?.pid) || (Number(receipt?.worker?.ppid) + 1)
   const rows = processTable()
@@ -561,6 +568,15 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
       const state = identityLiveness(kernel, business.pid, business.birth)
       if (state !== 'gone' && state !== 'foreign') {
         problems.push(`process Client ${String(client.label)} business PID is ${state}: ${String(business.pid)}`)
+      }
+    }
+    if (client.ownerPid !== null && client.ownerPid !== undefined) {
+      if (client.ownerExit === null || client.ownerExit === undefined) {
+        problems.push(`process Client ${String(client.label)} Owner has no terminal exit fact`)
+      }
+      const state = identityLiveness(kernel, client.ownerPid, client.ownerBirth)
+      if (state !== 'gone' && state !== 'foreign') {
+        problems.push(`process Client ${String(client.label)} Owner PID is ${state}: ${String(client.ownerPid)}`)
       }
     }
   }
@@ -1086,6 +1102,23 @@ try {
           }
           if (!Number.isInteger(client.ownerPid) || !Number.isInteger(client.shellPid)) {
             fail('terminal-owner-client-opened-before-ack: the owner/shell PID is not a real kernel PID')
+          }
+          const ownerLinks = processFdLinks(client.ownerPid)
+          if (!Object.values(ownerLinks).includes('/dev/ptmx')) {
+            fail('terminal-owner-client-opened-before-ack: the Owner process holds no /dev/ptmx master')
+          }
+          const supervisorPid = receipt.supervisor?.pid
+          if (!Number.isInteger(supervisorPid)) fail('terminal-owner-client-opened-before-ack: no Supervisor PID')
+          if (Object.values(processFdLinks(supervisorPid)).includes('/dev/ptmx')) {
+            fail('terminal-owner-client-opened-before-ack: the Supervisor also holds a /dev/ptmx master')
+          }
+          const shellLinks = processFdLinks(client.shellPid)
+          if (typeof shellLinks['0'] !== 'string' || !shellLinks['0'].startsWith('/dev/pts/')) {
+            fail('terminal-owner-client-opened-before-ack: the shell has no controlling pts')
+          }
+          const shellObservation = kernel.read(client.shellPid)
+          if (shellObservation.kind !== 'alive' || shellObservation.identity.ppid !== client.ownerPid) {
+            fail('terminal-owner-client-opened-before-ack: the shell is not the Owner direct child')
           }
         } else if (at === 'host-contenders-spawned') {
           const contenders = (receipt.hosts ?? []).filter(value => value.mode === 'seat-race')

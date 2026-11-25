@@ -521,9 +521,17 @@ interface SupervisorReceipt {
     label?: string
     sessionId?: string
     scratch?: string
+    terminal?: string
+    ownerPid?: number | null
+    ownerBirth?: string | null
+    ownerExit?: { code?: number | null; signal?: string | null } | null
     shellPid?: number
     shellBirth?: string
     businessIdentities?: Array<{ pid?: number; birth?: string }>
+    exited?: boolean
+    exitCode?: number | null
+    exitSignal?: string | null
+    verifiedTerminal?: Record<string, any> | null
   }>
   notes?: Array<{ event?: string; detail?: Record<string, any>; at?: string }>
 }

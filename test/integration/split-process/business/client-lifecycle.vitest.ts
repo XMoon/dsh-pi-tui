@@ -35,6 +35,62 @@ function clientDirectories(scene: SplitProcessScene, label: string): { home: str
   return { home, cwd }
 }
 
+/**
+ * The active Host Loader rows whose live fiber is the continuity fact. A
+ * Client-only Surface revision must not re-mount any of them; comparing row
+ * ids alone would accept a replaced fiber.
+ */
+const PROTECTED_HOST_ROWS = [
+  'agent',
+  'session',
+  'job-controller',
+  'typert-gateway',
+  'split-host-connection',
+  'split-host-api-remotes',
+  'split-host-file-upload',
+  'split-host-session-stats',
+  'split-host-turn-outline',
+  'split-host-session-controller',
+  'split-host-settings-controller',
+  'deepseek-account',
+  'split-host-session-log-download',
+  'split-host-pi-tui-runtime',
+  'pi-tui-performance-host',
+  'pi-tui-visual-tools',
+]
+
+type ProtectedHostRow = { state: string; fiberUid: number }
+
+async function protectedHostRows(
+  scene: SplitProcessScene,
+  host: SplitProcessHostHandle,
+): Promise<Map<string, ProtectedHostRow>> {
+  const status = await scene.hostStatus(host)
+  const rows = new Map<string, ProtectedHostRow>()
+  for (const entry of status.entries ?? []) {
+    if (!PROTECTED_HOST_ROWS.includes(entry.id)) continue
+    rows.set(entry.id, { state: entry.state, fiberUid: entry.fiberUid })
+  }
+  return rows
+}
+
+function expectHostRowsKept(
+  before: Map<string, ProtectedHostRow>,
+  after: Map<string, ProtectedHostRow>,
+  label: string,
+): void {
+  expect(before.size, `${label}: not every protected Host row was active before HMR`).toBe(PROTECTED_HOST_ROWS.length)
+  for (const id of PROTECTED_HOST_ROWS) {
+    const expected = before.get(id)
+    const actual = after.get(id)
+    expect(expected, `${label}: row ${id} was not active before HMR`).toBeDefined()
+    expect(Number.isInteger(expected?.fiberUid), `${label}: row ${id} had no live fiber UID`).toBe(true)
+    expect(actual, `${label}: row ${id} left the active inventory`).toBeDefined()
+    expect(actual?.state, `${label}: row ${id} left active state`).toBe('active')
+    expect(actual?.fiberUid, `${label}: row ${id} was re-mounted`).toBe(expected?.fiberUid)
+  }
+}
+
 async function frame(client: SplitProcessClient): Promise<string> {
   return await client.text()
 }
@@ -88,6 +144,18 @@ async function settleInitialPrompt(
   return sessionId
 }
 
+/** Kernel liveness for a Linux PID; a zombie is already terminal. */
+function processGone(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    const end = stat.lastIndexOf(')')
+    const state = stat.slice(end + 2, end + 3)
+    return state === 'Z' || state === 'X'
+  } catch {
+    return true
+  }
+}
+
 async function exitChat(client: SplitProcessClient, label: string, expectedCode = 0): Promise<void> {
   if (client.closed) return
   await client.press('Ctrl+U').catch(() => undefined)
@@ -127,9 +195,12 @@ test.skipIf(process.platform !== 'linux')(
       ownerClient = await scene.startClient({ label: 'terminal-owner-loss', ...directories, terminal: 'terminal-owner-loss' })
       expect(ownerClient.ready.surfaceMounted).toBe(true)
       expect(ownerClient.ready.hostPid).toBe(hostBefore.localHost.hostPid)
+      const businessPid = ownerClient.ready.businessPid
+      expect(Number.isInteger(businessPid)).toBe(true)
       const terminal = await ownerClient.loseTerminalOwner()
       expect(terminal.kind).toBe('owner-loss')
       expect(terminal.ownerExit).toEqual({ code: null, signal: 'SIGKILL' })
+      expect(processGone(businessPid)).toBe(true)
       expect(terminal.hostPid).toBe(hostBefore.localHost.hostPid)
       const after = await scene.hostStatus(host)
       expect(after.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
@@ -165,6 +236,8 @@ test('replaces the settled Client surface without changing the Host and submits 
       'T57 initial surface',
     )
     expect(before.surfaceRevision).toBeTypeOf('number')
+    const hostBefore = await scene.hostStatus(host)
+    const rowsBefore = await protectedHostRows(scene, host)
     await client.signal('SIGUSR2')
     const start = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T57 HMR start')
     const retired = await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T57 HMR retired')
@@ -183,17 +256,25 @@ test('replaces the settled Client surface without changing the Host and submits 
     expect(after.surfaceFiberUid).not.toBe(before.surfaceFiberUid)
     expect(after.sessionOpen).toBe(true)
     expect(after.openSessionId).toBe(sessionId)
+    expect(after.owners).toMatchObject({ typert: 1, connection: 1, remote: 1, fileUpload: 1, sessions: 1, jobs: 1 })
+    expect(after.privateNamespaces).toBe(3)
+    const rowsAfter = await protectedHostRows(scene, host)
+    expectHostRowsKept(rowsBefore, rowsAfter, 'T57')
     for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-ready']) {
       expect(client.readRecords().filter(record => record.m4b2s === 'qualification' && record.op === operation)).toHaveLength(1)
     }
     await waitFrame(client, 'long-turn answer', 'T57 new surface paint')
     const beforeSecondTurn = scene.sessionEvents(sessionId)?.length ?? 0
     await client.submit('t57 post-hmr prompt')
-    await scene.waitForSessionEvent(sessionId, beforeSecondTurn, event => event.type === 'turn/end', 'T57 post-HMR settle')
+    await scene.waitForSessionEvent(sessionId, beforeSecondTurn,
+      event => event.type === 'turn/start' && event.data?.turn === 2, 'T57 post-HMR turn/start')
+    await scene.waitForSessionEvent(sessionId, beforeSecondTurn,
+      event => event.type === 'turn/end' && event.data?.turn === 2, 'T57 post-HMR turn/end')
     await waitFrame(client, 'long-turn answer', 'T57 post-HMR paint')
     const hostAfter = await scene.hostStatus(host)
-    expect(hostAfter.localHost.hostPid).toBe(host.ready.localHost.hostPid)
-    expect(hostAfter.localHost.instanceId).toBe(host.ready.localHost.instanceId)
+    expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
+    expect(hostAfter.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
+    expectHostRowsKept(rowsBefore, await protectedHostRows(scene, host), 'T57 post-HMR Host')
     await exitChat(client, 'T57 Client')
     await closeHost(scene, host)
   } finally {
@@ -218,6 +299,9 @@ test('keeps a real Host Job running across HMR and reads its settlement from the
     expect(job.status).toBe('running')
     const before = await client.waitForSurfaceStatus(record => record.sessionOpen === true && record.openSessionId === sessionId,
       'T58 initial surface')
+    const hostBefore = await scene.hostStatus(host)
+    const rowsBefore = await protectedHostRows(scene, host)
+    const jobOwner = job.owner
     await client.signal('SIGUSR2')
     await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T58 HMR start')
     await client.waitForRecord(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T58 HMR retired')
@@ -226,6 +310,18 @@ test('keeps a real Host Job running across HMR and reads its settlement from the
       && record.openSessionId === sessionId, 'T58 new surface Session')
     expect(after.pid).toBe(before.pid)
     expect(after.generationId).toBe(before.generationId)
+    expect(after.openSessionId).toBe(sessionId)
+    expect(after.owners).toMatchObject({ sessions: 1, jobs: 1 })
+    expect(after.privateNamespaces).toBe(3)
+    const hostAfter = await scene.hostStatus(host)
+    expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
+    expect(hostAfter.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
+    expectHostRowsKept(rowsBefore, await protectedHostRows(scene, host), 'T58 Host')
+    const running = fixtureHelpers.readC1WorkEvents(host.jobWorkRoot!).find(
+      event => event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'registered',
+    )
+    expect(running?.owner).toBe(jobOwner)
+    expect(running?.status).toBe('running')
     expect(fixtureHelpers.readC1WorkEvents(host.jobWorkRoot!)).not.toContainEqual(
       expect.objectContaining({ kind: 'job-event', jobId: job.jobId, event: 'settled' }),
     )
@@ -319,6 +415,15 @@ test('rejects an HMR mount failure left on the ordinary terminal contract and re
     await expect(scene.dispose()).rejects.toThrow()
     const supervisorExit = await scene.waitSupervisorExit(120_000)
     expect(supervisorExit.code).not.toBe(0)
+    const receipt = await scene.readSupervisorReceipt()
+    expect(receipt.phase).toBe('NOT_QUIESCED')
+    const failed = receipt.processClients?.find(value => value.label === 'hmr-mount-negative')
+    expect(failed?.terminal).toBe('normal')
+    expect(failed?.exited).toBe(true)
+    expect(failed?.exitCode).toBe(1)
+    expect(failed?.verifiedTerminal ?? null).toBeNull()
+    expect(receipt.compensation?.attempted).toBe(true)
+    expect(receipt.cleanup?.sceneRootRemoved).toBe(false)
     expect(existsSync(scene.workDir)).toBe(true)
     rmSync(scene.workDir, { recursive: true, force: true })
   } finally {
@@ -387,6 +492,11 @@ test('exits only on the second real Ctrl+C/Ctrl+D chord and preserves the Sessio
 
     ctrlD = await scene.startClient({ label: 'ctrl-d', ...clientDirectories(scene, 'ctrl-d'), sessionId })
     await waitFrame(ctrlD, 't63 prompt', 'T63 Ctrl+D history')
+    await ctrlD.type('t63 draft')
+    await ctrlD.press('Ctrl+D')
+    await sleep(250)
+    expect((await ctrlD.state()).exited).toBe(false)
+    await ctrlD.press('Ctrl+U')
     await ctrlD.press('Ctrl+D')
     await waitFrame(ctrlD, 'again to exit', 'T63 Ctrl+D armed')
     await waitFrameGone(ctrlD, 'again to exit', 'T63 Ctrl+D expired')
@@ -444,6 +554,7 @@ test('treats a Host SIGHUP as carrier loss and discovers a new Host for the next
     expect(fresh.ready.hostPid).not.toBe(hostBefore.localHost.hostPid)
     expect(fresh.ready.instanceId).not.toBe(hostBefore.localHost.instanceId)
     expect(fresh.ready.sessionOpen).toBe(false)
+    await expect(scene.startHost()).rejects.toThrow(/discovered Host PID .* has not been normally reclaimed/)
     const recoveredHostPid = fresh.ready.hostPid
     const recoveredInstanceId = fresh.ready.instanceId
     await exitChat(fresh, 'T64 fresh Client')
