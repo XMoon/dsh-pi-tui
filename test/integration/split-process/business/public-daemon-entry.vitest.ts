@@ -720,10 +720,16 @@ test.skipIf(!linuxOnly)('__debug_settings_frames', async () => {
     launch = await scene.startPublicDaemon({ label: 'debug-settings', backend: 'daemon' })
     await waitForFrame(launch, '❯', 'debug composer')
     await launch.submit('/settings')
+    await sleep(1200)
+    await launch.press('Down')
+    await launch.press('Enter')
+    await sleep(800)
+    console.log(`DEBUG_SETTINGS_HOST\n${(await launch.text()).slice(-2600)}`)
     for (let index = 0; index < 8; index += 1) {
-      await sleep(800)
+      await launch.press('Down')
+      await sleep(350)
       const frame = await launch.text()
-      console.log(`DEBUG_SETTINGS_FRAME_${index}\n${frame.slice(-2400)}`)
+      console.log(`DEBUG_SETTINGS_ROW_${index}\n${frame.slice(-2200)}`)
     }
   } finally {
     if (launch !== undefined && !launch.closed) await launch.reclaim().catch(() => undefined)
