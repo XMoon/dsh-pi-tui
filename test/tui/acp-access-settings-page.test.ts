@@ -642,9 +642,11 @@ test('a throwing preference writer is an honest unconfirmed outcome', async () =
 })
 
 test('a non-current authority does not scroll the page back to the selected row', async () => {
-  const h = await mount({ status: { state: 'enabled' }, columns: 60, rows: 12 })
+  const h = await mount({ status: { state: 'enabled' }, columns: 72, rows: 14, profile: 'work profile 中文' })
   await h.key('\x1b[F') // End: read the Client Setup facts at the bottom
-  assert.match(h.frame(), /Closing an ACP View detaches it; Host/u)
+  assert.match(h.frame(), /dsh --profile 'work profile 中文' acp stdio/u, 'the quoted CJK command is fully readable')
+  assert.match(h.frame(), /The Host listener must be enabled before the client can connect\./u)
+  const scrolled = h.frame()
 
   // The Config authority becomes non-current while the user reads the bottom.
   // This is a read observation, NOT a selection move, so the viewport must stay
@@ -653,8 +655,9 @@ test('a non-current authority does not scroll the page back to the selected row'
   const reads = h.reads()
   h.mount.requestRender()
   await h.flush()
-  assert.match(h.frame(), /Closing an ACP View detaches it; Host/u, 'the reader keeps the scrolled viewport')
-  assert.doesNotMatch(h.frame(), /^> /mu, 'no forced reveal of the off-screen selection')
+  assert.match(h.frame(), /dsh --profile 'work profile 中文' acp stdio/u, 'the reader keeps the scrolled viewport')
+  assert.doesNotMatch(h.frame(), /Current Host/u, 'no forced scroll back to the selected/current header')
+  assert.notEqual(h.frame(), scrolled, 'the repaint reflected the new non-current fact, not a frozen frame')
   assert.match(h.frame(), /Start automatically\s+Unavailable/u)
   assert.equal(h.reads(), reads, 'the repaint performs no extra Host read')
   h.close()
