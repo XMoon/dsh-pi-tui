@@ -292,9 +292,10 @@ async function primeOutputTuiFile(session) {
   writeFileSync(path, bytes, { mode: 0o600 })
   const marker = `po4d-tui-file-${String(process.pid)}`
   const before = (hostSessionEvents(context.dshHome, sessionId) ?? []).length
+  // Wait for the OPEN Session's own painted workspace footer and composer seat
+  // (not the pre-open one) before typing a leading command.
+  await tui.waitForScreen('sdk-output-workspace', 'PR4D TUI open workspace', 30_000)
   await waitForComposer(tui, '❯', 'PR4D TUI composer ready')
-  // A short Client-cwd-relative path keeps the real editor line visible; the
-  // official intake still stores the sanitized leaf name.
   tui.send(`/attach ${path}`)
   tui.send('\r')
   await waitForComposer(tui, '[file #', 'PR4D TUI attach staged the Client-local file')
