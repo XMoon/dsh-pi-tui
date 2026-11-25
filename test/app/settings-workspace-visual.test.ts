@@ -92,6 +92,13 @@ const DEFAULT_DOC: TuiSettingsDoc = {
   wheelScrollLines: '1',
 }
 
+/** A scalar Config fixture state WITHOUT the Host authority: the harness owns
+ *  that identity and projects it onto every read, so a case can replace the
+ *  authority without restating the generation in every literal. */
+type VisualToolsStateInput = Omit<VisualToolsState, 'generation'>
+type WebStartupPreferenceInput = Omit<WebStartupPreferenceState, 'generation'>
+type BackendStartupPreferenceInput = Omit<BackendStartupPreferenceState, 'generation'>
+
 interface HarnessOptions {
   columns?: number
   rows?: number
@@ -154,7 +161,7 @@ interface HarnessOptions {
   holdFirstReplace?: boolean
   /** The profile-wide Visual tools state the ConfigPort reads. The default is
    *  the shipped state: enabled from the schema default, both tools registered. */
-  visualTools?: VisualToolsState
+  visualTools?: VisualToolsStateInput
   /** The visual-tools section is absent/unreadable (`read()` answers undefined). */
   visualToolsUnavailable?: boolean
   /** Make `setEnabled` reject with this reason (a refused Host write). */
@@ -166,7 +173,7 @@ interface HarnessOptions {
    *  just before the next switch write: the decision is then stale. */
   visualToolsExternalChange?: boolean
   /** M5-W PR-C: the profile-owned Web startup preference the ConfigPort reads. */
-  webStartupPreference?: WebStartupPreferenceState
+  webStartupPreference?: WebStartupPreferenceInput
   /** The Web startup preference section is absent/unreadable. */
   webStartupUnavailable?: boolean
   /** Make `setAutoStart` reject with this reason (a refused Host write). */
@@ -204,7 +211,7 @@ interface HarnessOptions {
    *  the pending parent/own-Back contract. */
   holdWebToggle?: boolean
   /** M6-2A A5: the profile-owned startup backend the ConfigPort reads. */
-  backendStartupPreference?: BackendStartupPreferenceState
+  backendStartupPreference?: BackendStartupPreferenceInput
   /** The startup backend section is absent/unreadable. */
   backendStartupUnavailable?: boolean
   /** Make `setBackend` reject with this reason (a refused Host write). */
@@ -495,7 +502,7 @@ interface Harness {
   /** Every `visualTools.setEnabled` value the UI dispatched, in order. */
   readonly visualWrites: () => readonly boolean[]
   /** The current fake Host state the ConfigPort reads. */
-  readonly visualState: () => VisualToolsState | undefined
+  readonly visualState: () => VisualToolsStateInput | undefined
   /** Every `webStartupPreference.setAutoStart` value the UI dispatched. */
   readonly webAutoStartWrites: () => readonly boolean[]
   /** Every `acpStartupPreference.setAutoStart` value the UI dispatched. */
@@ -603,8 +610,12 @@ interface Harness {
   /** Move the LIVE backend readiness the ConfigPort answers. */
   readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
   /** PR-A: replace the persisted next-start preference the ConfigPort reads
-   *  (a reconnected Host's mirror committing a changed value/revision). */
-  readonly setWebStartupPreference: (state: WebStartupPreferenceState | undefined) => void
+   *  (a reconnected Host's mirror committing a changed value/revision). The
+   *  harness projects its CURRENT Host authority onto the read. */
+  readonly setWebStartupPreference: (state: WebStartupPreferenceInput | undefined) => void
+  /** Replace the live scalar Config authority identity (a Host settings
+   *  service replacement: same revision/value, different authority). */
+  readonly replaceConfigAuthority: (next: object) => void
   /** Resolves once the held first document write really started. */
   readonly firstWriteStarted: () => Promise<void>
   /** Release the held first document write. */
@@ -651,7 +662,10 @@ function setup(options: HarnessOptions = {}): Harness {
   const pluginPageInstances: FakeEmbeddedPluginPage[] = []
   const visualWrites: boolean[] = []
   const webAutoStartWrites: boolean[] = []
-  let webStartupState: WebStartupPreferenceState | undefined = options.webStartupUnavailable === true
+  /** The live scalar Config authority identity. Replacing it simulates a Host
+   *  settings-authority replacement that keeps the same revision/value. */
+  let configGeneration: object = {}
+  let webStartupState: WebStartupPreferenceInput | undefined = options.webStartupUnavailable === true
     ? undefined
     : options.webStartupPreference ?? { autoStart: false, revision: 1, userOverridden: false }
   let acpSettingsGeneration: object = {}
@@ -664,13 +678,13 @@ function setup(options: HarnessOptions = {}): Harness {
   const acpAutoStartWrites: boolean[] = []
   let heldAcpConfigWrite: (() => void) | undefined
   const backendStartupWrites: PublicBackendValue[] = []
-  let backendStartupState: BackendStartupPreferenceState | undefined = options.backendStartupUnavailable === true
+  let backendStartupState: BackendStartupPreferenceInput | undefined = options.backendStartupUnavailable === true
     ? undefined
     : options.backendStartupPreference ?? { backend: 'direct', revision: 1, userOverridden: false }
   /** The LIVE backend readiness the ConfigPort answers (a case can move it). */
   let readiness = options.readiness ?? 'ready'
   let externalVisualChange = options.visualToolsExternalChange
-  let visualState: VisualToolsState | undefined = options.visualToolsUnavailable === true
+  let visualState: VisualToolsStateInput | undefined = options.visualToolsUnavailable === true
     ? undefined
     : options.visualTools ?? { enabled: true, revision: 1, userOverridden: false, applied: true }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
@@ -1152,10 +1166,17 @@ function setup(options: HarnessOptions = {}): Harness {
       ...(options.extensionConfigs === undefined ? {} : { extensionConfigs: options.extensionConfigs }),
       configReadiness: () => readiness,
       visualTools: {
-        read: () => visualState,
-        setEnabled: async (enabled: boolean, revision: number) => {
-          visualWrites.push(enabled)
-          if (externalVisualChange !== undefined && visualState !== undefined) {
+        read: () => visualState === undefined ? undefined : { ...visualState, generation: configGeneration },
+        setEnabled: async (enabled: boolean, revision: number, generation: object) => {
+          if (!Object.is(generation, configGeneration)) {
+            return { kind: 'rejected' as const, reason: 'the Host settings authority changed; refresh before saving' }
+          }
+          if (visualState === undefined) {
+            return { kind: 'rejected' as const, reason: 'the Host visual tools setting is unavailable' }
+          }
+          // A same-authority external write that landed before the queue head:
+          // the scalar mutation is refused with ZERO target writes.
+          if (externalVisualChange !== undefined) {
             visualState = {
               ...visualState,
               enabled: externalVisualChange,
@@ -1164,46 +1185,64 @@ function setup(options: HarnessOptions = {}): Harness {
               revision: visualState.revision + 1,
             }
             externalVisualChange = undefined
+            return { kind: 'conflict' as const, reason: `settings namespace "pi-tui-visual-tools" changed since it was read (expected revision ${revision}, now ${visualState.revision})` }
           }
-          if (options.visualToolsWriteFailure !== undefined) throw new Error(options.visualToolsWriteFailure)
-          if (visualState !== undefined && visualState.revision !== revision) {
-            throw new Error(`settings namespace "pi-tui-visual-tools" changed since it was read (expected revision ${revision}, now ${visualState.revision})`)
+          visualWrites.push(enabled)
+          if (options.visualToolsWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.visualToolsWriteFailure }
           }
-          if (visualState !== undefined) {
-            visualState = {
-              ...visualState,
-              enabled,
-              userOverridden: true,
-              applied: options.visualToolsAppliedAfterWrite ?? enabled,
-              revision: visualState.revision + 1,
-            }
+          if (visualState.revision !== revision) {
+            return { kind: 'conflict' as const, reason: `settings namespace "pi-tui-visual-tools" changed since it was read (expected revision ${revision}, now ${visualState.revision})` }
           }
+          visualState = {
+            ...visualState,
+            enabled,
+            userOverridden: true,
+            applied: options.visualToolsAppliedAfterWrite ?? enabled,
+            revision: visualState.revision + 1,
+          }
+          return { kind: 'accepted' as const }
         },
       },
       webStartupPreference: {
-        read: () => webStartupState,
-        setAutoStart: async (value: boolean, revision: number) => {
+        read: () => webStartupState === undefined ? undefined : { ...webStartupState, generation: configGeneration },
+        setAutoStart: async (value: boolean, revision: number, generation: object) => {
+          if (!Object.is(generation, configGeneration)) {
+            return { kind: 'rejected' as const, reason: 'the Host settings authority changed; refresh before saving' }
+          }
+          if (webStartupState === undefined) {
+            return { kind: 'rejected' as const, reason: 'the Host Web startup preference is unavailable' }
+          }
           webAutoStartWrites.push(value)
-          if (options.webStartupWriteFailure !== undefined) throw new Error(options.webStartupWriteFailure)
-          if (webStartupState !== undefined && webStartupState.revision !== revision) {
-            throw new Error(`settings namespace "pi-tui-web-preferences" changed since it was read (expected revision ${revision}, now ${webStartupState.revision})`)
+          if (options.webStartupWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.webStartupWriteFailure }
           }
-          if (webStartupState !== undefined) {
-            webStartupState = { autoStart: value, revision: webStartupState.revision + 1, userOverridden: true }
+          if (webStartupState.revision !== revision) {
+            return { kind: 'conflict' as const, reason: `settings namespace "pi-tui-web-preferences" changed since it was read (expected revision ${revision}, now ${webStartupState.revision})` }
           }
+          webStartupState = { autoStart: value, revision: webStartupState.revision + 1, userOverridden: true }
+          return { kind: 'accepted' as const }
         },
       },
       backendStartupPreference: {
-        read: () => backendStartupState, readFresh: async () => undefined,
-        setBackend: async (value: PublicBackendValue, revision: number) => {
+        read: () => backendStartupState === undefined ? undefined : { ...backendStartupState, generation: configGeneration },
+        readFresh: async () => undefined,
+        setBackend: async (value: PublicBackendValue, revision: number, generation: object) => {
+          if (!Object.is(generation, configGeneration)) {
+            return { kind: 'rejected' as const, reason: 'the Host settings authority changed; refresh before saving' }
+          }
+          if (backendStartupState === undefined) {
+            return { kind: 'rejected' as const, reason: 'the Host startup backend preference is unavailable' }
+          }
           backendStartupWrites.push(value)
-          if (options.backendStartupWriteFailure !== undefined) throw new Error(options.backendStartupWriteFailure)
-          if (backendStartupState !== undefined && backendStartupState.revision !== revision) {
-            throw new Error(`settings namespace "tui-startup" changed since it was read (expected revision ${revision}, now ${backendStartupState.revision})`)
+          if (options.backendStartupWriteFailure !== undefined) {
+            return { kind: 'rejected' as const, reason: options.backendStartupWriteFailure }
           }
-          if (backendStartupState !== undefined) {
-            backendStartupState = { backend: value, revision: backendStartupState.revision + 1, userOverridden: true }
+          if (backendStartupState.revision !== revision) {
+            return { kind: 'conflict' as const, reason: `settings namespace "tui-startup" changed since it was read (expected revision ${revision}, now ${backendStartupState.revision})` }
           }
+          backendStartupState = { backend: value, revision: backendStartupState.revision + 1, userOverridden: true }
+          return { kind: 'accepted' as const }
         },
       },
       // PR-B: the profile-owned ACP startup preference read/written ONLY by
@@ -1693,6 +1732,7 @@ function setup(options: HarnessOptions = {}): Harness {
     },
     setReadiness: (next: 'ready' | 'stale' | 'unavailable') => { readiness = next },
     setWebStartupPreference: (state) => { webStartupState = state },
+    replaceConfigAuthority: (next) => { configGeneration = next },
     /** Resolves once the first held document write really started. */
     firstWriteStarted: () => firstReplaceRunning ?? Promise.resolve(),
     /** Release the held first document write. */
@@ -6609,7 +6649,7 @@ test('a refused Visual tools write is reported as Not saved and never Verified',
   h.dispose()
 })
 
-test('an external edit before Confirm is a conflict, never a silent overwrite', async () => {
+test('an external edit before Confirm is a definite Not saved, never a silent overwrite', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsExternalChange: false })
   await h.open('Tools')
   await key(h, '\r')
@@ -6617,8 +6657,8 @@ test('an external edit before Confirm is a conflict, never a silent overwrite', 
   await key(h, '\x1b[B') // On -> Off
   await key(h, '\r')
   await settle(h)
-  assert.deepEqual(h.visualWrites(), [false], 'the confirm reached the Host once')
-  assert.match(h.view(), /Outcome unknown/, 'the stale decision is not attributed as a save or a refusal')
+  assert.deepEqual(h.visualWrites(), [], 'the queue-head conflict dispatched ZERO target writes')
+  assert.match(h.view(), /Not saved/, 'the pre-dispatch conflict is a definite refusal')
   assert.ok(!h.view().includes('Verified'), 'a stale decision is never Verified')
   assert.equal(h.visualState()?.enabled, false, 'the external edit stays authoritative')
   h.dispose()
@@ -8518,9 +8558,9 @@ test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads
     },
     config: {
       configReadiness: () => 'ready',
-      visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number) => {} },
-      webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number) => {} },
-      backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {} },
+      visualTools: { read: () => undefined, setEnabled: async (_enabled: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }) },
+      webStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }) },
+      backendStartupPreference: { read: () => undefined, readFresh: async () => undefined, setBackend: async (_value: 'direct' | 'daemon', _revision: number, _generation: object) => ({ kind: 'accepted' as const }) },
       acpStartupPreference: { read: () => undefined, setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }) },
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined },

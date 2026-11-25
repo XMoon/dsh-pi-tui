@@ -236,15 +236,15 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
       visualTools: {
         read: () => undefined,
-        setEnabled: async (_enabled: boolean, _revision: number) => {},
+        setEnabled: async (_enabled: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       webStartupPreference: {
         read: () => undefined,
-        setAutoStart: async (_value: boolean, _revision: number) => {},
+        setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       backendStartupPreference: {
         read: () => undefined, readFresh: async () => undefined,
-        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       acpStartupPreference: {
         read: () => undefined,

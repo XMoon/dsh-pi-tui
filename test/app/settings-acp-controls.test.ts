@@ -14,6 +14,13 @@
  * STAND-IN: the Host `acpAccess` port, the ConfigPort ACP preference and the
  * Client clipboard.
  *
+ * SUX #885 SCF: this file is also the single application-level REAL-queue proof
+ * for the three same-root scalar Config decisions (Web next-start, startup
+ * backend and Visual tools). They run over the SAME production RemoteConfigPort
+ * mirror/queue as the ACP preference above, so the queue-head fence, the
+ * accepted/unknown settlement and the Backend side-effect attribution are
+ * proved end to end instead of through a precomputed outcome.
+ *
  * @module @xmoon76/dsh-pi-tui/settings-acp-controls.test
  */
 
@@ -26,7 +33,15 @@ import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.t
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import type { AcpAccessPort, AcpAccessStatus } from '../../src/runtime/acp-access-port.ts'
-import type { AcpStartupPreferenceState, SectionMutationOutcome, TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
+import type {
+  AcpStartupPreferenceState,
+  BackendStartupPreferenceConfig,
+  SectionMutationOutcome,
+  TuiSettingsDoc,
+  VisualToolsConfig,
+  WebStartupPreferenceConfig,
+} from '../../src/runtime/config-port.ts'
 import { RemoteConfigPort, type RemoteConfigRuntimeSource, type RemoteSettingsPathOp } from '../../src/runtime/remote/config-remote.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { waitForFrame } from '../support/frame-wait.ts'
@@ -37,6 +52,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { unconfiguredPolicyObservation } from '../support/session-policy-fake.ts'
 
 const DOWN = '\x1b[B'
+const UP = '\x1b[A'
 const ENTER = '\r'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -88,6 +104,8 @@ interface Harness {
   readonly releaseAcpWrite: () => void
   readonly dispose: () => void
   readonly remote: RemoteConfigFixture | undefined
+  /** The process-lifetime Backend exit-transition intents this Client recorded. */
+  readonly backendTransitions: () => readonly ('daemon-to-direct' | undefined)[]
   readonly diagnostics: string[]
 }
 
@@ -97,13 +115,27 @@ interface RemoteConfigFixture {
     readonly read: () => AcpStartupPreferenceState | undefined
     readonly setAutoStart: (value: boolean, revision: number, generation: object) => Promise<SectionMutationOutcome>
   }
+  /** The three scalar Config sub-domains over the SAME real mirror/queue: the
+   *  Remote adapters' own typed setters, never a second writer. */
+  readonly configWeb: WebStartupPreferenceConfig
+  readonly configBackend: BackendStartupPreferenceConfig
+  readonly configVisual: VisualToolsConfig
   readonly forwarded: () => readonly { value: boolean; revision: number; generation: object }[]
+  readonly scalarForwarded: () => readonly { ns: string; value: unknown; revision: number; generation: object }[]
   readonly nextForwarded: () => Promise<void>
   readonly calls: () => readonly { ns: string; ops: readonly RemoteSettingsPathOp[]; revision: number | undefined; destination: 'A' | 'B' }[]
   readonly holdPredecessor: () => Promise<void>
   readonly submitSibling: () => Promise<SectionMutationOutcome>
   readonly releasePredecessor: () => void
-  readonly advanceB: (autoStart: boolean, revision: number) => void
+  readonly advanceB: (
+    autoStart: boolean,
+    revision: number,
+    overrides?: {
+      readonly web?: { readonly autoStart: boolean; readonly revision: number }
+      readonly backend?: { readonly backend: 'direct' | 'daemon'; readonly revision: number }
+      readonly visual?: { readonly enabled: boolean; readonly revision: number }
+    },
+  ) => void
   readonly holdReceipt: (fail?: boolean) => Promise<void>
   readonly releaseReceipt: () => void
   readonly acceptWithoutApply: () => void
@@ -122,17 +154,25 @@ interface RemoteConfigFixture {
 function makeRemoteConfig(
   connection: { readonly getSnapshot: () => object | undefined; readonly subscribe: (listener: () => void) => () => void },
   advanceRuntime: () => void,
+  initial: { readonly backend?: 'direct' | 'daemon' } = {},
 ): RemoteConfigFixture {
   const ACP = 'pi-tui-acp-preferences'
   const SIBLING = 'subagent'
+  const WEB = 'pi-tui-web-preferences'
+  const STARTUP = 'tui-startup'
+  const VISUAL = 'pi-tui-visual-tools'
   let phase: 'A' | 'B' = 'A'
   const aNamespaces: Array<{ ns: string; value?: unknown; base?: unknown; user?: unknown; revision?: number }> = [
     { ns: ACP, base: { autoStart: false }, user: {}, value: { autoStart: false }, revision: 7 },
     { ns: SIBLING, base: { maxDepth: 1, maxActiveSubagents: 8 }, user: {}, value: { maxDepth: 1, maxActiveSubagents: 8 }, revision: 5 },
+    { ns: WEB, base: { autoStart: false }, user: { autoStart: false }, value: { autoStart: false }, revision: 4 },
+    { ns: STARTUP, base: { backend: 'direct' }, user: { backend: initial.backend ?? 'direct' }, value: { backend: initial.backend ?? 'direct' }, revision: 6 },
+    { ns: VISUAL, base: { enabled: true }, user: { enabled: true }, value: { enabled: true }, revision: 3 },
   ]
   let namespaces = aNamespaces
   const calls: Array<{ ns: string; ops: readonly RemoteSettingsPathOp[]; revision: number | undefined; destination: 'A' | 'B' }> = []
   const forwarded: Array<{ value: boolean; revision: number; generation: object }> = []
+  const scalarForwarded: Array<{ ns: string; value: unknown; revision: number; generation: object }> = []
   let notifyForwarded: (() => void) | undefined
   let holdMutation: { entered: () => void; released: Promise<void> } | undefined
   let holdReceipt: { entered: () => void; released: Promise<void> } | undefined
@@ -215,10 +255,48 @@ function makeRemoteConfig(
       return write
     },
   }
+  const realWeb = port.webStartupPreference
+  const realBackend = port.backendStartupPreference
+  const realVisual = port.visualTools
+  const configWeb: WebStartupPreferenceConfig = {
+    read: () => realWeb.read(),
+    setAutoStart: (value, revision, generation) => {
+      scalarForwarded.push({ ns: WEB, value, revision, generation })
+      notifyForwarded?.(); notifyForwarded = undefined
+      const write = realWeb.setAutoStart(value, revision, generation)
+      lastWrite = write
+      return write
+    },
+  }
+  const configBackend: BackendStartupPreferenceConfig = {
+    read: () => realBackend.read(),
+    readFresh: () => realBackend.readFresh(),
+    setBackend: (value, revision, generation) => {
+      scalarForwarded.push({ ns: STARTUP, value, revision, generation })
+      notifyForwarded?.(); notifyForwarded = undefined
+      const write = realBackend.setBackend(value, revision, generation)
+      lastWrite = write
+      return write
+    },
+  }
+  const configVisual: VisualToolsConfig = {
+    read: () => realVisual.read(),
+    setEnabled: (enabled, revision, generation) => {
+      scalarForwarded.push({ ns: VISUAL, value: enabled, revision, generation })
+      notifyForwarded?.(); notifyForwarded = undefined
+      const write = realVisual.setEnabled(enabled, revision, generation)
+      lastWrite = write
+      return write
+    },
+  }
   return {
     ready: port.describe(),
     configAcp,
+    configWeb,
+    configBackend,
+    configVisual,
     forwarded: () => forwarded,
+    scalarForwarded: () => scalarForwarded,
     nextForwarded: () => new Promise<void>(resolve => { notifyForwarded = resolve }),
     calls: () => calls,
     holdPredecessor: () => new Promise<void>(resolve => {
@@ -236,11 +314,17 @@ function makeRemoteConfig(
       releasePredecessorFn?.()
       releasePredecessorFn = undefined
     },
-    advanceB: (autoStart: boolean, revision: number) => {
+    advanceB: (autoStart, revision, overrides = {}) => {
       phase = 'B'
+      const web = overrides.web ?? { autoStart: false, revision: 4 }
+      const backend = overrides.backend ?? { backend: 'direct' as const, revision: 6 }
+      const visual = overrides.visual ?? { enabled: true, revision: 3 }
       namespaces = [
         { ns: ACP, base: { autoStart: false }, user: { autoStart }, value: { autoStart }, revision },
         { ns: SIBLING, base: { maxDepth: 1, maxActiveSubagents: 8 }, user: {}, value: { maxDepth: 1, maxActiveSubagents: 8 }, revision: 5 },
+        { ns: WEB, base: { autoStart: false }, user: { autoStart: web.autoStart }, value: { autoStart: web.autoStart }, revision: web.revision },
+        { ns: STARTUP, base: { backend: 'direct' }, user: { backend: backend.backend }, value: { backend: backend.backend }, revision: backend.revision },
+        { ns: VISUAL, base: { enabled: true }, user: { enabled: visual.enabled }, value: { enabled: visual.enabled }, revision: visual.revision },
       ]
       advanceRuntime()
     },
@@ -279,8 +363,10 @@ function setup(options: {
   readonly holdSecondAcpRead?: boolean
   /** Hold the real `setEnabled` call after it is invoked. */
   readonly holdAcpWrite?: boolean
-  /** Compose the REAL RemoteConfigPort for the ACP preference path. */
+  /** Compose the REAL RemoteConfigPort for the scalar Config paths. */
   readonly remoteConfig?: boolean
+  /** The startup backend Host A starts with (default `direct`). */
+  readonly remoteInitialBackend?: 'direct' | 'daemon'
 } = {}): Harness {
   const columns = options.columns ?? 200
   const rows = options.rows ?? 44
@@ -331,6 +417,8 @@ function setup(options: {
   }
   const copied: string[] = []
   const diagnostics: string[] = []
+  const backendTransitions: ('daemon-to-direct' | undefined)[] = []
+  let webStatus: WebAccessStatus = { state: 'enabled' }
   // The opaque Connection generation identity (object) the ACP observation binds
   // to; a reconnect (Host A -> Host B) replaces it and notifies subscribers.
   let generation: object | undefined = { id: 1 }
@@ -348,6 +436,7 @@ function setup(options: {
           generation = { id: ((generation as { id?: number } | undefined)?.id ?? 0) + 1 }
           for (const listener of [...generationListeners]) listener()
         },
+        options.remoteInitialBackend === undefined ? {} : { backend: options.remoteInitialBackend },
       )
     : undefined
   const acpAccess: AcpAccessPort = {
@@ -429,8 +518,29 @@ function setup(options: {
           run: async () => ({ code: 0, stdout: '', stderr: '' }),
         },
     acpAccess,
+    // The Split Host's live Web frontend: only the Web UI page reads it, and
+    // the scalar cases never toggle it.
+    webAccess: {
+      getStatus: async () => webStatus,
+      setEnabled: async (enabled: boolean) => {
+        webStatus = enabled ? { state: 'enabled' } : { state: 'disabled' }
+        return webStatus
+      },
+      getAuthenticatedUrl: async () => ({ url: 'http://127.0.0.1:1/?token=TEST' }),
+      currentGeneration: () => generation,
+      subscribeGeneration: (listener: () => void) => {
+        generationListeners.add(listener)
+        return () => { generationListeners.delete(listener) }
+      },
+    },
+    recordBackendExitTransition: (transition: 'daemon-to-direct' | undefined) => { backendTransitions.push(transition) },
     config: settingsDirectPageConfig({
       configReadiness: () => remote?.readiness() ?? readiness,
+      ...(remote === undefined ? {} : {
+        webStartupPreference: remote.configWeb,
+        backendStartupPreference: remote.configBackend,
+        visualTools: remote.configVisual,
+      }),
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentLimits: {
@@ -520,6 +630,7 @@ function setup(options: {
     releaseAcpReads: () => { acp.releaseRead?.(); acp.releaseRead = undefined },
     releaseAcpWrite: () => { acp.release?.(); acp.release = undefined },
     remote,
+    backendTransitions: () => backendTransitions,
     diagnostics,
     dispose: () => {
       startedApps.delete(app)
@@ -964,5 +1075,266 @@ test('a mounted invoked write can be left by the page Back while its owner settl
   assert.match(h.view(), /Settings · Host · Rows/u, 'the late settlement never revives the page')
   assert.doesNotMatch(h.view(), /Waiting for the answer…/u)
   assert.deepEqual(h.acp.setEnabledCalls, [true], 'the dispatched write is never cancelled or replayed')
+  h.dispose()
+})
+
+// ── SUX #885 SCF: the three scalar Config decisions on the SAME real queue ───
+
+/** Open `/web` and stage its next-start On confirmation. */
+async function stageWebPreferenceConfirm(h: Harness): Promise<void> {
+  void h.invoke('web')
+  await settle(h, 'the Web UI page', frame => /Settings · Host · Web UI/u.test(frame))
+  await highlightRow(h, 'Start automatically')
+  await key(h, ENTER) // candidates
+  await key(h, ENTER) // stage On
+  assert.match(h.view(), /Save the next Host start preference as On\?/u)
+}
+
+/** Open the Host Rows level and the Backend inline choice. */
+async function openBackendChoice(h: Harness): Promise<void> {
+  await openHostRows(h)
+  await key(h, ENTER) // writable row -> L2 inline choice
+  await settle(h, 'the Backend choice', frame => /Choose value/u.test(frame))
+}
+
+/** Open the Tools Rows level and the Visual tools inline choice. */
+async function openVisualChoice(h: Harness): Promise<void> {
+  h.invoke('settings')
+  await settle(h, 'the Settings rail', frame => frame.includes('Settings ·'))
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER) // categories -> rows
+  await key(h, ENTER) // writable row -> L2 inline choice
+  await settle(h, 'the Visual tools choice', frame => /Choose value/u.test(frame))
+}
+
+const scalarCalls = (h: Harness, ns: string): number =>
+  h.remote!.calls().filter(call => call.ns === ns).length
+
+test('a queued Web next-start decision is fenced at the REAL Remote queue head', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await stageWebPreferenceConfirm(h)
+
+  const entered = h.remote!.holdPredecessor()
+  const predecessor = h.remote!.submitSibling()
+  await entered
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER) // Confirm save: A is admitted and queued
+  await forwarded
+  assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 0, 'A is queued; no Web RPC yet')
+
+  // B exposes the SAME revision and value; release the predecessor.
+  h.remote!.advanceB(false, 7, { web: { autoStart: false, revision: 4 } })
+  h.remote!.releasePredecessor()
+  await predecessor
+  await settle(h, 'the Web queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
+  assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 0,
+    'the old A intent dispatched ZERO Web mutations against B')
+  assert.match(h.view(), /Start automatically\s+Off\b/u, 'B keeps its own Off value')
+
+  // A fresh explicit B gesture is the only request that reaches B.
+  await highlightRow(h, 'Start automatically')
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await settle(h, 'the fresh Web verification', frame => /Status\s+Verified/u.test(frame))
+  assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 1, 'exactly ONE Web mutation, by the fresh B intent')
+  const call = h.remote!.calls().find(entry => entry.ns === 'pi-tui-web-preferences')!
+  assert.equal(call.revision, 4)
+  assert.equal(call.destination, 'B')
+  assert.equal(h.remote!.scalarForwarded().at(-1)!.generation, h.remote!.currentGeneration(),
+    'the fresh request carried the CURRENT B authority identity')
+  h.dispose()
+})
+
+test('a queued Backend decision is fenced at the REAL Remote queue head and records no follow-up', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await openBackendChoice(h)
+  await key(h, DOWN) // Direct -> Daemon
+  const entered = h.remote!.holdPredecessor()
+  const predecessor = h.remote!.submitSibling()
+  await entered
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER) // Confirm: A is admitted and queued
+  await forwarded
+  assert.equal(scalarCalls(h, 'tui-startup'), 0, 'A is queued; no startup RPC yet')
+
+  h.remote!.advanceB(false, 7, { backend: { backend: 'direct', revision: 6 } })
+  h.remote!.releasePredecessor()
+  await predecessor
+  await settle(h, 'the Backend queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
+  assert.equal(scalarCalls(h, 'tui-startup'), 0, 'the old A intent dispatched ZERO startup mutations against B')
+  assert.deepEqual(h.backendTransitions(), [], 'a refused A decision records no exit transition')
+  assert.doesNotMatch(h.view(), /Install service|Not now/u, 'B matching A never earns the install follow-up')
+
+  await key(h, ENTER) // fresh explicit Change against the current B row
+  await key(h, DOWN)
+  await key(h, ENTER)
+  await settle(h, 'the fresh Backend verification', frame => /Status\s+Verified/u.test(frame))
+  assert.equal(scalarCalls(h, 'tui-startup'), 1, 'exactly ONE startup mutation, by the fresh B intent')
+  const call = h.remote!.calls().find(entry => entry.ns === 'tui-startup')!
+  assert.equal(call.revision, 6)
+  assert.equal(call.destination, 'B')
+  assert.deepEqual(h.backendTransitions(), [undefined], 'the fresh verified direct→daemon clears the exit intent')
+  h.dispose()
+})
+
+test('a queued Visual tools decision is fenced at the REAL Remote queue head', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await openVisualChoice(h)
+  await key(h, DOWN) // On -> Off
+  const entered = h.remote!.holdPredecessor()
+  const predecessor = h.remote!.submitSibling()
+  await entered
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 0, 'A is queued; no visual-tools RPC yet')
+
+  h.remote!.advanceB(false, 7, { visual: { enabled: true, revision: 3 } })
+  h.remote!.releasePredecessor()
+  await predecessor
+  await settle(h, 'the Visual tools queue-head refusal', frame => /Status\s+Not saved/u.test(frame))
+  assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 0, 'the old A intent dispatched ZERO visual-tools mutations against B')
+
+  await key(h, ENTER) // fresh explicit Change against the current B row
+  await key(h, DOWN)
+  await key(h, ENTER)
+  await settle(h, 'the fresh Visual tools verification', frame => /Status\s+Verified/u.test(frame))
+  assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 1, 'exactly ONE visual-tools mutation, by the fresh B intent')
+  const call = h.remote!.calls().find(entry => entry.ns === 'pi-tui-visual-tools')!
+  assert.equal(call.revision, 3)
+  assert.equal(call.destination, 'B')
+  h.dispose()
+})
+
+test('an accepted Web write whose readback belongs to B is Unverified, never Verified', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await stageWebPreferenceConfirm(h)
+
+  const received = h.remote!.holdReceipt()
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER) // the real A mutation applies On and holds its receipt
+  await forwarded
+  await received
+  h.remote!.advanceB(true, 7, { web: { autoStart: true, revision: 4 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the cross-generation Web settlement', frame => /Status\s+Unverified/u.test(frame))
+  assert.match(h.view(), /no current same-generation readback/u)
+  assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 1, 'A is never replayed and B receives no implicit mutation')
+  h.dispose()
+})
+
+test('an accepted Backend write whose readback belongs to B is Unverified and emits no transition', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await openBackendChoice(h)
+  await key(h, DOWN)
+
+  const received = h.remote!.holdReceipt()
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(false, 7, { backend: { backend: 'daemon', revision: 6 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the cross-generation Backend settlement', frame => /Commit accepted · verification unavailable/u.test(frame))
+  assert.deepEqual(h.backendTransitions(), [], 'B matching the request never records a transition intent')
+  assert.doesNotMatch(h.view(), /Install service|Not now/u, 'B matching the request never earns the follow-up')
+  assert.equal(scalarCalls(h, 'tui-startup'), 1, 'A is never replayed')
+  h.dispose()
+})
+
+test('an accepted Visual tools write whose readback belongs to B is Unverified', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await openVisualChoice(h)
+  await key(h, DOWN)
+
+  const received = h.remote!.holdReceipt()
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(false, 7, { visual: { enabled: false, revision: 3 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the cross-generation Visual tools settlement', frame => /Commit accepted · verification unavailable/u.test(frame))
+  assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 1, 'A is never replayed')
+  h.dispose()
+})
+
+test('an unknown Web receipt is Outcome unconfirmed even when B matches the request', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await stageWebPreferenceConfirm(h)
+  const received = h.remote!.holdReceipt(true)
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(true, 7, { web: { autoStart: true, revision: 4 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the unknown Web receipt', frame => /Status\s+Outcome unconfirmed/u.test(frame))
+  assert.doesNotMatch(h.view(), /Status\s+Not saved/u)
+  assert.equal(scalarCalls(h, 'pi-tui-web-preferences'), 1)
+  h.dispose()
+})
+
+test('an unknown Backend receipt is painted Outcome unknown and never claimed saved', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await openBackendChoice(h)
+  await key(h, DOWN)
+  const received = h.remote!.holdReceipt(true)
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(false, 7, { backend: { backend: 'daemon', revision: 6 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the unknown Backend receipt', frame => /Status\s+Outcome unknown/u.test(frame))
+  assert.doesNotMatch(h.view(), /Status\s+Not saved/u)
+  assert.deepEqual(h.backendTransitions(), [], 'an unknown outcome records no exit intent')
+  assert.equal(scalarCalls(h, 'tui-startup'), 1)
+  h.dispose()
+})
+
+test('an unknown Visual tools receipt is painted Outcome unknown and never claimed saved', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true })
+  await h.remote!.ready
+  await openVisualChoice(h)
+  await key(h, DOWN)
+  const received = h.remote!.holdReceipt(true)
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(false, 7, { visual: { enabled: false, revision: 3 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the unknown Visual tools receipt', frame => /Status\s+Outcome unknown/u.test(frame))
+  assert.doesNotMatch(h.view(), /Status\s+Not saved/u)
+  assert.equal(scalarCalls(h, 'pi-tui-visual-tools'), 1)
+  h.dispose()
+})
+
+test('a matching Host B never grants daemon→direct exit intent from an accepted A receipt', async () => {
+  const h = setup({ columns: 200, rows: 44, remoteConfig: true, remoteInitialBackend: 'daemon' })
+  await h.remote!.ready
+  await openBackendChoice(h)
+  await key(h, UP) // Daemon -> Direct
+  const received = h.remote!.holdReceipt()
+  const forwarded = h.remote!.nextForwarded()
+  await key(h, ENTER)
+  await forwarded
+  await received
+  h.remote!.advanceB(false, 7, { backend: { backend: 'direct', revision: 6 } })
+  h.remote!.releaseReceipt()
+  await settle(h, 'the cross-generation daemon→direct settlement', frame => /Commit accepted · verification unavailable/u.test(frame))
+  assert.deepEqual(h.backendTransitions(), [],
+    'the matching B direct value never records a daemon-to-direct intent for the A request')
+  assert.equal(scalarCalls(h, 'tui-startup'), 1, 'A is never replayed')
   h.dispose()
 })

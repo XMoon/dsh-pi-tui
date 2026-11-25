@@ -16,6 +16,9 @@
 /** The provider/credential/authorization/account seams, as separate groups so
  *  a harness can keep its own answer for one of them. */
 const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+/** The one stable Host authority these shipped-default stubs project onto every
+ *  scalar read, so a mounted harness can address the row's writer. */
+const SETTINGS_CONFIG_GENERATION: object = {}
 
 export const SETTINGS_DIRECT_PAGE_STUBS = {
   providers: {
@@ -56,21 +59,21 @@ export const SETTINGS_DIRECT_PAGE_STUBS = {
   /** The shipped profile-wide visual-tools default: both tools registered and
    *  no USER override. The `/settings` snapshot reads it on every open. */
   visualTools: {
-    read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
-    setEnabled: async (_enabled: boolean, _revision: number) => {},
+    read: () => ({ enabled: true, revision: 1, generation: SETTINGS_CONFIG_GENERATION, userOverridden: false, applied: true }),
+    setEnabled: async (_enabled: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
   },
   /** The profile-owned Web startup preference: the schema default (OFF, no user
    *  override) at revision 1. The `/settings` snapshot reads it on every open. */
   webStartupPreference: {
-    read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
-    setAutoStart: async (_value: boolean, _revision: number) => {},
+    read: () => ({ autoStart: false, revision: 1, generation: SETTINGS_CONFIG_GENERATION, userOverridden: false }),
+    setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
   },
   /** The profile-owned startup backend: the schema default (`direct`, no user
    *  override) at revision 1. Read on every `/settings` snapshot. */
   backendStartupPreference: {
-    read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
-    readFresh: async () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
-    setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+    read: () => ({ backend: 'direct' as const, revision: 1, generation: SETTINGS_CONFIG_GENERATION, userOverridden: false }),
+    readFresh: async () => ({ backend: 'direct' as const, revision: 1, generation: SETTINGS_CONFIG_GENERATION, userOverridden: false }),
+    setBackend: async (_value: 'direct' | 'daemon', _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
   },
   /** The profile-owned ACP startup preference: the schema default (OFF, no user
    *  override) at revision 1. The `/settings` snapshot reads it on every open. */

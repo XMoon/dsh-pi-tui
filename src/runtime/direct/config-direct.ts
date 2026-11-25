@@ -2300,26 +2300,28 @@ class DirectVisualToolsConfig implements VisualToolsConfig {
     const applied = status === undefined || typeof status.applied !== 'function'
       ? undefined
       : status.applied()
+    // Direct's settings service object identity is the Host settings authority.
+    const generation = settings === undefined ? undefined : settingsAuthorityOf(settings)
     return {
       enabled,
       revision,
+      generation,
       userOverridden: userSection?.enabled !== undefined,
       applied,
     }
   }
 
-  async setEnabled(enabled: boolean, expectedRevision: number): Promise<void> {
+  async setEnabled(enabled: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-    if (settings === undefined) throw new Error('the Host settings service is unavailable')
-    if (readSettingsDescriptor(settings, VISUAL_TOOLS_NS) === undefined) {
-      throw new Error(`the "pi-tui-visual-tools" Host settings section is not mounted`)
+    if (settings === undefined) {
+      return { kind: 'rejected', reason: 'the Host settings service is unavailable' }
     }
-    // Submit the revision the USER's decision was read at — never a revision
-    // observed at write time, which would turn an external edit into a silent
-    // overwrite.
-    await mutateSettings(settings, VISUAL_TOOLS_NS, [
+    if (readSettingsDescriptor(settings, VISUAL_TOOLS_NS) === undefined) {
+      return { kind: 'rejected', reason: 'the "pi-tui-visual-tools" Host settings section is not mounted' }
+    }
+    return mutateDirectSection(this.ctx, VISUAL_TOOLS_NS, [
       { op: 'set', path: ['enabled'], value: enabled },
-    ], expectedRevision)
+    ], expectedRevision, generation)
   }
 }
 
@@ -2361,25 +2363,27 @@ class DirectWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
       : undefined
+    // Direct's settings service object identity is the Host settings authority.
+    const generation = settings === undefined ? undefined : settingsAuthorityOf(settings)
     return {
       autoStart,
       revision,
+      generation,
       userOverridden: userSection?.autoStart !== undefined,
     }
   }
 
-  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
+  async setAutoStart(value: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-    if (settings === undefined) throw new Error('the Host settings service is unavailable')
-    if (readSettingsDescriptor(settings, WEB_STARTUP_PREFERENCE_NS) === undefined) {
-      throw new Error(`the "pi-tui-web-preferences" Host settings section is not mounted`)
+    if (settings === undefined) {
+      return { kind: 'rejected', reason: 'the Host settings service is unavailable' }
     }
-    // Submit the revision the USER's decision was read at — never a revision
-    // observed at write time, which would turn an external edit into a silent
-    // overwrite.
-    await mutateSettings(settings, WEB_STARTUP_PREFERENCE_NS, [
+    if (readSettingsDescriptor(settings, WEB_STARTUP_PREFERENCE_NS) === undefined) {
+      return { kind: 'rejected', reason: 'the "pi-tui-web-preferences" Host settings section is not mounted' }
+    }
+    return mutateDirectSection(this.ctx, WEB_STARTUP_PREFERENCE_NS, [
       { op: 'set', path: ['autoStart'], value },
-    ], expectedRevision)
+    ], expectedRevision, generation)
   }
 }
 
@@ -2418,18 +2422,22 @@ class DirectBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
       ? user as Record<string, unknown>
       : undefined
-    return { backend, revision, userOverridden: userSection?.backend !== undefined }
+    // Direct's settings service object identity is the Host settings authority.
+    const generation = settings === undefined ? undefined : settingsAuthorityOf(settings)
+    return { backend, revision, generation, userOverridden: userSection?.backend !== undefined }
   }
 
-  async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
+  async setBackend(value: PublicBackendValue, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
     const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
-    if (settings === undefined) throw new Error('the Host settings service is unavailable')
-    if (readSettingsDescriptor(settings, TUI_STARTUP_NS) === undefined) {
-      throw new Error('the "tui-startup" Host settings section is not mounted')
+    if (settings === undefined) {
+      return { kind: 'rejected', reason: 'the Host settings service is unavailable' }
     }
-    await mutateSettings(settings, TUI_STARTUP_NS, [
+    if (readSettingsDescriptor(settings, TUI_STARTUP_NS) === undefined) {
+      return { kind: 'rejected', reason: 'the "tui-startup" Host settings section is not mounted' }
+    }
+    return mutateDirectSection(this.ctx, TUI_STARTUP_NS, [
       { op: 'set', path: ['backend'], value },
-    ], expectedRevision)
+    ], expectedRevision, generation)
   }
 
   async readFresh(): Promise<BackendStartupPreferenceState | undefined> {

@@ -94,11 +94,12 @@ test('a Remote Confirm toggles the real Host tool registry through the generated
   assert.equal(initial.enabled, true)
   assert.equal(initial.userOverridden, false)
   assert.equal(initial.applied, undefined, 'the wire publishes no Host registry read, so runtime state is unobservable')
+  assert.ok(initial.generation !== undefined, 'a current mirror read carries the writable Host authority')
 
   // Off over the REAL wire: the generated settings.mutate reaches the Host
   // SettingsForms, the Loader commits the volatile value and the Host row
   // unregisters both tools.
-  await config.visualTools.setEnabled(false, initial.revision)
+  assert.deepEqual(await config.visualTools.setEnabled(false, initial.revision, initial.generation), { kind: 'accepted' })
   assert.equal(config.configReadiness(), 'ready', 'the post-write mirror refresh stayed current')
   const off = config.visualTools.read()
   assert.equal(off?.enabled, false)
@@ -107,8 +108,8 @@ test('a Remote Confirm toggles the real Host tool registry through the generated
   assert.equal(host.ctx.tools.get(SVG_TOOL_NAME), undefined)
 
   // On over the same wire: both definitions return.
-  assert.ok(off !== undefined)
-  await config.visualTools.setEnabled(true, off.revision)
+  assert.ok(off !== undefined && off.generation !== undefined)
+  assert.deepEqual(await config.visualTools.setEnabled(true, off.revision, off.generation), { kind: 'accepted' })
   assert.notEqual(host.ctx.tools.get(CHART_TOOL_NAME), undefined)
   assert.notEqual(host.ctx.tools.get(SVG_TOOL_NAME), undefined)
 
@@ -116,16 +117,14 @@ test('a Remote Confirm toggles the real Host tool registry through the generated
   // decision read and the Confirm, so the decision revision must be refused
   // instead of silently overwriting it.
   const stale = config.visualTools.read()
-  assert.ok(stale !== undefined)
+  assert.ok(stale !== undefined && stale.generation !== undefined)
   assert.equal(stale.enabled, true)
   const live = hostSettings.describe().find(entry => entry.ns === VISUAL_TOOLS_ROW_ID)
   await hostSettings.mutate(VISUAL_TOOLS_ROW_ID, [{ op: 'set', path: ['enabled'], value: false }], live?.revision)
   assert.equal(host.ctx.tools.get(CHART_TOOL_NAME), undefined, 'the external Off reached the registry')
-  await assert.rejects(
-    config.visualTools.setEnabled(true, stale.revision),
-    /changed since it was read/u,
-    'the stale Remote decision can never overwrite the external edit',
-  )
+  const staleOutcome = await config.visualTools.setEnabled(true, stale.revision, stale.generation)
+  assert.equal(staleOutcome.kind, 'conflict', 'the stale Remote decision can never overwrite the external edit')
+  assert.match(staleOutcome.kind === 'conflict' ? staleOutcome.reason : '', /changed since it was read/u)
   assert.equal(config.visualTools.read()?.enabled, false, 'the external value remains authoritative')
   assert.equal(host.ctx.tools.get(CHART_TOOL_NAME), undefined, 'the stale write never re-registered the tools')
 })

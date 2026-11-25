@@ -266,16 +266,16 @@ function setupProof(options: ProofOptions): SinkHarness {
       configReadiness: () => 'ready',
       visualTools: {
         read: () => ({ enabled: true, revision: 1, userOverridden: false, applied: true }),
-        setEnabled: async (_enabled: boolean, _revision: number) => {},
+        setEnabled: async (_enabled: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       webStartupPreference: {
         read: () => ({ autoStart: false, revision: 1, userOverridden: false }),
-        setAutoStart: async (_value: boolean, _revision: number) => {},
+        setAutoStart: async (_value: boolean, _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       backendStartupPreference: {
         read: () => ({ backend: 'direct' as const, revision: 1, userOverridden: false }),
         readFresh: async () => undefined,
-        setBackend: async (_value: 'direct' | 'daemon', _revision: number) => {},
+        setBackend: async (_value: 'direct' | 'daemon', _revision: number, _generation: object) => ({ kind: 'accepted' as const }),
       },
       acpStartupPreference: {
         read: () => ({ autoStart: false, revision: 1, userOverridden: false, generation: ACP_STARTUP_PREFERENCE_GENERATION }),

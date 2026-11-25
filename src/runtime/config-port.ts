@@ -885,6 +885,13 @@ export interface VisualToolsState {
    *  as the official `expectedRevision`, so an external write between the read
    *  and the Confirm is a conflict instead of a silent last-write-wins. */
   readonly revision: number
+  /** The opaque Host settings authority this observation belongs to. It is
+   *  `undefined` when the last-known value is not current; an `undefined` value
+   *  is displayable but NEVER writable, and the mutation carries the captured
+   *  generation through the serialized write queue to the actual adapter
+   *  boundary. Same revision/value on a replacement Host is NOT the same
+   *  authority. */
+  readonly generation: object | undefined
   /** Whether the USER profile layer declares the value. `false` means the
    *  effective value is inherited/default — the only provenance the Host form
    *  exposes — so the UI may mark it `[default]` instead of claiming a user
@@ -908,10 +915,12 @@ export interface VisualToolsConfig {
   /** The current Host state, or `undefined` when the profile section cannot be
    *  read at all (missing namespace/service). Never a fabricated default. */
   read(): VisualToolsState | undefined
-  /** Persist `enabled` through the official settings write at the revision the
-   *  user's decision was read at. A stale revision is a refusal (the official
-   *  conflict), never a silent overwrite. */
-  setEnabled(enabled: boolean, expectedRevision: number): Promise<void>
+  /** Persist `enabled` through the official settings write at the revision and
+   *  Host authority the user's decision was read at. The generation travels to
+   *  the actual mutation/queue boundary: a replaced Host or a superseded queued
+   *  decision is a refusal, never a silent write to the new authority. A stale
+   *  revision is the official conflict. */
+  setEnabled(enabled: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome>
 }
 
 /**
@@ -930,6 +939,12 @@ export interface WebStartupPreferenceState {
    *  as the official `expectedRevision`, so an external write between the read
    *  and the Confirm is a conflict instead of a silent last-write-wins. */
   readonly revision: number
+  /** The opaque Host settings authority this observation belongs to. It is
+   *  `undefined` when the last-known value is not current; an `undefined` value
+   *  is displayable but NEVER writable, and the mutation carries the captured
+   *  generation through the serialized write queue to the actual adapter
+   *  boundary. */
+  readonly generation: object | undefined
   /** Whether the USER profile layer declares the value. `false` means the
    *  effective value is the schema default — the only provenance the Host form
    *  exposes — so the UI may mark it `[default]`; the default is never
@@ -939,19 +954,21 @@ export interface WebStartupPreferenceState {
 
 /**
  * The profile-wide Web startup preference. The write is the official
- * revision-checked settings mutation of the `pi-tui-web-preferences` entry. A
- * resolved write is NOT a read-back: the caller must
- * {@link WebStartupPreferenceConfig.read} again and only that read earns
- * `Verified`.
+ * revision- and generation-checked settings mutation of the
+ * `pi-tui-web-preferences` entry. A resolved write is NOT a read-back: the
+ * caller must {@link WebStartupPreferenceConfig.read} again and only a
+ * same-generation read earns `Verified`.
  */
 export interface WebStartupPreferenceConfig {
   /** The current Host preference, or `undefined` when the profile section
    *  cannot be read at all. Never a fabricated default. */
   read(): WebStartupPreferenceState | undefined
   /** Persist `autoStart` through the official settings write at the revision
-   *  the user's decision was read at. A stale revision is a refusal (the
-   *  official conflict), never a silent overwrite. */
-  setAutoStart(value: boolean, expectedRevision: number): Promise<void>
+   *  and Host authority the user's decision was read at. The generation travels
+   *  to the actual mutation/queue boundary: a replaced Host or a superseded
+   *  queued decision is a refusal, never a silent write to the new authority.
+   *  A stale revision is the official conflict. */
+  setAutoStart(value: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome>
 }
 
 /** The public backend a cold launch runs: the in-process Direct TUI or the
@@ -979,6 +996,12 @@ export interface BackendStartupPreferenceState {
    *  as the official `expectedRevision`, so an external write between the read
    *  and the Confirm is a conflict instead of a silent last-write-wins. */
   readonly revision: number
+  /** The opaque Host settings authority this observation belongs to. It is
+   *  `undefined` when the last-known value is not current; an `undefined` value
+   *  is displayable but NEVER writable, and the mutation carries the captured
+   *  generation through the serialized write queue to the actual adapter
+   *  boundary. */
+  readonly generation: object | undefined
   /** Whether the USER profile layer declares the value. `false` means the
    *  effective value is the schema default — the only provenance the Host form
    *  exposes — so the UI may mark it `[default]`; the default is never
@@ -987,11 +1010,11 @@ export interface BackendStartupPreferenceState {
 }
 
 /**
- * The profile-wide startup backend. The write is the official revision-checked
- * settings mutation of the `tui-startup` entry's `backend` field. A resolved
- * write is NOT a read-back: the caller must
- * {@link BackendStartupPreferenceConfig.read} again and only that read earns
- * `Verified`.
+ * The profile-wide startup backend. The write is the official revision- and
+ * generation-checked settings mutation of the `tui-startup` entry's `backend`
+ * field. A resolved write is NOT a read-back: the caller must
+ * {@link BackendStartupPreferenceConfig.read} again and only a same-generation
+ * read earns `Verified`.
  */
 export interface BackendStartupPreferenceConfig {
   /** The current Host preference, or `undefined` when the profile section
@@ -1009,10 +1032,12 @@ export interface BackendStartupPreferenceConfig {
    * authorize the Host stop.
    */
   readFresh(): Promise<BackendStartupPreferenceState | undefined>
-  /** Persist `backend` through the official settings write at the revision the
-   *  user's decision was read at. A stale revision is a refusal (the official
-   *  conflict), never a silent overwrite. */
-  setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void>
+  /** Persist `backend` through the official settings write at the revision and
+   *  Host authority the user's decision was read at. The generation travels to
+   *  the actual mutation/queue boundary: a replaced Host or a superseded queued
+   *  decision is a refusal, never a silent write to the new authority. A stale
+   *  revision is the official conflict. */
+  setBackend(value: PublicBackendValue, expectedRevision: number, generation: object): Promise<SectionMutationOutcome>
 }
 
 /**
