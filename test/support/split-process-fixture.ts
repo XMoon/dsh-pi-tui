@@ -189,6 +189,8 @@ export interface SplitProcessClient {
   ): Promise<Record<string, any>>
   waitForExit(timeoutMs?: number): Promise<SplitProcessClientExitFacts>
   close(): Promise<SplitProcessClientExitFacts>
+  /** Use the existing current-frame safe /exit path, then close. */
+  exitGracefully(): Promise<void>
   /** Send one declared product signal to the real business Client PID. */
   signal(signal: 'SIGUSR2' | 'SIGINT' | 'SIGTERM'): Promise<void>
   /** The ONE declared terminal-owner loss; returns the tagged verified fact. */

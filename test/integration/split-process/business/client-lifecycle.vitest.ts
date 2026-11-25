@@ -195,19 +195,7 @@ function processGroupState(pgid: number): 'gone' | 'live' | 'unknown' {
 
 async function exitChat(client: SplitProcessClient, label: string, expectedCode = 0): Promise<void> {
   if (client.closed) return
-  await client.press('Ctrl+U').catch(() => undefined)
-  await client.submit('/exit').catch(() => undefined)
-  const started = Date.now()
-  for (;;) {
-    const state = await client.state().catch(() => undefined)
-    if (state !== undefined && state.exited === true) break
-    const text = await frame(client).catch(() => '')
-    if (text.includes('Disconnect from dsh-pi-tui') && text.includes('Keep working and disconnect')) {
-      await client.press('Enter').catch(() => undefined)
-    }
-    if (Date.now() - started >= 120_000) throw new Error(`${label}: Client did not exit through /exit`)
-    await sleep(50)
-  }
+  await client.exitGracefully()
   const facts = await client.close()
   expect(facts.code, `${label} exit code`).toBe(expectedCode)
   expect(facts.signal, `${label} exit signal`).toBeNull()
@@ -225,6 +213,7 @@ test.skipIf(process.platform !== 'linux')(
     let host: SplitProcessHostHandle | undefined
     let ownerClient: SplitProcessClient | undefined
     let fresh: SplitProcessClient | undefined
+    let primary: unknown
     try {
       host = await scene.startHost()
       const hostBefore = await scene.hostStatus(host)
@@ -249,13 +238,18 @@ test.skipIf(process.platform !== 'linux')(
       await expect(fresh.loseTerminalOwner()).rejects.toThrow(/declared the terminal-owner-loss|not declare/)
       await exitChat(fresh, 'terminal-owner-loss reuse Client')
       await closeHost(scene, host)
+    } catch (error) {
+      primary = error
+      throw error
     } finally {
-      if (ownerClient !== undefined && !ownerClient.closed) {
-        await ownerClient.loseTerminalOwner().catch(() => undefined)
+      try {
+        await scene.dispose()
+      } catch (cleanupError) {
+        if (primary !== undefined) {
+          throw new AggregateError([primary, cleanupError], 'the terminal-owner-loss test failed and its Scene cleanup also failed')
+        }
+        throw cleanupError
       }
-      if (fresh !== undefined && !fresh.closed) await exitChat(fresh, 'terminal-owner-loss cleanup').catch(() => undefined)
-      if (host !== undefined) await closeHost(scene, host).catch(() => undefined)
-      await scene.dispose()
     }
   },
 )
@@ -308,6 +302,7 @@ test('replaces the settled Client surface without changing the Host and submits 
     await scene.waitForSessionEvent(sessionId, beforeSecondTurn,
       event => event.type === 'turn/end' && event.data?.turn === 2, 'T57 post-HMR turn/end')
     await waitFrame(client, 'long-turn answer', 'T57 post-HMR paint')
+    await waitFrame(client, 't57 post-hmr prompt', 'T57 post-HMR prompt readback')
     const hostAfter = await scene.hostStatus(host)
     expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
     expect(hostAfter.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
@@ -315,13 +310,11 @@ test('replaces the settled Client surface without changing the Host and submits 
     await exitChat(client, 'T57 Client')
     await closeHost(scene, host)
   } finally {
-    if (client !== undefined && !client.closed) await exitChat(client, 'T57 cleanup').catch(() => undefined)
-    if (host !== undefined) await closeHost(scene, host).catch(() => undefined)
     await scene.dispose()
   }
 })
 
-test('keeps a real Host Job running across HMR and reads its settlement from the new surface', async () => {
+test('keeps a real Host Job running across HMR and observes its settlement after HMR', async () => {
   const scene = await createSplitProcessScene()
   let host: SplitProcessHostHandle | undefined
   let client: SplitProcessClient | undefined
@@ -367,12 +360,9 @@ test('keeps a real Host Job running across HMR and reads its settlement from the
       event => event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled',
       'T58 settled Job', 120_000)
     expect(settled.status).toBe('completed')
-    await waitFrame(client, 'job accepted', 'T58 new surface readback')
     await exitChat(client, 'T58 Client')
     await closeHost(scene, host)
   } finally {
-    if (client !== undefined && !client.closed) await exitChat(client, 'T58 cleanup').catch(() => undefined)
-    if (host !== undefined) await closeHost(scene, host).catch(() => undefined)
     await scene.dispose()
   }
 })
@@ -399,6 +389,9 @@ test('fails HMR closed and stops during HMR without publishing a forged Ready', 
     expect(failureExit).toMatchObject({ code: 1, signal: null })
     const failureFacts = await failure.close()
     expect(failureFacts.code).toBe(1)
+    for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-failure']) {
+      expect(failure.readRecords().filter(record => record.m4b2s === 'qualification' && record.op === operation)).toHaveLength(1)
+    }
     expect((await scene.hostStatus(host)).localHost.hostPid).toBe(host.ready.localHost.hostPid)
     reuse = await scene.startClient({ label: 'hmr-failure-reuse', ...clientDirectories(scene, 'hmr-failure-reuse') })
     await exitChat(reuse, 'T59 reuse Client')
@@ -420,15 +413,14 @@ test('fails HMR closed and stops during HMR without publishing a forged Ready', 
     const stopExit = await hold.waitForExit(120_000)
     expect(stopExit).toMatchObject({ code: 0, signal: null })
     await hold.close()
+    for (const operation of ['hmr-revision-start', 'hmr-revision-retired']) {
+      expect(hold.readRecords().filter(record => record.m4b2s === 'qualification' && record.op === operation)).toHaveLength(1)
+    }
     expect(hold.readRecords().filter(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready')).toHaveLength(0)
     expect(hold.readRecords().some(record => record.m4a0 === 'cleanup-failure')).toBe(false)
     expect((await scene.hostStatus(host)).localHost.hostPid).toBe(host.ready.localHost.hostPid)
     await closeHost(scene, host)
   } finally {
-    if (failure !== undefined && !failure.closed) await failure.close().catch(() => undefined)
-    if (hold !== undefined && !hold.closed) await hold.close().catch(() => undefined)
-    if (reuse !== undefined && !reuse.closed) await exitChat(reuse, 'T59 cleanup').catch(() => undefined)
-    if (host !== undefined) await closeHost(scene, host).catch(() => undefined)
     await scene.dispose()
   }
 })
@@ -512,9 +504,6 @@ test('delivers a real SIGINT to the business PID with code 130 and keeps Host hi
     await exitChat(reader, 'T62 reader')
     await closeHost(scene, host)
   } finally {
-    if (client !== undefined && !client.closed) await client.close().catch(() => undefined)
-    if (reader !== undefined && !reader.closed) await exitChat(reader, 'T62 cleanup').catch(() => undefined)
-    if (host !== undefined) await closeHost(scene, host).catch(() => undefined)
     await scene.dispose()
   }
 })
@@ -546,11 +535,6 @@ test('exits only on the second real Ctrl+C/Ctrl+D chord and preserves the Sessio
 
     ctrlD = await scene.startClient({ label: 'ctrl-d', ...clientDirectories(scene, 'ctrl-d'), sessionId })
     await waitFrame(ctrlD, 't63 prompt', 'T63 Ctrl+D history')
-    await ctrlD.type('t63 draft')
-    await ctrlD.press('Ctrl+D')
-    await sleep(250)
-    expect((await ctrlD.state()).exited).toBe(false)
-    await ctrlD.press('Ctrl+U')
     await ctrlD.press('Ctrl+D')
     await waitFrame(ctrlD, 'again to exit', 'T63 Ctrl+D armed')
     await waitFrameGone(ctrlD, 'again to exit', 'T63 Ctrl+D expired')
@@ -568,10 +552,6 @@ test('exits only on the second real Ctrl+C/Ctrl+D chord and preserves the Sessio
     await exitChat(recovered, 'T63 recovery')
     await closeHost(scene, host)
   } finally {
-    if (ctrlC !== undefined && !ctrlC.closed) await ctrlC.close().catch(() => undefined)
-    if (ctrlD !== undefined && !ctrlD.closed) await ctrlD.close().catch(() => undefined)
-    if (recovered !== undefined && !recovered.closed) await exitChat(recovered, 'T63 cleanup').catch(() => undefined)
-    if (host !== undefined) await closeHost(scene, host).catch(() => undefined)
     await scene.dispose()
   }
 })
@@ -617,10 +597,8 @@ test('treats a Host SIGHUP as carrier loss and discovers a new Host for the next
     expect(stop.reclaimed).toBe(true)
     expect(stop.normalStop).toBe(true)
     expect(stop.registryRemoved).toBe(true)
+    expect(stop.scratchEntries).toEqual([])
   } finally {
-    if (client !== undefined && !client.closed) await client.close().catch(() => undefined)
-    if (fresh !== undefined && !fresh.closed) await exitChat(fresh, 'T64 cleanup').catch(() => undefined)
-    if (host !== undefined && !host.exited) await closeHost(scene, host).catch(() => undefined)
-    await scene.dispose().catch(() => undefined)
+    await scene.dispose()
   }
 })

@@ -3707,6 +3707,7 @@ async function handleStartHost(message) {
       }
     }
     for (const fallback of fallbackHosts) {
+      if (fallback.normalStopRequired !== true) continue
       if (fallback.reclaimed !== true) {
         throw new Error(`START_HOST: the discovered Host PID ${String(fallback.pid)} has not been normally reclaimed`)
       }
@@ -4505,8 +4506,11 @@ function registerProcessFallbackHost(handle, hostFacts, label) {
     uid: snapshot.uid,
     detectedAt: now(),
     reclaimed: false,
+    normalStopRequired: handle.kind === undefined,
+    scratchBaseline: handle.kind === undefined ? readdirSync(processScope.dir).filter(name => name.startsWith('host-scratch-')) : undefined,
     exitObserved: undefined,
   }
+  assertProcessFallbackOwnership(pid, handle.scratch, record, 'PROCESS_FALLBACK registration')
   fallbackHosts.push(record)
   syncFallbackHostsReceipt()
   appendNote('process-fallback-host-registered', {
@@ -4526,6 +4530,25 @@ function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
     env: { PATH: process.env.PATH ?? '', HOME: scene.workDir },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
+  if (!Number.isInteger(child.pid)) {
+    child.kill('SIGKILL')
+    throw new Error('START_PROCESS_CLIENT: the PTY Owner child has no real PID')
+  }
+  const observation = readKernelProcess(child.pid)
+  if (observation.kind !== 'alive' || observation.identity.ppid !== process.pid) {
+    child.kill('SIGKILL')
+    throw new Error('START_PROCESS_CLIENT: the PTY Owner is not the live direct child')
+  }
+  const ownerUid = readLinuxProcessUid(child.pid)
+  if (typeof process.getuid === 'function' && ownerUid !== process.getuid()) {
+    child.kill('SIGKILL')
+    throw new Error('START_PROCESS_CLIENT: the PTY Owner is not owned by this user')
+  }
+  const snapshot = nativeProcessSnapshot(child.pid)
+  if (snapshot === null || !snapshot.command.includes(PROCESS_PTY_OWNER)) {
+    child.kill('SIGKILL')
+    throw new Error('START_PROCESS_CLIENT: the PTY Owner does not run this Scene helper entry')
+  }
   const pending = new Map()
   let requestId = 0
   let stderr = ''
@@ -4548,9 +4571,17 @@ function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
       }
     })(),
     pending,
+    uid: ownerUid,
+    spawnError: undefined,
     stderr: () => stderr,
     exit: undefined,
   }
+  child.once('error', error => {
+    owner.spawnError = error
+    owner.exit = { code: null, signal: null }
+    for (const waiter of pending.values()) waiter.reject(error)
+    pending.clear()
+  })
   child.on('message', message => {
     if (message?.type === 'owner-response' || message?.type === 'owner-error') {
       const waiter = pending.get(message.requestId)
@@ -4588,7 +4619,16 @@ function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
         reject: error => { clearTimeout(timer); reject(error) },
       })
     })
-    child.send({ requestId: id, op, ...payload })
+    if (owner.spawnError !== undefined) throw owner.spawnError
+    if (!child.connected) throw new Error(`PTY Owner ${op} cannot be requested: the IPC channel is closed`)
+    try {
+      child.send({ requestId: id, op, ...payload })
+    } catch (error) {
+      const waiter = pending.get(id)
+      pending.delete(id)
+      waiter?.reject(error)
+      throw error
+    }
     return await result
   }
   return owner
@@ -4609,23 +4649,59 @@ function assertProcessPtyOwnerMaster(handle, shellPid, reason) {
     }
   }
   const ownerLinks = readLinks(ownerPid)
-  const ownerMasters = Object.values(ownerLinks).filter(link => link === '/dev/ptmx')
+  const unreadable = Object.entries(ownerLinks).filter(([, link]) => link === '<unreadable>')
+  if (unreadable.length > 0) throw new Error(`${reason}: the Owner fd table has unreadable entries ${JSON.stringify(unreadable)}`)
+  const ownerMasters = Object.entries(ownerLinks).filter(([, link]) => link === '/dev/ptmx')
   if (ownerMasters.length === 0) throw new Error(`${reason}: the Owner holds no /dev/ptmx master`)
-  const selfMasters = Object.values(readLinks(process.pid)).filter(link => link === '/dev/ptmx')
-  if (selfMasters.length !== 0) throw new Error(`${reason}: the Supervisor also holds a /dev/ptmx master`)
   const shellLinks = readLinks(shellPid)
-  if (typeof shellLinks['0'] !== 'string' || !shellLinks['0'].startsWith('/dev/pts/')) {
+  const shellTty = shellLinks['0']
+  if (typeof shellTty !== 'string' || !shellTty.startsWith('/dev/pts/')) {
     throw new Error(`${reason}: the Client shell has no controlling pts`)
+  }
+  const shellTtyMatch = /^\/dev\/pts\/(\d+)$/u.exec(shellTty)
+  if (shellTtyMatch === null) throw new Error(`${reason}: the Client shell controlling tty is not a pts index`)
+  const shellTtyIndex = Number(shellTtyMatch[1])
+  const ttyIndex = fd => {
+    try {
+      const info = readFileSync(`/proc/${String(ownerPid)}/fdinfo/${String(fd)}`, 'utf8')
+      const match = /^tty-index:\s*(\d+)$/mu.exec(info)
+      return match === null ? undefined : Number(match[1])
+    } catch (error) {
+      throw new Error(`${reason}: cannot read Owner tty-index for fd ${String(fd)} (${boundedError(error)})`)
+    }
+  }
+  const ownerMasterIndexes = ownerMasters.map(([fd]) => ttyIndex(fd))
+  const matchingOwnerMasters = ownerMasterIndexes.filter(index => index === shellTtyIndex)
+  if (matchingOwnerMasters.length === 0) {
+    throw new Error(`${reason}: the Owner holds no /dev/ptmx master for ${shellTty}`)
+  }
+  if (ownerMasterIndexes.some(index => index !== shellTtyIndex)) {
+    throw new Error(`${reason}: the Owner holds a /dev/ptmx master for another tty (${JSON.stringify(ownerMasterIndexes)} vs ${String(shellTtyIndex)})`)
+  }
+  const selfLinks = readLinks(process.pid)
+  const selfMasters = Object.entries(selfLinks).filter(([, link]) => link === '/dev/ptmx')
+  for (const [fd] of selfMasters) {
+    try {
+      const info = readFileSync(`/proc/${String(process.pid)}/fdinfo/${String(fd)}`, 'utf8')
+      const match = /^tty-index:\s*(\d+)$/mu.exec(info)
+      if (match !== null && Number(match[1]) === shellTtyIndex) {
+        throw new Error(`${reason}: the Supervisor also holds the matching /dev/ptmx master for ${shellTty}`)
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('also holds')) throw error
+      throw new Error(`${reason}: cannot audit the Supervisor ptmx fd ${String(fd)} (${boundedError(error)})`)
+    }
   }
   const shellObservation = readKernelProcess(shellPid)
   if (shellObservation.kind !== 'alive' || shellObservation.identity.ppid !== ownerPid) {
     throw new Error(`${reason}: the Client shell is not the Owner's direct child`)
   }
-  return { ownerPid, ownerMasters: ownerMasters.length, shellPid, shellTty: shellLinks['0'], parentMasters: 0 }
+  return { ownerPid, ownerMasters: ownerMasters.length, matchingOwnerMasters: matchingOwnerMasters.length, shellPid, shellTty, shellTtyIndex, parentMasters: 0 }
 }
 
 async function closeProcessPtyOwner(handle, reason) {
   if (handle.owner === undefined) return
+  if (handle.owner.spawnError !== undefined) throw new Error(`${reason}: the PTY Owner spawn failed: ${boundedError(handle.owner.spawnError)}`)
   if (handle.owner.exit !== undefined) {
     if (handle.owner.exit.code !== 0 && handle.owner.exit.signal !== null) {
       throw new Error(`${reason}: the PTY Owner exited abnormally: ${JSON.stringify(handle.owner.exit)}`)
@@ -4743,8 +4819,8 @@ async function handleStartProcessClient(message) {
     if (activeHost !== undefined) {
       throw new Error('START_PROCESS_CLIENT: a recovered-Host Client must start without an active Scene Host')
     }
-    if (processClients.some(client => !client.closed)) {
-      throw new Error('START_PROCESS_CLIENT: every older Client must be terminal before recovery')
+    if (processClients.some(client => !client.closed || client.verifiedTerminal === undefined)) {
+      throw new Error('START_PROCESS_CLIENT: every older Client must be verified terminal before recovery')
     }
     if (recovery && fallbackHosts.some(record => record.reclaimed !== true)) {
       throw new Error('START_PROCESS_CLIENT: an earlier discovered Host is still attached')
@@ -4818,7 +4894,7 @@ async function handleStartProcessClient(message) {
     cwd,
     home,
     hostId: recoveryHost?.hostId ?? recoveredRecord?.clientId ?? host?.hostId ?? null,
-    generation: recoveryHost?.generation ?? null,
+    generation: recoveryHost?.generation ?? host?.generation ?? null,
     expectedEntry: facts.entries.client,
     expectedBuildId: facts.buildId,
     hmr,
@@ -4876,6 +4952,7 @@ async function handleStartProcessClient(message) {
     handle.closeFailure = error
     syncProcessClientsReceipt()
     await closeProcessPtyOwner(handle, 'START_PROCESS_CLIENT PTY Owner create failure').catch(() => undefined)
+    handle.settlement.resolve()
     throw error
   }
   syncProcessClientsReceipt()
@@ -5363,6 +5440,14 @@ async function handleProcessClientTerminalLoss(message) {
     || ownerObservation.identity.ppid !== process.pid) {
     throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the PTY Owner lost its captured kernel/parent identity')
   }
+  if (handle.shellIdentity === undefined || processIdentityState(handle.shellIdentity.identity) !== 'alive') {
+    throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the Client shell is not fresh-live before the fault')
+  }
+  for (const value of handle.businessIdentities) {
+    if (processIdentityState(value.identity) !== 'alive') {
+      throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: a captured business identity is not fresh-live before the fault')
+    }
+  }
   assertProcessPtyOwnerMaster(handle, handle.shellPid, 'PROCESS_CLIENT_TERMINAL_LOSS')
   handle.ownerLossAttempted = true
   appendNote('process-client-terminal-owner-loss', {
@@ -5566,7 +5651,11 @@ async function reclaimProcessClient(handle, reason) {
         if (handle.owner?.exit === undefined) {
           await closeProcessPtyOwner(handle, `${reason}: PTY Owner cleanup`)
         }
-        if (handle.owner?.exit === undefined) {
+      } catch (error) {
+        failure = error
+      }
+      if (handle.owner?.exit === undefined) {
+        try {
           const observation = readKernelProcess(handle.owner.pid)
           if (observation.kind !== 'alive'
             || serializeKernelIdentity(observation.identity) !== handle.owner.birth
@@ -5577,9 +5666,9 @@ async function reclaimProcessClient(handle, reason) {
           const ownerDeadline = Date.now() + 10_000
           while (handle.owner.exit === undefined && Date.now() < ownerDeadline) await sleep(50)
           if (handle.owner.exit === undefined) throw new Error(`${reason}: the PTY Owner did not exit after the owned kill`)
+        } catch (error) {
+          failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} owner cleanup failed`)
         }
-      } catch (error) {
-        failure = error
       }
     } else {
       try {
@@ -5719,6 +5808,7 @@ async function handleFinalize(message) {
       }
     }
     for (const fallback of fallbackHosts) {
+      if (fallback.normalStopRequired !== true) continue
       if (fallback.reclaimed !== true) {
         preconditions.push(`the discovered Host PID ${String(fallback.pid)} was not reclaimed`)
       } else if (fallback.normalStop !== true) {
@@ -8187,6 +8277,10 @@ async function stopRecoveredProcessHost(record, client) {
     const after = readJson(instancePath, 'recovered Host registry after normal stop')
     registryRemoved = after?.instanceId !== record.instanceId
   }
+  const baseline = new Set(record.scratchBaseline ?? [])
+  for (const name of readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-') && !baseline.has(name))) {
+    rmSync(join(scopeDir, name), { recursive: true, force: true })
+  }
   return {
     pid: record.pid,
     birth: ownership.birth,
@@ -8204,6 +8298,9 @@ async function handleReclaimDiscoveredHost(message) {
     const client = processClientById(message.clientId, 'RECLAIM_DISCOVERED_HOST')
     if (!client.closed) throw new Error('RECLAIM_DISCOVERED_HOST: the discovery Client is still live')
     if (client.terminalMode !== 'normal') throw new Error('RECLAIM_DISCOVERED_HOST: the discovery Client did not use the normal terminal')
+    if (processClients.some(value => !value.closed || value.verifiedTerminal === undefined)) {
+      throw new Error('RECLAIM_DISCOVERED_HOST: every related Client must be verified terminal before normal stop')
+    }
     const record = fallbackHosts.find(entry => entry.clientId === client.clientId)
     if (record === undefined) throw new Error('RECLAIM_DISCOVERED_HOST: this Client registered no recovered Host')
     return await stopRecoveredProcessHost(record, client)

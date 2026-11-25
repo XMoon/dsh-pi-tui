@@ -522,6 +522,18 @@ function processFdLinks(pid) {
   }))
 }
 
+/** The kernel tty-index of one fd, or undefined when it is not a PTY fd. */
+function processFdTtyIndex(pid, fd) {
+  try {
+    const info = readFileSync(`/proc/${String(pid)}/fdinfo/${String(fd)}`, 'utf8')
+    const match = /^tty-index:\s*(\d+)$/mu.exec(info)
+    return match === null ? undefined : Number(match[1])
+  } catch {
+    return undefined
+  }
+}
+
+
 function installerProcessRunning(receipt) {
   const supervisorPid = Number(receipt?.supervisor?.pid) || (Number(receipt?.worker?.ppid) + 1)
   const rows = processTable()
@@ -1104,15 +1116,35 @@ try {
             fail('terminal-owner-client-opened-before-ack: the owner/shell PID is not a real kernel PID')
           }
           const ownerLinks = processFdLinks(client.ownerPid)
-          if (!Object.values(ownerLinks).includes('/dev/ptmx')) {
+          if (Object.values(ownerLinks).includes('<unreadable>')) {
+            fail('terminal-owner-client-opened-before-ack: the Owner fd table is unreadable')
+          }
+          const ownerMasters = Object.entries(ownerLinks).filter(([, link]) => link === '/dev/ptmx')
+          if (ownerMasters.length === 0) {
             fail('terminal-owner-client-opened-before-ack: the Owner process holds no /dev/ptmx master')
+          }
+          const shellLinks = processFdLinks(client.shellPid)
+          const shellTty = shellLinks['0']
+          const ttyMatch = typeof shellTty === 'string' ? /^\/dev\/pts\/(\d+)$/u.exec(shellTty) : null
+          if (ttyMatch === null) fail('terminal-owner-client-opened-before-ack: the shell has no pts index')
+          const shellTtyIndex = Number(ttyMatch[1])
+          const ownerMasterIndexes = ownerMasters.map(([fd]) => processFdTtyIndex(client.ownerPid, fd))
+          const matchingOwnerMasters = ownerMasterIndexes.filter(index => index === shellTtyIndex)
+          if (matchingOwnerMasters.length === 0) {
+            fail(`terminal-owner-client-opened-before-ack: the Owner has no matching ptmx master for ${String(shellTty)}`)
+          }
+          if (ownerMasterIndexes.some(index => index !== shellTtyIndex)) {
+            fail(`terminal-owner-client-opened-before-ack: the Owner has a ptmx master for another tty (${JSON.stringify(ownerMasterIndexes)})`)
           }
           const supervisorPid = receipt.supervisor?.pid
           if (!Number.isInteger(supervisorPid)) fail('terminal-owner-client-opened-before-ack: no Supervisor PID')
-          if (Object.values(processFdLinks(supervisorPid)).includes('/dev/ptmx')) {
-            fail('terminal-owner-client-opened-before-ack: the Supervisor also holds a /dev/ptmx master')
+          const supervisorLinks = processFdLinks(supervisorPid)
+          const matchingSupervisorMasters = Object.entries(supervisorLinks)
+            .filter(([, link]) => link === '/dev/ptmx')
+            .filter(([fd]) => processFdTtyIndex(supervisorPid, fd) === shellTtyIndex)
+          if (matchingSupervisorMasters.length !== 0) {
+            fail('terminal-owner-client-opened-before-ack: the Supervisor holds the matching ptmx master')
           }
-          const shellLinks = processFdLinks(client.shellPid)
           if (typeof shellLinks['0'] !== 'string' || !shellLinks['0'].startsWith('/dev/pts/')) {
             fail('terminal-owner-client-opened-before-ack: the shell has no controlling pts')
           }

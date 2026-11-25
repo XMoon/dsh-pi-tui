@@ -56,22 +56,10 @@ function composerOf(frame: string): string | undefined {
 
 async function exitChat(client: SplitProcessClient, label: string): Promise<void> {
   if (client.closed) return
-  await client.press('Ctrl+U').catch(() => undefined)
-  await client.submit('/exit').catch(() => undefined)
-  const started = Date.now()
-  for (;;) {
-    const state = await client.state().catch(() => undefined)
-    if (state?.exited === true) break
-    const frame = await client.text().catch(() => '')
-    if (frame.includes('Disconnect from dsh-pi-tui') && frame.includes('Keep working and disconnect')) {
-      await client.press('Enter').catch(() => undefined)
-    }
-    if (Date.now() - started >= 120_000) throw new Error(`${label}: Client did not exit`)
-    await sleep(50)
-  }
+  await client.exitGracefully()
   const facts = await client.close()
-  expect(facts.code).toBe(0)
-  expect(facts.signal).toBeNull()
+  expect(facts.code, `${label} exit code`).toBe(0)
+  expect(facts.signal, `${label} exit signal`).toBeNull()
 }
 
 async function startHeldSession(
@@ -132,6 +120,11 @@ async function recoverAndResume(
     `${label} orphan settlement`, 120_000)
   expect(settled.data?.reason?.kind).toBe('interrupted')
   const events = scene.sessionEvents(sessionId) ?? []
+  const starts = events.filter(event => event.type === 'turn/start')
+  const ends = events.filter(event => event.type === 'turn/end')
+  expect(starts).toHaveLength(1)
+  expect(ends).toHaveLength(1)
+  expect(settled.data?.turn).toBe(starts[0]?.data?.turn)
   expect(events.filter(event => event.type === 'turn/start')).toHaveLength(1)
   expect(sessionHelpers.hostUserTexts(events).filter(text => text === prompt)).toHaveLength(1)
   expect(sessionHelpers.hostAssistantHasText(events, 'long-turn answer')).toBe(false)
@@ -141,6 +134,7 @@ async function recoverAndResume(
   expect(stop.normalStop).toBe(true)
   expect(stop.reclaimed).toBe(true)
   expect(stop.registryRemoved).toBe(true)
+  expect(stop.scratchEntries).toEqual([])
 }
 
 test('SIGKILL after an accepted write never fakes settlement and cold-resumes the Session once', async () => {
@@ -165,9 +159,7 @@ test('SIGKILL after an accepted write never fakes settlement and cold-resumes th
     await recoverAndResume(scene, host, client, sessionId, 't65', 't65 prompt')
     client = undefined
   } finally {
-    if (client !== undefined && !client.closed) await client.close().catch(() => undefined)
-    if (host !== undefined && !host.exited) await scene.stopHost(host).catch(() => undefined)
-    await scene.dispose().catch(() => undefined)
+    await scene.dispose()
   }
 })
 
@@ -195,7 +187,7 @@ test('ACK-dropped unknown write survives Host death and cold resume without repl
       const composer = composerOf(frame)
       if (composer === undefined) throw new Error('T66 the current frame has no composer')
       const pending = frame.includes('Submitting…') || frame.includes('Queued…')
-      if (!pending && !composer.includes(token)) {
+      if (!pending && composer.replace(/❯/gu, '').trim() === '') {
         expect(frame.includes('indeterminate')).toBe(false)
         disposition = 'accepted'
         break
@@ -220,8 +212,6 @@ test('ACK-dropped unknown write survives Host death and cold resume without repl
     await recoverAndResume(scene, host, client, sessionId, 't66', token)
     client = undefined
   } finally {
-    if (client !== undefined && !client.closed) await client.close().catch(() => undefined)
-    if (host !== undefined && !host.exited) await scene.stopHost(host).catch(() => undefined)
-    await scene.dispose().catch(() => undefined)
+    await scene.dispose()
   }
 })
