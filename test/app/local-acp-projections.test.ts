@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { constants as bufferConstants } from 'node:buffer'
 import test from 'node:test'
 import {
   ACP_SESSION_LIST_CURSOR_MAX,
@@ -177,7 +178,7 @@ test('an unrepresentable committed block fails the WHOLE history closed', () => 
   assert.throws(
     () => projectSessionHistory([
       userEvent(0, 'm1', { kind: 'user' }, [{ type: 'text', text: 'ok' }]),
-      userEvent(1, 'm2', { kind: 'user' }, [{ type: 'file', attachment: { attachmentId: 'f', name: 'a.txt', bytes: 1 } }]),
+      userEvent(1, 'm2', { kind: 'user' }, [{ type: 'audio', data: 'AAAA' }]),
     ], NO_CAPABILITIES),
     (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT',
   )
@@ -391,4 +392,178 @@ test('the list request accepts an omitted/null filter and refuses a relative cwd
   assert.deepEqual(readSessionListRequest({ cwd: '/host/proj' }), { cwd: '/host/proj' })
   assert.throws(() => readSessionListRequest({ cwd: 'proj' }), /absolute/u)
   assert.throws(() => readSessionListRequest({ cwd: '/host/\u0000proj' }), /absolute/u)
+})
+
+// ---------------------------------------------------------------------------
+// PR4D: generic committed file content projects as standard resource steps.
+// ---------------------------------------------------------------------------
+
+/** One official durable file content-addressed id. */
+const FILE_ID = `sha256:${'a'.repeat(64)}`
+/** A second official durable file id (a distinct digest). */
+const FILE_ID_B = `sha256:${'b'.repeat(64)}`
+/** The canonical stored leaf name (space and CJK must be percent-encoded). */
+const FILE_NAME = 'PR4D 附件.bin'
+
+/** One committed generic file block naming a structural official file reference. */
+function fileBlock(attachmentId = FILE_ID, name = FILE_NAME, bytes = 6): unknown {
+  return { type: 'file', attachment: { attachmentId, name, bytes } }
+}
+
+test('human, assistant, tool and negotiated agent-message file blocks project ordered file steps', () => {
+  const units = projectSessionHistory([
+    userEvent(0, 'm-user-file', { kind: 'user' }, [
+      { type: 'text', text: 'before' },
+      fileBlock(),
+      { type: 'text', text: 'after' },
+    ]),
+    assistantEvent(1, 'm-assistant-file', [fileBlock()]),
+    {
+      seq: 2,
+      type: 'tool/result',
+      data: { message: { toolCallId: 'c1', isError: false, content: [{ type: 'text', text: 'tool' }, fileBlock()] } },
+    },
+    userEvent(3, 'am-file', { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, [fileBlock()]),
+  ], ALL_CAPABILITIES, 'S1', 64)
+  assert.deepEqual(units, [
+    { kind: 'update', update: { sessionUpdate: 'user_message_chunk', messageId: 'm-user-file', content: { type: 'text', text: 'before' } } },
+    {
+      kind: 'file',
+      file: {
+        messageId: 'm-user-file',
+        sessionUpdate: 'user_message_chunk',
+        ref: { attachmentId: FILE_ID, name: FILE_NAME, bytes: 6 },
+      },
+    },
+    { kind: 'update', update: { sessionUpdate: 'user_message_chunk', messageId: 'm-user-file', content: { type: 'text', text: 'after' } } },
+    {
+      kind: 'file',
+      file: {
+        messageId: 'm-assistant-file',
+        sessionUpdate: 'agent_message_chunk',
+        ref: { attachmentId: FILE_ID, name: FILE_NAME, bytes: 6 },
+      },
+    },
+    {
+      kind: 'tool-result',
+      result: {
+        toolCallId: 'c1',
+        status: 'completed',
+        content: [
+          { type: 'text', text: 'tool' },
+          { type: 'file', ref: { attachmentId: FILE_ID, name: FILE_NAME, bytes: 6 } },
+        ],
+      },
+    },
+    {
+      kind: 'session-message',
+      message: {
+        messageId: 'am-file',
+        senderSessionId: 'SENDER',
+        content: [{ type: 'file', ref: { attachmentId: FILE_ID, name: FILE_NAME, bytes: 6 } }],
+      },
+    },
+  ])
+})
+
+test('a malformed committed file reference stays unsupported content, never a guessed file', () => {
+  const malformed: unknown[] = [
+    { type: 'file', attachment: { attachmentId: 'f', name: 'a.txt', bytes: 1 } },
+    { type: 'file', attachment: { attachmentId: `sha256:${'A'.repeat(64)}`, name: 'a.txt', bytes: 1 } },
+    { type: 'file', attachment: { attachmentId: FILE_ID, name: '', bytes: 1 } },
+    { type: 'file', attachment: { attachmentId: FILE_ID, name: 'a.txt', bytes: -1 } },
+    { type: 'file', attachment: { attachmentId: FILE_ID, name: 'a.txt', bytes: 1.5 } },
+    { type: 'file', attachment: { attachmentId: FILE_ID, name: 'a.txt', bytes: '1' } },
+    { type: 'file', attachment: { attachmentId: FILE_ID, name: 'a.txt' } },
+  ]
+  for (const block of malformed) {
+    assert.throws(
+      () => projectSessionHistory([assistantEvent(0, 'a1', [block])], NO_CAPABILITIES),
+      (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT',
+      `a malformed file reference must fail closed: ${JSON.stringify(block)}`,
+    )
+  }
+})
+
+test('the per-event file budget is exact, counts every occurrence and requires a bound', () => {
+  const threeBytes = 3
+  const encodedThree = 4
+  // 6 bytes -> 8 Base64 characters: cap 7 is over, cap 8 is exact.
+  assert.throws(
+    () => projectSessionHistory([assistantEvent(0, 'a1', [fileBlock(FILE_ID, FILE_NAME, 6)])], NO_CAPABILITIES, '', 7),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+  const exact = projectSessionHistory([assistantEvent(0, 'a1', [fileBlock(FILE_ID, FILE_NAME, 6)])], NO_CAPABILITIES, '', 8)
+  assert.equal(exact.length, 1, 'an event exactly at the cap passes preflight')
+  // Two 3-byte occurrences cost 4 + 4 characters; a repeated ref is two costs.
+  assert.throws(
+    () => projectSessionHistory([assistantEvent(0, 'a1', [
+      fileBlock(FILE_ID_B, 'one.bin', threeBytes),
+      fileBlock(FILE_ID_B, 'one.bin', threeBytes),
+    ])], NO_CAPABILITIES, '', 2 * encodedThree - 1),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+  const sum = projectSessionHistory([assistantEvent(0, 'a1', [
+    fileBlock(FILE_ID_B, 'one.bin', threeBytes),
+    fileBlock(FILE_ID_B, 'two.bin', threeBytes),
+  ])], NO_CAPABILITIES, '', 2 * encodedThree)
+  assert.equal(sum.length, 2)
+  // A file-bearing event with NO connection budget is refused instead of
+  // reading an unbounded stream; a text-only event needs no budget.
+  assert.throws(
+    () => projectSessionHistory([assistantEvent(0, 'a1', [fileBlock()])], NO_CAPABILITIES),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+  assert.deepEqual(
+    projectSessionHistory([assistantEvent(0, 'a1', [{ type: 'text', text: 'no files' }])], NO_CAPABILITIES),
+    [{ kind: 'update', update: { sessionUpdate: 'agent_message_chunk', messageId: 'a1', content: { type: 'text', text: 'no files' } } }],
+  )
+})
+
+test('PR4D R1: an encoded blob above the runtime single-string capacity is refused before any read', () => {
+  // 400 MiB has a canonical Base64 length of 559,240,536, above V8's
+  // MAX_STRING_LENGTH (536,870,888) but below the image-derived frame budget.
+  // Nothing is allocated: this is the declared metadata preflight.
+  const declaredBytes = 400 * 1024 * 1024
+  assert.ok(4 * Math.ceil(declaredBytes / 3) > bufferConstants.MAX_STRING_LENGTH)
+  assert.throws(
+    () => projectSessionHistory(
+      [assistantEvent(0, 'a-big', [fileBlock(FILE_ID, 'big.bin', declaredBytes)])],
+      NO_CAPABILITIES, '', 2_000_000_000,
+    ),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+})
+
+test('PR4D R1: one single-frame tool result charges the SUM of its representable blobs', () => {
+  // Each blob alone fits one JS string; a tool result puts both in ONE update.
+  const each = 300_000_000
+  assert.ok(4 * Math.ceil(each / 3) < bufferConstants.MAX_STRING_LENGTH)
+  const blocks = [fileBlock(FILE_ID, 'one.bin', each), fileBlock(FILE_ID_B, 'two.bin', each)]
+  // Separate assistant chunks are separate frames: each blob is representable.
+  assert.equal(projectSessionHistory(
+    [assistantEvent(0, 'a-two', blocks)], NO_CAPABILITIES, '', 2_000_000_000,
+  ).length, 2)
+  // The tool result serializes both blobs into ONE string and must be refused.
+  assert.throws(
+    () => projectSessionHistory(
+      [{ seq: 0, type: 'tool/result', data: { message: { toolCallId: 'c1', isError: false, content: blocks } } }],
+      NO_CAPABILITIES, '', 2_000_000_000,
+    ),
+    (error: unknown) => error instanceof AcpProjectionError && error.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+  )
+})
+
+test('PR4D R2: an inter-agent file is never charged before official lineage is proven', () => {
+  // The pure conversion cannot prove lineage, so it must not charge the file:
+  // the View does that after the official header proof. A forged author with a
+  // huge file therefore yields a structural unit, not a size rejection.
+  const declaredBytes = 400 * 1024 * 1024
+  const units = projectSessionHistory(
+    [userEvent(0, 'am-big', { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, [
+      fileBlock(FILE_ID, 'big.bin', declaredBytes),
+    ])],
+    ALL_CAPABILITIES, '', 8,
+  )
+  assert.deepEqual(units.map(unit => unit.kind), ['session-message'])
 })

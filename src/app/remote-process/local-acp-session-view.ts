@@ -114,8 +114,10 @@ import {
 } from './local-acp-scoped-mcp.ts'
 import {
   AcpProjectionError,
+  assertFileBudget,
   compactionUpdate,
   durableAgentMessageOf,
+  fileAttachmentRef,
   imageRef,
   planEntriesFromTodos,
   planEntriesOf,
@@ -246,6 +248,13 @@ export interface HostAcpSessionAccess {
    * committed block may name a reference.
    */
   readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal): Promise<AcpStoredImage>
+  /**
+   * Read ONE committed generic file reference through the official Host
+   * Attachment Store as bounded chunks. The Store owns the leaf/byte/hash
+   * verification, which completes only after the final chunk: the caller must
+   * iterate to natural EOF and must never stop at the declared size.
+   */
+  readOutputFile(ref: AcpStoredFileRef, signal: AbortSignal): AsyncIterable<Uint8Array>
   /** Whether the exact configured Host default route explicitly accepts images. */
   supportsImagePrompts(): Promise<boolean>
   /** Submit ONE prompt through the official Session Controller (queue mode only). */
@@ -464,8 +473,14 @@ export type LocalAcpLoadErrorCode =
   | 'LOCAL_ACP_LOAD_INVALID_HISTORY'
   /** A committed block has no standard ACP v1 projection. */
   | 'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT'
-  /** An image the history/compaction references could not be read and verified. */
+  /** An image/file the history references could not be read and verified. */
   | 'LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED'
+  /**
+   * One history event's generic-file Base64 payload cannot fit this
+   * connection's frozen output frame budget. This is the adapter's bounded
+   * materialization refusal: it fails the load without touching the writer.
+   */
+  | 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'
   /** Live events during the replay window exceeded the bounded replay buffer. */
   | 'LOCAL_ACP_LOAD_BACKPRESSURE'
   /** This View cannot replay history because the Host read seam is absent. */
@@ -523,11 +538,18 @@ export type LocalAcpPromptErrorCode =
   /** A committed event could not be projected and delivery kept its real failure. */
   | 'LOCAL_ACP_PROMPT_OUTPUT_FAILED'
   /**
-   * The official Host Attachment Store could not read/verify an image a
-   * committed assistant or tool block referenced. The event is never sent
-   * partially and a fabricated image is never substituted.
+   * The official Host Attachment Store could not read/verify an image or
+   * generic file a committed assistant or tool block referenced. The event is
+   * never sent partially and a fabricated attachment is never substituted.
    */
   | 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'
+  /**
+   * One owned event's generic-file Base64 payload cannot fit this connection's
+   * frozen output frame budget. This is the adapter's bounded materialization
+   * refusal: the event is refused before any Store read, never a transport
+   * write, and the connection is not closed.
+   */
+  | 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'
   /** The bounded View output queue could not keep up with committed events. */
   | 'LOCAL_ACP_PROMPT_OUTPUT_BACKPRESSURE'
   /** A committed block has no PO-3A standard ACP projection (never truncated). */
@@ -677,6 +699,21 @@ export interface AcpStoredImage {
   readonly data: Uint8Array
   /** The media type the Store verified against those bytes. */
   readonly mediaType: string
+}
+
+/**
+ * The structural official `FileAttachmentRef` a committed file block carries.
+ * The View never interprets these fields beyond the opaque content identity:
+ * they identify the object the official Host Attachment Store must verify and
+ * read back.
+ */
+export interface AcpStoredFileRef {
+  /** The official content-addressed id (`sha256:<64 lowercase hex>`). */
+  readonly attachmentId: string
+  /** The official sanitized stored leaf name (never a client path). */
+  readonly name: string
+  /** The declared exact byte length the Store verifies. */
+  readonly bytes: number
 }
 
 /**
@@ -848,6 +885,12 @@ export interface AcpViewChannels {
   readonly notifyProjection?: AcpProjectionNotifier
   /** The capabilities this connection froze at `initialize` (never re-read). */
   readonly capabilities?: AcpNegotiatedCapabilities
+  /**
+   * This connection's frozen single-frame output budget, in bytes. It is the
+   * ONLY source of the generic-file event materialization budget; absent keeps
+   * the text/image behavior unchanged and refuses a file-bearing event.
+   */
+  readonly maxOutputFrameBytes?: number
 }
 
 /**
@@ -1111,6 +1154,8 @@ interface ViewClaim {
   notifyProjection?: AcpProjectionNotifier
   /** The capabilities frozen for this claim's connection at `initialize`. */
   capabilities?: AcpNegotiatedCapabilities
+  /** The connection's frozen single-frame output budget bound at attach. */
+  maxOutputFrameBytes?: number
   /** The ordered read-only projection chain of this claim (never rejects). */
   projectionTail?: Promise<void>
   /** Read-only projection tasks queued but not yet settled. */
@@ -1229,8 +1274,10 @@ type CommittedOutputEntry =
   | { readonly kind: 'thought'; readonly text: string }
   | { readonly kind: 'message'; readonly text: string }
   | { readonly kind: 'message-image'; readonly ref: AcpStoredImageRef }
+  | { readonly kind: 'message-file'; readonly ref: AcpStoredFileRef }
   | { readonly kind: 'tool'; readonly text: string }
   | { readonly kind: 'tool-image'; readonly ref: AcpStoredImageRef }
+  | { readonly kind: 'tool-file'; readonly ref: AcpStoredFileRef }
 
 /**
  * One transient command operation. The Host execution Promise is the only
@@ -2327,7 +2374,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim.selfHeader = history.header
       // The pure converter validates the WHOLE canonical order and every
       // committed block BEFORE a single notification is sent.
-      const units = projectSessionHistory(history.events, claim.capabilities ?? NO_PROJECTION_CAPABILITIES, sessionId)
+      const units = projectSessionHistory(history.events, claim.capabilities ?? NO_PROJECTION_CAPABILITIES, sessionId, claim.maxOutputFrameBytes)
       const cut = history.events[history.events.length - 1]?.seq ?? -1
       // Currentness after the Host await: a closed/replaced claim (or a stopped
       // replay) never publishes a stale history.
@@ -2377,7 +2424,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
             }
             await this.sendHistoryUnits(
               claim, replay,
-              projectSessionHistory([event], claim.capabilities ?? NO_PROJECTION_CAPABILITIES, claim.sessionId),
+              projectSessionHistory([event], claim.capabilities ?? NO_PROJECTION_CAPABILITIES, claim.sessionId, claim.maxOutputFrameBytes),
               access,
             )
             if (event.type === 'assistant/message') await this.sendLiveEvent(claim, replay, event)
@@ -2602,8 +2649,10 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           return false
         }
         if (message === undefined) return false
-        await this.projectSessionMessage(claim, access, replay, message)
-        return true
+        // Lineage, the legalization budget and the association all live in the
+        // one shared session-message path: an unproven author must NOT be
+        // charged (or diagnosed) for a file the Client can never be shown.
+        return await this.projectSessionMessage(claim, access, replay, message)
       }
       default:
         return false
@@ -2631,13 +2680,25 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     access: HostAcpSessionAccess,
     replay: ViewReplay | undefined,
     message: AcpHistoryAgentMessage,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const lineage = await this.sessionMessageLineage(claim, access, message.senderSessionId)
     if (lineage === 'unproven') {
       this.diag.warn('local-acp.projection.session-message-unverified', { key: 'session_message' })
-      return
+      return false
     }
-    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return
+    // A PROVEN inter-agent message is ONE ACP update: charge its files after
+    // lineage is real and before the child association or any Store read. An
+    // unproven author therefore costs no budget, diagnostic or read.
+    try {
+      assertFileBudget(filesOf(message.content), claim.maxOutputFrameBytes, true)
+    } catch (error) {
+      // Canonical history is fail-closed; a live projection only loses this
+      // one read-only message and keeps the View.
+      if (replay !== undefined) throw error
+      this.reportProjectionFailure(error)
+      return false
+    }
+    if (lineage === 'child' && !await this.announceChildAssociation(claim, access, message.senderSessionId)) return false
     const blocks: AcpWireContentBlock[] = []
     for (const part of message.content) {
       if (part.type === 'text') {
@@ -2646,18 +2707,20 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         continue
       }
       try {
-        blocks.push(await this.readProjectionImage(claim, replay, part.ref))
+        blocks.push(part.type === 'image'
+          ? await this.readProjectionImage(claim, replay, part.ref)
+          : await this.readProjectionFile(claim, replay, part.ref))
       } catch (error) {
-        // A CANONICAL HISTORY read is fail-closed: a committed image the Store
-        // cannot produce must fail the load (the same rule as any other
-        // history image), never silently drop the message and report a
+        // A CANONICAL HISTORY read is fail-closed: a committed attachment the
+        // Store cannot produce must fail the load (the same rule as any other
+        // history attachment), never silently drop the message and report a
         // complete replay. A live projection only loses this one message.
         if (replay !== undefined) throw error
         this.diag.warn('local-acp.projection.attachment-failed', { key: 'session_message' })
-        return
+        return false
       }
     }
-    if (blocks.length === 0) return
+    if (blocks.length === 0) return false
     await this.sendProjection(claim, {
       sessionUpdate: 'session_message',
       messageId: message.messageId,
@@ -2665,6 +2728,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       recipientSessionId: claim.sessionId,
       content: blocks,
     })
+    return true
   }
 
   /**
@@ -2977,6 +3041,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         })
         continue
       }
+      if (unit.kind === 'file') {
+        await this.sendProjection(claim, {
+          sessionUpdate: unit.file.sessionUpdate,
+          messageId: unit.file.messageId,
+          content: await this.readProjectionFile(claim, replay, unit.file.ref),
+        })
+        continue
+      }
       if (unit.kind === 'session-message') {
         await this.projectSessionMessage(claim, access, replay, unit.message)
         continue
@@ -2987,7 +3059,11 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           content.push({ type: 'content', content: { type: 'text', text: part.text } })
           continue
         }
-        content.push({ type: 'content', content: await this.readProjectionImage(claim, replay, part.ref) })
+        if (part.type === 'image') {
+          content.push({ type: 'content', content: await this.readProjectionImage(claim, replay, part.ref) })
+          continue
+        }
+        content.push({ type: 'content', content: await this.readProjectionFile(claim, replay, part.ref) })
       }
       await this.sendProjection(claim, {
         sessionUpdate: 'tool_call_update',
@@ -3012,6 +3088,30 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     } catch {
       // A close/EOF/Off during the Store read is NOT a corrupt attachment: it
       // is THIS claim's read being cancelled (replay or live).
+      if (claim.readAbort.signal.aborted || replay?.stopped === true) {
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
+      }
+      throw attachmentLoadFailed()
+    }
+  }
+
+  /**
+   * Read ONE committed generic file through the official Store and convert its
+   * verified bytes to the standard embedded `resource` blob. The stream must be
+   * iterated to natural EOF (the Store's hash/byte verification only completes
+   * there); an early stop is only the corrupt/over-declared case.
+   */
+  private async readProjectionFile(
+    claim: ViewClaim,
+    replay: ViewReplay | undefined,
+    ref: AcpStoredFileRef,
+  ): Promise<AcpWireContentBlock> {
+    const access = this.access
+    if (access === undefined) throw attachmentLoadFailed()
+    try {
+      const bytes = await readVerifiedFileBytes(access.readOutputFile(ref, claim.readAbort.signal), ref, claim.readAbort.signal)
+      return fileResourceBlock(ref, bytes)
+    } catch {
       if (claim.readAbort.signal.aborted || replay?.stopped === true) {
         throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP view was released during its history replay', JSONRPC_INVALID_PARAMS)
       }
@@ -5819,6 +5919,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     claim.requestElicitation = channels?.requestElicitation
     claim.notifyProjection = channels?.notifyProjection
     claim.capabilities = channels?.capabilities
+    claim.maxOutputFrameBytes = channels?.maxOutputFrameBytes
     // Every new View starts with a fresh complete catalog. The first read is
     // scheduled after the attach/load barrier, never from a previous claim.
     claim.catalogEpoch = 0
@@ -5910,11 +6011,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     const interrupted = (data as { readonly interrupted?: unknown }).interrupted === true
     // Reserve only what the join may ACTUALLY send. A streamed attempt already
     // delivered its text/thought under its own ACP message id, so the residual
-    // entries are the never-streamed durable images; an attempt that delivered
-    // nothing still falls back to the whole committed projection.
-    const residual = attempt.hasSent()
-      ? content.entries.filter(entry => entry.kind === 'message-image').length
-      : content.entries.length
+    // entries are the never-streamed durable images/files; an attempt that
+    // delivered nothing still falls back to the whole committed projection.
+    const residualEntries = attempt.hasSent()
+      ? content.entries.filter(entry => entry.kind === 'message-image' || entry.kind === 'message-file')
+      : content.entries
+    const residual = residualEntries.length
     this.enqueueOutputTask(claim, flight, residual, async () => {
       // Delivered bytes that no durable append can own make every later
       // outcome of this flight a failure, whatever this event proves.
@@ -5944,7 +6046,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return await this.committedUpdates(
         flight,
         attempt.messageId,
-        content.entries.filter(entry => entry.kind === 'message-image'),
+        residualEntries,
       )
     })
   }
@@ -5963,6 +6065,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   ): { readonly entries: readonly CommittedOutputEntry[]; readonly text: readonly AcpStreamBlock[] } | undefined {
     const entries: CommittedOutputEntry[] = []
     const text: AcpStreamBlock[] = []
+    const files: AcpStoredFileRef[] = []
     for (const block of content) {
       const type = (block as { readonly type?: unknown } | null)?.type
       const value = (block as { readonly text?: unknown } | null)?.text
@@ -5985,6 +6088,16 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         entries.push({ kind: 'message-image', ref })
         continue
       }
+      if (type === 'file') {
+        const ref = fileAttachmentRef(block)
+        if (ref === undefined) {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return undefined
+        }
+        entries.push({ kind: 'message-file', ref })
+        files.push(ref)
+        continue
+      }
       if (type === 'tool-call') {
         // The official `assistant/message` carries its tool-call blocks AND
         // the Host appends each of them as its OWN durable `tool/call` event;
@@ -5992,9 +6105,19 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         // source, so the block here is skipped instead of duplicated.
         continue
       }
-      // Audio/file/tool-change/unknown blocks have no standard ACP output form:
+      // Audio/tool-change/unknown blocks have no standard ACP output form:
       // never truncate or fake one, and never claim the event was delivered.
       this.failPrompt(claim, flight, unsupportedContent())
+      return undefined
+    }
+    // ONE event equals ONE materialization budget, checked synchronously
+    // before this event's Store reads are queued. Each committed assistant
+    // block is its own ACP chunk, so only each blob (not their sum) must fit
+    // one JS string.
+    try {
+      assertFileBudget(files, claim.maxOutputFrameBytes, false)
+    } catch {
+      this.failPrompt(claim, flight, outputFrameTooLarge())
       return undefined
     }
     return { entries, text }
@@ -6007,7 +6130,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     messageId: string,
     entries: readonly CommittedOutputEntry[],
   ): void {
-    if (entries.every(entry => entry.kind !== 'message-image')) {
+    if (entries.every(entry => entry.kind !== 'message-image' && entry.kind !== 'message-file')) {
       this.enqueueOutputTask(claim, flight, entries.length, (): readonly SessionUpdate[] =>
         committedTextUpdates(messageId, entries))
       return
@@ -6016,7 +6139,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       await this.committedUpdates(flight, messageId, entries))
   }
 
-  /** Convert committed entries to standard updates, reading images through the Host Store. */
+  /** Convert committed entries to standard updates, reading attachments through the Host Store. */
   private async committedUpdates(
     flight: InflightPrompt,
     messageId: string,
@@ -6034,6 +6157,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
           sessionUpdate: 'agent_message_chunk',
           messageId,
           content: { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType },
+        })
+      } else if (entry.kind === 'message-file') {
+        updates.push({
+          sessionUpdate: 'agent_message_chunk',
+          messageId,
+          content: await this.readOutputFile(flight, entry.ref),
         })
       }
     }
@@ -6078,6 +6207,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       return
     }
     const entries: CommittedOutputEntry[] = []
+    const files: AcpStoredFileRef[] = []
     for (const block of message.content as readonly unknown[]) {
       const type = (block as { readonly type?: unknown } | null)?.type
       const text = (block as { readonly text?: unknown } | null)?.text
@@ -6098,7 +6228,26 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
         entries.push({ kind: 'tool-image', ref })
         continue
       }
+      if (type === 'file') {
+        const ref = fileAttachmentRef(block)
+        if (ref === undefined) {
+          this.failPrompt(claim, flight, unsupportedContent())
+          return
+        }
+        entries.push({ kind: 'tool-file', ref })
+        files.push(ref)
+        continue
+      }
       this.failPrompt(claim, flight, unsupportedContent())
+      return
+    }
+    // The whole tool result is ONE ACP update for the materialization budget
+    // and is refused BEFORE any of its Store reads starts; its blobs must share
+    // one JSON string as well as fit the frame budget.
+    try {
+      assertFileBudget(files, claim.maxOutputFrameBytes, true)
+    } catch {
+      this.failPrompt(claim, flight, outputFrameTooLarge())
       return
     }
     const toolCallId = message.toolCallId
@@ -6114,12 +6263,14 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
             type: 'content',
             content: { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.mediaType },
           })
+        } else if (entry.kind === 'tool-file') {
+          content.push({ type: 'content', content: await this.readOutputFile(flight, entry.ref) })
         }
       }
       const update: SessionUpdate = { sessionUpdate: 'tool_call_update', toolCallId, status, content }
       return [update]
     }
-    if (entries.every(entry => entry.kind !== 'tool-image')) {
+    if (entries.every(entry => entry.kind !== 'tool-image' && entry.kind !== 'tool-file')) {
       this.enqueueOutputTask(claim, flight, 1, (): SessionUpdate[] => {
         const content: ToolCallContent[] = []
         for (const entry of entries) {
@@ -6143,6 +6294,23 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     if (access === undefined) throw attachmentReadFailed()
     try {
       return await access.readOutputImage(ref, flight.outputSignal)
+    } catch {
+      throw attachmentReadFailed()
+    }
+  }
+
+  /**
+   * Read ONE committed generic file through the official Host Attachment Store
+   * and convert it to the standard embedded `resource` block. Every Store
+   * rejection (missing object, unsupported provider, corrupt/incomplete bytes)
+   * keeps the ONE stable attachment-read content class.
+   */
+  private async readOutputFile(flight: InflightPrompt, ref: AcpStoredFileRef): Promise<AcpWireContentBlock> {
+    const access = this.access
+    if (access === undefined) throw attachmentReadFailed()
+    try {
+      const bytes = await readVerifiedFileBytes(access.readOutputFile(ref, flight.outputSignal), ref, flight.outputSignal)
+      return fileResourceBlock(ref, bytes)
     } catch {
       throw attachmentReadFailed()
     }
@@ -6448,11 +6616,11 @@ function projectionBackpressure(): LocalAcpViewError {
   )
 }
 
-/** The official Store could not read and verify one projected image. */
+/** The official Store could not read and verify one projected image/file. */
 function attachmentLoadFailed(): LocalAcpViewError {
   return new LocalAcpViewError(
     'LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED',
-    'a projected image attachment could not be read and verified',
+    'a projected attachment could not be read and verified',
     JSONRPC_INTERNAL_ERROR,
   )
 }
@@ -6563,13 +6731,80 @@ function validatePromptContent(prompt: readonly unknown[], imageEnabled: boolean
   return content
 }
 
-/** One stable "the official Store could not read this committed image" failure. */
+/** One stable "the official Store could not read this committed attachment" failure. */
 function attachmentReadFailed(): LocalAcpViewError {
   return promptError(
     'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
-    'a committed image attachment could not be read and verified',
+    'a committed attachment could not be read and verified',
     JSONRPC_INTERNAL_ERROR,
   )
+}
+
+/** One stable "this event's file payload cannot be materialized" failure. */
+function outputFrameTooLarge(): LocalAcpViewError {
+  return promptError(
+    'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+    'a committed event file payload cannot be represented in one output frame',
+    JSONRPC_INTERNAL_ERROR,
+  )
+}
+
+/**
+ * The generic file occurrences of one inter-agent message in wire order.
+ * A repeated reference is a separate occurrence and costs its payload again.
+ */
+function filesOf(content: AcpHistoryAgentMessage['content']): AcpStoredFileRef[] {
+  const files: AcpStoredFileRef[] = []
+  for (const part of content) {
+    if (part.type === 'file') files.push(part.ref)
+  }
+  return files
+}
+
+/**
+ * Materialize ONE verified generic file from its official Store stream.
+ *
+ * The official Store verifies the object only AFTER the final chunk, so the
+ * iteration always continues to natural EOF; stopping at the declared size
+ * would skip that verification. An over-declared chunk count aborts the
+ * iteration immediately (the Store's own `finally` destroys its read stream),
+ * and a short read is a corrupt attachment. The single concatenation is the
+ * only full-payload copy.
+ */
+async function readVerifiedFileBytes(
+  stream: AsyncIterable<Uint8Array>,
+  ref: AcpStoredFileRef,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  signal.throwIfAborted()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for await (const chunk of stream) {
+    signal.throwIfAborted()
+    total += chunk.byteLength
+    if (total > ref.bytes) throw new Error('a stored file yielded more bytes than its declared length')
+    chunks.push(chunk)
+  }
+  signal.throwIfAborted()
+  if (total !== ref.bytes) throw new Error('a stored file ended before its declared byte length')
+  return Buffer.concat(chunks, total)
+}
+
+/**
+ * One standard embedded `resource` blob for a committed generic file. The URI
+ * is this adapter's opaque, stable content identity (`dsh-attachment://`); it
+ * is never a Host path, a download URL or a token, and it carries no guessed
+ * MIME type because the Store's generic file has none.
+ */
+function fileResourceBlock(ref: AcpStoredFileRef, bytes: Buffer): AcpWireContentBlock {
+  return {
+    type: 'resource',
+    resource: {
+      uri: `dsh-attachment://sha256/${ref.attachmentId.slice('sha256:'.length)}/${encodeURIComponent(ref.name)}`,
+      // The concatenated verified Buffer IS the Base64 source: no extra copy.
+      blob: bytes.toString('base64'),
+    },
+  }
 }
 
 /**

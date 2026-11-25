@@ -1457,6 +1457,11 @@ const SDK_INTEROP_OUTCOMES = Object.freeze([
   'toolResultOrdered',
   'toolFailedStatusVerified',
   'missingStoreObjectFailedClosed',
+  'tuiFileCommitted',
+  'assistantFileProjected',
+  'toolFileProjected',
+  'loadFileReplayVerified',
+  'missingStoreFileFailedClosed',
   'healthyAfterFailure',
   'tuiHostSurvivedClientClose',
 ])
@@ -1471,7 +1476,11 @@ const SDK_INTEROP_OUTPUT_EVIDENCE = Object.freeze([
   'assistantAttachmentId', 'assistantImageSha256', 'assistantImageBytes',
   'imageOnlyTurn', 'toolTurn', 'toolCallId', 'toolAttachmentId', 'toolStatus',
   'failedToolTurn', 'failedToolCallId', 'failedStatus', 'missingObjectCode',
-  'acpErrorCode', 'healthyTurn', 'hostIdentityKept',
+  'acpErrorCode', 'tuiFile', 'assistantFileTurn', 'assistantFileMessageId',
+  'assistantFileAttachmentId', 'assistantFileSha256', 'assistantFileBytes',
+  'toolFileTurn', 'toolFileCallId', 'toolFileAttachmentId', 'toolFileSha256',
+  'toolFileBytes', 'loadFileResourceCount', 'loadFileSha256', 'missingFileCode',
+  'missingFileAcpErrorCode', 'healthyTurn', 'hostIdentityKept',
 ])
 
 /** One complete minimum-schema result, built fresh for every mutation. */
@@ -1494,6 +1503,11 @@ function sdkInteropVerdict() {
     toolResultOrdered: true,
     toolFailedStatusVerified: true,
     missingStoreObjectFailedClosed: true,
+    tuiFileCommitted: true,
+    assistantFileProjected: true,
+    toolFileProjected: true,
+    loadFileReplayVerified: true,
+    missingStoreFileFailedClosed: true,
     healthyAfterFailure: true,
     tuiHostSurvivedClientClose: true,
     evidence: {
@@ -1535,7 +1549,30 @@ function sdkInteropVerdict() {
         failedStatus: 'failed',
         missingObjectCode: 'ATTACHMENT_NOT_FOUND',
         acpErrorCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
-        healthyTurn: 13,
+        tuiFile: {
+          messageId: 'tui-file-message',
+          turn: 8,
+          attachmentId: `sha256:${'f'.repeat(64)}`,
+          name: 'TUI 附件.bin',
+          bytes: 70_000,
+          sha256: 'f'.repeat(64),
+          uri: `dsh-attachment://sha256/${'f'.repeat(64)}/${encodeURIComponent('TUI 附件.bin')}`,
+        },
+        assistantFileTurn: 14,
+        assistantFileMessageId: 'assistant-file-message',
+        assistantFileAttachmentId: `sha256:${'e'.repeat(64)}`,
+        assistantFileSha256: 'e'.repeat(64),
+        assistantFileBytes: 73_739,
+        toolFileTurn: 15,
+        toolFileCallId: 'tool-file-call',
+        toolFileAttachmentId: `sha256:${'d'.repeat(64)}`,
+        toolFileSha256: 'd'.repeat(64),
+        toolFileBytes: 73_739,
+        loadFileResourceCount: 3,
+        loadFileSha256: ['f'.repeat(64), 'e'.repeat(64), 'd'.repeat(64)],
+        missingFileCode: 'ATTACHMENT_NOT_FOUND',
+        missingFileAcpErrorCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
+        healthyTurn: 16,
         hostIdentityKept: true,
       },
     },
@@ -1559,6 +1596,8 @@ test('the ACP SDK content-interoperability verdict rejects every unproved outcom
     assertSdkInteropRejected(result => { delete result[field] })
     assertSdkInteropRejected(result => { result[field] = false })
   }
+  assertSdkInteropRejected(result => { result.evidence.output.loadFileSha256 = [] })
+  assertSdkInteropRejected(result => { result.evidence.output.loadFileSha256[1] = 'a'.repeat(64) })
   assertSdkInteropRejected(result => { delete result.status })
   assertSdkInteropRejected(result => { result.status = 'NOT_VERIFIED' })
   assertSdkInteropRejected(result => { result.status = 'FAIL' })

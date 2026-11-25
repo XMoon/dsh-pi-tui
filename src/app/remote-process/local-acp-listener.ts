@@ -959,6 +959,7 @@ function buildAgentApp(
       notifyConfigUpdate: configNotifierFor(client),
       notifyProjection: projectionNotifierFor(client),
       capabilities: state.capabilities,
+      maxOutputFrameBytes: state.maxOutputFrameBytes,
       ...state.elicitationForm ? { requestElicitation: requestElicitationFor(client) } : {},
     })
     app.onRequest(methods.agent.session.new, async ({ params, client, signal }) => {

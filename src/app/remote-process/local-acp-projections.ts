@@ -11,8 +11,8 @@
  * represent losslessly:
  *
  * - `user/message` with the official HUMAN `source.kind:'user'` discriminant,
- * - `assistant/message` ordered text/thought/image blocks,
- * - `tool/call` and `tool/result`,
+ * - `assistant/message` ordered text/thought/image/file blocks,
+ * - `tool/call` and `tool/result` ordered text/image/file content,
  * - `todo/write` as the complete plan replacement,
  * - `compaction/start|summary|end` keyed by their durable `compactionId`.
  *
@@ -24,8 +24,9 @@
  * @module app/remote-process/local-acp-projections
  */
 
+import { constants as bufferConstants } from 'node:buffer'
 import type { PlanEntry, PlanEntryStatus, SessionUpdate } from '@agentclientprotocol/sdk'
-import type { AcpStoredImageRef } from './local-acp-session-view.ts'
+import type { AcpStoredFileRef, AcpStoredImageRef } from './local-acp-session-view.ts'
 
 /** The fixed context-window occupancy a `usage_update` needs from the official projections. */
 export interface AcpContextPressureFacts {
@@ -91,24 +92,36 @@ export interface AcpHistoryImage {
   readonly ref: AcpStoredImageRef
 }
 
-/** One tool result whose ordered content may still need verified images. */
+/**
+ * One committed generic file the ordered tail must read through the official
+ * Attachment Store before it can become the standard ACP `resource` block.
+ */
+export interface AcpHistoryFile {
+  readonly messageId: string
+  readonly sessionUpdate: 'user_message_chunk' | 'agent_message_chunk'
+  readonly ref: AcpStoredFileRef
+}
+
+/** One tool result whose ordered content may still need verified images/files. */
 export interface AcpHistoryToolResult {
   readonly toolCallId: string
   readonly status: 'completed' | 'failed'
   readonly content: readonly (
     | { readonly type: 'text'; readonly text: string }
     | { readonly type: 'image'; readonly ref: AcpStoredImageRef }
+    | { readonly type: 'file'; readonly ref: AcpStoredFileRef }
   )[]
 }
 
 /**
- * One atomic replay step. Direct updates are already complete; image steps are
- * resolved through the official Store INSIDE the caller's ordered tail, so the
- * converted event keeps its place in the FIFO.
+ * One atomic replay step. Direct updates are already complete; image/file steps
+ * are resolved through the official Store INSIDE the caller's ordered tail, so
+ * the converted event keeps its place in the FIFO.
  */
 export type AcpHistoryUnit =
   | { readonly kind: 'update'; readonly update: SessionUpdate }
   | { readonly kind: 'image'; readonly image: AcpHistoryImage }
+  | { readonly kind: 'file'; readonly file: AcpHistoryFile }
   | { readonly kind: 'tool-result'; readonly result: AcpHistoryToolResult }
   | { readonly kind: 'session-message'; readonly message: AcpHistoryAgentMessage }
   /**
@@ -126,6 +139,7 @@ export interface AcpHistoryAgentMessage {
   readonly content: readonly (
     | { readonly type: 'text'; readonly text: string }
     | { readonly type: 'image'; readonly ref: AcpStoredImageRef }
+    | { readonly type: 'file'; readonly ref: AcpStoredFileRef }
   )[]
 }
 
@@ -135,6 +149,12 @@ export type AcpProjectionErrorCode =
   | 'LOCAL_ACP_LOAD_INVALID_HISTORY'
   /** A committed block has no standard ACP v1 form (never truncated). */
   | 'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT'
+  /**
+   * One event's generic-file Base64 budget exceeds the connection's frozen
+   * output frame budget, or no valid budget is bound for a file-bearing event.
+   * This is an adapter materialization refusal, never a transport write.
+   */
+  | 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'
 
 /** One classified projection refusal; it never carries content or a path. */
 export class AcpProjectionError extends Error {
@@ -190,20 +210,26 @@ interface TodoFacts {
  * The complete log is validated and converted BEFORE the caller sends any
  * notification: a strictly increasing seq order is required, and a committed
  * block with no standard v1 form refuses the whole history instead of
- * producing a partial replay. `inheritedEventCount` is not consumed here — the
- * official `readSession` already returns the complete replay-validated log.
+ * producing a partial replay. Every event that carries generic file content is
+ * bounded as ONE event (`maxOutputFrameBytes` is the connection's frozen
+ * single-frame budget), BEFORE the caller starts any Store read.
+ * `inheritedEventCount` is not consumed here — the official `readSession`
+ * already returns the complete replay-validated log.
  *
  * @param events - the official canonical events in ascending seq order.
  * @param capabilities - the capabilities frozen at `initialize`.
  * @param sessionId - the exact Session the replayed plan id is bound to.
+ * @param maxOutputFrameBytes - the connection's frozen single-frame budget.
  * @returns the ordered replay steps.
- * @throws {AcpProjectionError} when the seq order is invalid or a committed
- *   block has no standard ACP v1 projection.
+ * @throws {AcpProjectionError} when the seq order is invalid, a committed
+ *   block has no standard ACP v1 projection, or an event's file content cannot
+ *   fit this connection's materialization budget.
  */
 export function projectSessionHistory(
   events: readonly AcpHistoryEvent[],
   capabilities: AcpNegotiatedCapabilities,
   sessionId = '',
+  maxOutputFrameBytes?: number,
 ): readonly AcpHistoryUnit[] {
   const units: AcpHistoryUnit[] = []
   let previousSeq = -1
@@ -215,7 +241,7 @@ export function projectSessionHistory(
       )
     }
     previousSeq = event.seq
-    projectHistoryEvent(event, capabilities, sessionId, units)
+    projectHistoryEvent(event, capabilities, sessionId, units, maxOutputFrameBytes)
   }
   return units
 }
@@ -226,46 +252,56 @@ function projectHistoryEvent(
   capabilities: AcpNegotiatedCapabilities,
   sessionId: string,
   units: AcpHistoryUnit[],
+  maxOutputFrameBytes: number | undefined,
 ): void {
+  const files: AcpStoredFileRef[] = []
+  const firstUnit = units.length
   switch (event.type) {
     case 'user/message':
-      projectUserMessage(event.data, capabilities, units)
-      return
+      projectUserMessage(event.data, capabilities, units, files)
+      break
     case 'assistant/message':
-      projectAssistantMessage(event.data, units)
-      return
+      projectAssistantMessage(event.data, units, files)
+      break
     case 'tool/call':
       projectToolCall(event.data, units)
-      return
+      break
     case 'tool/result':
-      projectToolResult(event.data, units)
-      return
+      projectToolResult(event.data, units, files)
+      break
     case 'turn/start':
       // The official `todos` fold resets to null at every turn start; the View
       // owns whether a plan was announced and therefore needs removal.
       units.push({ kind: 'plan-reset' })
-      return
+      break
     case 'todo/write': {
       const entries = planEntriesOf(event.data)
       if (entries === undefined) throw unsupportedBlock()
       units.push({ kind: 'update', update: planUpdate(entries, capabilities.plan, sessionId) })
-      return
+      break
     }
     case 'compaction/start':
     case 'compaction/summary':
     case 'compaction/end': {
-      if (!capabilities.compaction) return
+      if (!capabilities.compaction) break
       const update = compactionUpdate(event)
       units.push({ kind: 'update', update })
-      return
+      break
     }
     default:
       // Host-internal durable records (turns, steps, request headers, system
       // prompts, developer tool changes, titles, attempts, seed markers,
       // projections and plugin records) never carry ACP-visible message
       // content and are never projected as one.
-      return
+      break
   }
+  // ONE event equals ONE budget: every file occurrence of this event, in wire
+  // order, counts (a repeated reference is two payload occurrences). Tool
+  // results and inter-agent messages become ONE ACP update, so their blobs must
+  // also fit one JS string; message-chunk events remain separate frames.
+  const singleFrame = units.slice(firstUnit).some(unit =>
+    unit.kind === 'tool-result' || unit.kind === 'session-message')
+  assertFileBudget(files, maxOutputFrameBytes, singleFrame)
 }
 
 /**
@@ -286,16 +322,23 @@ function projectUserMessage(
   data: unknown,
   capabilities: AcpNegotiatedCapabilities,
   units: AcpHistoryUnit[],
+  files: AcpStoredFileRef[],
 ): void {
   const message = bareMessageOf(data)
   if (message === undefined) throw unsupportedBlock()
   if (message.source?.kind === 'user') {
-    projectMessageBlocks(message, units, 'user_message_chunk', false)
+    projectMessageBlocks(message, units, 'user_message_chunk', false, files)
     return
   }
   if (!capabilities.subagents) return
   const agentMessage = durableAgentMessageOf(data)
-  if (agentMessage !== undefined) units.push({ kind: 'session-message', message: agentMessage })
+  if (agentMessage === undefined) return
+  // An inter-agent message's files are NOT charged here: the View first has to
+  // prove the author from official headers. An unproven message must produce
+  // no diagnostic and no Store read regardless of its file size; a proven one
+  // is charged by the shared session-message path before its association and
+  // first read.
+  units.push({ kind: 'session-message', message: agentMessage })
 }
 
 /**
@@ -316,7 +359,11 @@ function agentMessageOf(
   message: { readonly id: string; readonly content: readonly unknown[] },
   senderSessionId: string,
 ): AcpHistoryAgentMessage {
-  const content: ({ readonly type: 'text'; readonly text: string } | { readonly type: 'image'; readonly ref: AcpStoredImageRef })[] = []
+  const content: (
+    | { readonly type: 'text'; readonly text: string }
+    | { readonly type: 'image'; readonly ref: AcpStoredImageRef }
+    | { readonly type: 'file'; readonly ref: AcpStoredFileRef }
+  )[] = []
   for (const block of message.content) {
     const type = (block as { readonly type?: unknown } | null)?.type
     if (type === 'text') {
@@ -327,6 +374,10 @@ function agentMessageOf(
     }
     if (type === 'image') {
       content.push({ type: 'image', ref: imageRef(block) })
+      continue
+    }
+    if (type === 'file') {
+      content.push({ type: 'file', ref: fileRef(block) })
       continue
     }
     throw unsupportedBlock()
@@ -349,12 +400,12 @@ function bareMessageOf(data: unknown): {
 }
 
 /** Project one durable `assistant/message` (its data WRAPS the message) in committed block order. */
-function projectAssistantMessage(data: unknown, units: AcpHistoryUnit[]): void {
+function projectAssistantMessage(data: unknown, units: AcpHistoryUnit[], files: AcpStoredFileRef[]): void {
   // `assistant/message` data carries turn/step/message/stream/usage; only the
   // nested message is model-visible content.
   const message = messageOf(data)
   if (message === undefined) throw unsupportedBlock()
-  projectMessageBlocks(message, units, 'agent_message_chunk', true)
+  projectMessageBlocks(message, units, 'agent_message_chunk', true, files)
 }
 
 /** One durable message with a nonempty id, an optional source tag and content blocks. */
@@ -376,13 +427,15 @@ function messageOf(data: unknown): {
  * Convert one message's committed blocks. Empty text/thought blocks project
  * nothing (they are not visible content); a `tool-call` block is skipped
  * because the dedicated durable `tool/call` event is the projection source;
- * every other block type has no standard ACP v1 form and fails closed.
+ * image and generic file blocks are deferred to the official Store; every
+ * other block type has no standard ACP v1 form and fails closed.
  */
 function projectMessageBlocks(
   message: { readonly id: string; readonly content: readonly unknown[] },
   units: AcpHistoryUnit[],
   textKind: 'user_message_chunk' | 'agent_message_chunk',
   allowThought: boolean,
+  files: AcpStoredFileRef[],
 ): void {
   for (const block of message.content) {
     const type = (block as { readonly type?: unknown } | null)?.type
@@ -404,6 +457,15 @@ function projectMessageBlocks(
       units.push({
         kind: 'image',
         image: { messageId: message.id, sessionUpdate: textKind, ref: imageRef(block) },
+      })
+      continue
+    }
+    if (type === 'file') {
+      const ref = fileRef(block)
+      files.push(ref)
+      units.push({
+        kind: 'file',
+        file: { messageId: message.id, sessionUpdate: textKind, ref },
       })
       continue
     }
@@ -431,7 +493,7 @@ function projectToolCall(data: unknown, units: AcpHistoryUnit[]): void {
 }
 
 /** Project one durable tool result as ONE ordered `tool_call_update`. */
-function projectToolResult(data: unknown, units: AcpHistoryUnit[]): void {
+function projectToolResult(data: unknown, units: AcpHistoryUnit[], files: AcpStoredFileRef[]): void {
   const message = (data as {
     readonly message?: {
       readonly toolCallId?: unknown
@@ -442,7 +504,11 @@ function projectToolResult(data: unknown, units: AcpHistoryUnit[]): void {
   if (message === undefined || typeof message.toolCallId !== 'string' || !Array.isArray(message.content)) {
     throw unsupportedBlock()
   }
-  const content: ({ readonly type: 'text'; readonly text: string } | { readonly type: 'image'; readonly ref: AcpStoredImageRef })[] = []
+  const content: (
+    | { readonly type: 'text'; readonly text: string }
+    | { readonly type: 'image'; readonly ref: AcpStoredImageRef }
+    | { readonly type: 'file'; readonly ref: AcpStoredFileRef }
+  )[] = []
   for (const block of message.content as readonly unknown[]) {
     const type = (block as { readonly type?: unknown } | null)?.type
     if (type === 'text') {
@@ -453,6 +519,12 @@ function projectToolResult(data: unknown, units: AcpHistoryUnit[]): void {
     }
     if (type === 'image') {
       content.push({ type: 'image', ref: imageRef(block) })
+      continue
+    }
+    if (type === 'file') {
+      const ref = fileRef(block)
+      files.push(ref)
+      content.push({ type: 'file', ref })
       continue
     }
     throw unsupportedBlock()
@@ -788,6 +860,78 @@ export function imageRef(block: unknown): AcpStoredImageRef {
   }
 }
 
+/**
+ * The structural official `FileAttachmentRef` of one committed file block, or
+ * `undefined` when the block does not carry a legal durable file reference.
+ * The official Attachment Store remains the authority that verifies the exact
+ * stored leaf, bytes and digest; this only validates the reference SHAPE
+ * (`sha256:<64 lowercase hex>`, a non-empty display name and a non-negative
+ * safe-integer byte count).
+ */
+export function fileAttachmentRef(block: unknown): AcpStoredFileRef | undefined {
+  const attachment = (block as { readonly attachment?: unknown } | null)?.attachment
+  if (attachment === null || typeof attachment !== 'object') return undefined
+  const ref = attachment as Record<string, unknown>
+  if (typeof ref.attachmentId !== 'string' || !/^sha256:[0-9a-f]{64}$/u.test(ref.attachmentId)
+    || typeof ref.name !== 'string' || ref.name.length === 0
+    || typeof ref.bytes !== 'number' || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) {
+    return undefined
+  }
+  return { attachmentId: ref.attachmentId, name: ref.name, bytes: ref.bytes }
+}
+
+/** The strict history-conversion form of one committed file reference. */
+function fileRef(block: unknown): AcpStoredFileRef {
+  const ref = fileAttachmentRef(block)
+  if (ref === undefined) throw unsupportedBlock()
+  return ref
+}
+
+/**
+ * Enforce ONE event's generic-file materialization budget: the sum of every
+ * file occurrence's canonical Base64 length must fit the connection's frozen
+ * single-frame budget. Occurrences are counted in wire order (a repeated
+ * reference costs its payload twice), and the running subtraction never
+ * overflows. A file-bearing event without a valid positive budget is refused
+ * instead of reading an unbounded stream.
+ *
+ * The budget alone is not sufficient: it derives from the official image
+ * limits and may exceed Node's single-string capacity. Every raw Buffer and
+ * every encoded blob must be representable, and a `singleFrame` event (one
+ * tool result or one inter-agent message) serializes all its blobs into ONE
+ * JSON string, so their total must be representable too. Separate
+ * message-chunk frames are checked per blob and do not sum.
+ *
+ * @param files - every file occurrence of one event, in wire order.
+ * @param maxOutputFrameBytes - the connection's frozen frame budget.
+ * @param singleFrame - whether this event's file blobs share one ACP update.
+ * @throws {AcpProjectionError} with `LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE`.
+ */
+export function assertFileBudget(
+  files: readonly AcpStoredFileRef[],
+  maxOutputFrameBytes: number | undefined,
+  singleFrame: boolean,
+): void {
+  if (files.length === 0) return
+  if (maxOutputFrameBytes === undefined
+    || !Number.isSafeInteger(maxOutputFrameBytes) || maxOutputFrameBytes <= 0) {
+    throw frameTooLarge()
+  }
+  let remaining = maxOutputFrameBytes
+  let encodedTotal = 0
+  for (const file of files) {
+    const encoded = 4 * Math.ceil(file.bytes / 3)
+    if (!Number.isSafeInteger(encoded) || encoded > remaining
+      || file.bytes > bufferConstants.MAX_LENGTH
+      || encoded > bufferConstants.MAX_STRING_LENGTH) {
+      throw frameTooLarge()
+    }
+    remaining -= encoded
+    encodedTotal += encoded
+  }
+  if (singleFrame && encodedTotal > bufferConstants.MAX_STRING_LENGTH) throw frameTooLarge()
+}
+
 /** Preserve malformed model tool arguments as opaque input instead of dropping them. */
 function parseToolArguments(value: string): unknown {
   try {
@@ -802,5 +946,13 @@ function unsupportedBlock(): AcpProjectionError {
   return new AcpProjectionError(
     'LOCAL_ACP_LOAD_UNSUPPORTED_CONTENT',
     'a committed Session block has no standard ACP v1 projection',
+  )
+}
+
+/** One stable "this event's file content cannot be materialized" refusal. */
+function frameTooLarge(): AcpProjectionError {
+  return new AcpProjectionError(
+    'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
+    'a committed event file payload cannot be represented in one output frame',
   )
 }

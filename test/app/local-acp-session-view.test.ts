@@ -36,6 +36,7 @@ import {
   type AcpQuestionAnswer,
   type AcpQuestionSnapshot,
   type AcpSessionPromptRequest,
+  type AcpStoredFileRef,
   type AcpStoredImage,
   type AcpStoredImageRef,
   type AcpElicitationRequest,
@@ -261,6 +262,27 @@ class FakeAccess implements HostAcpSessionAccess {
   async readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal): Promise<AcpStoredImage> {
     this.imageReadCalls.push(ref)
     return await this.imageReadImpl(ref, signal)
+  }
+
+  /** The fake official Store file bytes, keyed by attachmentId. */
+  readonly storedFiles = new Map<string, Uint8Array>()
+  /** Every committed file reference the View asked the Store to read. */
+  readonly fileReadCalls: AcpStoredFileRef[] = []
+  /** One scripted Store byte stream; the default yields the stored bytes in two chunks. */
+  fileReadImpl: (ref: AcpStoredFileRef, signal: AbortSignal) => AsyncIterable<Uint8Array> =
+    (ref) => {
+      const stored = this.storedFiles.get(ref.attachmentId)
+      return (async function* storedFile() {
+        if (stored === undefined) throw new Error('attachment not found')
+        const split = Math.ceil(stored.byteLength / 2)
+        if (split > 0) yield stored.subarray(0, split)
+        yield stored.subarray(split)
+      })()
+    }
+
+  readOutputFile(ref: AcpStoredFileRef, signal: AbortSignal): AsyncIterable<Uint8Array> {
+    this.fileReadCalls.push(ref)
+    return this.fileReadImpl(ref, signal)
   }
 
   /** Every config-option read the View performed, with its exact Agent/Session identity. */
@@ -5828,6 +5850,7 @@ function projectionView(
     readonly history?: AcpSessionHistory
     readonly mcpServers?: readonly unknown[]
     readonly channels?: Partial<AcpViewChannels>
+    readonly diag?: Diag
   } = {},
 ): {
   access: FakeAccess
@@ -5849,7 +5872,7 @@ function projectionView(
   const agent = makeAgent(sessionId, '/w')
   access.seed(agent)
   access.sessionHistory = options.history ?? { header: { sessionId, cwd: '/w' }, events: [] }
-  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  const registry = new AcpSessionViewRegistry(options.diag ?? QUIET_DIAG)
   registry.bindAccess(access)
   const conn = registry.createConnection()
   const notifications: SessionUpdate[] = []
@@ -6615,20 +6638,27 @@ test('G-ACP2-PR2 PLAN-01: resume reads the CURRENT official plan once, and a nul
   assert.deepEqual(none.notifications, [], 'no todo write yet means no plan at all')
 })
 
-test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message as session_message', async () => {
+test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message and file as session_message', async () => {
   const view = projectionView('H1', {
+    channels: { maxOutputFrameBytes: 64 },
     history: {
       header: { sessionId: 'H1', cwd: '/w' },
       events: [{
         seq: 0,
         type: 'user/message',
-        data: { id: 'am1', source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' }, content: [{ type: 'text', text: 'from the child' }], role: 'user' },
+        data: {
+          id: 'am1',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+          content: [{ type: 'text', text: 'from the child' }, fileBlock()],
+          role: 'user',
+        },
       }],
     },
   })
   // The canonical history replays the verified child association first, exactly
   // like the live path: stable v1 announces a child before its traffic.
   view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'H1', cwd: '/w' }
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
   await view.load()
   assert.deepEqual(view.notifications, [
     { sessionUpdate: 'subagent_update', sessionId: 'SENDER', cwd: '/w' },
@@ -6637,9 +6667,13 @@ test('G-ACP2-PR2 MESSAGE-01: a loaded history replays its real agent-message as 
       messageId: 'am1',
       senderSessionId: 'SENDER',
       recipientSessionId: 'H1',
-      content: [{ type: 'text', text: 'from the child' }],
+      content: [
+        { type: 'text', text: 'from the child' },
+        { type: 'resource', resource: { uri: FILE_URI, blob: Buffer.from(FILE_BYTES).toString('base64') } },
+      ],
     },
   ])
+  assert.equal(view.access.fileReadCalls.length, 1)
   // A baseline client never receives the supplemental frame.
   const baseline = projectionView('H2', {
     capabilities: PR2_BASELINE,
@@ -6824,6 +6858,46 @@ test('G-ACP2-PR2 LOAD-06: an unreadable agent-message image fails the load inste
   await healthy.load()
   const message = healthy.notifications.find(update => update.sessionUpdate === 'session_message')
   assert.deepEqual(message?.content?.map(block => block.type), ['text', 'image'])
+})
+
+test('PR4D R3: a loaded child file that fails only at EOF fails the load; a healthy one replays the exact resource', async () => {
+  const event = [{
+    seq: 0,
+    type: 'user/message',
+    data: {
+      id: 'am-file',
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: 'CHILD' },
+      role: 'user',
+      content: [{ type: 'text', text: 'see the file' }, fileBlock()],
+    },
+  }]
+  const broken = projectionView('LD6F', {
+    history: { header: { sessionId: 'LD6F', cwd: '/w' }, events: event },
+    channels: { maxOutputFrameBytes: 64 },
+  })
+  broken.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'LD6F', cwd: '/w' }
+  broken.access.fileReadImpl = () => (async function* corruptChildFile() {
+    yield FILE_BYTES
+    throw new Error('stored child file verification failed at EOF')
+  })()
+  await assert.rejects(broken.load(), isViewError('LOCAL_ACP_LOAD_ATTACHMENT_READ_FAILED'))
+  assert.equal(broken.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'a late EOF failure never produces a partial session_message')
+  assert.equal(broken.access.fileReadCalls.length, 1)
+
+  const healthy = projectionView('LD6H', {
+    history: { header: { sessionId: 'LD6H', cwd: '/w' }, events: event },
+    channels: { maxOutputFrameBytes: 64 },
+  })
+  healthy.access.headerFacts = { sessionId: 'CHILD', origin: 'subagent', parentSessionId: 'LD6H', cwd: '/w' }
+  healthy.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  await healthy.load()
+  const message = healthy.notifications.find(update => update.sessionUpdate === 'session_message')
+  const content = (message as { content?: readonly Record<string, unknown>[] } | undefined)?.content
+  assert.equal(content?.[0]?.type, 'text')
+  assert.equal((content?.[1]?.resource as { uri?: string } | undefined)?.uri, FILE_URI)
+  assert.equal((content?.[1]?.resource as { blob?: string } | undefined)?.blob, Buffer.from(FILE_BYTES).toString('base64'))
+  assert.equal(healthy.access.fileReadCalls.length, 1)
 })
 
 test('G-ACP2-PR2 LOAD-02: buffered live events join in seq order, once per seq, even when delivered out of order', async () => {
@@ -7703,4 +7777,672 @@ test('R7: command admission refuses a still-retired turn', async () => {
     (error: unknown) => error instanceof LocalAcpViewError && error.code === 'LOCAL_ACP_VIEW_BUSY',
   )
   assert.equal(view.access.standaloneCommandCalls.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// PR4D: generic committed file attachments become standard resource blobs.
+// ---------------------------------------------------------------------------
+
+/** One official durable file content-addressed id. */
+const FILE_ID = `sha256:${'a'.repeat(64)}`
+/** A second official durable file id (a distinct digest). */
+const FILE_ID_B = `sha256:${'b'.repeat(64)}`
+/** NUL and non-UTF8 bytes: the wire blob must preserve them verbatim. */
+const FILE_BYTES = Uint8Array.from([0x00, 0xff, 0x80, 0x0a, 0x00, 0x41])
+/** The canonical stored leaf name (space and CJK must be percent-encoded). */
+const FILE_NAME = 'PR4D 附件.bin'
+/** The independent expected wire URI for the canonical leaf name. */
+const FILE_URI = `dsh-attachment://sha256/${'a'.repeat(64)}/PR4D%20%E9%99%84%E4%BB%B6.bin`
+
+/** One committed generic file block naming a structural official file reference. */
+function fileBlock(
+  attachmentId = FILE_ID,
+  name = FILE_NAME,
+  bytes = FILE_BYTES.byteLength,
+): Record<string, unknown> {
+  return { type: 'file', attachment: { attachmentId, name, bytes } }
+}
+
+/** The one embedded resource block of a collected update. */
+function resourceOf(update: SessionUpdate | undefined): { readonly uri?: unknown; readonly blob?: unknown; readonly mimeType?: unknown } {
+  const content = chunkOf(update)
+  assert.equal(content.type, 'resource', 'the file content is a standard embedded resource')
+  return (content as { readonly resource?: { readonly uri?: unknown; readonly blob?: unknown; readonly mimeType?: unknown } }).resource ?? {}
+}
+
+test('PR4D: a committed assistant text/file/text message becomes ordered text and one verified resource blob', async () => {
+  const view = promptView('PF1', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  const attempt = view.start('pr4d:assistant-file:v1')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-file')
+  view.claim('m-file', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-file', [
+    { type: 'text', text: 'before\r\n' },
+    fileBlock(),
+    { type: 'text', text: 'after\n' },
+  ]))
+  await flushOutput()
+  assert.deepEqual(view.access.fileReadCalls, [
+    { attachmentId: FILE_ID, name: FILE_NAME, bytes: FILE_BYTES.byteLength },
+  ], 'the View reads the exact committed file reference, never a guessed one')
+  assert.deepEqual(view.notifications.map(updateKind), [
+    'agent_message_chunk', 'agent_message_chunk', 'agent_message_chunk',
+  ])
+  assert.equal((chunkOf(view.notifications[0]) as { text?: string }).text, 'before\r\n')
+  const resource = resourceOf(view.notifications[1])
+  assert.equal(resource.uri, FILE_URI)
+  assert.equal(resource.blob, Buffer.from(FILE_BYTES).toString('base64'))
+  assert.equal(Object.hasOwn(resource, 'mimeType'), false, 'a generic file never invents a MIME type')
+  assert.equal((chunkOf(view.notifications[2]) as { text?: string }).text, 'after\n')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('PR4D: the same digest with different leaf names yields different URIs and repeated occurrences stay repeated', async () => {
+  const view = promptView('PF2', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  view.access.storedFiles.set(`sha256:${'c'.repeat(64)}`, new Uint8Array(0))
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-files')
+  view.claim('m-files', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-files', [
+    fileBlock(FILE_ID, 'one name.bin'),
+    fileBlock(FILE_ID, 'two name.bin'),
+    fileBlock(`sha256:${'c'.repeat(64)}`, 'empty.bin', 0),
+  ]))
+  await flushOutput()
+  assert.equal(view.access.fileReadCalls.length, 3, 'each occurrence is read in wire order')
+  assert.deepEqual(view.notifications.map(updateKind), [
+    'agent_message_chunk', 'agent_message_chunk', 'agent_message_chunk',
+  ])
+  const first = resourceOf(view.notifications[0])
+  const second = resourceOf(view.notifications[1])
+  const empty = resourceOf(view.notifications[2])
+  assert.equal(first.uri, `dsh-attachment://sha256/${'a'.repeat(64)}/one%20name.bin`)
+  assert.equal(second.uri, `dsh-attachment://sha256/${'a'.repeat(64)}/two%20name.bin`)
+  assert.notEqual(first.uri, second.uri, 'the stored leaf name is part of the opaque identity')
+  assert.equal(first.blob, second.blob, 'the same digest yields the same bytes')
+  assert.equal(empty.blob, '', 'an empty file is a legal empty blob')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('PR4D: a streamed text message appends its never-streamed durable file residual under the one attempt id', async () => {
+  const view = promptView('PF3', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  const attempt = view.start('pr4d:assistant-file:v1')
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-stream-file')
+  view.claim('m-stream-file', 1, request.requestId)
+  view.stream({ type: 'start', attemptId: 'attempt-1', revision: 1, turn: 1, step: 1 })
+  view.stream({ type: 'chunk', attemptId: 'attempt-1', revision: 2, index: 0, chunk: { type: 'block-start', index: 0, blockType: 'text' } })
+  view.stream({ type: 'chunk', attemptId: 'attempt-1', revision: 3, index: 1, chunk: { type: 'text-delta', index: 0, text: 'before\r\n' } })
+  view.stream({ type: 'chunk', attemptId: 'attempt-1', revision: 4, index: 2, chunk: { type: 'block-end', index: 0, block: { type: 'text', text: 'before\r\n' } } })
+  view.stream({ type: 'chunk', attemptId: 'attempt-1', revision: 5, index: 3, chunk: { type: 'block-start', index: 1, blockType: 'file' } })
+  view.stream({ type: 'chunk', attemptId: 'attempt-1', revision: 6, index: 4, chunk: { type: 'block-end', index: 1, block: fileBlock() } })
+  view.commit('assistant/message', assistantData(1, 'm-stream-file', [
+    { type: 'text', text: 'before\r\n' },
+    fileBlock(),
+  ]))
+  view.stream({
+    type: 'end', attemptId: 'attempt-1', revision: 7, index: 5,
+    outcome: { kind: 'committed', eventType: 'assistant/message', seq: view.lastSeq() },
+  })
+  await flushOutput()
+  const kinds = view.notifications.map(updateKind)
+  assert.deepEqual(kinds, ['agent_message_chunk', 'agent_message_chunk'],
+    'streamed text once, then exactly one durable file residual')
+  const streamedId = (view.notifications[0] as { messageId?: string }).messageId
+  assert.ok(typeof streamedId === 'string' && streamedId !== '')
+  assert.equal((view.notifications[1] as { messageId?: string }).messageId, streamedId,
+    'the residual file shares the one attempt message id')
+  assert.equal((chunkOf(view.notifications[1]) as { type?: string }).type, 'resource')
+  assert.equal((chunkOf(view.notifications[0]) as { text?: string }).text, 'before\r\n',
+    'the rejoined durable text is never re-sent')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('PR4D: a file stream that fails only at natural EOF fails the prompt without any partial content', async () => {
+  const view = promptView('PF4', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  // The bytes look complete, but the official Store rejects only after the
+  // final chunk (hash/count verification). Breaking at the declared size would
+  // therefore wrongly report success.
+  view.access.fileReadImpl = () => (async function* corrupt() {
+    yield FILE_BYTES
+    throw new Error('stored file integrity verification failed')
+  })()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-corrupt')
+  view.claim('m-corrupt', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-corrupt', [
+    { type: 'text', text: 'prefix' },
+    fileBlock(),
+  ]))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'))
+  assert.deepEqual(view.notifications, [], 'no text prefix or partial resource is handed to the client')
+  assert.equal(view.access.fileReadCalls.length, 1)
+})
+
+test('PR4D: a stream that yields more bytes than its declared size aborts the iterator instead of materializing it', async () => {
+  const view = promptView('PF5', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  let cleaned = false
+  view.access.fileReadImpl = () => (async function* overDeclared() {
+    try {
+      yield Uint8Array.of(1, 2, 3, 4)
+    } finally {
+      cleaned = true
+    }
+  })()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-over')
+  view.claim('m-over', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-over', [fileBlock(FILE_ID, FILE_NAME, 3)]))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'))
+  assert.equal(cleaned, true, 'the official Store stream is closed by the early iterator return')
+  assert.deepEqual(view.notifications, [])
+})
+
+test('PR4D: a tool result carries its files inside ONE complete ordered tool_call_update', async () => {
+  const view = promptView('PF6', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-tool-file')
+  view.claim('m-tool-file', 1, request.requestId)
+  view.commit('tool/call', { turn: 1, step: 1, callId: 'call-file', name: 'pr4d_tool', arguments: '{}' })
+  view.commit('tool/result', toolResultData(1, 'call-file', false, [
+    { type: 'text', text: 'tool-before\n' },
+    fileBlock(),
+    { type: 'text', text: 'tool-after\n' },
+  ]))
+  view.commit('assistant/message', assistantData(1, 'm-tool-answer', [{ type: 'text', text: 'done\n' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  const toolUpdate = view.notifications.find(update => updateKind(update) === 'tool_call_update')
+  assert.ok(toolUpdate !== undefined)
+  const content = (toolUpdate as { content?: readonly { type: string; content?: Record<string, unknown> }[] }).content
+  assert.equal(content?.length, 3)
+  assert.deepEqual(content?.[0], { type: 'content', content: { type: 'text', text: 'tool-before\n' } })
+  assert.equal(content?.[1]?.type, 'content')
+  assert.equal(content?.[1]?.content?.type, 'resource')
+  assert.equal((content?.[1]?.content?.resource as { uri?: string } | undefined)?.uri, FILE_URI)
+  assert.deepEqual(content?.[2], { type: 'content', content: { type: 'text', text: 'tool-after\n' } })
+  assert.equal(view.notifications.filter(update => updateKind(update) === 'tool_call_update').length, 1,
+    'the whole result is one update even with a file read')
+})
+
+test('PR4D: an event file budget over the connection frame cap is refused before any Store read', async () => {
+  const view = promptView('PF7', { channels: { maxOutputFrameBytes: 7 } })
+  await view.attach()
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-budget')
+  view.claim('m-budget', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-budget', [fileBlock()]))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.equal(view.access.fileReadCalls.length, 0, 'an oversized event is refused before its Store read')
+  assert.deepEqual(view.notifications, [])
+  // The connection/View is not destroyed: a normal text prompt still succeeds.
+  const healthy = view.start('healthy after oversize')
+  const healthyRequest = view.access.promptCalls[1]!
+  view.insert(healthyRequest.requestId, 'm-healthy')
+  view.claim('m-healthy', 2, healthyRequest.requestId)
+  view.commit('assistant/message', assistantData(2, 'm-healthy', [{ type: 'text', text: 'ok' }]))
+  view.commit('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.deepEqual(await healthy, { stopReason: 'end_turn' })
+})
+
+test('PR4D: the file budget is exact, counts repeated occurrences, and refuses a missing budget', async () => {
+  // 6 bytes encode to 8 Base64 characters: exactly the frame cap passes.
+  const exact = promptView('PF8', { channels: { maxOutputFrameBytes: 8 } })
+  await exact.attach()
+  exact.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  const attempt = exact.start()
+  const request = exact.access.promptCalls[0]!
+  exact.insert(request.requestId, 'm-exact')
+  exact.claim('m-exact', 1, request.requestId)
+  exact.commit('assistant/message', assistantData(1, 'm-exact', [fileBlock()]))
+  await flushOutput()
+  assert.equal(exact.access.fileReadCalls.length, 1, 'an event at exactly the cap is materialized')
+  exact.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+
+  // Two independent 3-byte files cost 4 + 4 characters, so cap=7 is over.
+  const sum = promptView('PF9', { channels: { maxOutputFrameBytes: 7 } })
+  await sum.attach()
+  sum.access.storedFiles.set(FILE_ID_B, Uint8Array.of(1, 2, 3))
+  const sumAttempt = sum.start()
+  const sumRequest = sum.access.promptCalls[0]!
+  sum.insert(sumRequest.requestId, 'm-sum')
+  sum.claim('m-sum', 1, sumRequest.requestId)
+  sum.commit('assistant/message', assistantData(1, 'm-sum', [
+    fileBlock(FILE_ID_B, 'one.bin', 3),
+    fileBlock(FILE_ID_B, 'two.bin', 3),
+  ]))
+  await assert.rejects(sumAttempt, isPromptError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.equal(sum.access.fileReadCalls.length, 0)
+
+  // The SAME reference twice is two payload occurrences, not one.
+  const repeated = promptView('PF10', { channels: { maxOutputFrameBytes: 4 } })
+  await repeated.attach()
+  repeated.access.storedFiles.set(FILE_ID_B, Uint8Array.of(1, 2, 3))
+  const repeatedAttempt = repeated.start()
+  const repeatedRequest = repeated.access.promptCalls[0]!
+  repeated.insert(repeatedRequest.requestId, 'm-repeat')
+  repeated.claim('m-repeat', 1, repeatedRequest.requestId)
+  repeated.commit('assistant/message', assistantData(1, 'm-repeat', [
+    fileBlock(FILE_ID_B, 'one.bin', 3),
+    fileBlock(FILE_ID_B, 'one.bin', 3),
+  ]))
+  await assert.rejects(repeatedAttempt, isPromptError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.equal(repeated.access.fileReadCalls.length, 0)
+
+  // A file-bearing event without the connection's frozen budget is refused
+  // instead of reading an unbounded stream; text-only behavior is unchanged.
+  const unbudgeted = promptView('PF11')
+  await unbudgeted.attach()
+  const unbudgetedAttempt = unbudgeted.start()
+  const unbudgetedRequest = unbudgeted.access.promptCalls[0]!
+  unbudgeted.insert(unbudgetedRequest.requestId, 'm-unbudgeted')
+  unbudgeted.claim('m-unbudgeted', 1, unbudgetedRequest.requestId)
+  unbudgeted.commit('assistant/message', assistantData(1, 'm-unbudgeted', [fileBlock()]))
+  await assert.rejects(unbudgetedAttempt, isPromptError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.equal(unbudgeted.access.fileReadCalls.length, 0)
+})
+
+test('PR4D: a verified child agent-message file becomes a session_message resource, and an unnegotiated client reads nothing', async () => {
+  const view = projectionView('PF12', { channels: { maxOutputFrameBytes: 64 } })
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF12', cwd: '/w' }
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  view.commit('user/message', {
+    id: 'am-file',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'the child sent a file' }, fileBlock()],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 2, 'the child association and the file message are projected')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['subagent_update', 'session_message'])
+  const message = view.notifications[1] as { content?: readonly Record<string, unknown>[] }
+  assert.equal(message.content?.[0]?.type, 'text')
+  assert.equal(message.content?.[1]?.type, 'resource')
+  assert.equal((message.content?.[1]?.resource as { uri?: string } | undefined)?.uri, FILE_URI)
+  assert.equal(view.access.fileReadCalls.length, 1)
+
+  const baseline = projectionView('PF13', {
+    capabilities: PR2_BASELINE,
+    channels: { maxOutputFrameBytes: 64 },
+  })
+  await baseline.resume()
+  baseline.notifications.length = 0
+  baseline.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF13', cwd: '/w' }
+  baseline.commit('user/message', {
+    id: 'am-hidden',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [fileBlock()],
+    role: 'user',
+  })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.deepEqual(baseline.notifications, [], 'no subagents capability means no session_message and no read')
+  assert.equal(baseline.access.fileReadCalls.length, 0)
+})
+
+test('PR4D: a loaded history replays a committed file as the exact resource, and an over-budget history fails closed before reading', async () => {
+  const history: AcpSessionHistory = {
+    header: { sessionId: 'PF14', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u-file', source: { kind: 'user' }, content: [{ type: 'text', text: 'uploaded' }, fileBlock()], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a-file', content: [fileBlock()] } } },
+      { seq: 2, type: 'tool/call', data: { callId: 'call-h', name: 'pr4d_tool', arguments: '{}' } },
+      { seq: 3, type: 'tool/result', data: { message: { toolCallId: 'call-h', isError: false, content: [fileBlock(), { type: 'text', text: 'tail' }] } } },
+    ],
+  }
+  const view = projectionView('PF14', { history, channels: { maxOutputFrameBytes: 64 } })
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  await view.load()
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), [
+    'user_message_chunk', 'user_message_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update',
+  ])
+  const userResource = resourceOf(view.notifications[1])
+  assert.equal(userResource.uri, FILE_URI)
+  assert.equal((view.notifications[1] as { messageId?: string }).messageId, 'u-file',
+    'the replayed user file keeps its original durable message id')
+  const toolUpdate = view.notifications[4] as { content?: readonly { type: string; content?: Record<string, unknown> }[] }
+  assert.equal(toolUpdate.content?.[0]?.content?.type, 'resource')
+  assert.deepEqual(toolUpdate.content?.[1], { type: 'content', content: { type: 'text', text: 'tail' } })
+
+  const oversized = projectionView('PF15', { history, channels: { maxOutputFrameBytes: 7 } })
+  oversized.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  await assert.rejects(oversized.load(), isViewError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.equal(oversized.access.fileReadCalls.length, 0, 'history preflight refuses before any Store read')
+  assert.deepEqual(oversized.notifications, [])
+})
+
+test('PR4D: close aborts a held load file read and the late verified bytes never reach the closed View', async () => {
+  const view = projectionView('PF16', {
+    history: {
+      header: { sessionId: 'PF16', cwd: '/w' },
+      events: [{ seq: 0, type: 'assistant/message', data: { message: { id: 'a-held', content: [fileBlock()] } } }],
+    },
+    channels: { maxOutputFrameBytes: 64 },
+  })
+  const readStarted = deferred<void>()
+  const releaseRead = deferred<void>()
+  let readSignal: AbortSignal | undefined
+  view.access.fileReadImpl = (_ref, signal) => {
+    readSignal = signal
+    readStarted.resolve()
+    return (async function* heldFile() {
+      await releaseRead.promise
+      yield FILE_BYTES
+    })()
+  }
+  const loading = view.load()
+  await readStarted.promise
+  await view.registry.closeSession(view.conn, view.access, 'PF16')
+  assert.equal(readSignal?.aborted, true, 'close aborts the EXACT claim read signal')
+  releaseRead.resolve()
+  await assert.rejects(loading, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.deepEqual(view.notifications, [], 'no late resource is projected into the closed View')
+})
+
+test('PR4D: a NON-COOPERATIVE late prompt-file success never reaches the closed or a newly attached View', async () => {
+  const view = promptView('PF17', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  const readStarted = deferred<void>()
+  let readSignal: AbortSignal | undefined
+  let cleaned = false
+  view.access.fileReadImpl = (_ref, signal) => {
+    readSignal = signal
+    readStarted.resolve()
+    return (async function* lateFile() {
+      try {
+        await new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+        // A backend that ignores the abort and yields the complete object
+        // anyway: the View must not trust it or leak it into another claim.
+        yield FILE_BYTES
+      } finally {
+        cleaned = true
+      }
+    })()
+  }
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-held-file')
+  view.access.turnFence = { openTurnStartSeq: 100, lastTurn: 1 }
+  view.access.agentStatus = 'running'
+  view.claim('m-held-file', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-held-file', [
+    { type: 'text', text: 'before' },
+    fileBlock(),
+  ]))
+  await readStarted.promise
+  const closing = view.registry.closeSession(view.conn, view.access, 'PF17')
+  await flushOutput()
+  assert.equal(readSignal?.aborted, true, 'close stops the flight-owned output read')
+  await waitUntil(() => cleaned, 'the late iterator still runs its finally through the early return')
+  assert.deepEqual(view.notifications, [], 'the pending text and late resource are dropped together')
+  view.commit('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  assert.deepEqual(await closing, {})
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.equal(view.registry.hasClaim('PF17'), false)
+  // The old flight's late bytes must not be delivered to a NEW claim on the
+  // same Session either; the turn/end fence still settled the old prompt.
+  const nextConn = view.registry.createConnection()
+  const next: SessionUpdate[] = []
+  await view.registry.resumeSession(nextConn, view.access, { sessionId: 'PF17', cwd: '/w' }, {
+    capabilities: PR2_CAPABILITIES,
+    maxOutputFrameBytes: 64,
+    notifyProjection: async (_sessionId, update) => {
+      if (update.sessionUpdate !== 'available_commands_update') next.push(update)
+    },
+  })
+  assert.deepEqual(next, [], 'the new claim receives no late old-flight content')
+  await view.registry.closeSession(nextConn, view.access, 'PF17')
+})
+
+test('PR4D R1: one tool result refuses the SUM of individually representable blobs before any read', async () => {
+  const view = promptView('PF-AGG', { channels: { maxOutputFrameBytes: 2_000_000_000 } })
+  await view.attach()
+  // Each blob's Base64 fits V8's one-string limit; the ONE tool_call_update
+  // serializes both into a single JSON string, so their sum must be refused.
+  const each = 300_000_000
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-aggregate')
+  view.claim('m-aggregate', 1, request.requestId)
+  view.commit('tool/call', { turn: 1, step: 1, callId: 'call-agg', name: 'pr4d_tool', arguments: '{}' })
+  view.commit('tool/result', toolResultData(1, 'call-agg', false, [
+    fileBlock(FILE_ID, 'one.bin', each),
+    fileBlock(FILE_ID_B, 'two.bin', each),
+  ]))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.equal(view.access.fileReadCalls.length, 0, 'the aggregate oversize is refused before any Store read')
+  assert.equal(view.notifications.some(update => updateKind(update) === 'tool_call_update'), false,
+    'no partial tool_call_update is sent')
+})
+
+test('PR4D R1: separate assistant chunks charge each blob, never their sum', async () => {
+  const view = promptView('PF-SEP', { channels: { maxOutputFrameBytes: 2_000_000_000 } })
+  await view.attach()
+  view.access.fileReadImpl = () => (async function* absentFile() {
+    throw new Error('no stored object for this test')
+  })()
+  const each = 300_000_000
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-separate')
+  view.claim('m-separate', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-separate', [
+    fileBlock(FILE_ID, 'one.bin', each),
+    fileBlock(FILE_ID_B, 'two.bin', each),
+  ]))
+  // The sum exceeds one string, but each committed block is its own ACP chunk:
+  // the preflight passes and the read fails as an attachment failure instead.
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'))
+  assert.notEqual(view.access.fileReadCalls.length, 0, 'the separate chunks reached the Store read')
+})
+
+test('PR4D R2: an unproven inter-agent author is never charged and reads nothing despite a huge file', async () => {
+  const huge = 400 * 1024 * 1024
+  const view = projectionView('PF-R2U', {
+    history: {
+      header: { sessionId: 'PF-R2U', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: {
+          id: 'am-unproven',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'FORGED' },
+          content: [fileBlock(FILE_ID, 'huge.bin', huge)],
+          role: 'user',
+        },
+      }],
+    },
+    channels: { maxOutputFrameBytes: 8 },
+  })
+  await view.load()
+  assert.deepEqual(view.notifications, [], 'an unproven author projects nothing')
+  assert.equal(view.access.fileReadCalls.length, 0, 'no budget and no Store read happen before lineage')
+})
+
+test('PR4D R2: a proven child file is charged after lineage and before association or read', async () => {
+  const huge = 400 * 1024 * 1024
+  const view = projectionView('PF-R2P', {
+    history: {
+      header: { sessionId: 'PF-R2P', cwd: '/w' },
+      events: [{
+        seq: 0,
+        type: 'user/message',
+        data: {
+          id: 'am-proven',
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+          content: [fileBlock(FILE_ID, 'huge.bin', huge)],
+          role: 'user',
+        },
+      }],
+    },
+    channels: { maxOutputFrameBytes: 8 },
+  })
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF-R2P', cwd: '/w' }
+  await assert.rejects(view.load(), isViewError('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'))
+  assert.deepEqual(view.notifications, [], 'the oversize message is refused before its child association')
+  assert.equal(view.access.fileReadCalls.length, 0, 'a proven oversize message is refused before any Store read')
+})
+
+test('PR4D R2: a live oversize child message drops without association, then a legal message still works', async () => {
+  const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    debug: () => {},
+    info: () => {},
+    warn: (message, fields) => { warnings.push({ message, fields }) },
+    error: () => {},
+    dispose: () => {},
+  }
+  const view = projectionView('PF-R2L', { channels: { maxOutputFrameBytes: 8 }, diag })
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF-R2L', cwd: '/w' }
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  view.commit('user/message', {
+    id: 'am-live-big',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [fileBlock(FILE_ID, 'big.bin', 30)],
+    role: 'user',
+  })
+  await waitUntil(() => warnings.some(warning => warning.message === 'local-acp.projection.failed'
+    && warning.fields?.code === 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE'), 'the budget failure is reported safely')
+  assert.equal(view.notifications.length, 0, 'the oversize live message announces no child and sends nothing')
+  assert.equal(view.access.fileReadCalls.length, 0)
+  view.commit('user/message', {
+    id: 'am-live-ok',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [fileBlock()],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.length >= 2, 'the later legal child message still projects')
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['subagent_update', 'session_message'])
+  assert.equal(view.access.fileReadCalls.length, 1)
+})
+
+test('PR4D R2/R3: a file-bearing child message buffered during load joins the same ordered consumer', async () => {
+  const view = projectionView('PF-R2B', { channels: { maxOutputFrameBytes: 64 } })
+  const readStarted = deferred<void>()
+  const readRelease = deferred<AcpSessionHistory>()
+  view.access.readSessionHistoryImpl = async () => {
+    readStarted.resolve()
+    return await readRelease.promise
+  }
+  const loading = view.load()
+  await readStarted.promise
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF-R2B', cwd: '/w' }
+  view.access.storedFiles.set(FILE_ID, FILE_BYTES)
+  view.commit('user/message', {
+    id: 'am-buffered',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'buffered file' }, fileBlock()],
+    role: 'user',
+  })
+  readRelease.resolve({ header: { sessionId: 'PF-R2B', cwd: '/w' }, events: [] })
+  await loading
+  assert.deepEqual(view.notifications.map(update => update.sessionUpdate), ['subagent_update', 'session_message'])
+  const message = view.notifications[1] as { content?: readonly Record<string, unknown>[] }
+  assert.equal(message.content?.[0]?.type, 'text')
+  assert.equal((message.content?.[1]?.resource as { uri?: string } | undefined)?.uri, FILE_URI)
+  assert.equal(view.access.fileReadCalls.length, 1)
+})
+
+test('PR4D R3: a file-bearing tool result that fails only at EOF fails the prompt without a partial update', async () => {
+  const view = promptView('PF-TOOL-EOF', { channels: { maxOutputFrameBytes: 64 } })
+  await view.attach()
+  view.access.fileReadImpl = () => (async function* corruptToolFile() {
+    yield FILE_BYTES
+    throw new Error('stored tool file verification failed at EOF')
+  })()
+  const attempt = view.start()
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-tool-eof')
+  view.claim('m-tool-eof', 1, request.requestId)
+  view.commit('tool/call', { turn: 1, step: 1, callId: 'call-eof', name: 'pr4d_tool', arguments: '{}' })
+  view.commit('tool/result', toolResultData(1, 'call-eof', false, [
+    { type: 'text', text: 'tool-before\n' },
+    fileBlock(),
+  ]))
+  await assert.rejects(attempt, isPromptError('LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED'))
+  assert.equal(view.notifications.some(update => updateKind(update) === 'tool_call_update'), false,
+    'no partial tool_call_update escapes before EOF verification')
+  assert.equal(view.access.fileReadCalls.length, 1)
+})
+
+test('PR4D R3 A5: an ordinary-live child file EOF drops only that message, reports a safe diagnostic, and the View keeps working', async () => {
+  const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    debug: () => {},
+    info: () => {},
+    warn: (message, fields) => { warnings.push({ message, fields }) },
+    error: () => {},
+    dispose: () => {},
+  }
+  const view = projectionView('PF-LIVE-EOF', { channels: { maxOutputFrameBytes: 64 }, diag })
+  await view.resume()
+  view.notifications.length = 0
+  view.access.headerFacts = { sessionId: 'SENDER', origin: 'subagent', parentSessionId: 'PF-LIVE-EOF', cwd: '/w' }
+  const defaultRead = view.access.fileReadImpl
+  // Natural EOF, not close/abort: the bytes look complete, then the Store's
+  // final verification throws. The live path must drop only this message.
+  view.access.fileReadImpl = () => (async function* brokenLiveFile() {
+    yield FILE_BYTES
+    throw new Error('private store verification detail')
+  })()
+  view.commit('user/message', {
+    id: 'am-live-eof',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [{ type: 'text', text: 'this one fails' }, fileBlock()],
+    role: 'user',
+  })
+  await waitUntil(() => warnings.some(warning => warning.message === 'local-acp.projection.attachment-failed'
+    && warning.fields?.key === 'session_message'), 'the live EOF failure is reported safely')
+  assert.equal(JSON.stringify(warnings).includes('private store verification detail'), false,
+    'the safe diagnostic never carries the raw exception')
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'session_message'), false,
+    'the failed live message is not partially emitted')
+  assert.equal(view.notifications.some(update => update.sessionUpdate === 'subagent_update'), true,
+    'the already-proven child association is allowed before the failed read')
+
+  // The ordered successor proves the View and its claim survived: a later legal
+  // child file through the SAME View must arrive with its exact identity.
+  view.access.fileReadImpl = defaultRead
+  const okBytes = Uint8Array.of(9, 8, 7)
+  view.access.storedFiles.set(FILE_ID_B, okBytes)
+  view.commit('user/message', {
+    id: 'am-live-ok-after-eof',
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'SENDER' },
+    content: [fileBlock(FILE_ID_B, 'ok.bin', okBytes.byteLength)],
+    role: 'user',
+  })
+  await waitUntil(() => view.notifications.some(update => update.sessionUpdate === 'session_message'
+    && (update as { messageId?: string }).messageId === 'am-live-ok-after-eof'),
+  'the later legal child file reaches the same View')
+  const messages = view.notifications.filter(update => update.sessionUpdate === 'session_message')
+  assert.equal(messages.length, 1, 'only the later legal message is emitted')
+  const content = (messages[0] as { content?: readonly Record<string, unknown>[] }).content
+  const resource = content?.[0]?.resource as { uri?: string; blob?: string } | undefined
+  assert.equal(resource?.uri, `dsh-attachment://sha256/${'b'.repeat(64)}/ok.bin`)
+  assert.equal(resource?.blob, Buffer.from(okBytes).toString('base64'))
+  assert.equal(view.registry.hasClaim('PF-LIVE-EOF'), true, 'the View/claim stays live after the drop')
 })

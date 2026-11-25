@@ -48,6 +48,7 @@ import {
   type AcpQuestionSnapshot,
   type AcpPromptFactListener,
   type AcpSessionPromptRequest,
+  type AcpStoredFileRef,
   type AcpStoredImage,
   type AcpStoredImageRef,
   type HostAcpSessionAccess,
@@ -1173,6 +1174,7 @@ function makeFakeAccess(options: {
   readonly imageLimits?: AcpImageLimits
   readonly supportsImagePrompts?: () => Promise<boolean>
   readonly readOutputImage?: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage>
+  readonly readOutputFile?: (ref: AcpStoredFileRef, signal: AbortSignal) => AsyncIterable<Uint8Array>
   readonly modelOptions?: (agent: LiveAgentViewIdentity, session: object) => Promise<SessionConfigOption[]>
   readonly selectModelOnly?: (
     agent: LiveAgentViewIdentity,
@@ -1306,6 +1308,10 @@ function makeFakeAccess(options: {
       async readOutputImage(ref: AcpStoredImageRef, signal: AbortSignal) {
         if (options.readOutputImage === undefined) throw new Error('no attachment store')
         return await options.readOutputImage(ref, signal)
+      },
+      readOutputFile(ref: AcpStoredFileRef, signal: AbortSignal) {
+        if (options.readOutputFile === undefined) throw new Error('no attachment store')
+        return options.readOutputFile(ref, signal)
       },
       async modelOptions(agent: LiveAgentViewIdentity, session: object) {
         // The real Host omits optional config options when its model catalog is
@@ -2124,6 +2130,9 @@ test('session/new carries the authoritative created session id in JSON-RPC error
       return Promise.resolve(false)
     },
     async readOutputImage() {
+      throw new Error('no attachment store')
+    },
+    readOutputFile(): AsyncIterable<Uint8Array> {
       throw new Error('no attachment store')
     },
     async modelOptions() {
@@ -4675,5 +4684,91 @@ test('G-ACP2-PR2 LOAD-01 wire: session/load replays the canonical history before
     assert.equal(busy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
   } finally {
     client.close()
+  }
+})
+
+test('PR4D wire: the connection frozen frame budget bounds a load file and the verified resource precedes the reply', async t => {
+  const { scope } = newScope(t)
+  const fileId = `sha256:${'d'.repeat(64)}`
+  const fileBytes = Uint8Array.from([0x00, 0xff, 0x80, 0x0a, 0x00, 0x41])
+  const reads: AcpStoredFileRef[] = []
+  const fake = makeFakeAccess({
+    sessionRead: true,
+    sessionHistory: sessionId => ({
+      header: { sessionId, cwd: '/host/proj' },
+      events: [{
+        seq: 0,
+        type: 'assistant/message',
+        data: { message: { id: 'a-file', content: [{ type: 'file', attachment: { attachmentId: fileId, name: 'wire file.bin', bytes: fileBytes.byteLength } }] } },
+      }],
+    }),
+    readOutputFile: (ref) => (async function* storeFile() {
+      reads.push(ref)
+      yield fileBytes
+    })(),
+  })
+  fake.seed('wire-file', '/host/proj')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/load', params: { sessionId: 'wire-file', cwd: '/host/proj', mcpServers: [] } })
+    const frames: Array<{ id?: number; method?: string; params?: { update?: { sessionUpdate?: string; content?: { type?: string; resource?: { uri?: string; blob?: string } } } }; result?: unknown }> = []
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; method?: string }
+      frames.push(frame as never)
+      if (frame.id === 2) break
+    }
+    assert.deepEqual(frames.map(frame => frame.method ?? frame.id), ['session/update', 2])
+    assert.deepEqual(frames[0]?.params?.update?.sessionUpdate, 'agent_message_chunk')
+    assert.equal(frames[0]?.params?.update?.content?.type, 'resource')
+    assert.equal(frames[0]?.params?.update?.content?.resource?.uri,
+      `dsh-attachment://sha256/${'d'.repeat(64)}/wire%20file.bin`)
+    assert.equal(frames[0]?.params?.update?.content?.resource?.blob, Buffer.from(fileBytes).toString('base64'))
+    assert.deepEqual(reads, [{ attachmentId: fileId, name: 'wire file.bin', bytes: fileBytes.byteLength }],
+      'the real listener budget lets this event read its exact committed reference once')
+    assert.deepEqual(frames[frames.length - 1]?.result, {})
+  } finally {
+    client.close()
+  }
+
+  // The legacy text-only connection cap is 256 KiB. A 200,000-byte file
+  // encodes to 266,668 Base64 characters (> 262,144), so the real per-connection
+  // budget must reach the View and refuse the event BEFORE any Store read.
+  const oversizedScope = newScope(t).scope
+  let oversizedRead = false
+  const oversizedBytes = 200_000
+  const oversized = makeFakeAccess({
+    sessionRead: true,
+    sessionHistory: sessionId => ({
+      header: { sessionId, cwd: '/host/proj' },
+      events: [{
+        seq: 0,
+        type: 'assistant/message',
+        data: { message: { id: 'a-big', content: [{ type: 'file', attachment: { attachmentId: `sha256:${'e'.repeat(64)}`, name: 'big.bin', bytes: oversizedBytes } }] } },
+      }],
+    }),
+    readOutputFile: () => (async function* mustNotRead() {
+      oversizedRead = true
+      yield new Uint8Array(oversizedBytes)
+    })(),
+  })
+  oversized.seed('wire-big', '/host/proj')
+  const bigListener = await startLocalAcpListener({ scope: oversizedScope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: oversized.access })
+  t.after(() => bigListener.close())
+  const bigClient = await RawClient.open(bigListener.socketPath)
+  try {
+    initialize(bigClient, 1)
+    await bigClient.next()
+    bigClient.send({ jsonrpc: '2.0', id: 2, method: 'session/load', params: { sessionId: 'wire-big', cwd: '/host/proj', mcpServers: [] } })
+    const frame = (await bigClient.next()) as { id?: number; error?: { code?: number; data?: { code?: string } } }
+    assert.equal(frame.id, 2)
+    assert.equal(frame.error?.code, -32603)
+    assert.equal(frame.error?.data?.code, 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE')
+    assert.equal(oversizedRead, false, 'the per-connection budget refused the event before its Store read')
+  } finally {
+    bigClient.close()
   }
 })
