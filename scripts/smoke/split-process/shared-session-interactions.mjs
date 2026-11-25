@@ -102,6 +102,42 @@ export async function runSharedSessionInteractions(context) {
         return prefix
       }
 
+      // Feature History PR2-A / A05-D fresh-Client negative. The positive
+      // control runs BEFORE Client B starts, so B's boot path really sees the
+      // existing row: A's Host-accepted seed must be in the isolated launch-cwd
+      // legacy history file with the row's own cwd and the file's hash identity.
+      // Verifying this after B's mount could not prove the row existed at B's
+      // boot, so a broken cold-seed implementation could still pass.
+      const launchCwd = realpathSync(context.installation.profileDir)
+      const historyDir = join(dshHome, 'user-history')
+      const historyRows = file => existsSync(file)
+        ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => {
+            try { return JSON.parse(line) } catch { return undefined }
+          }).filter(row => row !== undefined)
+        : []
+      const seedOccurrence = await waitForHostSessionEvent(dshHome, sessionX,
+        event => event.type === 'user/message' && textOf(event.data) === 'm5b-seed-a',
+        'M5B A seed durable user/message', 120_000)
+      assert(typeof seedOccurrence.data?.id === 'string' && seedOccurrence.data.id !== '',
+        'M5B the seed occurrence carries no durable identity')
+      const launchHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
+      const launchHistoryFile = join(historyDir, launchHistoryName)
+      {
+        const deadline = Date.now() + 30_000
+        while (Date.now() < deadline
+          && !historyRows(launchHistoryFile).some(row => row.content === 'm5b-seed-a')) {
+          await sleep(100)
+        }
+      }
+      const seedRow = historyRows(launchHistoryFile).find(row => row.content === 'm5b-seed-a')
+      assert(seedRow !== undefined,
+        `A05-D: the accepted seed is not in B's launch-cwd history file ${launchHistoryName}`)
+      assert(seedRow.cwd === launchCwd,
+        `A05-D: the seed history row carries cwd=${JSON.stringify(seedRow.cwd)}, expected ${JSON.stringify(launchCwd)}`)
+      assert(seedRow.sessionId === sessionX,
+        'A05-D: the seed history row is not attributed to Session X')
+      assert(!existsSync(releaseBarrier), 'M5B the held Turn was released before the fresh-Client negative')
+
       // MB-01: B is a SECOND real pty — its own `script(1)` wrapper and its
       // own business PID — whose startup intent opens the SAME Session X.
       const { client: clientB, ready: bReady } = await startC1Client('M5B B', {
@@ -134,39 +170,6 @@ export async function runSharedSessionInteractions(context) {
       await clientA.waitForScreen('long-turn started', 'M5B A still shows the running Host stream', 120_000)
       assert(alive(hostBefore.hostPid), 'M5B the Host died while both Clients retained Session X')
 
-      // Feature History PR2-A / A05-D fresh-Client negative. The positive
-      // control first: A's Host-accepted seed must really be in the isolated
-      // launch-cwd legacy history file B's boot path reads. The row's own cwd
-      // and the file's hash identity are asserted, so this cannot pass with a
-      // wrong-cwd or empty-file setup.
-      const launchCwd = realpathSync(context.installation.profileDir)
-      const historyDir = join(dshHome, 'user-history')
-      const historyRows = file => existsSync(file)
-        ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => {
-            try { return JSON.parse(line) } catch { return undefined }
-          }).filter(row => row !== undefined)
-        : []
-      const seedOccurrence = await waitForHostSessionEvent(dshHome, sessionX,
-        event => event.type === 'user/message' && textOf(event.data) === 'm5b-seed-a',
-        'M5B A seed durable user/message', 120_000)
-      assert(typeof seedOccurrence.data?.id === 'string' && seedOccurrence.data.id !== '',
-        'M5B the seed occurrence carries no durable identity')
-      const launchHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
-      const launchHistoryFile = join(historyDir, launchHistoryName)
-      {
-        const deadline = Date.now() + 30_000
-        while (Date.now() < deadline
-          && !historyRows(launchHistoryFile).some(row => row.content === 'm5b-seed-a')) {
-          await sleep(100)
-        }
-      }
-      const seedRow = historyRows(launchHistoryFile).find(row => row.content === 'm5b-seed-a')
-      assert(seedRow !== undefined,
-        `A05-D: the accepted seed is not in B's launch-cwd history file ${launchHistoryName}`)
-      assert(seedRow.cwd === launchCwd,
-        `A05-D: the seed history row carries cwd=${JSON.stringify(seedRow.cwd)}, expected ${JSON.stringify(launchCwd)}`)
-      assert(seedRow.sessionId === sessionX,
-        'A05-D: the seed history row is not attributed to Session X')
       // B boots with that real row present. Its empty composer is given a REAL
       // Up first; a boot file seed would put the seed text there and the
       // original marker would append to it, so the unchanged exact occurrence
