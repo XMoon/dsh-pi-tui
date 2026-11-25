@@ -3945,6 +3945,38 @@ test('the ACP access page returns to the Host Rows level and reopening mounts ON
   assert.equal(h.closes(), 0, 'the workspace never closed for a same-lease page switch')
 })
 
+test('the /acp deeplink is a real Detail tenant: parent panes stay painted and the page owns the cells', () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    acpAccessPage: true,
+    snapshot: () => acpAccessSnapshot(),
+    initial: { initialRowId: 'acp-access', initialSpecialist: 'acp-access' },
+  })
+  const painted = plain(h)
+  assert.match(painted, /Categories \(10\)/u, 'the parent rail stays readable')
+  assert.match(painted, /Rows \(/u, 'the parent Rows stay readable')
+  assert.match(painted, /\[Details\]/u, 'the Detail column owns the ONE active device')
+  assert.match(painted, /SPECIALIST HEADER/u, 'the tenant body owns the Detail cells')
+  assert.match(painted, /specialist hint/u, 'the page bar is the physical last row')
+  assert.doesNotMatch(painted, /^> ACP access/mu, 'the parent selection is passive context, not a second cursor')
+})
+
+test('an /acp first frame without one real Detail row refuses and starts no page', async () => {
+  const h = setup({
+    columns: 80,
+    rows: 2,
+    acpAccessPage: true,
+    snapshot: () => acpAccessSnapshot(),
+    initial: { initialRowId: 'acp-access', initialSpecialist: 'acp-access' },
+  })
+  plain(h)
+  const settlement = await h.panel.whenInitialSpecialistSettled()
+  assert.equal(settlement.ok, false)
+  assert.match(settlement.ok === false ? settlement.reason : '', /could not be created/u)
+  assert.equal(h.acpAccessBuilds(), 0, 'no page is built without a paintable Detail grant')
+})
+
 // ── C2-R7: the row contract has no legacy action left ─────────────────────
 
 test('read-only / writable / specialist rows own their own verb and a row hit activates only the painted row', () => {

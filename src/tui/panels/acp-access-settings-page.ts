@@ -1,12 +1,14 @@
 /**
- * The `/settings → Host → ACP access` page (PR-B): the ONE PiTui ACP control
+ * The `/settings → Host → ACP access` page (SUX-05): the ONE PiTui ACP control
  * surface.
  *
- * It is mounted as an EMBEDDED SPECIALIST PAGE inside the existing Settings
- * Workspace lease (the same body grant and physical last-row Action Bar as the
- * `Host · Web UI` page) — never a second alt-screen overlay, never a second
- * Settings screen, and never a `SettingsList`. `/acp` and the
- * `Host → ACP access` row reach the SAME page class through the SAME factory.
+ * It is mounted as a real Detail TENANT inside the existing Settings Workspace
+ * lease: the parent Categories/Rows stay painted and readable, the Root keeps
+ * the ONE physical last-row Action Bar and the ONE `Esc` target, and only this
+ * page's Detail body cells belong to the child. It is never a second alt-screen
+ * overlay, never a second Settings screen, and never a `SettingsList`. `/acp`
+ * and the `Host → ACP access` row reach the SAME page class through the SAME
+ * factory.
  *
  * Three authorities are painted side by side and are NEVER merged:
  *  - `Current Host` is the LIVE listener state of the running Split Host, read
@@ -42,7 +44,7 @@ import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from 
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
-import type { SettingsWorkspaceCommitOutcome, EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
+import type { SettingsWorkspaceCommitOutcome, EmbeddedSpecialistPage, SpecialistParentLeaveTarget } from './settings-workspace-panel.ts'
 
 /** The page's own name (the Settings row label and the pane header). The
  *  breadcrumb is `Settings · Host · ACP access` because the owning row label
@@ -90,9 +92,12 @@ interface OutcomeNote {
   readonly detail?: string
 }
 
-/** One focusable row of the current projection. */
+/** One focusable row of the current projection. `field` rows select on a row
+ *  click and expose ONE explicit `Change…` action; `action` rows publish the
+ *  complete business verb itself. */
 interface RowSpec {
   readonly id: string
+  readonly kind: 'action' | 'field'
   readonly label: string
   /** The row's own value / explanation column (a secondary fact). */
   readonly value?: string
@@ -104,10 +109,27 @@ interface RowSpec {
   readonly affordance?: string
 }
 
-/** One painted body line plus the row it belongs to (when focusable). */
+/** One painted body hit span, in this page's own columns. A `select` span only
+ *  moves the cursor; an `action` span runs the row's explicit intent. */
+interface BodyTarget {
+  readonly kind: 'select' | 'action'
+  readonly id: string
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** One painted body line plus the row it belongs to (when focusable) and its
+ *  complete-span admission. */
 interface ContentLine {
   readonly text: string
   readonly rowId?: string
+  readonly targets?: readonly BodyTarget[]
+  /** Necessary copy: a gated entry may only act while every line of this group
+   *  is inside the SAME painted viewport. */
+  readonly group?: 'copy'
+  /** This line is the explicit accept entry: blank unless its copy group is
+   *  complete in the same frame (and then its span is the ONLY accept grant). */
+  readonly gatedBy?: 'copy'
 }
 
 /** The geometry the page publishes to the Settings root for ONE painted frame:
@@ -117,7 +139,7 @@ interface PagePaint {
   readonly width: number
   readonly rows: number
   readonly identity: string
-  readonly targets: readonly { readonly id: string; readonly row: number; readonly startCol: number; readonly endCol: number }[]
+  readonly targets: readonly { readonly kind: BodyTarget['kind']; readonly id: string; readonly row: number; readonly startCol: number; readonly endCol: number }[]
   readonly scrollStart: number
   readonly scrollEnd: number
   readonly maxOffset: number
@@ -138,12 +160,15 @@ const REFRESH_KEY = 'r'
 /** The fixed label column. It fits the longest product label (`Start
  *  automatically`) and keeps every section's values in one column. */
 const LABEL_COLUMN = 19
-/** The label column never shrinks below this: a shorter one identifies nothing. */
-const MIN_LABEL_ROOM = 6
+/** Two-cell content indent shared by every body line/continuation. */
+const INDENT = '  '
 
 /** The exact confirm sentence of the runtime write (never paraphrased). */
 const DISABLE_QUESTION = 'Disable the local ACP listener? All connected ACP clients will be disconnected. '
   + 'Host sessions, Agents and this TUI will keep running.'
+/** The next-start choice prompt and its frozen lifetime fact. */
+const CHOOSE_PROMPT = 'Choose the value the next Host start applies:'
+const NEXT_START_ONLY = 'Applies on the next Host start; the running Host is unchanged.'
 
 /** The fixed Client Setup explanation lines. */
 const SETUP_LEAD = 'Configure an ACP stdio command in your external client/IDE.'
@@ -296,6 +321,14 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
    * instead of silently rebasing the CAS onto the newer revision.
    */
   private autostartFence: number | undefined
+  /**
+   * The Connection generation the staged choice was opened under. The revision
+   * alone cannot prove the authority still belongs to the Host the user was
+   * reading: a silent replacement (no rollover notification) keeps the same
+   * revision while its Config mirror already belongs to another Host, so the
+   * confirm compares BOTH captured facts.
+   */
+  private autostartGenerationFence: { readonly value: unknown } | undefined
   private selectedId: string | undefined
   private scrollOffset = 0
   private revealSelection = true
@@ -315,6 +348,9 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   private runtimeStage: 'preflight' | 'invoked' | undefined
   private awaitingPaint = true
   private paint: PagePaint | undefined
+  /** The actions whose COMPLETE span the last painted frame really published:
+   *  the keyboard reads exactly this set, like the pointer does. */
+  private paintedActions = new Set<string>()
   private pressed: { readonly paint: PagePaint; readonly target: PagePaint['targets'][number] } | undefined
   private escapeSpan: { readonly startCol: number; readonly endCol: number } | undefined
   private barSpans: readonly { readonly id: string; readonly action: BarAction; readonly startCol: number; readonly endCol: number }[] = []
@@ -364,6 +400,18 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   }
   invalidate(): void {}
 
+  /**
+   * The ONE user parent-leave query of the Detail tenant. The clean browse (or
+   * a loaded page whose read is still in flight) leaves immediately; a staged
+   * next-start choice, an open confirmation and a dispatched pending write keep
+   * the page until the user's own local Cancel/Back. It never navigates, writes
+   * or cancels an already dispatched write.
+   */
+  requestParentLeave(_target: SpecialistParentLeaveTarget, _leave: () => void): 'allow' | 'refuse' {
+    if (this.disposed) return 'refuse'
+    return this.phase === 'ready' || this.phase === 'settled' || this.phase === 'loading' ? 'allow' : 'refuse'
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -372,14 +420,15 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.unsubscribe()
   }
 
-  /** Any state change retires the last frame's pointer grant and the pending
-   *  press; the next real paint republishes both. */
+  /** Any state change retires the last frame's pointer grant, its action
+   *  admission and the pending press; the next real paint republishes them. */
   private revoke(): void {
     this.revision += 1
     this.awaitingPaint = true
     this.pressed = undefined
     this.escapeSpan = undefined
     this.barSpans = []
+    this.paintedActions.clear()
   }
   private changed(): void {
     if (this.disposed) return
@@ -468,6 +517,12 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     if (this.disposed || this.host.kind === 'split-host-only') return
     this.readSerial += 1
     this.host = { kind: 'checking' }
+    // Every ACTUAL rollover retires a local staged preference intent, even
+    // when the new Config mirror happens to expose the SAME revision: the
+    // decision was made against the old Host's authority. A dispatched write
+    // (`pending-*`) is never cancelled or replayed here — its own owner settles
+    // and diagnoses it.
+    this.retireStagedChoice()
     if (this.phase === 'pending-runtime') {
       // Retire this page's right to paint the old task's result (its owner
       // still settles and diagnoses). The stage decides the only honest word:
@@ -489,6 +544,15 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.startStatusRead()
   }
 
+  /** Drop a not-yet-dispatched next-start intent (phase, revision AND the
+   *  generation fence it was opened under). */
+  private retireStagedChoice(): void {
+    this.autostartCandidate = undefined
+    this.autostartFence = undefined
+    this.autostartGenerationFence = undefined
+    if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') this.phase = 'ready'
+  }
+
   /**
    * ONE live observation of the persisted next-start preference and its Config
    * authority (never a Host ACP read). The readiness preference and the value
@@ -502,12 +566,8 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.preference = this.intents.readPreference()
     if (!this.preferenceEditable()) {
       // The authority is no longer current: revoke the staged step, zero writes.
-      this.autostartCandidate = undefined
-      this.autostartFence = undefined
-      if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
-        this.phase = 'ready'
-        this.revealSelection = true
-      }
+      this.retireStagedChoice()
+      if (this.phase === 'ready' || this.phase === 'settled') this.revealSelection = true
     }
   }
 
@@ -516,6 +576,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   private settleStaleAutostartChoice(): void {
     this.autostartCandidate = undefined
     this.autostartFence = undefined
+    this.autostartGenerationFence = undefined
     if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
       this.phase = 'settled'
       this.revealSelection = true
@@ -572,6 +633,10 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
 
   private activateRow(id: string): void {
     if (this.disposed) return
+    // The ONE semantic admission shared by the body span, the bar span and the
+    // keyboard: a row that is not completely painted/actionable right now can
+    // never write or open a confirmation.
+    if (!this.paintedActions.has(id)) return
     // An action is admitted against a CURRENT Config observation, never against
     // the projection a previous frame captured.
     this.reconcilePreference()
@@ -589,10 +654,11 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
         if (!this.preferenceEditable() || this.preference === undefined) return
         // Stage the OPPOSITE of the persisted value: the row was activated to
         // change it, and the current candidate stays visible (marked below).
-        // The revision is captured HERE, at choice entry, and travels with the
-        // staged decision.
+        // The revision AND the Connection generation are captured HERE, at
+        // choice entry, and travel with the staged decision.
         this.phase = 'choose-autostart'
         this.autostartFence = this.preference.revision
+        this.autostartGenerationFence = { value: this.intents.currentGeneration() }
         this.autostartCandidate = this.preference.autoStart ? false : true
         this.selectedId = this.candidateId(this.autostartCandidate)
         this.revealSelection = true
@@ -638,6 +704,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       case 'choose-autostart':
         this.autostartCandidate = undefined
         this.autostartFence = undefined
+        this.autostartGenerationFence = undefined
         this.phase = 'ready'
         this.selectedId = 'autostart'
         this.changed()
@@ -909,11 +976,15 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     const candidate = this.autostartCandidate
     const state = this.preference
     const fence = this.autostartFence
-    if (candidate === undefined || state === undefined || fence === undefined || !this.preferenceEditable()) return
-    // The captured revision is the ONE revision this decision may submit; a
-    // moved authority refuses the stale confirmation instead of CAS-rebasing
-    // it onto the intervening write.
-    if (state.revision !== fence) {
+    const generationFence = this.autostartGenerationFence
+    if (candidate === undefined || state === undefined || fence === undefined
+      || generationFence === undefined || !this.preferenceEditable()) return
+    // The captured revision AND generation are the ONE decision this submit may
+    // use; a moved authority refuses the stale confirmation instead of
+    // CAS-rebasing it onto the intervening write, and a silently replaced Host
+    // can never receive a choice derived from its predecessor.
+    if (state.revision !== fence
+      || !Object.is(generationFence.value, this.intents.currentGeneration())) {
       this.settleStaleAutostartChoice()
       this.changed()
       return
@@ -941,6 +1012,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       this.configOutcome = configOutcomeNote(outcome)
       this.autostartCandidate = undefined
       this.autostartFence = undefined
+      this.autostartGenerationFence = undefined
       this.phase = 'settled'
       this.revealSelection = true
       this.changed()
@@ -950,6 +1022,7 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       this.configOutcome = { word: 'Outcome unconfirmed', tone: 'warning', detail: safeErrorMessage(error) }
       this.autostartCandidate = undefined
       this.autostartFence = undefined
+      this.autostartGenerationFence = undefined
       this.phase = 'settled'
       this.revealSelection = true
       this.changed()
@@ -966,7 +1039,12 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.pressed = undefined
     if (matchesKey(data, 'escape')) { this.cancelPhase(); return }
     if (this.phase === 'pending-runtime' || this.phase === 'pending-config' || this.phase === 'pending-copy') return
-    if (data === REFRESH_KEY || data === REFRESH_KEY.toUpperCase()) { this.refreshAll(); return }
+    if (data === REFRESH_KEY || data === REFRESH_KEY.toUpperCase()) {
+      // The refresh shortcut has the SAME admission as its painted row: a row
+      // the current grant does not paint publishes no action at all.
+      if (this.paintedActions.has('refresh')) this.refreshAll()
+      return
+    }
     if (matchesKey(data, 'up')) { this.move(-1); return }
     if (matchesKey(data, 'down')) { this.move(1); return }
     if (matchesKey(data, 'pageUp')) { this.scroll(-Math.max(1, this.bodyRows() - 2)); return }
@@ -979,20 +1057,25 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Invoke one delegated Action Bar intent. The id came from the LAST painted
-   *  frame; the live page state re-proves it before the SAME keyboard sink. */
+   *  frame; the live page re-proves the semantic admission before the SAME
+   *  keyboard sink. */
   activateBarSpan(id: string): void {
     if (this.disposed || this.awaitingPaint) return
     if (this.paint !== undefined && this.paint.identity !== this.gestureIdentity()) return
     const span = this.barSpans.find(candidate => candidate.id === id)
     if (span === undefined) return
     switch (span.action) {
-      case 'refresh': this.refreshAll(); return
+      case 'refresh': if (this.paintedActions.has('refresh')) this.refreshAll(); return
       case 'select': this.activateSelected(); return
       case 'confirm':
-        // The bar's confirm names the PHASE's own confirmation, not whichever
-        // row the cursor happens to rest on (the Cancel row is a sibling).
-        if (this.phase === 'confirm-disable') this.dispatchRuntime(false)
-        else if (this.phase === 'confirm-save') this.dispatchConfig()
+        // The bar's confirm names the PHASE's own confirmation, never whichever
+        // row the cursor happens to rest on: the Cancel row is a sibling and
+        // never advertises an Enter confirm.
+        if (this.phase === 'confirm-disable') {
+          if (this.paintedActions.has('confirm-disable')) this.dispatchRuntime(false)
+        } else if (this.phase === 'confirm-save') {
+          if (this.paintedActions.has('confirm-save')) this.dispatchConfig()
+        }
         return
     }
   }
@@ -1016,7 +1099,12 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       this.scroll(event.wheelDelta < 0 ? -1 : 1)
       return { handled: true }
     }
-    const target = paint.targets.find(target => target.row === event.y && event.x >= target.startCol && event.x < target.endCol)
+    // A complete ACTION span wins over the row's select-only surface: blank and
+    // padding cells can only move the cursor, never write.
+    const target = paint.targets.find(candidate => candidate.kind === 'action'
+      && candidate.row === event.y && event.x >= candidate.startCol && event.x < candidate.endCol)
+      ?? paint.targets.find(candidate => candidate.kind === 'select'
+        && candidate.row === event.y && event.x >= candidate.startCol && event.x < candidate.endCol)
     if (target === undefined || event.button !== 'left') {
       if (event.type === 'click') this.pressed = undefined
       return undefined
@@ -1027,18 +1115,19 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     }
     if (event.type !== 'click' || pressed === undefined
       || pressed.paint.identity !== paint.identity || pressed.paint.width !== paint.width || pressed.paint.rows !== paint.rows
-      || pressed.target.id !== target.id || pressed.target.row !== target.row
+      || pressed.target.kind !== target.kind || pressed.target.id !== target.id || pressed.target.row !== target.row
       || pressed.target.startCol !== target.startCol || pressed.target.endCol !== target.endCol) {
       if (event.type === 'click') this.pressed = undefined
       return undefined
     }
     this.pressed = undefined
-    // A click SELECTS the row it landed on first (the visible cursor must match
-    // what the pointer acts on), then runs the SAME Enter sink.
+    // A click always SELECTS the row it landed on first (the visible cursor
+    // must match what the pointer acts on); only a complete action span runs
+    // the row's explicit intent.
     this.selectedId = target.id
     this.revealSelection = true
     this.revision += 1
-    this.activateRow(target.id)
+    if (target.kind === 'action') this.activateRow(target.id)
     this.intents.requestRender()
     return { handled: true }
   }
@@ -1059,18 +1148,18 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
         return []
       case 'confirm-disable':
         return [
-          { id: 'confirm-disable', label: 'Disable ACP' },
-          { id: 'cancel', label: 'Cancel' },
+          { id: 'confirm-disable', kind: 'action', label: 'Disable ACP' },
+          { id: 'cancel', kind: 'action', label: 'Cancel' },
         ]
       case 'choose-autostart':
         return [
-          { id: 'candidate-on', label: 'On', ...(this.preference?.autoStart === true ? { chip: '[current]' } : {}) },
-          { id: 'candidate-off', label: 'Off', ...(this.preference?.autoStart === false ? { chip: '[current]' } : {}) },
+          { id: 'candidate-on', kind: 'action', label: 'On', ...(this.preference?.autoStart === true ? { chip: '[current]' } : {}) },
+          { id: 'candidate-off', kind: 'action', label: 'Off', ...(this.preference?.autoStart === false ? { chip: '[current]' } : {}) },
         ]
       case 'confirm-save':
         return [
-          { id: 'confirm-save', label: 'Confirm save' },
-          { id: 'cancel', label: 'Cancel' },
+          { id: 'confirm-save', kind: 'action', label: 'Confirm save' },
+          { id: 'cancel', kind: 'action', label: 'Cancel' },
         ]
       case 'ready':
       case 'settled':
@@ -1081,27 +1170,32 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     if (host !== undefined) {
       switch (host.status.state) {
         case 'enabled':
-          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', label: 'Copy client command' })
-          rows.push({ id: 'disable', label: 'Disable ACP…', value: 'Disconnects active ACP clients', valueInk: 'dim' })
+          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
+          rows.push({ id: 'disable', kind: 'action', label: 'Disable ACP…', value: 'Disconnects active ACP clients', valueInk: 'dim' })
           break
         case 'disabled':
-          rows.push({ id: 'enable', label: 'Enable ACP' })
-          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', label: 'Copy client command' })
+          rows.push({ id: 'enable', kind: 'action', label: 'Enable ACP' })
+          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
           break
         case 'changing':
         case 'unavailable':
-          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', label: 'Copy client command' })
-          rows.push({ id: 'refresh', label: 'Refresh' })
+          if (this.clientCommand() !== undefined) rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
           break
       }
-    } else {
-      // checking / unreadable / split-host-only: no Host action exists.
-      if (this.clientCommand() !== undefined) rows.push({ id: 'copy', label: 'Copy client command' })
-      rows.push({ id: 'refresh', label: 'Refresh' })
+    } else if (this.clientCommand() !== undefined) {
+      // checking / unreadable / split-host-only: no Host action exists, but the
+      // Client-local Copy still depends only on the proven Profile.
+      rows.push({ id: 'copy', kind: 'action', label: 'Copy client command' })
     }
+    // A ready/settled page ALWAYS keeps its explicit Refresh body route: the
+    // live listener can change under a same-generation external writer, and
+    // `r`/the bar must not become a hidden no-op. The changing/unavailable/
+    // Direct projections reach the SAME row through this push.
+    if (!rows.some(row => row.id === 'refresh')) rows.push({ id: 'refresh', kind: 'action', label: 'Refresh' })
     if (this.preferenceEditable()) {
       rows.push({
         id: 'autostart',
+        kind: 'field',
         label: 'Start automatically',
         value: preferenceSummary(this.preference, this.preferenceReadiness),
         valueInk: 'text',
@@ -1142,78 +1236,219 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.selectedId = next
   }
 
-  /** One `Label   value` fact line (label ink = role 5). */
-  private factLine(label: string, value: string, width: number): string {
-    const room = Math.max(MIN_LABEL_ROOM, LABEL_COLUMN)
-    const paintedLabel = truncateToWidth(label, room, '…', false)
-    const padding = ' '.repeat(Math.max(0, room - visibleWidth(paintedLabel)))
-    return `  ${color.textDim(paintedLabel)}${padding} ${value}`
+  /** One section heading (role 2/5). */
+  private header(label: string): ContentLine {
+    return { text: color.textDim(label) }
   }
 
-  /** One list row: `cursor + label + value + affordance + chip`. The whole row
-   *  is the pointer target when it is focusable. */
-  private listLine(row: RowSpec, width: number): string {
-    const selected = this.selectedId === row.id
-    const marker = selected ? color.primary('> ') : '  '
-    const chipText = row.chip === undefined ? '' : `  ${row.chip}`
-    const chipWidth = row.chip === undefined ? 0 : visibleWidth(chipText)
-    const room = Math.max(MIN_LABEL_ROOM, LABEL_COLUMN - chipWidth)
-    const label = truncateToWidth(row.label, room, '…', false)
-    const paintedLabel = `${selected ? color.textStrong(label) : color.text(label)}${' '.repeat(Math.max(0, room - visibleWidth(label)))}`
-    const tailRoom = Math.max(0, width - visibleWidth(marker) - room - 1 - chipWidth)
-    // The affordance is painted WHOLE right after the value and dropped whole
-    // when it cannot fit; it is never truncated into a different verb.
-    const affordance = row.affordance === undefined ? undefined : `· ${row.affordance}`
-    const affordanceWidth = affordance === undefined ? 0 : visibleWidth(affordance)
-    const fitsAffordance = affordance !== undefined && row.value !== undefined && affordanceWidth + 1 <= tailRoom
-    const reserved = fitsAffordance ? affordanceWidth + 1 : 0
-    const value = row.value === undefined ? '' : truncateToWidth(row.value, Math.max(0, tailRoom - reserved), '…', false)
-    const valueWidth = row.value === undefined ? 0 : visibleWidth(value)
-    const paintedValue = row.value === undefined ? '' : valueInk(row.valueInk ?? 'text', value)
-    const paintedAffordance = fitsAffordance ? ` ${color.primary(affordance!)}` : ''
-    const padding = ' '.repeat(Math.max(0, tailRoom - valueWidth - reserved))
-    return `${marker}${paintedLabel} ${paintedValue}${paintedAffordance}${padding}${chipText}`
-  }
-
-  /** One diagnostic sentence, wrapped to the pane width and painted whole. */
-  private wrapped(text: string, ink: 'text' | 'dim' | 'error', width: number): ContentLine[] {
+  /** One diagnostic/risk/question sentence, wrapped to the pane width and
+   *  painted whole. Every physical line becomes a `copy` group member when
+   *  asked: a gated accept only exists while the WHOLE sentence shares the
+   *  painted viewport. */
+  private wrapped(text: string, ink: 'text' | 'dim' | 'error', width: number, group?: 'copy'): ContentLine[] {
     return wrapTextWithAnsi(sanitizedPhysicalLine(text), Math.max(1, width)).map(line => ({
       text: valueInk(ink === 'error' ? 'error' : ink === 'text' ? 'text' : 'dim', line),
+      ...(group === undefined ? {} : { group }),
     }))
+  }
+
+  /** One `Label   value` fact. A value that does not fit the real cells is
+   *  WRAPPED (never truncated into a different writable-looking value): the
+   *  complete label and the complete value are always preserved. */
+  private factLines(label: string, paintedValue: string, width: number): ContentLine[] {
+    const indentCells = INDENT.length
+    const labelRoom = Math.max(1, Math.min(LABEL_COLUMN, width - indentCells - 1))
+    const labelCells = visibleWidth(label)
+    if (labelCells > labelRoom) {
+      // The identity does not fit its column: paint it complete on its own
+      // line(s), then the value below.
+      const lines: ContentLine[] = wrapTextWithAnsi(color.textDim(sanitizedPhysicalLine(label)), Math.max(1, width))
+        .map(text => ({ text }))
+      for (const line of wrapTextWithAnsi(paintedValue, Math.max(1, width - indentCells))) {
+        lines.push({ text: `${INDENT}${line}` })
+      }
+      return lines
+    }
+    const valueRoom = width - indentCells - labelRoom - 1
+    const labelPad = ' '.repeat(labelRoom - labelCells)
+    const paintedLabel = `${INDENT}${color.textDim(label)}${labelPad} `
+    if (valueRoom >= 1) {
+      const valueLines = wrapTextWithAnsi(paintedValue, valueRoom)
+      const lines: ContentLine[] = [{ text: `${paintedLabel}${valueLines[0] ?? ''}` }]
+      const contPrefix = ' '.repeat(indentCells + labelRoom + 1)
+      for (const line of valueLines.slice(1)) lines.push({ text: `${contPrefix}${line}` })
+      return lines
+    }
+    const lines: ContentLine[] = [{ text: `${INDENT}${color.textDim(label)}` }]
+    for (const line of wrapTextWithAnsi(paintedValue, Math.max(1, width - indentCells))) {
+      lines.push({ text: `${INDENT}${line}` })
+    }
+    return lines
+  }
+
+  /** One focusable row: cursor + complete verb + optional wrapped value +
+   *  complete affordance/chip. Publishing is all-or-nothing per segment: blank
+   *  and padding cells only select, never act. */
+  private entryLines(row: RowSpec, width: number): ContentLine[] {
+    const selected = this.selectedId === row.id
+    const markerCells = 2
+    const marker = selected ? color.primary('> ') : '  '
+    const verb = sanitizedPhysicalLine(row.label)
+    const verbCells = visibleWidth(verb)
+    // A partial verb is never painted: the row is simply absent from this
+    // frame (and therefore from the keyboard admission too).
+    if (markerCells + verbCells > width) return []
+    const labelRoom = Math.max(verbCells, Math.min(LABEL_COLUMN, Math.max(1, width - markerCells - 1)))
+    const padToLabel = ' '.repeat(labelRoom - verbCells)
+    const paintedLabel = selected ? color.textStrong(verb) : color.text(verb)
+    const chipText = row.chip === undefined ? '' : `  ${row.chip}`
+    const chipCells = visibleWidth(chipText)
+    const paintedValue = row.value === undefined ? '' : valueInk(row.valueInk ?? 'text', sanitizedPhysicalLine(row.value))
+    const valueCells = row.value === undefined ? 0 : visibleWidth(row.value)
+    const affordance = row.affordance === undefined ? '' : row.affordance
+    const affordanceCells = visibleWidth(affordance)
+    const selectTarget = (): BodyTarget => ({ kind: 'select', id: row.id, startCol: 0, endCol: width })
+    const verbActionStart = markerCells
+    const verbActionEnd = markerCells + verbCells
+
+    if (row.value === undefined) {
+      // Business verb / candidate row: the complete label (+ whole chip) is
+      // the action span.
+      if (markerCells + verbCells + chipCells > width) {
+        if (chipCells > 0) {
+          const line = `${marker}${paintedLabel}`
+          return [{ text: line, rowId: row.id, targets: [selectTarget(), { kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd }] }]
+        }
+        return []
+      }
+      const chipPainted = chipCells === 0 ? '' : color.textMuted(chipText)
+      return [{
+        text: `${marker}${paintedLabel}${chipPainted}`,
+        rowId: row.id,
+        targets: [selectTarget(), { kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd + chipCells }],
+      }]
+    }
+
+    const valueRoom = width - markerCells - labelRoom - 1
+    const singleValueCells = markerCells + labelRoom + 1 + valueCells
+    const affordanceSuffixCells = affordanceCells === 0 ? 0 : 3 + affordanceCells
+    // 1. The whole row (verb + value + ` · Change…`) on ONE line.
+    if (valueRoom >= 1 && singleValueCells + affordanceSuffixCells <= width) {
+      const affordanceStart = singleValueCells + 3
+      const actionTarget: BodyTarget | undefined = affordanceCells === 0
+        ? { kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd }
+        : { kind: 'action', id: row.id, startCol: affordanceStart, endCol: affordanceStart + affordanceCells }
+      return [{
+        text: `${marker}${paintedLabel}${padToLabel} ${paintedValue}${affordanceCells === 0 ? '' : ` · ${color.primary(affordance)}`}`,
+        rowId: row.id,
+        targets: actionTarget === undefined ? [selectTarget()] : [selectTarget(), actionTarget],
+      }]
+    }
+    // 2. The verb + value on ONE line, the explicit affordance on its own
+    //    continuation line (a complete verb never changes meaning).
+    if (valueRoom >= 1 && singleValueCells <= width) {
+      const lines: ContentLine[] = [{
+        text: `${marker}${paintedLabel}${padToLabel} ${paintedValue}`,
+        rowId: row.id,
+        targets: [selectTarget(), ...(affordanceCells === 0
+          ? [{ kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd } satisfies BodyTarget]
+          : [])],
+      }]
+      if (affordanceCells > 0) {
+        if (INDENT.length + affordanceCells > width) return lines
+        lines.push({
+          text: `${INDENT}${color.primary(affordance)}`,
+          rowId: row.id,
+          targets: [selectTarget(), { kind: 'action', id: row.id, startCol: INDENT.length, endCol: INDENT.length + affordanceCells }],
+        })
+      }
+      return lines
+    }
+    // 3. The value itself must wrap below the complete verb. Only the FIRST
+    //    line carries the verb's action span; continuation cells never publish
+    //    an action at the verb's old columns.
+    const lines: ContentLine[] = [{
+      text: `${marker}${paintedLabel}`,
+      rowId: row.id,
+      targets: [selectTarget(), ...(affordanceCells === 0
+        ? [{ kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd } satisfies BodyTarget]
+        : [])],
+    }]
+    const valueLines = wrapTextWithAnsi(paintedValue, Math.max(1, width - INDENT.length))
+    for (const [index, line] of valueLines.entries()) {
+      const isLast = index === valueLines.length - 1
+      const paintedLine = `${INDENT}${line}`
+      const canJoinAffordance = isLast && affordanceCells > 0
+        && visibleWidth(paintedLine) + 3 + affordanceCells <= width
+      if (canJoinAffordance) {
+        const affordanceStart = visibleWidth(paintedLine) + 3
+        lines.push({
+          text: `${paintedLine} · ${color.primary(affordance)}`,
+          rowId: row.id,
+          targets: [selectTarget(), { kind: 'action', id: row.id, startCol: affordanceStart, endCol: affordanceStart + affordanceCells }],
+        })
+      } else {
+        lines.push({ text: paintedLine, rowId: row.id, targets: [selectTarget()] })
+      }
+    }
+    if (affordanceCells > 0 && !lines.some(line => line.targets?.some(target => target.kind === 'action'))) {
+      if (INDENT.length + affordanceCells <= width) {
+        lines.push({
+          text: `${INDENT}${color.primary(affordance)}`,
+          rowId: row.id,
+          targets: [selectTarget(), { kind: 'action', id: row.id, startCol: INDENT.length, endCol: INDENT.length + affordanceCells }],
+        })
+      }
+    }
+    return lines
   }
 
   /** The current Host facts as painted `Listener` / `Access` values. */
   private hostFactLines(width: number): ContentLine[] {
-    const lines: ContentLine[] = [{ text: color.textDim('Current Host') }]
+    const lines: ContentLine[] = [this.header('Current Host')]
     const host = this.hostCurrent()
     if (host === undefined) {
       const checking = this.host.kind === 'checking'
       const listener = this.host.kind === 'split-host-only'
         ? `${color.error('Unavailable')}${color.textDim(' · Split Host only')}`
         : checking ? color.textDim('Checking…') : color.error('Unavailable')
-      const access = this.host.kind === 'split-host-only' || !checking
-        ? color.error('Unavailable')
-        : color.textDim('Checking…')
-      lines.push({ text: this.factLine('Listener', listener, width) })
-      lines.push({ text: this.factLine('Access', access, width) })
+      lines.push(...this.factLines('Listener', listener, width))
+      lines.push(...this.factLines(
+        'Access',
+        this.host.kind === 'split-host-only' || !checking ? color.error('Unavailable') : color.textDim('Checking…'),
+        width,
+      ))
       if (this.host.kind === 'unreadable') lines.push(...this.wrapped(this.host.message, 'error', width))
       return lines
     }
     const listener = listenerWord(host.status)
-    lines.push({ text: this.factLine('Listener', statusInk(listener.tone, listener.text), width) })
+    lines.push(...this.factLines('Listener', statusInk(listener.tone, listener.text), width))
     const access = accessWord(host.status)
-    lines.push({ text: this.factLine('Access', valueInk(access.tone === 'dim' ? 'dim' : access.tone === 'error' ? 'error' : 'text', access.text), width) })
+    lines.push(...this.factLines(
+      'Access',
+      valueInk(access.tone === 'dim' ? 'dim' : access.tone === 'error' ? 'error' : 'text', access.text),
+      width,
+    ))
     if (host.status.state === 'unavailable') lines.push(...this.wrapped(host.status.reason, 'error', width))
     return lines
   }
 
-  /** The complete body projection (unpainted rows are already painted strings). */
+  /** The complete body projection; every painted row carries its own spans. */
   private content(width: number): ContentLine[] {
+    switch (this.phase) {
+      case 'confirm-disable': return this.confirmDisableContent(width)
+      case 'choose-autostart': return this.chooseContent(width)
+      case 'confirm-save': return this.confirmSaveContent(width)
+      default: return this.browseContent(width)
+    }
+  }
+
+  private browseContent(width: number): ContentLine[] {
     const lines = this.hostFactLines(width)
     if (this.runtimeOutcome !== undefined) {
       // The runtime write's own result is painted beside the runtime facts: one
       // word carries the token, the explanation stays a separate line.
-      lines.push({ text: this.factLine('Status', statusInk(this.runtimeOutcome.tone, this.runtimeOutcome.word), width) })
+      lines.push(...this.factLines('Status', statusInk(this.runtimeOutcome.tone, this.runtimeOutcome.word), width))
       if (this.runtimeOutcome.detail !== undefined) lines.push(...this.wrapped(this.runtimeOutcome.detail, 'dim', width))
     }
     if (this.phase === 'loading') {
@@ -1229,43 +1464,21 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       return lines
     }
     const rows = this.rowSpecs()
-    if (this.phase === 'confirm-disable') {
-      lines.push({ text: color.textDim('Actions') })
-      lines.push(...this.wrapped(DISABLE_QUESTION, 'text', width))
-      for (const row of rows) lines.push({ text: this.listLine(row, width), rowId: row.id })
-      return lines
+    const runtimeRows = rows.filter(row => row.kind === 'action')
+    const fieldRow = rows.find(row => row.kind === 'field')
+    if (runtimeRows.length > 0) {
+      lines.push(this.header('Actions'))
+      for (const row of runtimeRows) lines.push(...this.entryLines(row, width))
     }
-    if (this.phase === 'choose-autostart') {
-      lines.push({ text: color.textDim('Next Host Start') })
-      lines.push(...this.wrapped('Choose the value the next Host start applies:', 'dim', width))
-      for (const row of rows) lines.push({ text: this.listLine(row, width), rowId: row.id })
-      lines.push(...this.wrapped('Applies on the next Host start; the running Host is unchanged.', 'dim', width))
-      return lines
-    }
-    if (this.phase === 'confirm-save') {
-      const candidate = this.autostartCandidate === true ? 'On' : 'Off'
-      lines.push({ text: color.textDim('Next Host Start') })
-      lines.push(...this.wrapped(`Save the next Host start preference as ${candidate}?`, 'text', width))
-      for (const row of rows) lines.push({ text: this.listLine(row, width), rowId: row.id })
-      return lines
-    }
-    const autostart = rows.find(row => row.id === 'autostart')
-    lines.push({ text: color.textDim('Actions') })
-    for (const row of rows) {
-      if (row.id === 'autostart') break
-      lines.push({ text: this.listLine(row, width), rowId: row.id })
-    }
-    lines.push({ text: color.textDim('Next Host Start') })
-    if (autostart !== undefined) {
-      lines.push({ text: this.listLine(autostart, width), rowId: autostart.id })
+    lines.push(this.header('Next Host Start'))
+    if (fieldRow !== undefined) {
+      lines.push(...this.entryLines(fieldRow, width))
     } else {
-      lines.push({
-        text: this.factLine('Start automatically', color.textDim(preferenceSummary(this.preference, this.preferenceReadiness)), width),
-      })
+      lines.push(...this.factLines('Start automatically', color.textDim(preferenceSummary(this.preference, this.preferenceReadiness)), width))
     }
     lines.push(...this.wrapped(
       this.preferenceEditable()
-        ? 'Applies on the next Host start; the running Host is unchanged.'
+        ? NEXT_START_ONLY
         : this.preferenceReadiness === 'ready'
           ? 'No persisted preference is available to edit.'
           : `The Host configuration is ${this.preferenceReadiness}; the next-start preference is read-only.`,
@@ -1273,12 +1486,16 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       width,
     ))
     if (this.configOutcome !== undefined) {
-      lines.push({ text: this.factLine('Status', statusInk(this.configOutcome.tone, this.configOutcome.word), width) })
+      lines.push(...this.factLines('Status', statusInk(this.configOutcome.tone, this.configOutcome.word), width))
       if (this.configOutcome.detail !== undefined) {
-        lines.push(...this.wrapped(this.configOutcome.detail, this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim' : 'error', width))
+        lines.push(...this.wrapped(
+          this.configOutcome.detail,
+          this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim' : 'error',
+          width,
+        ))
       }
     }
-    lines.push({ text: color.textDim('Client Setup') })
+    lines.push(this.header('Client Setup'))
     const command = this.clientCommand()
     lines.push(...this.wrapped(SETUP_LEAD, 'dim', width))
     lines.push(...(command === undefined
@@ -1289,6 +1506,40 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     return lines
   }
 
+  /** The disable confirmation: the EXACT risk copy is the first thing on the
+   *  page, and the accept row exists only while that whole copy shares the
+   *  painted viewport. Cancel is never gated. */
+  private confirmDisableContent(width: number): ContentLine[] {
+    const copy = this.wrapped(DISABLE_QUESTION, 'text', width, 'copy')
+    const accept = this.entryLines({ id: 'confirm-disable', kind: 'action', label: 'Disable ACP' }, width)
+      .map(line => ({ ...line, gatedBy: 'copy' as const }))
+    const cancel = this.entryLines({ id: 'cancel', kind: 'action', label: 'Cancel' }, width)
+    return [...copy, ...accept, ...cancel]
+  }
+
+  /** The next-start candidate choice. Each complete candidate is its own
+   *  explicit choice; its selection never dispatches a write. */
+  private chooseContent(width: number): ContentLine[] {
+    const lines = this.wrapped(CHOOSE_PROMPT, 'dim', width)
+    for (const row of this.rowSpecs()) lines.push(...this.entryLines(row, width))
+    lines.push(...this.wrapped(NEXT_START_ONLY, 'dim', width))
+    return lines
+  }
+
+  /** The save confirmation: the question AND the next-start-only lifetime fact
+   *  must both be complete in the same frame as the accept row. */
+  private confirmSaveContent(width: number): ContentLine[] {
+    const candidate = this.autostartCandidate === true ? 'On' : 'Off'
+    const copy = [
+      ...this.wrapped(`Save the next Host start preference as ${candidate}?`, 'text', width, 'copy'),
+      ...this.wrapped(NEXT_START_ONLY, 'dim', width, 'copy'),
+    ]
+    const accept = this.entryLines({ id: 'confirm-save', kind: 'action', label: 'Confirm save' }, width)
+      .map(line => ({ ...line, gatedBy: 'copy' as const }))
+    const cancel = this.entryLines({ id: 'cancel', kind: 'action', label: 'Cancel' }, width)
+    return [...copy, ...accept, ...cancel]
+  }
+
   render(width: number): string[] {
     if (this.disposed) return [fit('', width)]
     // The painted Config fact and the edit grant come from THIS frame's live
@@ -1297,21 +1548,47 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     this.ensureSelection()
     const bodyRows = this.bodyRows()
     const content = this.content(width)
-    const selection = content.findIndex(line => line.rowId !== undefined && line.rowId === this.selectedId)
+    const selectedLines: number[] = []
+    content.forEach((line, index) => { if (line.rowId !== undefined && line.rowId === this.selectedId) selectedLines.push(index) })
     const maxOffset = Math.max(0, content.length - bodyRows)
     let offset = Math.min(this.scrollOffset, maxOffset)
-    if (this.revealSelection && bodyRows > 0 && selection >= 0) {
-      if (selection < offset) offset = selection
-      if (selection >= offset + bodyRows) offset = selection - bodyRows + 1
-      this.revealSelection = false
+    if (this.revealSelection && bodyRows > 0 && selectedLines.length > 0) {
+      const start = selectedLines[0]!
+      const end = selectedLines[selectedLines.length - 1]!
+      if (start < offset) offset = start
+      if (end >= offset + bodyRows) offset = end - bodyRows + 1
+      if (start < offset) offset = start
     }
+    offset = Math.min(Math.max(0, offset), maxOffset)
     this.scrollOffset = offset
+    // The necessary-copy groups are judged against the FINAL physical viewport:
+    // a gated entry whose copy is scrolled out is painted BLANK and publishes
+    // no target — the same fact gates the keyboard and the bar.
+    const visible = new Set<number>()
+    for (let index = 0; index < bodyRows; index += 1) visible.add(offset + index)
+    const groups = new Map<string, number[]>()
+    content.forEach((line, index) => {
+      if (line.group === undefined) return
+      const list = groups.get(line.group) ?? []
+      list.push(index)
+      groups.set(line.group, list)
+    })
+    const groupComplete = (group: 'copy'): boolean => (groups.get(group) ?? []).every(index => visible.has(index))
     const lines: string[] = []
     const targets: PagePaint['targets'][number][] = []
+    this.escapeSpan = undefined
+    this.barSpans = []
+    this.paintedActions.clear()
     for (let index = 0; index < bodyRows; index += 1) {
       const line = content[offset + index]
-      lines.push(fit(line?.text ?? '', width))
-      if (line?.rowId !== undefined) targets.push({ id: line.rowId, row: index, startCol: 0, endCol: width })
+      const blanked = line?.gatedBy !== undefined && !groupComplete(line.gatedBy)
+      lines.push(fit(blanked ? '' : line?.text ?? '', width))
+      if (line !== undefined && !blanked) {
+        for (const target of line.targets ?? []) {
+          targets.push({ kind: target.kind, id: target.id, row: index, startCol: target.startCol, endCol: target.endCol })
+          if (target.kind === 'action') this.paintedActions.add(target.id)
+        }
+      }
     }
     while (lines.length < bodyRows) lines.push(fit('', width))
     const bar = this.renderBar(width)
@@ -1331,12 +1608,20 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
     return lines
   }
 
+  /** The physical last row. Only actions admitted by THIS frame are painted;
+   *  `Esc` is always last and always complete. */
   private renderBar(width: number): {
     readonly text: string
     readonly escapeSpan?: { readonly startCol: number; readonly endCol: number }
     readonly spans: readonly { readonly id: string; readonly action: BarAction; readonly startCol: number; readonly endCol: number }[]
   } {
     const segments: BarSegment[] = []
+    const barVerb: Record<string, string> = {
+      copy: 'Copy',
+      enable: 'Enable',
+      disable: 'Disable',
+      autostart: 'Change',
+    }
     switch (this.phase) {
       case 'loading':
       case 'pending-runtime':
@@ -1344,18 +1629,32 @@ export class AcpAccessSettingsPage implements EmbeddedSpecialistPage {
       case 'pending-copy':
         break
       case 'confirm-disable':
-        segments.push({ text: 'Confirm [Enter]', priority: 900, action: 'confirm' })
+        if (this.selectedId === 'confirm-disable' && this.paintedActions.has('confirm-disable')) {
+          segments.push({ text: 'Confirm [Enter]', priority: 900, action: 'confirm' })
+        }
         break
       case 'choose-autostart':
-        segments.push({ text: 'Select [Enter]', priority: 900, action: 'select' })
+        if (this.selectedId !== undefined && this.paintedActions.has(this.selectedId)) {
+          segments.push({ text: 'Select [Enter]', priority: 900, action: 'select' })
+        }
         break
       case 'confirm-save':
-        segments.push({ text: 'Confirm save [Enter]', priority: 900, action: 'confirm' })
+        if (this.selectedId === 'confirm-save' && this.paintedActions.has('confirm-save')) {
+          segments.push({ text: 'Confirm save [Enter]', priority: 900, action: 'confirm' })
+        }
         break
       case 'ready':
-      case 'settled':
-        segments.push({ text: `Refresh [${REFRESH_KEY.toUpperCase()}]`, short: 'Refresh', priority: 800, action: 'refresh' })
+      case 'settled': {
+        const selected = this.selectedId
+        const verb = selected === undefined ? undefined : barVerb[selected]
+        if (verb !== undefined && this.paintedActions.has(selected!)) {
+          segments.push({ text: `${verb} [Enter]`, priority: 900, action: 'select' })
+        }
+        if (this.paintedActions.has('refresh')) {
+          segments.push({ text: `Refresh [${REFRESH_KEY.toUpperCase()}]`, short: 'Refresh', priority: 800, action: 'refresh' })
+        }
         break
+      }
     }
     segments.push({
       text: this.phase === 'confirm-disable' || this.phase === 'choose-autostart' || this.phase === 'confirm-save' ? 'Cancel [Esc]' : 'Back [Esc]',

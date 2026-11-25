@@ -188,6 +188,9 @@ interface HarnessOptions {
   webSettledStatus?: WebAccessStatus
   /** PR-B: the LIVE Split Host ACP listener the `acpAccess` port serves. */
   acpStatus?: AcpAccessStatus
+  /** Hold a real ACP runtime toggle after it reached the Host, so a case can
+   *  prove the pending parent/own-Back contract. */
+  holdAcpToggle?: boolean
   /** Hold the official URL reply until `releaseWebUrl()`: the window between
    *  the URL RPC settling and the Client sink. */
   holdWebUrl?: boolean
@@ -505,6 +508,8 @@ interface Harness {
   readonly acpStatusReads: () => number
   /** PR-B: every `acpAccess.setEnabled` value the ACP page dispatched. */
   readonly acpEnabledWrites: () => readonly boolean[]
+  /** PR-B: release a held ACP runtime toggle. */
+  readonly releaseAcpToggle: () => void
   /** PR-B: replace the LIVE Connection generation (a Host A -> B replacement). */
   readonly bumpAcpGeneration: () => void
   /** PR-B: set the fake Host ACP listener state (the Host's own answer). */
@@ -739,6 +744,7 @@ function setup(options: HarnessOptions = {}): Harness {
   let acpStatus: AcpAccessStatus = options.acpStatus ?? { state: 'disabled' }
   const acpStatusReads = { count: 0 }
   const acpEnabledWrites: boolean[] = []
+  let heldAcpToggle: (() => void) | undefined
   const webEnabledWrites: boolean[] = []
   const webUrlReads = { count: 0 }
   const openedUrls: string[] = []
@@ -1030,6 +1036,9 @@ function setup(options: HarnessOptions = {}): Harness {
           throw new Error('acp access toggle superseded: the Host generation changed before dispatch')
         }
         acpEnabledWrites.push(enabled)
+        if (options.holdAcpToggle === true) {
+          await new Promise<void>(resolve => { heldAcpToggle = resolve })
+        }
         acpStatus = enabled ? { state: 'enabled' } : { state: 'disabled' }
         return acpStatus
       },
@@ -1631,6 +1640,7 @@ function setup(options: HarnessOptions = {}): Harness {
     setWebStatus: (status: WebAccessStatus) => { webStatus = status },
     acpStatusReads: () => acpStatusReads.count,
     acpEnabledWrites: () => acpEnabledWrites,
+    releaseAcpToggle: () => { heldAcpToggle?.(); heldAcpToggle = undefined },
     bumpAcpGeneration: () => {
       acpGeneration = {}
       for (const listener of [...acpGenerationListeners]) listener()
@@ -12909,6 +12919,19 @@ async function openAcpAccess(h: Harness): Promise<void> {
 }
 
 const acpAccessPlain = (h: Harness): string => h.rowsPlain().join('\n')
+/** The Detail-column prose as ONE string. Wide/medium paint the parent panes on
+ *  the same physical rows, so slicing from the painted Detail header is what
+ *  makes a sentence that wraps inside the real Detail cells readable; a narrow
+ *  frame paints only the tenant body and has no pane header. */
+const acpAccessDetailText = (h: Harness): string => {
+  const plain = h.rowsPlain()
+  const header = plain.find(line => line.includes('Details'))
+  if (header === undefined) return plain.join(' ').replace(/\s+/gu, ' ')
+  const label = header.indexOf('Details')
+  const start = header[label - 1] === '[' ? label - 1 : label
+  return plain.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ')
+}
+const acpAccessFlat = (h: Harness): string => acpAccessDetailText(h)
 
 test('/acp opens the ACP access page on the ONE Settings lease, with no overlay and no write', async () => {
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' } })
@@ -13031,8 +13054,8 @@ test('Disable ACP… requires the in-page risk confirmation; Cancel performs zer
   await highlightPageRow(h, 'Disable ACP…')
   await key(h, '\r')
   await settle(h, 10)
-  assert.match(acpAccessPlain(h), /Disable the local ACP listener\? All connected ACP clients will be disconnected\./u)
-  assert.match(acpAccessPlain(h), /Host sessions, Agents and this TUI will keep running\./u)
+  assert.match(acpAccessFlat(h), /Disable the local ACP listener\? All connected ACP clients will be disconnected\./u)
+  assert.match(acpAccessFlat(h), /Host sessions, Agents and this TUI will keep running\./u)
   assert.match(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\] · Cancel \[Esc\]/u)
   assert.deepEqual(h.acpEnabledWrites(), [], 'the first step dispatches nothing')
   await key(h, '\x1b')
@@ -13058,13 +13081,15 @@ test('the next-start preference writes ONLY after Confirm save and never toggles
   await settle(h, 10)
   assert.match(h.rowsPlain().join('\n'), /Choose the value the next Host start applies:/u)
   assert.match(h.rowsPlain().join('\n'), /Off\s+\[current\]/u)
-  assert.equal(h.webAutoStartWrites().length, 0, 'the ladder staged zero preference writes')
+  assert.equal(h.acpAutoStartWrites().length, 0, 'the ladder staged zero ACP preference writes')
+  assert.equal(h.webAutoStartWrites().length, 0, 'the Web preference sink is never touched')
   await key(h, '\r') // stage the opposite candidate (On)
   await settle(h)
   assert.match(h.rowsPlain().join('\n'), /Save the next Host start preference as On\?/u)
   await key(h, '\r') // Confirm save
   await settle(h, 10)
   assert.deepEqual(h.acpAutoStartWrites(), [true], 'the EXISTING acp-autostart writer received the value once')
+  assert.equal(h.webAutoStartWrites().length, 0, 'the Web preference sink stays independent')
   assert.deepEqual(h.acpEnabledWrites(), [], 'saving the preference never toggles the running Host')
   h.dispose()
 })
@@ -13105,7 +13130,7 @@ test('the ACP access page stays complete and operable across the frozen size mat
     }
     // A short grant scrolls ONE column instead of dropping the setup section.
     await key(h, '\x1b[F')
-    assert.match(acpAccessPlain(h), /Sessions, Agents and TUI remain/u, `${columns}x${rows}: End reveals the client setup tail`)
+    assert.match(acpAccessFlat(h), /Sessions, Agents and TUI remain/u, `${columns}x${rows}: End reveals the client setup tail`)
     const bar = h.rowsPlain().at(-1) ?? ''
     assert.match(bar, /Back \[Esc\]/u, `${columns}x${rows}: the complete Esc affordance is the last row`)
     assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
@@ -13121,10 +13146,10 @@ test('the ACP access page stays complete and operable across the frozen size mat
     // The complete risk sentence is a scrollable first-class fact: a short
     // frame reveals it by scrolling, never by dropping it.
     await key(h, '\x1b[H')
-    for (let page = 0; page < 4 && !/Disable the local ACP listener\?/u.test(acpAccessPlain(h)); page += 1) {
+    for (let page = 0; page < 4 && !/Disable the local ACP listener\?/u.test(acpAccessFlat(h)); page += 1) {
       await key(h, '\x1b[6~')
     }
-    assert.match(acpAccessPlain(h), /Disable the local ACP listener\?/u, `${columns}x${rows}: the risk sentence is readable`)
+    assert.match(acpAccessFlat(h), /Disable the local ACP listener\?/u, `${columns}x${rows}: the risk sentence is readable`)
     await key(h, '\x1b')
     await settle(h)
     assert.deepEqual(h.acpEnabledWrites(), [], `${columns}x${rows}: Escape wrote nothing`)
@@ -13145,6 +13170,241 @@ test('a Host A → B replacement repaints the new listener fact and re-reads bef
   assert.match(acpAccessPlain(h), /Listener\s+Enabled/u, 'the new Host fact replaces the old one')
   assert.match(acpAccessPlain(h), /> Copy client command/u, 'only the new Host\'s state admits its action')
   assert.deepEqual(h.acpEnabledWrites(), [], 'the rollover itself writes nothing')
+  h.dispose()
+})
+
+test('the ACP access page is a real Detail tenant: parent panes stay readable, one cursor, clean Tab yields', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  const frame = acpAccessPlain(h)
+  assert.match(frame, /Categories \(10\)/u, 'the parent rail stays readable')
+  assert.match(frame, /Rows \(\d+\)/u, 'the parent Rows stay readable')
+  assert.match(frame, /\[Details\]/u, 'the Detail column owns the ONE active device')
+  assert.match(frame, /Current Host/u, 'the tenant body owns the Detail cells')
+  assert.match(frame, /> Copy client command/mu, 'the page owns the ONE primary cursor')
+  const acpRow = h.rowsPlain().find(line => /ACP access\s+Live listener · next Host start/u.test(line))
+  assert.ok(acpRow !== undefined, `the parent ACP row must stay painted:\n${h.view()}`)
+  assert.ok(!acpRow.startsWith('>'), 'the parent selection is passive context (no second cursor)')
+  assert.equal(h.acpStatusReads(), 1, 'one Host read on the tenant entry')
+  // A clean page's Tab is the ROOT's guarded region transaction, never a hidden
+  // keyboard commit: it retires the tenant and moves the keyboard.
+  await key(h, '\t')
+  await settle(h)
+  assert.doesNotMatch(h.view(), /Current Host/u, 'the clean tenant is retired by the root Tab')
+  assert.match(h.view(), /^> Host/mu, 'the keyboard moved to the category rail')
+  assert.deepEqual(h.acpEnabledWrites(), [])
+  // Re-entry through the Rows level builds a FRESH page and performs ONE new read.
+  const readsBefore = h.acpStatusReads()
+  await key(h, '\r')
+  await settle(h)
+  await highlightRow(h, 'ACP access')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Current Host/u, 'the re-entered page is painted')
+  assert.equal(h.acpStatusReads(), readsBefore + 1, 're-entry starts exactly one fresh authoritative read')
+  h.dispose()
+})
+
+test('a resize keeps the SAME mounted ACP tenant and performs no extra Host read', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  assert.equal(h.acpStatusReads(), 1)
+  for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [72, 24]] as const) {
+    h.vt.resize(columns, rows)
+    await settle(h)
+    assert.match(h.view(), /Settings · Host · ACP access/u, `${columns}x${rows}: the tenant keeps the lease`)
+    assert.match(acpAccessFlat(h), /Current Host/u, `${columns}x${rows}: the same page body is projected`)
+    assert.equal(h.acpStatusReads(), 1, `${columns}x${rows}: a resize starts no new Host read`)
+    assert.deepEqual(h.acpEnabledWrites(), [])
+  }
+  h.dispose()
+})
+
+test('the normal enabled ACP page keeps a body Refresh route in the narrow Detail', async () => {
+  const h = setup({ columns: 44, rows: 20, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  const readsBefore = h.acpStatusReads()
+  // A same-generation external writer changes the listener; the enabled page
+  // must keep the ONE semantic Refresh body route, not only a keyboard badge.
+  h.setAcpStatus({ state: 'disabled' })
+  await highlightPageRow(h, 'Refresh')
+  await clickPainted(h, 'Refresh')
+  await settle(h)
+  assert.equal(h.acpStatusReads(), readsBefore + 1, 'the fresh status read ran exactly once')
+  assert.match(acpAccessPlain(h), /Listener\s+Disabled/u, 'the refreshed fact is painted')
+  assert.deepEqual(h.acpEnabledWrites(), [], 'Refresh never toggles the Host')
+  assert.equal(h.acpAutoStartWrites().length, 0, 'Refresh never writes the preference')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh/u, 'the bar keeps its complete Refresh affordance')
+  h.dispose()
+})
+
+test('a 38-cell ACP Detail completes the whole next-start preference journey by pointer only', async () => {
+  const h = setup({ columns: 80, rows: 24, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  assert.equal(h.acpAutoStartWrites().length, 0)
+  assert.deepEqual(h.acpEnabledWrites(), [])
+  // The field/value cell only selects; no candidate/confirm opens.
+  await clickPainted(h, 'Start automatically')
+  assert.match(detailPaneText(h), /> Start automatically/u, 'the field row took the cursor')
+  assert.doesNotMatch(detailPaneText(h), /Choose the value the next Host start applies:/u)
+  assert.equal(h.acpAutoStartWrites().length, 0)
+  // The complete Change… affordance is the explicit choice entry.
+  await clickPainted(h, 'Change…')
+  await settle(h)
+  assert.match(detailPaneText(h), /Choose the value the next Host start applies:/u)
+  assert.equal(h.acpAutoStartWrites().length, 0, 'opening the choice writes nothing')
+  // The complete candidate stages the confirmation only.
+  await clickPainted(h, 'On')
+  await settle(h)
+  assert.match(detailPaneText(h), /Save the next Host start preference as On\?/u)
+  assert.equal(h.acpAutoStartWrites().length, 0, 'the complete candidate writes nothing')
+  // The complete body Confirm save is the ONE preference write.
+  await clickPainted(h, 'Confirm save')
+  await settle(h, 10)
+  assert.deepEqual(h.acpAutoStartWrites(), [true], 'exactly one preference sink write')
+  assert.deepEqual(h.acpEnabledWrites(), [], 'the preference never toggles the running Host')
+  assert.match(detailPaneText(h), /Start automatically On(?:\s|·).*?Status Verified/u,
+    'the persisted value and its own settlement are painted')
+  // The real painted Back leaves the tenant once.
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u)
+  h.dispose()
+})
+
+test('a staged ACP choice and an open confirmation block parent clicks until their own Cancel', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  // A staged next-start choice keeps the tenant: the parent row click is refused.
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Choose the value the next Host start applies:/u)
+  const parentRow = rowOf(h, 'Web UI')
+  press(h, parentRow, cellIndexOf(h, parentRow, 'Web UI'))
+  release(h, parentRow, cellIndexOf(h, parentRow, 'Web UI'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · ACP access/u, 'the parent click cannot bypass the open choice')
+  assert.match(acpAccessPlain(h), /Choose the value the next Host start applies:/u)
+  assert.equal(h.acpAutoStartWrites().length, 0)
+  // The page's own Cancel returns to the clean page, and only then the SAME
+  // parent click leaves the tenant with its real selection.
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Listener\s+Enabled/u)
+  // The fork withholds a second click on the SAME cell inside its double-click
+  // window; a real user gesture on the same row is two independent clicks.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  const cleanRow = rowOf(h, 'Web UI')
+  press(h, cleanRow, cellIndexOf(h, cleanRow, 'Web UI'))
+  release(h, cleanRow, cellIndexOf(h, cleanRow, 'Web UI'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the clean parent click leaves the tenant')
+  assert.match(webUiPlain(h), /> Web UI/u, 'the clicked row really became the Rows selection')
+  // Re-open ACP (same lease) and prove an open confirmation is the same gate.
+  await key(h, '\x1b[B') // Web UI -> ACP access
+  await settle(h)
+  assert.match(webUiPlain(h), /> ACP access/u, 'the Host Rows cursor is back on ACP access')
+  await key(h, '\r')
+  await settle(h)
+  await highlightPageRow(h, 'Disable ACP…')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Disable the local ACP listener\?/u)
+  const toolsRow = railRowOf(h, 'Tools')
+  press(h, toolsRow, cellIndexOf(h, toolsRow, 'Tools'))
+  release(h, toolsRow, cellIndexOf(h, toolsRow, 'Tools'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · ACP access/u, 'a confirmation refuses every parent route')
+  assert.deepEqual(h.acpEnabledWrites(), [])
+  await key(h, '\x1b') // cancel the confirmation only
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Listener\s+Enabled/u)
+  h.dispose()
+})
+
+test('a pending ACP runtime write refuses parent clicks but the explicit page Back leaves', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'disabled' }, holdAcpToggle: true })
+  await openAcpAccess(h)
+  await key(h, '\r') // Enable ACP: the real Host toggle is held after dispatch
+  await settle(h)
+  assert.match(acpAccessPlain(h), /Waiting for the answer…/u)
+  assert.deepEqual(h.acpEnabledWrites(), [true], 'the real Host toggle was dispatched')
+  const parentRow = rowOf(h, 'Web UI')
+  press(h, parentRow, cellIndexOf(h, parentRow, 'Web UI'))
+  release(h, parentRow, cellIndexOf(h, parentRow, 'Web UI'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · ACP access/u, 'a pending write refuses parent navigation')
+  // The page's own explicit Back is the documented exception: the write keeps
+  // settling in its owner, and the gone page can never repaint it.
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the explicit page Back leaves the tenant')
+  h.releaseAcpToggle()
+  await settle(h, 10)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the late settlement never revives the page')
+  assert.doesNotMatch(h.view(), /Waiting for the answer…/u)
+  assert.deepEqual(h.acpEnabledWrites(), [true], 'the dispatch was not cancelled or replayed')
+  h.dispose()
+})
+
+test('an ACP tenant press is refused across a Host replacement and a fresh press still acts', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  const row = rowOf(h, 'Copy client command')
+  const col = cellIndexOf(h, row, 'Copy client command')
+  press(h, row, col)
+  await settle(h)
+  // The Host is replaced between the press and the release: the page's painted
+  // action identity is revoked and the settled page re-reads the new Host.
+  h.bumpAcpGeneration()
+  await settle(h, 10)
+  release(h, row, col)
+  await settle(h)
+  assert.equal(h.copied.length, 0, 'the stale release never copied the old Host command')
+  assert.deepEqual(h.acpEnabledWrites(), [])
+  // A fresh gesture against the current painted frame is the real action. The
+  // refused release already counted as the first press of the fork's same-cell
+  // multi-click window, so wait that bounded window out.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  await clickPainted(h, 'Copy client command')
+  await settle(h)
+  assert.equal(h.copied.length, 1, 'the fresh press/release copies the command exactly once')
+  h.dispose()
+})
+
+test('an /acp first frame without one real Detail row reports the command error and closes the lease', async () => {
+  const h = setup({ columns: 200, rows: 2, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  const pending = h.invoke('acp') as Promise<{ readonly kind: string; readonly text?: string }>
+  await settle(h)
+  const result = await pending
+  assert.equal(result.kind, 'error', 'the command reports its real failure')
+  assert.match(result.text ?? '', /could not open ACP access/u)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the failed lease is closed, never a silent Rows fallback')
+  assert.equal(h.acpStatusReads(), 0, 'no Host read starts without a real grant')
+  assert.equal(h.app.overlayGraphState().handles, 0)
+  h.dispose()
+})
+
+test('a short ACP confirmation withholds the accept until the real frame grants the necessary copy', async () => {
+  const h = setup({ columns: 80, rows: 10, backendKind: 'remote', acpStatus: { state: 'enabled' } })
+  await openAcpAccess(h)
+  await highlightPageRow(h, 'Disable ACP…')
+  await key(h, '\r')
+  await settle(h)
+  assert.doesNotMatch(acpAccessPlain(h), /> Disable ACP/u, 'the accept row is blank while the risk is incomplete')
+  assert.doesNotMatch(h.rowsPlain().at(-1) ?? '', /Confirm \[Enter\]/u, 'the bar advertises no hidden confirm')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Cancel \[Esc\]/u, 'Cancel stays reachable')
+  assert.deepEqual(h.acpEnabledWrites(), [])
+  // A sufficient real grant paints a NEW accept row; only an explicit gesture
+  // after that dispatch can write.
+  h.vt.resize(80, 24)
+  await settle(h)
+  assert.match(acpAccessFlat(h), /Disable the local ACP listener\?/u, 'the complete risk is painted again')
+  assert.match(acpAccessPlain(h), /> Disable ACP/u, 'the recovered frame publishes the accept row')
+  await key(h, '\r')
+  await settle(h, 10)
+  assert.deepEqual(h.acpEnabledWrites(), [false], 'the fresh confirmation dispatched exactly once')
   h.dispose()
 })
 

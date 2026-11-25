@@ -640,6 +640,142 @@ test('a short grant keeps ONE scrollable column and the Esc affordance', async (
   h.close()
 })
 
+test('a same-revision Host rollover still retires the staged next-start confirmation', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await highlight(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  // The replacement Host's Config mirror exposes the SAME revision: only the
+  // rollover itself can prove the decision belongs to the old authority.
+  h.setAuthority('ready', { autoStart: false, revision: 1, userOverridden: false })
+  h.bumpGeneration()
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Save the next Host start preference|Confirm save/u,
+    'the staged confirmation is revoked by the rollover')
+  assert.equal(h.commits().length, 0, 'the rollover itself writes nothing')
+  assert.match(h.frame(), /> Copy client command/u, 'the clean page returns to its real first focus')
+  h.close()
+})
+
+test('a silently replaced Host refuses the staged save with zero writes', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await highlight(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  // A replacement WITHOUT a rollover notification keeps the same revision, so
+  // the captured generation is the only fence that refuses the submit.
+  h.replaceGenerationSilently()
+  await h.key('\r')
+  await h.flush()
+  assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
+  assert.match(h.frame(), /Status\s+Not saved/u)
+  assert.match(h.frame(), /the configuration changed since this choice was opened/u)
+  h.close()
+})
+
+test('a page left during the live preflight invokes no Host mutation', async () => {
+  const h = await mount({ status: { state: 'disabled' }, holdSecondRead: true })
+  await h.key('\r') // Enable ACP: the live preflight is held unresolved
+  assert.equal(h.reads(), 2)
+  await h.key('\x1b') // the page's own explicit Back retires it
+  assert.equal(h.doneCalls(), 1)
+  h.resolveRead(0, { state: 'disabled' })
+  await h.flush()
+  assert.deepEqual(h.writes(), [], 'the retired preflight never invoked a Host mutation')
+  const diagnostic = h.diagnoses().find(entry => entry.label === 'acp access runtime write')
+  assert.ok(diagnostic !== undefined, 'the invoked=false fact is diagnosed')
+  assert.equal(diagnostic.detail.invoked, false)
+  assert.equal(diagnostic.detail.stage, 'preflight')
+  h.close()
+})
+
+test('a short confirm frame withholds the accept until the necessary copy is fully painted', async () => {
+  const disable = await mount({ status: { state: 'enabled' }, columns: 34, rows: 5 })
+  await highlight(disable, 'Disable ACP…')
+  await disable.key('\r')
+  await disable.flush()
+  assert.doesNotMatch(disable.frame(), /> Disable ACP/u, 'the accept row is blank while the risk is incomplete')
+  assert.doesNotMatch(disable.bar(), /Confirm \[Enter\]/u, 'the bar advertises no hidden confirm')
+  assert.match(disable.bar(), /Cancel \[Esc\]/u, 'Cancel stays reachable')
+  disable.vt.resize(34, 24)
+  await disable.flush()
+  assert.match(disable.frame(), /> Disable ACP/u, 'the sufficient grant paints a NEW accept row')
+  await disable.key('\r')
+  await disable.flush()
+  assert.deepEqual(disable.writes(), [false], 'the fresh confirmation dispatched exactly once')
+  disable.close()
+
+  const save = await mount({ status: { state: 'enabled' }, columns: 34, rows: 5 })
+  await highlight(save, 'Start automatically')
+  await save.key('\r')
+  await save.key('\r')
+  await save.flush()
+  assert.doesNotMatch(save.frame(), /> Confirm save/u, 'the save accept is withheld with its lifetime fact offscreen')
+  assert.doesNotMatch(save.bar(), /Confirm save/u)
+  save.vt.resize(34, 24)
+  await save.flush()
+  assert.match(save.frame(), /> Confirm save/u)
+  await save.key('\r')
+  await save.flush()
+  assert.deepEqual(save.commits(), [{ value: 'On', revision: 1 }], 'the recovered confirmation submits once')
+  save.close()
+})
+
+test('selecting Cancel never advertises or runs the destructive confirm', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await highlight(h, 'Disable ACP…')
+  await h.key('\r')
+  await h.key('\x1b[B') // Disable ACP -> Cancel
+  assert.match(h.frame(), /^> Cancel/mu)
+  assert.doesNotMatch(h.bar(), /Confirm \[Enter\]/u, 'a selected Cancel never advertises an Enter confirm')
+  await h.key('\r')
+  await h.flush()
+  assert.deepEqual(h.writes(), [])
+  assert.equal(h.doneCalls(), 0)
+  assert.match(h.frame(), /Listener\s+Enabled/u, 'Cancel returns to the clean runtime facts')
+  h.close()
+})
+
+test('Refresh is a real body action and its shortcut acts only while the row is painted', async () => {
+  const h = await mount({ status: { state: 'enabled' }, columns: 44, rows: 24 })
+  const reads = h.reads()
+  // A same-generation external writer changes the live listener: Refresh must
+  // perform a real authoritative read, not just repaint a cached fact.
+  h.setStatus({ state: 'disabled' })
+  await h.key('r')
+  await h.flush()
+  assert.equal(h.reads(), reads + 1, 'r performs exactly ONE status read')
+  assert.match(h.frame(), /Listener\s+Disabled/u, 'the refreshed fact is painted')
+  assert.deepEqual(h.writes(), [], 'Refresh never toggles the Host')
+  h.close()
+
+  const short = await mount({ status: { state: 'enabled' }, columns: 34, rows: 4 })
+  const before = short.reads()
+  assert.ok(!short.page.paintedBarSpans().some(span => span.id === 'bar:refresh'),
+    'a grant that drops the whole Refresh segment publishes no target')
+  await short.key('r')
+  await short.flush()
+  assert.equal(short.reads(), before, 'the shortcut cannot act on a row this frame did not paint')
+  short.close()
+})
+
+test('a preference write accepted without an agreeing readback is Unverified', async () => {
+  const h = await mount({
+    status: { state: 'enabled' },
+    commitOutcome: { outcome: 'unverified', reason: 'the readback disagrees' },
+  })
+  await highlight(h, 'Start automatically')
+  await h.key('\r')
+  await h.key('\r')
+  await h.key('\r')
+  await h.flush()
+  assert.match(h.frame(), /Status\s+Unverified/u)
+  assert.match(h.frame(), /the readback disagrees/u)
+  h.close()
+})
+
 /* ------------------------------------------------------------------ mouse */
 
 function mouseEvent(h: PageHarness, type: 'press' | 'click', x: number, y: number): TuiMouseEvent {
@@ -693,5 +829,25 @@ test('the Action Bar confirm segment is a delegated target for the SAME confirma
   h.page.activateBarSpan('bar:confirm')
   await h.flush()
   assert.deepEqual(h.writes(), [false], 'the painted Confirm runs the phase confirm, not the cursor row')
+  h.close()
+})
+
+test('a pointer click on a row value only selects; a fact row is inert', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  const y = rowOf(h, 'Disable ACP…')
+  const line = h.vt.getViewport().map(stripTerminalSequences)[y]!
+  const x = line.indexOf('Disconnects active ACP clients')
+  assert.ok(x > 0, `the row value must be painted:\n${h.frame()}`)
+  assert.equal(h.page.handleMouse(mouseEvent(h, 'press', x, y))?.handled, true)
+  assert.equal(h.page.handleMouse(mouseEvent(h, 'click', x, y))?.handled, true)
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Disable the local ACP listener\?/u,
+    'the value cell is select-only; it never opens the destructive confirm')
+  assert.match(h.frame(), /^> Disable ACP…/mu)
+  assert.deepEqual(h.writes(), [])
+  // A pure fact row publishes no target at all.
+  const factY = rowOf(h, 'Listener')
+  assert.equal(h.page.handleMouse(mouseEvent(h, 'press', 3, factY)), undefined)
+  assert.equal(h.page.handleMouse(mouseEvent(h, 'click', 3, factY)), undefined)
   h.close()
 })

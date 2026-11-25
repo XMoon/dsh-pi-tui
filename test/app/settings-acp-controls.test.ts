@@ -62,6 +62,7 @@ interface Harness {
   readonly invoke: (name: string) => unknown
   readonly acp: {
     status: AcpAccessStatus
+    reads: number
     setEnabledCalls: boolean[]
     setEnabledGenerations: unknown[]
     gate: Promise<void> | undefined
@@ -79,6 +80,8 @@ interface Harness {
   readonly bumpGeneration: () => void
   /** Release every held status read (the preflight and the new Host's read). */
   readonly releaseAcpReads: () => void
+  /** Release one held `setEnabled` call (the real Host write). */
+  readonly releaseAcpWrite: () => void
   readonly dispose: () => void
 }
 
@@ -92,6 +95,8 @@ function setup(options: {
   readonly profile?: string | undefined
   /** Hold every `getStatus` after the page-entry read (the live preflight). */
   readonly holdSecondAcpRead?: boolean
+  /** Hold the real `setEnabled` call after it is invoked. */
+  readonly holdAcpWrite?: boolean
 } = {}): Harness {
   const columns = options.columns ?? 200
   const rows = options.rows ?? 44
@@ -155,7 +160,10 @@ function setup(options: {
       }
       acp.setEnabledCalls.push(enabled)
       acp.setEnabledGenerations.push(expectedGeneration)
-      if (acp.gate !== undefined) await acp.gate
+      if (options.holdAcpWrite === true) {
+        acp.gate ??= new Promise<void>(resolve => { acp.release = resolve })
+        await acp.gate
+      }
       acp.status = enabled ? { state: 'enabled' } : { state: 'disabled' }
       return acp.status
     },
@@ -284,6 +292,7 @@ function setup(options: {
       for (const listener of [...generationListeners]) listener()
     },
     releaseAcpReads: () => { acp.releaseRead?.(); acp.releaseRead = undefined },
+    releaseAcpWrite: () => { acp.release?.(); acp.release = undefined },
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -299,6 +308,12 @@ async function key(h: Harness, data: string): Promise<void> {
 async function settle(h: Harness, label: string, predicate: (frame: string) => boolean): Promise<string> {
   await waitForFrame(() => h.view(), predicate, () => h.vt.waitForRender(), label)
   return h.view()
+}
+
+/** Drain the page's owned microtasks/timers and paint the resulting frame. */
+async function drain(h: Harness, rounds = 10): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+  await h.vt.waitForRender()
 }
 
 /** Open `/settings` on the `Host` Rows level. */
@@ -357,7 +372,7 @@ test('the /acp deep link mounts the ONE ACP access page in the SAME lease and wr
   await settle(h, 'the /acp deep link page', frame => frame.includes('Settings · Host · ACP access'))
   const result = await resultPromise
   assert.deepEqual(result, { kind: 'success' })
-  assert.match(h.view(), /^> Enable ACP/mu, 'the disabled Host offers its ONE runtime action')
+  assert.match(h.view(), /> Enable ACP/mu, 'the disabled Host offers its ONE runtime action')
   assert.match(h.view(), /Client Setup/u)
   assert.equal(h.app.overlayGraphState().handles, 0, 'ONE Settings lease: no second overlay is mounted')
   assert.equal(h.acp.setEnabledCalls.length, 0, 'opening the page dispatches no Host write')
@@ -388,7 +403,7 @@ test('the page toggles the live listener through ONE Host write and repaints the
   assert.match(h.view(), /Copy client command/u)
   assert.match(h.view(), /Disable ACP…/u)
   await key(h, DOWN) // Copy -> Disable ACP…
-  assert.match(h.view(), /^> Disable ACP…/mu)
+  assert.match(h.view(), /> Disable ACP…/mu)
   await key(h, ENTER) // stage the confirmation only
   assert.match(h.view(), /Disable the local ACP listener\?/u)
   assert.deepEqual(h.acp.setEnabledCalls, [true], 'the first step never writes')
@@ -434,12 +449,15 @@ test('the Copy action is the proven Profile command and never reaches the Host',
   const h = setup({ status: { state: 'enabled' }, profile: 'work profile' })
   await openHostRows(h)
   await openAcpAccess(h)
-  assert.match(h.view(), /^> Copy client command/mu)
+  assert.match(h.view(), /> Copy client command/mu)
   assert.match(h.view(), /dsh --profile 'work profile' acp stdio/u)
+  const readsBefore = h.acp.reads
   await key(h, ENTER)
   await settle(h, 'the copied client command', frame => /Status\s+Client command copied/u.test(frame))
   assert.deepEqual(h.copied, ["dsh --profile 'work profile' acp stdio"])
-  assert.deepEqual(h.acp.setEnabledCalls, [])
+  assert.equal(h.acp.reads, readsBefore, 'a Client-local copy performs no Host read')
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'a copy performs no Host write')
+  assert.deepEqual(h.pref.writes, [], 'a copy performs no preference write')
   h.dispose()
 })
 
@@ -460,7 +478,7 @@ test('a Host replacement during the live preflight is a definitive zero-write No
   const h = setup({ status: { state: 'disabled' }, holdSecondAcpRead: true })
   await openHostRows(h)
   await openAcpAccess(h)
-  assert.match(h.view(), /^> Enable ACP/mu)
+  assert.match(h.view(), /> Enable ACP/mu)
   await key(h, ENTER) // Enable ACP: the live preflight read is held unresolved
   assert.match(h.view(), /Waiting for the answer…/u)
   // Host A is replaced by Host B while the preflight has NOT invoked a write.
@@ -472,7 +490,7 @@ test('a Host replacement during the live preflight is a definitive zero-write No
   assert.deepEqual(h.acp.setEnabledCalls, [], 'no Host write was invoked before the preflight settled')
   h.releaseAcpReads()
   await settle(h, 'the replacement Host fact', frame => /Listener\s+Enabled/u.test(frame))
-  assert.match(h.view(), /^> Copy client command/mu, 'the replacement Host state owns the action')
+  assert.match(h.view(), /> Copy client command/mu, 'the replacement Host state owns the action')
   assert.deepEqual(h.acp.setEnabledCalls, [], 'the stale preflight reply never dispatches')
   h.dispose()
 })
@@ -481,12 +499,60 @@ test('a Host generation change repaints the new Host fact and never reuses the o
   const h = setup({ status: { state: 'disabled' } })
   await openHostRows(h)
   await openAcpAccess(h)
-  assert.match(h.view(), /^> Enable ACP/mu)
+  assert.match(h.view(), /> Enable ACP/mu)
   // The Host is replaced while the page is open; the new Host's listener is ON.
   h.acp.status = { state: 'enabled' }
   h.bumpGeneration()
   await settle(h, 'the new Host fact', frame => /Listener\s+Enabled/u.test(frame))
   assert.deepEqual(h.acp.setEnabledCalls, [], 'the rollover itself writes nothing')
-  assert.match(h.view(), /^> Copy client command/mu, 'the new Host offers its own enabled-state action')
+  assert.match(h.view(), /> Copy client command/mu, 'the new Host offers its own enabled-state action')
+  h.dispose()
+})
+
+test('a /acp first frame without one real Detail row reports the command error and starts no read', async () => {
+  const h = setup({ columns: 200, rows: 2, status: { state: 'disabled' } })
+  const pending = h.invoke('acp') as Promise<{ readonly kind: string; readonly text?: string }>
+  await settle(h, 'the closed refused lease', frame => !frame.includes('Settings ·'))
+  const result = await pending
+  assert.equal(result.kind, 'error', 'the command reports its real failure')
+  assert.match(result.text ?? '', /could not open ACP access/u)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the failed lease is closed, never a silent Rows fallback')
+  assert.equal(h.acp.reads, 0, 'no Host read starts without a real Detail grant')
+  assert.equal(h.app.overlayGraphState().handles, 0)
+  h.dispose()
+})
+
+test('a mounted preflight write can be left by the page Back and never invokes the Host', async () => {
+  const h = setup({ status: { state: 'disabled' }, holdSecondAcpRead: true })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  assert.match(h.view(), /> Enable ACP/u)
+  await key(h, ENTER) // Enable ACP: the live preflight read is held
+  await settle(h, 'the pending preflight', frame => frame.includes('Waiting for the answer…'))
+  assert.equal(h.acp.reads, 2)
+  await key(h, '\x1b') // the page's own explicit Back leaves the tenant
+  await settle(h, 'the Host Rows level', frame => frame.includes('Settings · Host · Rows'))
+  h.releaseAcpReads()
+  await drain(h)
+  assert.deepEqual(h.acp.setEnabledCalls, [], 'the retired preflight never invoked a Host mutation')
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the late preflight reply never revives the page')
+  assert.doesNotMatch(h.view(), /Waiting for the answer…/u)
+  h.dispose()
+})
+
+test('a mounted invoked write can be left by the page Back while its owner settles', async () => {
+  const h = setup({ status: { state: 'disabled' }, holdAcpWrite: true })
+  await openHostRows(h)
+  await openAcpAccess(h)
+  await key(h, ENTER) // Enable ACP: `setEnabled` is really invoked and held
+  await settle(h, 'the pending invoked write', frame => frame.includes('Waiting for the answer…'))
+  assert.deepEqual(h.acp.setEnabledCalls, [true], 'the real Host write was invoked exactly once')
+  await key(h, '\x1b') // the page's documented pending exit
+  await settle(h, 'the Host Rows level', frame => frame.includes('Settings · Host · Rows'))
+  h.releaseAcpWrite()
+  await drain(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the late settlement never revives the page')
+  assert.doesNotMatch(h.view(), /Waiting for the answer…/u)
+  assert.deepEqual(h.acp.setEnabledCalls, [true], 'the dispatched write is never cancelled or replayed')
   h.dispose()
 })

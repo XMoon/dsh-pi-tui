@@ -89,15 +89,15 @@ async function waitForDetailPattern(client, pattern, label, timeoutMs = 90_000) 
   throw new SplitSmokeAssertionError(`${label}: wanted ${String(pattern)} in the Detail column; frame=${JSON.stringify(await client.viewport())}`)
 }
 
-async function waitForProfileAutoStart(installation, expected, label, timeoutMs = 30_000) {
+async function waitForProfileAutoStart(installation, expected, label, timeoutMs = 30_000, namespace = WEB_PREFERENCE_NS) {
   const started = Date.now()
   let last
   while (Date.now() - started < timeoutMs) {
-    last = profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)
+    last = profileUserConfig(installation.profileDir, namespace)
     if (last?.autoStart === expected) return last
     await sleep(100)
   }
-  throw new SplitSmokeAssertionError(`${label}: ${WEB_PREFERENCE_NS}.autoStart never became ${expected}; last=${JSON.stringify(last)}`)
+  throw new SplitSmokeAssertionError(`${label}: ${namespace}.autoStart never became ${expected}; last=${JSON.stringify(last)}`)
 }
 
 async function selectFrame(client, predicate, label, limit = 24) {
@@ -313,10 +313,39 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\x1b') // fresh page -> the Host Rows
     await waitForNoPattern(clientA, /Current Host/u, 'FR5-B Web second retirement')
 
-    // The ACP preference still writes its original id from its own page.
+    // ACP access is the SAME real Detail tenant over the running Host runtime
+    // and the persisted next-start preference. The seeded autoStart binds the
+    // listener at boot; every mutation below proves its OWN authoritative
+    // readback and leaves the OTHER authority untouched.
     await selectFrame(clientA, frame => selectedRow(frame, 'ACP access'), 'FR5-B ACP access row')
     clientA.send('\r')
     await waitForPattern(clientA, /Settings · Host · ACP access/u, 'FR5-B ACP access page')
+    const acpBoot = await waitForPattern(clientA, /Listener\s+(?:Enabled|Disabled)/u, 'FR5-B ACP runtime fact')
+    assert(/Listener\s+Enabled/u.test(detailColumnText(acpBoot)),
+      `the seeded ACP autoStart must bind the listener at boot: ${JSON.stringify(acpBoot)}`)
+    const acpSeed = await waitForDetailPattern(clientA, /Start automatically\s+On\b/u, 'FR5-B ACP seeded preference')
+    assert(/Start automatically\s+On\b/u.test(detailColumnText(acpSeed)),
+      `the ACP page must read the seeded USER value On: ${JSON.stringify(acpSeed)}`)
+    // Disable: the complete risk copy gates the ONE real Host write.
+    await selectFrame(clientA, frame => selectedRow(frame, 'Disable ACP…'), 'FR5-B ACP disable row')
+    clientA.send('\r')
+    const acpDisableRisk = await waitForText(clientA, 'Disable the local ACP listener?', 'FR5-B ACP disable confirmation')
+    assert(/Disable the local ACP listener\? All connected ACP clients will be disconnected\. Host sessions, Agents and this TUI will keep running\./u
+      .test(detailColumnText(acpDisableRisk)),
+    `the exact ACP disable risk must be painted whole: ${JSON.stringify(acpDisableRisk)}`)
+    clientA.send('\r') // Disable ACP: the confirmation's own first focus
+    await waitForPattern(clientA, /Listener\s+Disabled/u, 'FR5-B ACP runtime disabled')
+    await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP runtime disable verified')
+    clientA.send('\r') // the disabled page's first focus is Enable ACP
+    await waitForPattern(clientA, /Listener\s+Enabled/u, 'FR5-B ACP runtime re-enabled')
+    await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP runtime enable verified')
+    // The runtime round trip must not have rewritten the next-start preference.
+    assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === true,
+      'the ACP runtime toggle must leave the next-start USER preference On')
+    trace('fr5b.host-acp-runtime', { disabled: true, reEnabled: true, authoritativeReadback: true, preferenceUnchanged: true })
+
+    // Next Host Start: the ACP page writes its own official preference id after
+    // the explicit candidate -> Confirm save ladder.
     await selectFrame(clientA, frame => selectedRow(frame, 'Start automatically'), 'FR5-B ACP start row')
     clientA.send('\r')
     await waitForText(clientA, 'Choose the value the next Host start applies:', 'FR5-B ACP start choice')
@@ -324,11 +353,31 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r')
     await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B ACP confirm step')
     clientA.send('\r')
-    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B ACP preference verified')
-    assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === false,
-      'the ACP page writes the SAME official preference id')
+    // Wait for the NEXT-START section's own settled Status, not the earlier
+    // runtime Status word.
+    await waitForDetailPattern(clientA,
+      /Next Host Start\s+Start automatically Off(?:\s|·).*?Status Verified/u,
+      'FR5-B ACP preference settled in the next-start section')
+    const acpSaved = await waitForProfileAutoStart(installation, false, 'FR5-B ACP preference profile', 30_000, ACP_PREFERENCE_NS)
+    assert(acpSaved.autoStart === false, 'the ACP page writes the SAME official preference field')
     trace('fr5b.host-acp-preference', { savedProfile: true })
-    clientA.send('\x1b') // the page -> the Host Rows
+    // Retire the tenant and re-enter through the real Host row: the fresh mount
+    // performs ONE new read and must still report the running listener, never the
+    // saved next-start value.
+    clientA.send('\x1b') // page -> Host Rows
+    await waitForNoPattern(clientA, /Current Host/u, 'FR5-B ACP page retired')
+    await selectFrame(clientA, frame => selectedRow(frame, 'ACP access'), 'FR5-B ACP re-entry row')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Settings · Host · ACP access/u, 'FR5-B ACP re-entered')
+    const acpFresh = await waitForPattern(clientA, /Listener\s+Enabled/u, 'FR5-B ACP fresh mount still listens')
+    assert(/Listener\s+Enabled/u.test(detailColumnText(acpFresh)),
+      `a fresh mount after the preference save must still report Enabled: ${JSON.stringify(acpFresh)}`)
+    await waitForDetailPattern(clientA, /Start automatically\s+Off\b/u, 'FR5-B ACP fresh mount preference Off')
+    assert(profileUserConfig(installation.profileDir, ACP_PREFERENCE_NS)?.autoStart === false,
+      'the next-start preference remains Off after the fresh runtime observation')
+    trace('fr5b.host-acp-reentry', { freshRead: true, runtimeUnchanged: true, preferenceOff: true })
+    clientA.send('\x1b') // fresh page -> the Host Rows
+    await waitForNoPattern(clientA, /Current Host/u, 'FR5-B ACP second retirement')
     await sleep(200)
 
     // ── Session log upload: risk text, Off, and Reset readback ─────────────

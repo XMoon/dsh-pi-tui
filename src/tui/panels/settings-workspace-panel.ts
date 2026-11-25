@@ -3635,7 +3635,10 @@ export class SettingsWorkspacePanel implements Component {
         // entry uses the SAME `Open…` wording as the other hosted pages.
         return this.intents.createWebUiPage === undefined ? undefined : { label: 'Open…' }
       case 'acp-access':
-        return this.intents.createAcpAccessPage === undefined ? undefined : { label: 'Open ACP access…' }
+        // SUX-05: the ACP access page is a real Detail TENANT, so its ONE
+        // explicit entry uses the SAME `Open…` wording as the other hosted
+        // pages.
+        return this.intents.createAcpAccessPage === undefined ? undefined : { label: 'Open…' }
     }
   }
 
@@ -4240,13 +4243,14 @@ export class SettingsWorkspacePanel implements Component {
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
     if (this.specialistPage !== undefined) return
-    // SUX-01/02/03/04: a Detail tenant is hosted inside the REAL Detail pane,
-    // so it must be entered only when that pane really grants a content row — a
-    // body row that the pane header would consume is not enough. The Web page's
-    // typed `/web` deeplink goes through this SAME floor, so it can never mount
-    // on the old full-width body grant.
+    // SUX-01/02/03/04/05: a Detail tenant is hosted inside the REAL Detail
+    // pane, so it must be entered only when that pane really grants a content
+    // row — a body row that the pane header would consume is not enough. The
+    // ACP page's typed `/acp` deeplink goes through this SAME floor, so it can
+    // never mount on the old full-width body grant.
     if (row.specialist === 'agent-loop-settings' || row.specialist === 'shell-execution-settings'
-      || row.specialist === 'subagent-settings' || row.specialist === 'web-ui') {
+      || row.specialist === 'subagent-settings' || row.specialist === 'web-ui'
+      || row.specialist === 'acp-access') {
       const plan = planSettingsChrome(
         this.projectionWidth(),
         this.intents.rows(),
@@ -4440,29 +4444,32 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  // ── the Detail tenants (Agent single / Shell group / Subagent group / Web) ─
+  // ── the Detail tenants (Agent single / Shell group / Subagent group / Web / ACP) ─
 
   /**
    * Whether the ONE mounted specialist is one of the real Detail TENANTS (the
-   * Agent single value, the Shell grouped fields, the Subagent grouped fields
-   * or the Web UI page). The authority is the real mounted slot plus its row id
-   * — never the selected-but-not-entered row, the category, the terminal width
-   * or the mere presence of a factory.
+   * Agent single value, the Shell grouped fields, the Subagent grouped fields,
+   * the Web UI page or the ACP access page). The authority is the real mounted
+   * slot plus its row id — never the selected-but-not-entered row, the
+   * category, the terminal width or the mere presence of a factory.
    */
   private detailTenantActive(): boolean {
     return this.specialistPage !== undefined
       && (this.specialistRow === 'agent-loop' || this.specialistRow === 'shell-execution'
-        || this.specialistRow === 'subagent-settings' || this.specialistRow === 'web-ui')
+        || this.specialistRow === 'subagent-settings' || this.specialistRow === 'web-ui'
+        || this.specialistRow === 'acp-access')
   }
 
   /** Whether this ROW's visible route is a hosted Detail tenant. It is the
    *  ENTRY-side question, while `singleAgentRow` below stays the Agent-only
    *  presentation fact. Each tenant's own factory is its presence proof: the
-   *  Subagent tenant never depends on the numeric factory, and the Web tenant
-   *  never depends on the Web Search / Fetch page's factory. */
+   *  Subagent tenant never depends on the numeric factory, the Web tenant
+   *  never depends on the Web Search / Fetch page's factory, and the ACP
+   *  tenant never depends on the Web factory. */
   private detailTenantRow(row: SettingsWorkspaceRow | undefined): boolean {
     if (row?.specialist === 'subagent-settings') return this.intents.createSubagentSettingsPage !== undefined
     if (row?.specialist === 'web-ui') return this.intents.createWebUiPage !== undefined
+    if (row?.specialist === 'acp-access') return this.intents.createAcpAccessPage !== undefined
     if (this.intents.createHostNumericSettingsPage === undefined) return false
     return row?.specialist === 'agent-loop-settings' || row?.specialist === 'shell-execution-settings'
   }
@@ -5102,15 +5109,16 @@ export class SettingsWorkspacePanel implements Component {
         return
       }
       if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
-      // SUX-01/04: a pure region-focus Tab exit of the clean Agent single value
-      // or the clean Web UI page is the ROOT's own focus transaction, so it
-      // runs through the tenant's ONE leave gate first. A page that keeps the
-      // keys (raw input, disclosure, saving, dirty, an open choice or a pending
-      // write) refuses and then consumes the key as its own local input.
+      // SUX-01/04/05: a pure region-focus Tab exit of the clean Agent single
+      // value, the clean Web UI page or the clean ACP access page is the ROOT's
+      // own focus transaction, so it runs through the tenant's ONE leave gate
+      // first. A page that keeps the keys (raw input, disclosure, saving, dirty,
+      // an open choice or a pending write) refuses and then consumes the key as
+      // its own local input.
       // SUX-02: the Shell group's Tab is a LOCAL field move and is never taken
       // by the Root — the child receives it (and refuses it at zero body rows).
       if (this.detailTenantActive()
-        && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui')
+        && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui' || this.specialistRow === 'acp-access')
         && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
         const tabForward = matchesKey(data, 'tab')
         // A narrow frame paints ONE region: there is no second region to focus.

@@ -1069,12 +1069,28 @@ painted cell or a trace.
 ### ACP access page (Host)
 
 `/settings → Host → ACP access` — and the PiTui `/acp` deep link — open ONE
-EMBEDDED SPECIALIST PAGE inside this same Settings lease. It is the ONE PiTui
-ACP surface: the retired short `SettingsList` menu no longer exists, there is no
-second screen, and the TSP-native `/acp` picker keeps its own native contract
-(see [surface-behavior.md](./surface-behavior.md#acp-quick-control-acp)).
+EMBEDDED SPECIALIST PAGE inside this same Settings lease, and that page is a
+REAL DETAIL TENANT: it mounts inside the workspace's real Detail pane, so the
+parent Categories/Rows stay painted and readable while it holds the active
+device. The child owns only its Detail body cells; the Root keeps the shared
+chrome, the ONE physical last-row Action Bar and the ONE `Esc` pointer target.
+There is no separate ACP overlay, no second screen and no second Settings
+workspace. The breadcrumb is `Settings · Host · ACP access`. The TSP-native
+`/acp` picker keeps its own native contract (see
+[surface-behavior.md](./surface-behavior.md#acp-quick-control-acp)).
 
-Three authorities are painted side by side and are NEVER merged:
+The tenant and its authority are entered only through the Rows level's
+`Enter`/`Right` or the Detail preview's complete `Open…`; an ordinary row click
+only selects the row and a Detail blank/fact click only transfers the Detail
+column's focus. The mount requires a REAL Detail content row (`contentRows >=
+1`): an `/acp` first frame that cannot grant one is a real command error that
+closes the lease — never a silent Rows fallback and never a Host read. A
+terminal resize keeps the SAME mounted page instance and performs no extra Host
+read; a mounted page that later receives a zero-body grant keeps only its own
+painted bar (`Back [Esc]`) and no hidden body action.
+
+Three authorities are painted as three separate reading groups and are NEVER
+merged:
 
 - `Current Host` is the LIVE listener state of the running Split Host, read
   through the semantic `AcpAccessPort` and bound to the Connection generation it
@@ -1098,11 +1114,13 @@ Three authorities are painted side by side and are NEVER merged:
   Host, and a runtime toggle never changes it. `Off (default)` marks the schema
   default the USER layer does not declare; a non-ready configuration, a missing
   revision or an unreadable section is `Unavailable`/read-only and never a
-  guessed default. The revision that opened the choice is the decision fence: a
-  moved revision refuses the staged confirmation with `Not saved` and ZERO
-  writes, and the user must review and choose again. The writer's four outcomes
-  (`Verified`, `Not saved`, `Unverified`, `Outcome unconfirmed`) are painted as
-  its own `Status`.
+  guessed default. The revision AND the Connection generation captured when the
+  choice opened are the decision fence: a moved revision is `Not saved`, and a
+  silently replaced Host is refused at the submit boundary, both with ZERO
+  writes and without rebasing the CAS onto newer authority. Every actual
+  generation rollover retires a staged choice even when the replacement exposes
+  the same revision. The writer's four outcomes (`Verified`, `Not saved`,
+  `Unverified`, `Outcome unconfirmed`) are painted as its own `Status`.
 - `Client Setup` is Client-local: it states the local Unix socket /
   same-OS-user / stdio bridge facts and the ONE copyable command
   `dsh --profile <proven-profile> acp stdio`, composed from the OFFICIAL Profile
@@ -1118,28 +1136,76 @@ Three authorities are painted side by side and are NEVER merged:
 
 The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
 `choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config`,
-`pending-copy` or `settled`. The enabled Host's first focus is
-`Copy client command` (else `Disable ACP…`), the disabled Host's is
-`Enable ACP`; with no runtime action the editable `Start automatically` or
-`Refresh` owns it. `Disable ACP…` only enters the risk confirmation whose exact
-sentence is `Disable the local ACP listener? All connected ACP clients will be
-disconnected. Host sessions, Agents and this TUI will keep running.`; only the
-phase's own `Disable ACP` row or the painted `Confirm [Enter]` segment dispatches
-the ONE disable, and `Cancel`/`Esc` performs zero writes. `Esc` steps
-`confirm-save → choose-autostart → ready → Host Rows`, and
-`confirm-disable → ready`; a `pending-*` write keeps settling in its own owner
-after the page is left (a late result is diagnosed, never repainted, never
-replayed). A retired page never revives a closed Settings screen.
+`pending-copy` or `settled`. Only the phase decides which body controls and bar
+segments exist.
+
+Admission is ONE semantic fact shared by the body, the keyboard and the
+delegated last-row spans: only an action whose complete verb/field/answer row
+was really painted in the CURRENT frame may run. A clipped, scrolled-out,
+dropped-wholesale or previous-frame control never writes, and the keyboard
+`Enter`, `r`/`R` and the painted bar span read exactly that set. The complete
+business verbs (`Copy client command`, `Enable ACP`, `Disable ACP…`, `Refresh`)
+are the action spans; the row label padding, a field's label/value cells, a pure
+fact row and blank cells only select (or are inert) and never act. `Refresh` is
+a real body action in EVERY `ready`/`settled` projection, not only the
+changing/unavailable one: it performs one authoritative status read, so a
+same-generation external listener change is refreshable without a hidden key.
+The `Start automatically` flow is: select the field, open the complete `Change…`
+affordance, choose `On`/`Off` (the current one carries `[current]`; staging
+writes nothing), then the ONE explicit `Confirm save`.
+
+The two confirmations are gated by the SAME rule and by the complete necessary
+copy in that frame:
+
+| Phase | Body / actions | Confirm and `Esc` |
+|---|---|---|
+| enabled Host | `Copy client command`, `Disable ACP…` (`Disconnects active ACP clients`), `Refresh` | `Esc` performs the clean parent leave |
+| disabled Host | `Enable ACP`, `Copy client command`, `Refresh` | `Esc` performs the clean parent leave |
+| changing / unavailable / unreadable | `Copy client command` when the Profile is proven, `Refresh` only, never a Host write | `Esc` performs the clean parent leave |
+| `confirm-disable` | the exact sentence `Disable the local ACP listener? All connected ACP clients will be disconnected. Host sessions, Agents and this TUI will keep running.` FIRST, then `Disable ACP` and `Cancel` | the accept row and the `Confirm [Enter]` bar segment exist ONLY while the whole risk sentence shares the painted viewport; a short grant paints no accept word and Enter is inert, while `Cancel`/`Esc` always performs zero writes. A selected `Cancel` never advertises an Enter confirm |
+| `Next Host Start` choice | the complete `On`/`Off` candidates; choosing/`Select [Enter]` stages only; no write | `Esc` steps back with zero writes |
+| `confirm-save` | the complete `Save the next Host start preference as On/Off?`, the `Applies on the next Host start; the running Host is unchanged.` lifetime sentence, `Confirm save` and `Cancel` | only `Confirm save` calls the writer and only while the question and lifetime sentence are complete in the SAME frame; `Esc` steps back with zero writes |
+| `pending-*` | `Waiting for the answer…` / `Copying the client command…`, no second action | the page's own `Back [Esc]` leaves while the dispatched write/copy keeps settling in its OWN owner (never cancelled, replayed or repainted); parent clicks/Tab are refused |
+
+The first focus is the enabled Host's `Copy client command` (else
+`Disable ACP…`), the disabled Host's `Enable ACP`, otherwise the Client-local
+`Copy client command` when the Profile is proven, else the editable
+`Start automatically` row when its preference can really be written, else
+`Refresh`. Label/value cells that do not fit are WRAPPED, never truncated into a
+different writable-looking value, and a complete action verb is never painted
+partially; a short frame scrolls ONE Detail column and a scroll/resize back to a
+sufficient grant restores the complete confirmation without any automatic
+confirmation.
 
 The Action Bar paints `Refresh [R] · Back [Esc]`,
-`Confirm [Enter] · Cancel [Esc]`, `Select [Enter] · Cancel [Esc]` or
-`Confirm save [Enter] · Cancel [Esc]` as the phase decides; only the ROOT owns the
-physical last row and every segment is dropped WHOLE. Every pointer-capable
-target is the last-painted row/bar geometry under the same admission as `Enter`,
-so a stale press/release, a resize, a generation change or a phase change can
-never activate an old control. A short frame scrolls ONE column and never drops
-the `Esc` affordance; the page never paints a partial verb and never exposes a
-target for an unpainted control.
+`Copy [Enter] · Refresh [R] · Back [Esc]` (or the selected row's own
+`Enable`/`Disable`/`Change` verb), `Confirm [Enter] · Cancel [Esc]`,
+`Select [Enter] · Cancel [Esc]` or `Confirm save [Enter] · Cancel [Esc]` as the
+phase decides; only the ROOT owns the physical last row and every segment is
+dropped WHOLE. Every pointer-capable target is the last-painted row/bar geometry
+under the same admission as `Enter`, so a stale press/release, a resize, a
+generation change or a phase change can never activate an old control. A short
+frame scrolls ONE column and never drops the `Esc` affordance.
+
+Parent navigation is the tenant's ONE guarded leave: `ready`/`settled`/`loading`
+allow it (the read that no longer owns the page is retired);
+`choose-autostart`, `confirm-disable` and `confirm-save` refuse every parent
+route until the user's own local `Cancel`; `pending-runtime`, `pending-config`
+and `pending-copy` refuse parent clicks/Tab while the explicit page `Back [Esc]`
+stays the documented exit, and the write/copy owner still settles and diagnoses
+the dispatched request. A forced teardown retires the page directly. The page's
+`done` is instance-fenced and always returns to the Host Rows level (also for
+`/acp`); re-entering builds a NEW page instance and starts exactly ONE new
+authoritative read.
+
+A write settlement is painted as its own `Status` word: the runtime write
+reports `Verified` only when the authoritative re-read agrees, `Not saved` when
+the request reported success but the Host reads otherwise, and `Outcome
+unconfirmed` when the receipt was lost, the Host changed during the request or
+the read-back could not be performed; it is never retried automatically and
+never attributed from a fresh read. The preference write reports the four
+existing writer outcomes on its own side. Closing an ACP View detaches it; Host
+Sessions, Agents and the TUI remain.
 
 Authority: `src/tui/panels/acp-access-settings-page.ts`,
 `src/tui/commands/settings.ts` (`createAcpAccessPage`,
