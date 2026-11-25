@@ -1123,6 +1123,9 @@ try {
       } else if (at === 'public-daemon-before-registry' || at === 'public-daemon-before-ready-ack') {
         receipt = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
+          if (current?.phase === 'NOT_QUIESCED') {
+            fail(`${String(at)}: the Supervisor failed before reaching the requested window (${String(current.errorName ?? 'unknown')})`)
+          }
           const note = processNote(current, 'process-probe-hold', at)
           if (note === undefined) return undefined
           const launch = (current.publicLaunches ?? []).find(value => value.launchId === note.detail?.launchId)
@@ -1171,6 +1174,9 @@ try {
       } else if (at === 'public-daemon-ownership-refused') {
         receipt = await waitUntil(() => {
           const current = latestProcessReceipt(tmpBase, runId)
+          if (current?.phase === 'NOT_QUIESCED') {
+            fail(`public-daemon-ownership-refused: the Supervisor failed before readiness (${String(current.errorName ?? 'unknown')})`)
+          }
           if (processNote(current, 'public-daemon-ownership-refused-ready') === undefined) return undefined
           const launch = (current.publicLaunches ?? []).find(value => value.readyAt !== undefined && value.host !== null)
           if (launch === undefined || launch.host === null) return undefined
