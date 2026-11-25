@@ -7161,23 +7161,26 @@ async function reclaimPublicLaunch(handle, reason) {
   if (handle.closed) return
   if (handle.reclaimPromise !== undefined) return await handle.reclaimPromise
   handle.reclaimPromise = (async () => {
-    if (!handle.exited) {
-      try {
-        await withProcessNativeOperation('public-daemon-reclaim-close', handle.launchId, () => handle.terminal.closeQuiet())
-      } catch (error) {
-        const stillOpen = new Set(await openTuiSessions()).has(handle.sessionId)
-        if (stillOpen) throw error
-      }
-      const exit = await waitForTerminalExit(handle.terminal, handle.label, 60_000)
-      handle.exitResult = exit
-      handle.exited = true
-    }
+    // The real frame is captured BEFORE the PTY is closed; after closeQuiet the
+    // native handle legitimately has no readable state, so terminal exit code is
+    // unknown and never invented.
     handle.exitText = await handle.terminal.text({ full: true }).catch(() => handle.exitText)
+    try {
+      await withProcessNativeOperation('public-daemon-reclaim-close', handle.launchId, () => handle.terminal.closeQuiet())
+    } catch (error) {
+      const stillOpen = new Set(await openTuiSessions()).has(handle.sessionId)
+      if (stillOpen) throw error
+    }
     await waitForPublicIdentityGone(handle.cli, `${reason}: ${handle.label} CLI`, 30_000)
     await waitForPublicIdentityGone(handle.client, `${reason}: ${handle.label} Client`, 30_000)
     if (handle.shellIdentity !== undefined) {
       await waitForProcessIdentityTerminal(handle.shellIdentity.identity, `${reason}: ${handle.label} shell`, 30_000)
     }
+    if (new Set(await openTuiSessions()).has(handle.sessionId)) {
+      throw new Error(`${reason}: ${handle.label} left its native public session open`)
+    }
+    handle.exited = true
+    handle.exitResult = handle.exitResult ?? { code: null, signal: null }
     handle.closed = true
     handle.closedAt = now()
     handle.verifiedTerminal = { kind: 'native', code: handle.exitResult?.code ?? null, signal: handle.exitResult?.signal ?? null }
