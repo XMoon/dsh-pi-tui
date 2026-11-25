@@ -74,8 +74,15 @@ interface HistoryHost {
   dispose(): Promise<void>
 }
 
-async function historyHost(life: TestLifecycle, presetId: string): Promise<HistoryHost> {
-  const host = await createRemoteApplicationHostFixture(life, presetId, { pluginManagerProfile: true })
+async function historyHost(
+  life: TestLifecycle,
+  presetId: string,
+  beforeHostRuntime?: (ctx: Context) => Promise<void>,
+): Promise<HistoryHost> {
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    pluginManagerProfile: true,
+    ...(beforeHostRuntime === undefined ? {} : { beforeHostRuntime }),
+  })
   const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const connection = host.ctx.connection
   const owner = connection.browserPeer
@@ -6824,6 +6831,75 @@ test('a real restored cold Session opened during a proven periodic round cannot 
     releaseA()
     rawQuery.observeSession = originalObserve
     service.enqueueWrite = originalEnqueue
+    await wire.dispose()
+  }
+})
+
+test('a real post-roster Session born during the held cold prewarm reaches ready without a periodic pass', async (t) => {
+  const rosterId = 'history-post-roster-real-a'
+  const bornId = 'history-post-roster-real-b'
+  let latched: () => void = () => {}
+  const latchedSignal = new Promise<void>(resolve => { latched = resolve })
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let rawPersistence: HistorySearchPersistenceLike | undefined
+  let originalOpen: HistorySearchPersistenceLike['open'] | undefined
+  const wire = await historyHost(testLifecycle(t), 'history-post-roster-real', async (ctx) => {
+    const handle = await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: SessionId(rosterId),
+      createdAt: Date.now(),
+      cwd: '/repo/post-roster-real',
+      isSeeded: false,
+    })
+    await handle.append([{
+      type: 'agent/inbox/spliced',
+      seq: 0,
+      time: 1000,
+      data: {
+        target: 'next-turn',
+        start: 0,
+        inserted: [{
+          id: 'post-roster-real-a-0',
+          role: 'user',
+          content: [{ type: 'text', text: 'post roster roster row' }],
+          source: { kind: 'user', rpcId: 'rpc-post-roster-real-a' },
+        }],
+      },
+    }] as never)
+    await handle.flush()
+    await handle.close()
+    const raw = ctx.sessionPersistence as unknown as HistorySearchPersistenceLike
+    rawPersistence = raw
+    originalOpen = raw.open
+    raw.open = async function (id, access, options) {
+      if (String(id) === rosterId) {
+        latched()
+        await gate
+      }
+      return originalOpen!.call(this, id, access, options)
+    }
+  })
+  try {
+    await latchedSignal
+    await wire.host.harness.create(
+      SessionId(bornId), { provider: 'smoke', model: 'smoke' }, { cwd: wire.host.anchorDir })
+    await prompt(wire, bornId, 'req-post-roster-real-b', 'post roster born row')
+    release()
+    const born = await waitForSettled(wire, {
+      scope: 'session', sessionId: bornId, query: 'post roster born row', limit: 10,
+    }, 'post-roster born readiness')
+    assert.equal(born.kind, 'ready', JSON.stringify(born))
+    if (born.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(born.items.length, 1)
+    const roster = await wire.search({
+      scope: 'session', sessionId: rosterId, query: 'post roster roster row', limit: 10,
+    })
+    assert.equal(roster.kind, 'ready')
+    assert.ok(roster.kind === 'ready' && roster.items.length === 1)
+  } finally {
+    release()
+    if (rawPersistence !== undefined && originalOpen !== undefined) rawPersistence.open = originalOpen
     await wire.dispose()
   }
 })

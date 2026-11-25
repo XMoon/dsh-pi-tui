@@ -3561,9 +3561,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     round: HistoryCoverageRound | undefined = this.coverageRound,
   ): void {
     if (round === undefined) return
-    // Both round kinds need the exact identity evidence: unproven rounds use it
-    // as the per-ID coverage fact, and a previously proven periodic round uses
-    // it to fence a destructive/read-only round that is still open.
+    // Unproven coverage is an exact fixed-roster predicate: a post-roster birth
+    // or an independent terminal for an ID outside the roster must not enlarge
+    // the cardinality set. Proven rounds have no expected set and admit their
+    // terminal identities (including the audit seed).
+    if (round.expected !== undefined && !round.expected.has(sessionId)) return
     round.settled.set(sessionId, { liveObject })
   }
 

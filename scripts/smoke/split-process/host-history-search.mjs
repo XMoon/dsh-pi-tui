@@ -398,6 +398,17 @@ function inspectDerivedHistory(profileDir) {
   }
 }
 
+/** Read one committed proof row, if present (Host stopped). */
+function sourceProofOf(profileDir, sessionId) {
+  const dbPath = join(profileDir, '.dsh-pi-tui', 'history-search', 'v2.sqlite')
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    return db.prepare('SELECT source_revision, checkpoint_hash, source_path FROM history_source_proofs WHERE session_id = ?').get(sessionId)
+  } finally {
+    db.close()
+  }
+}
+
 /**
  * One test-only Host plugin installed only into THIS smoke's isolated profile.
  * It uses official Host services (workingDirectory/sessionController) to
@@ -1017,6 +1028,44 @@ export async function runHostHistorySearch(context) {
     await scene.awaitSceneSeatFree()
     host = undefined
 
+    // W02f: the cold fork rebuilt by W02e must now hit its committed proof on a
+    // DISTINCT Host restart, with zero official body reads for the fork source.
+    const forkProofBefore = sourceProofOf(context.installation.profileDir, forkSession)
+    assert(forkProofBefore !== undefined, 'W02f: the cold fork has no committed proof before restart')
+    const forkRestartLog = join(workDir, 'host-history-search-fork-restart.log')
+    const forkRestart = await scene.startC1Host('skills-standing', 'history fork restart host', {
+      DSH_PI_TUI_LOG: forkRestartLog,
+      DSH_PI_TUI_LOG_LEVEL: 'debug',
+    })
+    const forkRestartClientResult = await scene.startC1Client('history fork restart client', {
+      SPLIT_PROCESS_CLIENT_HISTORY_SEARCH_REQUEST: requestPath,
+    })
+    const forkRestartClient = forkRestartClientResult.client
+    const forkRestartOwn = assertReady(await searchSettled(forkRestartClient, requestPath, {
+      scope: 'session', sessionId: forkSession, query: childPromptText, limit: 25,
+    }, 'host history search W02f fork restart own'), 'W02f fork restart own')
+    assert(forkRestartOwn.items.length === 1 && forkRestartOwn.items[0].preview === childPromptText,
+      `W02f: cold-fork proof hit own row: ${JSON.stringify(forkRestartOwn.items)}`)
+    const forkRestartInherited = assertReady(await searchSettled(forkRestartClient, requestPath, {
+      scope: 'session', sessionId: forkSession, query: 'hsp-cwd-', limit: 25,
+    }, 'host history search W02f fork restart inherited'), 'W02f fork restart inherited')
+    assert(forkRestartInherited.items.length === 0,
+      `W02f: cold-fork proof hit inherited prefix leaked ${String(forkRestartInherited.items.length)} rows`)
+    const forkRestartCounters = await waitForBootstrapCounters(forkRestartLog, 'W02f fork restart')
+    assert(Number(forkRestartCounters.sourceProofHit) >= 5,
+      `W02f: the restart did not prove the unchanged sources: ${JSON.stringify(forkRestartCounters)}`)
+    assert(Number(forkRestartCounters.directPersistenceOpenCalls) <= 1,
+      `W02f: more than one cold source opened: ${JSON.stringify(forkRestartCounters)}`)
+    const forkProofAfter = sourceProofOf(context.installation.profileDir, forkSession)
+    assert(forkProofAfter !== undefined
+      && forkProofAfter.source_revision === forkProofBefore.source_revision
+      && forkProofAfter.checkpoint_hash === forkProofBefore.checkpoint_hash,
+    `W02f: the fork proof changed across the restart: ${JSON.stringify({ forkProofBefore, forkProofAfter })}`)
+    await scene.exitC1Client(forkRestartClient, 'history fork restart client exit')
+    await scene.stopC1Host(forkRestart.host)
+    await scene.awaitSceneSeatFree()
+    host = undefined
+
     // W06: the active derived store is v2, private and profile-local; the
     // legacy v1 file set stayed byte/mode/inode identical.
     const dbPath = join(historyDir, 'v2.sqlite')
@@ -1058,6 +1107,8 @@ export async function runHostHistorySearch(context) {
       forkChild: true,
       coldForkOwnRows: 1,
       coldForkInheritedRows: 0,
+      coldForkProofHit: true,
+      coldForkHitOpens: Number(forkRestartCounters.directPersistenceOpenCalls),
       queueEditRemove: true,
       queueSteer: true,
       keysetPages: true,
