@@ -28,6 +28,13 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
+// These are ordinary (non-image) theme cases: pin the image protocol so an
+// ambient/host SIXEL handle can never turn the report-triggered observation's
+// first call into the §4.4 drain (which would consume the test's reply). The
+// one shared-probe/drain case lives in the SIXEL integration suite, on the real
+// protocol negotiation. The product lane sanitizes this variable; pinning makes
+// a developer run agree with it.
+process.env.PI_IMAGE_PROTOCOL = 'none'
 
 const noop = (): void => {}
 
@@ -43,8 +50,17 @@ afterEach(() => {
 })
 
 const runOwned: OwnedRunner = ((_label, task, options) => {
-  Promise.resolve().then(task).then(
-    (result) => { options.onResult?.(result as never) },
+  // The production owned-task entry invokes the factory SYNCHRONOUSLY (the
+  // owner slot must exist before any await); mirror that semantics here.
+  let result: unknown
+  try {
+    result = task()
+  } catch (error) {
+    options.onError?.(error)
+    return
+  }
+  Promise.resolve(result).then(
+    (value) => { options.onResult?.(value as never) },
     (error) => { options.onError?.(error) },
   )
 }) as OwnedRunner
@@ -223,9 +239,11 @@ test('a same-value report burst coalesces onto ONE committable observation and n
   await settle(h.vt)
   assert.equal(osc11Queries(h.writes.slice(before)), 1,
     'the burst shares ONE app-owned observation, not one query per report')
-  h.vt.sendInput('\x1b]11;#282A36\x07')
+  // The SUPERSEDED flight answers LIGHT — the opposite of the final background.
+  // A stale-commit implementation would paint it; the follow-up sample below is
+  // the only answer that may decide the family.
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
   await settle(h.vt)
-  // The superseded flight committed nothing; answer the ONE follow-up sample.
   h.vt.sendInput('\x1b]11;#282A36\x07')
   await settle(h.vt)
   assert.deepEqual(applied, [], 'no wrong light frame may be committed during the burst')
@@ -276,23 +294,70 @@ test('a stop releases the observation as a cancellation, never as an environment
 test('an A→B→A hand-off cannot commit the observation resolved before it', async () => {
   const h = mountThemeHarness()
   h.boot()
-  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
-  await waitForPalette(lightColors)
+  h.vt.sendInput('\x1b]11;#111111\x07')
+  await waitForPalette(darkColors)
   await settle(h.vt)
-  h.app.applyTheme('dark') // a known dark runtime palette to observe any stale commit
   const pending = h.app.autoDetectTheme() // observation on the main screen
+  const beforeHandoff = h.writes.length
   // The reply RESOLVES in this tick, then the screen is handed off twice before
-  // its continuation may commit: A(main) -> B(alt) -> A(main).
+  // its continuation may commit: A(main) -> B(alt) -> A(main). LIGHT would be a
+  // visible wrong commit if the released observation were still committed.
   h.vt.sendInput('\x1b]11;#F5F5F5\x07')
   h.app.setFullscreen(true)
   h.app.setFullscreen(false)
   await pending
   await settle(h.vt)
   assert.equal(currentPalette, darkColors, 'a released observation can never colour the restored screen')
-  // The one fresh observation on the restored screen supplies the real answer.
-  h.vt.sendInput('\x1b]11;#111111\x07')
+  // The restored screen really re-sampled: its fresh LIGHT answer is applied.
+  assert.equal(osc11Queries(h.writes.slice(beforeHandoff)), 1,
+    'the hand-off completion point issues exactly ONE fresh observation')
+  h.vt.sendInput('\x1b]11;#F5F5F5\x07')
+  await waitForPalette(lightColors)
+  assert.equal(currentPalette, lightColors, 'the fresh reply applies on the restored screen')
+})
+
+test('the colour opt-out admits no Auto observation at boot or on a live report', async () => {
+  const saved = { NO_COLOR: process.env.NO_COLOR, FORCE_COLOR: process.env.FORCE_COLOR, CI: process.env.CI }
+  process.env.NO_COLOR = '1'
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  try {
+    setTheme('dark')
+    const h = mountThemeHarness()
+    h.boot()
+    await settle(h.vt)
+    assert.equal(osc11Queries(h.writes), 0, 'the boot detection never queries under the opt-out')
+    const before = h.writes.length
+    h.vt.sendInput('\x1b[?997;2n')
+    await settle(h.vt)
+    assert.equal(osc11Queries(h.writes.slice(before)), 0, 'a live report never queries under the opt-out')
+    assert.equal(currentPalette, darkColors, 'and it never commits a light palette')
+  } finally {
+    for (const key of ['NO_COLOR', 'FORCE_COLOR', 'CI'] as const) {
+      const value = saved[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('a synchronous theme observer selection wins over the outer transaction', async () => {
+  const h = mountThemeHarness({ theme: 'dark' })
+  h.boot()
   await settle(h.vt)
-  assert.equal(currentPalette, darkColors, 'the fresh reply applies on the restored screen')
+  // The observer re-enters with a NEWER deliberate selection during the outer
+  // transaction's notification. The outer commit must already be visible and
+  // must not overwrite the nested one afterwards.
+  const release = h.app.onThemeChanged(() => {
+    if (h.app.currentTheme() === 'dark') h.app.noteThemeSelection('auto')
+  })
+  try {
+    h.app.applyTheme('dark', { value: 'dark' })
+  } finally {
+    release()
+  }
+  assert.equal(h.app.themeFollowsTerminal(), true,
+    'the nested selection is newer and must own the final intent')
 })
 
 test('a manual persisted theme applies itself and neither queries nor tracks', async () => {
@@ -313,6 +378,38 @@ test('a live report under a manual selection changes nothing', async () => {
   await settle(h.vt)
   assert.equal(osc11Queries(h.writes.slice(before)), 0, 'a fixed theme admits no observation')
   assert.equal(currentPalette, darkColors, 'a fixed theme keeps its palette')
+})
+
+test('display and fullscreen persist through the semantic settings port without Direct forms', async () => {
+  const writes: unknown[] = []
+  let doc = { displayPreset: 'regular', fullscreen: 'off' }
+  const runtime = createSettingsRuntime({
+    surface: {
+      app: {
+        setDisplayPreset: () => ({ kind: 'applied' }),
+        notify: (message: string) => { assert.fail(message) },
+      } as never,
+      status: { snapshot: () => ({}) as never, subscribe: () => noop },
+    },
+    signal: new AbortController().signal,
+    tuiSettings: {
+      get: () => doc,
+      replace: (next: typeof doc) => { writes.push(next); doc = next },
+    } as never,
+    settingsForms: undefined,
+    isCleanedUp: () => false,
+    backend: { config: { footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) } } } as never,
+    diag: { debug: noop, info: noop, warn: noop, error: assert.fail, dispose: noop } as never,
+    status: { refresh: noop },
+    extensions: () => undefined,
+  })
+  runtime.setDisplayPreset('focus')
+  runtime.setFullscreen(true)
+  // Both existing detached writes join the semantic document's FIFO.
+  await new Promise<void>((resolve) => { setImmediate(resolve) })
+  assert.equal(writes.length, 2)
+  assert.equal(doc.displayPreset, 'focus')
+  assert.equal(doc.fullscreen, 'on')
 })
 
 test('a stored fullscreen preference is restored by the boot application', async () => {

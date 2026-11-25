@@ -88,6 +88,21 @@ function startAppWithWrites(width = 100, height = 24): { vt: VirtualTerminal; ap
   startedApps.add(app)
   return { vt, app, writes }
 }
+/** Pin the image protocol for one ordinary (non-image) app construction: an
+ *  ambient SIXEL handle would turn the report-triggered observation's first call
+ *  into the §4.4 drain and consume this test's reply. The real drain path is
+ *  covered by the SIXEL integration suite. */
+function withoutImageProtocol<T>(fn: () => T): T {
+  const previous = process.env.PI_IMAGE_PROTOCOL
+  process.env.PI_IMAGE_PROTOCOL = 'none'
+  try {
+    return fn()
+  } finally {
+    if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous
+  }
+}
+
 /** A write-recording app with the app-owned task entry the live-report route
  *  uses (report/hand-off follow-ups run through `runOwned`, never a bare void). */
 function startAppWithWritesAndOwned(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp; writes: string[] } {
@@ -106,8 +121,16 @@ function startAppWithWritesAndOwned(width = 100, height = 24): { vt: VirtualTerm
     onResult?: (value: unknown) => void
     onError?: (error: unknown) => void
   }) => {
-    Promise.resolve().then(task).then(
-      (result) => { options.onResult?.(result) },
+    // Production invokes the owned factory SYNCHRONOUSLY.
+    let result: unknown
+    try {
+      result = task()
+    } catch (error) {
+      options.onError?.(error)
+      return
+    }
+    Promise.resolve(result).then(
+      (value) => { options.onResult?.(value) },
       (error) => { options.onError?.(error) },
     )
   }) as never
@@ -1885,7 +1908,7 @@ test('a late background reply across a Fullscreen/Main switch is not user input'
 })
 
 test('a full stop/start keeps the app-owned live scheme route alive', async () => {
-  const { vt, app, writes } = startAppWithWritesAndOwned()
+  const { vt, app, writes } = withoutImageProtocol(() => startAppWithWritesAndOwned())
   app.noteThemeSelection('auto')
   app.stop()
   app.start()
@@ -2010,7 +2033,7 @@ test('Mode 2031 follows the tracking choice across a Main/Fullscreen switch', as
 })
 
 test('a live scheme report on the alt screen triggers the app-owned observation there', async () => {
-  const { vt, app, writes } = startAppWithWritesAndOwned()
+  const { vt, app, writes } = withoutImageProtocol(() => startAppWithWritesAndOwned())
   app.noteThemeSelection('auto')
   app.setFullscreen(true)
   await viewport(vt)
