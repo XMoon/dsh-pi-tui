@@ -655,6 +655,33 @@ It requires two private inputs:
   real bytes and SHA256 before a Scene root, install or Host exists; a changed
   or replaced input is `INPUT_CANDIDATE_CHANGED`.
 
+For this Project only, the Process bootstrap reuses a pnpm content store and
+metadata cache across Scenes. The default root is
+`<account home>/.cache/dsh-pi-tui-test/{pnpm-store,pnpm-cache}`. Set
+`SPLIT_VITEST_PNPM_CACHE_ROOT` to an existing absolute canonical directory that
+the current user owns with mode 0700, outside this checkout, the candidate
+input directory, `SPLIT_VITEST_TMP_BASE` and the account home itself, to use a
+private cache root. The override is a test-run input, not a product setting; it
+is not passed to the Host/Client runtime environment, and Scene cleanup never
+removes the cache.
+
+Only pnpm's downloaded content and metadata are shared: every Scene still
+creates its own HOME, DSH_HOME, profile, lockfile and `node_modules` and runs a
+real install. pnpm imports installed files with `copy` and the side-effects
+cache is disabled. The qualified Profile graph has no lifecycle-script or
+patched dependency, and its installed files do not share a writable inode with
+the shared store; a future dependency of that class must re-qualify the pinned
+pnpm write semantics before the same claim applies. Do not prune or delete the cache while a run is active; a damaged
+cache is an operator cleanup after every user has stopped, with diagnostics
+preserved first. For example:
+
+```sh
+SPLIT_VITEST_TMP_BASE=/absolute/private/run-root \
+SPLIT_VITEST_CANDIDATE_TGZ=/absolute/immutable/candidate.tgz \
+SPLIT_VITEST_PNPM_CACHE_ROOT=/absolute/private/pnpm-cache \
+  mise exec -- pnpm test:split:process
+```
+
 The project's files run with real file parallelism. An explicit
 `SPLIT_VITEST_RUN_ID` together with the SAME value in
 `SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes the files report a `parallel-ready`

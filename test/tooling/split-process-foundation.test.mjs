@@ -36,6 +36,7 @@ import { npmDshVersion, PACKAGE_ROOT } from '../../scripts/lib/dsh-distribution.
 import {
   assertPostReadCandidateIdentity,
   inspectImmutableSplitCandidate,
+  prepareProcessInstallCache,
 } from '../../scripts/lib/split-smoke-profile.mjs'
 import {
   assertKernelGroupSignalOwnership,
@@ -323,6 +324,127 @@ test('a symlinked private tmp base is refused at the Process BOOTSTRAP boundary 
   } finally {
     await supervisor.close({ timeoutMs: 30_000, allowKill: false })
   }
+})
+
+test('the process install cache keeps a private reusable root and refuses unsafe overrides', t => {
+  const life = testLifecycle(t)
+  const root = realpathSync(life.tempDir('process-cache-'))
+  const tmpBase = privateBase(life, root, 'base')
+  const inputs = privateBase(life, root, 'inputs')
+  const candidate = join(inputs, 'candidate.tgz')
+  writeFileSync(candidate, 'input fixture\n', { mode: 0o600 })
+  const cache = privateBase(life, root, 'cache')
+
+  assert.equal(prepareProcessInstallCache({ tmpBase, override: cache, candidateTarball: candidate }), cache)
+  for (const name of ['pnpm-store', 'pnpm-cache']) {
+    const stats = lstatSync(join(cache, name))
+    assert.equal(stats.isDirectory(), true)
+    assert.equal(stats.mode & 0o777, 0o700)
+    if (typeof process.getuid === 'function') assert.equal(stats.uid, process.getuid())
+  }
+
+  const sentinel = join(cache, 'pnpm-store', 'sentinel')
+  writeFileSync(sentinel, 'owned\n', { mode: 0o600 })
+  assert.equal(prepareProcessInstallCache({ tmpBase, override: cache, candidateTarball: candidate }), cache)
+  assert.equal(existsSync(sentinel), true)
+
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: 'relative-cache', candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: '', candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: join(root, 'missing-cache'), candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+
+  const alias = join(root, 'cache-alias')
+  symlinkSync(cache, alias)
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: alias, candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+
+  const unsafeMode = privateBase(life, root, 'unsafe-mode')
+  writeFileSync(join(unsafeMode, 'sentinel'), 'owned\n', { mode: 0o600 })
+  chmodSync(unsafeMode, 0o755)
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: unsafeMode, candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(join(unsafeMode, 'sentinel')), true)
+  assert.equal(existsSync(join(unsafeMode, 'pnpm-store')), false)
+
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: tmpBase, candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(join(tmpBase, 'pnpm-store')), false)
+
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: inputs, candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(join(inputs, 'pnpm-store')), false)
+  writeFileSync(join(inputs, 'sentinel'), 'owned\n', { mode: 0o600 })
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: inputs, candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(join(inputs, 'sentinel')), true)
+
+  mkdirSync(join(PACKAGE_ROOT, 'temp'), { recursive: true })
+  const checkoutCache = realpathSync(life.tempDir('cache-inside-checkout-', join(PACKAGE_ROOT, 'temp')))
+  chmodSync(checkoutCache, 0o700)
+  writeFileSync(join(checkoutCache, 'sentinel'), 'owned\n', { mode: 0o600 })
+  assert.throws(
+    () => prepareProcessInstallCache({ tmpBase, override: checkoutCache, candidateTarball: candidate }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(join(checkoutCache, 'sentinel')), true)
+  assert.equal(existsSync(join(checkoutCache, 'pnpm-store')), false)
+})
+
+test('the process install cache refuses a case-alias overlap on a case-insensitive volume', t => {
+  const life = testLifecycle(t)
+  const root = realpathSync(life.tempDir('process-cache-case-'))
+  const tmpBase = join(root, 'RunBase')
+  mkdirSync(tmpBase, { mode: 0o700 })
+  const lowerBase = join(root, 'runbase')
+  if (!existsSync(lowerBase)) {
+    t.skip('case-insensitive filesystem required for the alias fixture')
+    return
+  }
+  const baseStats = lstatSync(tmpBase)
+  const aliasStats = lstatSync(lowerBase)
+  if (aliasStats.dev !== baseStats.dev || aliasStats.ino !== baseStats.ino) {
+    t.skip('case-insensitive filesystem required for the alias fixture')
+    return
+  }
+
+  const cache = join(tmpBase, 'Cache')
+  mkdirSync(cache, { mode: 0o700 })
+  const inputs = privateBase(life, root, 'inputs')
+  const candidate = join(inputs, 'candidate.tgz')
+  writeFileSync(candidate, 'input fixture\n', { mode: 0o600 })
+  const sentinel = join(tmpBase, 'sentinel')
+  writeFileSync(sentinel, 'owned\n', { mode: 0o600 })
+
+  // realpathSync keeps this spelling for the case-insensitive components, so
+  // only actual directory identity can see that it is inside tmpBase.
+  assert.throws(
+    () => prepareProcessInstallCache({
+      tmpBase,
+      override: join(lowerBase, 'cache'),
+      candidateTarball: candidate,
+    }),
+    /process install cache root/u,
+  )
+  assert.equal(existsSync(sentinel), true)
+  assert.equal(existsSync(join(cache, 'pnpm-store')), false)
 })
 
 test('the shared official-record reader keeps complete-line strictness and only streams an incomplete tail', async t => {

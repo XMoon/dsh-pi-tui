@@ -124,6 +124,7 @@ let inspectSplitCandidate
 let inspectImmutableSplitCandidate
 let assertImmutableSplitCandidateUnchanged
 let createSplitSmokeProfile
+let prepareProcessInstallCache
 let writeC1WorkFixture
 let createTestTempDir
 let inspectSplitUpgradePair
@@ -237,6 +238,7 @@ const modulesReady = Promise.all([
   inspectImmutableSplitCandidate = profile.inspectImmutableSplitCandidate
   assertImmutableSplitCandidateUnchanged = profile.assertImmutableSplitCandidateUnchanged
   createSplitSmokeProfile = profile.createSplitSmokeProfile
+  prepareProcessInstallCache = profile.prepareProcessInstallCache
   writeC1WorkFixture = fixtures.writeC1WorkFixture
   createTestTempDir = tempLifecycle.createTestTempDir
   inspectSplitUpgradePair = pair.inspectSplitUpgradePair
@@ -2872,6 +2874,14 @@ async function handleBootstrapProcess(message) {
     // The run root is the ONE directory this Supervisor will later remove; its
     // name makes the provenance of a retained root unmistakable.
     assertLifecycleOpen('BOOTSTRAP_PROCESS before the Scene root')
+    // The shared download cache is account-level state, not a Scene resource:
+    // it is validated before the root/install/Host exists and is never removed
+    // by Scene cleanup. Only this explicit Process branch opts in.
+    const installCacheRoot = prepareProcessInstallCache({
+      tmpBase,
+      override: process.env.SPLIT_VITEST_PNPM_CACHE_ROOT,
+      candidateTarball: processCandidate.tarball,
+    })
     root = createTestTempDir('dsh-split-process-foundation.', tmpBase)
     scene = { kind: 'process', workDir: root }
     installInProgress = true
@@ -2897,6 +2907,7 @@ async function handleBootstrapProcess(message) {
       targetDshVersion: processCandidate.targetDshVersion,
       workDir: root,
       clientPlatformProvisioning: 'bundled',
+      installCacheRoot,
     })
     assertImmutableSplitCandidateUnchanged(processCandidate)
     if (process.env.SPLIT_VITEST_PROCESS_FAILURE_POINT === 'after-profile-install') {
