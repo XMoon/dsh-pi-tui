@@ -1708,7 +1708,7 @@ test('credential READS still supersede a describe from a replaced Connection gen
 // ── the profile-wide visual tools switch ──────────────────────────────────
 
 test('visualTools mirrors the Host section and writes the exact enabled path through the generated remote', async () => {
-  const { port, state } = createBackend(current => {
+  const { port, state, generation } = createBackend(current => {
     current.namespaces.set('pi-tui-visual-tools', {
       ns: 'pi-tui-visual-tools',
       value: { enabled: true },
@@ -1717,9 +1717,16 @@ test('visualTools mirrors the Host section and writes the exact enabled path thr
   })
   assert.equal(port.visualTools.read(), undefined, 'a never-described mirror has no authority to report')
   await port.describe()
-  assert.deepEqual(port.visualTools.read(), { enabled: true, revision: 4, userOverridden: false, applied: undefined })
+  const authority = generation.source.getSnapshot()!
+  assert.deepEqual(port.visualTools.read(), {
+    enabled: true,
+    revision: 4,
+    generation: authority,
+    userOverridden: false,
+    applied: undefined,
+  })
 
-  await port.visualTools.setEnabled(false, 4)
+  assert.deepEqual(await port.visualTools.setEnabled(false, 4, authority), { kind: 'accepted' })
   assert.equal(state.mutateCalls.length, 1)
   assert.equal(state.mutateCalls[0]!.ns, 'pi-tui-visual-tools')
   assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['enabled'], value: false }])
@@ -1728,15 +1735,38 @@ test('visualTools mirrors the Host section and writes the exact enabled path thr
   assert.equal(port.visualTools.read()?.applied, undefined, 'the wire exposes no registry fact, so none is claimed')
 })
 
+test('visualTools refuses a replaced Host authority before any write', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.namespaces.set('pi-tui-visual-tools', {
+      ns: 'pi-tui-visual-tools',
+      value: { enabled: true },
+      revision: 4,
+    })
+  })
+  await port.describe()
+  const authority = generation.source.getSnapshot()!
+  // A replacement Host can expose the SAME revision/value; the captured
+  // identity is the only fence that refuses the old decision.
+  generation.set({ id: 'gen-2' })
+  assert.deepEqual(
+    await port.visualTools.setEnabled(false, 4, authority),
+    { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' },
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a replaced authority receives ZERO writes')
+})
+
 test('visualTools reports a namespace the Host does not expose instead of fabricating a value', async () => {
   const { port } = createBackend()
   await port.describe()
   assert.equal(port.visualTools.read(), undefined)
-  await assert.rejects(port.visualTools.setEnabled(true, 1), /not available in this deployment/u)
+  assert.deepEqual(
+    await port.visualTools.setEnabled(true, 1, {}),
+    { kind: 'rejected', reason: 'settings namespace "pi-tui-visual-tools" is not available in this deployment' },
+  )
 })
 
-test('a stale visualTools read stays last-known and the write is refused by the currentness fence', async () => {
-  const { port, state } = createBackend(current => {
+test('a stale visualTools read stays last-known, generationless and unwritable', async () => {
+  const { port, state, generation } = createBackend(current => {
     current.namespaces.set('pi-tui-visual-tools', {
       ns: 'pi-tui-visual-tools',
       value: { enabled: true },
@@ -1744,14 +1774,22 @@ test('a stale visualTools read stays last-known and the write is refused by the 
     })
   })
   await port.describe()
+  const authority = generation.source.getSnapshot()!
   state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
   await assert.rejects(port.describe())
-  assert.deepEqual(port.visualTools.read(), { enabled: true, revision: 2, userOverridden: false, applied: undefined },
-    'the last-known value remains READABLE but configReadiness reports it non-current')
+  assert.deepEqual(port.visualTools.read(), {
+    enabled: true,
+    revision: 2,
+    generation: undefined,
+    userOverridden: false,
+    applied: undefined,
+  }, 'the last-known value remains READABLE but carries no writable identity')
   assert.equal(port.configReadiness(), 'stale')
-  const callsBefore = state.mutateCalls.length
-  await assert.rejects(port.visualTools.setEnabled(false, 2), /settings\.describe failed: connection lost/u)
-  assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the switch')
+  assert.deepEqual(
+    await port.visualTools.setEnabled(false, 2, authority!),
+    { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' },
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a stale mirror never dispatches the switch')
 })
 
 
@@ -1772,17 +1810,20 @@ test('a visualTools confirm submits the revision the decision was read at, never
   entry.value.enabled = false
   entry.revision = 6
 
-  await assert.rejects(port.visualTools.setEnabled(false, decision.revision), /revision 5 != 6/u,
-    'the stale decision is refused by the official revision fence')
-  assert.deepEqual(state.mutateCalls.at(-1)?.revision, 5,
-    'the ORIGINAL decision revision was submitted, not the refreshed mirror revision')
+  // The mirror's own descriptor still reads revision 5, so the pre-queue fence
+  // passes; the official Host CAS refuses the decision revision at dispatch.
+  const outcome = await port.visualTools.setEnabled(false, decision.revision, decision.generation!)
+  assert.equal(outcome.kind, 'conflict', 'the stale decision is refused by the official revision fence')
+  assert.match(outcome.kind === 'conflict' ? outcome.reason : '', /revision 5 != 6/u)
+  assert.deepEqual(state.mutateCalls.map(call => call.revision), [5],
+    'the ORIGINAL decision revision was submitted, not the refreshed one')
   assert.equal(port.visualTools.read()?.enabled, false, 'the external value remains authoritative')
 })
 
 // ── M5-W PR-C: the profile-owned Web startup preference ────────────────────
 
 test('webStartupPreference mirrors the Host section and writes the exact autoStart path', async () => {
-  const { port, state } = createBackend(current => {
+  const { port, state, generation } = createBackend(current => {
     current.namespaces.set('pi-tui-web-preferences', {
       ns: 'pi-tui-web-preferences',
       value: { autoStart: false },
@@ -1791,9 +1832,15 @@ test('webStartupPreference mirrors the Host section and writes the exact autoSta
   })
   assert.equal(port.webStartupPreference.read(), undefined, 'a never-described mirror has no authority to report')
   await port.describe()
-  assert.deepEqual(port.webStartupPreference.read(), { autoStart: false, revision: 7, userOverridden: false })
+  const authority = generation.source.getSnapshot()!
+  assert.deepEqual(port.webStartupPreference.read(), {
+    autoStart: false,
+    revision: 7,
+    generation: authority,
+    userOverridden: false,
+  })
 
-  await port.webStartupPreference.setAutoStart(true, 7)
+  assert.deepEqual(await port.webStartupPreference.setAutoStart(true, 7, authority), { kind: 'accepted' })
   assert.equal(state.mutateCalls.length, 1)
   assert.equal(state.mutateCalls[0]!.ns, 'pi-tui-web-preferences')
   assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['autoStart'], value: true }])
@@ -1802,8 +1849,26 @@ test('webStartupPreference mirrors the Host section and writes the exact autoSta
     'the post-settlement mirror refresh is the new authority')
 })
 
+test('webStartupPreference refuses a replaced Host authority before any write', async () => {
+  const { port, state, generation } = createBackend(current => {
+    current.namespaces.set('pi-tui-web-preferences', {
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: false },
+      revision: 7,
+    })
+  })
+  await port.describe()
+  const authority = generation.source.getSnapshot()!
+  generation.set({ id: 'gen-2' })
+  assert.deepEqual(
+    await port.webStartupPreference.setAutoStart(true, 7, authority),
+    { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' },
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a replaced authority receives ZERO writes')
+})
+
 test('webStartupPreference marks a USER-declared value and reports an absent section', async () => {
-  const { port } = createBackend(current => {
+  const { port, generation } = createBackend(current => {
     current.namespaces.set('pi-tui-web-preferences', {
       ns: 'pi-tui-web-preferences',
       value: { autoStart: true },
@@ -1812,16 +1877,24 @@ test('webStartupPreference marks a USER-declared value and reports an absent sec
     })
   })
   await port.describe()
-  assert.deepEqual(port.webStartupPreference.read(), { autoStart: true, revision: 3, userOverridden: true })
+  assert.deepEqual(port.webStartupPreference.read(), {
+    autoStart: true,
+    revision: 3,
+    generation: generation.source.getSnapshot()!,
+    userOverridden: true,
+  })
 
   const absent = createBackend()
   await absent.port.describe()
   assert.equal(absent.port.webStartupPreference.read(), undefined)
-  await assert.rejects(absent.port.webStartupPreference.setAutoStart(true, 1), /not available in this deployment/u)
+  assert.deepEqual(
+    await absent.port.webStartupPreference.setAutoStart(true, 1, {}),
+    { kind: 'rejected', reason: 'settings namespace "pi-tui-web-preferences" is not available in this deployment' },
+  )
 })
 
-test('a stale webStartupPreference read stays last-known and the write is refused', async () => {
-  const { port, state } = createBackend(current => {
+test('a stale webStartupPreference read stays last-known, generationless and unwritable', async () => {
+  const { port, state, generation } = createBackend(current => {
     current.namespaces.set('pi-tui-web-preferences', {
       ns: 'pi-tui-web-preferences',
       value: { autoStart: false },
@@ -1829,14 +1902,21 @@ test('a stale webStartupPreference read stays last-known and the write is refuse
     })
   })
   await port.describe()
+  const authority = generation.source.getSnapshot()!
   state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
   await assert.rejects(port.describe())
-  assert.deepEqual(port.webStartupPreference.read(), { autoStart: false, revision: 2, userOverridden: false },
-    'the last-known value remains READABLE but non-current')
+  assert.deepEqual(port.webStartupPreference.read(), {
+    autoStart: false,
+    revision: 2,
+    generation: undefined,
+    userOverridden: false,
+  }, 'the last-known value remains READABLE but non-current')
   assert.equal(port.configReadiness(), 'stale')
-  const callsBefore = state.mutateCalls.length
-  await assert.rejects(port.webStartupPreference.setAutoStart(true, 2), /settings\.describe failed: connection lost/u)
-  assert.equal(state.mutateCalls.length, callsBefore, 'a stale mirror never dispatches the preference')
+  assert.deepEqual(
+    await port.webStartupPreference.setAutoStart(true, 2, authority!),
+    { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' },
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a stale mirror never dispatches the preference')
 })
 
 function seedWebNamespaces(state: FakeState, options: { readonly omit?: 'web' | 'api' } = {}): void {
@@ -2272,4 +2352,16 @@ test('a queued Remote reset is refused when the deployment default moved before 
   await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
   assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0)
   assert.equal(state.namespaces.get(WEB_NS)?.base?.searchProvider, 'deepseek-official')
+})
+
+test('the three Remote scalar reads reject a malformed numeric revision', async () => {
+  const { port } = createBackend(current => {
+    current.namespaces.set('pi-tui-visual-tools', { ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: -1 })
+    current.namespaces.set('pi-tui-web-preferences', { ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: -1 })
+    current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'direct' }, revision: -1 })
+  })
+  await port.describe()
+  assert.equal(port.visualTools.read(), undefined)
+  assert.equal(port.webStartupPreference.read(), undefined)
+  assert.equal(port.backendStartupPreference.read(), undefined)
 })

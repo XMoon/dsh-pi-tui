@@ -2057,34 +2057,36 @@ class RemoteVisualToolsConfig implements VisualToolsConfig {
     const revision = view.revision
     // Without the read revision the decision cannot be submitted conditionally;
     // report the section unreadable rather than allowing a silent overwrite.
-    if (typeof revision !== 'number') return undefined
+    if (!validRemoteSettingsRevision(revision)) return undefined
     const user = plainRecord(view.user)
+    // The value/revision may be the last-known projection of a stale mirror;
+    // only a CURRENT committed read owns a writable Host authority identity.
+    const generation = this.mirror.readyGeneration()
     return {
       enabled,
       revision,
+      generation,
       userOverridden: user?.enabled !== undefined,
       applied: undefined,
     }
   }
 
-  async setEnabled(enabled: boolean, expectedRevision: number): Promise<void> {
-    const view = this.mirror.namespace(VISUAL_TOOLS_NS)
-    if (view === undefined) {
-      throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" is not available in this deployment`)
+  async setEnabled(enabled: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
+    if (this.mirror.namespace(VISUAL_TOOLS_NS) === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${VISUAL_TOOLS_NS}" is not available in this deployment` }
     }
-    if (view.value === undefined) {
-      throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" exposes no form projection`)
+    if (this.mirror.namespace(VISUAL_TOOLS_NS)?.value === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${VISUAL_TOOLS_NS}" exposes no form projection` }
     }
-    // The decision's revision is the fence. The mirror may have refreshed its
-    // snapshot since the UI read; re-reading view.revision here would authorize
-    // a stale decision against a newer Host document.
-    // `record`: a failed post-settlement refresh is a currentness uncertainty,
-    // not proof of refusal — the consumer re-reads and classifies.
-    await this.mirror.mutate(
+    // `mutateRemoteSection` re-checks the generation before the write is even
+    // enqueued and AGAIN inside the same serialized queue before dispatch, so
+    // a decision made against Host A can never become a write against Host B.
+    return mutateRemoteSection(
+      this.mirror,
       VISUAL_TOOLS_NS,
       [{ op: 'set', path: ['enabled'], value: enabled }],
       expectedRevision,
-      'record',
+      generation,
     )
   }
 }
@@ -2119,30 +2121,35 @@ class RemoteWebStartupPreferenceConfig implements WebStartupPreferenceConfig {
     const revision = view.revision
     // Without the read revision the decision cannot be submitted conditionally;
     // report the section unreadable rather than allowing a silent overwrite.
-    if (typeof revision !== 'number') return undefined
+    if (!validRemoteSettingsRevision(revision)) return undefined
     const user = plainRecord(view.user)
+    // The value/revision may be the last-known projection of a stale mirror;
+    // only a CURRENT committed read owns a writable Host authority identity.
+    const generation = this.mirror.readyGeneration()
     return {
       autoStart,
       revision,
+      generation,
       userOverridden: user?.autoStart !== undefined,
     }
   }
 
-  async setAutoStart(value: boolean, expectedRevision: number): Promise<void> {
-    const view = this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS)
-    if (view === undefined) {
-      throw new Error(`settings namespace "${WEB_STARTUP_PREFERENCE_NS}" is not available in this deployment`)
+  async setAutoStart(value: boolean, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
+    if (this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS) === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${WEB_STARTUP_PREFERENCE_NS}" is not available in this deployment` }
     }
-    if (view.value === undefined) {
-      throw new Error(`settings namespace "${WEB_STARTUP_PREFERENCE_NS}" exposes no form projection`)
+    if (this.mirror.namespace(WEB_STARTUP_PREFERENCE_NS)?.value === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${WEB_STARTUP_PREFERENCE_NS}" exposes no form projection` }
     }
-    // The decision's revision is the fence; `record` keeps a failed
-    // post-settlement refresh a currentness uncertainty, not proof of refusal.
-    await this.mirror.mutate(
+    // The captured revision AND generation travel to the shared serialized
+    // write queue; a replaced Host refuses before dispatch instead of rebasing
+    // the old decision onto the new authority.
+    return mutateRemoteSection(
+      this.mirror,
       WEB_STARTUP_PREFERENCE_NS,
       [{ op: 'set', path: ['autoStart'], value }],
       expectedRevision,
-      'record',
+      generation,
     )
   }
 }
@@ -2180,20 +2187,28 @@ class RemoteBackendStartupPreferenceConfig implements BackendStartupPreferenceCo
     const backend = value?.backend
     if (!isPublicBackendValue(backend)) return undefined
     const revision = view.revision
-    if (typeof revision !== 'number') return undefined
+    if (!validRemoteSettingsRevision(revision)) return undefined
     const user = plainRecord(view.user)
-    return { backend, revision, userOverridden: user?.backend !== undefined }
+    // The value/revision may be the last-known projection of a stale mirror;
+    // only a CURRENT committed read owns a writable Host authority identity.
+    const generation = this.mirror.readyGeneration()
+    return { backend, revision, generation, userOverridden: user?.backend !== undefined }
   }
 
-  async setBackend(value: PublicBackendValue, expectedRevision: number): Promise<void> {
-    const view = this.mirror.namespace(TUI_STARTUP_NS)
-    if (view === undefined) {
-      throw new Error(`settings namespace "${TUI_STARTUP_NS}" is not available in this deployment`)
+  async setBackend(value: PublicBackendValue, expectedRevision: number, generation: object): Promise<SectionMutationOutcome> {
+    if (this.mirror.namespace(TUI_STARTUP_NS) === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${TUI_STARTUP_NS}" is not available in this deployment` }
     }
-    if (view.value === undefined) {
-      throw new Error(`settings namespace "${TUI_STARTUP_NS}" exposes no form projection`)
+    if (this.mirror.namespace(TUI_STARTUP_NS)?.value === undefined) {
+      return { kind: 'rejected', reason: `settings namespace "${TUI_STARTUP_NS}" exposes no form projection` }
     }
-    await this.mirror.mutate(TUI_STARTUP_NS, [{ op: 'set', path: ['backend'], value }], expectedRevision, 'record')
+    return mutateRemoteSection(
+      this.mirror,
+      TUI_STARTUP_NS,
+      [{ op: 'set', path: ['backend'], value }],
+      expectedRevision,
+      generation,
+    )
   }
 
   async readFresh(): Promise<BackendStartupPreferenceState | undefined> {

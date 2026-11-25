@@ -129,14 +129,19 @@ function expectVisualState(
   assert.equal(state.userOverridden, expected.userOverridden)
   assert.equal(state.applied, expected.applied)
   assert.equal(typeof state.revision, 'number', 'the decision fence is a real Host revision')
+  assert.equal(typeof state.generation, 'object', 'a readable state carries the live Host authority')
 }
 
-/** Submit one switch decision at the revision its CURRENT state was read at
- *  (the real UI carries the revision captured when the choice opened). */
+/** Submit one switch decision at the revision and Host authority its CURRENT
+ *  state was read at (the real UI carries both when the choice opens). */
 async function submitVisualTools(port: DirectConfigPort, enabled: boolean): Promise<void> {
   const state = port.visualTools.read()
   assert.ok(state !== undefined, 'the switch state must be readable before a write')
-  await port.visualTools.setEnabled(enabled, state.revision)
+  assert.ok(state.generation !== undefined, 'the switch state must carry a writable authority')
+  assert.deepEqual(
+    await port.visualTools.setEnabled(enabled, state.revision, state.generation),
+    { kind: 'accepted' },
+  )
 }
 
 test('a default profile exposes all three visual tools and a live Off write unregisters the exact group', async t => {
@@ -285,12 +290,12 @@ test('a Confirm based on a stale revision is refused and the external edit survi
   await forms.mutate(ROW_ID, [{ op: 'set', path: ['enabled'], value: false }], live?.revision)
   expectVisualState(plane.port, { enabled: false, userOverridden: true, applied: false })
 
-  // The stale decision's revision is the fence: the official write refuses it.
-  await assert.rejects(
-    plane.port.visualTools.setEnabled(true, decision.revision),
-    /changed since it was read/u,
-    'a stale Confirm can never overwrite the external edit',
-  )
+  // The stale decision's revision is the fence: the official write refuses it
+  // with the typed conflict settlement instead of a thrown error.
+  assert.ok(decision.generation !== undefined)
+  const staleOutcome = await plane.port.visualTools.setEnabled(true, decision.revision, decision.generation)
+  assert.equal(staleOutcome.kind, 'conflict', 'a stale Confirm can never overwrite the external edit')
+  assert.match(staleOutcome.kind === 'conflict' ? staleOutcome.reason : '', /changed since it was read/u)
   expectVisualState(plane.port, { enabled: false, userOverridden: true, applied: false })
   assert.equal(plane.ctx.tools.get(CHART_TOOL_NAME), undefined, 'the external Off stays applied')
 })

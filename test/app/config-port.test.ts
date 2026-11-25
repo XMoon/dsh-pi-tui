@@ -1033,34 +1033,48 @@ test('the session-policy port reads the exact live Session and classifies each s
 
 // ── the profile-wide visual tools switch ──────────────────────────────────
 
-test('visualTools reads the effective value, its USER provenance and the Host row status', () => {
+test('visualTools reads the effective value, its USER provenance, its Host authority and the Host row status', () => {
+  const authority = {
+    describe: () => [{
+      ns: 'pi-tui-visual-tools',
+      value: { enabled: false },
+      user: {},
+      revision: 7,
+    }],
+    mutate: async () => {},
+  }
   const config = port({
-    settings: {
-      describe: () => [{
-        ns: 'pi-tui-visual-tools',
-        value: { enabled: false },
-        user: {},
-        revision: 7,
-      }],
-      mutate: async () => {},
-    },
+    settings: authority,
     piTuiVisualToolsStatus: { applied: () => false },
   }).visualTools
-  assert.deepEqual(config.read(), { enabled: false, revision: 7, userOverridden: false, applied: false })
+  assert.deepEqual(config.read(), {
+    enabled: false,
+    revision: 7,
+    generation: authority,
+    userOverridden: false,
+    applied: false,
+  })
 
+  const overriddenAuthority = {
+    describe: () => [{
+      ns: 'pi-tui-visual-tools',
+      value: { enabled: true },
+      user: { enabled: true },
+      revision: 3,
+    }],
+    mutate: async () => {},
+  }
   const overridden = port({
-    settings: {
-      describe: () => [{
-        ns: 'pi-tui-visual-tools',
-        value: { enabled: true },
-        user: { enabled: true },
-        revision: 3,
-      }],
-      mutate: async () => {},
-    },
+    settings: overriddenAuthority,
     piTuiVisualToolsStatus: { applied: () => true },
   }).visualTools
-  assert.deepEqual(overridden.read(), { enabled: true, revision: 3, userOverridden: true, applied: true })
+  assert.deepEqual(overridden.read(), {
+    enabled: true,
+    revision: 3,
+    generation: overriddenAuthority,
+    userOverridden: true,
+    applied: true,
+  })
 })
 
 test('visualTools reports an unreadable section instead of the schema default', () => {
@@ -1078,26 +1092,30 @@ test('visualTools reports an unreadable section instead of the schema default', 
 })
 
 test('visualTools keeps the runtime fact unobservable when the Host row status is absent', () => {
-  const config = port({
-    settings: {
-      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 1 }],
-      mutate: async () => {},
-    },
-  }).visualTools
-  assert.deepEqual(config.read(), { enabled: true, revision: 1, userOverridden: false, applied: undefined })
+  const authority = {
+    describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 1 }],
+    mutate: async () => {},
+  }
+  const config = port({ settings: authority }).visualTools
+  assert.deepEqual(config.read(), {
+    enabled: true,
+    revision: 1,
+    generation: authority,
+    userOverridden: false,
+    applied: undefined,
+  })
 })
 
-test('visualTools.setEnabled writes the exact namespace path with the descriptor revision', async () => {
+test('visualTools.setEnabled writes the exact namespace path with the decision revision and authority', async () => {
   const writes: Array<{ ns: string; ops: unknown; revision?: number }> = []
-  const config = port({
-    settings: {
-      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
-      mutate: async (ns: string, ops: unknown, revision?: number) => {
-        writes.push({ ns, ops, revision })
-      },
+  const authority = {
+    describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
+    mutate: async (ns: string, ops: unknown, revision?: number) => {
+      writes.push({ ns, ops, revision })
     },
-  }).visualTools
-  await config.setEnabled(false, 11)
+  }
+  const config = port({ settings: authority }).visualTools
+  assert.deepEqual(await config.setEnabled(false, 11, authority), { kind: 'accepted' })
   assert.deepEqual(writes, [{
     ns: 'pi-tui-visual-tools',
     ops: [{ op: 'set', path: ['enabled'], value: false }],
@@ -1105,66 +1123,109 @@ test('visualTools.setEnabled writes the exact namespace path with the descriptor
   }])
 
   const unavailable = port({ settings: settings({}) }).visualTools
-  await assert.rejects(unavailable.setEnabled(true, 1), /not mounted/u, 'an absent section is an explicit refusal')
+  assert.deepEqual(
+    await unavailable.setEnabled(true, 1, {}),
+    { kind: 'rejected', reason: 'the "pi-tui-visual-tools" Host settings section is not mounted' },
+    'an absent section is an explicit typed refusal',
+  )
   const noSettings = port({}).visualTools
-  await assert.rejects(noSettings.setEnabled(true, 1), /settings service is unavailable/u)
+  assert.deepEqual(
+    await noSettings.setEnabled(true, 1, {}),
+    { kind: 'rejected', reason: 'the Host settings service is unavailable' },
+  )
+})
+
+test('visualTools.setEnabled refuses a replaced Host authority before any write', async () => {
+  const writesA: number[] = []
+  const writesB: number[] = []
+  const authorityA = {
+    describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesA.push(revision ?? -1) },
+  }
+  const authorityB = {
+    describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesB.push(revision ?? -1) },
+  }
+  const services: Record<string, unknown> = { settings: authorityA }
+  const config = port(services).visualTools
+  const decision = config.read()
+  assert.ok(decision !== undefined && decision.generation === authorityA)
+  // A REAL service replacement behind the same `ctx.get`, exposing the same
+  // revision/value: the captured decision still addresses A.
+  services.settings = authorityB
+  assert.deepEqual(
+    await config.setEnabled(false, decision.revision, decision.generation),
+    { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' },
+  )
+  assert.deepEqual(writesA, [], 'the replaced authority receives ZERO A writes')
+  assert.deepEqual(writesB, [], 'the replacement receives ZERO old-decision writes')
+  const fresh = config.read()
+  assert.ok(fresh !== undefined && fresh.generation === authorityB)
+  assert.deepEqual(await config.setEnabled(false, fresh.revision, fresh.generation), { kind: 'accepted' })
+  assert.deepEqual(writesA, [], 'the fresh decision never reaches A')
+  assert.deepEqual(writesB, [11], 'the fresh decision writes B at the exact read revision')
 })
 
 test('visualTools.setEnabled submits the decision revision, so an external edit is a conflict', async () => {
   let revision = 21
   const writes: Array<{ revision?: number }> = []
-  const config = port({
-    settings: {
-      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision }],
-      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
-        writes.push({ revision: expectedRevision })
-        if (expectedRevision !== revision) {
-          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
-            code: 'SETTINGS_CONFLICT',
-          })
-        }
-        revision += 1
-      },
+  const authority = {
+    describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision }],
+    mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+      writes.push({ revision: expectedRevision })
+      if (expectedRevision !== revision) {
+        throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
+          code: 'SETTINGS_CONFLICT',
+        })
+      }
+      revision += 1
     },
-  }).visualTools
+  }
+  const config = port({ settings: authority }).visualTools
   const decision = config.read()
   assert.equal(decision?.revision, 21)
   // An external writer lands between the UI read and the Confirm.
   revision = 22
-  await assert.rejects(config.setEnabled(false, decision.revision), /expected revision 21, actual 22/u,
-    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(
+    await config.setEnabled(false, decision.revision, authority),
+    { kind: 'conflict', reason: 'expected revision 21, actual 22' },
+    'the stale decision is refused instead of overwriting the external edit',
+  )
   assert.deepEqual(writes, [{ revision: 21 }], 'the ORIGINAL read revision is the fence')
   assert.equal(config.read()?.revision, 22, 'the authoritative read re-establishes the newer revision')
 })
 
 // ── M5-W PR-C: the profile-owned Web startup preference ────────────────────
 
-test('webStartupPreference reads the effective value and its USER provenance', () => {
-  const config = port({
-    settings: {
-      describe: () => [{
-        ns: 'pi-tui-web-preferences',
-        value: { autoStart: false },
-        user: {},
-        revision: 9,
-      }],
-      mutate: async () => {},
-    },
-  }).webStartupPreference
-  assert.deepEqual(config.read(), { autoStart: false, revision: 9, userOverridden: false })
+test('webStartupPreference reads the effective value, its USER provenance and its Host authority', () => {
+  const authority = {
+    describe: () => [{
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: false },
+      user: {},
+      revision: 9,
+    }],
+    mutate: async () => {},
+  }
+  const config = port({ settings: authority }).webStartupPreference
+  assert.deepEqual(config.read(), { autoStart: false, revision: 9, generation: authority, userOverridden: false })
 
-  const overridden = port({
-    settings: {
-      describe: () => [{
-        ns: 'pi-tui-web-preferences',
-        value: { autoStart: true },
-        user: { autoStart: true },
-        revision: 4,
-      }],
-      mutate: async () => {},
-    },
-  }).webStartupPreference
-  assert.deepEqual(overridden.read(), { autoStart: true, revision: 4, userOverridden: true })
+  const overriddenAuthority = {
+    describe: () => [{
+      ns: 'pi-tui-web-preferences',
+      value: { autoStart: true },
+      user: { autoStart: true },
+      revision: 4,
+    }],
+    mutate: async () => {},
+  }
+  const overridden = port({ settings: overriddenAuthority }).webStartupPreference
+  assert.deepEqual(overridden.read(), {
+    autoStart: true,
+    revision: 4,
+    generation: overriddenAuthority,
+    userOverridden: true,
+  })
 })
 
 test('webStartupPreference reports an unreadable section instead of the schema default', () => {
@@ -1179,17 +1240,16 @@ test('webStartupPreference reports an unreadable section instead of the schema d
   assert.equal(port({}).webStartupPreference.read(), undefined, 'no settings service at all is unreadable')
 })
 
-test('webStartupPreference.setAutoStart writes the exact namespace path and the decision revision', async () => {
+test('webStartupPreference.setAutoStart writes the exact namespace path, decision revision and authority', async () => {
   const writes: Array<{ ns: string; ops: unknown; revision?: number }> = []
-  const config = port({
-    settings: {
-      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
-      mutate: async (ns: string, ops: unknown, revision?: number) => {
-        writes.push({ ns, ops, revision })
-      },
+  const authority = {
+    describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
+    mutate: async (ns: string, ops: unknown, revision?: number) => {
+      writes.push({ ns, ops, revision })
     },
-  }).webStartupPreference
-  await config.setAutoStart(true, 12)
+  }
+  const config = port({ settings: authority }).webStartupPreference
+  assert.deepEqual(await config.setAutoStart(true, 12, authority), { kind: 'accepted' })
   assert.deepEqual(writes, [{
     ns: 'pi-tui-web-preferences',
     ops: [{ op: 'set', path: ['autoStart'], value: true }],
@@ -1197,33 +1257,91 @@ test('webStartupPreference.setAutoStart writes the exact namespace path and the 
   }])
 
   const unavailable = port({ settings: settings({}) }).webStartupPreference
-  await assert.rejects(unavailable.setAutoStart(true, 1), /not mounted/u, 'an absent section is an explicit refusal')
+  assert.deepEqual(
+    await unavailable.setAutoStart(true, 1, {}),
+    { kind: 'rejected', reason: 'the "pi-tui-web-preferences" Host settings section is not mounted' },
+    'an absent section is an explicit typed refusal',
+  )
   const noSettings = port({}).webStartupPreference
-  await assert.rejects(noSettings.setAutoStart(true, 1), /settings service is unavailable/u)
+  assert.deepEqual(
+    await noSettings.setAutoStart(true, 1, {}),
+    { kind: 'rejected', reason: 'the Host settings service is unavailable' },
+  )
+})
+
+test('webStartupPreference.setAutoStart refuses a replaced Host authority before any write', async () => {
+  const writesA: number[] = []
+  const writesB: number[] = []
+  const authorityA = {
+    describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesA.push(revision ?? -1) },
+  }
+  const authorityB = {
+    describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision: 12 }],
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { writesB.push(revision ?? -1) },
+  }
+  const services: Record<string, unknown> = { settings: authorityA }
+  const config = port(services).webStartupPreference
+  const decision = config.read()
+  assert.ok(decision !== undefined && decision.generation === authorityA)
+  services.settings = authorityB
+  assert.deepEqual(
+    await config.setAutoStart(true, decision.revision, decision.generation),
+    { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' },
+  )
+  assert.deepEqual(writesA, [], 'the replaced authority receives ZERO A writes')
+  assert.deepEqual(writesB, [], 'the replacement receives ZERO old-decision writes')
+  const fresh = config.read()
+  assert.ok(fresh !== undefined && fresh.generation === authorityB)
+  assert.deepEqual(await config.setAutoStart(true, fresh.revision, fresh.generation), { kind: 'accepted' })
+  assert.deepEqual(writesA, [], 'the fresh decision never reaches A')
+  assert.deepEqual(writesB, [12], 'the fresh decision writes B at the exact read revision')
 })
 
 test('webStartupPreference submits the decision revision, so an external edit is a conflict', async () => {
   let revision = 31
   const writes: Array<{ revision?: number }> = []
-  const config = port({
-    settings: {
-      describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision }],
-      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
-        writes.push({ revision: expectedRevision })
-        if (expectedRevision !== revision) {
-          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
-            code: 'SETTINGS_CONFLICT',
-          })
-        }
-        revision += 1
-      },
+  const authority = {
+    describe: () => [{ ns: 'pi-tui-web-preferences', value: { autoStart: false }, revision }],
+    mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+      writes.push({ revision: expectedRevision })
+      if (expectedRevision !== revision) {
+        throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
+          code: 'SETTINGS_CONFLICT',
+        })
+      }
+      revision += 1
     },
-  }).webStartupPreference
+  }
+  const config = port({ settings: authority }).webStartupPreference
   const decision = config.read()
   assert.equal(decision?.revision, 31)
   revision = 32
-  await assert.rejects(config.setAutoStart(true, decision.revision), /expected revision 31, actual 32/u,
-    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(
+    await config.setAutoStart(true, decision.revision, authority),
+    { kind: 'conflict', reason: 'expected revision 31, actual 32' },
+    'the stale decision is refused instead of overwriting the external edit',
+  )
   assert.deepEqual(writes, [{ revision: 31 }], 'the ORIGINAL read revision is the fence')
   assert.equal(config.read()?.revision, 32)
+})
+
+test('the three Direct scalar reads reject a malformed numeric revision instead of advertising an invalid CAS', () => {
+  const malformed = (ns: string, value: Record<string, unknown>) => ({
+    describe: () => [{ ns, value, user: value, revision: -1 }],
+    mutate: async () => {},
+  })
+  assert.equal(port({ settings: malformed('pi-tui-visual-tools', { enabled: true }) }).visualTools.read(), undefined)
+  assert.equal(port({ settings: malformed('pi-tui-web-preferences', { autoStart: false }) }).webStartupPreference.read(), undefined)
+  assert.equal(port({ settings: malformed('tui-startup', { backend: 'direct' }) }).backendStartupPreference.read(), undefined)
+
+  // A legal revision 0 is still readable: the guard rejects malformed values,
+  // never a real Host revision.
+  const zero = (ns: string, value: Record<string, unknown>) => ({
+    describe: () => [{ ns, value, user: {}, revision: 0 }],
+    mutate: async () => {},
+  })
+  assert.equal(port({ settings: zero('pi-tui-visual-tools', { enabled: true }) }).visualTools.read()?.revision, 0)
+  assert.equal(port({ settings: zero('pi-tui-web-preferences', { autoStart: false }) }).webStartupPreference.read()?.revision, 0)
+  assert.equal(port({ settings: zero('tui-startup', { backend: 'direct' }) }).backendStartupPreference.read()?.revision, 0)
 })

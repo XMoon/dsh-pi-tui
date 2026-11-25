@@ -93,6 +93,7 @@ test('a default profile projects autoStart=false with no USER override', async t
   assert.equal(state.autoStart, false, 'the schema default is OFF')
   assert.equal(state.userOverridden, false, 'the default is not a user choice')
   assert.equal(typeof state.revision, 'number', 'the decision fence is a real Host revision')
+  assert.equal(typeof state.generation, 'object', 'a readable preference carries the live Host authority')
 
   const descriptor = settingsDescriptor(plane)
   assert.equal(descriptor?.value?.autoStart, false, 'the Host Settings form projects the effective OFF')
@@ -109,10 +110,12 @@ test('a revision-checked On write persists the USER patch and a NEW Host cold bo
   const root = life.tempDir('web-prefs-persist-')
   const first = await bootPlane(life, root, { resetUserDocument: true })
   const before = first.port.webStartupPreference.read()
-  assert.ok(before !== undefined)
-  assert.equal(before.autoStart, false)
+  assert.ok(before !== undefined && before.generation !== undefined)
 
-  await first.port.webStartupPreference.setAutoStart(true, before.revision)
+  assert.deepEqual(
+    await first.port.webStartupPreference.setAutoStart(true, before.revision, before.generation),
+    { kind: 'accepted' },
+  )
   const after = first.port.webStartupPreference.read()
   assert.ok(after !== undefined, 'the committed preference must be re-readable')
   assert.equal(after.autoStart, true, 'the authoritative read carries the committed On')
@@ -141,17 +144,18 @@ test('a stale revision is refused instead of overwriting an external change', as
   const life = testLifecycle(t)
   const plane = await bootPlane(life, life.tempDir('web-prefs-conflict-'), { resetUserDocument: true })
   const read = plane.port.webStartupPreference.read()
-  assert.ok(read !== undefined)
+  assert.ok(read !== undefined && read.generation !== undefined)
   // An external writer commits On and advances the revision.
-  await plane.port.webStartupPreference.setAutoStart(true, read.revision)
-  const second = plane.port.webStartupPreference.read()
-  assert.ok(second !== undefined)
-
-  await assert.rejects(
-    plane.port.webStartupPreference.setAutoStart(false, read.revision),
-    /changed since it was read/u,
-    'the official revision guard refuses the stale decision',
+  assert.deepEqual(
+    await plane.port.webStartupPreference.setAutoStart(true, read.revision, read.generation),
+    { kind: 'accepted' },
   )
+  const second = plane.port.webStartupPreference.read()
+  assert.ok(second !== undefined && second.generation !== undefined)
+
+  const stale = await plane.port.webStartupPreference.setAutoStart(false, read.revision, read.generation)
+  assert.equal(stale.kind, 'conflict', 'the official revision guard refuses the stale decision')
+  assert.match(stale.kind === 'conflict' ? stale.reason : '', /changed since it was read/u)
   assert.equal(plane.port.webStartupPreference.read()?.autoStart, true, 'the external change survived')
 })
 
@@ -160,9 +164,9 @@ test('a DISABLED preference row contributes no writable section', async t => {
   const plane = await bootPlane(life, life.tempDir('web-prefs-disabled-'), { disabledRow: true })
   assert.equal(settingsDescriptor(plane), undefined, 'a disabled row must not project a settings section')
   assert.equal(plane.port.webStartupPreference.read(), undefined, 'and the adapter must not fabricate the default')
-  await assert.rejects(
-    plane.port.webStartupPreference.setAutoStart(true, 1),
-    /is not mounted/u,
-    'a write against the missing section is refused, never silently applied',
-  )
+  const outcome = await plane.port.webStartupPreference.setAutoStart(true, 1, {})
+  assert.deepEqual(outcome, {
+    kind: 'rejected',
+    reason: 'the "pi-tui-web-preferences" Host settings section is not mounted',
+  })
 })

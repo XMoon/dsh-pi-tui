@@ -20,14 +20,18 @@ import { WebUiSettingsPage, type WebUiSettingsPageIntents } from '../../src/tui/
 import type { WebAccessStatus } from '../../src/runtime/web-access-port.ts'
 import type { WebStartupPreferenceState } from '../../src/runtime/config-port.ts'
 
-interface PageHarnessOptions {
-  readonly columns?: number
+/** The preference value WITHOUT the Host authority: this harness owns the
+ *  identity and projects it onto every read, so a case can replace it without
+ *  restating the generation in every literal. */
+type WebStartupPreferenceInput = Omit<WebStartupPreferenceState, 'generation'>
+
+interface PageHarnessOptions {  readonly columns?: number
   readonly rows?: number
   readonly backendKind?: 'direct' | 'remote'
   readonly status?: WebAccessStatus
   readonly readFailure?: string
   readonly toggleFailure?: string
-  readonly preference?: WebStartupPreferenceState | undefined
+  readonly preference?: WebStartupPreferenceInput | undefined
   readonly readiness?: 'ready' | 'stale' | 'unavailable'
   readonly commitFailure?: string
   readonly copy?: boolean
@@ -59,6 +63,9 @@ interface PageHarness {
   readonly copied: () => readonly string[]
   readonly commits: () => readonly string[]
   readonly commitRevisions: () => readonly number[]
+  readonly commitGenerations: () => readonly object[]
+  /** The live scalar Config authority identity (the read/grant generation). */
+  readonly configAuthority: () => object
   readonly diagnoses: () => readonly { label: string; detail: Record<string, unknown> }[]
   /** Every error the page let escape into the owned-task logger. A
    *  credential-bearing failure must never appear here. */
@@ -70,11 +77,15 @@ interface PageHarness {
   readonly connect: () => void
   /** Resolve (or reject) the N-th held status read. */
   readonly resolveRead: (index: number, result: WebAccessStatus | { readonly error: string }) => void
-  /** Replace the LIVE Config authority (the Remote mirror's invalidation). */
+  /** Replace the LIVE Config authority (the Remote mirror's invalidation). The
+   *  Config authority identity is retained unless a Host rollover is driven. */
   readonly setAuthority: (
     readiness: 'ready' | 'stale' | 'unavailable',
-    preference: WebStartupPreferenceState | undefined,
+    preference: WebStartupPreferenceInput | undefined,
   ) => void
+  /** Replace ONLY the Config authority identity (a silent same-revision/value
+   *  Host replacement). */
+  readonly replaceConfigAuthority: () => void
   readonly releaseToggle: () => void
   readonly releaseUrl: () => void
   readonly key: (data: string) => Promise<void>
@@ -85,11 +96,13 @@ interface PageHarness {
 async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   const vt = new VirtualTerminal(options.columns ?? 100, options.rows ?? 30)
   const generation = { value: (options.disconnected === true ? undefined : {}) as object | undefined }
+  /** The scalar Config authority identity (the decision fence's second half). */
+  let preferenceGeneration: object = {}
   const listeners = new Set<() => void>()
   let status: WebAccessStatus = options.status ?? { state: 'enabled' }
-  let preference = 'preference' in options
+  let preference: WebStartupPreferenceInput | undefined = 'preference' in options
     ? options.preference
-    : { autoStart: false, revision: 1, userOverridden: false } satisfies WebStartupPreferenceState
+    : { autoStart: false, revision: 1, userOverridden: false }
   let readiness = options.readiness ?? 'ready'
   let reads = 0
   const writes: boolean[] = []
@@ -98,6 +111,7 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
   const copied: string[] = []
   const commits: string[] = []
   const commitRevisions: number[] = []
+  const commitGenerations: object[] = []
   const diagnoses: { label: string; detail: Record<string, unknown> }[] = []
   const ownedErrors: string[] = []
   let doneCalls = 0
@@ -146,11 +160,12 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
       copied.push(text)
       return options.copy ?? true
     },
-    readPreference: () => preference,
+    readPreference: () => preference === undefined ? undefined : { ...preference, generation: preferenceGeneration },
     configReadiness: () => readiness,
-    commitAutostart: async (value, revision) => {
+    commitAutostart: async (value, revision, commitGeneration) => {
       commits.push(value)
       commitRevisions.push(revision)
+      commitGenerations.push(commitGeneration)
       if (options.commitFailure !== undefined) throw new Error(options.commitFailure)
       return { outcome: 'verified' }
     },
@@ -196,22 +211,29 @@ async function mount(options: PageHarnessOptions = {}): Promise<PageHarness> {
     copied: () => copied,
     commits: () => commits,
     commitRevisions: () => commitRevisions,
+    commitGenerations: () => commitGenerations,
+    configAuthority: () => preferenceGeneration,
     diagnoses: () => diagnoses,
     ownedErrors: () => ownedErrors,
     doneCalls: () => doneCalls,
     generation,
     bumpGeneration: () => {
       generation.value = {}
+      // A Host rollover replaces the scalar Config authority too (the Remote
+      // mirror invalidates on the SAME Connection generation).
+      preferenceGeneration = {}
       for (const listener of [...listeners]) listener()
     },
     connect: () => {
       generation.value = {}
+      preferenceGeneration = {}
       for (const listener of [...listeners]) listener()
     },
     setAuthority: (nextReadiness, nextPreference) => {
       readiness = nextReadiness
       preference = nextPreference
     },
+    replaceConfigAuthority: () => { preferenceGeneration = {} },
     resolveRead: (index, result) => {
       const settle = heldReads[index]
       if (settle === undefined) throw new Error(`no held read at index ${index}`)
@@ -406,6 +428,9 @@ test('a committed preference re-reads the persisted value, never the requested o
   await h.key('\r') // Confirm save
   await h.flush()
   assert.deepEqual(h.commits(), ['On'], 'the EXISTING writer received the staged candidate')
+  assert.equal(h.commitGenerations().length, 1)
+  assert.ok(Object.is(h.commitGenerations()[0], h.configAuthority()),
+    'the confirmation carried the SAME observation generation the choice was opened against')
   assert.match(h.frame(), /Status\s+Verified/u)
   assert.equal(h.writes().length, 0, 'the preference write never toggles the running Host')
   h.close()
@@ -774,5 +799,19 @@ test('a Host rollover retires a staged choice even when the new mirror keeps the
   await h.key('\r') // Enter now belongs to the fresh page, not the retired intent
   await h.flush()
   assert.equal(h.commits().length, 0, 'the old intent never dispatches against the new Host')
+  h.close()
+})
+
+test('a silent same-revision Config replacement retires a staged confirm with zero writes', async () => {
+  const h = await mount({ status: { state: 'enabled' } })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r') // candidates
+  await h.key('\r') // -> confirm-save
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  h.replaceConfigAuthority()
+  await h.key('\r') // the old painted Confirm save
+  await h.flush()
+  assert.deepEqual(h.commits(), [], 'the stale confirmation dispatched no write')
+  assert.doesNotMatch(h.frame(), /Confirm save/u, 'the old confirmation is retired')
   h.close()
 })

@@ -201,7 +201,9 @@ export interface SettingsWorkspaceEdit {
    *  writer is not revision-addressed omit it. */
   readonly revision?: number
   /** The opaque Host generation this candidate source was read at, for writers
-   *  that must also refuse a REPLACED Host authority (Session log upload). */
+   *  that must also refuse a REPLACED Host authority (Visual tools, the startup
+   *  backend, the Web startup preference, Session log upload). A generationless
+   *  projection of a last-known value is readable but never writable. */
   readonly generation?: object
   /** A risk statement that must be FULLY painted in the L2 confirmation frame
    *  before a Confirm may dispatch (keyboard and pointer alike). */
@@ -5872,12 +5874,27 @@ export class SettingsWorkspacePanel implements Component {
     const row = this.selectedRow()
     if (row?.edit === undefined || this.editPhase.kind === 'pending') return
     if (this.focus !== 'detail') return
+    const before = row.edit
     this.refresh(false)
     const fresh = this.selectedRow()
     const options = fresh?.id === row.id ? fresh.edit?.options ?? [] : []
     if (fresh?.id !== row.id || fresh.edit === undefined || options.length === 0) {
       this.intents.requestRender()
       return
+    }
+    // F4: a generation-addressed editor must still address the SAME Host
+    // authority after the refresh. The captured row's gesture can never be
+    // re-bound to a replacement Host (silent same-revision/same-value
+    // rollover included): the fresh frame stays a browse frame and the user
+    // must issue a NEW explicit Change against it.
+    if (before.generation !== undefined || fresh.edit.generation !== undefined) {
+      if (before.generation === undefined || fresh.edit.generation === undefined
+        || !Object.is(before.generation, fresh.edit.generation)
+        || before.revision === undefined || fresh.edit.revision === undefined
+        || before.revision !== fresh.edit.revision) {
+        this.intents.requestRender()
+        return
+      }
     }
     const current = options.findIndex(option => option.current)
     const index = current >= 0 ? current : 0
@@ -5981,6 +5998,14 @@ export class SettingsWorkspacePanel implements Component {
     const row = this.selectedRow()
     const edit = row?.edit
     if (phase.kind !== 'settled' || row === undefined || edit === undefined || edit.field !== phase.field) return
+    // The painted Retry availability rule is re-proven at THIS real entry: a
+    // stale release or a hidden action can never dispatch a retry the row no
+    // longer offers (a non-verified Host decision requires a fresh
+    // Change -> Confirm instead).
+    const retryAllowed = edit.options.length > 0
+      && edit.retryable !== false
+      && (edit.retryOnlyWhenDefinite !== true || phase.outcome === 'not-saved')
+    if (!retryAllowed || phase.outcome === 'verified') return
     // A retry is still the SAME registration's attempt: a replaced record must
     // not receive it (the registry would answer `gone`, but the panel must not
     // even dispatch it against the new owner's row).

@@ -57,14 +57,24 @@ function settingsDoc(
   }
 }
 
-test('the Direct startup-backend read returns the effective value and its USER provenance', () => {
-  const unset = directPort({ settings: settingsDoc('tui-startup', { backend: 'daemon' }, { user: {} }) }).backendStartupPreference
-  assert.deepEqual(unset.read(), { backend: 'daemon', revision: 5, userOverridden: false })
+test('the Direct startup-backend read returns the effective value, provenance and Host authority', () => {
+  const unsetSettings = settingsDoc('tui-startup', { backend: 'daemon' }, { user: {} })
+  const unset = directPort({ settings: unsetSettings }).backendStartupPreference
+  assert.deepEqual(unset.read(), {
+    backend: 'daemon',
+    revision: 5,
+    generation: unsetSettings,
+    userOverridden: false,
+  })
 
-  const declared = directPort({
-    settings: settingsDoc('tui-startup', { backend: 'direct' }, { user: { backend: 'direct' }, revision: 9 }),
-  }).backendStartupPreference
-  assert.deepEqual(declared.read(), { backend: 'direct', revision: 9, userOverridden: true })
+  const declaredSettings = settingsDoc('tui-startup', { backend: 'direct' }, { user: { backend: 'direct' }, revision: 9 })
+  const declared = directPort({ settings: declaredSettings }).backendStartupPreference
+  assert.deepEqual(declared.read(), {
+    backend: 'direct',
+    revision: 9,
+    generation: declaredSettings,
+    userOverridden: true,
+  })
 })
 
 test('an out-of-vocabulary Profile backend is unreadable, never silently mapped to direct', () => {
@@ -86,15 +96,14 @@ test('an out-of-vocabulary Profile backend is unreadable, never silently mapped 
   assert.equal(directPort({}).backendStartupPreference.read(), undefined, 'no settings service at all is unreadable')
 })
 
-test('the Direct startup-backend write is ONE path-level set at the decision revision', async () => {
+test('the Direct startup-backend write is ONE path-level set at the decision revision and authority', async () => {
   const calls: Array<{ ns: string; ops: unknown; revision?: number }> = []
-  const config = directPort({
-    settings: settingsDoc('tui-startup', { backend: 'direct' }, {
-      revision: 12,
-      mutate: async (ns, ops, revision) => { calls.push({ ns, ops, revision }) },
-    }),
-  }).backendStartupPreference
-  await config.setBackend('daemon', 12)
+  const authority = settingsDoc('tui-startup', { backend: 'direct' }, {
+    revision: 12,
+    mutate: async (ns, ops, revision) => { calls.push({ ns, ops, revision }) },
+  })
+  const config = directPort({ settings: authority }).backendStartupPreference
+  assert.deepEqual(await config.setBackend('daemon', 12, authority), { kind: 'accepted' })
   assert.deepEqual(calls, [{
     ns: 'tui-startup',
     ops: [{ op: 'set', path: ['backend'], value: 'daemon' }],
@@ -102,31 +111,70 @@ test('the Direct startup-backend write is ONE path-level set at the decision rev
   }], 'the write is the exact backend path at the caller revision, never a whole-section replace')
 
   const absent = directPort({ settings: { describe: () => [], mutate: async () => {} } }).backendStartupPreference
-  await assert.rejects(absent.setBackend('daemon', 1), /not mounted/u, 'an absent section is an explicit refusal')
+  assert.deepEqual(
+    await absent.setBackend('daemon', 1, {}),
+    { kind: 'rejected', reason: 'the "tui-startup" Host settings section is not mounted' },
+    'an absent section is an explicit typed refusal',
+  )
   const noSettings = directPort({}).backendStartupPreference
-  await assert.rejects(noSettings.setBackend('daemon', 1), /settings service is unavailable/u)
+  assert.deepEqual(
+    await noSettings.setBackend('daemon', 1, {}),
+    { kind: 'rejected', reason: 'the Host settings service is unavailable' },
+  )
+})
+
+test('the Direct startup-backend write refuses a replaced Host authority before any write', async () => {
+  const callsA: number[] = []
+  const callsB: number[] = []
+  const authorityA = settingsDoc('tui-startup', { backend: 'direct' }, {
+    revision: 12,
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { callsA.push(revision ?? -1) },
+  })
+  const authorityB = settingsDoc('tui-startup', { backend: 'direct' }, {
+    revision: 12,
+    mutate: async (_ns: string, _ops: unknown, revision?: number) => { callsB.push(revision ?? -1) },
+  })
+  const services: Record<string, unknown> = { settings: authorityA }
+  const config = directPort(services).backendStartupPreference
+  const decision = config.read()
+  assert.ok(decision !== undefined && decision.generation === authorityA)
+  // A REAL service replacement behind the same `ctx.get`, same revision/value.
+  services.settings = authorityB
+  assert.deepEqual(
+    await config.setBackend('daemon', decision.revision, decision.generation),
+    { kind: 'rejected', reason: 'the Host settings authority changed; refresh before saving' },
+  )
+  assert.deepEqual(callsA, [], 'the replaced authority receives ZERO A writes')
+  assert.deepEqual(callsB, [], 'the replacement receives ZERO old-decision writes')
+  const fresh = config.read()
+  assert.ok(fresh !== undefined && fresh.generation === authorityB)
+  assert.deepEqual(await config.setBackend('daemon', fresh.revision, fresh.generation), { kind: 'accepted' })
+  assert.deepEqual(callsA, [], 'the fresh decision never reaches A')
+  assert.deepEqual(callsB, [12], 'the fresh decision writes B at the exact read revision')
 })
 
 test('a stale Direct decision is refused and the ORIGINAL read revision is the fence', async () => {
   let revision = 21
   const calls: Array<{ revision?: number }> = []
-  const config = directPort({
-    settings: {
-      describe: () => [{ ns: 'tui-startup', value: { backend: 'direct' }, revision }],
-      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
-        calls.push({ revision: expectedRevision })
-        if (expectedRevision !== revision) {
-          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), { code: 'SETTINGS_CONFLICT' })
-        }
-        revision += 1
-      },
+  const authority = {
+    describe: () => [{ ns: 'tui-startup', value: { backend: 'direct' }, revision }],
+    mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+      calls.push({ revision: expectedRevision })
+      if (expectedRevision !== revision) {
+        throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), { code: 'SETTINGS_CONFLICT' })
+      }
+      revision += 1
     },
-  }).backendStartupPreference
+  }
+  const config = directPort({ settings: authority }).backendStartupPreference
   const decision = config.read()
   assert.equal(decision?.revision, 21)
   revision = 22
-  await assert.rejects(config.setBackend('daemon', decision.revision), /expected revision 21, actual 22/u,
-    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(
+    await config.setBackend('daemon', decision.revision, authority),
+    { kind: 'conflict', reason: 'expected revision 21, actual 22' },
+    'the stale decision is refused instead of overwriting the external edit',
+  )
   assert.deepEqual(calls, [{ revision: 21 }], 'the ORIGINAL read revision is the fence')
   assert.equal(config.read()?.revision, 22, 'the authoritative read re-establishes the newer revision')
 })
@@ -207,22 +255,32 @@ function remotePort(seed?: (state: {
     remote: wire as never,
     connection: { generation: generation.source },
   })
-  return { port, state }
+  return { port, state, generation }
 }
 
-test('the Remote startup-backend read mirrors the Host namespace and its USER provenance', async () => {
-  const { port } = remotePort(current => {
+test('the Remote startup-backend read mirrors the Host namespace, provenance and authority', async () => {
+  const { port, generation } = remotePort(current => {
     current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'daemon' }, revision: 7 })
   })
   assert.equal(port.backendStartupPreference.read(), undefined, 'a never-described mirror has no authority to report')
   await port.describe()
-  assert.deepEqual(port.backendStartupPreference.read(), { backend: 'daemon', revision: 7, userOverridden: false })
+  assert.deepEqual(port.backendStartupPreference.read(), {
+    backend: 'daemon',
+    revision: 7,
+    generation: generation.source.getSnapshot()!,
+    userOverridden: false,
+  })
 
   const overridden = remotePort(current => {
     current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'direct' }, user: { backend: 'direct' }, revision: 3 })
   })
   await overridden.port.describe()
-  assert.deepEqual(overridden.port.backendStartupPreference.read(), { backend: 'direct', revision: 3, userOverridden: true })
+  assert.deepEqual(overridden.port.backendStartupPreference.read(), {
+    backend: 'direct',
+    revision: 3,
+    generation: overridden.generation.source.getSnapshot()!!,
+    userOverridden: true,
+  })
 })
 
 test('an out-of-vocabulary mirrored backend is unreadable, never the default', async () => {
@@ -235,15 +293,21 @@ test('an out-of-vocabulary mirrored backend is unreadable, never the default', a
   const absent = remotePort()
   await absent.port.describe()
   assert.equal(absent.port.backendStartupPreference.read(), undefined, 'an absent namespace is unavailable')
-  await assert.rejects(absent.port.backendStartupPreference.setBackend('direct', 1), /not available in this deployment/u)
+  assert.deepEqual(
+    await absent.port.backendStartupPreference.setBackend('direct', 1, {}),
+    { kind: 'rejected', reason: 'settings namespace "tui-startup" is not available in this deployment' },
+  )
 })
 
 test('the Remote startup-backend write is revision-checked and refreshes from authority', async () => {
-  const { port, state } = remotePort(current => {
+  const { port, state, generation } = remotePort(current => {
     current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'direct' }, revision: 7 })
   })
   await port.describe()
-  await port.backendStartupPreference.setBackend('daemon', 7)
+  assert.deepEqual(
+    await port.backendStartupPreference.setBackend('daemon', 7, generation.source.getSnapshot()!),
+    { kind: 'accepted' },
+  )
   assert.equal(state.mutateCalls.length, 1)
   assert.equal(state.mutateCalls[0]!.ns, 'tui-startup')
   assert.deepEqual(state.mutateCalls[0]!.ops, [{ op: 'set', path: ['backend'], value: 'daemon' }])
@@ -252,17 +316,38 @@ test('the Remote startup-backend write is revision-checked and refreshes from au
     'the post-settlement mirror refresh is the new authority')
 })
 
-test('a stale Remote mirror keeps the read last-known and refuses the write without dispatching', async () => {
-  const { port, state } = remotePort(current => {
+test('the Remote startup-backend write refuses a replaced Host authority before any write', async () => {
+  const { port, state, generation } = remotePort(current => {
+    current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'direct' }, revision: 7 })
+  })
+  await port.describe()
+  const authority = generation.source.getSnapshot()!
+  generation.set({ id: 'gen-2' })
+  assert.deepEqual(
+    await port.backendStartupPreference.setBackend('daemon', 7, authority),
+    { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' },
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a replaced authority receives ZERO writes')
+})
+
+test('a stale Remote mirror keeps the read last-known, generationless and unwritable', async () => {
+  const { port, state, generation } = remotePort(current => {
     current.namespaces.set('tui-startup', { ns: 'tui-startup', value: { backend: 'direct' }, revision: 2 })
   })
   await port.describe()
+  const authority = generation.source.getSnapshot()!
   state.describeFailure = { code: 'gateway/disconnected', message: 'connection lost' }
   await assert.rejects(port.describe())
-  assert.deepEqual(port.backendStartupPreference.read(), { backend: 'direct', revision: 2, userOverridden: false },
-    'the last-known value stays readable but non-current')
+  assert.deepEqual(port.backendStartupPreference.read(), {
+    backend: 'direct',
+    revision: 2,
+    generation: undefined,
+    userOverridden: false,
+  }, 'the last-known value stays readable but non-current')
   assert.equal(port.configReadiness(), 'stale')
-  const before = state.mutateCalls.length
-  await assert.rejects(port.backendStartupPreference.setBackend('daemon', 2), /settings\.describe failed: connection lost/u)
-  assert.equal(state.mutateCalls.length, before, 'a stale mirror never dispatches the startup backend')
+  assert.deepEqual(
+    await port.backendStartupPreference.setBackend('daemon', 2, authority!),
+    { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' },
+  )
+  assert.equal(state.mutateCalls.length, 0, 'a stale mirror never dispatches the startup backend')
 })

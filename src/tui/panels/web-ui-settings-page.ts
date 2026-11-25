@@ -261,6 +261,21 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
    * instead of silently rebasing the CAS onto the newer revision.
    */
   private autostartFence: number | undefined
+  /**
+   * The opaque Config authority the staged choice was opened against — the
+   * SAME observation that admitted the gesture. A replacement Host can expose
+   * the same revision and value; only this object identity (never a string or
+   * the Web runtime generation) proves the decision still addresses the
+   * authority it was made under.
+   */
+  private autostartGeneration: object | undefined
+  /** Monotonic serial of the last admitted Config observation. It changes on
+   *  ANY identity/revision/value/readiness movement, so a frame painted under
+   *  a silently replaced authority can never admit a gesture against the new
+   *  one without a fresh frame. */
+  private preferenceSerial = 0
+  /** The observation serial the LAST painted frame published. */
+  private paintedPreferenceSerial = -1
   private selectedId: string | undefined
   private scrollOffset = 0
   private revealSelection = true
@@ -361,11 +376,15 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** The pointer/gesture identity: phase + selection + staged candidate +
-   *  observations + semantic revision. A release must re-prove the SAME value. */
+   *  observations + semantic revision. A release must re-prove the SAME value.
+   *  The Config observation contributes its monotonic serial (the generation
+   *  object is compared by identity elsewhere and never stringified), so a
+   *  silent same-revision Host replacement revokes the previous frame's hit
+   *  map and keyboard admission. */
   gestureIdentity(): string {
     const preference = this.preference === undefined
       ? 'none'
-      : `${this.preference.revision}:${this.preference.autoStart}:${this.preferenceReadiness}`
+      : `${this.preferenceSerial}:${this.preference.revision}:${this.preference.autoStart}:${this.preferenceReadiness}:${this.preference.generation === undefined ? 'no-generation' : 'current'}`
     return `${this.phase}|${this.selectedId ?? ''}|${this.autostartCandidate === undefined ? '' : this.autostartCandidate ? 'on' : 'off'}|${this.host.kind}|${preference}|${this.revision}`
   }
 
@@ -468,29 +487,53 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   private retireStagedChoice(): void {
     this.autostartCandidate = undefined
     this.autostartFence = undefined
+    this.autostartGeneration = undefined
     if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') this.phase = 'ready'
   }
 
   /**
    * ONE live observation of the persisted next-start preference and its Config
-   * authority (never a Host Web read). The readiness preference and the value
-   * are captured TOGETHER and every projection/admission of this observation
-   * derives from the SAME pair — the page never reads the authority twice in
-   * one decision, so a painted `Unavailable` fact can never sit beside an
-   * editable row (or a stale revision beside an edit grant).
+   * authority (never a Host Web read). The readiness preference, the value and
+   * the opaque Host generation are captured TOGETHER and every
+   * projection/admission of this observation derives from the SAME tuple — the
+   * page never reads the authority twice in one decision, so a painted
+   * `Unavailable` fact can never sit beside an editable row (or a stale
+   * revision/generation beside an edit grant).
    *
    * The Remote Config mirror invalidates on the same Connection generation
    * rollover the page observes. When the captured authority is not current the
    * staged preference step is revoked here (zero writes) and the painted fact
-   * degrades to `Unavailable`/`last known` from THIS observation.
+   * degrades to `Unavailable`/`last known` from THIS observation. A REPLACED
+   * authority retires a staged decision even when it exposes the same revision
+   * and value.
    */
   private reconcilePreference(): void {
-    this.preferenceReadiness = this.intents.configReadiness()
-    this.preference = this.intents.readPreference()
+    const readiness = this.intents.configReadiness()
+    const next = this.intents.readPreference()
+    const previous = this.preference
+    if (
+      this.preferenceReadiness !== readiness
+      || previous === undefined !== (next === undefined)
+      || (previous !== undefined && next !== undefined
+        && (previous.autoStart !== next.autoStart
+          || previous.revision !== next.revision
+          || !Object.is(previous.generation, next.generation)))
+    ) {
+      this.preferenceSerial += 1
+    }
+    this.preferenceReadiness = readiness
+    this.preference = next
+    // A staged decision whose captured Host authority was replaced (same
+    // revision/value or not) is no longer this page's intent.
+    if (this.autostartGeneration !== undefined
+      && (next === undefined || next.generation === undefined || !Object.is(next.generation, this.autostartGeneration))) {
+      this.retireStagedChoice()
+    }
     if (!this.preferenceEditable()) {
       // The authority is no longer current: revoke the staged step, zero writes.
       this.autostartCandidate = undefined
       this.autostartFence = undefined
+      this.autostartGeneration = undefined
       if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
         this.phase = 'ready'
         this.revealSelection = true
@@ -504,6 +547,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   private settleStaleAutostartChoice(): void {
     this.autostartCandidate = undefined
     this.autostartFence = undefined
+    this.autostartGeneration = undefined
     if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') {
       this.phase = 'settled'
       this.revealSelection = true
@@ -516,11 +560,14 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Whether the OBSERVATION captured by the current projection/admission may
-   *  be edited: the authority must be `ready` and must expose a revision. Every
-   *  caller reconciles first (projection, generation change, refresh, action,
-   *  write admission), so this never re-reads the authority. */
+   *  be edited: the authority must be `ready` and must expose both a revision
+   *  and a CURRENT Host authority generation. Every caller reconciles first
+   *  (projection, generation change, refresh, action, write admission), so this
+   *  never re-reads the authority. */
   private preferenceEditable(): boolean {
-    return this.preferenceReadiness === 'ready' && this.preference !== undefined
+    return this.preferenceReadiness === 'ready'
+      && this.preference !== undefined
+      && this.preference.generation !== undefined
   }
 
   private hostCurrent(): { readonly status: WebAccessStatus; readonly generation: unknown } | undefined {
@@ -562,6 +609,14 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     // An action is admitted against a CURRENT Config observation, never against
     // the projection a previous frame captured.
     this.reconcilePreference()
+    // The painted `Change…` belonged to the observation THAT frame drew. A
+    // silent replacement (same revision/value) or any observed movement since
+    // then must not re-bind the old gesture to the new authority: the stale
+    // affordance is revoked and the next frame requires a fresh gesture.
+    if (id === 'autostart' && this.paintedPreferenceSerial !== this.preferenceSerial) {
+      this.changed()
+      return
+    }
     switch (id) {
       case 'open': this.openBrowser(); return
       case 'copy': this.copyLink(); return
@@ -574,13 +629,14 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
         return
       case 'refresh': this.refreshAll(); return
       case 'autostart':
-        if (!this.preferenceEditable() || this.preference === undefined) return
+        if (!this.preferenceEditable() || this.preference === undefined || this.preference.generation === undefined) return
         // Stage the OPPOSITE of the persisted value: the row was activated to
         // change it, and the current candidate stays visible (marked below).
-        // The revision is captured HERE, at choice entry, and travels with the
-        // staged decision.
+        // The revision and the SAME observation's Host generation are captured
+        // HERE, at choice entry, and travel with the staged decision.
         this.phase = 'choose-autostart'
         this.autostartFence = this.preference.revision
+        this.autostartGeneration = this.preference.generation
         this.autostartCandidate = this.preference.autoStart ? false : true
         this.selectedId = this.candidateId(this.autostartCandidate)
         this.revealSelection = true
@@ -626,6 +682,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       case 'choose-autostart':
         this.autostartCandidate = undefined
         this.autostartFence = undefined
+        this.autostartGeneration = undefined
         this.phase = 'ready'
         this.selectedId = 'autostart'
         this.changed()
@@ -882,11 +939,14 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     const candidate = this.autostartCandidate
     const state = this.preference
     const fence = this.autostartFence
-    if (candidate === undefined || state === undefined || fence === undefined || !this.preferenceEditable()) return
-    // The captured revision is the ONE revision this decision may submit; a
-    // moved authority refuses the stale confirmation instead of CAS-rebasing
-    // it onto the intervening write.
-    if (state.revision !== fence) {
+    const generation = this.autostartGeneration
+    if (candidate === undefined || state === undefined || fence === undefined || generation === undefined
+      || !this.preferenceEditable()) return
+    // The captured revision AND the captured Host generation are the ONE
+    // decision fence this confirmation may submit. A moved revision OR a
+    // replaced authority (even with the same revision/value) refuses the stale
+    // confirmation instead of CAS-rebasing it onto the new Host.
+    if (state.revision !== fence || state.generation === undefined || !Object.is(state.generation, generation)) {
       this.settleStaleAutostartChoice()
       this.changed()
       return
@@ -898,7 +958,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.selectedId = undefined
     this.changed()
     this.intents.runOwned('web ui next launch preference', async () => {
-      const outcome = await this.intents.commitAutostart(candidate ? 'On' : 'Off', revision)
+      const outcome = await this.intents.commitAutostart(candidate ? 'On' : 'Off', revision, generation)
       if (this.disposed || serial !== this.writeSerial) {
         this.intents.diagnose('web ui preference write', {
           value: candidate ? 'On' : 'Off',
@@ -1481,6 +1541,7 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       scrollEnd: bodyRows,
       maxOffset,
     }
+    this.paintedPreferenceSerial = this.preferenceSerial
     this.awaitingPaint = false
     return lines
   }
@@ -1570,13 +1631,20 @@ export interface WebUiSettingsPageIntents {
   /** The Client-local clipboard; resolves whether the URL was copied. */
   readonly copyToClipboard: (text: string) => Promise<boolean>
   /** The persisted next-launch preference, or `undefined` when the profile
-   *  section cannot be read at all. */
+   *  section cannot be read at all. A last-known value carries an `undefined`
+   *  generation and is therefore displayable but never writable. */
   readonly readPreference: () => WebStartupPreferenceState | undefined
   /** The live Config readiness (`ready` is the only writable state). */
   readonly configReadiness: () => 'ready' | 'stale' | 'unavailable'
-  /** The EXISTING revision-checked `web-autostart` writer. A resolved write is
-   *  not a read-back: the four official outcomes decide what is painted. */
-  readonly commitAutostart: (value: 'On' | 'Off', revision: number) => Promise<SettingsWorkspaceCommitOutcome>
+  /** The EXISTING revision-and-generation-checked `web-autostart` writer. A
+   *  resolved write is not a read-back: the four official outcomes decide what
+   *  is painted. The captured Host generation travels with the request so a
+   *  replaced authority is refused even when the revision/value match. */
+  readonly commitAutostart: (
+    value: 'On' | 'Off',
+    revision: number,
+    generation: object,
+  ) => Promise<SettingsWorkspaceCommitOutcome>
   /** The opaque current Connection generation (object identity). */
   readonly currentGeneration: () => unknown
   /** Observe Connection generation changes (Direct is a no-op). */

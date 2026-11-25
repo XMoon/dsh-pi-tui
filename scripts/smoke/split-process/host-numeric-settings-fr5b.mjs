@@ -4,8 +4,10 @@
  * One Host with two authenticated Clients proves: the Host category and the
  * preference/runtime authority its Web UI page owns (a real Disable -> Enable
  * round trip with authoritative readback, plus the real profile preference),
- * the next-start preference its ACP access page owns (same ids, real profile
- * values), the Session log upload switch and its official Reset readback, the
+ * the startup Backend's next-launch preference (a real revision-checked save
+ * that never switches the running Host), the next-start preference its ACP
+ * access page owns (same ids, real profile values), the Session log upload
+ * switch and its official Reset readback, the
  * Agent-loop numeric page, the ACTIVE-shell two-cap page, and a two-Client
  * stale-revision refusal that never overwrites the winning profile bytes.
  *
@@ -21,6 +23,7 @@ import { submitLine } from './mcp-servers-fr3.mjs'
 
 const WEB_PREFERENCE_NS = 'pi-tui-web-preferences'
 const ACP_PREFERENCE_NS = 'pi-tui-acp-preferences'
+const STARTUP_NS = 'tui-startup'
 const SESSION_LOG_NS = 'session-log-deepseek'
 const AGENT_LOOP_NS = 'agent-loop'
 const SHELL_NS = 'bash-sandbox'
@@ -211,6 +214,7 @@ export async function runHostNumericSettingsFr5B(context) {
       ...existingRows,
       { id: WEB_PREFERENCE_NS, config: { autoStart: true } },
       { id: ACP_PREFERENCE_NS, config: { autoStart: true } },
+      { id: STARTUP_NS, config: { backend: 'direct' } },
     ])}\n`, { mode: 0o600 })
     chmodSync(profilePatch, 0o600)
 
@@ -243,6 +247,47 @@ export async function runHostNumericSettingsFr5B(context) {
       'Auto-enable Web on Host startup', 'Auto-enable ACP on Host startup']) {
       assert(!hostRows.includes(retired), `the retired Host row ${JSON.stringify(retired)} must not survive`)
     }
+
+    // ── Startup backend: a real next-launch preference write on the SAME Host
+    // The seeded USER row proves the row reads the official field; the Daemon
+    // save must verify on THIS Host without starting, stopping or replacing it.
+    const backendSeeded = profileUserConfig(installation.profileDir, STARTUP_NS)
+    assert(backendSeeded?.backend === 'direct',
+      `the fixture must seed tui-startup.backend=direct, got ${JSON.stringify(backendSeeded)}`)
+    await selectFrame(clientA, frame => selectedRow(frame, 'Backend'), 'FR5-B Backend row')
+    const backendBefore = await waitForDetailPattern(clientA, /Value\s+Direct\b/u, 'FR5-B Backend reads Direct')
+    assert(/Applies on next launch; current TUI\/Host remains unchanged/u.test(detailColumnText(backendBefore)),
+      `the Backend row must state its next-launch-only lifetime: ${JSON.stringify(backendBefore)}`)
+    clientA.send('\r') // writable row -> the inline choice
+    await waitForText(clientA, 'Choose value', 'FR5-B Backend choice')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Daemon'), 'FR5-B Backend Daemon candidate')
+    clientA.send('\r') // Confirm: ONE official revision-checked mutation
+    await waitForDetailPattern(clientA, /Value\s+Daemon\b/u, 'FR5-B Backend verified Daemon')
+    await waitForDetailPattern(clientA, /Status\s+Verified/u, 'FR5-B Backend write verified')
+    const backendSaved = profileUserConfig(installation.profileDir, STARTUP_NS)
+    assert(backendSaved?.backend === 'daemon',
+      `the Backend save must persist the official tui-startup.backend field, got ${JSON.stringify(backendSaved)}`)
+    // An optional service-install follow-up may be offered after a verified
+    // direct -> daemon save. BOTH forms (installable actions and the
+    // local-Linux/macOS-only status line) paint the `Optional OS supervision`
+    // heading, and Root Esc withdraws the follow-up in either phase. It must be
+    // DISMISSED, never installed; the running Host must stay untouched either
+    // way. A blind extra Esc would instead leave the Detail and break the Back
+    // ladder below.
+    const backendAfter = await frameOf(clientA)
+    const followUpPresent = /Optional OS supervision/u.test(backendAfter)
+    if (followUpPresent) {
+      clientA.send('\x1b') // withdraw the follow-up; zero management IO
+      await waitForNoPattern(clientA, /Optional OS supervision/u, 'FR5-B Backend follow-up retired')
+    }
+    clientA.send('\x1b') // Backend Detail -> Host Rows
+    await waitForPattern(clientA, /Settings · Host · Rows/u, 'FR5-B Backend row retired')
+    trace('fr5b.host-backend-preference', {
+      seededDirectRead: true,
+      savedDaemon: true,
+      verifiedReadback: true,
+      followUp: followUpPresent ? 'dismissed' : 'not-offered',
+    })
 
     // The seeded Web USER value is read on the page that OWNS it and written
     // through the same official preference id (the General row is retired).

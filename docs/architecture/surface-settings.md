@@ -266,6 +266,18 @@ specialist-page contract below).
   `Verified` claims only the live runtime fact. `Submit while busy`,
   `Fullscreen` and `Agent` user-shell sandbox are PERSIST-FIRST rows (see below).
   Browsing never writes, and the configuration rows expose no copy verb at all.
+- A Host-form scalar whose writer is revision-and-authority checked (Visual
+  tools, the startup Backend, the Web next-start preference, Session log
+  upload) carries that section's revision AND its opaque settings-authority
+  generation as ONE captured decision. The L2 fence is never rebased from a
+  later refresh, and the shared serialized Config queue re-proves both at its
+  head before dispatch; a moved revision or a REPLACED generation — even one
+  exposing the same revision and value — is a definite `Not saved` with ZERO
+  target mutation. Only a CURRENT same-generation readback can earn `Verified`;
+  an accepted write the readback cannot attribute is unverified, never a
+  refusal. The Root's own Change entry re-proves that the row it painted still
+  addresses the same authority after its refresh; otherwise the old gesture
+  stays browsing and a new explicit gesture is required.
 - The document-backed rows do NOT share one apply/persist order, and the
   contract keeps their differences instead of normalizing them:
   - `Submit while busy`, `Fullscreen` and the `Agent` user-shell sandbox policy
@@ -286,10 +298,18 @@ specialist-page contract below).
     skipped. A forced teardown, a newer blocking owner or any unverified outcome
     switches nothing; the stored preference then applies at the next TUI mount.
   - `Backend` (`startup-backend`) is a NEXT cold-launch fact only: a save never
-    switches the running TUI/Host. A verified NEW value may open ONE transient
-    follow-up inside the SAME lease (`direct → daemon` offers the optional
-    service install; `daemon → direct` records the process-lifetime
-    exit-transition intent). The follow-up is presentation state of that lease:
+    switches the running TUI/Host. Its L2 decision captures the Host form
+    section's revision AND its opaque settings-authority generation; both travel
+    with the request through the ONE serialized Config write queue to the
+    dispatch boundary, so a replaced Host (even one that exposes the same
+    revision and value) cannot receive the old decision. A verified NEW value may
+    open ONE transient follow-up inside the SAME lease (`direct → daemon` offers
+    the optional service install; `daemon → direct` records the process-lifetime
+    exit-transition intent). The follow-up exists ONLY for a same-generation
+    `Verified` result that actually changed the value: a same-value save, a
+    pre-dispatch refusal, an accepted-but-unverifiable readback and an unknown
+    outcome never record an intent or offer the install, and offer no `Retry
+    save` — a fresh explicit `Change… → Confirm` is the only way to act again.
     `Not now`/Esc/row change withdraws it with zero management IO, one explicit
     `Install service` confirmation drives exactly one profile-scoped install
     through the existing control plane (never a start/enable/migrate), and a
@@ -495,7 +515,16 @@ specialist-page contract below).
   below).
   Its stated value is the effective Host form value; `[default]` marks a value
   the USER layer does not declare. Confirm writes that ONE field through the
-  official revision-checked settings mutation and re-reads the Host. Off
+  official revision-checked settings mutation and re-reads the Host. The L2
+  decision captures the section revision AND the opaque Host settings-authority
+  generation from the SAME observation; the replacement fence travels through
+  the shared serialized Config queue to the dispatch boundary, so a replaced
+  Host (even with the same revision/value) is `Not saved` with zero dispatch.
+  An accepted write is `Verified` only from a CURRENT same-generation readback
+  that carries the requested value; an accepted-but-unattributable readback is
+  unverified, never `Not saved`, and never triggers the runtime claim below.
+  Non-verified outcomes offer no `Retry save`: the user returns with a fresh
+  explicit `Change… → Confirm`. Off
   releases both built-in registrations from the global Host tool registry and
   On restores the original definitions; already-recorded results and their
   rendering, copy, search and export are unaffected. A missing, unreadable or
@@ -994,8 +1023,21 @@ Two authorities are painted as two separate reading groups and are NEVER merged:
   revision-checked `web-autostart` settings writer. It never toggles the
   running Host, and a runtime toggle never changes it. `Off (default)` marks
   the schema default the USER layer does not declare; a non-ready
-  configuration, a missing revision or an unreadable section is
-  `Unavailable`/read-only and never a guessed default.
+  configuration, a missing revision, an unreadable section or a last-known
+  value without a CURRENT settings-authority generation is
+  `Unavailable`/read-only and never a guessed default. The `Change…` gesture
+  itself belongs to the observation that frame painted: a silent replacement of
+  the settings authority (even with an identical revision and value) retires the
+  painted affordance and requires a fresh frame and gesture. The choice
+  captures that SAME observation's revision and generation; they travel through
+  the ONE serialized Config queue to its head, where a moved revision or a
+  replaced generation is `Not saved` with ZERO mutation and no CAS rebase. An
+  accepted write is `Verified` only from a CURRENT same-generation authoritative
+  read that carries the requested value; an accepted-but-unattributable readback
+  is `Unverified` (never `Not saved`), and a lost/unknown receipt is `Outcome
+  unconfirmed`. No outcome is retried automatically and the page offers no
+  `Retry save`: a new explicit `Change… → Confirm save` is the only way to act
+  again.
 
 The page keeps ONE transient phase: `loading`, `ready`, `confirm-disable`,
 `choose-autostart`, `confirm-save`, `pending-runtime`, `pending-config` or
@@ -1056,7 +1098,10 @@ unconfirmed` when the receipt was lost, the Host changed during the request or
 the read-back could not be performed; it is never retried automatically and
 never attributed from a fresh read. The preference write reports the four
 existing writer outcomes (`Verified`, `Not saved`, `Unverified`, `Outcome
-unconfirmed`) on its own side. The authenticated launch URL is requested only
+unconfirmed`) on its own side, with the same-generation rule above: a
+pre-dispatch fence refusal is `Not saved`, an accepted write with a stale,
+replaced or disagreeing readback is `Unverified`, and a lost settlement is
+`Outcome unconfirmed`. The authenticated launch URL is requested only
 by an explicit `Open in browser` / `Copy access link`, handed straight to the
 Client-local opener or clipboard, and never painted, stored, logged or attached
 to a diagnostic. A credential-bearing failure — the URL request, the Client
@@ -1250,7 +1295,15 @@ process's backend is never read from this row.
 The value is a NEXT cold-launch fact. The `Runtime` half always states
 `Applies on next launch; current TUI/Host remains unchanged`: a verified write
 never hot-switches the running process, never spawns or stops a Host, and never
-changes the current backend. The summary marks `(default)` only while the USER
+changes the current backend. The L2 decision carries the section revision and
+the opaque Host settings-authority generation from ONE observation; the shared
+serialized Config queue re-proves both at its head, so a queued decision whose
+authority was replaced behind a predecessor is `Not saved` with ZERO dispatch
+and no CAS rebase (a same-revision/same-value replacement is still a different
+authority). Only a CURRENT same-generation readback that carries the requested
+value is `Verified`; an accepted write without that proof is unverified and
+neither records the exit-transition intent nor offers the install follow-up. The
+summary marks `(default)` only while the USER
 layer does not declare the value; a Profile section that is unreadable or
 carries an illegal value is `Unavailable` and cannot be edited, never silently
 shown as the shipped `direct` default. When `DSH_PI_TUI_BACKEND` is set for the

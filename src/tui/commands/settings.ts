@@ -1420,8 +1420,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             copyToClipboard: (text) => runner.copyToClipboard(text),
             readPreference: () => runner.config.webStartupPreference.read(),
             configReadiness: () => runner.config.configReadiness(),
-            commitAutostart: (value, revision) =>
-              commitSettingsWorkspaceField({ field: 'web-autostart', value, revision }, undefined),
+            commitAutostart: (value, revision, generation) =>
+              commitSettingsWorkspaceField({ field: 'web-autostart', value, revision, generation }, undefined),
             currentGeneration: () => runner.webAccess.currentGeneration(),
             subscribeGeneration: (listener) => runner.webAccess.subscribeGeneration(listener),
             runOwned: (label, task, onError) => runOwned(label, task, {
@@ -2011,14 +2011,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     state: VisualToolsState | undefined,
     readiness: 'ready' | 'stale' | 'unavailable',
   ): SettingsWorkspaceEdit => {
-    // A non-ready backend or an unreadable section still shows the row (the
-    // Tools category exists) but offers NO candidate, so Confirm is impossible
-    // instead of writing against a value the Client cannot vouch for.
-    const editable = state !== undefined && readiness === 'ready'
+    // A non-ready backend, an unreadable section or a last-known value with no
+    // current Host authority identity still shows the row (the Tools category
+    // exists) but offers NO candidate, so Confirm is impossible instead of
+    // writing against a value the Client cannot vouch for.
+    const editable = state !== undefined && readiness === 'ready' && state.generation !== undefined
     return {
       field: 'visual-tools',
       primary: 'persisted',
       ...(state === undefined ? {} : { revision: state.revision }),
+      ...(state === undefined || state.generation === undefined ? {} : { generation: state.generation }),
       options: editable
         ? [
             { value: 'On', label: 'On', available: true, current: state.enabled },
@@ -2027,6 +2029,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         : [],
       runtime: visualToolsRuntimeOf(state),
       persisted: visualToolsSummaryOf(state),
+      // A non-verified outcome requires a fresh explicit Change -> Confirm;
+      // an old Retry must never re-dispatch an unproven Host decision.
+      retryable: false,
     }
   }
 
@@ -2045,23 +2050,26 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const visualToolsValueOf = (value: string): boolean | undefined =>
     value === 'On' ? true : value === 'Off' ? false : undefined
 
-  /** The authoritative re-read of the committed switch. `agrees` requires the
-   *  Host form to carry the requested value; when the backend also observes the
-   *  registry (Direct), the live registration must agree as well, otherwise the
-   *  commit is `unverified` — never a `Verified` the runtime does not back. */
-  const verifyCommittedVisualTools = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+  /** The authoritative re-read of the committed switch. `Verified` requires a
+   *  CURRENT same-generation readback that carries the requested value; when
+   *  the backend also observes the registry (Direct), the live registration
+   *  must agree as well. An accepted write this readback cannot attribute (a
+   *  stale/replaced generation, an unreadable section or a different value) is
+   *  `unverified` — the mutation may have committed, so it is neither a
+   *  refusal nor a verification claim. */
+  const verifyCommittedVisualTools = (expected: boolean, generation: object): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed value could not be re-read` }
+      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
     }
     const state = runner.config.visualTools.read()
-    if (state === undefined) {
-      return { outcome: 'unverified', reason: 'the committed Host visual tools setting could not be re-read' }
+    if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
+      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
     }
     if (state.enabled !== expected) {
       return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the authoritative Host setting reads ${state.enabled ? 'On' : 'Off'}`,
+        outcome: 'unverified',
+        reason: `the write was accepted, but the same-generation Host setting reads ${state.enabled ? 'On' : 'Off'}`,
       }
     }
     if (state.applied !== undefined && state.applied !== expected) {
@@ -2075,36 +2083,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return { outcome: 'verified' }
   }
 
-  /** Attribute a REJECTED switch write from a fresh authoritative read: only an
-   *  authority still carrying the request's base value REFUTES it; a third or
-   *  already-requested value (or an unreadable authority) cannot be attributed
-   *  to THIS request. */
-  const classifyRejectedVisualTools = (
-    expected: boolean,
-    base: boolean,
-    failureReason: string,
-  ): SettingsWorkspaceCommitOutcome => {
-    const state = runner.config.configReadiness() === 'ready'
-      ? runner.config.visualTools.read()
-      : undefined
-    if (state === undefined) {
-      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative Host setting could not be re-read` }
-    }
-    if (state.enabled === base) return { outcome: 'not-saved', reason: failureReason }
-    return {
-      outcome: 'indeterminate',
-      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
-    }
-  }
-
-  /** Commit the ONE profile-wide switch through the official revision-checked
-   *  settings write, then re-read the authority (a resolved write is not a
-   *  read-back). `revision` is the revision the painted candidate was read at:
-   *  submitting it is what turns a concurrent external edit into a conflict
-   *  instead of a silent overwrite. */
+  /** Commit the ONE profile-wide switch through the official revision- and
+   *  generation-checked settings write. The decision fences are proved AGAIN
+   *  against the live observation before the port is entered; the port then
+   *  carries the captured generation through its own serialized queue to the
+   *  dispatch boundary. */
   const commitVisualTools = async (
     value: string,
     revision: number | undefined,
+    generation: object | undefined,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
     const enabled = visualToolsValueOf(value)
     if (enabled === undefined) {
@@ -2112,6 +2099,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     if (revision === undefined) {
       return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    if (generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no current authority generation this choice could be based on' }
     }
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
@@ -2121,12 +2111,23 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (base === undefined) {
       return { outcome: 'not-saved', reason: 'the Host visual tools setting is unavailable; the switch was not changed' }
     }
-    try {
-      await runner.config.visualTools.setEnabled(enabled, revision)
-    } catch (error) {
-      return classifyRejectedVisualTools(enabled, base.enabled, safeErrorMessage(error))
+    if (base.generation === undefined || !Object.is(base.generation, generation) || base.revision !== revision) {
+      return { outcome: 'not-saved', reason: 'the Host settings authority changed since this choice was read; nothing was changed' }
     }
-    return verifyCommittedVisualTools(enabled)
+    let outcome: SectionMutationOutcome
+    try {
+      outcome = await runner.config.visualTools.setEnabled(enabled, revision, generation)
+    } catch (error) {
+      // The adapter contract returns a typed settlement; an unexpected throw is
+      // an unattributable outcome, never a refusal derived from a later value.
+      return { outcome: 'indeterminate', reason: safeErrorMessage(error) }
+    }
+    switch (outcome.kind) {
+      case 'accepted': return verifyCommittedVisualTools(enabled, generation)
+      case 'rejected': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'conflict': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'outcome-unconfirmed': return { outcome: 'indeterminate', reason: outcome.reason }
+    }
   }
 
   /**
@@ -2142,48 +2143,34 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     value === 'On' ? true : value === 'Off' ? false : undefined
 
   /** The authoritative re-read of the committed PREFERENCE (never the current
-   *  Web state, which this row does not own). */
-  const verifyCommittedWebAutostart = (expected: boolean): SettingsWorkspaceCommitOutcome => {
+   *  Web state, which this row does not own). `Verified` requires a CURRENT
+   *  same-generation readback carrying the requested value; an accepted write
+   *  this read cannot attribute is `unverified`. */
+  const verifyCommittedWebAutostart = (expected: boolean, generation: object): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed preference could not be re-read` }
+      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
     }
     const state = runner.config.webStartupPreference.read()
-    if (state === undefined) {
-      return { outcome: 'unverified', reason: 'the committed Web startup preference could not be re-read' }
+    if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
+      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
     }
     if (state.autoStart !== expected) {
       return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the authoritative preference reads ${state.autoStart ? 'On' : 'Off'}`,
+        outcome: 'unverified',
+        reason: `the write was accepted, but the same-generation preference reads ${state.autoStart ? 'On' : 'Off'}`,
       }
     }
     return { outcome: 'verified' }
   }
 
-  /** Attribute a REJECTED preference write from a fresh authoritative read. */
-  const classifyRejectedWebAutostart = (
-    base: boolean,
-    failureReason: string,
-  ): SettingsWorkspaceCommitOutcome => {
-    const state = runner.config.configReadiness() === 'ready'
-      ? runner.config.webStartupPreference.read()
-      : undefined
-    if (state === undefined) {
-      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
-    }
-    if (state.autoStart === base) return { outcome: 'not-saved', reason: failureReason }
-    return {
-      outcome: 'indeterminate',
-      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
-    }
-  }
-
-  /** Commit the next-launch preference through the official revision-checked
-   *  settings write. It never touches the current Host's Web frontend. */
+  /** Commit the next-launch preference through the official revision- and
+   *  generation-checked settings write. It never touches the current Host's
+   *  Web frontend. */
   const commitWebAutostart = async (
     value: string,
     revision: number | undefined,
+    generation: object | undefined,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
     const autoStart = webAutostartValueOf(value)
     if (autoStart === undefined) {
@@ -2191,6 +2178,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     if (revision === undefined) {
       return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    if (generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no current authority generation this choice could be based on' }
     }
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
@@ -2200,12 +2190,21 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (base === undefined) {
       return { outcome: 'not-saved', reason: 'the Host Web startup preference is unavailable; nothing was changed' }
     }
-    try {
-      await runner.config.webStartupPreference.setAutoStart(autoStart, revision)
-    } catch (error) {
-      return classifyRejectedWebAutostart(base.autoStart, safeErrorMessage(error))
+    if (base.generation === undefined || !Object.is(base.generation, generation) || base.revision !== revision) {
+      return { outcome: 'not-saved', reason: 'the Host settings authority changed since this choice was read; nothing was changed' }
     }
-    return verifyCommittedWebAutostart(autoStart)
+    let outcome: SectionMutationOutcome
+    try {
+      outcome = await runner.config.webStartupPreference.setAutoStart(autoStart, revision, generation)
+    } catch (error) {
+      return { outcome: 'indeterminate', reason: safeErrorMessage(error) }
+    }
+    switch (outcome.kind) {
+      case 'accepted': return verifyCommittedWebAutostart(autoStart, generation)
+      case 'rejected': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'conflict': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'outcome-unconfirmed': return { outcome: 'indeterminate', reason: outcome.reason }
+    }
   }
 
   /** The ONE General `Session log upload` row: the official
@@ -2378,12 +2377,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     state: BackendStartupPreferenceState | undefined,
     readiness: 'ready' | 'stale' | 'unavailable',
   ): SettingsWorkspaceEdit => {
-    const editable = state !== undefined && readiness === 'ready'
+    const editable = state !== undefined && readiness === 'ready' && state.generation !== undefined
     const launchOverride = backendLaunchOverrideOf()
     return {
       field: 'startup-backend',
       primary: 'persisted',
       ...(state === undefined ? {} : { revision: state.revision }),
+      ...(state === undefined || state.generation === undefined ? {} : { generation: state.generation }),
       options: editable
         ? [
             { value: 'Direct', label: 'Direct', available: true, current: state.backend === 'direct' },
@@ -2395,6 +2395,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       runtime: 'Applies on next launch; current TUI/Host remains unchanged',
       ...(launchOverride === undefined ? {} : { runtimeEffect: launchOverride }),
       persisted: backendStartupSummaryOf(state),
+      // A non-verified outcome requires a fresh explicit Change -> Confirm;
+      // Retry must not re-dispatch a Host decision whose authority may have
+      // been replaced.
+      retryable: false,
     }
   }
 
@@ -2410,48 +2414,37 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     value === 'Direct' ? 'direct' : value === 'Daemon' ? 'daemon' : undefined
 
   /** The authoritative re-read of the committed PREFERENCE (never the current
-   *  process's backend, which this row does not own). */
-  const verifyCommittedBackendStartup = (expected: PublicBackendValue): SettingsWorkspaceCommitOutcome => {
+   *  process's backend, which this row does not own). `Verified` requires a
+   *  CURRENT same-generation readback carrying the requested value; an accepted
+   *  write this read cannot attribute is `unverified`. */
+  const verifyCommittedBackendStartup = (
+    expected: PublicBackendValue,
+    generation: object,
+  ): SettingsWorkspaceCommitOutcome => {
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the committed startup backend could not be re-read` }
+      return { outcome: 'unverified', reason: `the write was accepted, but the configuration is ${readiness}; no same-generation readback could verify it` }
     }
     const state = runner.config.backendStartupPreference.read()
-    if (state === undefined) {
-      return { outcome: 'unverified', reason: 'the committed startup backend preference could not be re-read' }
+    if (state === undefined || state.generation === undefined || !Object.is(state.generation, generation)) {
+      return { outcome: 'unverified', reason: 'the write was accepted, but no current same-generation readback could verify it' }
     }
     if (state.backend !== expected) {
       return {
-        outcome: 'not-saved',
-        reason: `the write reported success, but the authoritative preference reads ${state.backend}`,
+        outcome: 'unverified',
+        reason: `the write was accepted, but the same-generation preference reads ${state.backend}`,
       }
     }
     return { outcome: 'verified' }
   }
 
-  /** Attribute a REJECTED preference write from a fresh authoritative read. */
-  const classifyRejectedBackendStartup = (
-    base: PublicBackendValue,
-    failureReason: string,
-  ): SettingsWorkspaceCommitOutcome => {
-    const state = runner.config.configReadiness() === 'ready'
-      ? runner.config.backendStartupPreference.read()
-      : undefined
-    if (state === undefined) {
-      return { outcome: 'indeterminate', reason: `${failureReason}; the authoritative preference could not be re-read` }
-    }
-    if (state.backend === base) return { outcome: 'not-saved', reason: failureReason }
-    return {
-      outcome: 'indeterminate',
-      reason: `${failureReason}; the authority no longer reads the value this request started from, so its outcome cannot be attributed`,
-    }
-  }
-
-  /** Commit the next-launch backend through the official revision-checked
-   *  settings write. It never spawns/stops a Host or switches the current TUI. */
+  /** Commit the next-launch backend through the official revision- and
+   *  generation-checked settings write. It never spawns/stops a Host or
+   *  switches the current TUI. */
   const commitBackendStartup = async (
     value: string,
     revision: number | undefined,
+    generation: object | undefined,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
     const backend = backendStartupValueOf(value)
     if (backend === undefined) {
@@ -2459,6 +2452,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
     if (revision === undefined) {
       return { outcome: 'not-saved', reason: 'the Host setting exposed no revision this choice could be based on' }
+    }
+    if (generation === undefined) {
+      return { outcome: 'not-saved', reason: 'the Host setting exposed no current authority generation this choice could be based on' }
     }
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
@@ -2468,26 +2464,38 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (base === undefined) {
       return { outcome: 'not-saved', reason: 'the Host startup backend preference is unavailable; nothing was changed' }
     }
-    try {
-      await runner.config.backendStartupPreference.setBackend(backend, revision)
-    } catch (error) {
-      return classifyRejectedBackendStartup(base.backend, safeErrorMessage(error))
+    if (base.generation === undefined || !Object.is(base.generation, generation) || base.revision !== revision) {
+      return { outcome: 'not-saved', reason: 'the Host settings authority changed since this choice was read; nothing was changed' }
     }
-    const verified = verifyCommittedBackendStartup(backend)
+    let outcome: SectionMutationOutcome
+    try {
+      outcome = await runner.config.backendStartupPreference.setBackend(backend, revision, generation)
+    } catch (error) {
+      return { outcome: 'indeterminate', reason: safeErrorMessage(error) }
+    }
+    switch (outcome.kind) {
+      case 'accepted': break
+      case 'rejected': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'conflict': return { outcome: 'not-saved', reason: outcome.reason }
+      case 'outcome-unconfirmed': return { outcome: 'indeterminate', reason: outcome.reason }
+    }
+    const verified = verifyCommittedBackendStartup(backend, generation)
+    if (verified.outcome !== 'verified') return verified
     // M6 UX PR2 Step D: record the ONE process-lifetime transient
     // user-conversion intent. Only a verified transition made by THIS Client
-    // matters; any other outcome never touches it.
+    // from the value the decision was read at matters; an unproven or
+    // same-value save never touches it.
     const transition = classifyBackendExitTransition(base.backend, backend, runner.backendKind)
-    if (verified.outcome === 'verified' && runner.recordBackendExitTransition !== undefined && transition !== 'none') {
+    if (runner.recordBackendExitTransition !== undefined && transition !== 'none') {
       runner.recordBackendExitTransition(transition === 'clear' ? undefined : 'daemon-to-direct')
     }
     // M6 UX PR2: the ONE verified-transition follow-up. Only a NEW value that
-    // the official readback confirmed (direct → daemon) may offer the optional
-    // service install in the SAME lease; a same-value confirm, a failed write
-    // or a Daemon→Direct save never does. `installable` folds the platform and
-    // the proven local Profile capability into one fact the panel presents;
-    // the command layer keeps the install task's only owner.
-    if (verified.outcome === 'verified' && base.backend === 'direct' && backend === 'daemon') {
+    // the official same-generation readback confirmed (direct → daemon) may
+    // offer the optional service install in the SAME lease; a same-value
+    // confirm, a failed write or a Daemon→Direct save never does. `installable`
+    // folds the platform and the proven local Profile capability into one fact
+    // the panel presents; the command layer keeps the install task's only owner.
+    if (base.backend === 'direct' && backend === 'daemon') {
       return {
         ...verified,
         followUp: { kind: 'daemon-service-install', installable: backendServiceInstallable() },
@@ -2707,10 +2715,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       }
       const field = request.field as Exclude<SettingsWorkspaceWritableField, `ext-setting:${string}`>
       switch (field) {
-        case 'visual-tools': return commitVisualTools(request.value, request.revision)
-        case 'web-autostart': return commitWebAutostart(request.value, request.revision)
+        case 'visual-tools': return commitVisualTools(request.value, request.revision, request.generation)
+        case 'web-autostart': return commitWebAutostart(request.value, request.revision, request.generation)
         case 'session-log-upload': return commitSessionLogUpload(request.value, request.revision, request.generation)
-        case 'startup-backend': return commitBackendStartup(request.value, request.revision)
+        case 'startup-backend': return commitBackendStartup(request.value, request.revision, request.generation)
         case 'acp-autostart': return commitAcpAutostart(request.value, request.revision, request.generation)
         case 'display-preset': return commitDisplayPreset(request.value)
         case 'theme': return commitTheme(request.value)

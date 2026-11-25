@@ -4118,10 +4118,13 @@ test('a replaced Host generation with the SAME revision refuses Confirm with zer
 
 test('the confirmation warning is scrollable in L2 and must be read before Confirm', () => {
   const warning = 'Risk: May send chat content to DeepSeek API'
+  // ONE stable Host authority across reads: the row's generation is its
+  // decision identity, not a fresh token per snapshot.
+  const generation = {}
   const h = setup({
     columns: 120,
     rows: 40,
-    snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning }),
+    snapshot: () => scalarSnapshot({ revision: 1, generation, warning }),
   })
   openScalarChoice(h)
   const frame = plain(h)
@@ -4135,10 +4138,11 @@ test('the confirmation warning is scrollable in L2 and must be read before Confi
   assert.equal(h.commits(), 1, 'a fully painted warning admits the pointer Confirm')
 
   const longWarning = `Risk: ${'sensitive-session-content '.repeat(30)}`
+  const shortGeneration = {}
   const short = setup({
     columns: 120,
     rows: 10,
-    snapshot: () => scalarSnapshot({ revision: 1, generation: {}, warning: longWarning }),
+    snapshot: () => scalarSnapshot({ revision: 1, generation: shortGeneration, warning: longWarning }),
   })
   plain(short)
   walkTo(short, 'tools')
