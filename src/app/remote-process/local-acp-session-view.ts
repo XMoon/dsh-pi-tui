@@ -603,10 +603,15 @@ export class LocalAcpViewError extends Error {
   }
 }
 
-/** The minimal `session/new` request facts this module validates. */
+/**
+ * The minimal `session/new` request facts this module validates.
+ * `systemPrompt` is present only so an unadvertised value is refused, never
+ * silently dropped: this Host does not advertise the capability.
+ */
 export interface AcpNewSessionParams {
   readonly cwd: string
   readonly additionalDirectories?: readonly string[]
+  readonly systemPrompt?: unknown
   readonly mcpServers: readonly unknown[]
 }
 
@@ -615,6 +620,7 @@ export interface AcpResumeSessionParams {
   readonly sessionId: string
   readonly cwd: string
   readonly additionalDirectories?: readonly string[]
+  readonly systemPrompt?: unknown
   readonly mcpServers?: readonly unknown[]
 }
 
@@ -626,13 +632,15 @@ export interface AcpSetConfigOptionParams extends AcpModelOptionRequest {
 /**
  * The `session/load` request facts. `mcpServers` is mandatory in the ACP v1
  * schema; `cwd` is a claim proposal (the official Session keeps its own cwd)
- * and `additionalDirectories` is not supported by this Host.
+ * and `additionalDirectories` is not supported by this Host. `systemPrompt`
+ * is present only to refuse an unadvertised value.
  */
 export interface AcpLoadSessionParams {
   readonly sessionId: string
   readonly cwd: string
   readonly mcpServers: readonly unknown[]
   readonly additionalDirectories?: readonly string[]
+  readonly systemPrompt?: unknown
 }
 /** Raster MIME vocabulary shared by the ACP wire and official Host admission. */
 export const ACP_IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
@@ -6375,6 +6383,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   private validateNew(request: AcpNewSessionParams): void {
+    rejectUnsupportedSystemPrompt(request.systemPrompt)
     validateCwd(request.cwd)
     // The complete stdio declaration list is validated BEFORE any Host
     // Workspace/Session create or child process start.
@@ -6385,6 +6394,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   private validateResume(request: AcpResumeSessionParams): void {
+    rejectUnsupportedSystemPrompt(request.systemPrompt)
     if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'a non-empty sessionId is required', JSONRPC_INVALID_PARAMS)
     }
@@ -6396,6 +6406,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   private validateLoad(request: AcpLoadSessionParams): void {
+    rejectUnsupportedSystemPrompt(request.systemPrompt)
     if (typeof request.sessionId !== 'string' || request.sessionId.length === 0) {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_INVALID_REQUEST', 'a non-empty sessionId is required', JSONRPC_INVALID_PARAMS)
     }
@@ -6464,6 +6475,25 @@ function subagentStopReason(reason: string | undefined): 'end_turn' | 'max_token
     default:
       return { stopReason: 'error' }
   }
+}
+
+/**
+ * Refuse an unadvertised per-Session system prompt BEFORE any Host side effect.
+ *
+ * The ACP v1 schema marks `systemPrompt` optional/nullable on `session/new`,
+ * `session/resume` and `session/load`; this Host does not advertise
+ * `sessionCapabilities.systemPrompt` and cannot apply it. Ignoring a non-null
+ * value would create/load/resume a Session whose instructions differ from what
+ * the client asked for, so it is a request error instead. Omitted and `null`
+ * keep the Host's own default instructions and are not affected.
+ */
+function rejectUnsupportedSystemPrompt(systemPrompt: unknown): void {
+  if (systemPrompt === undefined || systemPrompt === null) return
+  throw new LocalAcpViewError(
+    'LOCAL_ACP_VIEW_INVALID_REQUEST',
+    'ACP system prompts are not supported by this Host',
+    JSONRPC_INVALID_PARAMS,
+  )
 }
 
 /** A `session/new|resume` cwd is a non-empty Linux absolute path with no NUL. */

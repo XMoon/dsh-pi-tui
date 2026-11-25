@@ -216,7 +216,11 @@ profile's independent `autoStart` preference enables it (see below).
   [Official session facts on the stable v1 wire](#official-session-facts-on-the-stable-v1-wire)).
   It never advertises `delete`, `fork`, `additionalDirectories`, `systemPrompt` or
   `options`, and it does not expose client `fs`/`terminal` capabilities or issue
-  those reverse requests. MCP capability is explicit:
+  those reverse requests. A `session/new`/`session/resume`/`session/load`
+  request that still carries a non-null `systemPrompt` is refused before any
+  Host Workspace/Session create, Agent borrow, MCP mount or history replay
+  (`-32602` / `LOCAL_ACP_VIEW_INVALID_REQUEST`); omission and `null` keep the
+  Host's own default instructions. MCP capability is explicit:
   `mcpCapabilities: { http: false, sse: false }`; standard stdio MCP servers are
   `session/new`/`session/resume` inputs, not an HTTP/SSE capability. It does NOT
   advertise the optional `sessionCapabilities.options` capability: the standard

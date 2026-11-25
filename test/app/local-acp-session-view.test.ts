@@ -500,6 +500,55 @@ test('session/new rejects an invalid cwd and an unsupported MCP server before an
   assert.equal(registry.phaseOf(conn), 'idle')
 })
 
+test('session lifecycle requests carrying an unadvertised systemPrompt are refused before any Host side effect', async () => {
+  const prompt = { mode: 'append', content: [{ type: 'text', text: 'b3-unannounced-system-prompt' }] }
+  {
+    const access = new FakeAccess()
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(
+      registry.newSession(conn, access, { ...NEW, systemPrompt: prompt }),
+      isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'),
+    )
+    assert.deepEqual(access.createWorkspaceCalls, [], 'a rejected systemPrompt must not reach the Host workspace')
+    assert.equal(registry.phaseOf(conn), 'idle')
+  }
+  {
+    const access = new FakeAccess()
+    access.seed(makeAgent('S40', '/work/b'))
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(
+      registry.resumeSession(conn, access, { sessionId: 'S40', cwd: '/work/b', systemPrompt: prompt }),
+      isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'),
+    )
+    assert.deepEqual(access.resolveCalls, [], 'a rejected systemPrompt must not borrow the Agent')
+    assert.equal(registry.hasClaim('S40'), false)
+  }
+  {
+    const access = new FakeAccess()
+    access.sessionReadReady = true
+    access.seed(makeAgent('S41', '/work/c'))
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    await assert.rejects(
+      registry.loadSession(conn, access, { sessionId: 'S41', cwd: '/work/c', mcpServers: [], systemPrompt: prompt }),
+      isViewError('LOCAL_ACP_VIEW_INVALID_REQUEST'),
+    )
+    assert.deepEqual(access.resolveCalls, [], 'a rejected systemPrompt must not borrow the Agent')
+    assert.deepEqual(access.historyCalls, [], 'a rejected systemPrompt must not replay Session history')
+  }
+  {
+    // Omitted and null keep the Host's own default instructions.
+    const access = new FakeAccess()
+    const agent = makeAgent('S42', '/work/a')
+    access.createSessionImpl = async () => { access.seed(agent); return { kind: 'created', sessionId: 'S42' } }
+    const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+    const conn = registry.createConnection()
+    assert.deepEqual(await registry.newSession(conn, access, { ...NEW, systemPrompt: null }), { sessionId: 'S42' })
+  }
+})
+
 test('session/new reports an unconfirmed workspace outcome instead of a client directory error', async () => {
   const access = new FakeAccess()
   // The official Workspace Controller wraps persistence failures as
