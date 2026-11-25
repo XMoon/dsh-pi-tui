@@ -270,8 +270,8 @@ test('refuses a missing installed Host Runtime artifact and authenticates after 
     expect(host.ready.services.piTuiTerminalProgress).toBe(true)
     expect(host.ready.ownerEntries.piTuiHostRuntime).toEqual(['split-host-pi-tui-runtime'])
     await assertAuthenticatedCurrentHost(scene, host)
-    await scene.stopHost(host)
-    await scene.assertEntrySeatsFree()
+    // Leave the active Host to dispose/FINALIZE: this is the direct positive
+    // for the normal officialStopHost(activeHost) path and its seat/root proof.
   } catch (error) {
     testError = error
     throw error

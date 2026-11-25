@@ -7069,13 +7069,16 @@ async function restoreInstallationMutation({ compensating = false } = {}) {
     throw new Error('RESTORE_INSTALLATION: the Host artifact mutation cannot be restored under a live Host')
   }
   if (!compensating) {
-    if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true)) {
+    if (hosts.some(handle => handle.mode !== undefined && handle.finished !== true && handle.acceptedHost !== true)) {
       throw new Error('RESTORE_INSTALLATION: a Host attempt is not finished')
     }
     const allowStableHost = mutation.fault === 'client-bootstrap-drift'
     await assertNoLiveMutationConsumers({ allowStableHost, label: 'RESTORE_INSTALLATION' })
     await assertClientSeatFree(scene.installation, processScope.scopeId, 'RESTORE_INSTALLATION')
     if (!allowStableHost) await assertSceneHostSeatFree('RESTORE_INSTALLATION')
+    // The seat probes are real async operations; re-check admission at the
+    // actual commit boundary immediately before the synchronous fs effect.
+    assertLifecycleOpen('RESTORE_INSTALLATION')
   }
   // Compensation is the cleanup owner: it already audited every owned group,
   // PTY ledger, fallback and both seats before calling this restore.
