@@ -264,7 +264,11 @@ async function waitForComposer(tui, needle, label, timeoutMs = 30_000) {
     if (composer !== undefined && composer.includes(needle)) return
     await new Promise(resolve => setTimeout(resolve, 50))
   }
-  throw new SplitSmokeAssertionError(`${label}: composer never contained ${needle}: ${JSON.stringify(await tui.composerText())}`)
+  const frame = await tui.viewport().catch(() => [])
+  throw new SplitSmokeAssertionError(
+    `${label}: composer never contained ${needle}: ${JSON.stringify(await tui.composerText())}`
+    + `\n--- viewport tail ---\n${frame.slice(-10).join('\n')}`,
+  )
 }
 
 /** One committed file block of a durable user message. */
