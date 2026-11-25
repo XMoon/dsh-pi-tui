@@ -690,10 +690,6 @@ class ProcessClient implements SplitProcessClient {
     this.#exitFacts = {
       code: payload.exitCode ?? null,
       signal: payload.exitSignal ?? null,
-      kind: payload.kind ?? 'native',
-      terminal: payload.terminal ?? null,
-      ownerPid: payload.ownerPid ?? null,
-      ownerExit: payload.ownerExit ?? null,
     }
     return this.#exitFacts
   }
