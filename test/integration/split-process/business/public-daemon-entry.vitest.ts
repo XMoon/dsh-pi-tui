@@ -360,6 +360,9 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
       surface: 'workspace',
     })
     launches.push(browser)
+    const browserFrame = await browser.text()
+    expect(browserFrame, `the real Session Browser frame (${browserFrame})`).toContain('Sessions · 1')
+    expect(browserFrame, `the real Session Browser workspace row (${browserFrame})`).toContain('pi-tui')
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await browser.press('Escape')
       await sleep(300)
@@ -542,7 +545,10 @@ test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after t
     // processes disappear between two 50ms reads the trace cannot order them;
     // in that case the loop above has still rejected any observation of a live
     // Client after the CLI was gone. No local Date.now() fiction is used.
-    if (!clientFirst) expect(trace.length).toBeGreaterThan(0)
+    if (!clientFirst) {
+      expect(trace.length).toBeGreaterThan(0)
+      console.log(`public peer detach order indeterminate: ${JSON.stringify(trace.slice(-5))}`)
+    }
     const surviving = await second.kernelState()
     expect(surviving.hostState, 'the Host survives the peer CLI TERM').toBe('alive')
     expect(surviving.clientState, 'the surviving Client stays live').toBe('alive')
