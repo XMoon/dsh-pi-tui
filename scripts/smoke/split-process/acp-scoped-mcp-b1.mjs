@@ -383,7 +383,9 @@ export async function runAcpScopedMcpB1(context) {
         return await client.request(method, params)
       } catch (error) {
         if (error?.data?.code !== 'LOCAL_ACP_VIEW_ALREADY_ATTACHED') throw error
-        if (Date.now() - started > 30_000) throw error
+        if (Date.now() - started > 30_000) {
+          throw new SplitSmokeAssertionError(`${CASE_ID}: ${label} never became attachable: ${error.message}`)
+        }
         await sleep(50)
       }
     }
