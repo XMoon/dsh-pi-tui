@@ -601,11 +601,12 @@ export async function runHostNumericSettingsFr5B(context) {
     assert(shellPatch?.timeoutMs === 45_000 && shellPatch?.maxOutputBytes === 128_000,
       `the shell group writes both caps in the official patch: ${JSON.stringify(shellPatch)}`)
     const aVerifiedFrame = await frameOf(clientA)
-    assert(/\bSaved\b/u.test(aVerifiedFrame) && /Settings · Tools · Shell execution/u.test(aVerifiedFrame),
+    const aVerifiedDetail = detailColumnText(aVerifiedFrame)
+    assert(/\bSaved\b/u.test(aVerifiedDetail) && /Settings · Tools · Shell execution/u.test(aVerifiedFrame),
       'a verified Save stays in the SAME group')
-    assert(/Command timeout \(ms\)\s+45000 ms/u.test(aVerifiedFrame)
-      && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(aVerifiedFrame),
-    `the verified frame paints BOTH authoritative caps: ${JSON.stringify(aVerifiedFrame)}`)
+    assert(/Command timeout \(ms\)\s+45000 ms/u.test(aVerifiedDetail)
+      && /Output cap per stream \(bytes\)\s+128000 bytes/u.test(aVerifiedDetail),
+    `the verified Detail paints BOTH authoritative caps: ${JSON.stringify(aVerifiedDetail)}`)
 
     // A's committed write invalidated B's captured revision. Depending on
     // whether the shared document-updated event reaches B before the key, the
@@ -649,10 +650,11 @@ export async function runHostNumericSettingsFr5B(context) {
     assertShellCaps(installation.profileDir, committedCaps, 'A staged reset (both caps)')
     await saveAndVerify(clientA, 'FR5-B Shell reset saved A', /\bSaved\b/u)
     const shellAfterReset = await frameOf(clientA)
-    assert(new RegExp(`Output cap per stream \\(bytes\\)\\s+${inheritedCap} bytes`, 'u').test(shellAfterReset),
-      `the verified group paints the Host readback, not the requested unset: ${JSON.stringify(shellAfterReset)}`)
-    assert(/Command timeout \(ms\)\s+45000 ms/u.test(shellAfterReset),
-      `the verified group keeps the sibling timeout: ${JSON.stringify(shellAfterReset)}`)
+    const shellAfterResetDetail = detailColumnText(shellAfterReset)
+    assert(new RegExp(`Output cap per stream \\(bytes\\)\\s+${inheritedCap} bytes`, 'u').test(shellAfterResetDetail),
+      `the verified Detail paints the Host readback, not the requested unset: ${JSON.stringify(shellAfterResetDetail)}`)
+    assert(/Command timeout \(ms\)\s+45000 ms/u.test(shellAfterResetDetail),
+      `the verified Detail keeps the sibling timeout: ${JSON.stringify(shellAfterResetDetail)}`)
     const resetPatch = profileUserConfig(installation.profileDir, SHELL_NS)
     assert(resetPatch?.timeoutMs === 45_000,
       `the sibling timeout stays at its saved value after the reset: ${JSON.stringify(resetPatch)}`)
