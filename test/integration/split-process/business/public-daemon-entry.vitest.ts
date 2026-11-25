@@ -82,7 +82,7 @@ test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the spli
     const teardown: Error[] = []
     if (launch !== undefined) {
       try {
-        if (!launch.closed) await launch.close()
+        if (!launch.closed) await launch.reclaim()
       } catch (error) {
         teardown.push(asError(error))
       }
@@ -124,6 +124,7 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
     const rows = launch.loaderRows
     expect(rows, 'the parent daemon Loader dump').not.toBeNull()
     const byId = new Map((rows ?? []).map(row => [row.id, row]))
+    const rowOf = (id: string) => byId.get(`include:${id}`) ?? byId.get(id)
     for (const id of [
       'session', 'session-persistence-jsonl', 'storage-json', 'jobs', 'typert-gateway',
       'remote-access', 'deepseek-account', 'authorization', 'credentials', 'workspace',
@@ -132,11 +133,12 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
       'directory-picker', 'pi-tui-schedule', 'pi-tui-direct-connection',
       'pi-tui-direct-file-upload', 'pi-tui-direct-session-controller',
     ]) {
-      expect(byId.get(id), `the real parent Loader row ${id}`).toBeDefined()
-      expect(byId.get(id)?.disabled, `the second Host authority row ${id} is disabled`).toBe(true)
+      const row = rowOf(id)
+      expect(row, `the real parent Loader row ${id} (actual ids: ${[...byId.keys()].join(',')})`).toBeDefined()
+      expect(row?.disabled, `the second Host authority row ${id} is disabled`).toBe(true)
     }
     for (const id of ['timer', 'llm', 'tools']) {
-      const row = byId.get(id)
+      const row = rowOf(id)
       if (row !== undefined) expect(row.disabled, `the stateless Loader row ${id} is not disabled`).not.toBe(true)
     }
     expect(new Set(rows?.map(row => row.id)).size, 'the Loader dump has unique row ids').toBe(rows?.length)
@@ -175,7 +177,7 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
     const teardown: Error[] = []
     if (launch !== undefined) {
       try {
-        if (!launch.closed) await launch.close()
+        if (!launch.closed) await launch.reclaim()
       } catch (error) {
         teardown.push(asError(error))
       }

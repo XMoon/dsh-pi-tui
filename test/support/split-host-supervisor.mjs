@@ -6545,7 +6545,7 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       cliBirth: handle.cli.birth,
     })
     writeReceipt({})
-    if (handle.backend === undefined || handle.backend === 'direct') {
+    if (handle.backend === null || handle.backend === 'direct') {
       handle.surfaceProbe = surface === 'workspace'
         ? await waitForPublicWorkspaceSurface(handle, `${label} direct workspace surface`)
         : await waitForPublicUsableSurface(handle, `${label} direct surface`)
@@ -6887,6 +6887,14 @@ async function assertPublicLaunchTerminalContract(handle, reason) {
       throw new Error(`${reason}: ${handle.label} native shell PID ${String(handle.shellPid)} is ${state}`)
     }
   }
+}
+
+async function handlePublicDaemonReclaim(message) {
+  requireProcessScene('PUBLIC_DAEMON_RECLAIM')
+  const handle = publicLaunchById(message.launchId, 'PUBLIC_DAEMON_RECLAIM')
+  if (handle.closed) return publicLaunchFacts(handle)
+  await reclaimPublicLaunch(handle, 'PUBLIC_DAEMON_RECLAIM')
+  return publicLaunchFacts(handle)
 }
 
 async function handlePublicDaemonTerminateCli(message) {
@@ -9963,6 +9971,11 @@ async function dispatch(message) {
       }
       case 'PUBLIC_DAEMON_CLOSE': {
         const payload = await handlePublicDaemonClose(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PUBLIC_DAEMON_RECLAIM': {
+        const payload = await handlePublicDaemonReclaim(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }

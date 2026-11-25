@@ -330,6 +330,8 @@ export interface PublicDaemonLaunch {
   state(): Promise<PublicDaemonState>
   waitForExit(timeoutMs?: number): Promise<{ code: number | null; signal: string | null; text: string }>
   close(): Promise<PublicDaemonLaunchFacts>
+  /** Failure teardown: close the native PTY and prove the kernel terminal. */
+  reclaim(): Promise<PublicDaemonLaunchFacts>
   daemonStatus(): Promise<PublicDaemonStatusFacts>
   stopHost(): Promise<PublicDaemonHostFacts>
   /** Send SIGTERM to the captured public CLI PID only (freshly re-proved). */
@@ -1040,6 +1042,34 @@ class PublicDaemon implements PublicDaemonLaunch {
       ready: this.ready,
       refused: this.refused,
       exit: this.#exitFacts ?? null,
+      surface: this.surface,
+      loaderRows: this.loaderRows,
+      herdr: this.herdr,
+    }
+  }
+
+  async reclaim(): Promise<PublicDaemonLaunchFacts> {
+    if (this.#closed) return await this.close()
+    const payload = await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_RECLAIM', {}, 240_000)
+    this.#closed = true
+    this.#exitFacts = payload.exitCode === null || payload.exitCode === undefined
+      ? { code: null, signal: null }
+      : { code: Number(payload.exitCode), signal: payload.exitSignal ?? null }
+    return {
+      launchId: this.launchId,
+      label: this.label,
+      profile: this.profile,
+      alias: this.alias,
+      sessionId: this.sessionId,
+      backend: this.backend,
+      shellPid: this.shellPid,
+      shellBirth: null,
+      cli: this.cli,
+      client: this.client,
+      host: this.host,
+      ready: this.ready,
+      refused: this.refused,
+      exit: this.#exitFacts,
       surface: this.surface,
       loaderRows: this.loaderRows,
       herdr: this.herdr,
@@ -1834,7 +1864,7 @@ class ProcessScene implements SplitProcessScene {
     for (const launch of [...this.#publicLaunches].reverse()) {
       if (launch.closed) continue
       try {
-        await launch.close()
+        await launch.reclaim()
       } catch (error) {
         errors.push(asError(error))
       }
