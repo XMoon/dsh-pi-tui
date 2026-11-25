@@ -471,9 +471,6 @@ function reply(requestId, payload) {
 
 function fail(requestId, code, error) {
   const message = redactText(error instanceof Error ? error.message : String(error))
-  if (process.env.SPLIT_VITEST_DEBUG_SUPERVISOR === '1') {
-    writeReceipt({ debugLastError: { code, message, stack: error instanceof Error ? error.stack : undefined, at: now() } })
-  }
   send({ type: 'ERROR', requestId, code, message })
 }
 

@@ -691,13 +691,36 @@ The project's files run with real file parallelism. An explicit
 `SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID` makes the files report a `parallel-ready`
 checkpoint and prove that the other real Scene's Worker (with its live Vitest
 parent edge), Host and Client kernel identities are live at the same time;
-select the project's files together and
-use a fresh private run root per round:
+select the project's files together and use a fresh private run root per round:
 
 ```sh
 SPLIT_VITEST_RUN_ID=process-overlap-r1 \
 SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=process-overlap-r1 \
 mise exec -- pnpm test:split:process
+```
+
+The installed-public-entry anchor
+(`test/integration/split-process/business/public-daemon-entry.vitest.ts`) joins
+that same checkpoint explicitly. It drives the packed public
+`dsh --profile ...` CLI under a real PTY and proves the Direct default, the
+daemon cold start, public Session/preset/peer/alias/Settings paths and the
+public refusal boundary; the positive terminal cases are Linux-only and report
+`N/A` on Darwin, while the public Client is observed through the real OS
+process tree and the public daemon CLI, never an internal JSONL sink. Its cold
+anchor runs first in the file; the remaining public business cases run after
+the overlap. Select both files in ONE Vitest invocation (the Worker parent-edge
+check requires one real Vitest main), set
+`SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry`, and use a fresh run id:
+
+```sh
+SPLIT_VITEST_RUN_ID=public-overlap-r1 \
+SPLIT_VITEST_PARALLEL_AUDIT_RUN_ID=public-overlap-r1 \
+SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry \
+SPLIT_VITEST_TMP_BASE=/absolute/private/run-root \
+SPLIT_VITEST_CANDIDATE_TGZ=/absolute/immutable/candidate.tgz \
+mise exec -- pnpm test:split:process -- \
+  test/integration/split-process/business/host-file-completion.vitest.ts \
+  test/integration/split-process/business/public-daemon-entry.vitest.ts
 ```
 
 `SPLIT_VITEST_PROCESS_PROBE_POINT` arms the fixed checkpoints the external
