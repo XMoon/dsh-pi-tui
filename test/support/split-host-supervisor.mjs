@@ -26,6 +26,7 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
@@ -4435,6 +4436,9 @@ function assertProcessClientTerminalContract(handle, reason) {
 
 async function assertProcessClientQuiesced(handle, reason) {
   if (handle.terminalMode === 'terminal-owner-loss') {
+    if (handle.shellIdentity === undefined || handle.businessIdentities.length === 0) {
+      throw new Error(`${reason}: ${handle.label} has no captured shell/business identity to prove Owner quiescence`)
+    }
     if (handle.owner?.exit === undefined) throw new Error(`${reason}: ${handle.label} PTY Owner has not exited`)
     if (handle.ownerLossAttempted === true) {
       if (handle.owner.exit.code !== null || handle.owner.exit.signal !== 'SIGKILL') {
@@ -4534,56 +4538,43 @@ function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
     env: { PATH: process.env.PATH ?? '', HOME: scene.workDir },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
-  if (!Number.isInteger(child.pid)) {
-    child.kill('SIGKILL')
-    throw new Error('START_PROCESS_CLIENT: the PTY Owner child has no real PID')
-  }
-  const observation = readKernelProcess(child.pid)
-  if (observation.kind !== 'alive' || observation.identity.ppid !== process.pid) {
-    child.kill('SIGKILL')
-    throw new Error('START_PROCESS_CLIENT: the PTY Owner is not the live direct child')
-  }
-  const ownerUid = readLinuxProcessUid(child.pid)
-  if (typeof process.getuid === 'function' && ownerUid !== process.getuid()) {
-    child.kill('SIGKILL')
-    throw new Error('START_PROCESS_CLIENT: the PTY Owner is not owned by this user')
-  }
-  const snapshot = nativeProcessSnapshot(child.pid)
-  if (snapshot === null || !snapshot.command.includes(PROCESS_PTY_OWNER)) {
-    child.kill('SIGKILL')
-    throw new Error('START_PROCESS_CLIENT: the PTY Owner does not run this Scene helper entry')
-  }
   const pending = new Map()
   let requestId = 0
   let stderr = ''
+  const ready = Promise.withResolvers()
+  const owner = {
+    child,
+    pid: Number.isInteger(child.pid) ? child.pid : undefined,
+    birth: undefined,
+    uid: undefined,
+    pending,
+    ready,
+    spawnError: undefined,
+    validationError: undefined,
+    stderr: () => stderr,
+    exit: undefined,
+  }
+  child.once('spawn', () => ready.resolve())
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', chunk => { if (stderr.length < 32_000) stderr += chunk })
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', chunk => {
     if (stderr.length < 32_000) stderr += chunk
   })
-  const owner = {
-    child,
-    pid: child.pid,
-    birth: (() => {
-      if (!Number.isInteger(child.pid)) return undefined
-      try {
-        const observation = readKernelProcess(child.pid)
-        return observation.kind === 'alive' ? serializeKernelIdentity(observation.identity) : undefined
-      } catch {
-        return undefined
-      }
-    })(),
-    pending,
-    uid: ownerUid,
-    spawnError: undefined,
-    stderr: () => stderr,
-    exit: undefined,
-  }
+  // Register the real child BEFORE any identity check or await. A spawn error
+  // can arrive on the next tick; it settles every wait and never fabricates a
+  // native close.
   child.once('error', error => {
     owner.spawnError = error
-    owner.exit = { code: null, signal: null }
+    ready.reject(error)
     for (const waiter of pending.values()) waiter.reject(error)
+    pending.clear()
+  })
+  child.once('close', (code, signal) => {
+    owner.exit = { code, signal }
+    for (const waiter of pending.values()) {
+      waiter.reject(new Error(`PTY Owner exited before ${waiter.requestId}: ${JSON.stringify(owner.exit)}`))
+    }
     pending.clear()
   })
   child.on('message', message => {
@@ -4603,17 +4594,14 @@ function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
       pending.clear()
     }
   })
-  child.once('close', (code, signal) => {
-    owner.exit = { code, signal }
-    for (const waiter of pending.values()) {
-      waiter.reject(new Error(`PTY Owner exited before ${waiter.requestId}: ${JSON.stringify(owner.exit)}`))
-    }
-    pending.clear()
-  })
   owner.request = async (op, payload = {}, timeoutMs = 120_000) => {
+    if (owner.spawnError !== undefined) throw owner.spawnError
+    await ready.promise
+    if (!child.connected) throw new Error(`PTY Owner ${op} cannot be requested: the IPC channel is closed`)
     const id = `pty-owner-${String(++requestId)}`
+    let timer
     const result = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         pending.delete(id)
         reject(new Error(`PTY Owner ${op} timed out after ${String(timeoutMs)}ms`))
       }, timeoutMs)
@@ -4623,17 +4611,36 @@ function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
         reject: error => { clearTimeout(timer); reject(error) },
       })
     })
-    if (owner.spawnError !== undefined) throw owner.spawnError
-    if (!child.connected) throw new Error(`PTY Owner ${op} cannot be requested: the IPC channel is closed`)
     try {
       child.send({ requestId: id, op, ...payload })
     } catch (error) {
-      const waiter = pending.get(id)
       pending.delete(id)
-      waiter?.reject(error)
+      clearTimeout(timer)
       throw error
     }
     return await result
+  }
+  if (owner.pid === undefined) {
+    owner.validationError = new Error('START_PROCESS_CLIENT: the PTY Owner child has no real PID')
+    return owner
+  }
+  try {
+    const observation = readKernelProcess(owner.pid)
+    if (observation.kind !== 'alive' || observation.identity.ppid !== process.pid) {
+      throw new Error('START_PROCESS_CLIENT: the PTY Owner is not the live direct child')
+    }
+    const uid = readLinuxProcessUid(owner.pid)
+    if (typeof process.getuid === 'function' && uid !== process.getuid()) {
+      throw new Error('START_PROCESS_CLIENT: the PTY Owner is not owned by this user')
+    }
+    const snapshot = nativeProcessSnapshot(owner.pid)
+    if (snapshot === null || !snapshot.command.includes(PROCESS_PTY_OWNER)) {
+      throw new Error('START_PROCESS_CLIENT: the PTY Owner does not run this Scene helper entry')
+    }
+    owner.birth = serializeKernelIdentity(observation.identity)
+    owner.uid = uid
+  } catch (error) {
+    owner.validationError = error
   }
   return owner
 }
@@ -4727,17 +4734,21 @@ async function closeProcessPtyOwner(handle, reason) {
 }
 
 async function waitProcessPtyOwnerTerminal(handle, reason, timeoutMs = 20_000) {
-  const started = Date.now()
-  for (;;) {
-    if (handle.owner.exit !== undefined) break
-    if (Date.now() - started >= timeoutMs) throw new Error(`${reason}: the PTY Owner did not terminate within ${String(timeoutMs)}ms`)
-    await sleep(50)
-  }
+  const deadline = Date.now() + timeoutMs
+  while (handle.owner.exit === undefined && Date.now() < deadline) await sleep(50)
+  if (handle.owner.exit === undefined) throw new Error(`${reason}: the PTY Owner did not terminate within ${String(timeoutMs)}ms`)
   if (handle.owner.exit.code !== null || handle.owner.exit.signal !== 'SIGKILL') {
     throw new Error(`${reason}: the PTY Owner terminal was not the intentional SIGKILL: ${JSON.stringify(handle.owner.exit)}`)
   }
-  if (handle.shellIdentity !== undefined) await waitForProcessIdentityTerminal(handle.shellIdentity.identity, `${reason}: Client shell`, timeoutMs)
-  for (const value of handle.businessIdentities) await waitForProcessIdentityTerminal(value.identity, `${reason}: Client business`, timeoutMs)
+  const remaining = () => deadline - Date.now()
+  if (handle.shellIdentity !== undefined) {
+    if (remaining() <= 0) throw new Error(`${reason}: the shared Owner terminal deadline expired before the shell`)
+    await waitForProcessIdentityTerminal(handle.shellIdentity.identity, `${reason}: Client shell`, remaining())
+  }
+  for (const value of handle.businessIdentities) {
+    if (remaining() <= 0) throw new Error(`${reason}: the shared Owner terminal deadline expired before the business identity`)
+    await waitForProcessIdentityTerminal(value.identity, `${reason}: Client business`, remaining())
+  }
   return true
 }
 
@@ -4882,7 +4893,7 @@ async function handleStartProcessClient(message) {
   mkdirSync(scratch, { recursive: true, mode: 0o700 })
   const recordFile = join(clientDir, 'records.jsonl')
   writeFileSync(recordFile, '', { mode: 0o600, flag: 'wx' })
-  const clientId = `split-process-client-${String(sequence)}-${Date.now().toString(36)}`
+  const clientId = `split-process-client-${String(sequence)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   const holdBarrier = hmr === 'hold' ? join(clientDir, 'hmr-hold.barrier') : undefined
   // The reservation is durable BEFORE any native handle exists, so a Worker
   // death in any startup window remains owned by this process. The native
@@ -4935,12 +4946,13 @@ async function handleStartProcessClient(message) {
         traceDirectory: join(scene.workDir, 'trace'),
         artifactsDirectory: join(scene.workDir, 'artifacts'),
       })
+      if (handle.owner.validationError !== undefined) throw handle.owner.validationError
       if (handle.owner.birth === undefined) throw new Error(`${label}: the PTY Owner produced no readable kernel identity`)
-      const created = await handle.owner.request('create', {
+      const created = await withProcessNativeOperation('client-owner-create', clientId, () => handle.owner.request('create', {
         prefix: 'split-process-owner',
         traceDirectory: join(scene.workDir, 'trace'),
         artifactsDirectory: join(scene.workDir, 'artifacts'),
-      })
+      }))
       handle.sessionId = String(created.sessionId)
     } else {
       splitTerminal = createSplitTerminal({
@@ -5700,14 +5712,7 @@ async function reclaimProcessClient(handle, reason) {
       }
     }
     try {
-      if (handle.terminalMode === 'terminal-owner-loss') {
-        // An owner-loss cleanup has no native session in this process; the
-        // shared audit below proves the Owner and the exact shell/business
-        // identities terminal.
-        await assertProcessClientQuiesced(handle, reason)
-      } else {
-        await assertProcessClientQuiesced(handle, reason)
-      }
+      await assertProcessClientQuiesced(handle, reason)
     } catch (error) {
       failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} reclaim failed`)
     }
@@ -5986,7 +5991,16 @@ async function handleFinalize(message) {
     await cleanupSceneRoot('FINALIZE')
   }
   finalized = true
-  writeReceipt({ phase: 'FINALIZED', cleanup: { ...(receipt?.cleanup ?? {}), completedAt: now() } })
+  writeReceipt({
+    phase: 'FINALIZED',
+    cleanup: {
+      ...(receipt?.cleanup ?? {}),
+      completedAt: now(),
+      ...(scene?.kind === 'process'
+        ? { hostsExited: hosts.every(handle => handle.exited), hostSeatFree: true, qualificationSeatFree: true }
+        : {}),
+    },
+  })
   receiptTerminal = true
 }
 
@@ -8270,6 +8284,12 @@ async function stopRecoveredProcessHost(record, client) {
       throw new Error('RECLAIM_DISCOVERED_HOST: the stopped Host left its own instance record')
     }
   }
+  const baseline = new Set(record.scratchBaseline ?? [])
+  const scratchEntries = readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-'))
+  const newScratch = scratchEntries.filter(name => !baseline.has(name))
+  if (newScratch.length > 0) {
+    throw new Error(`RECLAIM_DISCOVERED_HOST: the stopped Host left its own scratch material: ${JSON.stringify(newScratch)}`)
+  }
   record.reclaimed = true
   record.exitObserved = 'sigterm'
   record.normalStop = true
@@ -8288,17 +8308,13 @@ async function stopRecoveredProcessHost(record, client) {
     const after = readJson(instancePath, 'recovered Host registry after normal stop')
     registryRemoved = after?.instanceId !== record.instanceId
   }
-  const baseline = new Set(record.scratchBaseline ?? [])
-  for (const name of readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-') && !baseline.has(name))) {
-    rmSync(join(scopeDir, name), { recursive: true, force: true })
-  }
   return {
     pid: record.pid,
     birth: ownership.birth,
     reclaimed: true,
     normalStop: true,
     registryRemoved,
-    scratchEntries: readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-')),
+    scratchEntries,
   }
 }
 

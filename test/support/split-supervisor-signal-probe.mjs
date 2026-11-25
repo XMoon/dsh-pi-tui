@@ -524,13 +524,10 @@ function processFdLinks(pid) {
 
 /** The kernel tty-index of one fd, or undefined when it is not a PTY fd. */
 function processFdTtyIndex(pid, fd) {
-  try {
-    const info = readFileSync(`/proc/${String(pid)}/fdinfo/${String(fd)}`, 'utf8')
-    const match = /^tty-index:\s*(\d+)$/mu.exec(info)
-    return match === null ? undefined : Number(match[1])
-  } catch {
-    return undefined
-  }
+  const info = readFileSync(`/proc/${String(pid)}/fdinfo/${String(fd)}`, 'utf8')
+  const match = /^tty-index:\s*(\d+)$/mu.exec(info)
+  if (match === null) throw new Error(`fd ${String(fd)} of PID ${String(pid)} has no tty-index`)
+  return Number(match[1])
 }
 
 
@@ -556,6 +553,8 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
     problems.push(`scene root still exists: ${receipt.sceneRoot}`)
   }
   if (receipt.install?.inProgress === true) problems.push('install is still marked in progress')
+  if (receipt.cleanup?.hostSeatFree !== true) problems.push('the process Scene did not report its Host seat free')
+  if (receipt.cleanup?.qualificationSeatFree !== true) problems.push('the process Scene did not report its Client seat free')
   for (const host of receipt.hosts ?? []) {
     const state = identityLiveness(kernel, host.pid, host.birth)
     if (state !== 'gone' && state !== 'foreign') {
@@ -1114,6 +1113,13 @@ try {
           }
           if (!Number.isInteger(client.ownerPid) || !Number.isInteger(client.shellPid)) {
             fail('terminal-owner-client-opened-before-ack: the owner/shell PID is not a real kernel PID')
+          }
+          const host = (receipt.hosts ?? []).find(value => value.exited !== true)
+          if (host === undefined || identityLiveness(kernel, host.pid, host.birth) !== 'live') {
+            fail('terminal-owner-client-opened-before-ack: the authenticated Host is not live at the checkpoint')
+          }
+          if (host.pgid === undefined || !groupAlive(host.pgid)) {
+            fail('terminal-owner-client-opened-before-ack: the authenticated Host group is not live at the checkpoint')
           }
           const ownerLinks = processFdLinks(client.ownerPid)
           if (Object.values(ownerLinks).includes('<unreadable>')) {

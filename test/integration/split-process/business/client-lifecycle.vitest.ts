@@ -89,6 +89,7 @@ function expectHostRowsKept(
     const expected = before.get(id)
     const actual = after.get(id)
     expect(expected, `${label}: row ${id} was not active before HMR`).toBeDefined()
+    expect(expected?.state, `${label}: row ${id} was not active before HMR`).toBe('active')
     expect(Number.isInteger(expected?.fiberUid), `${label}: row ${id} had no live fiber UID`).toBe(true)
     expect(actual, `${label}: row ${id} left the active inventory`).toBeDefined()
     expect(actual?.state, `${label}: row ${id} left active state`).toBe('active')
@@ -266,6 +267,7 @@ test('replaces the settled Client surface without changing the Host and submits 
     host = await scene.startHost({ scenario: 'long-turn' })
     client = await scene.startClient({ label: 'hmr-settled', ...clientDirectories(scene, 'hmr-settled'), hmr: 'replace' })
     const sessionId = await settleInitialPrompt(scene, client, host, 't57 initial prompt', 'long-turn-held', 'T57')
+    await waitFrame(client, 'long-turn answer 1', 'T57 initial answer')
     const before = await client.waitForSurfaceStatus(
       record => record.surfaceMounted === true && record.sessionOpen === true && record.openSessionId === sessionId,
       'T57 initial surface',
@@ -305,7 +307,7 @@ test('replaces the settled Client surface without changing the Host and submits 
       event => event.type === 'turn/start' && event.data?.turn === 2, 'T57 post-HMR turn/start')
     await scene.waitForSessionEvent(sessionId, beforeSecondTurn,
       event => event.type === 'turn/end' && event.data?.turn === 2, 'T57 post-HMR turn/end')
-    await waitFrame(client, 'long-turn answer', 'T57 post-HMR paint')
+    await waitFrame(client, 'long-turn answer 2', 'T57 post-HMR answer')
     await waitFrame(client, 't57 post-hmr prompt', 'T57 post-HMR prompt readback')
     const hostAfter = await scene.hostStatus(host)
     expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
@@ -351,11 +353,6 @@ test('keeps a real Host Job running across HMR and observes its settlement after
     expect(hostAfter.localHost.hostPid).toBe(hostBefore.localHost.hostPid)
     expect(hostAfter.localHost.instanceId).toBe(hostBefore.localHost.instanceId)
     expectHostRowsKept(rowsBefore, await protectedHostRows(scene, host), 'T58 Host')
-    const running = fixtureHelpers.readC1WorkEvents(host.jobWorkRoot!).find(
-      event => event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'registered',
-    )
-    expect(running?.owner).toBe(jobOwner)
-    expect(running?.status).toBe('running')
     expect(fixtureHelpers.readC1WorkEvents(host.jobWorkRoot!)).not.toContainEqual(
       expect.objectContaining({ kind: 'job-event', jobId: job.jobId, event: 'settled' }),
     )
@@ -364,6 +361,7 @@ test('keeps a real Host Job running across HMR and observes its settlement after
       event => event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled',
       'T58 settled Job', 120_000)
     expect(settled.status).toBe('completed')
+    expect(settled.owner).toBe(jobOwner)
     await exitChat(client, 'T58 Client')
     await closeHost(scene, host)
   } finally {

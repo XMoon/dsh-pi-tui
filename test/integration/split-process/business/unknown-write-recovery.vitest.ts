@@ -50,11 +50,13 @@ async function waitFrame(client: SplitProcessClient, text: string, label: string
 
 function composerOf(frame: string): string | undefined {
   const lines = frame.split('\n')
+  const marker = lines.findLastIndex(line => line.includes('❯'))
+  if (marker < 0) return undefined
   const rules: number[] = []
   lines.forEach((line, index) => { if (/^─+$/u.test(line.trim())) rules.push(index) })
-  if (rules.length < 2) return undefined
-  const top = rules.at(-2)!
-  const bottom = rules.at(-1)!
+  const top = rules.filter(index => index < marker).at(-1)
+  const bottom = rules.find(index => index > marker)
+  if (top === undefined || bottom === undefined) return undefined
   return lines.slice(top + 1, bottom).join('\n')
 }
 
@@ -202,13 +204,13 @@ test('ACK-dropped unknown write survives Host death and cold resume without repl
       const composer = composerOf(frame)
       if (composer === undefined) throw new Error('T66 the current frame has no composer')
       const pending = frame.includes('Submitting…') || frame.includes('Queued…')
-      if (!pending && composer.replace(/❯/gu, '').trim() === '') {
+      const draft = composer.replace(/❯/gu, '').trim()
+      if (!pending && draft === '') {
         expect(frame.includes('indeterminate')).toBe(false)
         disposition = 'accepted'
         break
       }
-      if (!pending && composer.includes(token) && frame.includes('indeterminate')) {
-        expect(composer.split(token).length - 1).toBe(1)
+      if (!pending && draft === token && frame.includes('indeterminate')) {
         disposition = 'unknown'
         break
       }
