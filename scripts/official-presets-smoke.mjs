@@ -63,6 +63,7 @@ import {
   PACKAGE_ROOT,
   validateDshSourceConfig,
 } from './lib/dsh-distribution.mjs'
+import { installCacheEnvironment, prepareInstallCache } from './lib/test-install-cache.mjs'
 
 const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
 const DIRECT_STANDARD_PROMPT = 'pr-e direct standard prompt'
@@ -1031,6 +1032,15 @@ async function main() {
   }
 
   try {
+    let installEnv = env
+    if (distribution.kind === 'npm') {
+      const installCacheRoot = prepareInstallCache({
+        tmpBase: workDir,
+        override: process.env.DSH_TEST_INSTALL_CACHE_ROOT,
+        candidateTarballs: [tarball],
+      })
+      installEnv = installCacheEnvironment(env, installCacheRoot)
+    }
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-official-presets-harness',
       private: true,
@@ -1041,7 +1051,7 @@ async function main() {
     }, null, 2) + '\n', 'utf8')
     const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })
     if (pnpm.status !== 0) throw new Error(`pnpm is unavailable:\n${commandOutput(pnpm)}`)
-    runPnpmInstall(harnessDir, env, distribution)
+    runPnpmInstall(harnessDir, installEnv, distribution)
 
     const dsh = dshInvocation(harnessDir)
     const version = runDsh(dsh, ['--version'], harnessDir, env)
@@ -1049,12 +1059,12 @@ async function main() {
     requireExactVersion('DSH', commandOutput(version).split(/\r?\n/u).find(line => line.trim() !== '')?.trim(), targetDshVersion)
 
     const promptPackage = writePromptQualificationPackage(workDir, targetDshVersion)
-    runPnpmInstall(promptPackage, env, distribution)
+    runPnpmInstall(promptPackage, installEnv, distribution)
     const promptLlmManifest = createRequire(join(promptPackage, 'package.json')).resolve('@deepseek-ai/dsh-llm/package.json')
     requireExactVersion('@deepseek-ai/dsh-llm qualification dependency', readOptionalJson(promptLlmManifest)?.version, targetDshVersion)
-    installPlugin(dsh, tarball, harnessDir, env, false)
-    installPlugin(dsh, promptPackage, harnessDir, env, false)
-    installPlugin(dsh, writeHeaderProbePackage(workDir), harnessDir, env, false)
+    installPlugin(dsh, tarball, harnessDir, installEnv, false)
+    installPlugin(dsh, promptPackage, harnessDir, installEnv, false)
+    installPlugin(dsh, writeHeaderProbePackage(workDir), harnessDir, installEnv, false)
     await smokeOfficialPresetMounts(dsh, workDir, env, promptEvidencePath, {
       candidate: tarball,
       version: targetDshVersion,

@@ -45,6 +45,7 @@ import {
 } from './lib/dsh-smoke-harness.mjs'
 import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
+import { installCacheEnvironment, prepareInstallCache } from './lib/test-install-cache.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -103,6 +104,12 @@ async function main() {
   const env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'evidence.json'))
 
   try {
+    const installCacheRoot = prepareInstallCache({
+      tmpBase: workDir,
+      override: process.env.DSH_TEST_INSTALL_CACHE_ROOT,
+      candidateTarballs: [tarball],
+    })
+    const installEnv = installCacheEnvironment(env, installCacheRoot)
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-startup-strictness-harness',
       private: true,
@@ -113,14 +120,14 @@ async function main() {
     }, null, 2) + '\n', 'utf8')
     const pnpm = run(PNPM_COMMAND, ['--version'], { cwd: harnessDir, env })
     if (pnpm.status !== 0) throw new Error(`pnpm is unavailable:\n${commandOutput(pnpm)}`)
-    runPnpmInstall(harnessDir, env, distribution)
+    runPnpmInstall(harnessDir, installEnv, distribution)
 
     const dsh = dshInvocation(harnessDir)
     const version = runDsh(dsh, ['--version'], harnessDir, env)
     if (version.status !== 0) throw new Error(`installed DSH --version failed:\n${commandOutput(version)}`)
     requireExactVersion('DSH', commandOutput(version).split(/\r?\n/u).find(line => line.trim() !== '')?.trim(), targetDshVersion)
 
-    installPlugin(dsh, tarball, harnessDir, env, false)
+    installPlugin(dsh, tarball, harnessDir, installEnv, false)
     disableTuiAppRow(join(dshHome, 'profiles', 'pi-tui'))
 
     // The CLI must exit BY ITSELF with a nonzero code: a lingering process is
