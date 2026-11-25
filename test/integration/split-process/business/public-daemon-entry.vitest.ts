@@ -707,6 +707,8 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
     expect(launch.client, 'the real foreground Client identity').not.toBeNull()
     expect(launch.host, 'the detached public Host identity').not.toBeNull()
     await waitForFrame(launch, '❯', 'public daemon composer')
+    await scene.publicDaemonParallelReady(launch)
+    await scene.publicDaemonParallelRelease()
 
     const rows = launch.loaderRows
     expect(rows, 'the parent daemon Loader dump').not.toBeNull()

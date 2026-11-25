@@ -331,6 +331,7 @@ export interface PublicDaemonLaunch {
   readonly sessionId: string
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
+  readonly shellBirth: string | null
   readonly cli: PublicProcessIdentity | null
   readonly client: PublicProcessIdentity | null
   readonly host: PublicDaemonHostFacts | null
@@ -948,6 +949,7 @@ class PublicDaemon implements PublicDaemonLaunch {
   readonly sessionId: string
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
+  readonly shellBirth: string | null
   readonly cli: PublicProcessIdentity | null
   readonly client: PublicProcessIdentity | null
   readonly host: PublicDaemonHostFacts | null
@@ -969,6 +971,7 @@ class PublicDaemon implements PublicDaemonLaunch {
     this.sessionId = String(payload.sessionId)
     this.backend = (payload.backend ?? null) as PublicDaemonBackend | null
     this.shellPid = payload.shellPid === null || payload.shellPid === undefined ? null : Number(payload.shellPid)
+    this.shellBirth = payload.shellBirth === null || payload.shellBirth === undefined ? null : String(payload.shellBirth)
     this.cli = payload.cli ?? null
     this.client = payload.client ?? null
     this.host = payload.host ?? null
@@ -1045,7 +1048,7 @@ class PublicDaemon implements PublicDaemonLaunch {
         sessionId: this.sessionId,
         backend: this.backend,
         shellPid: this.shellPid,
-        shellBirth: null,
+        shellBirth: this.shellBirth,
         cli: this.cli,
         client: this.client,
         host: this.host,
@@ -1070,7 +1073,7 @@ class PublicDaemon implements PublicDaemonLaunch {
       sessionId: this.sessionId,
       backend: this.backend,
       shellPid: this.shellPid,
-      shellBirth: null,
+      shellBirth: this.shellBirth,
       cli: this.cli,
       client: this.client,
       host: this.host,
@@ -1098,7 +1101,7 @@ class PublicDaemon implements PublicDaemonLaunch {
       sessionId: this.sessionId,
       backend: this.backend,
       shellPid: this.shellPid,
-      shellBirth: null,
+      shellBirth: this.shellBirth,
       cli: this.cli,
       client: this.client,
       host: this.host,
@@ -1490,10 +1493,8 @@ class ProcessScene implements SplitProcessScene {
 
   async publicDaemonParallelReady(launch: PublicDaemonLaunch): Promise<void> {
     const auditRunId = process.env[PARALLEL_AUDIT_ENV]
+    if (auditRunId === undefined || auditRunId === '') return
     const pair = process.env[PARALLEL_AUDIT_PAIR_ENV]
-    if (auditRunId === undefined || auditRunId === '') {
-      throw new Error('publicDaemonParallelReady: the parallel audit run id is not configured')
-    }
     if (pair !== 'public-daemon-entry') {
       throw new Error('publicDaemonParallelReady: SPLIT_VITEST_PARALLEL_AUDIT_PAIR must be public-daemon-entry')
     }
@@ -1521,7 +1522,7 @@ class ProcessScene implements SplitProcessScene {
       publicClientPid: launch.client.pid,
       publicClientBirth: launch.client.birth,
       shellPid: launch.shellPid,
-      shellBirth: launch.shellPid === null ? null : launch.shellPid,
+      shellBirth: launch.shellBirth,
       sessionId: launch.sessionId,
       activeStartedAt: new Date().toISOString(),
     })
@@ -1867,14 +1868,32 @@ class ProcessScene implements SplitProcessScene {
     if (worker === undefined) return false
     assert(other.worker.ppid === process.ppid && worker.ppid === process.ppid,
       'the parallel Scene Worker is not a live child of this Vitest main')
-    let live = this.#isSameLiveKernel(other.host?.pid, other.host?.birth,
-      'the parallel Scene Host')
+    let live: boolean
+    if (other.host !== undefined) {
+      live = this.#isSameLiveKernel(other.host.pid, other.host.birth, 'the parallel Scene Host')
+    } else {
+      const publicHosts = other.publicHosts ?? []
+      if (publicHosts.length === 0) return false
+      live = publicHosts.every(host => this.#isSameLiveKernel(host.pid, host.birth,
+        'the parallel public Host'))
+    }
     for (const entry of other.processClients ?? []) {
       live = this.#isSameLiveKernel(entry.shellPid, entry.shellBirth,
         'the parallel Scene Client shell') && live
       for (const business of entry.businessIdentities ?? []) {
         live = this.#isSameLiveKernel(business.pid, business.birth,
           'the parallel Scene Client business process') && live
+      }
+    }
+    for (const launch of other.publicLaunches ?? []) {
+      for (const [kind, identity] of [['CLI', launch.cli], ['Client', launch.client]] as const) {
+        if (identity === null || identity === undefined) continue
+        live = this.#isSameLiveKernel(identity.pid, identity.birth,
+          `the parallel public ${kind}`) && live
+      }
+      if (launch.shellPid !== null && launch.shellPid !== undefined) {
+        live = this.#isSameLiveKernel(launch.shellPid, launch.shellBirth ?? undefined,
+          'the parallel public shell') && live
       }
     }
     return live
