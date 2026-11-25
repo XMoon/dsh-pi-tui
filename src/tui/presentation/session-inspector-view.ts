@@ -28,11 +28,13 @@ import type {
 } from '../../app/command/session-browser-presentation.ts'
 import type { SessionWorkspaceFact } from '../../runtime/session-workspace-facts-port.ts'
 import { shortSessionId } from '../../domain/session/browser.ts'
+import { formatSessionAge } from '../pickers/sessions.ts'
 import { formatTokens } from '../token-format.ts'
 import { sanitizedPhysicalLine } from './lines.ts'
 import {
   SESSION_PENDING_LABEL,
   SESSION_SOURCE_LABEL,
+  workspaceRowStatusLabel,
   type SessionWorkspaceRowFact,
 } from './session-workspace-view.ts'
 
@@ -95,6 +97,8 @@ export interface SessionInspectorView {
   readonly stateLabel: string
   /** The printed Identity `State` value (`Persisted session · Migration required`). */
   readonly identityState: string
+  /** The fixed truthful freshness line (`Updated 2m`). */
+  readonly freshness: string
   /** Whether the Indicator groups below describe a settled (or last known) cut. */
   readonly state: SessionInspectorViewState
   /** The ONE fixed status sentence of a non-ready state (or `Refreshing`). */
@@ -182,12 +186,13 @@ function stateParts(row: SessionBrowserRow, fact: SessionWorkspaceRowFact | unde
   const parts: string[] = []
   if (row.id === currentSessionId) parts.push('Current')
   parts.push(row.live ? 'Live' : 'Persisted')
-  const status = fact === undefined ? '' : fact.priority === 'needs'
-    ? (fact.running === true ? 'Needs attention · Working' : 'Needs attention')
-    : fact.priority === 'working'
-      ? 'Working'
-      : fact.pending === 'unverified' ? 'Pending unverified' : ''
-  if (status !== '') parts.push(status)
+  if (fact !== undefined) {
+    // Reuse the ONE wording authority; only its verbose transitional phrase is
+    // shortened for the compact header.
+    const status = workspaceRowStatusLabel(fact)
+    if (status === 'Pending · not actionable here') parts.push('Pending unverified')
+    else if (status !== '') parts.push(status)
+  }
   if (row.formatStatus === 'migration-required') parts.push('Migration required')
   return parts
 }
@@ -379,7 +384,10 @@ function summaryOf(
 export function buildSessionInspectorView(input: SessionInspectorViewInput): SessionInspectorView {
   const row = input.row
   const inspector = input.inspector
-  const matching = inspector !== undefined && inspector.sessionId === row.id ? inspector : undefined
+  const matching = inspector !== undefined && inspector.sessionId === row.id
+    && (inspector.state !== 'ready' || inspector.data.sessionId === row.id)
+    ? inspector
+    : undefined
   const rosterTitle = row.title === undefined || row.title.trim() === '' ? undefined : sanitizedPhysicalLine(row.title)
   const stateLabel = stateParts(row, input.fact, input.currentSessionId).join(' · ')
   const identityState = `${row.id === input.currentSessionId ? 'Current session' : row.live ? 'Live session' : 'Persisted session'}${
@@ -395,6 +403,7 @@ export function buildSessionInspectorView(input: SessionInspectorViewInput): Ses
     title,
     stateLabel,
     identityState,
+    freshness: `Updated ${formatSessionAge(row.updatedAt)}`,
   }
   if (matching === undefined || matching.state === 'loading') {
     return { ...base, state: 'loading', notice: 'Loading statistics…', groups, summary: [] }

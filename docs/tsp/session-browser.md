@@ -106,15 +106,19 @@ production default; TSP keeps the experimental opt-in described in
 - Details is one read-only native Overlay Reader. Back or Esc returns to the same Picker and retains query/selection. Each OPEN reading owns a distinct Reader/
   body/scroll identity; a same-id data-only Inspector refresh keeps that SAME
   identity (it opens no second page), while a real page/selection change opens a
-  new reading. No Resume action is offered from Details.
+  new reading. No Resume action is offered from Details. When the Details target
+  leaves the accepted roster/search state, the reading exits and the typed
+  session id and picker item identity are re-anchored TOGETHER to the first
+  surviving accepted row (or cleared); Enter/Footer can never resume a hidden
+  id that the painted frame does not select.
 - The native Browser reports its typed Session-row selection (Browse and
   Search-results rows, plus the SAME admitted id while its read-only Details
   reading is painted; a Folder, Show more, directory editor or suspended
   Browser reports none) to the SAME shared
   [`SessionBrowserReadOwner` selected-Session Inspector seam](../architecture/host-client.md#selected-session-inspector-exact-projection-read).
-  The owner owns the debounce, exact read, fences and teardown; TSP performs no
-  read of its own and paints no Inspector data of its own. It reports Browse
-  versus Search from the actual query-mode layer. An Inspector-only publication
+  The owner owns the debounce, exact read, fences and teardown; TSP starts no
+  read of its own and renders only the detached projection that owner publishes.
+  It reports Browse versus Search from the actual query-mode layer. An Inspector-only publication
   stores detached data and repaints ONLY a visible consumer (the selected
   Picker preview child or the Details reading) without advancing the native
   revision, invalidating a painted action token, rebinding the source or

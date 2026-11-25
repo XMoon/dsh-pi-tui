@@ -180,6 +180,9 @@ const WIDE_RIGHT_MIN_CELLS = 34
 /** From this terminal width the right Inspector may paint two complete facts
  *  per row; below it every fact owns its own full-width label/value rows. */
 const WIDE_TWO_FACT_MIN_COLUMNS = 120
+/** One Inspector identity region (title/status/freshness/notice) plus at least
+ *  one fact row. The split decision never depends on loading/error data. */
+const INSPECTOR_SPLIT_MIN_BUDGET = 5
 /** The two plain cells that make a Session a CHILD of its Folder row. `> ` stays
  *  in the fixed tree gutter, so the bullet and the identity move together. */
 const SESSION_TREE_INDENT = 2
@@ -221,6 +224,22 @@ interface SessionTranscriptReader {
   scrollRow: number
 }
 
+/** One semantic reading position: the fact/group line painted at the viewport
+ *  top plus its line offset inside that fact. Physical row numbers are only a
+ *  projection of this anchor, so wrapping/packing changes never move the reader
+ *  to a different fact. */
+interface InspectorReadingAnchor {
+  readonly token: string
+  readonly offset: number
+  readonly ordinal: number
+}
+
+interface InspectorReadingLine {
+  readonly text: string
+  readonly token: string
+  readonly offset: number
+}
+
 /** ONE full-width read-only Inspector reading of a painted typed Session row.
  *  Its identity is the same id+origin the list already reported; opening it
  *  never changes the selection, resumes a Session or starts a second read. */
@@ -228,7 +247,7 @@ interface SessionInspectorPage {
   readonly sessionId: string
   readonly origin: 'browse' | 'search'
   readonly returnFocus: 'list' | 'search-results'
-  scrollRow: number
+  anchor: InspectorReadingAnchor | undefined
 }
 
 /** Truncate one rendered line to the pane width and pad it with plain spaces. */
@@ -466,7 +485,14 @@ interface PaneRender {
  *  clickable `Verb [Key]`; an action-less segment is an inert hint/fact that
  *  paints muted and never registers a hit region. */
 type SessionBarSegment = ActionBarSegment & (
-  | { readonly action: SessionBarAction; readonly ink: ActionInkRole }
+  | {
+      readonly action: SessionBarAction
+      readonly ink: ActionInkRole
+      /** The EXACT typed row/session this painted action belongs to. The press
+       *  and the release both re-prove it, so a same-looking replacement at the
+       *  same cell can never inherit another target's action. */
+      readonly targetId?: string
+    }
   | { readonly action?: undefined; readonly ink?: undefined }
 )
 
@@ -566,10 +592,16 @@ export class SessionWorkspacePanel implements Component {
   /** The selected Session whose inline Inspector this frame really painted (the
    *  two-column right pane). Used only for presentation-only repaint admission. */
   private lastPaintedInlineInspectorSessionId: string | undefined
-  /** The inline right Inspector's own scroll offset and the id it belongs to:
-   *  switching id starts at the top, same-id refresh/resize clamps in place. */
-  private inlineInspectorScroll = 0
-  private inlineInspectorScrollId: string | undefined
+  /** The inline right Inspector's semantic reading anchor and the id it belongs
+   *  to. Switching id starts at the top; same-id refresh/resize re-projects the
+   *  anchor so the same (or nearest surviving) fact stays at the top. */
+  private inlineInspectorAnchor: InspectorReadingAnchor | undefined
+  private inlineInspectorAnchorId: string | undefined
+  /** The body this frame really painted, used by the wheel/page scroll verbs. */
+  private lastInlineInspectorLines: readonly InspectorReadingLine[] = []
+  private lastInlineInspectorBodyRows = 0
+  private lastInspectorPageLines: readonly InspectorReadingLine[] = []
+  private lastInspectorPageBodyRows = 0
   /** The per-open mouse gesture: one press identity, cleared by ANY content
    *  change of the last committed frame. */
   private pressed:
@@ -918,6 +950,15 @@ export class SessionWorkspacePanel implements Component {
     return row?.kind === 'session' ? row.sessionId : undefined
   }
 
+  /** The EXACT typed row a painted selected-row bar action belongs to. It must
+   *  agree with the region's captured target at activation time. */
+  private currentBarTargetId(): string | undefined {
+    if (this.searchMode && this.focus === 'search-results') return this.selectedSearchSessionId
+    const row = this.selectedBrowseRow()
+    if (row === undefined) return undefined
+    return row.kind === 'session' ? row.sessionId : row.id
+  }
+
   private folderRowOf(row: PiTuiWorkspaceTreeRow): PiTuiWorkspaceTreeRow | undefined {
     if (row.kind === 'folder') return row
     if (row.kind === 'addDirectory') return undefined
@@ -1203,6 +1244,8 @@ export class SessionWorkspacePanel implements Component {
    *  selection, starts no read of its own and never resumes a Session. */
   private openInspector(): void {
     if (this.focus !== 'list' && this.focus !== 'search-results') return
+    // A chooser's job is to pick an existing Workspace, not read Sessions.
+    if (this.chooserMode()) return
     if (this.snapshot.resumePending || this.newSessionPending !== undefined) return
     const target = this.focus === 'search-results' ? this.selectedSearchSessionId : this.selectedBrowseSessionId()
     if (target === undefined) return
@@ -1212,7 +1255,7 @@ export class SessionWorkspacePanel implements Component {
       sessionId: target,
       origin: this.searchMode ? 'search' : 'browse',
       returnFocus: this.focus === 'search-results' ? 'search-results' : 'list',
-      scrollRow: 0,
+      anchor: undefined,
     }
     this.inspectorPage = page
     this.focus = 'inspector'
@@ -1237,11 +1280,11 @@ export class SessionWorkspacePanel implements Component {
     if (matchesKey(data, Key.pageUp)) return this.scrollInspectorPage(-Math.max(1, this.lastPaintedListRows - 1))
     if (matchesKey(data, Key.pageDown)) return this.scrollInspectorPage(Math.max(1, this.lastPaintedListRows - 1))
     if (matchesKey(data, Key.home)) {
-      page.scrollRow = 0
+      page.anchor = { token: '', offset: 0, ordinal: 0 }
       return this.host.requestRender()
     }
     if (matchesKey(data, Key.end)) {
-      page.scrollRow = Number.MAX_SAFE_INTEGER
+      page.anchor = { token: '', offset: 0, ordinal: Number.MAX_SAFE_INTEGER }
       return this.host.requestRender()
     }
   }
@@ -1249,7 +1292,16 @@ export class SessionWorkspacePanel implements Component {
   private scrollInspectorPage(delta: number): void {
     const page = this.inspectorPage
     if (page === undefined) return
-    page.scrollRow = Math.max(0, page.scrollRow + delta)
+    const start = this.inspectorReadingStart(
+      page.anchor,
+      this.lastInspectorPageLines,
+      this.lastInspectorPageBodyRows,
+    )
+    const next = Math.min(
+      Math.max(0, start + delta),
+      Math.max(0, this.lastInspectorPageLines.length - this.lastInspectorPageBodyRows),
+    )
+    page.anchor = this.inspectorAnchorAt(this.lastInspectorPageLines, next)
     this.host.requestRender()
   }
 
@@ -1919,7 +1971,13 @@ export class SessionWorkspacePanel implements Component {
     switch (region.kind) {
       case 'bar-action': {
         // The bar only re-enters the EXISTING keyboard/currentness path; it
-        // never calls a Host intent or writes navigation state directly.
+        // never calls a Host intent or writes navigation state directly. Every
+        // selected-row action re-proves the SAME typed target it painted, so a
+        // stale press can never act on a same-looking replacement.
+        const selectedAction = region.action === 'open' || region.action === 'peek'
+          || region.action === 'inspect' || region.action === 'activate-row'
+        if (selectedAction
+          && (region.id === undefined || region.id !== this.currentBarTargetId())) return
         switch (region.action) {
           case 'close': return this.handleEscape()
           case 'open': return this.resumeSelected()
@@ -2191,9 +2249,10 @@ export class SessionWorkspacePanel implements Component {
     }
     head.push(...this.renderStatusLines(width))
     const paneBudget = budget - head.length
-    // Two columns need a real Inspector identity line plus at least one fact
-    // row; a frame squeezed by status lines keeps the plain list.
-    if (paneBudget < 2) return this.renderSingleColumn(width, budget)
+    // Two columns need the FIXED Inspector identity region plus at least one
+    // real fact row. This threshold is state-independent: a loading/error
+    // update can never change the list/right split.
+    if (paneBudget < INSPECTOR_SPLIT_MIN_BUDGET) return this.renderSingleColumn(width, budget)
     const left = this.searchMode
       ? this.renderSearchPane(leftWidth, paneBudget, false)
       : this.renderListPane(leftWidth, paneBudget, false)
@@ -2706,9 +2765,9 @@ export class SessionWorkspacePanel implements Component {
           provenance.push(color.text(excerptLine))
         }
       }
-      // Keep at most the provenance plus the fixed Inspector identity; a tiny
-      // pane never slices the excerpt into an unreadable fragment first.
-      const reserve = Math.min(provenance.length, Math.max(0, budget - 2))
+      // Provenance may use only what remains after the FIXED Inspector identity
+      // plus one real fact row; a tiny pane drops provenance, never the fact.
+      const reserve = Math.min(provenance.length, Math.max(0, budget - INSPECTOR_SPLIT_MIN_BUDGET))
       const inspector = this.renderInspectorPaneLines(
         row.id,
         'search',
@@ -2829,43 +2888,57 @@ export class SessionWorkspacePanel implements Component {
     return view.state === 'error' ? color.error(text) : color.textMuted(text)
   }
 
-  /** Paint one fact block: its muted label then the complete wrapped value. */
-  private inspectorFactBlock(fact: SessionInspectorFact, width: number): string[] {
+  /** Paint one fact block: its muted label then the complete wrapped value.
+   *  Every physical line keeps the semantic fact token and its own offset. */
+  private inspectorFactBlock(fact: SessionInspectorFact, token: string, width: number): InspectorReadingLine[] {
     const label = truncateToWidth(fact.label, Math.max(1, width - 2), '…', false)
     const labelCells = visibleWidth(label)
     const valueWidth = Math.max(1, width - labelCells - 1)
     const wrapped = wrapTextWithAnsi(fact.value, valueWidth)
-    if (wrapped.length === 0) return [fit(color.textMuted(label), width)]
-    return wrapped.map((line, index) => index === 0
-      ? fit(`${color.textMuted(label)} ${color.text(line)}`, width)
-      : fit(`${' '.repeat(labelCells + 1)}${color.text(line)}`, width))
+    if (wrapped.length === 0) {
+      return [{ text: fit(color.textMuted(label), width), token, offset: 0 }]
+    }
+    return wrapped.map((line, index) => ({
+      text: index === 0
+        ? fit(`${color.textMuted(label)} ${color.text(line)}`, width)
+        : fit(`${' '.repeat(labelCells + 1)}${color.text(line)}`, width),
+      token,
+      offset: index,
+    }))
   }
 
   /** Paint a group's facts one per row, or two COMPLETE facts side by side when
    *  both fit their half untouched; a fact that must wrap takes the full width. */
   private inspectorFactLines(
     facts: readonly SessionInspectorFact[],
+    groupId: string,
     width: number,
     twoPerRow: boolean,
-  ): string[] {
-    if (!twoPerRow) return facts.flatMap(fact => this.inspectorFactBlock(fact, width))
-    const lines: string[] = []
+  ): InspectorReadingLine[] {
+    const block = (fact: SessionInspectorFact): InspectorReadingLine[] =>
+      this.inspectorFactBlock(fact, `${groupId}/${fact.label}`, width)
+    if (!twoPerRow) return facts.flatMap(block)
+    const lines: InspectorReadingLine[] = []
     const half = Math.max(1, Math.floor((width - 3) / 2))
     for (let index = 0; index < facts.length; index += 2) {
       const first = facts[index]!
       const second = facts[index + 1]
       if (second === undefined) {
-        lines.push(...this.inspectorFactBlock(first, width))
+        lines.push(...block(first))
         continue
       }
-      const left = this.inspectorFactBlock(first, half)
-      const right = this.inspectorFactBlock(second, half)
+      const left = this.inspectorFactBlock(first, `${groupId}/${first.label}`, half)
+      const right = this.inspectorFactBlock(second, `${groupId}/${second.label}`, half)
       if (left.length === 1 && right.length === 1) {
-        lines.push(`${padColumn(left[0]!, half)}   ${right[0]!}`)
+        lines.push({
+          text: `${padColumn(left[0]!.text, half)}   ${right[0]!.text}`,
+          token: left[0]!.token,
+          offset: 0,
+        })
         continue
       }
-      lines.push(...this.inspectorFactBlock(first, width))
-      lines.push(...this.inspectorFactBlock(second, width))
+      lines.push(...block(first))
+      lines.push(...block(second))
     }
     return lines
   }
@@ -2876,23 +2949,67 @@ export class SessionWorkspacePanel implements Component {
     width: number,
     twoPerRow: boolean,
     includeExcerpt: boolean,
-  ): string[] {
-    const lines: string[] = []
+  ): InspectorReadingLine[] {
+    const lines: InspectorReadingLine[] = []
     for (const group of groups) {
       if (group.id === 'excerpt' && !includeExcerpt) continue
-      lines.push(color.textMuted(truncateToWidth(group.head, width, '…', false)))
+      lines.push({
+        text: color.textMuted(truncateToWidth(group.head, width, '…', false)),
+        token: `${group.id}/@head`,
+        offset: 0,
+      })
       if (group.prose === true) {
         for (const fact of group.facts) {
-          lines.push(color.textDim(truncateToWidth(fact.label, width, '…', false)))
-          for (const line of wrapTextWithAnsi(fact.value, Math.max(1, width))) {
-            lines.push(color.text(truncateToWidth(line, width, '…', false)))
-          }
+          const token = `${group.id}/${fact.label}`
+          lines.push({ text: color.textDim(truncateToWidth(fact.label, width, '…', false)), token, offset: 0 })
+          const wrapped = wrapTextWithAnsi(fact.value, Math.max(1, width))
+          wrapped.forEach((line, index) => {
+            lines.push({
+              text: color.text(truncateToWidth(line, width, '…', false)),
+              token,
+              offset: index + 1,
+            })
+          })
         }
         continue
       }
-      lines.push(...this.inspectorFactLines(group.facts, width, twoPerRow))
+      lines.push(...this.inspectorFactLines(group.facts, group.id, width, twoPerRow))
     }
     return lines
+  }
+
+  /** Resolve a semantic anchor against the newly projected lines. An exact fact
+   *  wins; a removed fact falls back to the same group, then to the same
+   *  ordinal reading position. The result is always clamped to the real body. */
+  private inspectorReadingStart(
+    anchor: InspectorReadingAnchor | undefined,
+    lines: readonly InspectorReadingLine[],
+    bodyRows: number,
+  ): number {
+    if (lines.length === 0 || bodyRows <= 0) return 0
+    const max = Math.max(0, lines.length - bodyRows)
+    if (anchor === undefined) return 0
+    if (anchor.ordinal === Number.MAX_SAFE_INTEGER) return max
+    const exact = lines.findIndex(line => line.token === anchor.token)
+    if (exact >= 0) {
+      const tokenLines = lines.filter(line => line.token === anchor.token).length
+      const offset = Math.min(Math.max(0, anchor.offset), Math.max(0, tokenLines - 1))
+      return Math.min(exact + offset, max)
+    }
+    const group = anchor.token.split('/')[0]
+    const sibling = group === undefined || group === ''
+      ? -1
+      : lines.findIndex(line => line.token.startsWith(`${group}/`))
+    if (sibling >= 0) return Math.min(sibling, max)
+    return Math.min(Math.max(0, anchor.ordinal), max)
+  }
+
+  private inspectorAnchorAt(
+    lines: readonly InspectorReadingLine[],
+    index: number,
+  ): InspectorReadingAnchor | undefined {
+    const line = lines[Math.max(0, Math.min(index, lines.length - 1))]
+    return line === undefined ? undefined : { token: line.token, offset: line.offset, ordinal: Math.max(0, index) }
   }
 
   /** The inline right-pane Inspector: a FIXED identity/status region plus the
@@ -2910,27 +3027,38 @@ export class SessionWorkspacePanel implements Component {
     if (view === undefined) {
       return { lines: [color.textMuted(fit('Session unavailable', width))].slice(0, budget), regions: [] }
     }
+    // The identity/status/freshness/scope-or-notice budget is FIXED by geometry,
+    // not by data state: a loading update never steals the fact rows or changes
+    // the list/right split.
     const fixed = [
       fit(color.textStrong(truncateToWidth(view.title, width, '…', false)), width),
       fit(color.textDim(truncateToWidth(`${view.shortId} · ${view.stateLabel}`, width, '…', false)), width),
-      ...(view.notice === '' ? [] : [fit(this.inspectorNotice(view, width), width)]),
+      fit(color.textDim(truncateToWidth(view.freshness, width, '…', false)), width),
+      fit(view.notice === ''
+        ? color.textMuted(truncateToWidth('Read-only statistics', width, '…', false))
+        : this.inspectorNotice(view, width), width),
     ]
+    if (this.inlineInspectorAnchorId !== sessionId) {
+      this.inlineInspectorAnchorId = sessionId
+      this.inlineInspectorAnchor = undefined
+    }
     const bodyBudget = Math.max(0, budget - fixed.length)
     const all = bodyBudget <= 0
       ? []
       : this.inspectorGroupLines(view.groups, width, terminalWidth >= WIDE_TWO_FACT_MIN_COLUMNS, includeExcerpt)
-    if (this.inlineInspectorScrollId !== sessionId) {
-      this.inlineInspectorScrollId = sessionId
-      this.inlineInspectorScroll = 0
-    }
-    const maxScroll = Math.max(0, all.length - bodyBudget)
-    this.inlineInspectorScroll = Math.min(Math.max(0, this.inlineInspectorScroll), maxScroll)
-    const body = all.slice(this.inlineInspectorScroll, this.inlineInspectorScroll + bodyBudget)
+    const start = this.inspectorReadingStart(this.inlineInspectorAnchor, all, bodyBudget)
+    const body = all.slice(start, start + bodyBudget)
+    if (body.length > 0) this.inlineInspectorAnchor = this.inspectorAnchorAt(all, start)
+    this.lastInlineInspectorLines = all
+    this.lastInlineInspectorBodyRows = Math.min(bodyBudget, all.length)
     this.lastPaintedInlineInspectorSessionId = sessionId
     const regions: HitRegion[] = body.length === 0
       ? []
       : this.wheelZoneRegions('wheel-inspector', fixed.length, fixed.length + body.length, width)
-    return { lines: [...fixed, ...body].slice(0, budget), regions }
+    return {
+      lines: [...fixed, ...body.map(line => line.text)].slice(0, budget),
+      regions,
+    }
   }
 
   /** The full-width Inspector page: fixed identity/status lines and the ONE
@@ -2951,40 +3079,78 @@ export class SessionWorkspacePanel implements Component {
     const idPrefix = 'ID '
     const idIndent = ' '.repeat(visibleWidth(idPrefix))
     const idLines = wrapTextWithAnsi(view.fullId, Math.max(1, width - visibleWidth(idPrefix)))
-    const fixed = [
+    const fixed: string[] = [
       fit(identity, width),
       ...idLines.map((line, index) => fit(
         `${index === 0 ? color.textDim(idPrefix) : idIndent}${color.text(line)}`,
         width,
       )),
-      ...(view.notice === '' ? [] : [fit(this.inspectorNotice(view, width), width)]),
     ]
+    // Decoration yields to the reading. Keep at least one fact row whenever the
+    // remaining geometry can hold it; a short page still paints identity+Back.
+    const remaining = budget - fixed.length
+    if (remaining >= 3) {
+      fixed.push(fit(color.textDim(truncateToWidth(view.freshness, width, '…', false)), width))
+      fixed.push(fit(view.notice === ''
+        ? color.textMuted(truncateToWidth('Read-only Inspector', width, '…', false))
+        : this.inspectorNotice(view, width), width))
+    } else if (remaining >= 2 && view.notice !== '') {
+      fixed.push(fit(this.inspectorNotice(view, width), width))
+    }
+    const fixedShown = fixed.slice(0, budget)
     // The page's real object identity is painted: from here its body target is
     // reportable. A 0/1-row frame never reaches this method.
     this.inspectorPagePainted = true
-    const bodyBudget = Math.max(0, budget - fixed.length)
-    const all = bodyBudget <= 0
+    const bodyBudget = Math.max(0, budget - fixedShown.length)
+    // A one-line notice is fully present in the fixed row above; only a notice
+    // that had to be summarized (or cut) is ALSO painted in full inside the
+    // scrollable body, so the safe reason is never lost.
+    const noticeLines = view.notice === ''
       ? []
-      : this.inspectorGroupLines(view.groups, width, width >= WIDE_TWO_FACT_MIN_COLUMNS, true)
-    const maxScroll = Math.max(0, all.length - bodyBudget)
-    page.scrollRow = Math.min(Math.max(0, page.scrollRow), maxScroll)
-    const body = all.slice(page.scrollRow, page.scrollRow + bodyBudget)
+      : wrapTextWithAnsi(sanitizedPhysicalLine(view.notice), Math.max(1, width))
+    const all: InspectorReadingLine[] = bodyBudget <= 0
+      ? []
+      : [
+          ...(noticeLines.length <= 1
+            ? []
+            : noticeLines.map((line, index) => ({
+                text: color.text(truncateToWidth(line, width, '…', false)),
+                token: 'notice/@message',
+                offset: index,
+              }))),
+          ...this.inspectorGroupLines(view.groups, width, width >= WIDE_TWO_FACT_MIN_COLUMNS, true),
+        ]
+    const start = this.inspectorReadingStart(page.anchor, all, bodyBudget)
+    const body = all.slice(start, start + bodyBudget)
+    if (body.length > 0) page.anchor = this.inspectorAnchorAt(all, start)
+    this.lastInspectorPageLines = all
+    this.lastInspectorPageBodyRows = Math.min(bodyBudget, all.length)
     this.lastPaintedListRows = Math.max(1, body.length)
     this.inspectorScrollPainted = body.length > 0
     const regions: HitRegion[] = body.length === 0
       ? []
-      : this.wheelZoneRegions('wheel-inspector', fixed.length, fixed.length + body.length, width)
-    return { lines: [...fixed, ...body].slice(0, budget), regions }
+      : this.wheelZoneRegions('wheel-inspector', fixedShown.length, fixedShown.length + body.length, width)
+    return {
+      lines: [...fixedShown, ...body.map(line => line.text)].slice(0, budget),
+      regions,
+    }
   }
 
   private scrollInlineInspector(delta: number): void {
     const sessionId = this.lastPaintedInlineInspectorSessionId
     if (sessionId === undefined) return
-    if (this.inlineInspectorScrollId !== sessionId) {
-      this.inlineInspectorScrollId = sessionId
-      this.inlineInspectorScroll = 0
+    if (this.inlineInspectorAnchorId !== sessionId) {
+      this.inlineInspectorAnchorId = sessionId
+      this.inlineInspectorAnchor = undefined
     }
-    this.inlineInspectorScroll = Math.max(0, this.inlineInspectorScroll + delta)
+    const bodyRows = this.lastInlineInspectorBodyRows
+    if (bodyRows <= 0) return
+    const start = this.inspectorReadingStart(this.inlineInspectorAnchor, this.lastInlineInspectorLines, bodyRows)
+    const next = Math.min(
+      Math.max(0, start + delta),
+      Math.max(0, this.lastInlineInspectorLines.length - bodyRows),
+    )
+    this.inlineInspectorAnchor = this.inspectorAnchorAt(this.lastInlineInspectorLines, next)
     this.host.requestRender()
   }
 
@@ -3301,6 +3467,7 @@ export class SessionWorkspacePanel implements Component {
       regions.push({
         kind: 'bar-action',
         action: segment.action,
+        ...(segment.targetId === undefined ? {} : { id: segment.targetId }),
         xStart: span.startCol,
         xEnd: span.endCol - 1,
         line: 0,
@@ -3394,16 +3561,16 @@ export class SessionWorkspacePanel implements Component {
       const selectedPainted = this.selectedSearchSessionId !== undefined && painted.has(this.selectedSearchSessionId)
       const segments: SessionBarSegment[] = []
       if (painted.size >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
-      if (selectedPainted && !this.snapshot.resumePending) {
+      if (selectedPainted && !this.snapshot.resumePending && !this.chooserMode()) {
         // The second Enter on a result is the one explicit resume; on the
         // Session this Browser was opened from it returns instead.
         if (this.selectedSearchSessionId === this.options.currentSessionId) {
-          segments.push({ text: 'Return [Enter]', priority: 8, short: 'Return', action: 'open', ink: 'secondary' })
+          segments.push({ text: 'Return [Enter]', priority: 8, short: 'Return', action: 'open', ink: 'secondary', targetId: this.selectedSearchSessionId })
         } else {
-          segments.push({ text: 'Open [Enter]', priority: 8, short: 'Open', action: 'open', ink: 'primary' })
+          segments.push({ text: 'Open [Enter]', priority: 8, short: 'Open', action: 'open', ink: 'primary', targetId: this.selectedSearchSessionId })
         }
-        segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary' })
-        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary' })
+        segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary', targetId: this.selectedSearchSessionId })
+        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId: this.selectedSearchSessionId })
       }
       segments.push({ text: 'Back [Esc]', priority: 9, short: 'Back', action: 'close', ink: 'secondary' })
       return segments
@@ -3435,22 +3602,25 @@ export class SessionWorkspacePanel implements Component {
       segments.push({ text: `${SESSION_WORKSPACE_CHORDS.folderCycle.label} Workspace`, priority: 3, short: 'Tab' })
     }
     if (paintedRows.length >= 2) segments.push({ text: 'Up/Down move', priority: 6, short: 'Move' })
-    if (selected !== undefined && selectedPainted
+    if (selected !== undefined && selectedPainted && !this.chooserMode()
       && !(selected.kind === 'session' && this.snapshot.resumePending)) {
       if (selected.kind === 'session' && selected.sessionId === this.options.currentSessionId) {
         // Enter on the opened Session returns to it. The bar advertises that
         // real action (secondary navigation ink) and keeps the read-only Reader
         // plus the SAME read-only Inspector page.
         const enter = this.enterAction(selected)
-        segments.push({ text: enter.text, priority: 8, short: enter.short, action: 'activate-row', ink: 'secondary' })
-        segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary' })
-        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary' })
+        const targetId = selected.sessionId
+        segments.push({ text: enter.text, priority: 8, short: enter.short, action: 'activate-row', ink: 'secondary', targetId })
+        segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary', targetId })
+        segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId })
       } else if (selected.kind === 'folder' || selected.kind === 'session') {
         const enter = this.enterAction(selected)
-        segments.push({ text: enter.text, priority: 7, short: enter.short, action: 'activate-row', ink: 'primary' })
+        const targetId = selected.kind === 'session' ? selected.sessionId : selected.id
+        const priority = selected.kind === 'session' ? 8 : 7
+        segments.push({ text: enter.text, priority, short: enter.short, action: 'activate-row', ink: 'primary', targetId })
         if (selected.kind === 'session') {
-          segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary' })
-          segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary' })
+          segments.push({ text: 'Read [Space]', priority: 8, short: 'Read', action: 'peek', ink: 'secondary', targetId })
+          segments.push({ text: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, priority: 8, short: `Inspect [${SESSION_WORKSPACE_CHORDS.inspect.label}]`, action: 'inspect', ink: 'secondary', targetId })
         }
       } else {
         // New / Add / More: the painted ROOT ROW already runs that explicit

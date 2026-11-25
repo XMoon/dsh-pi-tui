@@ -385,18 +385,28 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
   `Esc`/the painted Back returns to the exact previous focus, typed selection,
   query, expansion and scroll anchors. Opening Inspect never changes the
   selection, starts no second read and never resumes/returns/writes a Session.
-  The page's fixed identity region shows the row's own title/full identity and
-  truthful Current/Live/Persisted/Migration/Running/Pending facts; its
-  scrollable body groups Whole session / Activity / Token usage / Performance /
-  Workspace & dates / Goal & todo / Lineage (+ an accepted Search excerpt).
-  A missing exact cut is `Loading statistics…` with roster facts still shown; a
+  The page's fixed identity region shows the row's own title/full identity,
+  truthful Current/Live/Persisted/Migration/Running/Pending facts and the
+  row's `Updated` freshness; its scrollable body groups Whole session / Activity /
+  Token usage / Performance / Workspace & dates / Goal & todo / Lineage (+ an
+  accepted Search excerpt). The notice row is part of the fixed geometry, so a
+  loading/error update never changes the split or steals a granted fact row; a
+  short page drops nonessential decoration before its body and keeps at least
+  one fact row, while a complete safe failure reason remains scroll-readable.
+  The reading position is the semantic group/fact (plus its line offset), not a
+  physical row number: same-id data-only wrapping, packing or width changes keep
+  the same (or nearest surviving) fact at the top, and a temporarily unpaintable
+  body keeps that anchor for the next real paint. A missing exact cut is
+  `Loading statistics…` with roster facts still shown; a cut whose own data names
+  a different Session is treated the same way, never as ready facts. A
   failed/denied/unavailable/migration state says so and never fabricates zero.
   The full page paints `↑↓ Scroll`, `PgUp/PgDn Page` and `Back [Esc]`; a frame
   too short to paint the page's own identity reports no target and offers only
   the real Back. Data-only Inspector publications repaint a visible Inspector
   (including a cleared/revoked cut) without normalizing the selection or
   advancing the Browser's action/target revision. The Inspector title is its
-  own display; the roster title is never rewritten.
+  own display; the roster title is never rewritten. The Sessionless chooser
+  paints no Inspect verb and F2 is inert there.
 - **Header, Preview and navigation.** The header is ONE row: `Sessions · <listed
   count>` (or `Choose workspace` in the chooser) with the real `/ Search` target
   on the right. It never repeats the Current Session id or an `All workspaces`
@@ -428,9 +438,12 @@ is not a fallback. TSP keeps its own native Presenter over the same owner (see
 - **Mouse is the last painted hit-map.** One render commits a frame revision and
   the REAL painted cell ranges of every tree row plus the Folder disclosure,
   search results and the physical Action Bar's action segments. A click acts
-  only on the SAME frame revision and SAME target range as its press; any
-  scroll, resize, search, Activity or content change between press and release
-  drops the gesture. In the ordinary Browse tree a Folder's title/blank area
+  only on the SAME frame revision, SAME target range and SAME typed target id as
+  its press; every selected-row bar action (`Open`/`Return`, `Read`, `Inspect`
+  and the row's Enter verb) carries the full Session/Folder id it painted, so a
+  replacement that paints identical text at the same cell can never inherit the
+  old target. Any scroll, resize, search, Activity or content change between
+  press and release drops the gesture. In the ordinary Browse tree a Folder's title/blank area
   AND its disclosure both toggle that Folder exactly once, so the whole row is
   the disclosure target while the `> ` gutter and Session rows keep their own
   verbs. In the Sessionless `Choose workspace` Browser the same title click

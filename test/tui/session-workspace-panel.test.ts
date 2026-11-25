@@ -30,7 +30,8 @@ import type { HostDirectoryBrowseOutcome } from '../../src/runtime/host-director
 import type { SessionMarkdownReadResult } from '../../src/runtime/session-markdown-port.ts'
 import { SupersededReadError } from '../../src/runtime/read-error.ts'
 import { sessionBrowserErrorNotice, shortSessionId } from '../../src/tui/pickers/sessions.ts'
-import { color, currentPalette } from '../../src/tui/theme/runtime.ts'
+import { buildSessionInspectorView } from '../../src/tui/presentation/session-inspector-view.ts'
+import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
@@ -5262,7 +5263,7 @@ test('F2/W03: the right Inspector takes its OWN wheel while the list selection a
           totalTokens: 5_112_600,
           cacheHitPct: 96.1,
         },
-        context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true },
+        context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
         model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
         preset: 'coding',
         effectiveCwd: '/ws/alpha',
@@ -5284,7 +5285,7 @@ test('F2/W03: the right Inspector takes its OWN wheel while the list selection a
   const selected = h.view()
   const left = selected.split('\n').map(line => line.slice(0, 66)).join('\n')
   // The wide frame is 120 cells: left 0..65, a two-cell gap 66..67, right 68+.
-  await wheelCell(h, 80, top + 3, 'down')
+  await wheelCell(h, 80, top + 5, 'down')
   const scrolled = h.view()
   assert.notEqual(scrolled, selected, 'the right Inspector scrolls its own fact body')
   assert.equal(scrolled.split('\n').map(line => line.slice(0, 66)).join('\n'), left,
@@ -5895,7 +5896,7 @@ test('the real panel reports a Search result target and reports no target in the
 
 test('F2 opens the SAME admitted Inspector page, scrolls its own body and returns to the list', async () => {
   const reports: Array<import('../../src/app/command/session-browser-presentation.ts').SessionInspectorSelection | undefined> = []
-  const longPath = `/工作区/${'很长的路径/'.repeat(12)}end`
+  const longPath = `/工作区/${'很长的路径/'.repeat(8)}MID9${'很长的路径/'.repeat(4)}ZK9TAIL`
   const data = {
     sessionId: OTHER,
     asOfSeq: 9,
@@ -5983,16 +5984,24 @@ test('F2 opens the SAME admitted Inspector page, scrolls its own body and return
   h.handle.setSnapshot(base, { inspectorOnly: true })
   await h.paint()
   assert.ok(h.view().includes('Turns 38'), 'the matching cut is restored')
-  // The page's own body scrolls; its fixed identity/header do not. Scan the
-  // scrolled window for the long CJK path tail (never assert one fixed offset).
+  // The page's own body scrolls; its fixed identity/header do not. Read the
+  // COMPLETE long CJK value across the scrolled windows: a unique head, middle
+  // and tail marker must all survive (an any-prefix match would be lossy).
   const top = h.view()
-  let sawLongPath = false
-  for (let step = 0; step < 40 && !sawLongPath; step += 1) {
+  let sawHead = false
+  let sawMiddle = false
+  let sawTail = false
+  for (let step = 0; step < 40 && !(sawHead && sawMiddle && sawTail); step += 1) {
     h.vt.sendInput('\x1b[B')
     await h.paint()
-    sawLongPath = h.view().includes('很长的路径') || h.view().includes('end')
+    const window = h.view()
+    sawHead ||= window.includes('很长的路径')
+    sawMiddle ||= window.includes('MID9')
+    sawTail ||= window.includes('ZK9TAIL')
   }
-  assert.ok(sawLongPath, 'the long CJK path becomes readable by scrolling the page body')
+  assert.ok(sawHead, 'the complete CJK path head is readable')
+  assert.ok(sawMiddle, 'the unique middle of the long CJK path is readable')
+  assert.ok(sawTail, 'the unique actual tail is readable; no prefix-only pass')
   page = h.view()
   assert.notEqual(page, top, 'the page body scrolls')
   assert.ok(page.includes('Session Inspector · other-se'), 'the page header stays fixed')
@@ -6010,6 +6019,17 @@ test('F2 opens the SAME admitted Inspector page, scrolls its own body and return
   assert.ok(x > 0, `the bar paints Inspect [F2]:\n${bar}`)
   await clickCell(h, x, panelFrame(h).length - 1)
   assert.ok(h.view().includes('Session Inspector · other-se'), 'the painted Inspect verb opens the same page')
+  // The page is also exit-ready by pointer: its own Back segment runs the same
+  // Esc ladder, then the list re-enters through a fresh Inspect click.
+  const pageBar = panelFrame(h).at(-1)!
+  const backX = pageBar.indexOf('Back [Esc]') + 1
+  assert.ok(backX > 0, `the page paints its Back verb:\n${pageBar}`)
+  await clickCell(h, backX, panelFrame(h).length - 1)
+  assert.ok(h.view().includes('Sessions · 2') && !h.view().includes('Session Inspector'),
+    'the pointer Back returns to the same list')
+  assert.deepEqual(reports.at(-1), { sessionId: OTHER, origin: 'browse' }, 'the list keeps the same target')
+  await clickCell(h, x, panelFrame(h).length - 1)
+  assert.ok(h.view().includes('Session Inspector · other-se'), 'the pointer reopens the same page')
   // A 3-row frame paints the page identity but has no scrollable body row: it
   // keeps the target and the real Back verb, and advertises no inert Scroll.
   h.vt.resize(80, 3)
@@ -6071,4 +6091,378 @@ test('the full-width Inspector keeps a complete long Session id readable at 44x2
   h.vt.sendInput('\x1b')
   await h.paint()
   assert.ok(/^> .*12345678/m.test(h.view()), `Esc returns to the same list selection:\n${h.view()}`)
+})
+
+test('F1: a same-looking selected-row bar action never retargets a replacement row', async () => {
+  const xId = 'session-abcdefgh-x'
+  const yId = 'session-abcdefgh-y'
+  const sameRow = (id: string) => row(id, 2_000, { title: 'Same title', cwd: '/ws/same', createdAt: 2_000 })
+  const h = harness({ columns: 44, rows: 20, initialMode: 'search', onInspectorSelection: () => {} })
+  const result = (id: string) => ({ row: sameRow(id), source: 'Metadata' as const })
+  const base = snapshot({
+    rows: [sameRow(xId), sameRow(yId)],
+    query: 'same',
+    searchState: 'ready',
+    searchResults: [result(xId)],
+    hasMore: false,
+    listRevision: 1,
+  })
+  h.handle.setSnapshot(base)
+  await h.paint()
+  // Move the keyboard seat from the query editor to the accepted result row.
+  h.vt.sendInput('\r')
+  await h.paint()
+  const press = (label: string): { readonly x: number; readonly y: number } => {
+    const frame = panelFrame(h)
+    const bar = frame.at(-1)!
+    const x = bar.indexOf(label)
+    assert.ok(x >= 0, `the bar paints ${JSON.stringify(label)}:\n${bar}`)
+    return { x, y: frame.length - 1 }
+  }
+  const down = (cell: { readonly x: number; readonly y: number }): void => {
+    h.vt.sendInput(`\x1b[<0;${cell.x + 1};${cell.y + 1}M`)
+  }
+  const up = (cell: { readonly x: number; readonly y: number }): void => {
+    h.vt.sendInput(`\x1b[<0;${cell.x + 1};${cell.y + 1}m`)
+  }
+
+  // The two rows paint the SAME visible cells (same short id/title/metadata);
+  // only their hidden full ids differ. A press on X's Inspect verb followed by
+  // an accepted X->Y replacement must not open Y's Inspector.
+  const before = h.view()
+  assert.ok(/^> .*abcdefgh/m.test(before), `X is the typed result:\n${before}`)
+  const inspect = press('Inspect [F2]')
+  down(inspect)
+  await h.paint()
+  h.handle.setSnapshot({ ...base, searchResults: [result(yId)] })
+  await h.paint()
+  assert.equal(h.view(), before, 'the replaced result repaints an identical frame')
+  up(inspect)
+  await h.paint()
+  assert.ok(!h.view().includes('Session Inspector'), 'the stale Inspect press cannot open the replacement')
+  assert.deepEqual(h.resumes, [])
+
+  // The same stale press must not Resume the replacement either.
+  const open = press('Open')
+  down(open)
+  await h.paint()
+  h.handle.setSnapshot({ ...base, searchResults: [result(xId)] })
+  await h.paint()
+  up(open)
+  await h.paint()
+  assert.deepEqual(h.resumes, [], 'the stale Open press cannot resume the replacement')
+
+  // The same stale-press rule covers Read: no transcript read starts for the
+  // replacement whose identical cells were not the pressed target.
+  const read = press('Read')
+  down(read)
+  await h.paint()
+  h.handle.setSnapshot({ ...base, searchResults: [result(yId)] })
+  await h.paint()
+  up(read)
+  await h.paint()
+  assert.ok(!h.view().includes('Transcript'), 'the stale Read press opens no Reader')
+  assert.deepEqual(h.reads, [], 'the stale Read press starts no read')
+
+  // Positive controls: the same painted cells work for the CURRENT target.
+  down(inspect)
+  await h.paint()
+  up(inspect)
+  await h.paint()
+  assert.ok(h.view().includes('Session Inspector · abcdefgh'), 'a fresh Inspect press opens the current target')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  const freshOpen = press('Open')
+  down(freshOpen)
+  await h.paint()
+  up(freshOpen)
+  await h.paint()
+  assert.deepEqual(h.resumes, [yId], 'a fresh Open press resumes the current target exactly once')
+})
+
+test('F3: a same-id data-only reflow keeps the semantic Inspector fact at the top', async () => {
+  const inspectorData = {
+    sessionId: OTHER,
+    asOfSeq: 9,
+    stats: { turns: 38, steps: 216, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+    usage: {
+      uncachedInputTokens: 184_200,
+      outputTokens: 96_400,
+      cacheReadTokens: 4_820_000,
+      cacheWriteTokens: 12_000,
+      totalTokens: 5_112_600,
+      cacheHitPct: 96.1,
+    },
+    context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
+    model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
+    preset: 'coding',
+    effectiveCwd: '/ws/alpha',
+    title: 'Other session',
+    goal: { objective: 'Finish the workspace UX', phase: 'active' as const },
+    todos: { pending: 2, inProgress: 1, completed: 3 },
+  }
+  const base = snapshot({
+    rows: [
+      row(CURRENT, 3_000, { title: 'Current session' }),
+      row(OTHER, 2_000, { title: 'Other session' }),
+    ],
+    inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data: inspectorData },
+  })
+  const h = harness({ columns: 120, rows: 24 })
+  h.handle.setSnapshot(base)
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, OTHER] },
+  ] })
+  settleActivity(h)
+  await h.paint()
+  let width = 120
+  const top = bodyTopRow(h)
+  const rightStart = (): number => Math.min(Math.max(44, Math.floor(width * 0.55)), width - 2 - 34) + 2
+  const rightLine = (row: number): string => panelFrame(h)[row]!.slice(rightStart()).trimEnd()
+  // Wheel the inline body until the semantic `Token usage` group owns the top.
+  for (let step = 0; step < 20 && !rightLine(top + 4).startsWith('Token usage'); step += 1) {
+    await wheelCell(h, 80, top + 5, 'down')
+  }
+  assert.equal(rightLine(top + 4), 'Token usage', `the wheel anchors the named group:\n${h.view()}`)
+
+  // Change ONLY the Inspector data for the SAME id, and make a fact before it
+  // wrap one extra row. A numeric row offset would now show the previous fact.
+  const longModel = { ...inspectorData, model: { ...inspectorData.model, model: 'deepseek-v4-pro-with-a-very-long-model-name' } }
+  h.handle.setSnapshot({ ...base, inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data: longModel } }, { inspectorOnly: true })
+  await h.paint()
+  assert.equal(rightLine(top + 4), 'Token usage', `the anchored fact survives preceding wrap changes:\n${h.view()}`)
+
+  // The same anchor survives a compact/wide round trip: the semantic fact, not
+  // its physical row, owns the reading position.
+  width = 100
+  h.vt.resize(width, 24)
+  await h.paint()
+  assert.equal(rightLine(top + 4), 'Token usage', `the anchored fact survives a narrow re-project:\n${h.view()}`)
+  width = 120
+  h.vt.resize(width, 24)
+  await h.paint()
+  assert.equal(rightLine(top + 4), 'Token usage', `the anchored fact survives the wide re-project:\n${h.view()}`)
+
+  // The full page uses the same semantic anchor.
+  h.vt.sendInput('\x1bOQ') // F2
+  await h.paint()
+  assert.ok(h.view().includes('Session Inspector'), `F2 opens the full page:\n${h.view()}`)
+  const pageTop = bodyTopRow(h)
+  const pageLine = (row: number): string => panelFrame(h)[row]!.trimEnd()
+  for (let step = 0; step < 30 && pageLine(pageTop + 4) !== 'Token usage'; step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+  }
+  assert.equal(pageLine(pageTop + 4), 'Token usage', `the page wheel anchors the named group:\n${h.view()}`)
+  h.handle.setSnapshot({ ...base, inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data: longModel } }, { inspectorOnly: true })
+  await h.paint()
+  assert.equal(pageLine(pageTop + 4), 'Token usage', `the page keeps its semantic fact after a same-id wrap change:\n${h.view()}`)
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Session Inspector'))
+})
+
+test('F3: loading/error keeps the split, fixed freshness and a readable short page', async () => {
+  const h = harness({ columns: 80, rows: 12 })
+  const ready = snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+    inspector: {
+      sessionId: OTHER,
+      state: 'ready',
+      refreshing: false,
+      data: {
+        sessionId: OTHER,
+        asOfSeq: 1,
+        stats: { turns: 1, steps: 1, llmMs: 0, toolMs: 0 },
+        usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 },
+        context: { approximate: true as const },
+        model: { provider: 'deepseek', model: 'deepseek-v4-pro' },
+        preset: 'coding',
+        effectiveCwd: '/ws/alpha',
+        title: 'Other session',
+      },
+    },
+  })
+  h.handle.setSnapshot(ready)
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, OTHER] },
+  ] })
+  settleActivity(h)
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+  const readyFrame = panelFrame(h)
+  const bodyStart = bodyTopRow(h)
+  assert.ok(readyFrame[bodyStart]!.slice(46).includes('Other session'), `the 80x12 split paints the selected identity:\n${h.view()}`)
+  const readyLeft = readyFrame.map(line => line.slice(0, 44)).join('\n')
+  const readyBodyTop = readyFrame[bodyStart + 4]!.slice(46).trimEnd()
+  assert.equal(readyBodyTop, 'Whole session', `the ready body starts at the first fact group:\n${h.view()}`)
+
+  // A loading publication changes only the notice row: the split, the left
+  // list and the one granted fact row stay exactly where they were.
+  h.handle.setSnapshot({ ...ready, inspector: { sessionId: OTHER, state: 'loading' } })
+  await h.paint()
+  const loadingFrame = panelFrame(h)
+  assert.equal(loadingFrame.map(line => line.slice(0, 44)).join('\n'), readyLeft,
+    'loading never changes the left list or the split')
+  assert.equal(loadingFrame[bodyStart + 4]!.slice(46).trimEnd(), 'Whole session',
+    'loading never steals the granted fact row')
+  assert.ok(loadingFrame[bodyStart + 2]!.slice(46).includes('Updated'),
+    'freshness stays a fixed truthful identity fact while loading')
+
+  // A short full page keeps the complete identity, Back/Close and a scrollable
+  // body. The complete safe failure reason is reachable by scrolling, not cut
+  // to one invisible line.
+  h.vt.sendInput('\x1bOQ')
+  await h.paint()
+  h.vt.resize(80, 10)
+  await h.paint()
+  const pageTop = bodyTopRow(h)
+  assert.ok(panelFrame(h).at(-1)!.includes('Back [Esc]'), `the short page keeps its exit:\n${h.view()}`)
+  assert.ok(panelFrame(h)[pageTop]!.includes('Other session'), `the short page keeps identity:\n${h.view()}`)
+  const longError = 'Host denied the read: the complete saved diagnostic remains readable at the tail DENIED_TAIL'
+  h.handle.setSnapshot({
+    ...ready,
+    inspector: { sessionId: OTHER, state: 'error', message: longError },
+  })
+  await h.paint()
+  assert.ok(!panelFrame(h).some(line => line.includes('DENIED_TAIL')), 'the fixed notice is only a summary')
+  // The semantic anchor stayed on the surviving fact; Home returns to the
+  // beginning of the scrollable body where the complete safe reason lives.
+  h.vt.sendInput('\x1b[H')
+  await h.paint()
+  for (let step = 0; step < 6 && !h.view().includes('DENIED_TAIL'); step += 1) {
+    h.vt.sendInput('\x1b[B')
+    await h.paint()
+  }
+  assert.ok(h.view().includes('DENIED_TAIL'), `the full safe reason is scroll-readable:\n${h.view()}`)
+  h.vt.sendInput('\x1b')
+  await h.paint()
+  assert.ok(!h.view().includes('Session Inspector'), 'Esc returns to the list from the short page')
+})
+
+test('F4: a wrapper-matching but nested-mismatched Inspector stays loading', () => {
+  const view = buildSessionInspectorView({
+    row: row(OTHER, 2_000, { title: 'Other session' }),
+    fact: undefined,
+    inspector: {
+      sessionId: OTHER,
+      state: 'ready',
+      refreshing: false,
+      data: {
+        sessionId: THIRD,
+        asOfSeq: 1,
+        stats: { turns: 1, steps: 1, llmMs: 0, toolMs: 0 },
+        usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 },
+        context: { approximate: true as const },
+        model: { provider: 'deepseek', model: 'deepseek-v4-pro' },
+        preset: 'coding',
+        effectiveCwd: '/ws/alpha',
+        title: 'Wrong session',
+      },
+    },
+    workspaces: [],
+    workspaceBaselineProven: true,
+    currentSessionId: CURRENT,
+  })
+  assert.equal(view.state, 'loading', 'a cut whose own data names another Session is never ready')
+  assert.equal(view.notice, 'Loading statistics…')
+  assert.equal(view.title, 'Other session', 'the roster identity is still painted')
+  assert.match(view.freshness, /^Updated /u)
+})
+
+test('F4: the Sessionless chooser never offers or opens the Inspector', async () => {
+  const h = harness({ columns: 44, rows: 20, initialDirectoryChooser: true })
+  h.handle.setSnapshot(snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+  }))
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, OTHER] },
+  ] })
+  await h.paint()
+  assert.ok(!h.view().includes('Inspect [F2]'), `the chooser bar offers no Inspector verb:\n${h.view()}`)
+  h.vt.sendInput('\x1bOQ')
+  await h.paint()
+  assert.ok(!h.view().includes('Session Inspector'), 'F2 is inert in the chooser')
+  h.vt.sendInput('\x1b')
+  await h.paint()
+})
+
+test('PR3 visual checklist: the Inspector holds the frozen size matrix and palettes', async () => {
+  const h = harness({ columns: 200, rows: 50 })
+  const inspectorData = {
+    sessionId: OTHER,
+    asOfSeq: 12,
+    stats: { turns: 38, steps: 216, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+    usage: {
+      uncachedInputTokens: 184_200, outputTokens: 96_400, cacheReadTokens: 4_820_000,
+      cacheWriteTokens: 12_000, totalTokens: 5_112_600, cacheHitPct: 96.1,
+    },
+    context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
+    model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
+    preset: 'coding',
+    effectiveCwd: `/ws/${'很长的路径/'.repeat(8)}MID9${'很长的路径/'.repeat(4)}ZK9TAIL`,
+    title: 'Other session',
+    goal: { objective: 'Finish the workspace UX', phase: 'active' as const },
+    todos: { pending: 2, inProgress: 1, completed: 3 },
+  }
+  const base = snapshot({
+    rows: [row(CURRENT, 3_000, { title: 'Current session' }), row(OTHER, 2_000, { title: 'Other session' })],
+    inspector: { sessionId: OTHER, state: 'ready', refreshing: false, data: inspectorData },
+  })
+  h.handle.setSnapshot(base)
+  h.handle.updateWorkspaces({ type: 'baseline', items: [
+    { workspaceId: 'ws-alpha', path: '/ws/alpha', title: 'Alpha', sessionIds: [CURRENT, OTHER] },
+  ] })
+  settleActivity(h)
+  await h.paint()
+  h.vt.sendInput('\x1b[B')
+  await h.paint()
+
+  const sizes = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+  for (const [columns, rows] of sizes) {
+    h.vt.resize(columns, rows)
+    await h.paint()
+    const frame = panelFrame(h)
+    assert.ok(frame.length <= rows, `${columns}x${rows}: frame fits`)
+    for (const line of frame) assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: no overflow: ${JSON.stringify(line)}`)
+    assert.match(stripTerminalSequences(frame.at(-1)!), /\b(Close|Back|Esc)\b/u,
+      `${columns}x${rows}: a real exit verb survives`)
+    const split = columns >= 80 && rows >= 12
+    if (split) {
+      const right = frame.map(line => line.slice(Math.min(Math.max(44, Math.floor(columns * 0.55)), columns - 2 - 34) + 2)).join('\n')
+      assert.ok(right.includes('Other session') && right.includes('Updated'), `${columns}x${rows}: identity+freshness paint in the right pane`)
+      assert.ok(right.includes('Whole session'), `${columns}x${rows}: at least one fact group is granted`)
+    }
+    h.vt.sendInput('\x1bOQ')
+    await h.paint()
+    const page = panelFrame(h)
+    assert.ok(page.some(line => line.includes('Session Inspector')), `${columns}x${rows}: F2 opens the page`)
+    assert.ok(page.some(line => line.includes(`ID ${OTHER}`)), `${columns}x${rows}: the full id is painted`)
+    assert.match(stripTerminalSequences(page.at(-1)!), /\b(Close|Back|Esc)\b/u,
+      `${columns}x${rows}: the page keeps a real exit`)
+    for (const line of page) assert.ok(visibleWidth(line) <= columns, `${columns}x${rows}: page no overflow`)
+    h.vt.sendInput('\x1b')
+    await h.paint()
+  }
+
+  // Dark / light / custom: the same surface and wording, only palette ANSI
+  // changes; no token overflows or loses the identity/fact region.
+  h.vt.resize(120, 40)
+  await h.paint()
+  const wording = h.view()
+  try {
+    h.app.applyTheme('light')
+    await h.paint()
+    assert.equal(stripTerminalSequences(h.view()), stripTerminalSequences(wording), 'light keeps the same layout and wording')
+    setTheme('custom', { ...currentPalette, primary: '#123456', accent: '#654321', textStrong: '#abcdef' })
+    h.handle.setSnapshot(base)
+    await h.paint()
+    assert.ok(h.view().includes('Other session') && h.view().includes('Whole session'), 'custom keeps the Inspector identity and body')
+    for (const line of panelFrame(h)) assert.ok(visibleWidth(line) <= 120, 'custom palette never overflows')
+  } finally {
+    setTheme('dark')
+    h.app.applyTheme('dark')
+    h.dispose()
+  }
 })

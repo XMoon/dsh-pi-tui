@@ -352,13 +352,26 @@ function stepActionFocus(panel: SessionBrowserPanel, delta: -1 | 1): BrowseActio
   return enabled[(at + delta + enabled.length) % enabled.length]!
 }
 
+/** Re-anchor the ONE typed selection after an accepted state change. The
+ *  session id and its picker item identity are committed TOGETHER: a stale
+ *  `session:<old>` item beside a new `selected` id would make Enter/Footer act
+ *  on a row the frame never selected. */
+function selectFirstVisibleSession(panel: SessionBrowserPanel): void {
+  const next = firstBrowseId(panel)
+  panel.selected = next
+  panel.selectedItem = next === undefined ? undefined : `session:${next}`
+}
+
 function normalize(panel: SessionBrowserPanel): void {
   if (panel.page === 'details') {
     if (rowFor(panel, panel.selected) === undefined) {
+      // A Details target that left the accepted roster/search state exits its
+      // reading and re-anchors BOTH halves of the typed selection. Nothing
+      // hidden may remain activatable through Enter or the Footer.
       panel.page = 'browse'
       panel.readerEpoch++
       panel.zone = 'list'
-      panel.selected = firstBrowseId(panel)
+      selectFirstVisibleSession(panel)
     } else {
       return
     }
@@ -367,7 +380,7 @@ function normalize(panel: SessionBrowserPanel): void {
   if (folderOrMore) {
     panel.selected = undefined
   } else if (panel.selected === undefined || rowFor(panel, panel.selected) === undefined) {
-    panel.selected = firstBrowseId(panel)
+    selectFirstVisibleSession(panel)
   }
   if (panel.zone === 'actions') panel.actionFocus = focusedAction(panel)
 }
@@ -900,8 +913,9 @@ export class TspSessionBrowser {
     }
     if (base === 'new-session' && actionDisabledReason(panel, base) === undefined) return { kind: 'new-session' }
     if (base === 'details' && selectedSessionRow(panel) !== undefined) return { kind: 'details' }
-    if (base === 'resume' && actionDisabledReason(panel, 'resume') === undefined && panel.selected !== undefined) {
-      return { kind: 'resume', sessionId: panel.selected, source: 'footer' }
+    if (base === 'resume' && actionDisabledReason(panel, 'resume') === undefined) {
+      const session = selectedSessionRow(panel)
+      return session === undefined ? undefined : { kind: 'resume', sessionId: session.id, source: 'footer' }
     }
     return undefined
   }
@@ -1167,7 +1181,8 @@ export class TspSessionBrowser {
     if (key.name === 'enter') {
       if (selectedId?.startsWith('workspace:')) return { kind: 'browse-workspace', workspaceId: selectedId.slice('workspace:'.length), toggle: true }
       if (selectedId?.startsWith('more:')) return { kind: 'browse-more', workspaceId: selectedId.slice('more:'.length), reveal: true }
-      return panel.selected === undefined ? undefined : { kind: 'resume', sessionId: panel.selected, source: 'enter' }
+      const session = selectedSessionRow(panel)
+      return session === undefined ? undefined : { kind: 'resume', sessionId: session.id, source: 'enter' }
     }
     const items = pickerLayerItems(panel)
     const index = Math.max(0, items.findIndex(item => item.id === selectedId))

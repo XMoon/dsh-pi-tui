@@ -192,26 +192,38 @@ const controlledActivityObservation = (): ActivityObservation => {
  * come from this ONE source, never from the roster or a local transcript. The
  * read is resolved immediately; the pane proves presentation, not Host latency.
  */
-const inspectorData = (sessionId: string) => ({
-  sessionId,
-  asOfSeq: 12,
-  stats: { turns: 38, steps: 216, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
-  usage: {
-    uncachedInputTokens: 184_200,
-    outputTokens: 96_400,
-    cacheReadTokens: 4_820_000,
-    cacheWriteTokens: 12_000,
-    totalTokens: 5_112_600,
-    cacheHitPct: 96.1,
-  },
-  context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
-  model: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' },
-  preset: 'reviewer',
-  title: projections.get(sessionId)?.title ?? sessionId,
-  effectiveCwd: `/workspace/${sessionId === contentId ? 'other' : 'project'}`,
-  goal: { objective: 'Finish the Session Workspace Inspector', phase: 'active' as const },
-  todos: { pending: 2, inProgress: 1, completed: 3 },
-})
+const inspectorSeed = (sessionId: string): { readonly seq: number; readonly turns: number; readonly steps: number; readonly total: number; readonly model: string } => {
+  switch (sessionId) {
+    case currentId: return { seq: 3, turns: 3, steps: 7, total: 12_345, model: 'deepseek/deepseek-v4-flash' }
+    case longId: return { seq: 21, turns: 21, steps: 55, total: 2_345_678, model: 'deepseek/deepseek-v4-pro' }
+    case contentId: return { seq: 38, turns: 38, steps: 216, total: 5_112_600, model: 'deepseek/deepseek-v4-pro' }
+    default: return { seq: 1, turns: 1, steps: 1, total: 1_000, model: 'deepseek/deepseek-v4-flash' }
+  }
+}
+
+const inspectorData = (sessionId: string) => {
+  const seed = inspectorSeed(sessionId)
+  return {
+    sessionId,
+    asOfSeq: seed.seq,
+    stats: { turns: seed.turns, steps: seed.steps, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+    usage: {
+      uncachedInputTokens: 184_200,
+      outputTokens: 96_400,
+      cacheReadTokens: 4_820_000,
+      cacheWriteTokens: 12_000,
+      totalTokens: seed.total,
+      cacheHitPct: 96.1,
+    },
+    context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
+    model: { provider: 'deepseek', model: seed.model.replace('deepseek/', ''), reasoningEffort: 'high' },
+    preset: 'reviewer',
+    title: projections.get(sessionId)?.title ?? sessionId,
+    effectiveCwd: `/workspace/${sessionId === contentId ? 'other' : 'project'}`,
+    goal: { objective: 'Finish the Session Workspace Inspector', phase: 'active' as const },
+    todos: { pending: 2, inProgress: 1, completed: 3 },
+  }
+}
 
 const sessionWorkspaceFacts: SessionWorkspaceFactsPort = {
   readActivity: async () => [],

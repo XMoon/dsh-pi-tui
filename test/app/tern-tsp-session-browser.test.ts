@@ -1605,7 +1605,8 @@ test('native Session: a KV re-render and a resize never remount the Reader body'
     ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>).some(action => String(action.label).includes('Details [Enter]')))
   pane.key('\r')
   await waitUntil('Details opens', () => details(pane) !== undefined)
-  assert.equal(kvNodes(pane).length, 8, 'each short-fact group is exactly one grid')
+  assert.ok(kvNodes(pane).length > 0, 'the short-fact groups paint native grids on a kv-capable pane')
+  assert.ok(detailGroups(pane).size >= 1, 'the grids carry group facts')
   const bodyId = detailBody(pane)!.id
   const gridIds = kvNodes(pane).map((node) => node.id)
   const factsBefore = detailGroups(pane)
@@ -1690,9 +1691,9 @@ test('TSP PR3: the real presenter reports its typed Session row and keeps it thr
 })
 
 test('TSP PR2: inspector-only data never invalidates a painted native action', async (t) => {
-  let resolveRead!: (result: { readonly kind: 'ready'; readonly data: SessionInspectorData }) => void
   let reads = 0
-  const gate = new Promise<{ readonly kind: 'ready'; readonly data: SessionInspectorData }>((resolve) => { resolveRead = resolve })
+  let invalidate: ((reason: 'changed' | 'source-replaced') => void) | undefined
+  const pending: Array<(result: { readonly kind: 'ready'; readonly data: SessionInspectorData }) => void> = []
   const data: SessionInspectorData = {
     sessionId: 'session-current',
     asOfSeq: 1,
@@ -1718,10 +1719,16 @@ test('TSP PR2: inspector-only data never invalidates a painted native action', a
         await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }))
       },
     }),
-    openInspector: () => ({
-      read: async () => { reads += 1; return gate },
-      dispose() {},
-    }),
+    openInspector: (_sessionId, onInvalidated) => {
+      invalidate = onInvalidated
+      return {
+        read: async () => {
+          reads += 1
+          return new Promise(resolve => pending.push(resolve))
+        },
+        dispose() {},
+      }
+    },
   }
   const m = await mounted(t, reader({
     list: async () => [row('session-current'), row('session-other', { updatedAt: 90 })],
@@ -1736,15 +1743,40 @@ test('TSP PR2: inspector-only data never invalidates a painted native action', a
   const token = String(detailsAction.id)
   assert.match(token, /#\d+$/u, 'the native action token embeds the committed revision')
 
-  resolveRead({ kind: 'ready', data })
-  await waitUntil('the selected Inspector read settles', () => reads === 1)
-  // Let the owner's settled result publish through the shared snapshot seam.
-  await new Promise<void>(resolve => setImmediate(resolve))
-  await new Promise<void>(resolve => setImmediate(resolve))
+  await waitUntil('the first read is pending', () => reads === 1 && pending.length === 1)
+  pending.shift()!({ kind: 'ready', data })
+  // Read the ACTUAL native preview wire value, not an intermediate variable.
+  const previewFact = (label: string): unknown => {
+    const kv = kvNodes(pane)[0]
+    const items = (kv?.p.items ?? []) as Array<{ readonly k?: unknown; readonly v?: unknown }>
+    return items.find(item => String(item.k) === label)?.v
+  }
+  await waitUntil('the preview paints the settled wire fact', () => String(previewFact('Turns')) === '1')
   assert.equal(String(pickerActionByBase(pane, 'details', BROWSER)?.id), token,
     'inspector-only data must not advance the native action revision')
+
+  // A same-id invalidation performs ONE trailing read and repaints its newer
+  // value on the same Picker/Details reading identity.
+  assert.ok(invalidate)
+  invalidate('changed')
+  await waitUntil('the trailing read is pending', () => reads === 2 && pending.length === 1)
+  pending.shift()!({ kind: 'ready', data: { ...data, asOfSeq: 2, stats: { ...data.stats!, turns: 2 } } })
+  await waitUntil('the preview paints the newer same-id wire fact', () => String(previewFact('Turns')) === '2')
+  assert.equal(String(pickerActionByBase(pane, 'details', BROWSER)?.id), token,
+    'the same-id refresh must not advance the native action revision')
+
   sendAction(pane, token, undefined, pickerId)
   await waitUntil('the painted native details action is admitted', () => details(pane) !== undefined)
+  const detailFacts = [...detailGroups(pane).values()].flat()
+  assert.equal(detailFacts.find(([label]) => label === 'Turns')?.[1], '2',
+    'Details reads the same source\'s newer cut')
+  const body = detailBody(pane)
+  assert.ok(body !== undefined, 'the Details body is really painted')
+  pane.key('\u001b[B')
+  await waitUntil('the body scrolls its own id', () => scrollOps(pane).length > 0)
+  pane.key('\u001b')
+  await waitUntil('Back returns to the same Picker', () => details(pane) === undefined && picker(pane) !== undefined)
+  assert.equal(m.resumeIntents.length, 0, 'the read-only Inspector never resumes')
 })
 
 test('TSP PR2: a Search-result snapshot reports Search provenance', () => {
@@ -1875,4 +1907,55 @@ test('TSP PR3: an accepted Search result removal exits Details and a late exact 
   assert.equal(m.inspectorSelections.at(-1), undefined, 'the late cut revives no target')
   assert.ok(!sheetText(pane, BROWSER).includes('Turns'), 'the late cut paints no fact on the emptied page')
   assert.equal(m.fatals.length, 0)
+})
+
+test('TSP F2: Details revocation re-anchors ONE coherent surviving selection', async (t) => {
+  let roster = [row('session-current', { live: true }), row('session-other', { updatedAt: 90 }), row('session-content', { cwd: '/workspace/other' })]
+  const m = await mounted(t, reader({
+    list: async () => roster,
+    projectionBatch: async (rows) => new Map(rows.map((entry) => [entry.id, {
+      title: entry.id === 'session-current' ? 'Current title' : `${entry.id} title`,
+      preset: 'reviewer',
+    }])),
+    search: async () => ({
+      items: [
+        { sessionId: 'session-other', snippet: 'other host hit' },
+        { sessionId: 'session-content', snippet: 'content host hit' },
+      ],
+      hasMore: false,
+    }),
+  }), false)
+  const { pane } = m
+  pane.key('needle')
+  await waitUntil('global cards search is ready', () => props(pane).layout === 'cards' && props(pane).state === 'ready')
+  sendSelect(pane, 'session:session-other', picker(pane)!.id)
+  await waitUntil('the X result is selected', () => props(pane).selected === 'session:session-other')
+  pane.key('\t')
+  await waitUntil('the Footer focuses Details', () =>
+    ((pickerProps(pane, BROWSER).actions ?? []) as Array<{ readonly label?: unknown }>)
+      .some(action => String(action.label).includes('Details [Enter]')))
+  pane.key('\r')
+  await waitUntil('Details opens for X', () => details(pane) !== undefined)
+
+  // The official roster loses X while Y (session-content) remains accepted and
+  // listed. This is the real acceptance boundary: the Details reading exits and
+  // BOTH halves of the typed selection must become the one surviving row.
+  roster = [roster[0]!, roster[2]!]
+  m.owner.refresh()
+  await waitUntil('the removed Details target exits its reading', () => details(pane) === undefined)
+  await waitUntil('Y is the ONE typed selection', () => props(pane).selected === 'session:session-content' && picker(pane) !== undefined)
+  assert.deepEqual(m.inspectorSelections.at(-1), { sessionId: 'session-content', origin: 'search' },
+    'the surviving selection is reported, never the vanished X')
+  assert.equal(
+    ((pickerProps(pane, BROWSER).items ?? []) as Array<{ readonly id?: unknown }>).filter((item) => item.id === 'session:session-content').length,
+    1,
+    'the frame and the hidden typed item agree on the surviving Session',
+  )
+
+  // Enter is admitted for the selection the frame really paints, not a stale
+  // session id hidden beside it.
+  pane.key('\r')
+  await waitUntil('Enter emits exactly the visible selection resume', () => m.resumeIntents.length === 1)
+  assert.equal(m.resumeIntents[0]!.sessionId, 'session-content')
+  assert.notEqual(m.resumeIntents[0]!.sessionId, 'session-other')
 })

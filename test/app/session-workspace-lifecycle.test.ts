@@ -3382,6 +3382,9 @@ test('PR3: the full Inspector page reuses the SAME admitted source and a held cu
   // Resolve the superseded OTHER cut AFTER THIRD became current: its promise is
   // still held but its identity is stale, so it must never repaint THIRD.
   other.resolveNext(inspectorCut(OTHER, 99))
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('Turns 99'),
+    'the held superseded cut paints nowhere while the newer target is still held')
   await waitUntil(() => third.reads === 1, 'the latest intent starts the one trailing read')
   third.resolveNext(inspectorCut(THIRD, 2))
   await h.vt.waitForRender()
