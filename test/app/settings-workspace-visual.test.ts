@@ -13573,7 +13573,7 @@ test('a pending ACP preference write settles honestly across A→B without a B w
   await key(h, '\r') // stage On
   await key(h, '\r') // Confirm save: the settings mutation is held after dispatch
   await settle(h)
-  assert.match(acpAccessPlain(h), /Waiting for the answer…/u)
+  assert.match(acpAccessPlain(h), /Saving…/u)
   assert.deepEqual(h.acpAutoStartWrites(), [true], 'the A decision reached the real writer once')
 
   // The Host is replaced while A is pending. The write stays owned by A; it is
@@ -13581,7 +13581,7 @@ test('a pending ACP preference write settles honestly across A→B without a B w
   h.bumpAcpGeneration()
   await settle(h, 12)
   assert.equal(h.acpAutoStartWrites().length, 1, 'A→B dispatches no second/B write')
-  assert.match(acpAccessPlain(h), /Waiting for the answer…/u, 'the pending A settlement still owns its phase')
+  assert.match(acpAccessPlain(h), /Saving…/u, 'the pending A settlement still owns its phase')
   assert.doesNotMatch(acpAccessPlain(h), /Status\s+Saved/u, 'no optimistic verification across the replacement')
 
   h.releaseAcpConfigWrite()

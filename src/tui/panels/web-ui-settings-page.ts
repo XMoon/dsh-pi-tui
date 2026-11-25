@@ -1422,8 +1422,12 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       lines.push(...this.wrapped('Reading the Host Web state…', 'dim', width))
       return lines
     }
-    if (this.phase === 'pending-runtime' || this.phase === 'pending-config') {
+    if (this.phase === 'pending-runtime') {
       lines.push(...this.wrapped('Waiting for the answer…', 'dim', width))
+      return lines
+    }
+    if (this.phase === 'pending-config') {
+      lines.push(...this.wrapped('Saving…', 'dim', width))
       return lines
     }
     const rows = this.rowSpecs()
