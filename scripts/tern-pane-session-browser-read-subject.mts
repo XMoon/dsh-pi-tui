@@ -1,5 +1,5 @@
 /** Test-only controlled SessionReader routed through the production TSP Browser Presenter. */
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, unlinkSync } from 'node:fs'
 import { connect, type Key, type Node, type ScrollTo, type TspEvent } from '@stencil-hq/tern'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
 import type { SessionScope } from '../src/app/session/scope.ts'
@@ -187,9 +187,75 @@ const controlledActivityObservation = (): ActivityObservation => {
   }
 }
 
+/**
+ * The controlled exact Inspector cut of this fixture: PR3's visible statistics
+ * come from this ONE source, never from the roster or a local transcript. The
+ * read is resolved immediately; the pane proves presentation, not Host latency.
+ */
+const inspectorSeed = (sessionId: string): { readonly seq: number; readonly turns: number; readonly steps: number; readonly total: number; readonly model: string } => {
+  switch (sessionId) {
+    case currentId: return { seq: 3, turns: 3, steps: 7, total: 12_345, model: 'deepseek/deepseek-v4-flash' }
+    case longId: return { seq: 21, turns: 21, steps: 55, total: 2_345_678, model: 'deepseek/deepseek-v4-pro' }
+    case contentId: return { seq: 38, turns: 38, steps: 216, total: 5_112_600, model: 'deepseek/deepseek-v4-pro' }
+    default: return { seq: 1, turns: 1, steps: 1, total: 1_000, model: 'deepseek/deepseek-v4-flash' }
+  }
+}
+
+const inspectorData = (sessionId: string, bump = 0) => {
+  const seed = inspectorSeed(sessionId)
+  return {
+    sessionId,
+    asOfSeq: seed.seq,
+    stats: { turns: seed.turns + bump, steps: seed.steps + bump, llmMs: 1_122_000, toolMs: 378_000, avgTtftMs: 1_800, decodeTokensPerSec: 82.4 },
+    usage: {
+      uncachedInputTokens: 184_200,
+      outputTokens: 96_400,
+      cacheReadTokens: 4_820_000,
+      cacheWriteTokens: 12_000,
+      totalTokens: seed.total + bump,
+      cacheHitPct: 96.1,
+    },
+    context: { usedTokens: 84_000, windowTokens: 200_000, percent: 42, approximate: true as const },
+    model: { provider: 'deepseek', model: seed.model.replace('deepseek/', ''), reasoningEffort: 'high' },
+    preset: 'reviewer',
+    title: projections.get(sessionId)?.title ?? sessionId,
+    effectiveCwd: `/workspace/${sessionId === contentId ? 'other' : 'project'}`,
+    goal: { objective: 'Finish the Session Workspace Inspector', phase: 'active' as const },
+    todos: { pending: 2, inProgress: 1, completed: 3 },
+  }
+}
+
 const sessionWorkspaceFacts: SessionWorkspaceFactsPort = {
   readActivity: async () => [],
   observeActivity: () => controlledActivityObservation(),
+  openInspector: (sessionId, onInvalidated) => {
+    note({ inspector: { open: sessionId } })
+    let disposed = 0
+    let reads = 0
+    // Test-only control for the native active-reading refresh: the flow writes
+    // `inspector-invalidate` into this run directory, and the REAL source
+    // invalidation callback starts the owner's trailing read. No production
+    // polling or second reader.
+    const trigger = setInterval(() => {
+      const path = `${dir}/inspector-invalidate`
+      if (!existsSync(path)) return
+      unlinkSync(path)
+      onInvalidated('changed')
+    }, 100)
+    return {
+      async read(signal) {
+        signal.throwIfAborted()
+        reads += 1
+        note({ inspector: { read: sessionId, reads } })
+        return { kind: 'ready' as const, data: inspectorData(sessionId, reads - 1) }
+      },
+      dispose() {
+        disposed += 1
+        clearInterval(trigger)
+        note({ inspector: { dispose: sessionId, disposed } })
+      },
+    }
+  },
   followWorkspaces: (signal): WorkspaceFactsHandle => ({
     dispose() {},
     async *[Symbol.asyncIterator]() {

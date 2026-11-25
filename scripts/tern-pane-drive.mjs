@@ -311,7 +311,7 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
     writeFileSync(join(root, RUN_SCRIPT_NAME), `#!/bin/bash
 export TERN_PANE_DIR=${shellQuote(root)}
 cd ${shellQuote(repo)} || exit 1
-exec node --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 'subject.err'))}
+exec ${shellQuote(process.execPath)} --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 'subject.err'))}
 `, { mode: 0o755 })
     send('run', RUN_SCRIPT)
     return ready === undefined ? true : waitFor(ready, { timeoutMs: readyTimeoutMs })

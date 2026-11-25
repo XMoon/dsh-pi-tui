@@ -1649,9 +1649,12 @@ without touching the roster summary or the activity sample:
   revokes the prior cut. It never calls `refreshProjections`, `retainInfo`/
   `retain`, polls, or uses merged list hints as an exact value. A missing
   generation or unlisted target performs no RPC.
-- **Presentation and lifecycle.** The TUI renderer reports only the typed main
+- **Presentation and lifecycle.** A renderer reports only the typed main
   Session its committed frame really painted (never a Folder, Show more, Add,
   Reader, inline directory editor or search editor without a painted result).
+  The SAME admitted id stays reported while a read-only Inspector identity page
+  is really painted (the PiTUI inline/full Inspector or the TSP Details
+  reading); entering or leaving that page neither clears nor reopens the source.
   The read owner debounces a settled selection (~150 ms), keeps at most ONE
   physical exact read per open, coalesces same-source changes into ONE trailing
   read, and fences every result by the panel, selection/source epoch and the
@@ -1662,13 +1665,15 @@ without touching the roster summary or the activity sample:
   is insufficient): its source/timer/flight is retired synchronously at the
   search/roster acceptance boundary, before that accepted state is published.
   A same-id provenance change keeps the source and cut. An Inspector-only
-  publication is explicitly marked: presenters store the detached data without
-  advancing native action/target revision or requesting a render while no
-  Inspector UI is painted. A late or stale result is inert. The DTO carries no
-  Session-switch authority:
-  the renderer may present it later, while the existing Browser Resume owner
-  remains the only switch authority. This seam is data-only; a later visual
-  surface consumes it without changing the read owner.
+  publication is explicitly marked: a presenter whose visible consumer can show
+  the cut stores the detached data and requests a presentation-only repaint, but
+  advances no semantic target/action revision, rebinds no source and normalizes
+  no selection; a presenter with nothing visibly affected may skip the render.
+  A late or stale result is inert. The DTO carries no Session-switch authority:
+  the existing Browser Resume owner remains the only switch authority. The
+  consuming surfaces are owned by [surface-session.md](./surface-session.md) and
+  [tsp/session-browser.md](../tsp/session-browser.md); this seam stays data-only
+  and adds no second reader.
 
 Authority: `src/runtime/session-workspace-facts-port.ts`,
 `src/runtime/remote/session-workspace-facts-remote.ts`,
