@@ -271,6 +271,17 @@ async function waitForComposer(tui, needle, label, timeoutMs = 30_000) {
   )
 }
 
+/** Wait until the PAINTED composer no longer contains `needle`. */
+async function waitForComposerGone(tui, needle, label, timeoutMs = 30_000) {
+  const deadlineAt = Date.now() + timeoutMs
+  while (Date.now() < deadlineAt) {
+    const composer = await tui.composerText()
+    if (composer === undefined || !composer.includes(needle)) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SplitSmokeAssertionError(`${label}: composer still contained ${needle}`)
+}
+
 /** One committed file block of a durable user message. */
 function durableFileOf(message) {
   const file = message.content.find(block => block.type === 'file' && /^sha256:[0-9a-f]{64}$/u.test(block.attachment?.attachmentId ?? ''))
@@ -293,9 +304,14 @@ async function primeOutputTuiFile(session) {
   const marker = `po4d-tui-file-${String(process.pid)}`
   const before = (hostSessionEvents(context.dshHome, sessionId) ?? []).length
   // Wait for the OPEN Session's own painted workspace footer and composer seat
-  // (not the pre-open one) before typing a leading command.
+  // (not the pre-open one), then prove the seat really consumes input before
+  // sending the leading attachment command.
   await tui.waitForScreen('sdk-output-workspace', 'PR4D TUI open workspace', 30_000)
   await waitForComposer(tui, '❯', 'PR4D TUI composer ready')
+  tui.send('x')
+  await waitForComposer(tui, 'x', 'PR4D TUI editor accepts input')
+  tui.send('\x7f')
+  await waitForComposerGone(tui, 'x', 'PR4D TUI editor input probe cleared')
   tui.send(`/attach ${path}`)
   tui.send('\r')
   await waitForComposer(tui, '[file #', 'PR4D TUI attach staged the Client-local file')
