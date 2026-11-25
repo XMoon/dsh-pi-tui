@@ -47,6 +47,7 @@ const PROCESS_ATS = [
   'host-spawned-before-ack',
   'client-reserved-before-spawn',
   'client-opened-before-ack',
+  'terminal-owner-client-opened-before-ack',
   'clients-ready',
   'fallback-host-ready',
   'host-contenders-spawned',
@@ -61,6 +62,10 @@ const PROCESS_ATS = [
  * windows keep the complete target file, unchanged.
  */
 const PROCESS_AT_TARGETS = new Map([
+  ['terminal-owner-client-opened-before-ack', {
+    file: 'test/integration/split-process/business/client-lifecycle.vitest.ts',
+    title: 'loses the terminal owner without stopping the Host and reconnects a fresh Client',
+  }],
   ['host-contenders-spawned', {
     file: 'test/integration/split-process/business/host-seat.vitest.ts',
     title: 'admits exactly one Host when the same installed profile is started concurrently',
@@ -1060,6 +1065,28 @@ try {
             fail('client-opened-before-ack: the registered shell is not the live kernel process')
           }
           if (client.readyAt !== undefined) fail('client-opened-before-ack: the Client already reached ready')
+        } else if (at === 'terminal-owner-client-opened-before-ack') {
+          const client = (receipt.processClients ?? [])[0]
+          if (client === undefined || client.shellPid === null || client.ownerPid === null) {
+            fail('terminal-owner-client-opened-before-ack: no registered PTY Owner/shell identity')
+          }
+          if (client.terminal !== 'terminal-owner-loss') {
+            fail('terminal-owner-client-opened-before-ack: the Client did not declare the owner-loss terminal')
+          }
+          if (client.readyAt !== undefined) fail('terminal-owner-client-opened-before-ack: the Client already reached ready')
+          if (identityLiveness(kernel, client.ownerPid, client.ownerBirth) !== 'live') {
+            fail('terminal-owner-client-opened-before-ack: the PTY Owner is not the live kernel process')
+          }
+          if (identityLiveness(kernel, client.shellPid, client.shellBirth) !== 'live') {
+            fail('terminal-owner-client-opened-before-ack: the shell is not the live kernel process')
+          }
+          if (!Array.isArray(client.businessIdentities) || client.businessIdentities.length === 0
+            || client.businessIdentities.some(value => identityLiveness(kernel, value.pid, value.birth) !== 'live')) {
+            fail('terminal-owner-client-opened-before-ack: the business identity is not live')
+          }
+          if (!Number.isInteger(client.ownerPid) || !Number.isInteger(client.shellPid)) {
+            fail('terminal-owner-client-opened-before-ack: the owner/shell PID is not a real kernel PID')
+          }
         } else if (at === 'host-contenders-spawned') {
           const contenders = (receipt.hosts ?? []).filter(value => value.mode === 'seat-race')
           if (contenders.length < 2) fail('host-contenders-spawned: fewer than two registered contenders')

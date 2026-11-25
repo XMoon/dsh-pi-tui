@@ -26,12 +26,13 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process'
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { fileURLToPath } from 'node:url'
 
 import { waitForEntryClose } from './entry-close.mjs'
 
@@ -147,6 +148,14 @@ let createSplitTerminal
 let readOfficialClientRecords
 let waitForTerminalExit
 let openTuiSessions
+let processC1Work
+const SUPERVISOR_DIR = fileURLToPath(new URL('.', import.meta.url))
+const PROCESS_PTY_OWNER = fileURLToPath(new URL('./split-process-pty-owner.mjs', import.meta.url))
+const PROCESS_HOST_SCENARIOS = new Set(['long-turn', 'job'])
+const PROCESS_HOST_CRASH_SIGNALS = new Set(['SIGHUP', 'SIGKILL'])
+const PROCESS_CLIENT_HMR_MODES = new Set(['replace', 'mount-failure', 'hold'])
+const PROCESS_CLIENT_TERMINAL_MODES = new Set(['normal', 'sigint', 'hmr-failure', 'terminal-owner-loss'])
+const PROCESS_CLIENT_SIGNALS = new Set(['SIGUSR2', 'SIGINT', 'SIGTERM'])
 let EXPECTED_PACKAGE_NAME
 let hostStatusSequence = 0
 /** The ONE native managed-service bridge state, or undefined for default/pilot scenes. */
@@ -946,6 +955,13 @@ function publicProcessClientFacts(handle) {
     scratch: handle.scratch,
     recordFile: handle.recordFile,
     expectedEntry: handle.expectedEntry,
+    hmr: handle.hmr ?? null,
+    dropPromptAck: handle.dropPromptAck === true,
+    terminal: handle.terminalMode ?? null,
+    ownerPid: handle.owner?.pid ?? null,
+    ownerBirth: handle.owner?.birth ?? null,
+    ownerExit: handle.owner?.exit ?? null,
+    verifiedTerminal: handle.verifiedTerminal ?? null,
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth,
     businessPids: handle.businessPids,
@@ -3623,6 +3639,9 @@ async function handleStartHost(message) {
   if (activeHost !== undefined) throw new Error('START_HOST: one active Host per scene is supported')
   if (scene.kind === 'pilot' && hosts.length > 0) throw new Error('START_HOST: one Host per scene is supported')
   if (scene.kind === 'process') assertNoBootstrapCliPatch('START_HOST')
+  if (scene.kind !== 'process' && message.crashSignal !== undefined) {
+    throw new Error('START_HOST: only a process Scene accepts a declared Host crash signal')
+  }
 
   let source = 'profile'
   let entry
@@ -3632,9 +3651,22 @@ async function handleStartHost(message) {
   let expectedScopeId
   let workRoot
   let env
+  let scenario
+  let crashSignal
+  let workloadRoot
+  let holdReleasePath
+  let jobWorkRoot
   if (scene.kind === 'process') {
-    if (message.scenario !== undefined) {
-      throw new Error('START_HOST: a process scene starts the installed Host with no scenario')
+    scenario = message.scenario
+    crashSignal = message.crashSignal
+    if (scenario !== undefined && !PROCESS_HOST_SCENARIOS.has(scenario)) {
+      throw new Error(`START_HOST: unknown process workload scenario ${JSON.stringify(scenario)}`)
+    }
+    if (crashSignal !== undefined && !PROCESS_HOST_CRASH_SIGNALS.has(crashSignal)) {
+      throw new Error(`START_HOST: unknown process crash signal ${JSON.stringify(crashSignal)}`)
+    }
+    if (crashSignal !== undefined && scenario !== 'long-turn') {
+      throw new Error('START_HOST: a declared crash signal requires the long-turn workload')
     }
     if (message.extraEnv !== undefined) {
       throw new Error('START_HOST: a process scene does not accept arbitrary extra environment')
@@ -3689,15 +3721,31 @@ async function handleStartHost(message) {
     mkdirSync(workRoot, { recursive: true, mode: 0o700 })
     const hostScratch = join(scene.workDir, `host-scratch-${generationLabel}`)
     mkdirSync(hostScratch, { recursive: true, mode: 0o700 })
-    // The curated install environment already carries the offline LLM patch;
-    // this Scene passes no workload scenario, no workload variables and no
-    // arbitrary extra environment.
+    // The curated install environment already carries the offline LLM patch.
+    // A workload is prepared once, on demand, with the existing C1 fixture; its
+    // roots are Supervisor-owned and no Worker path/environment is accepted.
     env = {
       ...scene.installation.base.env,
       DSH_PI_TUI_ENTRY_RECORDS: '1',
       SPLIT_PROCESS_DSH_ANCHOR: scene.installation.anchor,
       SPLIT_PROCESS_PROFILE: 'pi-tui',
       SPLIT_PROCESS_SCRATCH: hostScratch,
+    }
+    if (scenario !== undefined) {
+      processC1Work = processC1Work ?? writeC1WorkFixture(scene.installation.profileDir, scene.workDir)
+      const workloadLabel = `${scenario}-${generationLabel}`
+      workloadRoot = scenario === 'job'
+        ? join(scene.installation.profileDir, `c1-job-${workloadLabel}`)
+        : join(scene.workDir, `c1-workload-${workloadLabel}`)
+      mkdirSync(workloadRoot, { recursive: true, mode: 0o700 })
+      if (scenario === 'job') jobWorkRoot = workloadRoot
+      env.SPLIT_PROCESS_EXTRA_PATCH = processC1Work.patchPath
+      env.C1_SCENARIO = scenario
+      env.C1_WORK_ROOT = workloadRoot
+      if (scenario === 'long-turn') {
+        holdReleasePath = join(workloadRoot, 'long-turn.release')
+        env.C1_HOLD_LONG_TURN = holdReleasePath
+      }
     }
   } else if (scene.kind === 'upgrade') {
     source = message.source ?? 'profile'
@@ -3779,7 +3827,11 @@ async function handleStartHost(message) {
     hostId,
     generation,
     source,
-    scenario: message.scenario,
+    scenario: scenario ?? message.scenario,
+    crashSignal,
+    workloadRoot,
+    holdReleasePath,
+    jobWorkRoot,
     child,
     records,
     workRoot,
@@ -3917,6 +3969,11 @@ async function handleStartHost(message) {
     ready,
     workRoot,
     source,
+    scenario: handle.scenario ?? null,
+    crashSignal: handle.crashSignal ?? null,
+    workloadRoot: handle.workloadRoot ?? null,
+    holdReleasePath: handle.holdReleasePath ?? null,
+    jobWorkRoot: handle.jobWorkRoot ?? null,
     buildId: handle.buildId,
     scopeId: expectedScopeId,
     pgid: hostPgid(handle),
@@ -4326,7 +4383,63 @@ async function waitForProcessIdentityTerminal(identity, reason, timeoutMs = 10_0
  * session is gone and every captured shell/business identity is gone or a
  * provably different PID. A live identity, or an unverifiable one, fails.
  */
+function assertProcessClientTerminalContract(handle, reason) {
+  const terminal = handle.verifiedTerminal
+  if (terminal === undefined) throw new Error(`${reason}: ${handle.label} has no verified terminal fact`)
+  if (handle.terminalMode === 'terminal-owner-loss') {
+    if (terminal.kind !== 'owner-loss'
+      || terminal.ownerPid !== handle.owner?.pid
+      || terminal.ownerExit?.code !== null
+      || terminal.ownerExit?.signal !== 'SIGKILL') {
+      throw new Error(`${reason}: ${handle.label} has no verified terminal-owner-loss fact`)
+    }
+    return
+  }
+  if (terminal.kind !== 'native') throw new Error(`${reason}: ${handle.label} has no native terminal fact`)
+  const expected = handle.terminalMode === 'sigint'
+    ? { code: 130, signal: null }
+    : handle.terminalMode === 'hmr-failure'
+      ? { code: 1, signal: null }
+      : { code: 0, signal: null }
+  if (terminal.code !== expected.code || terminal.signal !== expected.signal) {
+    throw new Error(`${reason}: ${handle.label} terminal ${JSON.stringify(terminal)} is not the declared ${JSON.stringify(expected)}`)
+  }
+  if (handle.terminalMode === 'hmr-failure') {
+    const records = readOfficialClientRecords(handle.recordFile, handle.label)
+    const count = op => records.filter(record => record?.m4b2s === 'qualification' && record?.op === op).length
+    if (count('hmr-revision-start') !== 1 || count('hmr-revision-retired') !== 1 || count('hmr-revision-failure') !== 1) {
+      throw new Error(`${reason}: ${handle.label} HMR failure records are not exactly one start/retired/failure`)
+    }
+    if (records.some(record => record?.m4b2s === 'qualification' && record?.op === 'hmr-revision-ready')) {
+      throw new Error(`${reason}: ${handle.label} HMR failure published a replacement Ready`)
+    }
+    const closed = records.find(record => record?.m4b2s === 'client-closed')
+    if (closed === undefined) throw new Error(`${reason}: ${handle.label} HMR failure has no client-closed inventory`)
+    for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+      if (closed.owners?.[owner] !== 0) throw new Error(`${reason}: ${handle.label} HMR failure left ${owner} owner alive`)
+    }
+  }
+}
+
 async function assertProcessClientQuiesced(handle, reason) {
+  if (handle.terminalMode === 'terminal-owner-loss') {
+    if (handle.owner?.exit === undefined) throw new Error(`${reason}: ${handle.label} PTY Owner has not exited`)
+    if (handle.ownerLossAttempted === true) {
+      if (handle.owner.exit.code !== null || handle.owner.exit.signal !== 'SIGKILL') {
+        throw new Error(`${reason}: ${handle.label} PTY Owner has no verified SIGKILL exit`)
+      }
+    } else if (!(handle.owner.exit.code === 0 && handle.owner.exit.signal === null)
+      && !(handle.owner.exit.code === null && handle.owner.exit.signal === 'SIGKILL')) {
+      throw new Error(`${reason}: ${handle.label} PTY Owner cleanup was neither a normal close nor an owned emergency kill`)
+    }
+    if (handle.shellIdentity !== undefined) {
+      await waitForProcessIdentityTerminal(handle.shellIdentity.identity, `${reason}: ${handle.label} shell`)
+    }
+    for (const value of handle.businessIdentities) {
+      await waitForProcessIdentityTerminal(value.identity, `${reason}: ${handle.label} business`)
+    }
+    return
+  }
   const openSessions = new Set(await openTuiSessions())
   if (openSessions.has(handle.sessionId)) {
     throw new Error(`${reason}: ${handle.label} left its native TUI session open`)
@@ -4397,6 +4510,148 @@ function registerProcessFallbackHost(handle, hostFacts, label) {
   return record
 }
 
+/** The one PTY Owner used ONLY by a declared terminal-owner-loss Client. */
+function startProcessPtyOwner({ traceDirectory, artifactsDirectory }) {
+  const child = spawn(process.execPath, [PROCESS_PTY_OWNER], {
+    cwd: scene.workDir,
+    env: { PATH: process.env.PATH ?? '', HOME: scene.workDir },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  })
+  const pending = new Map()
+  let requestId = 0
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => { if (stderr.length < 32_000) stderr += chunk })
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => {
+    if (stderr.length < 32_000) stderr += chunk
+  })
+  const owner = {
+    child,
+    pid: child.pid,
+    birth: (() => {
+      if (!Number.isInteger(child.pid)) return undefined
+      try {
+        const observation = readKernelProcess(child.pid)
+        return observation.kind === 'alive' ? serializeKernelIdentity(observation.identity) : undefined
+      } catch {
+        return undefined
+      }
+    })(),
+    pending,
+    stderr: () => stderr,
+    exit: undefined,
+  }
+  child.on('message', message => {
+    if (message?.type === 'owner-response' || message?.type === 'owner-error') {
+      const waiter = pending.get(message.requestId)
+      if (waiter === undefined) return
+      pending.delete(message.requestId)
+      if (message.type === 'owner-error' || message.ok !== true) {
+        waiter.reject(new Error(`PTY Owner ${message.requestId} failed: ${String(message.message ?? 'unknown')}`))
+      } else {
+        waiter.resolve(message)
+      }
+      return
+    }
+    if (message?.type === 'owner-fatal') {
+      for (const waiter of pending.values()) waiter.reject(new Error(`PTY Owner fatal: ${String(message.message)}`))
+      pending.clear()
+    }
+  })
+  child.once('close', (code, signal) => {
+    owner.exit = { code, signal }
+    for (const waiter of pending.values()) {
+      waiter.reject(new Error(`PTY Owner exited before ${waiter.requestId}: ${JSON.stringify(owner.exit)}`))
+    }
+    pending.clear()
+  })
+  owner.request = async (op, payload = {}, timeoutMs = 120_000) => {
+    const id = `pty-owner-${String(++requestId)}`
+    const result = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id)
+        reject(new Error(`PTY Owner ${op} timed out after ${String(timeoutMs)}ms`))
+      }, timeoutMs)
+      pending.set(id, {
+        requestId: id,
+        resolve: value => { clearTimeout(timer); resolve(value) },
+        reject: error => { clearTimeout(timer); reject(error) },
+      })
+    })
+    child.send({ requestId: id, op, ...payload })
+    return await result
+  }
+  return owner
+}
+
+/** Prove the child Owner holds the real master for the Client's controlling tty. */
+function assertProcessPtyOwnerMaster(handle, shellPid, reason) {
+  if (process.platform !== 'linux') throw new Error(`${reason}: the PTY Owner proof is Linux-only`)
+  const ownerPid = handle.owner.pid
+  if (!Number.isInteger(ownerPid) || !Number.isInteger(shellPid)) throw new Error(`${reason}: missing real PTY Owner/shell PID`)
+  const readLinks = pid => {
+    try {
+      return Object.fromEntries(readdirSync(`/proc/${String(pid)}/fd`).map(name => {
+        try { return [name, readlinkSync(`/proc/${String(pid)}/fd/${name}`)] } catch { return [name, '<unreadable>'] }
+      }))
+    } catch (error) {
+      throw new Error(`${reason}: cannot read fd table of PID ${String(pid)} (${boundedError(error)})`)
+    }
+  }
+  const ownerLinks = readLinks(ownerPid)
+  const ownerMasters = Object.values(ownerLinks).filter(link => link === '/dev/ptmx')
+  if (ownerMasters.length === 0) throw new Error(`${reason}: the Owner holds no /dev/ptmx master`)
+  const selfMasters = Object.values(readLinks(process.pid)).filter(link => link === '/dev/ptmx')
+  if (selfMasters.length !== 0) throw new Error(`${reason}: the Supervisor also holds a /dev/ptmx master`)
+  const shellLinks = readLinks(shellPid)
+  if (typeof shellLinks['0'] !== 'string' || !shellLinks['0'].startsWith('/dev/pts/')) {
+    throw new Error(`${reason}: the Client shell has no controlling pts`)
+  }
+  const shellObservation = readKernelProcess(shellPid)
+  if (shellObservation.kind !== 'alive' || shellObservation.identity.ppid !== ownerPid) {
+    throw new Error(`${reason}: the Client shell is not the Owner's direct child`)
+  }
+  return { ownerPid, ownerMasters: ownerMasters.length, shellPid, shellTty: shellLinks['0'], parentMasters: 0 }
+}
+
+async function closeProcessPtyOwner(handle, reason) {
+  if (handle.owner === undefined) return
+  if (handle.owner.exit !== undefined) {
+    if (handle.owner.exit.code !== 0 && handle.owner.exit.signal !== null) {
+      throw new Error(`${reason}: the PTY Owner exited abnormally: ${JSON.stringify(handle.owner.exit)}`)
+    }
+    return
+  }
+  const closed = await handle.owner.request('close', {}, 30_000).catch(error => {
+    handle.owner.closeError = error
+    return undefined
+  })
+  const started = Date.now()
+  while (handle.owner.exit === undefined && Date.now() - started < 10_000) await sleep(50)
+  if (handle.owner.exit === undefined) {
+    throw new Error(`${reason}: the PTY Owner did not exit after close${closed === undefined ? ` (${String(handle.owner.closeError?.message ?? 'close failed')})` : ''}`)
+  }
+  if (handle.owner.exit.code !== 0 || handle.owner.exit.signal !== null) {
+    throw new Error(`${reason}: the PTY Owner close was abnormal: ${JSON.stringify(handle.owner.exit)}`)
+  }
+}
+
+async function waitProcessPtyOwnerTerminal(handle, reason, timeoutMs = 20_000) {
+  const started = Date.now()
+  for (;;) {
+    if (handle.owner.exit !== undefined) break
+    if (Date.now() - started >= timeoutMs) throw new Error(`${reason}: the PTY Owner did not terminate within ${String(timeoutMs)}ms`)
+    await sleep(50)
+  }
+  if (handle.owner.exit.code !== null || handle.owner.exit.signal !== 'SIGKILL') {
+    throw new Error(`${reason}: the PTY Owner terminal was not the intentional SIGKILL: ${JSON.stringify(handle.owner.exit)}`)
+  }
+  if (handle.shellIdentity !== undefined) await waitForProcessIdentityTerminal(handle.shellIdentity.identity, `${reason}: Client shell`, timeoutMs)
+  for (const value of handle.businessIdentities) await waitForProcessIdentityTerminal(value.identity, `${reason}: Client business`, timeoutMs)
+  return true
+}
+
 async function handleStartProcessClient(message) {
   requireProcessScene('START_PROCESS_CLIENT')
   assertLifecycleOpen('START_PROCESS_CLIENT')
@@ -4418,12 +4673,106 @@ async function handleStartProcessClient(message) {
   if (message.sessionId !== undefined && (typeof message.sessionId !== 'string' || message.sessionId === '')) {
     throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT sessionId must be non-empty when set')
   }
+  const hmr = message.hmr
+  const dropPromptAck = message.dropPromptAck === true
+  const terminalMode = message.terminal ?? 'normal'
+  const recoverFromHostId = message.recoverFromHostId
+  const attachRecoveredHostId = message.attachRecoveredHostId
+  if (hmr !== undefined && !PROCESS_CLIENT_HMR_MODES.has(hmr)) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT unknown hmr mode ${JSON.stringify(hmr)}`)
+  }
+  if (message.dropPromptAck !== undefined && message.dropPromptAck !== true) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT dropPromptAck may only be true when set')
+  }
+  if (!PROCESS_CLIENT_TERMINAL_MODES.has(terminalMode)) {
+    throw new Error(`INPUT_UNQUALIFIED: START_PROCESS_CLIENT unknown terminal mode ${JSON.stringify(terminalMode)}`)
+  }
+  if (hmr !== undefined && dropPromptAck) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT cannot combine HMR and a dropped prompt ACK')
+  }
+  if (terminalMode === 'hmr-failure' && hmr !== 'mount-failure') {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT hmr-failure terminal requires the mount-failure mode')
+  }
+  if (terminalMode === 'sigint' && (hmr !== undefined || dropPromptAck)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT SIGINT terminal excludes HMR and ACK-drop modes')
+  }
+  if (terminalMode === 'terminal-owner-loss' && process.platform !== 'linux') {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT terminal-owner-loss is implemented on Linux only')
+  }
+  if (terminalMode === 'terminal-owner-loss' && (hmr !== undefined || dropPromptAck)) {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT terminal-owner-loss excludes HMR and ACK-drop modes')
+  }
+  if (hmr === 'hold' && terminalMode !== 'normal') {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT HMR hold requires the normal terminal contract')
+  }
+  if (hmr === 'replace' && terminalMode !== 'normal') {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT HMR replacement requires the normal terminal contract')
+  }
+  if (hmr === 'mount-failure' && terminalMode !== 'normal' && terminalMode !== 'hmr-failure') {
+    throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT mount failure only permits normal or hmr-failure terminal')
+  }
   const fallbackProbe = process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'fallback-host-ready'
-  const host = activeHost
+  const recovery = recoverFromHostId !== undefined
+  const attach = attachRecoveredHostId !== undefined
+  if (recovery && attach) throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT cannot recover and attach at once')
+  if (recovery || attach) {
+    if (hmr !== undefined || dropPromptAck || terminalMode !== 'normal') {
+      throw new Error('INPUT_UNQUALIFIED: a recovered-Host Client requires the ordinary terminal contract')
+    }
+    if (recovery && (typeof recoverFromHostId !== 'string' || recoverFromHostId === '')) {
+      throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT recoverFromHostId must be a non-empty hostId')
+    }
+    if (attach && (typeof attachRecoveredHostId !== 'string' || attachRecoveredHostId === '')) {
+      throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT attachRecoveredHostId must name the discovery Client')
+    }
+    if (recovery && message.sessionId !== undefined) {
+      throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT recoverFromHostId starts a sessionless Client')
+    }
+    if (attach && (typeof message.sessionId !== 'string' || message.sessionId === '')) {
+      throw new Error('INPUT_UNQUALIFIED: START_PROCESS_CLIENT attachRecoveredHostId requires the recovered Session id')
+    }
+    if (activeHost !== undefined) {
+      throw new Error('START_PROCESS_CLIENT: a recovered-Host Client must start without an active Scene Host')
+    }
+    if (processClients.some(client => !client.closed)) {
+      throw new Error('START_PROCESS_CLIENT: every older Client must be terminal before recovery')
+    }
+    if (recovery && fallbackHosts.some(record => record.reclaimed !== true)) {
+      throw new Error('START_PROCESS_CLIENT: an earlier discovered Host is still attached')
+    }
+  }
+  let recoveryHost
+  let recoveredRecord
+  if (recovery) {
+    recoveryHost = hosts.find(handle => handle.hostId === recoverFromHostId && handle.crashSignal !== undefined)
+    if (recoveryHost === undefined) {
+      throw new Error('START_PROCESS_CLIENT: recoverFromHostId does not name a declared-crash Host')
+    }
+    if (recoveryHost.finished !== true || recoveryHost.terminal?.outcome !== 'business-crash') {
+      throw new Error('START_PROCESS_CLIENT: the predecessor Host has no verified business-crash terminal')
+    }
+    await assertHostGroupGone(recoveryHost, 'START_PROCESS_CLIENT recovery predecessor')
+    await assertSceneHostSeatFree('START_PROCESS_CLIENT recovery predecessor')
+  }
+  if (attach) {
+    const discoveryClient = processClients.find(client => client.clientId === attachRecoveredHostId)
+    if (discoveryClient === undefined || !discoveryClient.closed) {
+      throw new Error('START_PROCESS_CLIENT: attachRecoveredHostId must name a closed discovery Client')
+    }
+    recoveredRecord = fallbackHosts.find(record => record.clientId === attachRecoveredHostId)
+    if (recoveredRecord === undefined || recoveredRecord.reclaimed === true) {
+      throw new Error('START_PROCESS_CLIENT: the discovery Client registered no live recovered Host')
+    }
+    assertProcessFallbackOwnership(recoveredRecord.pid, recoveredRecord.scratch, recoveredRecord,
+      'START_PROCESS_CLIENT attach recovered Host')
+  }
+  let host = activeHost
   if (fallbackProbe) {
     if (host !== undefined || hosts.length > 0) {
       throw new Error('START_PROCESS_CLIENT: the fallback-host-ready probe must run without an explicit Host')
     }
+  } else if (recovery || attach) {
+    host = undefined
   } else {
     if (host === undefined) throw new Error('START_PROCESS_CLIENT: no ready Host exists in this Scene')
     if (host.exited || host.child.exitCode !== null || host.child.signalCode !== null
@@ -4443,28 +4792,37 @@ async function handleStartProcessClient(message) {
   mkdirSync(scratch, { recursive: true, mode: 0o700 })
   const recordFile = join(clientDir, 'records.jsonl')
   writeFileSync(recordFile, '', { mode: 0o600, flag: 'wx' })
-  const splitTerminal = createSplitTerminal({
-    prefix: 'split-process',
-    traceDirectory: join(scene.workDir, 'trace'),
-    artifactsDirectory: join(scene.workDir, 'artifacts'),
-  })
   const clientId = `split-process-client-${String(sequence)}-${Date.now().toString(36)}`
-  // The reservation is durable BEFORE the native handle exists, so a Worker
-  // death in any startup window is still owned by this process.
+  const holdBarrier = hmr === 'hold' ? join(clientDir, 'hmr-hold.barrier') : undefined
+  // The reservation is durable BEFORE any native handle exists, so a Worker
+  // death in any startup window remains owned by this process. The native
+  // terminal/owner is attached only after the row is visible in the receipt.
   const handle = {
     clientId,
     label,
-    sessionId: splitTerminal.sessionId,
-    terminal: splitTerminal.terminal,
+    sessionId: null,
+    terminal: undefined,
+    owner: undefined,
     recordFile,
     scratch,
     clientDir,
     cwd,
     home,
-    hostId: host?.hostId ?? null,
-    generation: host?.generation ?? null,
+    hostId: recoveryHost?.hostId ?? recoveredRecord?.clientId ?? host?.hostId ?? null,
+    generation: recoveryHost?.generation ?? null,
     expectedEntry: facts.entries.client,
     expectedBuildId: facts.buildId,
+    hmr,
+    dropPromptAck,
+    terminalMode,
+    holdBarrier,
+    recoverFromHostId,
+    attachRecoveredHostId,
+    recoveryHost,
+    recoveredRecord,
+    ownerLossTerminal: undefined,
+    verifiedTerminal: undefined,
+    signalIntents: [],
     shellPid: null,
     shellIdentity: undefined,
     businessPids: [],
@@ -4480,6 +4838,38 @@ async function handleStartProcessClient(message) {
   }
   processClients.push(handle)
   handle.settlement = Promise.withResolvers()
+  let splitTerminal
+  try {
+    if (terminalMode === 'terminal-owner-loss') {
+      handle.owner = startProcessPtyOwner({
+        traceDirectory: join(scene.workDir, 'trace'),
+        artifactsDirectory: join(scene.workDir, 'artifacts'),
+      })
+      if (handle.owner.birth === undefined) throw new Error(`${label}: the PTY Owner produced no readable kernel identity`)
+      const created = await handle.owner.request('create', {
+        prefix: 'split-process-owner',
+        traceDirectory: join(scene.workDir, 'trace'),
+        artifactsDirectory: join(scene.workDir, 'artifacts'),
+      })
+      handle.sessionId = String(created.sessionId)
+    } else {
+      splitTerminal = createSplitTerminal({
+        prefix: 'split-process',
+        traceDirectory: join(scene.workDir, 'trace'),
+        artifactsDirectory: join(scene.workDir, 'artifacts'),
+      })
+      handle.terminal = splitTerminal.terminal
+      handle.sessionId = splitTerminal.sessionId
+    }
+  } catch (error) {
+    handle.exited = true
+    handle.exitResult = { code: null, signal: null }
+    handle.closeFailure = error
+    syncProcessClientsReceipt()
+    await closeProcessPtyOwner(handle, 'START_PROCESS_CLIENT PTY Owner create failure').catch(() => undefined)
+    throw error
+  }
+  syncProcessClientsReceipt()
   try {
   appendNote('process-client-reserved', {
     clientId,
@@ -4519,20 +4909,41 @@ async function handleStartProcessClient(message) {
     SPLIT_PROCESS_SCRATCH: scratch,
     SPLIT_PROCESS_CLIENT_RECORD_FILE: recordFile,
     ...(message.sessionId === undefined ? {} : { SPLIT_PROCESS_CLIENT_SESSION: message.sessionId }),
+    ...(hmr === 'replace' || hmr === 'mount-failure' || hmr === 'hold'
+      ? { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' }
+      : {}),
+    ...(hmr === 'mount-failure' ? { SPLIT_PROCESS_CLIENT_HMR_FAIL: '1' } : {}),
+    ...(hmr === 'hold' ? { SPLIT_PROCESS_CLIENT_HMR_HOLD: `surface@${String(holdBarrier)}` } : {}),
+    ...(dropPromptAck ? { SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1' } : {}),
   }
   let opened
   try {
-    opened = await withProcessNativeOperation('client-run', clientId, () => splitTerminal.terminal.run(
-      process.execPath,
-      [facts.entries.client],
-      { cwd, cols, rows, waitReady: false, env },
-    ))
+    if (handle.owner !== undefined) {
+      const ownerRun = await withProcessNativeOperation('client-owner-run', clientId, () => handle.owner.request('run', {
+        entry: facts.entries.client,
+        cwd,
+        cols,
+        rows,
+        env,
+      }, 180_000))
+      opened = { session: ownerRun.sessionId, shell_pid: ownerRun.shellPid }
+    } else {
+      opened = await withProcessNativeOperation('client-run', clientId, () => handle.terminal.run(
+        process.execPath,
+        [facts.entries.client],
+        { cwd, cols, rows, waitReady: false, env },
+      ))
+    }
   } catch (error) {
     // The native run may have failed before returning. Its handle is still
     // owned here; close it and prove the terminal state before rethrowing.
     let cleanupError
     try {
-      await withProcessNativeOperation('client-run-reclaim', clientId, () => splitTerminal.terminal.closeQuiet())
+      if (handle.owner !== undefined) {
+        await closeProcessPtyOwner(handle, 'START_PROCESS_CLIENT owner run failure')
+      } else {
+        await withProcessNativeOperation('client-run-reclaim', clientId, () => handle.terminal.closeQuiet())
+      }
       await assertProcessClientQuiesced(handle, 'START_PROCESS_CLIENT run failure')
     } catch (failure) {
       cleanupError = failure
@@ -4560,6 +4971,9 @@ async function handleStartProcessClient(message) {
   handle.openedAt = now()
   handle.shellPid = Number.isInteger(opened.shell_pid) ? opened.shell_pid : null
   handle.shellIdentity = captureShellIdentity(handle.shellPid, `${label} shell`)
+  if (handle.owner !== undefined) {
+    handle.ptyOwnerFacts = assertProcessPtyOwnerMaster(handle, handle.shellPid, `${label} PTY Owner`)
+  }
   syncProcessClientsReceipt()
   writeReceipt({ phase: 'PROCESS_CLIENT_OPENED' })
   if (lifecycleClosed || disconnected) {
@@ -4596,6 +5010,22 @@ async function handleStartProcessClient(message) {
   handle.businessPids = [started.pid]
   handle.businessIdentities = [business]
   syncProcessClientsReceipt()
+  if (terminalMode === 'terminal-owner-loss') {
+    await processProbeHold('terminal-owner-client-opened-before-ack', {
+      clientId,
+      label,
+      sessionId: handle.sessionId,
+      ownerPid: handle.owner.pid,
+      ownerBirth: handle.owner.birth,
+      shellPid: handle.shellPid,
+      shellBirth: handle.shellIdentity.birth,
+      businessPid: started.pid,
+      businessBirth: business.birth,
+      hostId: handle.hostId,
+      workerPid: receipt.worker?.pid,
+      workerPpid: receipt.worker?.ppid,
+    })
+  }
   const authenticated = await waitForProcessClientRecord(
     handle,
     record => record.m4a0 === 'host-authenticated',
@@ -4604,8 +5034,14 @@ async function handleStartProcessClient(message) {
   )
   const authenticatedHost = assertProcessHostRecord(handle, authenticated, `${label} host-authenticated`)
   assertHostIdentityMatchesKernel(authenticatedHost, authenticatedHost.hostPid, `${label} host-authenticated`)
-  if (fallbackProbe) {
-    registerProcessFallbackHost(handle, authenticatedHost, `${label} host-authenticated`)
+  if (fallbackProbe || recovery) {
+    handle.fallbackHostRecord = registerProcessFallbackHost(handle, authenticatedHost, `${label} host-authenticated`)
+  } else if (attach) {
+    if (authenticatedHost.hostPid !== recoveredRecord.pid
+      || authenticatedHost.instanceId !== recoveredRecord.instanceId) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the Client authenticated a Host other than the recovered Host`)
+    }
+    handle.fallbackHostRecord = recoveredRecord
   } else if (authenticatedHost.hostPid !== host.child.pid) {
     // A normal anchor must never be silently rebound to a discovery fallback.
     registerProcessFallbackHost(handle, authenticatedHost, `${label} unexpected fallback`)
@@ -4639,9 +5075,14 @@ async function handleStartProcessClient(message) {
   }
   const readyHost = assertProcessHostRecord(handle, ready, `${label} ready`)
   assertHostIdentityMatchesKernel(readyHost, readyHost.hostPid, `${label} ready`)
-  if (fallbackProbe) {
-    if (readyHost.instanceId !== authenticatedHost.instanceId || readyHost.hostPid !== authenticatedHost.hostPid) {
-      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready Host is not the Host the Client authenticated`)
+  if (fallbackProbe || recovery) {
+    if (readyHost.instanceId !== authenticatedHost.instanceId || readyHost.hostPid !== authenticatedHost.hostPid
+      || readyHost.hostPid !== handle.fallbackHostRecord.pid) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready Host is not the recovered discovery Host`)
+    }
+  } else if (attach) {
+    if (readyHost.hostPid !== recoveredRecord.pid || readyHost.instanceId !== recoveredRecord.instanceId) {
+      throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready Host is not the recovered Host`)
     }
   } else if (readyHost.hostPid !== host.child.pid) {
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the ready Host is not this Scene's ready Host`)
@@ -4684,6 +5125,13 @@ async function handleStartProcessClient(message) {
     rows,
     shellPid: handle.shellPid,
     businessPids: handle.businessPids,
+    hmr: handle.hmr ?? null,
+    dropPromptAck: handle.dropPromptAck === true,
+    terminal: handle.terminalMode,
+    holdBarrier: handle.holdBarrier ?? null,
+    ownerPid: handle.owner?.pid ?? null,
+    ownerBirth: handle.owner?.birth ?? null,
+    ptyOwnerFacts: handle.ptyOwnerFacts ?? null,
     ready: handle.readyHost,
   }
   } finally {
@@ -4704,6 +5152,9 @@ async function handleProcessClientInput(message) {
   const input = message.input
   if (input === null || typeof input !== 'object') {
     throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT requires an input object')
+  }
+  if (handle.owner !== undefined) {
+    throw new Error('INPUT_UNQUALIFIED: PROCESS_CLIENT_INPUT is not available on a terminal-owner-loss Client')
   }
   let body
   if (input.type === 'type') {
@@ -4733,6 +5184,10 @@ async function handleProcessClientText(message) {
   const handle = requireProcessClientRequest(message, 'PROCESS_CLIENT_TEXT')
   // The CURRENT visible screen is the only observable; scrollback is never a
   // substitute for what the surface paints now.
+  if (handle.owner !== undefined) {
+    const text = await withProcessNativeOperation('client-owner-text', handle.clientId, () => handle.owner.request('text', {}, 30_000))
+    return { text: String(text.text) }
+  }
   const text = await withProcessNativeOperation('client-text', handle.clientId, () => handle.terminal.text({ full: false }))
   return { text }
 }
@@ -4753,7 +5208,30 @@ async function handleProcessClientState(message) {
       exited: true,
       exitCode: handle.exitResult?.code ?? null,
       exitSignal: handle.exitResult?.signal ?? null,
-      sessionListed: new Set(await openTuiSessions()).has(handle.sessionId),
+      kind: handle.verifiedTerminal?.kind ?? handle.ownerLossTerminal?.kind ?? 'native',
+      terminal: handle.verifiedTerminal ?? handle.ownerLossTerminal ?? null,
+      sessionListed: handle.terminalMode === 'terminal-owner-loss' ? false : new Set(await openTuiSessions()).has(handle.sessionId),
+      shellState: handle.shellIdentity === undefined ? 'unknown' : processIdentityState(handle.shellIdentity.identity),
+      businessStates: handle.businessIdentities.map(value => ({
+        pid: value.identity.pid,
+        state: processIdentityState(value.identity),
+      })),
+    }
+  }
+  if (handle.owner !== undefined) {
+    const ownerState = await withProcessNativeOperation('client-owner-state', handle.clientId, () => handle.owner.request('state', {}, 30_000))
+    return {
+      clientId: handle.clientId,
+      label: handle.label,
+      sessionId: handle.sessionId,
+      shellPid: handle.shellPid,
+      businessPids: handle.businessPids,
+      exited: Boolean(ownerState.state?.exited),
+      exitCode: ownerState.state?.exited ?? null,
+      exitSignal: ownerState.state?.exit_signal ?? null,
+      kind: 'owner-loss',
+      terminal: handle.ownerLossTerminal ?? null,
+      sessionListed: false,
       shellState: handle.shellIdentity === undefined ? 'unknown' : processIdentityState(handle.shellIdentity.identity),
       businessStates: handle.businessIdentities.map(value => ({
         pid: value.identity.pid,
@@ -4789,6 +5267,146 @@ async function handleProcessClientState(message) {
   }
 }
 
+async function handleSignalProcessClient(message) {
+  requireProcessScene('SIGNAL_PROCESS_CLIENT')
+  assertLifecycleOpen('SIGNAL_PROCESS_CLIENT')
+  const handle = processClientById(message.clientId, 'SIGNAL_PROCESS_CLIENT')
+  if (handle.closed) throw new Error('SIGNAL_PROCESS_CLIENT: the Client is already closed')
+  const signal = message.signal
+  if (!PROCESS_CLIENT_SIGNALS.has(signal)) {
+    throw new Error(`INPUT_UNQUALIFIED: SIGNAL_PROCESS_CLIENT unsupported signal ${JSON.stringify(signal)}`)
+  }
+  if (handle.terminalMode === 'terminal-owner-loss') {
+    throw new Error('SIGNAL_PROCESS_CLIENT: a terminal-owner-loss Client never receives a test signal')
+  }
+  if (handle.readyAt === undefined || handle.businessIdentities.length === 0) {
+    throw new Error('SIGNAL_PROCESS_CLIENT: the Client is not ready')
+  }
+  if (signal === 'SIGUSR2') {
+    if (handle.hmr === undefined) throw new Error('SIGNAL_PROCESS_CLIENT: SIGUSR2 requires a declared HMR mode')
+    if (handle.hmrSignalled === true) throw new Error('SIGNAL_PROCESS_CLIENT: the one HMR replacement was already requested')
+  } else if (signal === 'SIGINT') {
+    if (handle.terminalMode !== 'sigint') throw new Error('SIGNAL_PROCESS_CLIENT: SIGINT requires the declared sigint terminal')
+    if (handle.signalIntents.includes('SIGINT')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGINT was already sent')
+  } else if (signal === 'SIGTERM') {
+    if (handle.terminalMode !== 'normal') throw new Error('SIGNAL_PROCESS_CLIENT: SIGTERM requires the ordinary terminal contract')
+    if (handle.signalIntents.includes('SIGTERM')) throw new Error('SIGNAL_PROCESS_CLIENT: SIGTERM was already sent')
+  }
+  const business = handle.businessIdentities[0]
+  if (business === undefined || processIdentityState(business.identity) !== 'alive') {
+    throw new Error('SIGNAL_PROCESS_CLIENT: the captured business Client identity is not alive')
+  }
+  if (signal === 'SIGUSR2') handle.hmrSignalled = true
+  handle.signalIntents.push(signal)
+  appendNote('process-client-signalled', {
+    clientId: handle.clientId,
+    pid: business.identity.pid,
+    birth: business.birth,
+    signal,
+    terminal: handle.terminalMode,
+  })
+  writeReceipt({})
+  try {
+    process.kill(business.identity.pid, signal)
+  } catch (error) {
+    if (error?.code !== 'ESRCH') {
+      throw new Error(`SIGNAL_PROCESS_CLIENT: the captured business PID ${String(business.identity.pid)} could not be signalled (${String(error?.code ?? 'unknown')})`)
+    }
+  }
+  if (signal === 'SIGINT' || signal === 'SIGTERM') {
+    const record = await waitForProcessClientRecord(handle,
+      value => value?.m4a0 === 'signal' && value.signal === signal && value.pid === business.identity.pid,
+      `${handle.label} ${signal} admission`, 30_000)
+    if (record.pid !== business.identity.pid) {
+      throw new Error(`SIGNAL_PROCESS_CLIENT: the ${signal} record came from another PID`)
+    }
+  }
+  syncProcessClientsReceipt()
+  return { clientId: handle.clientId, signal, pid: business.identity.pid, birth: business.birth }
+}
+
+/**
+ * The ONE declared terminal-owner loss. This is the only positive path that
+ * kills the PTY Owner; it never touches the business Client, its group or the
+ * Host. The Owner's real close and the Client's actual kernel terminal are both
+ * required before the tagged terminal fact exists.
+ */
+async function handleProcessClientTerminalLoss(message) {
+  requireProcessScene('PROCESS_CLIENT_TERMINAL_LOSS')
+  assertLifecycleOpen('PROCESS_CLIENT_TERMINAL_LOSS')
+  const handle = processClientById(message.clientId, 'PROCESS_CLIENT_TERMINAL_LOSS')
+  if (handle.terminalMode !== 'terminal-owner-loss') {
+    throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the Client did not declare the terminal-owner-loss contract')
+  }
+  if (handle.closed) throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the Client is already closed')
+  if (handle.readyAt === undefined) throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the Client is not ready')
+  if (handle.owner === undefined || handle.owner.exit !== undefined) {
+    throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the PTY Owner is not live')
+  }
+  if (processNativeOperation !== undefined) {
+    throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: a native operation is still in flight')
+  }
+  if (handle.ownerLossAttempted === true) throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the Owner loss was already attempted')
+  if (activeHost === undefined) throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the business Host is not active')
+  const ownerObservation = readKernelProcess(handle.owner.pid)
+  if (ownerObservation.kind !== 'alive'
+    || serializeKernelIdentity(ownerObservation.identity) !== handle.owner.birth
+    || ownerObservation.identity.ppid !== process.pid) {
+    throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the PTY Owner lost its captured kernel/parent identity')
+  }
+  assertProcessPtyOwnerMaster(handle, handle.shellPid, 'PROCESS_CLIENT_TERMINAL_LOSS')
+  handle.ownerLossAttempted = true
+  appendNote('process-client-terminal-owner-loss', {
+    clientId: handle.clientId,
+    ownerPid: handle.owner.pid,
+    ownerBirth: handle.owner.birth,
+    shellPid: handle.shellPid,
+    shellBirth: handle.shellIdentity?.birth,
+    businessPids: handle.businessPids,
+    hostPid: activeHost.child.pid,
+  })
+  writeReceipt({})
+  // The only fault signal: the exact Supervisor-owned PTY Owner. The Client
+  // receives the kernel's terminal HUP; no test facility signal is sent to it.
+  process.kill(handle.owner.pid, 'SIGKILL')
+  await waitProcessPtyOwnerTerminal(handle, 'PROCESS_CLIENT_TERMINAL_LOSS', 20_000)
+  const hostStatus = await queryHostStatus(activeHost)
+  if (hostStatus.localHost?.hostPid !== activeHost.child.pid
+    || hostStatus.localHost?.instanceId !== activeHost.ready?.localHost?.instanceId) {
+    throw new Error('PROCESS_CLIENT_TERMINAL_LOSS: the business Host identity changed')
+  }
+  handle.ownerLossTerminal = {
+    kind: 'owner-loss',
+    ownerPid: handle.owner.pid,
+    ownerBirth: handle.owner.birth,
+    ownerExit: handle.owner.exit,
+    shellPid: handle.shellPid,
+    businessPids: [...handle.businessPids],
+    hostPid: activeHost.child.pid,
+    hostInstanceId: hostStatus.localHost.instanceId,
+    terminalAt: now(),
+  }
+  handle.verifiedTerminal = handle.ownerLossTerminal
+  handle.exited = true
+  handle.exitResult = { code: null, signal: null }
+  handle.closed = true
+  handle.closedAt = now()
+  handle.closeFailure = undefined
+  syncProcessClientsReceipt()
+  writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
+  return {
+    clientId: handle.clientId,
+    kind: 'owner-loss',
+    terminal: handle.ownerLossTerminal,
+    exitCode: null,
+    exitSignal: null,
+    ownerPid: handle.owner.pid,
+    ownerExit: handle.owner.exit,
+    hostPid: activeHost.child.pid,
+    hostInstanceId: hostStatus.localHost.instanceId,
+  }
+}
+
 async function handleCloseProcessClient(message) {
   requireProcessScene('CLOSE_PROCESS_CLIENT')
   assertLifecycleOpen('CLOSE_PROCESS_CLIENT')
@@ -4797,52 +5415,93 @@ async function handleCloseProcessClient(message) {
   if (handle.closed) {
     return {
       clientId: handle.clientId,
+      kind: handle.verifiedTerminal?.kind ?? 'native',
       exitCode: handle.exitResult?.code ?? null,
       exitSignal: handle.exitResult?.signal ?? null,
+      ownerPid: handle.owner?.pid ?? null,
+      ownerExit: handle.owner?.exit ?? null,
+      terminal: handle.verifiedTerminal ?? null,
       closedAt: handle.closedAt,
     }
   }
   handle.closeSettlement = Promise.withResolvers()
   try {
-  let failure
-  let exit
-  try {
-    exit = await withProcessNativeOperation('client-close', handle.clientId, () => waitForTerminalExit(handle.terminal, handle.label, 120_000))
-    if (exit.code !== 0 || exit.signal !== null) {
-      throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} exited ${JSON.stringify(exit)}; the normal path requires code 0 and no signal`)
+    if (handle.terminalMode === 'terminal-owner-loss') {
+      if (handle.ownerLossTerminal === undefined || handle.ownerLossAttempted !== true) {
+        const failure = new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} has no verified terminal-owner-loss fact`)
+        handle.closeFailure = failure
+        syncProcessClientsReceipt()
+        throw failure
+      }
+      handle.verifiedTerminal = handle.ownerLossTerminal
+      assertProcessClientTerminalContract(handle, 'CLOSE_PROCESS_CLIENT')
+      await assertProcessClientQuiesced(handle, 'CLOSE_PROCESS_CLIENT')
+      handle.closed = true
+      handle.closedAt = now()
+      handle.closeFailure = undefined
+      syncProcessClientsReceipt()
+      writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
+      return {
+        clientId: handle.clientId,
+        kind: 'owner-loss',
+        exitCode: null,
+        exitSignal: null,
+        ownerPid: handle.owner.pid,
+        ownerExit: handle.owner.exit,
+        terminal: handle.verifiedTerminal,
+        closedAt: handle.closedAt,
+      }
     }
-  } catch (error) {
-    failure = error
-  }
-  try {
-    await withProcessNativeOperation('client-close-native', handle.clientId, () => handle.terminal.closeQuiet())
-  } catch (error) {
-    failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close and native teardown both failed`)
-  }
-  try {
-    await assertProcessClientQuiesced(handle, 'CLOSE_PROCESS_CLIENT')
-  } catch (error) {
-    failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close did not reach a quiescent terminal state`)
-  }
-  handle.exited = true
-  handle.exitResult = exit ?? handle.exitResult
-  if (failure !== undefined) {
-    handle.closeFailure = failure
+    let failure
+    let exit
+    try {
+      exit = await withProcessNativeOperation('client-close', handle.clientId, () => waitForTerminalExit(handle.terminal, handle.label, 120_000))
+      const expected = handle.terminalMode === 'sigint' ? 130 : handle.terminalMode === 'hmr-failure' ? 1 : 0
+      if (exit.code !== expected || exit.signal !== null) {
+        throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} exited ${JSON.stringify(exit)}; the declared ${handle.terminalMode} path requires code ${String(expected)} and no signal`)
+      }
+      if (handle.terminalMode === 'sigint') {
+        const records = readOfficialClientRecords(handle.recordFile, handle.label)
+        const businessPid = handle.businessPids[0]
+        const admitted = records.find(record => record?.m4a0 === 'signal' && record.signal === 'SIGINT' && record.pid === businessPid)
+        if (admitted === undefined) throw new Error(`CLOSE_PROCESS_CLIENT: ${handle.label} has no SIGINT admission record from its business PID`)
+      }
+      handle.verifiedTerminal = { kind: 'native', code: exit.code, signal: exit.signal }
+      assertProcessClientTerminalContract(handle, 'CLOSE_PROCESS_CLIENT')
+    } catch (error) {
+      failure = error
+    }
+    try {
+      await withProcessNativeOperation('client-close-native', handle.clientId, () => handle.terminal.closeQuiet())
+    } catch (error) {
+      failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close and native teardown both failed`)
+    }
+    try {
+      await assertProcessClientQuiesced(handle, 'CLOSE_PROCESS_CLIENT')
+    } catch (error) {
+      failure = failure === undefined ? error : new AggregateError([failure, error], `${handle.label}: close did not reach a quiescent terminal state`)
+    }
+    handle.exited = true
+    handle.exitResult = exit ?? handle.exitResult
+    if (failure !== undefined) {
+      handle.closeFailure = failure
+      syncProcessClientsReceipt()
+      writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(failure) })
+      throw failure
+    }
+    handle.closed = true
+    handle.closedAt = now()
+    handle.closeFailure = undefined
     syncProcessClientsReceipt()
-    writeReceipt({ phase: 'NOT_QUIESCED', errorName: boundedError(failure) })
-    throw failure
-  }
-  handle.closed = true
-  handle.closedAt = now()
-  handle.closeFailure = undefined
-  syncProcessClientsReceipt()
-  writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
-  return {
-    clientId: handle.clientId,
-    exitCode: handle.exitResult?.code ?? null,
-    exitSignal: handle.exitResult?.signal ?? null,
-    closedAt: handle.closedAt,
-  }
+    writeReceipt({ phase: 'PROCESS_CLIENT_CLOSED' })
+    return {
+      clientId: handle.clientId,
+      kind: 'native',
+      exitCode: handle.exitResult?.code ?? null,
+      exitSignal: handle.exitResult?.signal ?? null,
+      terminal: handle.verifiedTerminal ?? null,
+      closedAt: handle.closedAt,
+    }
   } finally {
     handle.closeSettlement.resolve()
   }
@@ -4889,6 +5548,26 @@ async function reclaimProcessClient(handle, reason) {
     let failure
     if (processNativeOperation !== undefined) {
       failure = new Error(`${reason}: a native operation is still unsettled after 120000ms`)
+    } else if (handle.terminalMode === 'terminal-owner-loss') {
+      try {
+        if (handle.owner?.exit === undefined) {
+          await closeProcessPtyOwner(handle, `${reason}: PTY Owner cleanup`)
+        }
+        if (handle.owner?.exit === undefined) {
+          const observation = readKernelProcess(handle.owner.pid)
+          if (observation.kind !== 'alive'
+            || serializeKernelIdentity(observation.identity) !== handle.owner.birth
+            || observation.identity.ppid !== process.pid) {
+            throw new Error(`${reason}: the PTY Owner is no longer the captured live child`)
+          }
+          process.kill(handle.owner.pid, 'SIGKILL')
+          const ownerDeadline = Date.now() + 10_000
+          while (handle.owner.exit === undefined && Date.now() < ownerDeadline) await sleep(50)
+          if (handle.owner.exit === undefined) throw new Error(`${reason}: the PTY Owner did not exit after the owned kill`)
+        }
+      } catch (error) {
+        failure = error
+      }
     } else {
       try {
         await withProcessNativeOperation('client-reclaim', handle.clientId, () => handle.terminal.closeQuiet())
@@ -4896,8 +5575,26 @@ async function reclaimProcessClient(handle, reason) {
         failure = error
       }
     }
+    if (handle.terminalMode === 'terminal-owner-loss') {
+      if (handle.owner?.exit === undefined) {
+        failure = failure ?? new Error(`${reason}: the PTY Owner has no terminal fact`)
+      } else if (handle.ownerLossAttempted === true) {
+        try {
+          await waitProcessPtyOwnerTerminal(handle, `${reason}: PTY Owner terminal`, 20_000)
+        } catch (error) {
+          failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} owner terminal failed`)
+        }
+      }
+    }
     try {
-      await assertProcessClientQuiesced(handle, reason)
+      if (handle.terminalMode === 'terminal-owner-loss') {
+        // An owner-loss cleanup has no native session in this process; the
+        // shared audit below proves the Owner and the exact shell/business
+        // identities terminal.
+        await assertProcessClientQuiesced(handle, reason)
+      } else {
+        await assertProcessClientQuiesced(handle, reason)
+      }
     } catch (error) {
       failure = failure === undefined ? error : new AggregateError([failure, error], `${reason}: ${handle.label} reclaim failed`)
     }
@@ -4928,7 +5625,20 @@ async function auditProcessClientLedger(reason) {
   const openSessions = new Set(await openTuiSessions())
   for (const handle of processClients) {
     if (!handle.closed) problems.push(`${handle.label}: the Client is not closed`)
-    if (openSessions.has(handle.sessionId)) problems.push(`${handle.label}: its native TUI session is still open`)
+    if (handle.terminalMode !== 'terminal-owner-loss' && openSessions.has(handle.sessionId)) {
+      problems.push(`${handle.label}: its native TUI session is still open`)
+    }
+    if (handle.terminalMode === 'terminal-owner-loss') {
+      if (handle.owner?.exit === undefined) problems.push(`${handle.label}: its PTY Owner has no terminal fact`)
+      else if (handle.ownerLossAttempted === true
+        && (handle.owner.exit.code !== null || handle.owner.exit.signal !== 'SIGKILL')) {
+        problems.push(`${handle.label}: its PTY Owner did not terminate by the intentional SIGKILL`)
+      } else if (handle.ownerLossAttempted !== true
+        && !(handle.owner.exit.code === 0 && handle.owner.exit.signal === null)
+        && !(handle.owner.exit.code === null && handle.owner.exit.signal === 'SIGKILL')) {
+        problems.push(`${handle.label}: its PTY Owner cleanup was not a normal close`)
+      }
+    }
     try {
       const records = readOfficialClientRecords(handle.recordFile, handle.label)
       const started = records.find(record => record?.m4a0 === 'client-started')
@@ -4977,8 +5687,14 @@ async function handleFinalize(message) {
     }
     for (const handle of processClients) {
       if (!handle.closed) preconditions.push(`the process Client ${String(handle.label)} is not closed`)
-      if (handle.exitResult?.code !== 0 || handle.exitResult?.signal !== null) {
-        preconditions.push(`the process Client ${String(handle.label)} exited abnormally: ${JSON.stringify(handle.exitResult ?? null)}`)
+      if (handle.verifiedTerminal === undefined) {
+        preconditions.push(`the process Client ${String(handle.label)} has no verified terminal fact`)
+        continue
+      }
+      try {
+        assertProcessClientTerminalContract(handle, 'FINALIZE')
+      } catch (error) {
+        preconditions.push(boundedError(error))
       }
     }
     if (processClients.length > 0 && !preconditions.some(value => value.includes('process Client'))) {
@@ -6209,6 +6925,38 @@ async function handleSignalEntry(message) {
   assertLifecycleOpen('SIGNAL_ENTRY')
   const handle = findEntryById(message.entryId, 'SIGNAL_ENTRY')
   const signal = message.signal
+  // A normal process Host generation may declare one real business crash. It is
+  // delivered to the Host PID itself, never to the group, after the same exact
+  // kernel-identity/group ownership proof every Host signal uses.
+  if (hosts.includes(handle) && handle.kind === undefined && handle.crashSignal !== undefined) {
+    if (handle.crashSignal !== signal) {
+      throw codedInputError('INPUT_ENTRY_SIGNAL',
+        `SIGNAL_ENTRY: this Host declared ${String(handle.crashSignal)}, not ${String(signal)}`)
+    }
+    if (handle.ready === undefined) throw new Error('SIGNAL_ENTRY: the Host is not ready')
+    if (handle.exited || handle.child.exitCode !== null || handle.child.signalCode !== null) {
+      throw new Error('SIGNAL_ENTRY: the Host already exited')
+    }
+    if (handle.signalIntent !== undefined) throw new Error('SIGNAL_ENTRY: the Host already received its declared crash signal')
+    assertProcessHostSignalOwnership(handle, `SIGNAL_ENTRY ${signal}`)
+    try {
+      process.kill(handle.child.pid, signal)
+    } catch (error) {
+      if (error?.code !== 'ESRCH') {
+        throw new Error(`SIGNAL_ENTRY: the owned Host PID ${String(handle.child.pid)} could not be signalled (${String(error?.code ?? 'unknown')})`)
+      }
+    }
+    handle.signalIntent = signal
+    appendNote('host-business-crash-signalled', {
+      entryId: handle.hostId,
+      pid: handle.child.pid,
+      birth: handle.birth,
+      signal,
+      target: 'host-pid',
+    })
+    writeReceipt({})
+    return { entryId: handle.hostId, signal, pid: handle.child.pid, birth: handle.birth, target: 'host-pid' }
+  }
   if (!ENTRY_SIGNALS.has(signal)) {
     throw codedInputError('INPUT_ENTRY_SIGNAL', `SIGNAL_ENTRY: unsupported signal ${JSON.stringify(signal)}`)
   }
@@ -6493,6 +7241,40 @@ async function handleFinishEntry(message) {
   }
   let exit
   const isHostEntry = hosts.includes(handle)
+  if (isHostEntry && handle.kind === undefined && handle.crashSignal !== undefined) {
+    if (handle.signalIntent !== handle.crashSignal) {
+      throw new Error(`FINISH_ENTRY: the Host did not receive its declared ${String(handle.crashSignal)} crash signal`)
+    }
+    exit = await finishHostAttempt(handle)
+    await assertHostGroupGone(handle, `FINISH_ENTRY ${handle.label ?? handle.hostId}`)
+    if (exit.code !== null || exit.signal !== handle.crashSignal) {
+      throw new Error(`FINISH_ENTRY: the declared Host crash was not ${JSON.stringify({
+        code: null,
+        signal: handle.crashSignal,
+      })}; actual=${JSON.stringify(exit)}`)
+    }
+    if (handle.ready === undefined) throw new Error('FINISH_ENTRY: a crashed Host never reached Ready')
+    if (activeHost === handle) activeHost = undefined
+    const liveOthers = hosts.some(other => other !== handle && !other.exited)
+    if (!liveOthers) await assertSceneHostSeatFree(`FINISH_ENTRY ${handle.hostId}`)
+    handle.finished = true
+    handle.terminal = {
+      outcome: 'business-crash',
+      signal: handle.crashSignal,
+      readyEmitted: true,
+      hostPid: handle.child.pid,
+      hostBirth: handle.birth ?? null,
+      entryId: handle.hostId,
+      kind: 'host',
+      mode: null,
+      exit: { code: exit.code, signal: exit.signal },
+      records: entryRecordsOf(handle).records,
+      stderrMarkers: entryStderrMarkers(handle),
+    }
+    syncHostReceipt()
+    writeReceipt({ phase: 'ENTRY_FINISHED' })
+    return handle.terminal
+  }
   if (isHostEntry) exit = await finishHostAttempt(handle)
   else if (handle.kind === 'qualification-client') exit = await finishQualificationClient(handle)
   else throw new Error(`FINISH_ENTRY: ${entryKindLabel(handle)} does not use finishEntry`)
@@ -7320,10 +8102,87 @@ async function handleFinishIdentityWitness(message) {
   return handle.terminal
 }
 
+async function stopRecoveredProcessHost(record, client) {
+  if (record.reclaimed === true) throw new Error('RECLAIM_DISCOVERED_HOST: the recovered Host is already reclaimed')
+  const ownership = assertProcessFallbackOwnership(record.pid, record.scratch, record,
+    'RECLAIM_DISCOVERED_HOST recovered Host')
+  const scopeDir = processScope.dir
+  const launchPath = join(scopeDir, 'launch.json')
+  const instancePath = join(scopeDir, 'instance.json')
+  if (!existsSync(scopeDir) || !statSync(scopeDir).isDirectory()) {
+    throw new Error('RECLAIM_DISCOVERED_HOST: the full-scope run directory is missing')
+  }
+  if (!existsSync(launchPath) || !existsSync(instancePath)) {
+    throw new Error('RECLAIM_DISCOVERED_HOST: the live recovered Host did not publish launch/instance material')
+  }
+  const before = readJson(instancePath, 'recovered Host instance')
+  if (before?.hostPid !== record.pid || before?.instanceId !== record.instanceId
+    || before?.scopeId !== processScope.scopeId) {
+    throw new Error('RECLAIM_DISCOVERED_HOST: the product instance record does not name the recovered Host')
+  }
+  if (before.schema === 1) {
+    if (before.hostStarttime !== readHostStarttime(record.pid)) {
+      throw new Error('RECLAIM_DISCOVERED_HOST: the instance starttime is not the live kernel birth')
+    }
+  } else if (before.schema === 2) {
+    if (sameKernelProcess(before.hostKernelIdentity, readKernelProcess(record.pid)) !== 'same') {
+      throw new Error('RECLAIM_DISCOVERED_HOST: the instance kernel identity is not live')
+    }
+  } else {
+    throw new Error('RECLAIM_DISCOVERED_HOST: unsupported instance identity schema')
+  }
+  // Normal business stop: one exact SIGTERM to the Host PID itself. No group
+  // signal and no forced escalation in this positive path.
+  process.kill(record.pid, 'SIGTERM')
+  await waitForProcessIdentityTerminal(ownership.identity, 'RECLAIM_DISCOVERED_HOST Host PID', 30_000)
+  const remaining = kernelGroupLiveMemberPids(processKernelReaders(), record.pid, 'RECLAIM_DISCOVERED_HOST Host group')
+  if (remaining.length > 0) {
+    throw new Error(`RECLAIM_DISCOVERED_HOST: the stopped Host group still has live members: ${JSON.stringify(remaining)}`)
+  }
+  await assertSceneHostSeatFree('RECLAIM_DISCOVERED_HOST')
+  await assertClientSeatFree(scene.installation, processScope.scopeId, 'RECLAIM_DISCOVERED_HOST')
+  if (existsSync(launchPath)) throw new Error('RECLAIM_DISCOVERED_HOST: the stopped Host left launch material')
+  if (existsSync(instancePath)) {
+    const after = readJson(instancePath, 'recovered Host instance after stop')
+    if (after?.instanceId === record.instanceId) {
+      throw new Error('RECLAIM_DISCOVERED_HOST: the stopped Host left its own instance record')
+    }
+  }
+  record.reclaimed = true
+  record.exitObserved = 'sigterm'
+  record.normalStop = true
+  record.stoppedAt = now()
+  record.stoppedByClientId = client.clientId
+  syncFallbackHostsReceipt()
+  appendNote('discovered-host-stopped', {
+    pid: record.pid,
+    birth: ownership.birth,
+    clientId: client.clientId,
+    signal: 'SIGTERM',
+  })
+  writeReceipt({})
+  return {
+    pid: record.pid,
+    birth: ownership.birth,
+    reclaimed: true,
+    normalStop: true,
+    registryRemoved: !existsSync(instancePath),
+    scratchEntries: readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-')),
+  }
+}
+
 async function handleReclaimDiscoveredHost(message) {
-  requireKnownFields(message, ['entryId'], 'RECLAIM_DISCOVERED_HOST')
   requireProcessScene('RECLAIM_DISCOVERED_HOST')
   assertLifecycleOpen('RECLAIM_DISCOVERED_HOST')
+  if (message.clientId !== undefined) {
+    const client = processClientById(message.clientId, 'RECLAIM_DISCOVERED_HOST')
+    if (!client.closed) throw new Error('RECLAIM_DISCOVERED_HOST: the discovery Client is still live')
+    if (client.terminalMode !== 'normal') throw new Error('RECLAIM_DISCOVERED_HOST: the discovery Client did not use the normal terminal')
+    const record = fallbackHosts.find(entry => entry.clientId === client.clientId)
+    if (record === undefined) throw new Error('RECLAIM_DISCOVERED_HOST: this Client registered no recovered Host')
+    return await stopRecoveredProcessHost(record, client)
+  }
+  requireKnownFields(message, ['entryId'], 'RECLAIM_DISCOVERED_HOST')
   const client = findQualificationClientById(message.entryId, 'RECLAIM_DISCOVERED_HOST')
   if (client.kind !== 'qualification-client') throw new Error('RECLAIM_DISCOVERED_HOST: the entry is not a qualification Client')
   if (!client.exited) throw new Error('RECLAIM_DISCOVERED_HOST: the attached qualification Client is still live')
@@ -7466,6 +8325,16 @@ async function dispatch(message) {
       }
       case 'CLOSE_PROCESS_CLIENT': {
         const payload = await handleCloseProcessClient(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'SIGNAL_PROCESS_CLIENT': {
+        const payload = await handleSignalProcessClient(message)
+        if (requestId !== undefined) reply(requestId, payload)
+        break
+      }
+      case 'PROCESS_CLIENT_TERMINAL_LOSS': {
+        const payload = await handleProcessClientTerminalLoss(message)
         if (requestId !== undefined) reply(requestId, payload)
         break
       }
