@@ -6101,6 +6101,48 @@ async function waitForPublicProcess(rootPid, marker, label, timeoutMs, options =
  * provably still-live existing Host; a new Host child wins if the product
  * actually started one.
  */
+/**
+ * A launch with NO backend environment fact follows the persisted Profile. The
+ * CLI supervisor paints nothing, so a painted composer with no local-client.mjs
+ * child is Direct; an actual Client child is Daemon. Both are observed real
+ * facts, never inferred from the absence of an env value.
+ */
+async function waitForPublicProfileBackendKind(handle, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  for (;;) {
+    for (const pid of linuxDescendantPids(handle.cli.pid)) {
+      const captured = capturePublicProcess(pid, 'local-client.mjs', `${label} profile Client`)
+      if (captured !== undefined) return { kind: 'daemon', client: captured }
+    }
+    const state = await handle.terminal.state().catch(() => undefined)
+    if (state !== undefined && state.exited !== null) {
+      return {
+        kind: 'exit',
+        exit: { code: state.exited, signal: state.exit_signal ?? null },
+        text: await handle.terminal.text({ full: true }).catch(() => ''),
+      }
+    }
+    const frame = await handle.terminal.text({ full: false }).catch(() => '')
+    if (publicComposerVisible(frame)) {
+      // The CLI itself paints nothing in daemon mode; the Client child must be
+      // observed before a composer can exist there. One settling read avoids
+      // classifying a just-spawned Client as Direct.
+      await sleep(50)
+      let lateClient
+      for (const pid of linuxDescendantPids(handle.cli.pid)) {
+        const captured = capturePublicProcess(pid, 'local-client.mjs', `${label} profile Client`)
+        if (captured !== undefined) { lateClient = captured; break }
+      }
+      if (lateClient !== undefined) return { kind: 'daemon', client: lateClient }
+      return { kind: 'direct' }
+    }
+    if (Date.now() - started >= timeoutMs) {
+      throw new Error(`${label}: neither a real Client nor a painted Direct composer appeared within ${String(timeoutMs)}ms`)
+    }
+    await sleep(25)
+  }
+}
+
 async function waitForPublicHostChildOrUsableSurface(handle, existing, label, surface) {
   const started = Date.now()
   for (;;) {
@@ -6580,7 +6622,7 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       cliBirth: handle.cli.birth,
     })
     writeReceipt({})
-    if (handle.backend === null || handle.backend === 'direct') {
+    if (handle.backend === 'direct') {
       handle.surfaceProbe = surface === 'workspace'
         ? await waitForPublicWorkspaceSurface(handle, `${label} direct workspace surface`)
         : await waitForPublicUsableSurface(handle, `${label} direct surface`)
@@ -6589,8 +6631,24 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       writeReceipt({ phase: 'PUBLIC_DAEMON_READY' })
       return publicLaunchReturnFacts(handle)
     }
-    const clientOutcome = await waitForPublicProcessOrExit(handle, handle.cli.pid,
-      'local-client.mjs', `${label} public Client`, 120_000)
+    let clientOutcome
+    if (handle.backend === null) {
+      const kind = await waitForPublicProfileBackendKind(handle, label)
+      if (kind.kind === 'exit') return finishPublicRefusal(handle, kind)
+      if (kind.kind === 'direct') {
+        handle.surfaceProbe = surface === 'workspace'
+          ? await waitForPublicWorkspaceSurface(handle, `${label} persisted-direct workspace surface`)
+          : await waitForPublicUsableSurface(handle, `${label} persisted-direct surface`)
+        handle.readyAt = now()
+        syncPublicLaunchReceipt()
+        writeReceipt({ phase: 'PUBLIC_DAEMON_READY' })
+        return publicLaunchReturnFacts(handle)
+      }
+      clientOutcome = { kind: 'process', process: kind.client }
+    } else {
+      clientOutcome = await waitForPublicProcessOrExit(handle, handle.cli.pid,
+        'local-client.mjs', `${label} public Client`, 120_000)
+    }
     if (clientOutcome.kind === 'exit') return finishPublicRefusal(handle, clientOutcome)
     handle.client = clientOutcome.process
     syncPublicLaunchReceipt()

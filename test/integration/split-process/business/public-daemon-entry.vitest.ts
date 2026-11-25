@@ -588,6 +588,105 @@ test.skipIf(!linuxOnly)('pins the public alias resume command and replays it aga
   }
 })
 
+test.skipIf(!linuxOnly)('persists the public daemon preference for the next launch without restarting the current Host', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  let testError: unknown
+  try {
+    const current = await scene.startPublicDaemon({ label: 'settings-current', backend: 'daemon' })
+    launches.push(current)
+    await waitForFrame(current, '❯', 'settings current composer')
+    const before = await current.kernelState()
+    const beforeStatus = await current.daemonStatus()
+    expect(beforeStatus.fields.host).toBe('ready')
+
+    await current.submit('/settings')
+    await waitForFrame(current, 'Settings · Categories', 'Settings categories')
+    await current.press('Down')
+    await current.press('Enter')
+    await waitForFrame(current, 'Settings · Host · Rows', 'Settings Host rows')
+    await waitForFrame(current, '> Backend', 'the Backend row is focused')
+    await current.press('Enter')
+    await waitForFrame(current, 'Choose value', 'the Backend value chooser')
+    await waitForFrame(current, 'Daemon', 'the Daemon candidate')
+    await current.press('Down')
+    await current.press('Enter')
+    await waitForFrame(current, 'Status      Verified', 'the same-generation Verified backend write')
+    const installFrame = await current.text()
+    if (installFrame.includes('> Not now')) await current.press('Enter')
+    await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
+    await waitForFrame(current, 'Status      Verified', 'the backend stays Verified')
+    await waitForFrame(current, 'Applies on next launch; current TUI/Host remains', 'the next-launch-only statement')
+    await waitForFrame(current, 'Current launch: daemon (environment override)', 'the current launch override fact')
+
+    const after = await current.kernelState()
+    expect(after.hostPid, 'the current Host process was not restarted').toBe(before.hostPid)
+    expect(after.clientPid, 'the current Client process was not restarted').toBe(before.clientPid)
+    expect(after.hostState).toBe('alive')
+    expect(after.clientState).toBe('alive')
+    expect((await current.daemonStatus()).fields.host).toBe('ready')
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const frame = await current.text()
+      if (frame.includes('❯') && !frame.includes('Settings')) break
+      await current.press('Escape')
+      await sleep(250)
+    }
+    await waitForFrame(current, '❯', 'Settings closed back to the chat')
+    await exitPublicLaunch(current, 'settings current launch')
+    await current.stopHost()
+
+    const persisted = await scene.startPublicDaemon({ label: 'settings-persisted-daemon' })
+    launches.push(persisted)
+    expect(persisted.client, 'the saved Daemon preference starts a real Client without env').not.toBeNull()
+    expect(persisted.host, 'the saved Daemon preference starts/attaches a real Host without env').not.toBeNull()
+    await waitForFrame(persisted, '❯', 'the persisted daemon composer')
+    expect((await persisted.daemonStatus()).fields.host).toBe('ready')
+    await exitPublicLaunch(persisted, 'persisted daemon launch')
+    await persisted.stopHost()
+
+    const directOverride = await scene.startPublicDaemon({ label: 'settings-env-direct', backend: 'direct' })
+    launches.push(directOverride)
+    expect(directOverride.host, 'the Direct env override starts no Host').toBeNull()
+    expect(directOverride.client, 'the Direct env override starts no Client').toBeNull()
+    await waitForFrame(directOverride, '❯', 'the Direct env override composer')
+    await exitPublicLaunch(directOverride, 'Direct env override')
+
+    const persistedAgain = await scene.startPublicDaemon({ label: 'settings-persisted-daemon-again' })
+    launches.push(persistedAgain)
+    expect(persistedAgain.client, 'the Direct env override did not rewrite the saved Daemon preference').not.toBeNull()
+    expect(persistedAgain.host, 'the persisted preference still starts a daemon Host').not.toBeNull()
+    await waitForFrame(persistedAgain, '❯', 'the persisted daemon composer after the Direct override')
+    await exitPublicLaunch(persistedAgain, 'persisted daemon after Direct')
+    await persistedAgain.stopHost()
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the Settings persistence test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the Settings persistence test cleanup failed')
+    }
+  }
+})
+
 test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
@@ -711,36 +810,3 @@ test.skipIf(!linuxOnly || !ownershipRefusalProbe)(
     })
   },
 )
-
-
-test.skipIf(!linuxOnly)('__debug_settings_frames', async () => {
-  const scene = await createSplitProcessScene()
-  let launch: PublicDaemonLaunch | undefined
-  try {
-    launch = await scene.startPublicDaemon({ label: 'debug-settings', backend: 'daemon' })
-    await waitForFrame(launch, '❯', 'debug composer')
-    await launch.submit('/settings')
-    await sleep(1200)
-    await launch.press('Down')
-    await launch.press('Enter')
-    await sleep(800)
-    console.log(`DEBUG_SETTINGS_HOST\n${(await launch.text()).slice(-2600)}`)
-    await launch.press('Enter')
-    await sleep(600)
-    console.log(`DEBUG_SETTINGS_EDIT_0\n${(await launch.text()).slice(-2600)}`)
-    await launch.press('Down')
-    await sleep(350)
-    console.log(`DEBUG_SETTINGS_EDIT_1\n${(await launch.text()).slice(-2600)}`)
-    await launch.press('Enter')
-    await sleep(600)
-    console.log(`DEBUG_SETTINGS_EDIT_2\n${(await launch.text()).slice(-2600)}`)
-    await launch.press('Enter')
-    await sleep(1500)
-    console.log(`DEBUG_SETTINGS_EDIT_3\n${(await launch.text()).slice(-2600)}`)
-    await sleep(1500)
-    console.log(`DEBUG_SETTINGS_EDIT_4\n${(await launch.text()).slice(-2600)}`)
-  } finally {
-    if (launch !== undefined && !launch.closed) await launch.reclaim().catch(() => undefined)
-    await scene.dispose().catch(() => undefined)
-  }
-})
