@@ -79,6 +79,16 @@ async function waitForNoPattern(client, pattern, label, timeoutMs = 30_000) {
   throw new SplitSmokeAssertionError(`${label}: still matched ${String(pattern)}; frame=${JSON.stringify(await client.viewport())}`)
 }
 
+async function waitForDetailPattern(client, pattern, label, timeoutMs = 90_000) {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    const frame = await frameOf(client)
+    if (pattern.test(detailColumnText(frame))) return frame
+    await sleep(100)
+  }
+  throw new SplitSmokeAssertionError(`${label}: wanted ${String(pattern)} in the Detail column; frame=${JSON.stringify(await client.viewport())}`)
+}
+
 async function waitForProfileAutoStart(installation, expected, label, timeoutMs = 30_000) {
   const started = Date.now()
   let last
@@ -256,10 +266,15 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r') // Disable Web: the confirmation's own first focus
     await waitForPattern(clientA, /Serving\s+Disabled/u, 'FR5-B Web runtime disabled')
     await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web runtime disable verified')
+    // The runtime mutation must not have rewritten the next-start preference.
+    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === true,
+      'Disable Web must leave the next-start USER preference On')
     clientA.send('\r') // the disabled page's first focus is Enable Web
     await waitForPattern(clientA, /Serving\s+Enabled/u, 'FR5-B Web runtime re-enabled')
     await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web runtime enable verified')
-    trace('fr5b.host-web-runtime', { disabled: true, reEnabled: true, authoritativeReadback: true })
+    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === true,
+      'Enable Web must leave the next-start USER preference On')
+    trace('fr5b.host-web-runtime', { disabled: true, reEnabled: true, authoritativeReadback: true, preferenceUnchanged: true })
 
     // The seeded Web USER value is read on the page that OWNS it and written
     // through the same official preference id (the General row is retired).
@@ -272,20 +287,31 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r')
     await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B Web confirm step')
     clientA.send('\r')
-    // A settled write leaves the pending state; the persisted profile is the
-    // authoritative sink of the next-start preference (never the runtime
-    // Status word, which may still describe the earlier runtime toggle).
-    await waitForNoPattern(clientA, /Waiting for the answer…/u, 'FR5-B Web preference settlement', 60_000)
+    // Wait for the NEXT-START field and its OWN settled Status, not the earlier
+    // runtime Status word; then prove the official profile sink.
+    await waitForDetailPattern(clientA,
+      /Next Host Start\s+Start automatically Off(?:\s|·).*?Status Verified/u,
+      'FR5-B Web preference settled in the next-start section')
     const savedPreference = await waitForProfileAutoStart(installation, false, 'FR5-B Web preference profile')
     assert(savedPreference.autoStart === false, 'the Web page writes the SAME official preference field')
-    // Saving a Settings value may briefly recompose the Host profile; the final
-    // serving target must still be the running Host the runtime toggle left on.
-    const webPreference = await waitForPattern(clientA, /Serving\s+Enabled/u, 'FR5-B Web runtime unchanged by preference')
+    // Retire the tenant and re-enter through the real Host row. The fresh mount
+    // performs its own status read; its frame must still report the running Host
+    // the runtime toggle left on, never the saved next-start value.
+    clientA.send('\x1b') // page -> Host Rows
+    await waitForNoPattern(clientA, /Current Host/u, 'FR5-B Web page retired')
+    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
+      'the saved preference stays Off while the page is retired')
+    await selectFrame(clientA, frame => selectedRow(frame, 'Web UI'), 'FR5-B Web re-entry row')
+    clientA.send('\r')
+    await waitForPattern(clientA, /Settings · Host · Web UI/u, 'FR5-B Web re-entered')
+    const webPreference = await waitForPattern(clientA, /Serving\s+Enabled/u, 'FR5-B Web fresh mount still serves')
     assert(/Serving\s+Enabled/u.test(webPreference),
-      `saving the next-start preference must not toggle the running Host: ${JSON.stringify(webPreference)}`)
-    trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true, runtimeUnchanged: true })
-    clientA.send('\x1b') // the page -> the Host Rows
-    await sleep(200)
+      `a fresh mount after the preference save must still report Enabled: ${JSON.stringify(webPreference)}`)
+    assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
+      'the next-start preference remains Off after the fresh runtime observation')
+    trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true, freshMountRuntimeUnchanged: true })
+    clientA.send('\x1b') // fresh page -> the Host Rows
+    await waitForNoPattern(clientA, /Current Host/u, 'FR5-B Web second retirement')
 
     // The ACP preference still writes its original id from its own page.
     await selectFrame(clientA, frame => selectedRow(frame, 'ACP access'), 'FR5-B ACP access row')

@@ -481,6 +481,8 @@ interface Harness {
   readonly terminalProgressWrites: () => readonly string[]
   /** Every `diag.warn` the commands recorded (the write-owner failure trail). */
   readonly warnings: () => readonly { readonly message: string; readonly fields?: Record<string, unknown> }[]
+  /** Every diagnostics level the real composition observed (debug/info/warn/error). */
+  readonly diagnostics: () => readonly { readonly level: string; readonly message: string; readonly fields?: Record<string, unknown> }[]
   /** Every `visualTools.setEnabled` value the UI dispatched, in order. */
   readonly visualWrites: () => readonly boolean[]
   /** The current fake Host state the ConfigPort reads. */
@@ -514,6 +516,9 @@ interface Harness {
   readonly connectWeb: () => void
   /** PR-A: the current fake Host state. */
   readonly webStatus: () => WebAccessStatus | undefined
+  /** PR-A: change the fake Host state WITHOUT a generation rollover (an
+   *  external writer changed the same Host). */
+  readonly setWebStatus: (status: WebAccessStatus) => void
   /** Every `backendStartupPreference.setBackend` value the UI dispatched. */
   readonly backendStartupWrites: () => readonly PublicBackendValue[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
@@ -624,6 +629,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const replaced: TuiSettingsDoc[] = []
   const calls: string[] = []
   const warnings: { message: string; fields?: Record<string, unknown> }[] = []
+  const diagnostics: { level: string; message: string; fields?: Record<string, unknown> }[] = []
   const held: Array<() => void> = []
   let reads = 0
   let hostReads = 0
@@ -883,7 +889,13 @@ function setup(options: HarnessOptions = {}): Harness {
     app,
     diag: (() => {
       const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
-      return { ...diag, warn: (message: string, fields?: Record<string, unknown>) => { warnings.push({ message, ...fields === undefined ? {} : { fields } }); diag.warn(message, fields) } }
+      const record = (level: 'debug' | 'info' | 'warn' | 'error') =>
+        (message: string, fields?: Record<string, unknown>) => {
+          diagnostics.push({ level, message, ...fields === undefined ? {} : { fields } })
+          if (level === 'warn') warnings.push({ message, ...fields === undefined ? {} : { fields } })
+          diag[level](message, fields)
+        }
+      return { ...diag, debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') }
     })(),
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -1597,6 +1609,7 @@ function setup(options: HarnessOptions = {}): Harness {
     notificationWrites: () => notificationWrites,
     terminalProgressWrites: () => terminalProgressWrites,
     warnings: () => warnings,
+    diagnostics: () => diagnostics,
     visualWrites: () => visualWrites,
     webAutoStartWrites: () => webAutoStartWrites,
     acpAutoStartWrites: () => acpAutoStartWrites,
@@ -1615,6 +1628,7 @@ function setup(options: HarnessOptions = {}): Harness {
       for (const listener of [...webGenerationListeners]) listener()
     },
     webStatus: () => webStatus,
+    setWebStatus: (status: WebAccessStatus) => { webStatus = status },
     acpStatusReads: () => acpStatusReads.count,
     acpEnabledWrites: () => acpEnabledWrites,
     bumpAcpGeneration: () => {
@@ -12203,9 +12217,22 @@ test('Open in browser requests the official URL exactly once and never paints it
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
   await openWebUi(h)
   assert.equal(h.webUrlReads(), 0, 'the first screen requests no URL')
-  await key(h, 'r') // refresh: still no URL
+  // A same-generation external writer changes the live listener: Refresh must
+  // perform a real authoritative read and repaint the fact, not silently no-op.
+  const readsBefore = h.webStatusReads()
+  h.setWebStatus({ state: 'disabled' })
+  await key(h, 'r')
   await settle(h)
+  assert.equal(h.webStatusReads(), readsBefore + 1, 'r performs exactly one real status read')
+  assert.match(webUiPlain(h), /Serving\s+Disabled/u, 'the refreshed fact is painted')
   assert.equal(h.webUrlReads(), 0, 'a refresh requests no URL')
+  h.setWebStatus({ state: 'enabled' })
+  await key(h, 'r')
+  await settle(h)
+  assert.equal(h.webStatusReads(), readsBefore + 2)
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u)
+  assert.equal(h.webEnabledWrites().length, 0, 'Refresh never toggles the Host')
+  assert.equal(h.webAutoStartWrites().length, 0, 'Refresh never writes the preference')
   await key(h, '\r') // Open in browser (first focus)
   await settle(h)
   assert.equal(h.webUrlReads(), 1, 'the explicit Open requests the URL exactly once')
@@ -12383,7 +12410,10 @@ test('a credential-bearing URL failure never reaches the real composition diagno
   assert.match(detailPaneText(h), /The access link could not be obtained or handed over\./u)
   assert.doesNotMatch(plain, new RegExp(canary, 'u'), 'the URL/token is never painted')
   assert.doesNotMatch(JSON.stringify(h.warnings()), new RegExp(canary, 'u'),
-    'the raw credential error never enters the write-owner diagnostics')
+    'the raw credential error never enters the write-owner warn diagnostics')
+  assert.doesNotMatch(JSON.stringify(h.diagnostics()), new RegExp(canary, 'u'),
+    'the raw credential error never enters ANY real diagnostics level (warn/error/info/debug)')
+  assert.doesNotMatch(h.notices().join('\n'), new RegExp(canary, 'u'), 'no notice carries the token')
   assert.deepEqual(h.openedUrls(), [], 'no URL reached the Client opener')
   assert.doesNotMatch(h.view(), new RegExp(canary, 'u'), 'no frame/notice carries the token')
   h.dispose()
@@ -12697,6 +12727,58 @@ test('a resize keeps the SAME mounted Web UI tenant and performs no extra Host r
   h.dispose()
 })
 
+test('the normal enabled/disabled page keeps a body Refresh route in the narrow Detail', async () => {
+  const h = setup({ columns: 44, rows: 20, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  const readsBefore = h.webStatusReads()
+  // A same-generation external writer changes the listener; the enabled page
+  // must keep the ONE semantic Refresh body route, not only a keyboard badge.
+  h.setWebStatus({ state: 'disabled' })
+  await highlightPageRow(h, 'Refresh')
+  await clickPainted(h, 'Refresh')
+  await settle(h)
+  assert.equal(h.webStatusReads(), readsBefore + 1, 'the fresh status read ran exactly once')
+  assert.match(webUiPlain(h), /Serving\s+Disabled/u, 'the refreshed fact is painted')
+  assert.equal(h.webEnabledWrites().length, 0, 'Refresh never toggles the Host')
+  assert.equal(h.webAutoStartWrites().length, 0, 'Refresh never writes the preference')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Refresh/u, 'the bar keeps its complete Refresh affordance')
+  h.dispose()
+})
+
+test('a 38-cell Detail completes the whole next-start preference journey by pointer only', async () => {
+  const h = setup({ columns: 80, rows: 24, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  assert.equal(h.webAutoStartWrites().length, 0)
+  assert.equal(h.webEnabledWrites().length, 0)
+  // The field/value cell only selects; no candidate/confirm opens.
+  await clickPainted(h, 'Start automatically')
+  assert.match(h.view(), /> Start automatically/mu, 'the field row took the cursor')
+  assert.doesNotMatch(detailPaneText(h), /Choose the value the next Host start applies:/u)
+  assert.equal(h.webAutoStartWrites().length, 0)
+  // The complete Change… affordance is the explicit choice entry.
+  await clickPainted(h, 'Change…')
+  await settle(h)
+  assert.match(detailPaneText(h), /Choose the value the next Host start applies:/u)
+  assert.equal(h.webAutoStartWrites().length, 0, 'opening the choice writes nothing')
+  // The complete candidate stages the confirmation only.
+  await clickPainted(h, 'On')
+  await settle(h)
+  assert.match(detailPaneText(h), /Save the next Host start preference as On\?/u)
+  assert.equal(h.webAutoStartWrites().length, 0, 'the complete candidate writes nothing')
+  // The complete body Confirm save is the ONE preference write.
+  await clickPainted(h, 'Confirm save')
+  await settle(h, 10)
+  assert.deepEqual(h.webAutoStartWrites(), [true], 'exactly one preference sink write')
+  assert.equal(h.webEnabledWrites().length, 0, 'the preference never toggles the running Host')
+  assert.match(detailPaneText(h), /Start automatically On(?:\s|·).*?Status Verified/u,
+    'the persisted value and its own settlement are painted')
+  // The real painted Back leaves the tenant once.
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u)
+  h.dispose()
+})
+
 test('a staged choice and an open confirmation block parent clicks until their own Cancel', async () => {
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
   await openWebUi(h)
@@ -12761,8 +12843,9 @@ test('a pending runtime write refuses parent clicks but the explicit page Back l
   await settle(h)
   assert.match(h.view(), /Settings · Host · Web UI/u, 'a pending write refuses parent navigation')
   // The page's own explicit Back is the documented exception: the write keeps
-  // settling in its owner, and the gone page can never repaint it.
-  await key(h, '\x1b')
+  // settling in its owner, and the gone page can never repaint it. Use the REAL
+  // painted last-row span, not a keyboard-only shortcut.
+  await clickPainted(h, 'Back [Esc]', true)
   await settle(h)
   assert.match(h.view(), /Settings · Host · Rows/u, 'the explicit page Back leaves the tenant')
   h.releaseWebToggle()

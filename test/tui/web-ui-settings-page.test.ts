@@ -273,10 +273,7 @@ test('the Esc ladder cancels a confirmation before leaving, and leaves no write 
 
 test('the next-start candidate ladder stages zero writes and saves only on Confirm save', async () => {
   const h = await mount({ status: { state: 'enabled' } })
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Disable -> Start automatically
-  assert.match(h.frame(), /^> Start automatically/mu)
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidate choice
   assert.match(h.frame(), /Choose the value the next Host start applies:/u)
   assert.match(h.frame(), /Off\s+\[current\]/u, 'the current candidate carries the whole state chip')
@@ -403,9 +400,7 @@ test('a short grant keeps ONE scrollable column and the Esc affordance', async (
 
 test('a committed preference re-reads the persisted value, never the requested one', async () => {
   const h = await mount({ status: { state: 'enabled' } })
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates
   await h.key('\r') // confirm step
   await h.key('\r') // Confirm save
@@ -492,9 +487,7 @@ test('a status reply from a superseded generation is never painted as current', 
 test('a Host rollover revokes the next-start edit grant taken from the old Config mirror', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   // Stage the confirmation through the page's own ladder (zero writes so far).
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidate choice
   await h.key('\r') // -> confirm-save
   assert.match(h.frame(), /Save the next Host start preference as On\?/u)
@@ -526,7 +519,7 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
   // fixture writer refuses any other revision.
   for (let step = 0; step < 8 && !/^> Open in browser/mu.test(h.frame()); step += 1) await h.key('\x1b[B')
   assert.match(h.frame(), /^> Open in browser/mu, 'the focus is deterministic before the staged change')
-  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B') // Open -> Copy -> Disable -> Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates: the OPPOSITE of the persisted On is staged (Off)
   await h.key('\r') // -> confirm-save
   await h.key('\r') // Confirm save
@@ -540,9 +533,7 @@ test('a Host rollover revokes the next-start edit grant taken from the old Confi
 test('a same-generation Config update refuses the staged confirmation instead of rebasing its revision', async () => {
   const h = await mount({ status: { state: 'enabled' } })
   // Stage the confirmation at revision 1.
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates
   await h.key('\r') // -> confirm-save
   assert.match(h.frame(), /Save the next Host start preference as On\?/u)
@@ -558,7 +549,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
   assert.match(h.frame(), /Start automatically\s+On · Change…/u, 'the CURRENT value is painted for review')
   // A NEW choice is opened at the CURRENT revision and succeeds.
   for (let step = 0; step < 8 && !/^> Open in browser/mu.test(h.frame()); step += 1) await h.key('\x1b[B')
-  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B')
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates: the OPPOSITE of On is staged (Off)
   await h.key('\r') // -> confirm-save
   await h.key('\r') // Confirm save
@@ -571,9 +562,7 @@ test('a same-generation Config update refuses the staged confirmation instead of
 
 test('a throwing commit is an honest unconfirmed outcome', async () => {
   const h = await mount({ status: { state: 'enabled' }, commitFailure: 'the writer crashed' })
-  await h.key('\x1b[B')
-  await h.key('\x1b[B')
-  await h.key('\x1b[B') // Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r') // candidates
   await h.key('\r') // confirm step
   await h.key('\r') // Confirm save
@@ -615,6 +604,18 @@ async function clickCell(h: PageHarness, row: number, col: number): Promise<void
 }
 
 const flat = (text: string): string => text.replace(/\s+/gu, ' ')
+
+/** Move the page cursor onto `label` using the real Down key, stopping on the
+ *  semantic SELECTED row rather than a hardcoded count (Refresh is a real body
+ *  action in every normal ready/settled projection). */
+async function focusPaintedRow(h: PageHarness, label: string): Promise<void> {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  for (let step = 0; step < 16; step += 1) {
+    if (new RegExp(`^> ${escaped}(?:\\s|$)`, 'mu').test(h.frame())) return
+    await h.key('\x1b[B')
+  }
+  assert.fail(`the page row "${label}" never owned the selection:\n${h.frame()}`)
+}
 
 test('a complete verb is the only pointer action; the row padding only selects', async () => {
   const h = await mount({ status: { state: 'enabled' } })
@@ -724,9 +725,41 @@ test('credential-bearing link failures never reach the owned task logger or a pa
   clipboard.close()
 })
 
+
+test('the save confirmation requires its complete copy in the same frame and recovers by resize', async () => {
+  const h = await mount({ status: { state: 'enabled' }, columns: 44, rows: 30 })
+  await focusPaintedRow(h, 'Start automatically')
+  await h.key('\r') // candidate choice
+  await h.key('\r') // stage On -> confirm-save
+  assert.match(h.frame(), /Save the next Host start preference as On\?/u)
+  // A grant that cannot paint a required copy line together with the accept
+  // row must not expose the accept word or admit Enter.
+  h.vt.resize(44, 4)
+  await h.flush()
+  assert.doesNotMatch(h.frame(), /Confirm save/u, 'the accept word is not painted without its complete copy')
+  assert.doesNotMatch(h.bar(), /Confirm save/u)
+  await h.key('\r')
+  assert.equal(h.commits().length, 0, 'Enter on the gated accept writes nothing')
+  // Clicking the blank accept-line cells where the row WOULD be also writes
+  // nothing: the gated line publishes no target at all.
+  await clickCell(h, 2, 0)
+  assert.equal(h.commits().length, 0, 'a blank-cell click on the gated accept writes nothing')
+  // A sufficient grant plus a real scroll home restores the SAME accept span;
+  // a fresh POINTER accept then dispatches exactly once.
+  h.vt.resize(44, 8)
+  await h.flush()
+  await h.key('\x1b[H')
+  assert.match(h.frame(), /^> Confirm save/mu)
+  const acceptRow = rowOfPlain(h, 'Confirm save')
+  await clickCell(h, acceptRow, colOfPlain(h, acceptRow, 'Confirm save'))
+  await h.flush()
+  assert.deepEqual(h.commits(), ['On'], 'the recovered complete frame dispatches exactly once by pointer')
+  h.close()
+})
+
 test('a Host rollover retires a staged choice even when the new mirror keeps the same revision', async () => {
   const h = await mount({ status: { state: 'enabled' } })
-  for (let step = 0; step < 3; step += 1) await h.key('\x1b[B') // Open -> Copy -> Disable -> Start automatically
+  await focusPaintedRow(h, 'Start automatically')
   await h.key('\r')
   await h.key('\r')
   assert.match(h.frame(), /Save the next Host start preference as On\?/u)

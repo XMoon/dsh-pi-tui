@@ -1087,6 +1087,14 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       // checking / unreadable / split-host-only: no Host action exists.
       rows.push({ id: 'refresh', kind: 'action', label: 'Refresh' })
     }
+    // A normal enabled/disabled Host still needs the page's explicit Refresh:
+    // the live listener can change under a same-generation external writer, and
+    // `r`/the bar must not become a hidden no-op. The row is the SAME existing
+    // `refreshAll` action and the SAME painted admission as every other verb;
+    // the changing/unavailable/Direct projections already publish exactly one.
+    if (!rows.some(row => row.id === 'refresh')) {
+      rows.push({ id: 'refresh', kind: 'action', label: 'Refresh' })
+    }
     if (this.preferenceEditable()) {
       rows.push({
         id: 'autostart',

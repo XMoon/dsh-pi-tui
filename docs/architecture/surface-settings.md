@@ -1005,8 +1005,12 @@ business verbs (`Open in browser`, `Copy access link`, `Enable Web`,
 are different controls: clicking a COMPLETE verb executes it (Disable only
 enters its risk confirmation), the backing padding/blank cells only select the
 row, and `Change…` on the field is the explicit entry into the candidate
-choice. The whole-row blank/padding click is NEVER a business action. The same
-`Start automatically` flow is: select the field, open the `Change…` choice,
+choice. The whole-row blank/padding click is NEVER a business action. `Refresh` is a
+real body action in EVERY `ready`/`settled` projection (not only the
+changing/unavailable one): it performs one authoritative status read, and the
+same painted admission gates the body verb, the bar span and `r`; a
+same-generation external listener change is therefore refreshable without a
+hidden key. The same `Start automatically` flow is: select the field, open the `Change…` choice,
 choose `On`/`Off` (the current one carries `[current]`; staging writes nothing),
 then the ONE explicit `Confirm save`.
 
@@ -1018,8 +1022,8 @@ are gated by the SAME rule and by the complete necessary copy in that frame:
 
 | Phase | Body / actions | Confirm and `Esc` |
 |---|---|---|
-| enabled Host | `Open in browser`, `Copy access link` (`Contains a sign-in token`), `Disable Web…` (`Stops serving; does not revoke access`) | `Esc` performs the clean parent leave |
-| disabled Host | `Enable Web` | `Esc` performs the clean parent leave |
+| enabled Host | `Open in browser`, `Copy access link` (`Contains a sign-in token`), `Disable Web…` (`Stops serving; does not revoke access`), `Refresh` | `Esc` performs the clean parent leave |
+| disabled Host | `Enable Web`, `Refresh` | `Esc` performs the clean parent leave |
 | changing / unavailable / unreadable | `Refresh` only, never a Host write | `Esc` performs the clean parent leave |
 | `confirm-disable` | the exact sentence `Stop serving the Web UI? Existing browser credentials and sessions are not revoked.` FIRST, then `Disable Web` and `Cancel` | the accept row and the `Confirm [Enter]` bar segment exist ONLY while the whole risk sentence shares the painted viewport; a short grant paints no accept word and Enter is inert, while `Cancel`/`Esc` always performs zero writes. A selected `Cancel` never advertises an Enter confirm |
 | `Next Host Start` choice | `Choose the value the next Host start applies:`, the complete `On`/`Off` candidates and the next-start-only lifetime sentence | choosing/`Select [Enter]` stages only; no write |
