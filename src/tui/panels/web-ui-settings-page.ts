@@ -1,13 +1,15 @@
 /**
- * The `/settings → Host → Web UI` page (PR-A): the ONE Web frontend surface.
+ * The `/settings → Host → Web UI` page (SUX-04): the ONE Web frontend surface.
  *
- * It is mounted as an EMBEDDED SPECIALIST PAGE inside the existing Settings
- * Workspace lease (the same body grant and physical last-row Action Bar as the
- * Web Search / Fetch page) — never a second alt-screen overlay, never a second
- * Settings screen. `/web` and the `Host → Web UI` row reach the SAME page class
- * through the SAME factory.
+ * It is mounted as a real Detail TENANT inside the existing Settings Workspace
+ * lease: the parent Categories/Rows stay painted and readable, the root keeps
+ * the ONE physical last-row Action Bar and the ONE Esc target, and only this
+ * page's body cells belong to the child. It is never a second alt-screen
+ * overlay, never a second Settings screen. `/web` and the `Host → Web UI` row
+ * reach the SAME page class through the SAME factory.
  *
- * Two authorities are painted side by side and are NEVER merged:
+ * Two authorities are painted as two separate reading groups and are NEVER
+ * merged:
  *  - `Current Host` is the LIVE listener state of the running Split Host, read
  *    through the semantic `WebAccessPort` and bound to the Connection
  *    generation it was read under. Every Host action is qualified by a CURRENT
@@ -19,11 +21,21 @@
  *    `web-autostart` writer. Toggling the running Host never changes it, and
  *    saving it never toggles the running Host.
  *
+ * Admission is ONE local semantic fact: only an action whose complete verb,
+ * candidate or confirmation row was really painted in the CURRENT frame may be
+ * activated — by a pointer press/release at the painted cells, by the page's
+ * bar span or by the keyboard. A whole-row blank/padding click only selects.
+ * A confirmation is never admitted until its necessary risk/question copy was
+ * completely painted in the SAME frame; a short grant paints only the safe
+ * Cancel/Esc until the user scrolls or resizes to a sufficient grant.
+ *
  * Authority is deliberately NOT here: the page owns only transient
  * presentation state (phase, cursor, scroll offset, staged candidate, the
  * last-painted pointer geometry). The authenticated launch URL is requested
  * ONLY by an explicit Open/Copy action, handed straight to the Client opener or
- * clipboard, and never painted, stored or logged.
+ * clipboard, and never painted, stored or logged; a credential-bearing failure
+ * is converted to a fixed safe fact BEFORE it can reach the owned-task
+ * diagnostic.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/web-ui-settings-page
  */
@@ -36,7 +48,7 @@ import { ACTION_BAR_SEPARATOR, layoutActionBarRow, type ActionBarSegment } from 
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
-import type { SettingsWorkspaceCommitOutcome, EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
+import type { SettingsWorkspaceCommitOutcome, EmbeddedSpecialistPage, SpecialistParentLeaveTarget } from './settings-workspace-panel.ts'
 
 /** The page's own name (the Settings row label, the breadcrumb tail and the
  *  pane header). */
@@ -82,9 +94,12 @@ interface OutcomeNote {
   readonly detail?: string
 }
 
-/** One focusable row of the current projection. */
+/** One focusable row of the current projection. `field` rows select on a row
+ *  click and expose ONE explicit `Change…` action; `action` rows publish the
+ *  complete business verb itself. */
 interface RowSpec {
   readonly id: string
+  readonly kind: 'action' | 'field'
   readonly label: string
   /** The row's own value / explanation column (a secondary fact). */
   readonly value?: string
@@ -96,10 +111,27 @@ interface RowSpec {
   readonly affordance?: string
 }
 
-/** One painted body line plus the row it belongs to (when focusable). */
+/** One painted body hit span, in this page's own columns. A `select` span only
+ *  moves the cursor; an `action` span runs the row's explicit intent. */
+interface BodyTarget {
+  readonly kind: 'select' | 'action'
+  readonly id: string
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** One painted body line plus the row it belongs to (when focusable) and its
+ *  complete-span admission. */
 interface ContentLine {
   readonly text: string
   readonly rowId?: string
+  readonly targets?: readonly BodyTarget[]
+  /** Necessary copy: a gated entry may only act while every line of this group
+   *  is inside the SAME painted viewport. */
+  readonly group?: 'copy'
+  /** This line is the explicit accept entry: blank unless its copy group is
+   *  complete in the same frame (and then its span is the ONLY accept grant). */
+  readonly gatedBy?: 'copy'
 }
 
 /** The geometry the page publishes to the Settings root for ONE painted frame:
@@ -109,7 +141,7 @@ interface PagePaint {
   readonly width: number
   readonly rows: number
   readonly identity: string
-  readonly targets: readonly { readonly id: string; readonly row: number; readonly startCol: number; readonly endCol: number }[]
+  readonly targets: readonly { readonly kind: BodyTarget['kind']; readonly id: string; readonly row: number; readonly startCol: number; readonly endCol: number }[]
   readonly scrollStart: number
   readonly scrollEnd: number
   readonly maxOffset: number
@@ -130,50 +162,17 @@ const REFRESH_KEY = 'r'
 /** The fixed label column. It fits the longest product label (`Start
  *  automatically`) and keeps every section's values in one column. */
 const LABEL_COLUMN = 19
-/** The label column never shrinks below this: a shorter one identifies nothing. */
-const MIN_LABEL_ROOM = 6
+/** Two-cell content indent shared by every body line/continuation. */
+const INDENT = '  '
 
 /** The exact confirm sentence of the runtime write (never paraphrased). */
 const DISABLE_QUESTION = 'Stop serving the Web UI? Existing browser credentials and sessions are not revoked.'
-
-export interface WebUiSettingsPageIntents {
-  /** The backend locality: Direct owns no Split Host Web frontend. */
-  readonly backendKind: 'direct' | 'remote'
-  /** ONE Host status read (the command owner's read authority). */
-  readonly readStatus: () => Promise<WebAccessStatus>
-  /** ONE Host toggle, fenced to the generation the user's action was read
-   *  under (a replaced Host never receives the old choice). */
-  readonly setEnabled: (enabled: boolean, expectedGeneration?: unknown) => Promise<WebAccessStatus>
-  /** ONE official launch URL, fenced to the generation the state was read
-   *  under; only an explicit Open/Copy asks for it. */
-  readonly getAuthenticatedUrl: (expectedGeneration?: unknown) => Promise<{ readonly url: string }>
-  /** The Client-local OS opener (the Host never runs a browser opener).
-   *  `false` = this composition has no opener, so nothing was requested. */
-  readonly openUrl: (url: string) => boolean
-  /** The Client-local clipboard; resolves whether the URL was copied. */
-  readonly copyToClipboard: (text: string) => Promise<boolean>
-  /** The persisted next-launch preference, or `undefined` when the profile
-   *  section cannot be read at all. */
-  readonly readPreference: () => WebStartupPreferenceState | undefined
-  /** The live Config readiness (`ready` is the only writable state). */
-  readonly configReadiness: () => 'ready' | 'stale' | 'unavailable'
-  /** The EXISTING revision-checked `web-autostart` writer. A resolved write is
-   *  not a read-back: the four official outcomes decide what is painted. */
-  readonly commitAutostart: (value: 'On' | 'Off', revision: number) => Promise<SettingsWorkspaceCommitOutcome>
-  /** The opaque current Connection generation (object identity). */
-  readonly currentGeneration: () => unknown
-  /** Observe Connection generation changes (Direct is a no-op). */
-  readonly subscribeGeneration: (listener: () => void) => () => void
-  /** The owned-task entry (the runner's diagnostics pre-attached). A write it
-   *  dispatches keeps settling in its own owner after this page is gone. */
-  readonly runOwned: (label: string, task: () => Promise<void>, onError: (error: unknown) => void) => void
-  /** The write OWNER's diagnostics: a dispatched write that no longer has a
-   *  live page is still diagnosed instead of silently lost. */
-  readonly diagnose: (label: string, detail: Record<string, unknown>) => void
-  readonly requestRender: () => void
-  /** Leave the page (the root keeps Settings and returns to `Host · Rows`). */
-  readonly done: () => void
-}
+/** The next-start choice prompt and its frozen lifetime fact. */
+const CHOOSE_PROMPT = 'Choose the value the next Host start applies:'
+const NEXT_START_ONLY = 'Applies on the next Host start; the running Host is unchanged.'
+/** The ONE fixed reason a credential-bearing hand-off failure may paint or
+ *  diagnose: it never carries the URL, its query, an error message or a cause. */
+const LINK_FAILURE_REASON = 'The access link could not be obtained or handed over.'
 
 /** The `Serving` word + tone of one Host status (design language role 9). */
 function servingWord(status: WebAccessStatus): { readonly text: string; readonly tone: 'success' | 'muted' | 'warning' | 'error' } {
@@ -229,7 +228,7 @@ function statusInk(tone: 'success' | 'error' | 'warning' | 'muted', text: string
   return color.textMuted(text)
 }
 
-/** Paint one already-truncated value by its content role. */
+/** Paint one already-sanitized value by its content role. */
 function valueInk(ink: 'text' | 'dim' | 'error' | 'muted', text: string): string {
   if (ink === 'dim') return color.textDim(text)
   if (ink === 'error') return color.error(text)
@@ -272,6 +271,9 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   private writeSerial = 0
   private awaitingPaint = true
   private paint: PagePaint | undefined
+  /** The actions whose COMPLETE span the last painted frame really published:
+   *  the keyboard reads exactly this set, like the pointer does. */
+  private paintedActions = new Set<string>()
   private pressed: { readonly paint: PagePaint; readonly target: PagePaint['targets'][number] } | undefined
   private escapeSpan: { readonly startCol: number; readonly endCol: number } | undefined
   private barSpans: readonly { readonly id: string; readonly action: BarAction; readonly startCol: number; readonly endCol: number }[] = []
@@ -321,6 +323,19 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   }
   invalidate(): void {}
 
+  /**
+   * The ONE user parent-leave query of the Detail tenant. The two authorities
+   * are independent and asynchronous, so a clean browse (or a loaded page whose
+   * read is still in flight) leaves immediately; a staged next-start choice, an
+   * open confirmation and a dispatched pending write keep the page until the
+   * user's own local Cancel/Back. It never navigates, writes or cancels an
+   * already dispatched write.
+   */
+  requestParentLeave(_target: SpecialistParentLeaveTarget, _leave: () => void): 'allow' | 'refuse' {
+    if (this.disposed) return 'refuse'
+    return this.phase === 'ready' || this.phase === 'settled' || this.phase === 'loading' ? 'allow' : 'refuse'
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -329,14 +344,15 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.unsubscribe()
   }
 
-  /** Any state change retires the last frame's pointer grant and the pending
-   *  press; the next real paint republishes both. */
+  /** Any state change retires the last frame's pointer grant, its action
+   *  admission and the pending press; the next real paint republishes them. */
   private revoke(): void {
     this.revision += 1
     this.awaitingPaint = true
     this.pressed = undefined
     this.escapeSpan = undefined
     this.barSpans = []
+    this.paintedActions.clear()
   }
   private changed(): void {
     if (this.disposed) return
@@ -424,6 +440,12 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     if (this.disposed || this.host.kind === 'split-host-only') return
     this.readSerial += 1
     this.host = { kind: 'checking' }
+    // Every ACTUAL rollover retires a local staged preference intent, even
+    // when the new Config mirror happens to expose the SAME revision: the
+    // decision was made against the old Host's authority. A dispatched write
+    // (`pending-*`) is never cancelled or replayed here — its own owner settles
+    // and diagnoses it.
+    this.retireStagedChoice()
     if (this.phase === 'pending-runtime') {
       // The request belonged to the replaced Host: retire this page's right to
       // paint its result (its owner still settles and diagnoses) and state the
@@ -440,6 +462,13 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.reconcilePreference()
     this.changed()
     this.startStatusRead()
+  }
+
+  /** Drop a not-yet-dispatched next-start intent (phase and decision fence). */
+  private retireStagedChoice(): void {
+    this.autostartCandidate = undefined
+    this.autostartFence = undefined
+    if (this.phase === 'choose-autostart' || this.phase === 'confirm-save') this.phase = 'ready'
   }
 
   /**
@@ -517,12 +546,19 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.changed()
   }
 
+  /** The keyboard's ONE Enter sink: only an action whose complete span the LAST
+   *  painted frame really published may run. */
   private activateSelected(): void {
-    if (this.selectedId !== undefined) this.activateRow(this.selectedId)
+    const id = this.selectedId
+    if (id !== undefined) this.activateRow(id)
   }
 
   private activateRow(id: string): void {
     if (this.disposed) return
+    // The ONE semantic admission shared by the body span, the bar span and the
+    // keyboard: a row that is not completely painted/actionable right now can
+    // never write or open a confirmation.
+    if (!this.paintedActions.has(id)) return
     // An action is admitted against a CURRENT Config observation, never against
     // the projection a previous frame captured.
     this.reconcilePreference()
@@ -607,7 +643,16 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     const generation = host.generation
     this.runtimeOutcome = undefined
     this.intents.runOwned('web ui open browser', async () => {
-      const { url } = await this.intents.getAuthenticatedUrl(generation)
+      let url: string
+      try {
+        url = (await this.intents.getAuthenticatedUrl(generation)).url
+      } catch {
+        // The request may carry the launch URL/error text: it is converted to
+        // the fixed no-secret fact HERE, before the owned-task diagnostic or
+        // any painted cell can observe it.
+        this.reportLinkFailure('open')
+        return
+      }
       if (this.disposed) return
       // The URL belongs to the Host that produced it: a replacement between the
       // reply and the sink revokes it BEFORE it can reach the Client opener.
@@ -618,16 +663,18 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       // The Client-local opener is the ONLY consumer of the launch URL: it is
       // never painted, stored or logged. Success only claims the request, and
       // only when an opener really exists.
-      const requested = this.intents.openUrl(url)
+      let requested: boolean
+      try {
+        requested = this.intents.openUrl(url)
+      } catch {
+        this.reportLinkFailure('open')
+        return
+      }
       this.runtimeOutcome = requested
         ? { word: 'Browser open requested', tone: 'muted' }
         : { word: 'Browser opener unavailable', tone: 'error' }
       this.changed()
-    }, (error) => {
-      if (this.disposed) return
-      this.runtimeOutcome = { word: 'Open failed', tone: 'error', detail: safeErrorMessage(error) }
-      this.changed()
-    })
+    }, () => { this.reportLinkFailure('open') })
   }
 
   private copyLink(): void {
@@ -636,7 +683,13 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     const generation = host.generation
     this.runtimeOutcome = undefined
     this.intents.runOwned('web ui copy link', async () => {
-      const { url } = await this.intents.getAuthenticatedUrl(generation)
+      let url: string
+      try {
+        url = (await this.intents.getAuthenticatedUrl(generation)).url
+      } catch {
+        this.reportLinkFailure('copy')
+        return
+      }
       if (this.disposed) return
       // Same sink fence as Open: an old Host's token never reaches the
       // clipboard of the replacement Host's session.
@@ -644,17 +697,32 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
         this.refuseReplacedLink('copy', generation)
         return
       }
-      const copied = await this.intents.copyToClipboard(url)
+      let copied: boolean
+      try {
+        copied = await this.intents.copyToClipboard(url)
+      } catch {
+        this.reportLinkFailure('copy')
+        return
+      }
       if (this.disposed) return
       this.runtimeOutcome = copied
         ? { word: 'Link copied', tone: 'muted' }
         : { word: 'Clipboard unavailable', tone: 'error' }
       this.changed()
-    }, (error) => {
-      if (this.disposed) return
-      this.runtimeOutcome = { word: 'Clipboard unavailable', tone: 'error', detail: safeErrorMessage(error) }
-      this.changed()
-    })
+    }, () => { this.reportLinkFailure('copy') })
+  }
+
+  /** The ONE credential-safe failure projection: the fixed word + fixed
+   *  reason. The original error, its cause and the URL never reach the UI or
+   *  the owned-task diagnostic. */
+  private reportLinkFailure(kind: 'open' | 'copy'): void {
+    if (this.disposed) return
+    this.runtimeOutcome = {
+      word: kind === 'open' ? 'Open failed' : 'Clipboard unavailable',
+      tone: 'error',
+      detail: LINK_FAILURE_REASON,
+    }
+    this.changed()
   }
 
   /** An official URL produced by a REPLACED Host is dropped, never handed to
@@ -871,7 +939,12 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.pressed = undefined
     if (matchesKey(data, 'escape')) { this.cancelPhase(); return }
     if (this.phase === 'pending-runtime' || this.phase === 'pending-config') return
-    if (data === REFRESH_KEY || data === REFRESH_KEY.toUpperCase()) { this.refreshAll(); return }
+    if (data === REFRESH_KEY || data === REFRESH_KEY.toUpperCase()) {
+      // The refresh shortcut has the SAME admission as its painted row: a row
+      // the current grant does not paint publishes no action at all.
+      if (this.paintedActions.has('refresh')) this.refreshAll()
+      return
+    }
     if (matchesKey(data, 'up')) { this.move(-1); return }
     if (matchesKey(data, 'down')) { this.move(1); return }
     if (matchesKey(data, 'pageUp')) { this.scroll(-Math.max(1, this.bodyRows() - 2)); return }
@@ -884,20 +957,25 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
   }
 
   /** Invoke one delegated Action Bar intent. The id came from the LAST painted
-   *  frame; the live page state re-proves it before the SAME keyboard sink. */
+   *  frame; the live page re-proves the semantic admission before the SAME
+   *  keyboard sink. */
   activateBarSpan(id: string): void {
     if (this.disposed || this.awaitingPaint) return
     if (this.paint !== undefined && this.paint.identity !== this.gestureIdentity()) return
     const span = this.barSpans.find(candidate => candidate.id === id)
     if (span === undefined) return
     switch (span.action) {
-      case 'refresh': this.refreshAll(); return
+      case 'refresh': if (this.paintedActions.has('refresh')) this.refreshAll(); return
       case 'select': this.activateSelected(); return
       case 'confirm':
-        // The bar's confirm names the PHASE's own confirmation, not whichever
-        // row the cursor happens to rest on (the Cancel row is a sibling).
-        if (this.phase === 'confirm-disable') this.dispatchRuntime(false)
-        else if (this.phase === 'confirm-save') this.dispatchConfig()
+        // The bar's confirm names the PHASE's own confirmation, never whichever
+        // row the cursor happens to rest on: the Cancel row is a sibling and
+        // never advertises an Enter confirm.
+        if (this.phase === 'confirm-disable') {
+          if (this.paintedActions.has('confirm-disable')) this.dispatchRuntime(false)
+        } else if (this.phase === 'confirm-save') {
+          if (this.paintedActions.has('confirm-save')) this.dispatchConfig()
+        }
         return
     }
   }
@@ -921,7 +999,12 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       this.scroll(event.wheelDelta < 0 ? -1 : 1)
       return { handled: true }
     }
-    const target = paint.targets.find(target => target.row === event.y && event.x >= target.startCol && event.x < target.endCol)
+    // A complete ACTION span wins over the row's select-only surface: blank and
+    // padding cells can only move the cursor, never write.
+    const target = paint.targets.find(candidate => candidate.kind === 'action'
+      && candidate.row === event.y && event.x >= candidate.startCol && event.x < candidate.endCol)
+      ?? paint.targets.find(candidate => candidate.kind === 'select'
+        && candidate.row === event.y && event.x >= candidate.startCol && event.x < candidate.endCol)
     if (target === undefined || event.button !== 'left') {
       if (event.type === 'click') this.pressed = undefined
       return undefined
@@ -932,18 +1015,19 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     }
     if (event.type !== 'click' || pressed === undefined
       || pressed.paint.identity !== paint.identity || pressed.paint.width !== paint.width || pressed.paint.rows !== paint.rows
-      || pressed.target.id !== target.id || pressed.target.row !== target.row
+      || pressed.target.kind !== target.kind || pressed.target.id !== target.id || pressed.target.row !== target.row
       || pressed.target.startCol !== target.startCol || pressed.target.endCol !== target.endCol) {
       if (event.type === 'click') this.pressed = undefined
       return undefined
     }
     this.pressed = undefined
-    // A click SELECTS the row it landed on first (the visible cursor must match
-    // what the pointer acts on), then runs the SAME Enter sink.
+    // A click always SELECTS the row it landed on first (the visible cursor
+    // must match what the pointer acts on); only a complete action span runs
+    // the row's explicit intent.
     this.selectedId = target.id
     this.revealSelection = true
     this.revision += 1
-    this.activateRow(target.id)
+    if (target.kind === 'action') this.activateRow(target.id)
     this.intents.requestRender()
     return { handled: true }
   }
@@ -963,18 +1047,18 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
         return []
       case 'confirm-disable':
         return [
-          { id: 'confirm-disable', label: 'Disable Web' },
-          { id: 'cancel', label: 'Cancel' },
+          { id: 'confirm-disable', kind: 'action', label: 'Disable Web' },
+          { id: 'cancel', kind: 'action', label: 'Cancel' },
         ]
       case 'choose-autostart':
         return [
-          { id: 'candidate-on', label: 'On', ...(this.preference?.autoStart === true ? { chip: '[current]' } : {}) },
-          { id: 'candidate-off', label: 'Off', ...(this.preference?.autoStart === false ? { chip: '[current]' } : {}) },
+          { id: 'candidate-on', kind: 'action', label: 'On', ...(this.preference?.autoStart === true ? { chip: '[current]' } : {}) },
+          { id: 'candidate-off', kind: 'action', label: 'Off', ...(this.preference?.autoStart === false ? { chip: '[current]' } : {}) },
         ]
       case 'confirm-save':
         return [
-          { id: 'confirm-save', label: 'Confirm save' },
-          { id: 'cancel', label: 'Cancel' },
+          { id: 'confirm-save', kind: 'action', label: 'Confirm save' },
+          { id: 'cancel', kind: 'action', label: 'Cancel' },
         ]
       case 'ready':
       case 'settled':
@@ -986,26 +1070,27 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       switch (host.status.state) {
         case 'enabled':
           rows.push(
-            { id: 'open', label: 'Open in browser' },
-            { id: 'copy', label: 'Copy access link', value: 'Contains a sign-in token', valueInk: 'dim' },
-            { id: 'disable', label: 'Disable Web…', value: 'Stops serving; does not revoke access', valueInk: 'dim' },
+            { id: 'open', kind: 'action', label: 'Open in browser' },
+            { id: 'copy', kind: 'action', label: 'Copy access link', value: 'Contains a sign-in token', valueInk: 'dim' },
+            { id: 'disable', kind: 'action', label: 'Disable Web…', value: 'Stops serving; does not revoke access', valueInk: 'dim' },
           )
           break
         case 'disabled':
-          rows.push({ id: 'enable', label: 'Enable Web' })
+          rows.push({ id: 'enable', kind: 'action', label: 'Enable Web' })
           break
         case 'changing':
         case 'unavailable':
-          rows.push({ id: 'refresh', label: 'Refresh' })
+          rows.push({ id: 'refresh', kind: 'action', label: 'Refresh' })
           break
       }
     } else {
       // checking / unreadable / split-host-only: no Host action exists.
-      rows.push({ id: 'refresh', label: 'Refresh' })
+      rows.push({ id: 'refresh', kind: 'action', label: 'Refresh' })
     }
     if (this.preferenceEditable()) {
       rows.push({
         id: 'autostart',
+        kind: 'field',
         label: 'Start automatically',
         value: preferenceSummary(this.preference, this.preferenceReadiness),
         valueInk: 'text',
@@ -1037,77 +1122,214 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.selectedId = next
   }
 
-  /** One `Label   value` fact line (label ink = role 5, value already painted). */
-  private factLine(label: string, value: string, width: number): string {
-    const room = Math.max(MIN_LABEL_ROOM, LABEL_COLUMN)
-    const paintedLabel = truncateToWidth(label, room, '…', false)
-    const padding = ' '.repeat(Math.max(0, room - visibleWidth(paintedLabel)))
-    return `  ${color.textDim(paintedLabel)}${padding} ${value}`
+  /** One section heading (role 2/5). */
+  private header(label: string): ContentLine {
+    return { text: color.textDim(label) }
   }
 
-  /** One list row: `cursor + label + value + affordance + chip`. The whole row
-   *  is the pointer target when it is focusable. */
-  private listLine(row: RowSpec, width: number): string {
-    const selected = this.selectedId === row.id
-    const marker = selected ? color.primary('> ') : '  '
-    const chipText = row.chip === undefined ? '' : `  ${row.chip}`
-    const chipWidth = row.chip === undefined ? 0 : visibleWidth(chipText)
-    const room = Math.max(MIN_LABEL_ROOM, LABEL_COLUMN - chipWidth)
-    const label = truncateToWidth(row.label, room, '…', false)
-    const paintedLabel = `${selected ? color.textStrong(label) : color.text(label)}${' '.repeat(Math.max(0, room - visibleWidth(label)))}`
-    const tailRoom = Math.max(0, width - visibleWidth(marker) - room - 1 - chipWidth)
-    // The affordance is painted WHOLE right after the value and dropped whole
-    // when it cannot fit; it is never truncated into a different verb.
-    const affordance = row.affordance === undefined ? undefined : `· ${row.affordance}`
-    const affordanceWidth = affordance === undefined ? 0 : visibleWidth(affordance)
-    const fitsAffordance = affordance !== undefined && row.value !== undefined && affordanceWidth + 1 <= tailRoom
-    const reserved = fitsAffordance ? affordanceWidth + 1 : 0
-    const value = row.value === undefined ? '' : truncateToWidth(row.value, Math.max(0, tailRoom - reserved), '…', false)
-    const valueWidth = row.value === undefined ? 0 : visibleWidth(value)
-    const paintedValue = row.value === undefined ? '' : valueInk(row.valueInk ?? 'text', value)
-    const paintedAffordance = fitsAffordance ? ` ${color.primary(affordance!)}` : ''
-    const padding = ' '.repeat(Math.max(0, tailRoom - valueWidth - reserved))
-    return `${marker}${paintedLabel} ${paintedValue}${paintedAffordance}${padding}${chipText}`
-  }
-
-  /** One diagnostic sentence, wrapped to the pane width and painted whole. */
-  private wrapped(text: string, ink: 'text' | 'dim' | 'error', width: number): ContentLine[] {
+  /** A diagnostic/risk/question sentence, wrapped to the pane width and painted
+   *  whole. Every physical line becomes a `copy` group member when asked. */
+  private wrapped(text: string, ink: 'text' | 'dim' | 'error', width: number, group?: 'copy'): ContentLine[] {
     return wrapTextWithAnsi(sanitizedPhysicalLine(text), Math.max(1, width)).map(line => ({
       text: valueInk(ink === 'error' ? 'error' : ink === 'text' ? 'text' : 'dim', line),
+      ...(group === undefined ? {} : { group }),
     }))
+  }
+
+  /** One `Label   value` fact. A value that does not fit the real cells is
+   *  WRAPPED (never truncated into a different writable-looking value): the
+   *  complete label and the complete value are always preserved. */
+  private factLines(label: string, paintedValue: string, width: number): ContentLine[] {
+    const indentCells = INDENT.length
+    const labelRoom = Math.max(1, Math.min(LABEL_COLUMN, width - indentCells - 1))
+    const labelCells = visibleWidth(label)
+    if (labelCells > labelRoom) {
+      // The identity does not fit its column: paint it complete on its own
+      // line(s), then the value below.
+      const lines: ContentLine[] = wrapTextWithAnsi(color.textDim(sanitizedPhysicalLine(label)), Math.max(1, width))
+        .map(text => ({ text }))
+      for (const line of wrapTextWithAnsi(paintedValue, Math.max(1, width - indentCells))) {
+        lines.push({ text: `${INDENT}${line}` })
+      }
+      return lines
+    }
+    const valueRoom = width - indentCells - labelRoom - 1
+    const labelPad = ' '.repeat(labelRoom - labelCells)
+    const paintedLabel = `${INDENT}${color.textDim(label)}${labelPad} `
+    if (valueRoom >= 1) {
+      const valueLines = wrapTextWithAnsi(paintedValue, valueRoom)
+      const lines: ContentLine[] = [{ text: `${paintedLabel}${valueLines[0] ?? ''}` }]
+      const contPrefix = ' '.repeat(indentCells + labelRoom + 1)
+      for (const line of valueLines.slice(1)) lines.push({ text: `${contPrefix}${line}` })
+      return lines
+    }
+    const lines: ContentLine[] = [{ text: `${INDENT}${color.textDim(label)}` }]
+    for (const line of wrapTextWithAnsi(paintedValue, Math.max(1, width - indentCells))) {
+      lines.push({ text: `${INDENT}${line}` })
+    }
+    return lines
+  }
+
+  /** One focusable row: cursor + complete verb + optional wrapped value +
+   *  complete affordance/chip. Publishing is all-or-nothing per segment. */
+  private entryLines(row: RowSpec, width: number): ContentLine[] {
+    const selected = this.selectedId === row.id
+    const markerCells = 2
+    const marker = selected ? color.primary('> ') : '  '
+    const verb = sanitizedPhysicalLine(row.label)
+    const verbCells = visibleWidth(verb)
+    // A partial verb is never painted: the row is simply absent from this
+    // frame (and therefore from the keyboard admission too).
+    if (markerCells + verbCells > width) return []
+    const labelRoom = Math.max(verbCells, Math.min(LABEL_COLUMN, Math.max(1, width - markerCells - 1)))
+    const padToLabel = ' '.repeat(labelRoom - verbCells)
+    const paintedLabel = selected ? color.textStrong(verb) : color.text(verb)
+    const chipText = row.chip === undefined ? '' : `  ${row.chip}`
+    const chipCells = visibleWidth(chipText)
+    const paintedValue = row.value === undefined ? '' : valueInk(row.valueInk ?? 'text', sanitizedPhysicalLine(row.value))
+    const valueCells = row.value === undefined ? 0 : visibleWidth(row.value)
+    const affordance = row.affordance === undefined ? '' : row.affordance
+    const affordanceCells = visibleWidth(affordance)
+    const selectTarget = (): BodyTarget => ({ kind: 'select', id: row.id, startCol: 0, endCol: width })
+    const verbActionStart = markerCells
+    const verbActionEnd = markerCells + verbCells
+
+    if (row.value === undefined) {
+      // Business verb / candidate row: the complete label (+ whole chip) is
+      // the action span.
+      if (markerCells + verbCells + chipCells > width) {
+        if (chipCells > 0) {
+          const line = `${marker}${paintedLabel}`
+          return [{ text: line, rowId: row.id, targets: [selectTarget(), { kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd }] }]
+        }
+        return []
+      }
+      const chipPainted = chipCells === 0 ? '' : color.textMuted(chipText)
+      return [{
+        text: `${marker}${paintedLabel}${chipPainted}`,
+        rowId: row.id,
+        targets: [selectTarget(), { kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd + chipCells }],
+      }]
+    }
+
+    const valueRoom = width - markerCells - labelRoom - 1
+    const singleValueCells = markerCells + labelRoom + 1 + valueCells
+    const affordanceSuffixCells = affordanceCells === 0 ? 0 : 3 + affordanceCells
+    // 1. The whole row (verb + value + ` · Change…`) on ONE line.
+    if (valueRoom >= 1 && singleValueCells + affordanceSuffixCells <= width) {
+      const affordanceStart = singleValueCells + 3
+      const actionTarget: BodyTarget | undefined = affordanceCells === 0
+        ? { kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd }
+        : { kind: 'action', id: row.id, startCol: affordanceStart, endCol: affordanceStart + affordanceCells }
+      return [{
+        text: `${marker}${paintedLabel}${padToLabel} ${paintedValue}${affordanceCells === 0 ? '' : ` · ${color.primary(affordance)}`}`,
+        rowId: row.id,
+        targets: actionTarget === undefined ? [selectTarget()] : [selectTarget(), actionTarget],
+      }]
+    }
+    // 2. The verb + value on ONE line, the explicit affordance on its own
+    //    continuation line (a complete verb never changes meaning).
+    if (valueRoom >= 1 && singleValueCells <= width) {
+      const lines: ContentLine[] = [{
+        text: `${marker}${paintedLabel}${padToLabel} ${paintedValue}`,
+        rowId: row.id,
+        targets: [selectTarget(), ...(affordanceCells === 0
+          ? [{ kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd } satisfies BodyTarget]
+          : [])],
+      }]
+      if (affordanceCells > 0) {
+        if (INDENT.length + affordanceCells > width) return lines
+        lines.push({
+          text: `${INDENT}${color.primary(affordance)}`,
+          rowId: row.id,
+          targets: [selectTarget(), { kind: 'action', id: row.id, startCol: INDENT.length, endCol: INDENT.length + affordanceCells }],
+        })
+      }
+      return lines
+    }
+    // 3. The value itself must wrap below the complete verb. Only the FIRST
+    //    line carries the verb's action span; continuation cells never publish
+    //    an action at the verb's old columns.
+    const lines: ContentLine[] = [{
+      text: `${marker}${paintedLabel}`,
+      rowId: row.id,
+      targets: [selectTarget(), ...(affordanceCells === 0
+        ? [{ kind: 'action', id: row.id, startCol: verbActionStart, endCol: verbActionEnd } satisfies BodyTarget]
+        : [])],
+    }]
+    const valueLines = wrapTextWithAnsi(paintedValue, Math.max(1, width - INDENT.length))
+    for (const [index, line] of valueLines.entries()) {
+      const isLast = index === valueLines.length - 1
+      const paintedLine = `${INDENT}${line}`
+      const canJoinAffordance = isLast && affordanceCells > 0
+        && visibleWidth(paintedLine) + 3 + affordanceCells <= width
+      if (canJoinAffordance) {
+        const affordanceStart = visibleWidth(paintedLine) + 3
+        lines.push({
+          text: `${paintedLine} · ${color.primary(affordance)}`,
+          rowId: row.id,
+          targets: [selectTarget(), { kind: 'action', id: row.id, startCol: affordanceStart, endCol: affordanceStart + affordanceCells }],
+        })
+      } else {
+        lines.push({ text: paintedLine, rowId: row.id, targets: [selectTarget()] })
+      }
+    }
+    if (affordanceCells > 0 && !lines.some(line => line.targets?.some(target => target.kind === 'action'))) {
+      if (INDENT.length + affordanceCells <= width) {
+        lines.push({
+          text: `${INDENT}${color.primary(affordance)}`,
+          rowId: row.id,
+          targets: [selectTarget(), { kind: 'action', id: row.id, startCol: INDENT.length, endCol: INDENT.length + affordanceCells }],
+        })
+      }
+    }
+    return lines
   }
 
   /** The current Host facts as painted `Serving` / `Access` values. */
   private hostFactLines(width: number): ContentLine[] {
-    const lines: ContentLine[] = [{ text: color.textDim('Current Host') }]
+    const lines: ContentLine[] = [this.header('Current Host')]
     const host = this.hostCurrent()
     if (host === undefined) {
       const checking = this.host.kind === 'checking'
       const serving = this.host.kind === 'split-host-only'
         ? `${color.error('Unavailable')}${color.textDim(' · Split Host only')}`
         : checking ? color.textDim('Checking…') : color.error('Unavailable')
-      lines.push({ text: this.factLine('Serving', serving, width) })
-      lines.push({
-        text: this.factLine('Access', this.host.kind === 'split-host-only' || !checking ? color.error('Unavailable') : color.textDim('Checking…'), width),
-      })
+      lines.push(...this.factLines('Serving', serving, width))
+      lines.push(...this.factLines(
+        'Access',
+        this.host.kind === 'split-host-only' || !checking ? color.error('Unavailable') : color.textDim('Checking…'),
+        width,
+      ))
       if (this.host.kind === 'unreadable') lines.push(...this.wrapped(this.host.message, 'error', width))
       return lines
     }
     const serving = servingWord(host.status)
-    lines.push({ text: this.factLine('Serving', statusInk(serving.tone, serving.text), width) })
+    lines.push(...this.factLines('Serving', statusInk(serving.tone, serving.text), width))
     const access = accessWord(host.status)
-    lines.push({ text: this.factLine('Access', valueInk(access.tone === 'dim' ? 'dim' : access.tone === 'error' ? 'error' : 'text', access.text), width) })
+    lines.push(...this.factLines(
+      'Access',
+      valueInk(access.tone === 'dim' ? 'dim' : access.tone === 'error' ? 'error' : 'text', access.text),
+      width,
+    ))
     if (host.status.state === 'unavailable') lines.push(...this.wrapped(host.status.reason, 'error', width))
     return lines
   }
 
-  /** The complete body projection (unpainted rows are already painted strings). */
+  /** The complete body projection; every painted row carries its own spans. */
   private content(width: number): ContentLine[] {
+    switch (this.phase) {
+      case 'confirm-disable': return this.confirmDisableContent(width)
+      case 'choose-autostart': return this.chooseContent(width)
+      case 'confirm-save': return this.confirmSaveContent(width)
+      default: return this.browseContent(width)
+    }
+  }
+
+  private browseContent(width: number): ContentLine[] {
     const lines = this.hostFactLines(width)
     if (this.runtimeOutcome !== undefined) {
-      // The runtime write's own result is painted beside the runtime facts: one
-      // word carries the token, the explanation stays a separate line.
-      lines.push({ text: this.factLine('Status', statusInk(this.runtimeOutcome.tone, this.runtimeOutcome.word), width) })
+      lines.push(...this.factLines('Status', statusInk(this.runtimeOutcome.tone, this.runtimeOutcome.word), width))
       if (this.runtimeOutcome.detail !== undefined) lines.push(...this.wrapped(this.runtimeOutcome.detail, 'dim', width))
     }
     if (this.phase === 'loading') {
@@ -1119,40 +1341,21 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       return lines
     }
     const rows = this.rowSpecs()
-    lines.push({ text: color.textDim('Actions') })
-    if (this.phase === 'confirm-disable') {
-      lines.push(...this.wrapped(DISABLE_QUESTION, 'text', width))
-      for (const row of rows) lines.push({ text: this.listLine(row, width), rowId: row.id })
-      return lines
+    const runtimeRows = rows.filter(row => row.kind === 'action')
+    const fieldRow = rows.find(row => row.kind === 'field')
+    if (runtimeRows.length > 0) {
+      lines.push(this.header('Actions'))
+      for (const row of runtimeRows) lines.push(...this.entryLines(row, width))
     }
-    if (this.phase === 'choose-autostart') {
-      lines.push(...this.wrapped('Choose the value the next Host start applies:', 'dim', width))
-      for (const row of rows) lines.push({ text: this.listLine(row, width), rowId: row.id })
-      lines.push(...this.wrapped('Applies on the next Host start; the running Host is unchanged.', 'dim', width))
-      return lines
-    }
-    if (this.phase === 'confirm-save') {
-      const candidate = this.autostartCandidate === true ? 'On' : 'Off'
-      lines.push(...this.wrapped(`Save the next Host start preference as ${candidate}?`, 'text', width))
-      for (const row of rows) lines.push({ text: this.listLine(row, width), rowId: row.id })
-      return lines
-    }
-    const autostart = rows.find(row => row.id === 'autostart')
-    for (const row of rows) {
-      if (row.id === 'autostart') break
-      lines.push({ text: this.listLine(row, width), rowId: row.id })
-    }
-    lines.push({ text: color.textDim('Next Host Start') })
-    if (autostart !== undefined) {
-      lines.push({ text: this.listLine(autostart, width), rowId: autostart.id })
+    lines.push(this.header('Next Host Start'))
+    if (fieldRow !== undefined) {
+      lines.push(...this.entryLines(fieldRow, width))
     } else {
-      lines.push({
-        text: this.factLine('Start automatically', color.textDim(preferenceSummary(this.preference, this.preferenceReadiness)), width),
-      })
+      lines.push(...this.factLines('Start automatically', color.textDim(preferenceSummary(this.preference, this.preferenceReadiness)), width))
     }
     lines.push(...this.wrapped(
       this.preferenceEditable()
-        ? 'Applies on the next Host start; the running Host is unchanged.'
+        ? NEXT_START_ONLY
         : this.preferenceReadiness === 'ready'
           ? 'No persisted preference is available to edit.'
           : `The Host configuration is ${this.preferenceReadiness}; the next-start preference is read-only.`,
@@ -1160,12 +1363,50 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
       width,
     ))
     if (this.configOutcome !== undefined) {
-      lines.push({ text: this.factLine('Status', statusInk(this.configOutcome.tone, this.configOutcome.word), width) })
+      lines.push(...this.factLines('Status', statusInk(this.configOutcome.tone, this.configOutcome.word), width))
       if (this.configOutcome.detail !== undefined) {
-        lines.push(...this.wrapped(this.configOutcome.detail, this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim' : 'error', width))
+        lines.push(...this.wrapped(
+          this.configOutcome.detail,
+          this.configOutcome.tone === 'success' || this.configOutcome.tone === 'muted' ? 'dim' : 'error',
+          width,
+        ))
       }
     }
     return lines
+  }
+
+  /** The disable confirmation: the EXACT risk copy is the first thing on the
+   *  page, and the accept row exists only while that whole copy shares the
+   *  painted viewport. Cancel is never gated. */
+  private confirmDisableContent(width: number): ContentLine[] {
+    const copy = this.wrapped(DISABLE_QUESTION, 'text', width, 'copy')
+    const accept = this.entryLines({ id: 'confirm-disable', kind: 'action', label: 'Disable Web' }, width)
+      .map(line => ({ ...line, gatedBy: 'copy' as const }))
+    const cancel = this.entryLines({ id: 'cancel', kind: 'action', label: 'Cancel' }, width)
+    return [...copy, ...accept, ...cancel]
+  }
+
+  /** The next-start candidate choice. Each complete candidate is its own
+   *  explicit choice; its selection never dispatches a write. */
+  private chooseContent(width: number): ContentLine[] {
+    const lines: ContentLine[] = this.wrapped(CHOOSE_PROMPT, 'dim', width)
+    for (const row of this.rowSpecs()) lines.push(...this.entryLines(row, width))
+    lines.push(...this.wrapped(NEXT_START_ONLY, 'dim', width))
+    return lines
+  }
+
+  /** The save confirmation: the question AND the next-start-only lifetime fact
+   *  must both be complete in the same frame as the accept row. */
+  private confirmSaveContent(width: number): ContentLine[] {
+    const candidate = this.autostartCandidate === true ? 'On' : 'Off'
+    const copy = [
+      ...this.wrapped(`Save the next Host start preference as ${candidate}?`, 'text', width, 'copy'),
+      ...this.wrapped(NEXT_START_ONLY, 'dim', width, 'copy'),
+    ]
+    const accept = this.entryLines({ id: 'confirm-save', kind: 'action', label: 'Confirm save' }, width)
+      .map(line => ({ ...line, gatedBy: 'copy' as const }))
+    const cancel = this.entryLines({ id: 'cancel', kind: 'action', label: 'Cancel' }, width)
+    return [...copy, ...accept, ...cancel]
   }
 
   render(width: number): string[] {
@@ -1176,21 +1417,47 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     this.ensureSelection()
     const bodyRows = this.bodyRows()
     const content = this.content(width)
-    const selection = content.findIndex(line => line.rowId !== undefined && line.rowId === this.selectedId)
+    const selectedLines: number[] = []
+    content.forEach((line, index) => { if (line.rowId !== undefined && line.rowId === this.selectedId) selectedLines.push(index) })
     const maxOffset = Math.max(0, content.length - bodyRows)
     let offset = Math.min(this.scrollOffset, maxOffset)
-    if (this.revealSelection && bodyRows > 0 && selection >= 0) {
-      if (selection < offset) offset = selection
-      if (selection >= offset + bodyRows) offset = selection - bodyRows + 1
-      this.revealSelection = false
+    if (this.revealSelection && bodyRows > 0 && selectedLines.length > 0) {
+      const start = selectedLines[0]!
+      const end = selectedLines[selectedLines.length - 1]!
+      if (start < offset) offset = start
+      if (end >= offset + bodyRows) offset = end - bodyRows + 1
+      if (start < offset) offset = start
     }
+    offset = Math.min(Math.max(0, offset), maxOffset)
     this.scrollOffset = offset
+    // The necessary-copy groups are judged against the FINAL physical viewport:
+    // a gated entry whose copy is scrolled out is painted BLANK and publishes
+    // no target — the same fact gates the keyboard and the bar.
+    const visible = new Set<number>()
+    for (let index = 0; index < bodyRows; index += 1) visible.add(offset + index)
+    const groups = new Map<string, number[]>()
+    content.forEach((line, index) => {
+      if (line.group === undefined) return
+      const list = groups.get(line.group) ?? []
+      list.push(index)
+      groups.set(line.group, list)
+    })
+    const groupComplete = (group: 'copy'): boolean => (groups.get(group) ?? []).every(index => visible.has(index))
     const lines: string[] = []
     const targets: PagePaint['targets'][number][] = []
+    this.escapeSpan = undefined
+    this.barSpans = []
+    this.paintedActions.clear()
     for (let index = 0; index < bodyRows; index += 1) {
       const line = content[offset + index]
-      lines.push(fit(line?.text ?? '', width))
-      if (line?.rowId !== undefined) targets.push({ id: line.rowId, row: index, startCol: 0, endCol: width })
+      const blanked = line?.gatedBy !== undefined && !groupComplete(line.gatedBy)
+      lines.push(fit(blanked ? '' : line?.text ?? '', width))
+      if (line !== undefined && !blanked) {
+        for (const target of line.targets ?? []) {
+          targets.push({ kind: target.kind, id: target.id, row: index, startCol: target.startCol, endCol: target.endCol })
+          if (target.kind === 'action') this.paintedActions.add(target.id)
+        }
+      }
     }
     while (lines.length < bodyRows) lines.push(fit('', width))
     const bar = this.renderBar(width)
@@ -1210,30 +1477,53 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     return lines
   }
 
+  /** The physical last row. Only actions admitted by THIS frame are painted;
+   *  `Esc` is always last and always complete. */
   private renderBar(width: number): {
     readonly text: string
     readonly escapeSpan?: { readonly startCol: number; readonly endCol: number }
     readonly spans: readonly { readonly id: string; readonly action: BarAction; readonly startCol: number; readonly endCol: number }[]
   } {
     const segments: BarSegment[] = []
+    const barVerb: Record<string, string> = {
+      open: 'Open',
+      copy: 'Copy',
+      enable: 'Enable',
+      disable: 'Disable',
+      autostart: 'Change',
+    }
     switch (this.phase) {
       case 'loading':
       case 'pending-runtime':
       case 'pending-config':
         break
       case 'confirm-disable':
-        segments.push({ text: 'Confirm [Enter]', priority: 900, action: 'confirm' })
+        if (this.selectedId === 'confirm-disable' && this.paintedActions.has('confirm-disable')) {
+          segments.push({ text: 'Confirm [Enter]', priority: 900, action: 'confirm' })
+        }
         break
       case 'choose-autostart':
-        segments.push({ text: 'Select [Enter]', priority: 900, action: 'select' })
+        if (this.selectedId !== undefined && this.paintedActions.has(this.selectedId)) {
+          segments.push({ text: 'Select [Enter]', priority: 900, action: 'select' })
+        }
         break
       case 'confirm-save':
-        segments.push({ text: 'Confirm save [Enter]', priority: 900, action: 'confirm' })
+        if (this.selectedId === 'confirm-save' && this.paintedActions.has('confirm-save')) {
+          segments.push({ text: 'Confirm save [Enter]', priority: 900, action: 'confirm' })
+        }
         break
       case 'ready':
-      case 'settled':
-        segments.push({ text: `Refresh [${REFRESH_KEY.toUpperCase()}]`, short: 'Refresh', priority: 800, action: 'refresh' })
+      case 'settled': {
+        const selected = this.selectedId
+        const verb = selected === undefined ? undefined : barVerb[selected]
+        if (verb !== undefined && this.paintedActions.has(selected!)) {
+          segments.push({ text: `${verb} [Enter]`, priority: 900, action: 'select' })
+        }
+        if (this.paintedActions.has('refresh')) {
+          segments.push({ text: `Refresh [${REFRESH_KEY.toUpperCase()}]`, short: 'Refresh', priority: 800, action: 'refresh' })
+        }
         break
+      }
     }
     segments.push({
       text: this.phase === 'confirm-disable' || this.phase === 'choose-autostart' || this.phase === 'confirm-save' ? 'Cancel [Esc]' : 'Back [Esc]',
@@ -1253,4 +1543,43 @@ export class WebUiSettingsPage implements EmbeddedSpecialistPage {
     }
     return { text: fit(painted.join(ACTION_BAR_SEPARATOR), width), ...(escapeSpan === undefined ? {} : { escapeSpan }), spans }
   }
+}
+
+export interface WebUiSettingsPageIntents {
+  /** The backend locality: Direct owns no Split Host Web frontend. */
+  readonly backendKind: 'direct' | 'remote'
+  /** ONE Host status read (the command owner's read authority). */
+  readonly readStatus: () => Promise<WebAccessStatus>
+  /** ONE Host toggle, fenced to the generation the user's action was read
+   *  under (a replaced Host never receives the old choice). */
+  readonly setEnabled: (enabled: boolean, expectedGeneration?: unknown) => Promise<WebAccessStatus>
+  /** ONE official launch URL, fenced to the generation the state was read
+   *  under; only an explicit Open/Copy asks for it. */
+  readonly getAuthenticatedUrl: (expectedGeneration?: unknown) => Promise<{ readonly url: string }>
+  /** The Client-local OS opener (the Host never runs a browser opener).
+   *  `false` = this composition has no opener, so nothing was requested. */
+  readonly openUrl: (url: string) => boolean
+  /** The Client-local clipboard; resolves whether the URL was copied. */
+  readonly copyToClipboard: (text: string) => Promise<boolean>
+  /** The persisted next-launch preference, or `undefined` when the profile
+   *  section cannot be read at all. */
+  readonly readPreference: () => WebStartupPreferenceState | undefined
+  /** The live Config readiness (`ready` is the only writable state). */
+  readonly configReadiness: () => 'ready' | 'stale' | 'unavailable'
+  /** The EXISTING revision-checked `web-autostart` writer. A resolved write is
+   *  not a read-back: the four official outcomes decide what is painted. */
+  readonly commitAutostart: (value: 'On' | 'Off', revision: number) => Promise<SettingsWorkspaceCommitOutcome>
+  /** The opaque current Connection generation (object identity). */
+  readonly currentGeneration: () => unknown
+  /** Observe Connection generation changes (Direct is a no-op). */
+  readonly subscribeGeneration: (listener: () => void) => () => void
+  /** The owned-task entry (the runner's diagnostics pre-attached). A write it
+   *  dispatches keeps settling in its own owner after this page is gone. */
+  readonly runOwned: (label: string, task: () => Promise<void>, onError: (error: unknown) => void) => void
+  /** The write OWNER's diagnostics: a dispatched write that no longer has a
+   *  live page is still diagnosed instead of silently lost. */
+  readonly diagnose: (label: string, detail: Record<string, unknown>) => void
+  readonly requestRender: () => void
+  /** Leave the page (the root keeps Settings and returns to `Host · Rows`). */
+  readonly done: () => void
 }

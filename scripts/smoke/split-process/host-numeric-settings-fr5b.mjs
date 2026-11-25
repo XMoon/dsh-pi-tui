@@ -1,12 +1,13 @@
 /**
  * FR5-B official Settings sections over real authenticated Split Clients.
  *
- * One Host with two authenticated Clients proves: the Host category and the two
- * next-start preferences its Web UI / ACP access pages own (same ids, real
- * profile values), the Session log upload switch and its official Reset
- * readback, the Agent-loop numeric page, the ACTIVE-shell two-cap page, and a
- * two-Client stale-revision refusal that never overwrites the winning profile
- * bytes.
+ * One Host with two authenticated Clients proves: the Host category and the
+ * preference/runtime authority its Web UI page owns (a real Disable -> Enable
+ * round trip with authoritative readback, plus the real profile preference),
+ * the next-start preference its ACP access page owns (same ids, real profile
+ * values), the Session log upload switch and its official Reset readback, the
+ * Agent-loop numeric page, the ACTIVE-shell two-cap page, and a two-Client
+ * stale-revision refusal that never overwrites the winning profile bytes.
  *
  * @module split-process/host-numeric-settings-fr5b
  */
@@ -215,6 +216,30 @@ export async function runHostNumericSettingsFr5B(context) {
     await selectFrame(clientA, frame => selectedRow(frame, 'Web UI'), 'FR5-B Web UI row')
     clientA.send('\r')
     await waitForPattern(clientA, /Settings · Host · Web UI/u, 'FR5-B Web UI page')
+
+    // The same page owns the CURRENT Host runtime. The seeded autoStart turned
+    // the frontend on at boot, so the mounted page must paint the real live
+    // fact and complete a real Disable -> Enable round trip with readback.
+    const runtimeReady = await waitForPattern(clientA, /Serving\s+(?:Enabled|Disabled|Unavailable)/u,
+      'FR5-B Web runtime fact')
+    assert(/Serving\s+Enabled/u.test(runtimeReady),
+      `the seeded autoStart Host must serve Web at boot: ${JSON.stringify(runtimeReady)}`)
+    await selectFrame(clientA, frame => selectedRow(frame, 'Disable Web…'), 'FR5-B Web disable row')
+    clientA.send('\r')
+    const disableRisk = await waitForText(clientA, 'Stop serving the Web UI?', 'FR5-B Web disable confirmation')
+    assert(/Stop serving the Web UI\? Existing browser credentials and sessions are not revoked\./u
+      .test(disableRisk.replace(/\s+/gu, ' ')),
+    `the exact disable risk must be painted whole: ${JSON.stringify(disableRisk)}`)
+    clientA.send('\r') // Disable Web: the confirmation's own first focus
+    await waitForPattern(clientA, /Serving\s+Disabled/u, 'FR5-B Web runtime disabled')
+    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web runtime disable verified')
+    clientA.send('\r') // the disabled page's first focus is Enable Web
+    await waitForPattern(clientA, /Serving\s+Enabled/u, 'FR5-B Web runtime re-enabled')
+    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web runtime enable verified')
+    trace('fr5b.host-web-runtime', { disabled: true, reEnabled: true, authoritativeReadback: true })
+
+    // The seeded Web USER value is read on the page that OWNS it and written
+    // through the same official preference id (the General row is retired).
     await selectFrame(clientA, frame => selectedRow(frame, 'Start automatically'), 'FR5-B Web start row')
     const webOn = await frameOf(clientA)
     assert(/Start automatically[^\n]*\bOn\b/u.test(webOn), `the Web page must read the seeded USER value On: ${JSON.stringify(webOn)}`)
@@ -224,10 +249,12 @@ export async function runHostNumericSettingsFr5B(context) {
     clientA.send('\r')
     await waitForText(clientA, 'Save the next Host start preference as Off?', 'FR5-B Web confirm step')
     clientA.send('\r')
-    await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web preference verified')
+    const webPreference = await waitForPattern(clientA, /Status\s+Verified/u, 'FR5-B Web preference verified')
+    assert(/Serving\s+Enabled/u.test(webPreference),
+      `saving the next-start preference must not toggle the running Host: ${JSON.stringify(webPreference)}`)
     assert(profileUserConfig(installation.profileDir, WEB_PREFERENCE_NS)?.autoStart === false,
       'the Web page writes the SAME official preference field')
-    trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true })
+    trace('fr5b.host-web-preference', { existingUserValueRead: true, savedProfile: true, runtimeUnchanged: true })
     clientA.send('\x1b') // the page -> the Host Rows
     await sleep(200)
 

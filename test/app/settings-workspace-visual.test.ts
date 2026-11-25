@@ -181,6 +181,8 @@ interface HarnessOptions {
   webDisconnected?: boolean
   /** Make the toggle reject with this reason (a refused/disconnected Host). */
   webToggleFailure?: string
+  /** Make the official URL request reject with this credential-bearing text. */
+  webUrlFailure?: string
   /** The state the Host reports AFTER a successful toggle (default: the
    *  requested target). */
   webSettledStatus?: WebAccessStatus
@@ -189,6 +191,9 @@ interface HarnessOptions {
   /** Hold the official URL reply until `releaseWebUrl()`: the window between
    *  the URL RPC settling and the Client sink. */
   holdWebUrl?: boolean
+  /** Hold a real runtime toggle after it reached the Host, so a case can prove
+   *  the pending parent/own-Back contract. */
+  holdWebToggle?: boolean
   /** M6-2A A5: the profile-owned startup backend the ConfigPort reads. */
   backendStartupPreference?: BackendStartupPreferenceState
   /** The startup backend section is absent/unreadable. */
@@ -502,8 +507,9 @@ interface Harness {
   readonly bumpAcpGeneration: () => void
   /** PR-B: set the fake Host ACP listener state (the Host's own answer). */
   readonly setAcpStatus: (status: AcpAccessStatus) => void
-  /** PR-A: release a held official URL reply. */
+  /** PR-A: release a held official URL reply, and a held runtime toggle. */
   readonly releaseWebUrl: () => void
+  readonly releaseWebToggle: () => void
   /** PR-A: the Split Host connects (a fresh generation is observed). */
   readonly connectWeb: () => void
   /** PR-A: the current fake Host state. */
@@ -731,6 +737,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const webUrlReads = { count: 0 }
   const openedUrls: string[] = []
   let heldWebUrl: (() => void) | undefined
+  let heldWebToggle: (() => void) | undefined
   const webToggleRefusal = options.webToggleFailure
   const webUrl = 'http://127.0.0.1:4321/?token=SECRET-LAUNCH-TOKEN'
   const notifyPolicyListeners = (event: 'committed' | 'invalidated'): void => {
@@ -977,6 +984,7 @@ function setup(options: HarnessOptions = {}): Harness {
         // The request really reached the Host; a lost receipt is a failure
         // AFTER the dispatch, never a pre-dispatch refusal.
         webEnabledWrites.push(enabled)
+        if (options.holdWebToggle === true) await new Promise<void>(resolve => { heldWebToggle = resolve })
         if (webToggleRefusal !== undefined) throw new Error(webToggleRefusal)
         webStatus = options.webSettledStatus ?? (enabled ? { state: 'enabled' } : { state: 'disabled' })
         return webStatus
@@ -986,6 +994,7 @@ function setup(options: HarnessOptions = {}): Harness {
           throw new Error('web access link superseded: the Host generation changed before dispatch')
         }
         webUrlReads.count += 1
+        if (options.webUrlFailure !== undefined) throw new Error(options.webUrlFailure)
         if (options.holdWebUrl === true) await new Promise<void>(resolve => { heldWebUrl = resolve })
         return { url: webUrl }
       },
@@ -1600,6 +1609,7 @@ function setup(options: HarnessOptions = {}): Harness {
       for (const listener of [...webGenerationListeners]) listener()
     },
     releaseWebUrl: () => { heldWebUrl?.(); heldWebUrl = undefined },
+    releaseWebToggle: () => { heldWebToggle?.(); heldWebToggle = undefined },
     connectWeb: () => {
       webGeneration = {}
       for (const listener of [...webGenerationListeners]) listener()
@@ -12035,6 +12045,9 @@ async function highlightPageRow(h: Harness, label: string): Promise<void> {
 
 /** The frame without ANSI, for token/word assertions. */
 const webUiPlain = (h: Harness): string => h.rowsPlain().join('\n')
+/** The same frame as ONE prose string: a sentence that wraps inside the real
+ *  Detail cell width must still read as the same complete fact. */
+const webUiFlat = (h: Harness): string => webUiPlain(h).replace(/\s+/gu, ' ')
 
 test('/web opens the Web UI page on the ONE Settings lease, with no overlay and no URL request', async () => {
   const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
@@ -12043,11 +12056,27 @@ test('/web opens the Web UI page on the ONE Settings lease, with no overlay and 
   assert.match(h.view(), /Settings · Host · Web UI/u, 'the breadcrumb names the page')
   assert.match(h.view(), /Current Host/u, 'the page owns the settings body')
   assert.match(h.view(), /Open in browser/u)
+  assert.match(h.view(), /\[Details\]/u, 'the tenant Detail column owns the active device')
+  assert.doesNotMatch(h.view(), /\[Rows \(/u, 'the passive Rows header never keeps the active device')
+  assert.match(h.view(), /> Open in browser/mu, 'the page cursor is painted from the first frame')
   assert.equal(h.app.overlayGraphState().handles, 0, 'no second overlay is mounted')
   assert.equal(h.webStatusReads(), 1, 'exactly one Host status read on the first frame')
   assert.equal(h.webUrlReads(), 0, 'opening the page never requests the authenticated URL')
   assert.equal(h.webEnabledWrites().length, 0, 'opening the page never writes')
   assert.doesNotMatch(webUiPlain(h), /SECRET-LAUNCH-TOKEN/u, 'the launch token is never painted')
+  h.dispose()
+})
+
+test('a /web first frame without one real Detail row reports the command error and closes the lease', async () => {
+  const h = setup({ columns: 200, rows: 2, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  const pending = h.invoke('web') as Promise<{ readonly kind: string; readonly text?: string }>
+  await settle(h)
+  const result = await pending
+  assert.equal(result.kind, 'error', 'the command reports its real failure')
+  assert.match(result.text ?? '', /could not open Web UI/u)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the failed lease is closed, never a silent Rows fallback')
+  assert.equal(h.webStatusReads(), 0, 'no Host read starts without a real grant')
+  assert.equal(h.app.overlayGraphState().handles, 0)
   h.dispose()
 })
 
@@ -12319,7 +12348,8 @@ test('a same-generation Config update refuses the painted confirmation with zero
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [], 'the stale confirmation wrote nothing')
   assert.match(webUiPlain(h), /Status\s+Not saved/u)
-  assert.match(webUiPlain(h), /changed since this choice was opened/u)
+  assert.match(webUiFlat(h), /changed since this choice was opened/u,
+    'the complete reason is readable across its wrapped Detail lines')
   assert.doesNotMatch(webUiPlain(h), /Confirm save/u)
   assert.match(webUiPlain(h), /Start automatically\s+On · Change…/u, 'the current value is painted for review')
   // A NEW choice at the current revision really writes (the fixture refuses
@@ -12333,6 +12363,29 @@ test('a same-generation Config update refuses the painted confirmation with zero
   await settle(h)
   assert.deepEqual(h.webAutoStartWrites(), [false])
   assert.match(webUiPlain(h), /Status\s+Verified/u)
+  h.dispose()
+})
+
+test('a credential-bearing URL failure never reaches the real composition diagnostics or a painted cell', async () => {
+  const canary = 'CANARY-URL-LEAK-7c41'
+  const h = setup({
+    columns: 120,
+    rows: 40,
+    backendKind: 'remote',
+    webStatus: { state: 'enabled' },
+    webUrlFailure: `refused http://127.0.0.1:4321/?token=${canary}`,
+  })
+  await openWebUi(h)
+  await key(h, '\r') // Open in browser
+  await settle(h)
+  const plain = webUiPlain(h)
+  assert.match(plain, /Status\s+Open failed/u)
+  assert.match(detailPaneText(h), /The access link could not be obtained or handed over\./u)
+  assert.doesNotMatch(plain, new RegExp(canary, 'u'), 'the URL/token is never painted')
+  assert.doesNotMatch(JSON.stringify(h.warnings()), new RegExp(canary, 'u'),
+    'the raw credential error never enters the write-owner diagnostics')
+  assert.deepEqual(h.openedUrls(), [], 'no URL reached the Client opener')
+  assert.doesNotMatch(h.view(), new RegExp(canary, 'u'), 'no frame/notice carries the token')
   h.dispose()
 })
 
@@ -12358,7 +12411,8 @@ test('a Host rollover downgrades the next-start preference until the new Config 
   assert.doesNotMatch(nonCurrent, /Save the next Host start|Confirm save|Change…/u,
     'the staged confirmation and the edit affordance are revoked')
   assert.match(nonCurrent, /Start automatically\s+Unavailable/u, 'the stale value is never painted as current')
-  assert.match(nonCurrent, /The Host configuration is unavailable; the next-start preference is read-only\./u)
+  assert.match(webUiFlat(h), /The Host configuration is unavailable; the next-start preference is read-only\./u,
+    'the complete read-only reason survives its wrapped Detail lines')
   assert.equal(h.webAutoStartWrites().length, 0, 'zero preference writes under a non-current authority')
   // A reconnected mirror commits a CHANGED value + revision; the page adopts it.
   h.setReadiness('ready')
@@ -12564,11 +12618,16 @@ test('the Web UI page stays complete and operable across the frozen size matrix'
     await openWebUi(h)
     const frame = webUiPlain(h)
     assert.match(frame, /Settings · Host · Web UI/u, `${columns}x${rows}: page identity`)
-    assert.match(frame, /Current Host/u, `${columns}x${rows}: the runtime facts survive`)
     if (rows >= 24) {
+      assert.match(frame, /Current Host/u, `${columns}x${rows}: the runtime facts survive`)
       assert.match(frame, /Next Host Start/u, `${columns}x${rows}: the preference facts survive`)
     } else {
-      // A short grant scrolls ONE column instead of dropping the section.
+      // A short grant scrolls the ONE Detail column: Home reveals the runtime
+      // facts and End the preference facts; neither section is dropped.
+      await key(h, '\x1b[H')
+      const top = webUiPlain(h)
+      assert.match(top, /Current Host/u, `${columns}x${rows}: Home reveals the runtime facts`)
+      assert.match(top, /Serving\s+Enabled/u, `${columns}x${rows}: the live fact is readable`)
       await key(h, '\x1b[F')
       assert.match(webUiPlain(h), /Next Host Start/u, `${columns}x${rows}: End reveals the preference facts`)
       await key(h, '\x1b[H')
@@ -12589,6 +12648,169 @@ test('the Web UI page stays complete and operable across the frozen size matrix'
     assert.equal(h.webEnabledWrites().length, 0, `${columns}x${rows}: Escape wrote nothing`)
     h.dispose()
   }
+})
+
+test('the Web UI page is a real Detail tenant: parent panes stay readable, one cursor, clean Tab yields', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  const frame = webUiPlain(h)
+  assert.match(frame, /Categories \(10\)/u, 'the parent rail stays readable')
+  assert.match(frame, /Rows \(3\)/u, 'the parent Rows stay readable')
+  assert.match(frame, /\[Details\]/u, 'the Detail column owns the ONE active device')
+  assert.match(frame, /Current Host/u, 'the tenant body owns the Detail cells')
+  assert.match(frame, /> Open in browser/mu, 'the page owns the ONE primary cursor')
+  const webRow = h.rowsPlain().find(line => /Web UI\s+Live control · next Host start/u.test(line))
+  assert.ok(webRow !== undefined, `the parent Web UI row must stay painted:\n${h.view()}`)
+  assert.ok(!webRow.startsWith('>'), 'the parent selection is passive context (no second cursor)')
+  assert.equal(h.webStatusReads(), 1, 'one Host read on the tenant entry')
+  // The clean page's Tab is the ROOT's guarded region transaction, not a
+  // hidden keyboard commit: it retires the tenant and moves the keyboard.
+  await key(h, '\t')
+  await settle(h)
+  assert.doesNotMatch(h.view(), /Current Host/u, 'the clean tenant is retired by the root Tab')
+  assert.match(h.view(), /^> Host/mu, 'the keyboard moved to the category rail')
+  assert.equal(h.webEnabledWrites().length, 0)
+  // Re-entry through the Rows level builds a FRESH page and performs ONE new read.
+  const readsBefore = h.webStatusReads()
+  await key(h, '\r') // category -> Rows
+  await settle(h)
+  await highlightRow(h, 'Web UI')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(h.view(), /Current Host/u, 'the re-entered page is painted')
+  assert.equal(h.webStatusReads(), readsBefore + 1, 're-entry starts exactly one fresh authoritative read')
+  h.dispose()
+})
+
+test('a resize keeps the SAME mounted Web UI tenant and performs no extra Host read', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  assert.equal(h.webStatusReads(), 1)
+  for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [72, 24]] as const) {
+    h.vt.resize(columns, rows)
+    await settle(h)
+    assert.match(h.view(), /Settings · Host · Web UI/u, `${columns}x${rows}: the tenant keeps the lease`)
+    assert.match(webUiFlat(h), /Current Host/u, `${columns}x${rows}: the same page body is projected`)
+    assert.equal(h.webStatusReads(), 1, `${columns}x${rows}: a resize starts no new Host read`)
+    assert.equal(h.webEnabledWrites().length, 0)
+  }
+  h.dispose()
+})
+
+test('a staged choice and an open confirmation block parent clicks until their own Cancel', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  // A staged next-start choice keeps the tenant: the parent row click is refused.
+  await highlightPageRow(h, 'Start automatically')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(webUiPlain(h), /Choose the value the next Host start applies:/u)
+  const acpRow = rowOf(h, 'ACP access')
+  press(h, acpRow, cellIndexOf(h, acpRow, 'ACP access'))
+  release(h, acpRow, cellIndexOf(h, acpRow, 'ACP access'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Web UI/u, 'the parent click cannot bypass the open choice')
+  assert.match(webUiPlain(h), /Choose the value the next Host start applies:/u)
+  assert.equal(h.webAutoStartWrites().length, 0)
+  // The page's own Cancel returns to the clean page, and only then the SAME
+  // parent click leaves the tenant with its real selection.
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u)
+  // The fork withholds a second click on the SAME cell inside its double-click
+  // window; a real user gesture on the same row is two independent clicks.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  const confirmRow = rowOf(h, 'ACP access')
+  press(h, confirmRow, cellIndexOf(h, confirmRow, 'ACP access'))
+  release(h, confirmRow, cellIndexOf(h, confirmRow, 'ACP access'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the clean parent click leaves the tenant')
+  assert.match(webUiPlain(h), /> ACP access/u, 'the clicked row really became the Rows selection')
+  // Re-open Web (same lease) and prove an open confirmation is the same gate.
+  await key(h, '\x1b[A') // ACP access -> Web UI
+  await settle(h)
+  assert.match(webUiPlain(h), /> Web UI/u, 'the Host Rows cursor is back on Web UI')
+  await key(h, '\r')
+  await settle(h)
+  await highlightPageRow(h, 'Disable Web…')
+  await key(h, '\r')
+  await settle(h)
+  assert.match(webUiPlain(h), /Stop serving the Web UI\?/u)
+  const railsRow = railRowOf(h, 'Tools')
+  press(h, railsRow, cellIndexOf(h, railsRow, 'Tools'))
+  release(h, railsRow, cellIndexOf(h, railsRow, 'Tools'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Web UI/u, 'a confirmation refuses every parent route')
+  assert.equal(h.webEnabledWrites().length, 0)
+  await key(h, '\x1b') // cancel the confirmation only
+  await settle(h)
+  assert.match(webUiPlain(h), /Serving\s+Enabled/u)
+  h.dispose()
+})
+
+test('a pending runtime write refuses parent clicks but the explicit page Back leaves while its owner settles', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'disabled' }, holdWebToggle: true })
+  await openWebUi(h)
+  await key(h, '\r') // Enable Web (held after the real Host dispatch)
+  await settle(h)
+  assert.match(webUiPlain(h), /Waiting for the answer…/u)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the real Host toggle was dispatched')
+  const acpRow = rowOf(h, 'ACP access')
+  press(h, acpRow, cellIndexOf(h, acpRow, 'ACP access'))
+  release(h, acpRow, cellIndexOf(h, acpRow, 'ACP access'))
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Web UI/u, 'a pending write refuses parent navigation')
+  // The page's own explicit Back is the documented exception: the write keeps
+  // settling in its owner, and the gone page can never repaint it.
+  await key(h, '\x1b')
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the explicit page Back leaves the tenant')
+  h.releaseWebToggle()
+  await settle(h, 10)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the late settlement never revives the page')
+  assert.doesNotMatch(h.view(), /Waiting for the answer…/u)
+  assert.deepEqual(h.webEnabledWrites(), [true], 'the dispatch was not cancelled or replayed')
+  h.dispose()
+})
+
+test('a mounted Web UI tenant keeps its real Back when the grant shrinks to zero body rows', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  h.vt.resize(200, 2)
+  await settle(h)
+  const bar = h.rowsPlain().at(-1) ?? ''
+  assert.match(bar, /Back \[Esc\]/u, 'the zero-body frame keeps the page own Esc')
+  assert.doesNotMatch(h.view(), /> Open in browser/u, 'no invisible page action is painted or admitted')
+  await clickPainted(h, 'Back [Esc]', true)
+  await settle(h)
+  assert.match(h.view(), /Settings · Host · Rows/u, 'the real Esc retires the tenant')
+  assert.equal(h.webEnabledWrites().length, 0)
+  h.dispose()
+})
+
+test('a tenant page press is refused across a Host replacement and a fresh press still acts', async () => {
+  const h = setup({ columns: 200, rows: 40, backendKind: 'remote', webStatus: { state: 'enabled' } })
+  await openWebUi(h)
+  const firstRow = rowOf(h, 'Open in browser')
+  const firstCol = cellIndexOf(h, firstRow, 'Open in browser')
+  press(h, firstRow, firstCol)
+  await settle(h)
+  // The Host is replaced between the press and the release: the page's painted
+  // action identity is revoked and the settled page re-reads the new Host.
+  h.bumpWebGeneration()
+  await settle(h, 10)
+  release(h, firstRow, firstCol)
+  await settle(h)
+  assert.equal(h.webUrlReads(), 0, 'the stale release never requests the URL')
+  assert.equal(h.webEnabledWrites().length, 0)
+  // A fresh gesture against the current painted frame is the real action. Wait
+  // out the fork's same-cell multi-click window: the refused release still
+  // counts as the first press of that gesture sequence.
+  await new Promise<void>(resolve => setTimeout(resolve, 650))
+  await clickPainted(h, 'Open in browser')
+  await settle(h)
+  assert.equal(h.webUrlReads(), 1, 'the fresh press/release requests the URL exactly once')
+  h.dispose()
 })
 
 // ── PR-B: the `Host · ACP access` page and the `/acp` typed deeplink ───────
