@@ -109,6 +109,45 @@ export async function runClientHmrSignals(context) {
       const beforeRootFiber = before.rootFiberUid
       const beforeGeneration = before.generationId
       const beforeRevision = before.surfaceRevision
+      // Feature History PR2-A disk negative, established BEFORE the HMR: the
+      // new revision's mount/hydration is exactly where the removed file
+      // cold-seed used to run, so the run's legacy history must already be
+      // gone when the replacement Surface starts. The durable user row is the
+      // official occurrence identity: the initial prompt and the recalled
+      // resubmission must be two DISTINCT rows of the same text, and the
+      // recalled text is what the new revision's editor actually held (an
+      // empty draft would create no occurrence at all).
+      const durableBeforeHmr = hostSessionEvents(dshHome, sessionId) ?? []
+      const userTextOf = event => Array.isArray(event?.data?.content)
+        ? event.data.content.map(part => typeof part?.text === 'string' ? part.text : '').join('')
+        : ''
+      const isInitialOccurrence = event => event.type === 'user/message' && userTextOf(event) === 't57 prompt'
+      const initialOccurrenceIndex = durableBeforeHmr.findIndex(isInitialOccurrence)
+      const initialOccurrence = durableBeforeHmr[initialOccurrenceIndex]
+      assert(initialOccurrenceIndex >= 0 && initialOccurrence !== undefined,
+        'T57 the initial prompt is not a durable official user occurrence')
+      // The legacy Ctrl+R writer is STILL the local-search source: the same
+      // accepted prompt must have a real history row BEFORE the disk negative.
+      const legacyHistoryDir = join(dshHome, 'user-history')
+      const legacyHistoryText = () => !existsSync(legacyHistoryDir)
+        ? ''
+        : readdirSync(legacyHistoryDir)
+          .filter(name => name.endsWith('.jsonl'))
+          .map(name => readFileSync(join(legacyHistoryDir, name), 'utf8'))
+          .join('\n')
+      {
+        const deadline = Date.now() + 30_000
+        while (Date.now() < deadline && !legacyHistoryText().includes('t57 prompt')) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      }
+      assert(legacyHistoryText().includes('t57 prompt'),
+        'T57 the legacy Ctrl+R writer did not record the accepted prompt')
+      const legacyHistoryBackup = join(workDir, 't57-user-history-backup')
+      rmSync(legacyHistoryBackup, { recursive: true, force: true })
+      renameSync(legacyHistoryDir, legacyHistoryBackup)
+      assert(!existsSync(legacyHistoryDir), 'T57 the legacy history directory was not moved aside')
+
       client.signalBusiness('SIGUSR2')
       await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T57 HMR start', 60_000)
       await waitForSurfaceStatus(client, record => record.surfaceRevision === beforeRevision && record.surfaceMounted === false, 'T57 retired surface status', 60_000)
@@ -131,47 +170,10 @@ export async function runClientHmrSignals(context) {
       }
       await client.waitForScreen('long-turn answer', 'T57 new TTY paint', 120_000)
 
-      // Feature History PR2-A: the ↑/↓ recall is the Client PROCESS's recent
-      // inputs. Prove it on the real HMR replacement, against a disk negative.
-      // The durable user row is the official occurrence identity: the initial
-      // prompt and the recalled resubmission must be two DISTINCT rows of the
-      // same text, and the recalled text is what the new revision's editor
-      // actually held (an empty draft would create no occurrence at all).
-      const durableBeforeRecall = hostSessionEvents(dshHome, sessionId) ?? []
-      const userTextOf = event => Array.isArray(event?.data?.content)
-        ? event.data.content.map(part => typeof part?.text === 'string' ? part.text : '').join('')
-        : ''
-      const isInitialOccurrence = event => event.type === 'user/message' && userTextOf(event) === 't57 prompt'
-      const initialOccurrenceIndex = durableBeforeRecall.findIndex(isInitialOccurrence)
-      const initialOccurrence = durableBeforeRecall[initialOccurrenceIndex]
-      assert(initialOccurrenceIndex >= 0 && initialOccurrence !== undefined,
-        'T57 the initial prompt is not a durable official user occurrence')
-      // The legacy Ctrl+R writer is STILL the local-search source: the same
-      // accepted prompt must have a real history row before any disk negative.
-      const legacyHistoryDir = join(dshHome, 'user-history')
-      const legacyHistoryText = () => !existsSync(legacyHistoryDir)
-        ? ''
-        : readdirSync(legacyHistoryDir)
-          .filter(name => name.endsWith('.jsonl'))
-          .map(name => readFileSync(join(legacyHistoryDir, name), 'utf8'))
-          .join('\n')
-      {
-        const deadline = Date.now() + 30_000
-        while (Date.now() < deadline && !legacyHistoryText().includes('t57 prompt')) {
-          await new Promise(resolve => setTimeout(resolve, 100))
-        }
-      }
-      assert(legacyHistoryText().includes('t57 prompt'),
-        'T57 the legacy Ctrl+R writer did not record the accepted prompt')
-      // Disk negative: move this run's legacy history aside, so a wrong HMR
-      // file cold-seed could not restore the same text and pass falsely.
-      const legacyHistoryBackup = join(workDir, 't57-user-history-backup')
-      rmSync(legacyHistoryBackup, { recursive: true, force: true })
-      renameSync(legacyHistoryDir, legacyHistoryBackup)
-      assert(!existsSync(legacyHistoryDir), 'T57 the legacy history directory was not moved aside')
 
       // The new composer is empty: a real Up recalls the accepted prompt from
-      // the process memory, and Enter submits exactly that text as a SECOND
+      // the process memory (the disk history is gone since before the HMR), and
+      // Enter submits exactly that text as a SECOND
       // official occurrence (a fresh Host Turn is the source->decision->sink
       // proof on the real Gateway/Peer; the old surface already retired, so
       // this is also the teardown negative).
@@ -213,10 +215,9 @@ export async function runClientHmrSignals(context) {
       // exact launch cwd. Any wrongly imported row would make the submitted
       // occurrence differ from the marker (Up recalls it, typing appends).
       const freshLaunchCwd = workDir
-      const { client: fresh } = await startC1Client('T57 fresh Client', {}, { cwd: freshLaunchCwd })
-      const freshReadyPid = fresh.records.find(record => record.m4a0 === 'ready')?.pid
-      assert(typeof freshReadyPid === 'number' && freshReadyPid !== beforePid,
-        `T57 the fresh Client did not become a new OS process: ${String(freshReadyPid)} vs ${String(beforePid)}`)
+      // The disk-only row exists BEFORE the fresh Client boots: the boot recall
+      // (sessionless) reads the launch cwd's file, so an imported row would be
+      // visible to this process. Writing it after `ready` would prove nothing.
       const freshHistoryFile = join(
         dshHome,
         'user-history',
@@ -224,6 +225,10 @@ export async function runClientHmrSignals(context) {
       )
       mkdirSync(dirname(freshHistoryFile), { recursive: true, mode: 0o700 })
       writeFileSync(freshHistoryFile, `${JSON.stringify({ content: 't57 fresh-client disk row' })}\n`, { mode: 0o600 })
+      const { client: fresh } = await startC1Client('T57 fresh Client', {}, { cwd: freshLaunchCwd })
+      const freshReadyPid = fresh.records.find(record => record.m4a0 === 'ready')?.pid
+      assert(typeof freshReadyPid === 'number' && freshReadyPid !== beforePid,
+        `T57 the fresh Client did not become a new OS process: ${String(freshReadyPid)} vs ${String(beforePid)}`)
       await waitForSurfaceStatus(fresh, record => record.surfaceMounted === true && record.sessionOpen === false, 'T57 fresh Client sessionless surface', 120_000)
       fresh.send('\x1b[A')
       fresh.send('t57 fresh marker\r')
@@ -247,8 +252,11 @@ export async function runClientHmrSignals(context) {
         recalled: 'empty',
         submitted: userTextOf(freshOccurrence),
       })
-      // Restore this run's shared legacy history directory.
-      rmSync(legacyHistoryDir, { recursive: true, force: true })
+      // Keep the live Clients' new rows as this run's evidence, then restore
+      // the run's shared legacy history directory.
+      const afterHistoryDir = join(workDir, 't57-user-history-after-a')
+      rmSync(afterHistoryDir, { recursive: true, force: true })
+      if (existsSync(legacyHistoryDir)) renameSync(legacyHistoryDir, afterHistoryDir)
       renameSync(legacyHistoryBackup, legacyHistoryDir)
       trace('t57', { hostPid: ready.pid, clientPid: beforePid, sessionId, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, sessionWrapper: 're-adopted', newTty: true, processRecallAcrossHmr: true, freshProcessRecallEmpty: true, hostRows: 'same loader fibers', hostRowUids: PROTECTED_HOST_ROWS.length })
     }

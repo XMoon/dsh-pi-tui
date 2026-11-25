@@ -1365,12 +1365,14 @@ export function applyRunnerWithRuntime(
         },
         beginInputHistoryScope: (owner) => {
           // The editor-recall scope of the owner this commit section publishes
-          // or creates: the owner's hydration reseeds ↕ recall from its
-          // session-scoped disk rows afterwards, while a submission accepted in
-          // between has its own append ordered behind the transition (submit
-          // FIFO turn + ensureSession), so the row can land after that read.
-          // Recording the scope-bound temporary submissions lets the reseed
-          // reconcile them instead of dropping them (PiTui editor history).
+          // or creates. On Direct the owner's hydration reseeds ↕ recall from
+          // its session-scoped disk rows afterwards, while a submission accepted
+          // in between has its own append ordered behind the transition (submit
+          // FIFO turn + ensureSession), so the row can land after that read;
+          // recording the scope-bound temporary submissions lets the reseed
+          // reconcile them instead of dropping them (PiTui editor history). The
+          // Daemon/Split Client's process recall is not a Session scope: this
+          // commit only retires the outgoing browse/bookmark and keeps the list.
           surface.display.beginInputHistoryScope(owner)
         },
         dropOutgoingActiveDraft: () => {

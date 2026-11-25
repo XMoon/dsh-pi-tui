@@ -269,22 +269,25 @@ Two intentional trade-offs of the bounded window:
 
 ### Recall-order contract (trap: get this backwards and ↑ shows the OLDEST entry)
 
-The file is oldest-first; the recall API (`SurfaceDisplaySeam.resetInputHistory`,
-implemented by each renderer's adapter over the shared kernel) takes
-**newest-first**. Both editors consume that projection: the PiTui adapter
-mirrors the kernel snapshot into its editor stack in reverse (the editor's
-`addToHistory` unshifts), and the TSP composer reads the kernel's newest-first
-snapshot directly at each arrow. The runner therefore reverses the loaded
-entries before seeding. The first `↑` must recall the MOST RECENT submission —
+The file is oldest-first; the Direct recall API
+(`SurfaceDisplaySeam.resetInputHistory`, implemented by each renderer's adapter
+over the shared kernel) takes **newest-first**. Both editors consume that
+projection: the PiTui adapter mirrors the kernel snapshot into its editor stack
+in reverse (the editor's `addToHistory` unshifts), and the TSP composer reads
+the kernel's newest-first snapshot directly at each arrow. The runner therefore
+reverses the loaded entries before seeding. (The Daemon/Split Client reads its
+process memory newest-first and never seeds from this file; see its section
+below.) The first `↑` must recall the MOST RECENT submission —
 this is pinned by `test/tui/input-experience.test.ts` ("seeded input history
 recalls entries with the up arrow"), `test/client/tui-app.test.ts` and the TSP
 composer tests.
 
 ### The two editors' ↑/↓ presentation
 
-Both editor adapters read the SAME newest-first kernel projection; their
-vertical-caret model is deliberately different because the layout owner is
-different:
+Both editor adapters read the SAME newest-first projection of their selected
+recall authority — the Direct kernel, or the Daemon/Split Client's process
+memory; their vertical-caret model is deliberately different because the layout
+owner is different:
 
 - PiTui owns its own visual soft-wrap map, so ↑/↓ first move across the lines
   it actually painted, then walk its editor history stack at the first/last
@@ -300,9 +303,10 @@ In both adapters, leaving index 0 downward restores the exact draft and caret
 that browsing replaced; a real text edit ends the browse and makes the recalled
 row ordinary editable content. Browsing never submits, writes a row, switches a
 Session or paints a second input surface. A formal owner publication
-(`beginInputHistoryScope`, before the kernel commit) retires the short-lived
-browse bookmark; a current-owner asynchronous cold reseed
-(`resetInputHistory`) instead restores the exact pre-browse draft/caret, ends
+(`beginInputHistoryScope`, before the Direct kernel commit) retires the
+short-lived browse bookmark — on the Daemon/Split Client this is the ONLY
+publication effect (there is no reseed); a current-owner asynchronous Direct
+cold reseed (`resetInputHistory`) instead restores the exact pre-browse draft/caret, ends
 that browse and replaces the projection, while a settlement, a repaint or a
 pre-publication hydration window leaves the current browse alone. Entering the
 first recalled row consults the application's existing pasted-path delivery and
@@ -313,13 +317,14 @@ empty scope starts no browse and keeps no bookmark either). A whole-document
 recall replacement retires old pasted-path leases, so a late image read cannot
 rewrite bytes inside a history row.
 
-### Seeding at boot (trap: deferred start has no session)
+### Seeding at boot, Direct only (trap: deferred start has no session)
 
-With a deferred start (`dsh --profile …` without `--session`) no session
-exists at boot, so the per-session seed in `initLiveSession` has not run.
-The runner seeds the recall history from the LAUNCH cwd at boot too, so ↑
-works immediately in a new window; `initLiveSession` replaces it when the
-first session is born (and on every session switch).
+With a deferred Direct start no session exists at boot, so the per-session
+seed in `initLiveSession` has not run. The runner seeds the Direct recall
+history from the LAUNCH cwd at boot too, so ↑ works immediately in a new
+window; `initLiveSession` replaces it when the first session is born (and on
+every session switch). The Daemon/Split Client does NOT do this: its boot
+recall is empty and `initLiveSession` never reseeds it (see the next section).
 
 ### Daemon/Split Client: process-lifetime recall (↑/↓)
 
@@ -403,11 +408,13 @@ broader search (its `Current directory` / `All directories` scopes cover
 legacy rows; `Current session` filters to the live session exactly like
 the editor recall).
 
-### Publication→hydration window (trap: the reseed races the submission's OWN write)
+### Publication→hydration window (Direct; trap: the reseed races the submission's OWN write)
 
-A Session publication (ordinary `/new` / switch, `/fork` adoption, the
-first-session creation) makes the new owner current BEFORE its hydration
-reseeds ↑/↓ from the session-scoped JSONL rows. A submission accepted inside
+On Direct, a Session publication (ordinary `/new` / switch, `/fork` adoption,
+the first-session creation) makes the new owner current BEFORE its hydration
+reseeds ↑/↓ from the session-scoped JSONL rows. The Daemon/Split Client has no
+hydration reseed (its process list is not a Session scope), so this race does
+not exist there; its publication only retires the outgoing browse bookmark. A submission accepted inside
 that window is already owned by the NEW Session, but its own persistence is
 ordered behind the transition — the submit FIFO turn and `ensureSession()`
 (`persistAfterSession`) — so the write can run AFTER the snapshot read: the row
@@ -421,8 +428,8 @@ never the append.
 The open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS are kept as the scope's TRUE
 submission sequence (newest first) in ONE Client-local pure kernel,
 `src/client/history/recall-scope.ts` (`createHistoryRecallScope()`): no IO, no
-renderer, no SDK, no Session reader. Every mounted renderer owns exactly ONE
-instance and commits the same three signals into it through the existing
+renderer, no SDK, no Session reader. Every Direct-mounted renderer owns exactly
+ONE instance and commits the same three signals into it through the existing
 `SurfaceDisplaySeam` (`beginInputHistoryScope` / `resetInputHistory` /
 `settleScopeInput`); the PiTui adapter mirrors the kernel's snapshot into its
 editor stack, and the TSP adapter keeps the ONE composer's browse state while
