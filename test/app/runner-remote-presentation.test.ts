@@ -906,6 +906,16 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
     const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId) ?? []
     return pending.some(item => item.text === text)
   }
+  /** The painted History RESULT rows (between the counter and the Preview
+   * band). The transcript above can carry the same text, so a whole-viewport
+   * substring is not a result-row proof. */
+  const historyResultLines = (): string[] => {
+    const lines = fixture.vt.getViewport()
+    const start = lines.findIndex(line => line.includes('Results ·'))
+    if (start < 0) return []
+    const end = lines.findIndex((line, index) => index > start && line.trimStart().startsWith('Preview'))
+    return lines.slice(start + 1, end < 0 ? undefined : end)
+  }
   try {
     // A new process recall is empty even though the legacy file already has a row.
     assert.deepEqual([...edited.getInputHistory()], [],
@@ -929,7 +939,9 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
     fixture.vt.sendInput('\x12')
     await waitFor('the History seat opened', () => viewport().includes('Input History'), 15_000)
     fixture.vt.sendInput('foreign disk-only')
-    await waitFor('the disk row is found by Ctrl+R', () => viewport().includes('foreign disk-only ctrl r row'), 15_000)
+    await waitFor('the disk row is the committed filtered result', () =>
+      viewport().includes('Results · 1 match')
+      && historyResultLines().some(line => line.includes('foreign disk-only ctrl r row')), 15_000)
     fixture.vt.sendInput('\x1b')
     await fixture.vt.waitForRender()
     assert.deepEqual([...edited.getInputHistory()], memoryBefore,
@@ -939,11 +951,13 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
     fixture.vt.sendInput('\x12')
     await waitFor('the History seat reopened', () => viewport().includes('Input History'), 15_000)
     fixture.vt.sendInput('ctrl r remote accepted')
-    // Settle on the FILTERED result state (the match painted AND the previous
-    // disk row gone), never on the debounced query echo: acceptance stays frozen
-    // until the search really commits.
+    // Settle on the painted RESULT ROW (not a transcript substring): one
+    // committed match whose row really carries the accepted marker. Acceptance
+    // stays frozen until the debounced search commits.
     await waitFor('the accepted marker is the committed filtered result', () =>
-      viewport().includes(marker) && !viewport().includes('foreign disk-only ctrl r row'), 15_000)
+      viewport().includes('Results · 1 match')
+      && historyResultLines().some(line => line.includes(marker))
+      && !historyResultLines().some(line => line.includes('foreign disk-only ctrl r row')), 15_000)
     fixture.vt.sendInput('\r')
     await fixture.vt.waitForRender()
     assert.equal(edited.getDraft(), marker, 'Ctrl+R restores the accepted prompt into the editor')
