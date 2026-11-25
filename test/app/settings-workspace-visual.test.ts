@@ -12803,9 +12803,10 @@ test('a tenant page press is refused across a Host replacement and a fresh press
   await settle(h)
   assert.equal(h.webUrlReads(), 0, 'the stale release never requests the URL')
   assert.equal(h.webEnabledWrites().length, 0)
-  // A fresh gesture against the current painted frame is the real action. Wait
-  // out the fork's same-cell multi-click window: the refused release still
-  // counts as the first press of that gesture sequence.
+  // A fresh gesture against the current painted frame is the real action. The
+  // refused release still counts as the first press of that gesture sequence
+  // inside the fork's same-cell multi-click window, so the next press must wait
+  // that bounded window out.
   await new Promise<void>(resolve => setTimeout(resolve, 650))
   await clickPainted(h, 'Open in browser')
   await settle(h)
