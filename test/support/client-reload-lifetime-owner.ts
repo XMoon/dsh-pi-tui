@@ -154,7 +154,7 @@ export function createClientReloadLifetimeOwner(): ClientReloadLifetimeOwner {
     surface: { refreshPendingInput: () => {} },
     history: {
       persist: () => {},
-      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+      persistAfterSession: async (resolveSession, persist) => { persist?.(await resolveSession()) },
     },
     viewer: { isViewing: () => false },
     extensions: {

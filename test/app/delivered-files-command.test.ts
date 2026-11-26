@@ -709,7 +709,7 @@ test('a typed /deliverables reaches the panel through the REAL submission contro
     drafts: { images: draftImages, files: draftFiles },
     status: { sessionCwd: () => '/ws' },
     surface: { refreshPendingInput: () => {} },
-    history: { persist: () => {}, persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) } },
+    history: { persist: () => {}, persistAfterSession: async (resolveSession, persist) => { persist?.(await resolveSession()) } },
     viewer: { isViewing: () => false },
     extensions: {
       findContribution: () => undefined,

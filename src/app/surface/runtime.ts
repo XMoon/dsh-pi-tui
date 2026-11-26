@@ -176,6 +176,7 @@ import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
 import { createTerminalProgressInterval, type IntervalProgress } from '../../domain/terminal-progress/interval.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
+import type { HistorySearchReadPort } from '../../runtime/history-search-read-port.ts'
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
 // constructed exactly once here; none of them imports this aggregate's value
@@ -653,11 +654,15 @@ export function createSurfaceDraftImageProjection(
  */
 export interface TspHistorySearchBinding {
   /** The runner-owned search source: the ONLY history read authority. */
-  readonly source: OptionCapability<'historySearchSource'>
+  readonly source: TuiAppOptions['historySearchSource']
   /** The live session cwd, read once per Ctrl+R open by the seat. */
   readonly cwd: () => string
   /** The ONE atomic History currentness capture (exact owner + generation). */
   readonly captureScope: () => HistoryOpenScope
+  /** The Remote-only private Host read; absent on Direct. */
+  readonly read?: HistorySearchReadPort
+  /** The composition diagnostics channel for the Remote seat's detached reads. */
+  readonly diag?: Diag
 }
 
 /**
@@ -823,7 +828,11 @@ export interface SurfaceMountDeps {
   /** The shared canonical display authority. */
   readonly displayState: OptionCapability<'displayState'>
   /** Ctrl+R input-history source (the runner owns its filesystem IO). */
-  readonly historySearchSource: OptionCapability<'historySearchSource'>
+  readonly historySearchSource: TuiAppOptions['historySearchSource']
+  /** The Remote-only private Host accepted-history read; absent on Direct. */
+  readonly historySearchRead?: HistorySearchReadPort
+  /** The composition diagnostics channel for the Remote seat's detached reads. */
+  readonly historySearchDiag?: Diag
   /**
    * Feature History PR2-A: the Split Client root's process-lifetime input
    * recall memory, forwarded verbatim to the PiTui mount. Absent on Direct,
@@ -3423,6 +3432,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
     historySearchSource: deps.historySearchSource,
     historySearchCwd: () => deps.sessionCwd(),
+    ...(deps.historySearchRead === undefined ? {} : { historySearchRead: deps.historySearchRead }),
+    ...(deps.historySearchDiag === undefined ? {} : { historySearchDiag: deps.historySearchDiag }),
     // Feature History PR2-A: the process recall memory forwarded to the PiTui
     // mount (absent on Direct, where the renderer owns the scoped kernel).
     ...(deps.inputRecall === undefined ? {} : { inputRecall: deps.inputRecall }),
@@ -3826,6 +3837,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             source: deps.historySearchSource,
             cwd: () => deps.sessionCwd(),
             captureScope: deps.captureHistoryScope,
+            ...(deps.historySearchRead === undefined ? {} : { read: deps.historySearchRead }),
+            ...(deps.historySearchDiag === undefined ? {} : { diag: deps.historySearchDiag }),
           },
           semanticSearchBinding,
           queueManager,

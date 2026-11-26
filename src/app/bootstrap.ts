@@ -53,7 +53,7 @@ import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
 import { createStatusRuntime, type StatusRuntime } from './surface/status-runtime.ts'
 import { createSessionPolicyObservation } from './command/session-policy-observation.ts'
-import { createInputHistory } from './surface/input-history.ts'
+import { createInputHistory, type InputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { QueueManagerController, queueManagerCommandResult } from './queue/manager.ts'
 import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
@@ -143,6 +143,7 @@ import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import type { LaunchWorkspaceVerdict } from './remote-process/local-workspace-equivalence.ts'
 import { createWorkspaceNextIntentOwner } from '../app/session/workspace-next-intent.ts'
+import { createRemoteHistoryOpenScope } from './remote/history-scope.ts'
 import { createSessionScopeAuthority, SessionScopeSupersededError, type LiveSessionScope } from '../app/session/scope.ts'
 import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
@@ -2008,18 +2009,18 @@ export function applyRunnerWithRuntime(
       initialSkills = resolution.skills
       surfaceNotice = resolution.notice
     }
-    // Ctrl+R input-history search AND the cold cross-cwd session-recall
-    // reader: ONE Client-local FileHistorySearchSource instance per
-    // composition. It is constructed here (before the presentation owner) so
-    // the SAME object backs both the History panel source and the editor
-    // hydration seed; never a second reader authority.
-    const historySearchSource = new FileHistorySearchSource({
-      dshHome: dshHome(process.env),
-      // A RESOLVER, not a snapshot: the all-scope search must see the newest
-      // known cwds (sessions created/switched after startup).
-      knownCwds: () => history.knownCwds(),
-      diagnostics: event => diag.warn('history source diagnostic', { ...event }),
-    })
+    // Feature History PR2-B: the file-backed input-history owner and Ctrl+R
+    // source are the DIRECT backend's contract only. The Split Client has no
+    // JSONL writer, dedupe anchor, known-cwd set or file read; its ↑/↓ recall
+    // is the process memory and Ctrl+R is the Host accepted-history read. The
+    // owner is constructed here (before the presentation owner) so the SAME
+    // object backs both the Direct History panel source and the hydration seed.
+    // Late-bound Direct-only file owners: their construction needs the live
+    // surface/status/cwd, which are created later in this composition. The
+    // presentation capability below only closes over these slots; on the Split
+    // Client both stay undefined and no file capability is injected at all.
+    let history: InputHistory | undefined
+    let historySearchSource: FileHistorySearchSource | undefined
     // A5b-1: the live-session presentation owner (main transcript/stats folds,
     // the main presentation target, the generation reset and the ONE cold
     // hydration path) is constructed here, where its folds used to live.
@@ -2061,19 +2062,33 @@ export function applyRunnerWithRuntime(
         markContextDirty: () => status.markContextDirty(),
         refreshContextMeasurement: (reason: ContextMeasureReason) => status.refreshContextMeasurement(reason),
       },
-      history: {
-        rememberCwd: (cwd) => history.rememberCwd(cwd),
-        currentCwd: () => status.sessionCwd(),
-        records: (cwd) => history.records(cwd),
-        setLastContent: (content) => history.setLastContent(content),
-        // Feature History PR2-A: the cold cross-cwd session recall read is the
-        // DIRECT backend's contract only. The Split Client recalls from its
-        // process memory, so it injects no reader at all — the hydration tail
-        // then never scans a history file or schedules a reset.
-        ...(override === undefined
-          ? { readSessionRecall: (sessionId, signal) => historySearchSource.readSessionRecall(sessionId, signal) }
-          : {}),
-      },
+      // The Direct-only file capability is late-bound to the owners created
+      // after the surface/status/cwd exist. On the Split Client this property
+      // is absent, so hydration never remembers a cwd, reads a file or
+      // schedules a cold recall.
+      ...(override === undefined ? {
+        history: {
+          rememberCwd: (dir) => {
+            if (history === undefined) throw new Error('the Direct input-history owner is not constructed')
+            history.rememberCwd(dir)
+          },
+          currentCwd: () => status.sessionCwd(),
+          records: (dir) => {
+            if (history === undefined) throw new Error('the Direct input-history owner is not constructed')
+            return history.records(dir)
+          },
+          setLastContent: (content) => {
+            if (history === undefined) throw new Error('the Direct input-history owner is not constructed')
+            history.setLastContent(content)
+          },
+          // The cold cross-cwd session recall read is the DIRECT backend's
+          // contract only; the Split Client has no file capability at all.
+          readSessionRecall: (sessionId, signal) => {
+            if (historySearchSource === undefined) throw new Error('the Direct history source is not constructed')
+            return historySearchSource.readSessionRecall(sessionId, signal)
+          },
+        },
+      } : {}),
       // The exact ownership fence for the asynchronous cold recall read. The
       // generation is captured before the read and re-checked after it.
       currentness: {
@@ -3217,6 +3232,28 @@ export function applyRunnerWithRuntime(
         },
       }),
     })
+    if (override === undefined) {
+      // Feature History PR2-B: the file-backed owner and Ctrl+R source are the
+      // DIRECT backend's contract only. The Split Client has no JSONL writer,
+      // dedupe anchor, known-cwd set or file read; its ↑/↓ recall is the
+      // process memory and Ctrl+R is the Host accepted-history read.
+      history = createInputHistory({
+        // Late-bound: the seam exists only after `surface.start`; the owner
+        // reads it inside `activateBootRecall` (a post-mount step).
+        surface: { get display() { return surface.display } },
+        clientCwd: cwd,
+        sessionCwd: () => status.sessionCwd(),
+        diag,
+        isCleanedUp: () => cleanedUp,
+      })
+      historySearchSource = new FileHistorySearchSource({
+        dshHome: dshHome(process.env),
+        // A RESOLVER, not a snapshot: the all-scope search must see the newest
+        // known cwds (sessions created/switched after startup).
+        knownCwds: () => history?.knownCwds() ?? new Map(),
+        diagnostics: event => diag.warn('history source diagnostic', { ...event }),
+      })
+    }
     // TSP-7 PR-E: arm the Permission UI owner BEFORE `bindRendererInput()`
     // can deliver the first click/key. The renderer only reaches this owner
     // through the narrow surface seam above.
@@ -3224,24 +3261,6 @@ export function applyRunnerWithRuntime(
     // M6-1 F8: the observation owner's repaint hook now points at the live
     // status runtime (declared late to avoid a creation-order cycle).
     statusRuntimeRef = status
-    // A5b-2: the client-local input-history owner (known cwds, the canonical
-    // last row and the per-session recall projection). Constructed before the
-    // mount; it only touches the display seam inside `activateBootRecall`.
-    const history = createInputHistory({
-      // Late-bound: the seam exists only after `surface.start` below; the
-      // owner reads it inside `activateBootRecall` (a post-mount step).
-      surface: { get display() { return surface.display } },
-      clientCwd: cwd,
-      sessionCwd: () => status.sessionCwd(),
-      diag,
-      isCleanedUp: () => cleanedUp,
-      // Feature History PR2-A: the file writer (and the old Ctrl+R source)
-      // stay in place on both backends, but only Direct feeds the renderer's
-      // scoped recall kernel with boot seeds and row settlements. The Split
-      // Client recalls from the injected process memory instead.
-      recallAuthority: override === undefined ? 'direct' : 'none',
-    })
-
     // Surface lifetime fence: every callback below can outlive the TUI
     // surface, so the guard is initialized before any refresh callback exists.
     let cleanedUp = false
@@ -3913,10 +3932,9 @@ export function applyRunnerWithRuntime(
             })
           },
        },
-      history: {
-        persist: (record) => history.persist(record),
-        persistAfterSession: (resolveSession, persist) => history.persistAfterSession(resolveSession, persist),
-      },
+      ...(history === undefined ? {} : {
+        history: { persist: (record) => history.persist(record) },
+      }),
       viewer: { isViewing: () => viewer.isViewing() },
       extensions: {
         findContribution: (name) => extensionService?.commands.find(name),
@@ -4400,6 +4418,8 @@ export function applyRunnerWithRuntime(
       // panel lifecycle (plan §27 — TuiApp never touches the filesystem). The
       // SAME source instance also backs the cold session-recall reader above.
       historySearchSource,
+      ...(remoteSources === undefined ? {} : { historySearchRead: remoteSources.historySearch }),
+      historySearchDiag: diag,
       // Feature History PR2-A: the Split Client's process recall memory. The
       // surface forwards it to the PiTui mount options; Direct passes nothing
       // and keeps its scoped kernel.
@@ -4504,7 +4524,22 @@ export function applyRunnerWithRuntime(
       // session has no Direct agent), never `agentNow()`.
       captureHistoryScope: () => {
         const scope = sessionScope.capture()
-        return { sessionId: scope.sessionId, isCurrent: () => sessionScope.isCurrent(scope) }
+        if (remoteSources === undefined) {
+          return { sessionId: scope.sessionId, isCurrent: () => sessionScope.isCurrent(scope) }
+        }
+        // The Remote branch adds the exact Host scope (the per-open cwd face and
+        // the sessionless confirmed Workspace baseline). The capture owns its
+        // subscriptions and is disposed by the seat; `isCurrent` includes the
+        // ONE SessionScopeAuthority pair.
+        const remote = createRemoteHistoryOpenScope({
+          sessionId: scope.sessionId,
+          isScopeCurrent: () => sessionScope.isCurrent(scope),
+          sessionFacts: remoteSources.sessionFacts,
+          workspaceFacts: backend.sessionWorkspaceFacts,
+          workspaceIntent: scope.sessionId === undefined ? workspaceNextIntent : undefined,
+          diag,
+        })
+        return { sessionId: scope.sessionId, isCurrent: () => sessionScope.isCurrent(scope), remote }
       },
       // M5: a material width change refreshes the command surface (the runner
       // coalesces to its interval).
@@ -4678,7 +4713,7 @@ export function applyRunnerWithRuntime(
     // this point, so the guard keeps the cwd pool out of a live-session reseed
     // window. A fresh/sessionless start has no owner and receives the launch
     // cwd's recall seed.
-    if (ownership.currentSessionId() === undefined) history.activateBootRecall()
+    if (ownership.currentSessionId() === undefined) history?.activateBootRecall()
     // Fresh/deferred startup title: no session yet — cwd identity only. The
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()

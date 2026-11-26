@@ -42,6 +42,10 @@ import type { RemoteConnectionGenerationSource } from '../../runtime/remote/sess
 import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.ts'
 import { createRemoteChildViewSource } from './child-view.ts'
 import { createRemoteTerminalProgressSource } from './terminal-progress-source.ts'
+import {
+  RemoteHistorySearchPort,
+  type RemoteHistorySearchNamespace,
+} from '../../runtime/remote/history-search-remote.ts'
 import { createRemoteCommandSource, type RemoteCommandSource } from './command-source.ts'
 import type { RemoteBackendRuntime } from './runtime.ts'
 import type { RemoteM3ARuntimeSource } from './m3a-semantics.ts'
@@ -116,13 +120,28 @@ export interface RemoteSessionFacts {
   windowRefoldProof(sessionId: string, revision: number): PresentationWindowRefoldProof | undefined
   /** The official whole-log `sessionStats` projection value (PR4 §3.3). */
   sessionStatsProjection(sessionId: string): unknown
+  /**
+   * Subscribe the exact retained binding's `workingDirectory` face. The
+   * callback runs from the official projection store's own notification path,
+   * BEFORE the coalesced live-ingress refresh, and carries no value: read
+   * `sessionStatus` only after deciding what the change means. Undefined when
+   * the Session has no binding.
+   */
+  subscribeWorkingDirectory(sessionId: string, listener: () => void): (() => void) | undefined
+  /** The exact retained binding's current `workingDirectory` face value. */
+  workingDirectory(sessionId: string): string | undefined
 }
 
 /** The structural binding face the projection/running reads borrow. */
 interface RemotePlanBindingSource {
   binding(id: string): {
     readonly session: {
-      readonly projections: { faceOf(key: string): { getSnapshot(): unknown } }
+      readonly projections: {
+        faceOf(key: string): {
+          getSnapshot(): unknown
+          subscribe(listener: () => void): () => void
+        }
+      }
       getSnapshot(): { readonly running: boolean }
     }
   } | undefined
@@ -199,6 +218,14 @@ export function createRemotePresentationSource(
   const taskReader = new RemoteTaskReader(sessions, client.jobs, generation)
   return {
     presentationReader: backendRuntime.semantics.presentationReader,
+    // The private Host accepted-history read: the SAME mounted namespace and
+    // Connection generation this bundle already owns. A missing optional
+    // namespace is the adapter's typed `service-missing`, never a second mount.
+    historySearch: new RemoteHistorySearchPort(
+      () => (client.remote as unknown as { readonly piTuiHistorySearch?: RemoteHistorySearchNamespace })
+        .piTuiHistorySearch,
+      generation,
+    ),
     // PR4 §D1: the branch-specific command authority read, assembled from the
     // SAME wire faces (the generated commands/skills namespaces + the ONE
     // Connection generation) — never a second graph.
@@ -260,6 +287,17 @@ export function createRemotePresentationSource(
         // main-view reference is not a view either.
         if (sessions.binding(sessionId as never) === undefined) return false
         return (sessions.retainInfo(sessionId as never).getSnapshot().retainedBy.tuiMainView ?? 0) > 0
+      },
+      subscribeWorkingDirectory(sessionId: string, listener: () => void): (() => void) | undefined {
+        const binding = planSource.binding(sessionId)
+        if (binding === undefined) return undefined
+        return binding.session.projections.faceOf('workingDirectory').subscribe(listener)
+      },
+      workingDirectory(sessionId: string): string | undefined {
+        const binding = planSource.binding(sessionId)
+        if (binding === undefined) return undefined
+        const value = binding.session.projections.faceOf('workingDirectory').getSnapshot()
+        return typeof value === 'string' && value !== '' ? value : undefined
       },
       windowRefoldProof(sessionId: string, revision: number): PresentationWindowRefoldProof | undefined {
         const current = generation.getSnapshot()

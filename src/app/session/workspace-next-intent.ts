@@ -48,6 +48,15 @@ export interface WorkspaceNextIntentOwner {
    *  EVERY caller must refuse the Host request on `undefined`. */
   capture(): WorkspaceNextIntentCapture | undefined
   snapshot(): WorkspaceNextIntentSnapshot
+  /**
+   * Observe every committed state change, including a same-revision
+   * `verifying`/`rejected` transition. The callback runs synchronously AFTER
+   * the mutator committed its own state and before it returns; it must not
+   * re-enter the mutator or assume the keyboard/seat still admits an action.
+   * The initial subscription is silent: read `snapshot()` after subscribing to
+   * establish the baseline without a gap.
+   */
+  subscribe(listener: (snapshot: WorkspaceNextIntentSnapshot) => void): () => void
   setResolvedWorkspace(workspaceId: string, displayPath?: string): void
   proposeHostPath(path: string, provenance?: WorkspaceNextIntentProvenance): WorkspaceNextIntentCapture
   beginPathVerification(path?: string): WorkspaceNextIntentCapture
@@ -86,6 +95,7 @@ export function createWorkspaceNextIntentOwner(
   let workspaceId: string | undefined
   let error: string | undefined
   let disposed = false
+  const listeners = new Set<(snapshot: WorkspaceNextIntentSnapshot) => void>()
 
   const capture = (): WorkspaceNextIntentCapture | undefined => {
     if (disposed) throw new Error('workspace next-intent owner is disposed')
@@ -110,6 +120,14 @@ export function createWorkspaceNextIntentOwner(
     ...(error === undefined ? {} : { error }),
   })
 
+  /** Publish one committed state change. A listener may unsubscribe (or
+   *  dispose the owner) while being notified, so the live set is iterated as a
+   *  snapshot of itself. */
+  const notify = (): void => {
+    const current = snapshot()
+    for (const listener of [...listeners]) listener(current)
+  }
+
   const setWorkspace = (id: string, path: string | undefined, source: WorkspaceNextIntentProvenance): void => {
     pathGeneration += 1
     verificationPath = undefined
@@ -121,6 +139,7 @@ export function createWorkspaceNextIntentOwner(
     displayPath = path
     workspaceId = id
     error = undefined
+    notify()
   }
 
   /** Drop every proposal: the surface has no legal Host target until a new
@@ -136,6 +155,7 @@ export function createWorkspaceNextIntentOwner(
     displayPath = undefined
     workspaceId = undefined
     error = undefined
+    notify()
   }
 
   const resetToLaunchCwd = (): void => {
@@ -155,11 +175,16 @@ export function createWorkspaceNextIntentOwner(
     displayPath = launchCwd
     workspaceId = undefined
     error = undefined
+    notify()
   }
 
   return {
     capture,
     snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
     setResolvedWorkspace(id, path) {
       if (disposed) throw new Error('workspace next-intent owner is disposed')
       setWorkspace(id, path, 'manual')
@@ -178,6 +203,7 @@ export function createWorkspaceNextIntentOwner(
       error = undefined
       const captured = capture()
       if (captured === undefined) throw new Error('a proposed Host path must capture')
+      notify()
       return captured
     },
     beginPathVerification(path) {
@@ -195,6 +221,7 @@ export function createWorkspaceNextIntentOwner(
       displayPath = candidate
       status = 'verifying'
       error = undefined
+      notify()
       return {
         intent: { kind: 'host-path', path: candidate },
         revision: capturedRevision,
@@ -210,12 +237,14 @@ export function createWorkspaceNextIntentOwner(
       if (!capture.isCurrent() || disposed || capture.revision !== revision) return
       status = 'rejected'
       error = message
+      notify()
     },
     rejectPathVerification(token, message) {
       if (!token.isCurrent() || disposed || token.revision !== revision) return
       status = 'rejected'
       displayPath = verificationPath
       error = message
+      notify()
     },
     resetToLaunchCwd() {
       if (disposed) throw new Error('workspace next-intent owner is disposed')
@@ -246,6 +275,8 @@ export function createWorkspaceNextIntentOwner(
       pathGeneration += 1
       verificationPath = undefined
       verificationProvenance = undefined
+      notify()
+      listeners.clear()
     },
   }
 }

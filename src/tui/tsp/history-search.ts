@@ -29,6 +29,13 @@ import { View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo } from '@stencil-hq/tern'
 import type { HistoryScope, HistorySearchResult } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS, HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
+import {
+  createRemoteHistorySeat,
+  type RemoteHistoryBodyView,
+  type RemoteHistoryRow,
+  type RemoteHistorySeat,
+  type RemoteHistorySeatView,
+} from '../../client/history/remote-search-seat.ts'
 import type { TspHistorySearchBinding } from '../../app/surface/runtime.ts'
 import type { HistoryOpenScope } from '../../tui-app.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -38,8 +45,18 @@ import { HISTORY_CHORDS } from '../keybindings/hints.ts'
 /** The seat's own lifecycle: one card per open, parked under a Modal. */
 export type TspHistorySearchPhase = 'closed' | 'open' | 'parked'
 
-/** What the painted frame states about the in-flight search. */
-export type TspHistorySearchStatus = 'searching' | 'ready' | 'failed'
+/** What the painted frame states about the in-flight search. The Remote owner's
+ *  typed states are projected verbatim; Direct keeps its three local states. */
+export type TspHistorySearchStatus =
+  | 'searching'
+  | 'loading-host'
+  | 'incomplete'
+  | 'unavailable'
+  | 'denied'
+  | 'failed'
+  | 'stale'
+  | 'too-long'
+  | 'ready'
 
 /** The Scope labels the card shows (`Directory` is the `current` scope file). */
 export type TspHistoryScopeLabel = 'Session' | 'Directory' | 'All'
@@ -60,6 +77,11 @@ export type TspHistorySearchIntent =
   | { readonly kind: 'preview-scroll'; readonly to: ScrollTo; readonly serial: number; readonly revision: number }
   | { readonly kind: 'expand'; readonly serial: number; readonly revision: number }
   | { readonly kind: 'retry'; readonly serial: number; readonly revision: number }
+  /** Load the next Remote page. `page` is the number of rows the cell was
+   *  painted against, so a click that arrives after an append (which does not
+   *  bump the query revision) cannot request the NEXT page from a frame the user
+   *  never saw. */
+  | { readonly kind: 'more'; readonly page: number; readonly serial: number; readonly revision: number }
   /** `selectedId` is the row the CELL WAS PAINTED FOR. Moving the highlight
    *  does not bump `queryRevision`, so serial+revision alone cannot tell a
    *  lagging click which selection the user was looking at; without this the
@@ -88,6 +110,10 @@ export interface TspHistorySearchPreview {
   readonly directory: string
   readonly time: string
   readonly session: string
+  /** One honest body-read line: `Loading full text…`, a body failure reason or
+   *  the text-only attachment notice. Absent for a Direct row, whose preview IS
+   *  the exact stored text. */
+  readonly notice?: string
 }
 
 /** The render-time state the Dock view paints. `undefined` from
@@ -114,6 +140,9 @@ export interface TspHistorySearchRenderState {
   readonly empty: string | undefined
   readonly failure: string | undefined
   readonly preview: TspHistorySearchPreview | undefined
+  /** The Preview heading. Remote states its body-loading/readiness here; Direct
+   *  keeps the plain heading. */
+  readonly previewHeading: string
   readonly hint: string
   readonly copyLabel: string
   readonly copyKey: string
@@ -121,7 +150,17 @@ export interface TspHistorySearchRenderState {
   readonly restoreKey: string
   readonly retryLabel: string
   readonly retryKey: string
+  readonly retryEnabled: boolean
   readonly actionsEnabled: boolean
+  /** Whether this card is the Remote accepted-history seat. Direct keeps its
+   *  original action row and never paints the Remote More control. */
+  readonly remote: boolean
+  readonly moreLabel: string
+  readonly moreKey: string
+  readonly moreEnabled: boolean
+  readonly moreLoading: boolean
+  /** The row count the More control was painted against (the intent's fence). */
+  readonly page: number
 }
 
 export interface TspHistorySearchPorts {
@@ -220,6 +259,14 @@ export const HISTORY_SEARCH_FAILURE = 'Could not search input history.'
  *  native scroll container grants the real height, so this is a paging step and
  *  never a claim about how many rows the pane shows. */
 const HISTORY_SEARCH_PAGE_ROWS = 6
+
+/** The Remote states whose own control is Retry. A `Down` at any of them (and
+ *  the visible Retry button) restarts the query from its first page; the seat
+ *  never continues the stale cursor. A too-long query is edit-only and never
+ *  starts a retry RPC. */
+const REMOTE_RETRY_STATUSES: ReadonlySet<RemoteHistorySeatView['status']> = new Set([
+  'loading-host', 'failed', 'stale', 'incomplete', 'unavailable', 'denied',
+])
 
 /** The Scope ring in the frozen `Session → Directory → All → Session` order. A
  *  card opened with no live Session identity never offers `Session` — a Session
@@ -369,6 +416,12 @@ interface HistorySeatState {
   revealPending: boolean
   /** Set when a DIFFERENT row became selected: its Preview starts at the top. */
   previewResetPending: boolean
+  /** The ONE shared Remote owner for this open, or `undefined` on Direct. Its
+   *  committed view owns query/page/body/currentness there; this seat keeps only
+   *  the presentation/selection/caret identity around it. */
+  remote: RemoteHistorySeat | undefined
+  remoteView: RemoteHistorySeatView | undefined
+  remoteUnsubscribe: (() => void) | undefined
   retired: boolean
 }
 
@@ -414,7 +467,8 @@ export function createTspHistorySearch(
    *  selected row's position joins the key, so a repaint that moved the
    *  selection retires the old cell's identity along with it. */
   const selectionActionKeyOf = (owner: HistorySeatState, token: string): string => {
-    const index = owner.rows.findIndex((row) => row.id === owner.selectedId)
+    const rows = owner.remoteView?.rows ?? owner.rows
+    const index = rows.findIndex((row) => row.id === owner.selectedId)
     return `h${owner.openSerial}-r${owner.queryRevision}-s${index}-${token}`
   }
 
@@ -455,6 +509,14 @@ export function createTspHistorySearch(
     owner.retired = true
     clearTimer(owner)
     abandonPending()
+    // The shared Remote owner and its ONE subscription are released exactly
+    // once. `close()` is idempotent and does NOT call `onRetire`, so retiring
+    // this seat can never re-enter the callback that retired it.
+    owner.remoteUnsubscribe?.()
+    owner.remoteUnsubscribe = undefined
+    owner.remote?.close()
+    owner.remote = undefined
+    owner.remoteView = undefined
     frameIds = new Map()
   }
 
@@ -469,6 +531,111 @@ export function createTspHistorySearch(
     if (state === undefined) return
     retire()
     ports.requestRender()
+  }
+
+  /** The Remote owner's typed state, projected onto this seat's own status. */
+  const projectRemoteStatus = (status: RemoteHistorySeatView['status']): TspHistorySearchStatus =>
+    status === 'idle' ? 'searching' : status
+
+  /** More is an explicit user read: ready page with an older page remaining and
+   *  no append in flight. Every other state is a real disabled state. */
+  const remoteMoreEnabled = (view: RemoteHistorySeatView): boolean =>
+    view.status === 'ready' && view.hasMore && !view.moreLoading
+
+  /** Retry is the honest recovery for a failed/stale/incomplete/unavailable/
+   *  denied search, and for a selected row whose exact body read failed. */
+  const remoteRetryEnabled = (view: RemoteHistorySeatView): boolean =>
+    REMOTE_RETRY_STATUSES.has(view.status)
+    || (view.status === 'ready' && view.body.kind === 'failed')
+
+  /** The one exact body this card may copy or restore: committed, ready and
+   *  still the row the painted action belongs to. */
+  const remoteBodyReady = (owner: HistorySeatState): Extract<RemoteHistoryBodyView, { readonly kind: 'ready' }> | undefined => {
+    const view = owner.remoteView
+    if (view === undefined || view.status !== 'ready') return undefined
+    const body = view.body
+    if (body.kind !== 'ready') return undefined
+    if (body.row.id !== view.selectedId) return undefined
+    return body
+  }
+
+  /**
+   * Commit the shared owner's already-decided view into this seat's local
+   * presentation facts. It owns no query/page/body truth of its own: it mirrors
+   * the seat's query revision (so old painted action keys retire), the scope it
+   * decided, the selected row and the row/body/status the view already carries.
+   */
+  const syncRemoteView = (owner: HistorySeatState): void => {
+    const remote = owner.remote
+    if (state !== owner || owner.retired || remote === undefined) return
+    const view = remote.view()
+    const previous = owner.remoteView
+    owner.remoteView = view
+    owner.scope = view.scope
+    owner.query = view.query
+    owner.queryRevision = view.queryRevision
+    owner.selectedId = view.selectedId
+    owner.status = projectRemoteStatus(view.status)
+    if (view.selectedId !== previous?.selectedId) {
+      owner.previewResetPending = true
+      owner.revealPending = true
+    }
+    change(owner)
+  }
+
+  /** The Remote seat retired itself because its captured Host scope died. The
+   *  mount's existing retire path owns the visible removal and the composer's
+   *  caret return; nothing here touches the draft. */
+  const retireFromRemote = (owner: HistorySeatState): void => {
+    if (state !== owner || owner.retired) return
+    retire()
+    try {
+      ports.requestRender()
+    } catch (error) {
+      try {
+        ports.reportFatal(error)
+      } catch (secondary) {
+        ports.reportSecondaryFailure(error, secondary)
+      }
+    }
+  }
+
+  const remoteMore = (owner: HistorySeatState): void => {
+    const view = owner.remoteView
+    if (view === undefined || !remoteMoreEnabled(view)) return
+    owner.remote?.more()
+  }
+
+  const remoteRetry = (owner: HistorySeatState): void => {
+    const view = owner.remoteView
+    if (view === undefined || !remoteRetryEnabled(view)) return
+    owner.remote?.retry()
+  }
+
+  /** The Remote browse route: an ordinary selection move, the frozen
+   *  Down-at-the-tail More, and Down-as-Retry in a failed/stale state. PageUp
+   *  and PageDown stay ordinary selection steps and claim no More action. */
+  const remoteBrowse = (owner: HistorySeatState, step: TspHistoryBrowseStep): void => {
+    const remote = owner.remote
+    const view = owner.remoteView
+    if (remote === undefined || view === undefined) return
+    if (step === 'down' && REMOTE_RETRY_STATUSES.has(view.status)) {
+      remoteRetry(owner)
+      return
+    }
+    if (view.status !== 'ready') return
+    const rows = view.rows
+    if (step === 'down' && view.selectedId === rows.at(-1)?.id) {
+      remoteMore(owner)
+      return
+    }
+    if (rows.length === 0) return
+    const at = Math.max(0, rows.findIndex((row) => row.id === view.selectedId))
+    const size = step === 'page-up' || step === 'page-down' ? HISTORY_SEARCH_PAGE_ROWS : 1
+    const delta = step === 'up' || step === 'page-up' ? -size : size
+    const target = rows[Math.min(rows.length - 1, Math.max(0, at + delta))]
+    if (target === undefined || target.id === view.selectedId) return
+    remote.select(target.id)
   }
 
   const runSearch = (owner: HistorySeatState, request: PendingSearch): void => {
@@ -659,6 +826,12 @@ export function createTspHistorySearch(
       case 'query': {
         owner.query = intent.query
         owner.queryCursor = intent.cursor
+        // The shared Remote owner debounces, aborts the old read and cancels its
+        // body; the local caret/query text stays this seat's.
+        if (owner.remote !== undefined) {
+          owner.remote.setQuery(intent.query)
+          return
+        }
         schedule(owner, false)
         return
       }
@@ -668,6 +841,10 @@ export function createTspHistorySearch(
         owner.scope = ring[(at + intent.delta + ring.length) % ring.length]!
         // The query string survives the switch; the rows belong to the Scope, so
         // the settled page is re-queried rather than re-labelled.
+        if (owner.remote !== undefined) {
+          owner.remote.setScope(owner.scope)
+          return
+        }
         schedule(owner, false)
         return
       }
@@ -676,6 +853,15 @@ export function createTspHistorySearch(
         // PREVIOUS query, so they are visible but no longer operable. Accepting
         // a click here would let a lagging pointer select a row the user has
         // already typed past.
+        if (owner.remote !== undefined) {
+          const view = owner.remoteView
+          if (view === undefined || view.status !== 'ready') return
+          if (!view.rows.some((row) => row.id === intent.rowId)) return
+          // The shared seat decides whether the same row is a body retry; a
+          // select of the same still-ready row is its own no-op.
+          owner.remote.select(intent.rowId)
+          return
+        }
         if (owner.status !== 'ready') return
         const row = owner.rows.find((candidate) => candidate.id === intent.rowId)
         if (row === undefined || row.id === owner.selectedId) return
@@ -685,7 +871,18 @@ export function createTspHistorySearch(
         return
       }
       case 'browse': {
+        if (owner.remote !== undefined) {
+          remoteBrowse(owner, intent.step)
+          return
+        }
         browse(owner, intent.step)
+        return
+      }
+      case 'more': {
+        if (owner.remote === undefined) return
+        const view = owner.remoteView
+        if (view === undefined || intent.page !== view.rows.length) return
+        remoteMore(owner)
         return
       }
       case 'preview-scroll': {
@@ -701,12 +898,34 @@ export function createTspHistorySearch(
         return
       }
       case 'retry': {
+        if (owner.remote !== undefined) {
+          remoteRetry(owner)
+          return
+        }
         if (owner.status !== 'failed') return
         schedule(owner, true)
         return
       }
       case 'copy': {
         if (!selectionStillPainted(owner, intent)) return
+        if (owner.remote !== undefined) {
+          const body = remoteBodyReady(owner)
+          if (body === undefined || body.row.id !== intent.selectedId || body.text === '') return
+          const raw = body.text
+          const rowId = body.row.id
+          const serial = owner.openSerial
+          const revision = owner.queryRevision
+          ports.copyRaw(raw, () => {
+            const live = state
+            if (live === undefined || live.retired || live.remote === undefined) return false
+            if ((live.phase !== 'open' && live.phase !== 'parked')
+              || live.openSerial !== serial || live.queryRevision !== revision
+              || live.selectedId !== rowId || !live.scopeCapture.isCurrent()) return false
+            const current = remoteBodyReady(live)
+            return current !== undefined && current.row.id === rowId && current.text === raw
+          })
+          return
+        }
         const row = settledSelected(owner)
         if (row === undefined) return
         // The RAW stored content is captured at admission and never re-read from
@@ -738,6 +957,15 @@ export function createTspHistorySearch(
       }
       case 'restore': {
         if (!selectionStillPainted(owner, intent)) return
+        if (owner.remote !== undefined) {
+          const body = remoteBodyReady(owner)
+          if (body === undefined || body.row.id !== intent.selectedId || body.text === '') return
+          const raw = body.text
+          if (!ports.composerWritable()) return
+          retire()
+          ports.restoreToComposer(raw)
+          return
+        }
         const row = settledSelected(owner)
         if (row === undefined) return
         const raw = row.content
@@ -821,12 +1049,120 @@ export function createTspHistorySearch(
     return undefined
   }
 
+  /** The Preview of the shared Remote owner's selected row: the bounded preview
+   *  until the exact body is verified, then the exact text. Copy/Restore read
+   *  the raw body, never this sanitized projection. */
+  const remotePreview = (body: RemoteHistoryBodyView, row: RemoteHistoryRow): TspHistorySearchPreview => {
+    const text = body.kind === 'ready'
+      ? body.text
+      : body.kind === 'failed'
+        ? body.preview
+        : body.kind === 'loading'
+          ? body.preview
+          : row.preview
+    // A loading body states itself in the Preview heading; the notice line is
+    // reserved for a failed read and the text-only/empty exact-body facts.
+    const notice = body.kind === 'failed'
+      ? body.message
+      : body.kind === 'ready'
+        ? body.text === ''
+          ? 'No text to restore'
+          : body.hasNonText ? 'Text only · attachments not restored' : undefined
+        : undefined
+    return {
+      text: sanitizeDisplayText(text),
+      directory: `Directory: ${row.effectiveCwd === null ? 'unknown' : sanitizedPhysicalLine(row.effectiveCwd)}`,
+      time: `Time: ${previewTime(row.acceptedAt)}`,
+      session: `Session: ${sanitizedPhysicalLine(row.sessionId)}`,
+      ...(notice === undefined ? {} : { notice: sanitizedPhysicalLine(notice) }),
+    }
+  }
+
+  const remoteRenderState = (owner: HistorySeatState): TspHistorySearchRenderState | undefined => {
+    const view = owner.remoteView
+    if (view === undefined) return undefined
+    const now = Date.now()
+    const painted: TspHistorySearchRow[] = view.rows.map((row, index) => ({
+      id: row.id,
+      key: actionKeyOf(owner, `o${index}`),
+      summary: rowSummary(row.preview),
+      time: shortTime(row.acceptedAt, now),
+      directory: row.effectiveCwd === null ? '' : shortCwd(row.effectiveCwd),
+      selected: row.id === view.selectedId,
+    }))
+    const exact = remoteBodyReady(owner)
+    const selectedRow = view.rows.find((row) => row.id === view.selectedId)
+    const preview = selectedRow === undefined ? undefined : remotePreview(view.body, selectedRow)
+    const status = projectRemoteStatus(view.status)
+    // The shared owner's committed message is already the safe human statement
+    // for every typed state; `ready` counts the rows this frame really shows and
+    // never claims a total.
+    const header = view.status === 'ready'
+      ? view.moreLoading
+        ? `Results · ${String(view.rows.length)} shown · Loading more…`
+        : sanitizedPhysicalLine(view.message === '' ? `Results · ${String(view.rows.length)} shown` : view.message)
+      : sanitizedPhysicalLine(view.message === '' ? 'Searching…' : view.message)
+    return {
+      serial: owner.openSerial,
+      revision: owner.queryRevision,
+      scope: SCOPE_LABELS[view.scope],
+      scopeKey: actionKeyOf(owner, 'scope'),
+      expandKey: actionKeyOf(owner, 'expand'),
+      closeKey: actionKeyOf(owner, 'close'),
+      queryKey: queryKeyOf(owner.openSerial),
+      query: owner.query,
+      queryCursor: owner.queryCursor,
+      status,
+      expanded: owner.expanded,
+      selectedId: view.selectedId,
+      resultsKey: containerKeyOf(owner.openSerial, 'results-scroll'),
+      previewKey: containerKeyOf(owner.openSerial, 'preview-scroll'),
+      header,
+      rows: painted,
+      empty: undefined,
+      failure: undefined,
+      preview,
+      previewHeading: view.body.kind === 'ready'
+        ? 'Preview'
+        : view.body.kind === 'failed'
+          ? 'Preview · exact text unavailable'
+          : 'Preview · Loading full text…',
+      hint: `${HISTORY_CHORDS.scope.label} scope · ${HISTORY_CHORDS.results.label} select`
+        + ` · ${HISTORY_CHORDS.preview.label} preview · ${HISTORY_CHORDS.copy.label} copy`
+        + ` · ${HISTORY_CHORDS.expand.label} ${owner.expanded ? 'collapse' : 'expand'}`
+        + ` · ${HISTORY_CHORDS.accept.label} restore · ${HISTORY_CHORDS.cancel.label} cancel`,
+      copyLabel: `Copy all · ${HISTORY_CHORDS.copy.label}`,
+      copyKey: selectionActionKeyOf(owner, 'copy'),
+      restoreLabel: `Restore to draft · ${HISTORY_CHORDS.accept.label}`,
+      restoreKey: selectionActionKeyOf(owner, 'restore'),
+      retryLabel: 'Retry · ↓',
+      // The retry cell is keyed by the state it was painted for: a click that
+      // arrives after the state changed can never retry a newer round.
+      retryKey: actionKeyOf(owner, `retry-${view.status}-${view.body.kind}`),
+      retryEnabled: remoteRetryEnabled(view),
+      actionsEnabled: exact !== undefined && exact.text !== '',
+      remote: true,
+      moreLabel: 'More · ↓',
+      // More is keyed by the page it appends to and its in-flight flag; an
+      // append does not bump the query revision, so the page identity is the
+      // only fence a lagging click would otherwise lack.
+      moreKey: actionKeyOf(owner,
+        `more-${String(view.rows.length)}-${view.moreLoading ? 'loading' : 'idle'}-${view.hasMore ? 'more' : 'end'}`),
+      moreEnabled: remoteMoreEnabled(view),
+      moreLoading: view.moreLoading,
+      page: view.rows.length,
+    }
+  }
+
   const renderState = (): TspHistorySearchRenderState | undefined => {
     const owner = state
     if (owner === undefined || owner.retired) return undefined
     // A parked card, or a mount that no longer admits it, paints NO card: a
     // hidden-but-clickable History is exactly the forbidden state.
     if (owner.phase !== 'open' || !ports.admitted() || !owner.scopeCapture.isCurrent()) return undefined
+    // The shared Remote owner already decided query/page/body/status; this seat
+    // projects that one committed view into its existing native card.
+    if (owner.remote !== undefined) return remoteRenderState(owner)
     const rows = owner.rows
     const now = Date.now()
     const painted: TspHistorySearchRow[] = rows.map((row, index) => ({
@@ -880,6 +1216,7 @@ export function createTspHistorySearch(
       empty,
       failure: owner.status === 'failed' ? HISTORY_SEARCH_FAILURE : undefined,
       preview,
+      previewHeading: 'Preview',
       hint: `${HISTORY_CHORDS.scope.label} scope · ${HISTORY_CHORDS.results.label} select`
         + ` · ${HISTORY_CHORDS.preview.label} preview · ${HISTORY_CHORDS.copy.label} copy`
         + ` · ${HISTORY_CHORDS.expand.label} ${owner.expanded ? 'collapse' : 'expand'}`
@@ -898,7 +1235,14 @@ export function createTspHistorySearch(
       restoreKey: selectionActionKeyOf(owner, 'restore'),
       retryLabel: 'Retry',
       retryKey: actionKeyOf(owner, 'retry'),
+      retryEnabled: owner.status === 'failed',
       actionsEnabled: selected !== undefined,
+      remote: false,
+      moreLabel: '',
+      moreKey: '',
+      moreEnabled: false,
+      moreLoading: false,
+      page: 0,
     }
   }
 
@@ -913,7 +1257,8 @@ export function createTspHistorySearch(
       containerKeyOf(owner.openSerial, 'results-scroll'),
       containerKeyOf(owner.openSerial, 'preview-scroll'),
     ])
-    owner.rows.forEach((_, index) => wanted.add(actionKeyOf(owner, `o${index}`)))
+    const rowCount = owner.remoteView?.rows.length ?? owner.rows.length
+    for (let index = 0; index < rowCount; index += 1) wanted.add(actionKeyOf(owner, `o${index}`))
     const visit = (tree: NonNullable<typeof root>): void => {
       const key = tree.props['key']
       if (typeof key === 'string' && wanted.has(key)) frameIds.set(key, tree.id)
@@ -924,7 +1269,8 @@ export function createTspHistorySearch(
     // committed, so the selection is never left outside the visible list.
     if (owner.revealPending) {
       owner.revealPending = false
-      const at = owner.rows.findIndex((row) => row.id === owner.selectedId)
+      const rows = owner.remoteView?.rows ?? owner.rows
+      const at = rows.findIndex((row) => row.id === owner.selectedId)
       const id = at < 0 ? undefined : frameIds.get(actionKeyOf(owner, `o${at}`))
       if (id !== undefined) ports.reveal(id)
     }
@@ -972,7 +1318,15 @@ export function createTspHistorySearch(
       // captures anything, so no older request, key or click can act on it.
       retire()
       const scopeCapture = bundle.captureScope()
-      const scope: HistoryScope = scopeCapture.sessionId === undefined ? 'current' : 'session'
+      const remoteScope = scopeCapture.remote
+      const read = bundle.read
+      const diag = bundle.diag
+      // Remote opens on the shared owner's default Scope: Session when a live
+      // identity exists, otherwise All (the Host's sessionless start). Direct
+      // keeps its own file-search default (Directory), exactly as before.
+      const scope: HistoryScope = remoteScope === undefined
+        ? scopeCapture.sessionId === undefined ? 'current' : 'session'
+        : scopeCapture.sessionId === undefined ? 'all' : 'session'
       const owner: HistorySeatState = {
         phase: 'open',
         openSerial: ++openSerial,
@@ -991,12 +1345,36 @@ export function createTspHistorySearch(
         timer: undefined,
         revealPending: false,
         previewResetPending: false,
+        remote: undefined,
+        remoteView: undefined,
+        remoteUnsubscribe: undefined,
         retired: false,
       }
       state = owner
-      // The empty query browses recent history and reads NOW — the debounce only
-      // delays later file reads, never the first frame's search.
-      schedule(owner, true)
+      if (remoteScope !== undefined) {
+        if (read !== undefined && diag !== undefined) {
+          // ONE shared Remote owner per open. It owns query/page/body/More/
+          // Retry and currentness; this seat only follows its committed view.
+          const remote = createRemoteHistorySeat({
+            read,
+            diag,
+            sessionId: scopeCapture.sessionId,
+            scope: remoteScope,
+            onRetire: () => { retireFromRemote(owner) },
+          })
+          owner.remote = remote
+          owner.remoteView = remote.view()
+          owner.remoteUnsubscribe = remote.subscribe(() => { syncRemoteView(owner) })
+          remote.open(scope, owner.query)
+          syncRemoteView(owner)
+        }
+        // A Remote capture without its private read port has no truthful source
+        // to read: never fall back to the Direct file source.
+      } else {
+        // The empty query browses recent history and reads NOW — the debounce
+        // only delays later file reads, never the first frame's search.
+        schedule(owner, true)
+      }
       ports.setFocus()
     },
     syncBlocker: (blocked: boolean) => {

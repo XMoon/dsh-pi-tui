@@ -54,6 +54,8 @@ export const HISTORY_SEARCH_ROLES = {
   rowText: 'dsh.history.row-text',
   rowMeta: 'dsh.history.row-meta',
   status: 'dsh.history.status',
+  pageActions: 'dsh.history.page-actions',
+  more: 'dsh.history.more',
   preview: 'dsh.history.preview',
   previewHead: 'dsh.history.preview-head',
   previewScroll: 'dsh.history.preview-scroll',
@@ -137,6 +139,19 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
     resultsBody.push(ui.text({ key: `h${serial}-empty`, role: HISTORY_SEARCH_ROLES.status, wrap: 'none', text: state.empty }))
   }
 
+  const pageActions = state.remote
+    ? ui.row(
+        { key: `h${serial}-page-actions`, role: HISTORY_SEARCH_ROLES.pageActions, gap: 'sm', align: 'center' },
+        chromeButton(state.moreKey, HISTORY_SEARCH_ROLES.more, state.moreLabel,
+          state.moreEnabled ? 'Load the next page of history'
+            : state.moreLoading ? 'Loading the next page of history' : 'No more history to load',
+          state.moreEnabled, () => onIntent({ kind: 'more', page: state.page, serial, revision })),
+        chromeButton(state.retryKey, HISTORY_SEARCH_ROLES.retry, state.retryLabel,
+          state.retryEnabled ? 'Search this scope and query again' : 'Retry is not available right now',
+          state.retryEnabled, () => onIntent({ kind: 'retry', serial, revision })),
+      )
+    : undefined
+
   const results = ui.col(
     { key: `h${serial}-results`, role: HISTORY_SEARCH_ROLES.results, gap: 'none' },
     ui.text({ key: `h${serial}-results-head`, role: HISTORY_SEARCH_ROLES.resultsHead, wrap: 'none', text: state.header }),
@@ -144,6 +159,7 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
       { key: state.resultsKey, role: HISTORY_SEARCH_ROLES.resultsScroll, variant: 'bar', gap: 'none' },
       ...resultsBody,
     ),
+    ...(pageActions === undefined ? [] : [pageActions]),
   )
 
   const previewBody: Node[] = []
@@ -172,6 +188,14 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
       wrap: 'none',
       text: state.preview.session,
     }))
+    if (state.preview.notice !== undefined) {
+      previewBody.push(ui.text({
+        key: `h${serial}-preview-notice`,
+        role: HISTORY_SEARCH_ROLES.previewMeta,
+        wrap: 'none',
+        text: state.preview.notice,
+      }))
+    }
   } else {
     previewBody.push(ui.text({
       key: `h${serial}-preview-none`,
@@ -182,7 +206,12 @@ export function historySearchView(input: TspHistorySearchViewInput): Node {
   }
   const preview = ui.col(
     { key: `h${serial}-preview`, role: HISTORY_SEARCH_ROLES.preview, gap: 'none' },
-    ui.text({ key: `h${serial}-preview-head`, role: HISTORY_SEARCH_ROLES.previewHead, wrap: 'none', text: 'Preview' }),
+    ui.text({
+      key: `h${serial}-preview-head`,
+      role: HISTORY_SEARCH_ROLES.previewHead,
+      wrap: 'none',
+      text: state.previewHeading,
+    }),
     ui.scroll({ key: state.previewKey, role: HISTORY_SEARCH_ROLES.previewScroll, variant: 'bar', gap: 'none' }, ...previewBody),
   )
 
@@ -303,7 +332,8 @@ export const HISTORY_SEARCH_STYLES = `
   [data-role='dsh.history.close'],
   [data-role='dsh.history.copy'],
   [data-role='dsh.history.restore'],
-  [data-role='dsh.history.retry'] {
+  [data-role='dsh.history.retry'],
+  [data-role='dsh.history.more'] {
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -321,16 +351,29 @@ export const HISTORY_SEARCH_STYLES = `
   [data-role='dsh.history.scope']:hover,
   [data-role='dsh.history.expand']:hover,
   [data-role='dsh.history.close']:hover,
-  [data-role='dsh.history.retry']:hover {
+  [data-role='dsh.history.retry']:hover,
+  [data-role='dsh.history.more']:hover {
     background: var(--l1);
     color: var(--t1);
   }
   [data-role='dsh.history.scope'][aria-disabled='true'],
   [data-role='dsh.history.copy'][aria-disabled='true'],
-  [data-role='dsh.history.restore'][aria-disabled='true'] {
+  [data-role='dsh.history.restore'][aria-disabled='true'],
+  [data-role='dsh.history.retry'][aria-disabled='true'],
+  [data-role='dsh.history.more'][aria-disabled='true'] {
     color: var(--t4);
     border-color: var(--l1);
     cursor: not-allowed;
+  }
+  /* The Remote paging row is a fixed non-shrinking row inside the results
+     region, exactly like the region heading; the scroll area above it owns the
+     only flexible space. */
+  [data-role='dsh.history.page-actions'] {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-top: 2px;
   }
   /* The primary verb is the filled one, and it is never called Send or Run. */
   [data-role='dsh.history.restore'] {

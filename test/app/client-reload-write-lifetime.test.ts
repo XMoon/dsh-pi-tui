@@ -196,7 +196,7 @@ function startHarness(): Harness {
     surface: { refreshPendingInput: () => {} },
     history: {
       persist: () => {},
-      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+      persistAfterSession: async (resolveSession, persist) => { persist?.(await resolveSession()) },
     },
     viewer: { isViewing: () => false },
     extensions: {
@@ -520,7 +520,7 @@ function startShellHarness(composerOverride?: unknown): ShellHarness {
     surface: { refreshPendingInput: () => {} },
     history: {
       persist: () => {},
-      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+      persistAfterSession: async (resolveSession, persist) => { persist?.(await resolveSession()) },
     },
     viewer: { isViewing: () => false },
     extensions: {

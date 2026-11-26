@@ -1120,7 +1120,7 @@ export interface SteerSubmissionDeps {
   readonly pinDraftAttachments: (text: string) => () => void
   readonly persistAfterSession: (
     resolveSession: () => Promise<string | undefined>,
-    persist: (sessionId: string | undefined) => void,
+    persist?: (sessionId: string | undefined) => void,
   ) => Promise<void>
   readonly ensureSession: () => Promise<void>
   readonly withPromptAdmission: <T>(

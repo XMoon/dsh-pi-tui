@@ -1820,11 +1820,15 @@ accepted text. `all` addresses every accessible Session of the authenticated
 Profile, `session` one exact id, and `directory` the event-time effective
 directory (path-normalized; never a realpath or a Client fallback). The preview
 is bounded and explicitly not recoverable full text; full text is read only
-through `readText`, keyed by the stored content hash. A keyset cursor is bound to
-one Host service incarnation and index revision: any newer observed event makes
-it `stale` instead of silently re-ranking the caller's page. The Host refuses a
-non-Owner, an ended peer or an aborted invocation before any official read or
-index query.
+through `readText`, keyed by the stored content hash. The opaque keyset cursor is
+v2: one Host service incarnation, one index revision, a digest of the exact
+request context (scope, literal query, normalized scope id) and one canonical
+signed 64-bit SQLite row anchor. It carries no query, path, official id or whole
+row, and stays below the fixed 2048-byte wire bound; the anchor is re-read
+against the same scope/query match set without selecting content. A different
+incarnation/revision/hash, or a deleted, rebuilt or re-scoped anchor, is `stale`
+instead of silently re-ranking the caller's page. The Host refuses a non-Owner,
+an ended peer or an aborted invocation before any official read or index query.
 
 Restore invalidation is an explicit operator procedure, not a runtime
 feature. Before restoring a backup, rolling back/cloning a filesystem snapshot

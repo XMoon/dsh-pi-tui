@@ -297,6 +297,9 @@ import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
 import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
+import { createRemoteHistorySeat, type RemoteHistorySeat } from './client/history/remote-search-seat.ts'
+import type { HistorySearchReadPort } from './runtime/history-search-read-port.ts'
+import type { Diag } from './runtime/process/diagnostics.ts'
 import { createHistoryRecallScope, type HistoryRecallScope, type HistoryScopeSettlement } from './client/history/recall-scope.ts'
 import type { InputMemoryRecall } from './client/history/memory-recall.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
@@ -2425,6 +2428,8 @@ function pendingTailRowKey(item: PendingTailRow): string {
 export interface HistoryOpenScope {
   readonly sessionId: string | undefined
   readonly isCurrent: () => boolean
+  /** The Remote-only capture (absent on Direct, which keeps its file cwd). */
+  readonly remote?: import('./client/history/remote-scope.ts').RemoteHistoryOpenScope
 }
 
 /** Injectable TuiApp options; every field is optional. */
@@ -2728,6 +2733,10 @@ export interface TuiAppOptions {
    * itself. Optional — absent, Ctrl+R falls through unbound.
    */
   historySearchSource?: import('./client/history/search.ts').HistorySearchSource
+  /** The Remote-only private Host accepted-history read; absent on Direct. */
+  historySearchRead?: HistorySearchReadPort
+  /** The composition diagnostics channel for the Remote seat's detached reads. */
+  historySearchDiag?: Diag
   /**
    * Feature History PR2-A: the Split/Daemon Client root's process-lifetime
    * input-recall memory, injected by the composition root. When present this
@@ -4446,6 +4455,8 @@ export class TuiApp {
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
+  private readonly historySearchRead: HistorySearchReadPort | undefined
+  private readonly historySearchDiag: Diag | undefined
   /** The live working directory for the panel's `current` scope — a GETTER
    * (the runner's `sessionCwd()`), never a snapshot: a session switch moves
    * the whole surface's cwd with the new session header, so the panel must
@@ -5838,6 +5849,8 @@ export class TuiApp {
     // Same for the session identity: a session switch must make the next
     // history search the NEW session (see the field doc).
     this.captureHistoryScope = options.captureHistoryScope
+    this.historySearchRead = options.historySearchRead
+    this.historySearchDiag = options.historySearchDiag
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -8542,7 +8555,8 @@ export class TuiApp {
         // remainder; a guard no-op stays host-owned). The continuable
         // subagent viewer keeps its OWN live editor — the chord is a
         // no-op there (never the child draft, never the parent draft).
-        if (this.historySearchSource === undefined || this.viewerMode !== undefined) return true
+        if ((this.historySearchSource === undefined && this.historySearchRead === undefined)
+          || this.viewerMode !== undefined) return true
         this.openHistorySearch()
         return true
       },
@@ -10066,7 +10080,7 @@ export class TuiApp {
    */
   openHistorySearch(): void {
     if (this.historyPanel !== undefined) return
-    if (this.historySearchSource === undefined) return
+    if (this.historySearchSource === undefined && this.historySearchRead === undefined) return
     if (this.disposed) return
     const captureHistoryScope = this.captureHistoryScope
     if (captureHistoryScope === undefined) return
@@ -10075,10 +10089,16 @@ export class TuiApp {
     // like before; the identity and its currentness come from the SAME capture,
     // so no later read can recombine a different session id with this scope.
     const captured = captureHistoryScope()
+    const remote = captured.remote
+    const read = this.historySearchRead
+    const diag = this.historySearchDiag
+    if (remote !== undefined && (read === undefined || diag === undefined)) return
     const cwd = this.historySearchCwd?.() ?? this.status.cwd
     const sessionId = captured.sessionId
     let panel: HistoryPanel | undefined
     let lease: { close(): void } | undefined
+    let seat: RemoteHistorySeat | undefined
+    let createdPanel: HistoryPanel | undefined
     // The ONE caller subject predicate: the same panel is still the live tenant
     // AND the captured Session scope (exact owner + generation) is still
     // current. The seam reads it at every revalidation entry AND the panel reads
@@ -10091,8 +10111,21 @@ export class TuiApp {
       && !this.disposed
       && captured.isCurrent()
     lease = this.tryOpenOptionalSeatTenant(() => {
+      if (remote !== undefined && read !== undefined && diag !== undefined) {
+        seat = createRemoteHistorySeat({
+          read,
+          diag,
+          sessionId,
+          scope: remote,
+          onRetire: () => {
+            if (createdPanel !== undefined && this.historyPanel === createdPanel) lease?.close()
+          },
+        })
+      }
       const created = new HistoryPanel({
-        source,
+        ...(source === undefined ? {} : { source }),
+        ...(seat === undefined ? {} : { remote: seat }),
+        ...(remote === undefined ? {} : { defaultScope: remote.initialScope }),
         cwd,
         sessionId,
         geometry: {
@@ -10131,6 +10164,7 @@ export class TuiApp {
       // The panel pointer is committed BEFORE the seam installs/validates the
       // record, so `isCurrent()` and the lease's own cleanup already see the
       // instance they belong to.
+      createdPanel = created
       this.historyPanel = created
       panel = created
       return {
@@ -10141,6 +10175,7 @@ export class TuiApp {
             this.historyPanel = undefined
             this.historyLease = undefined
           }
+          seat?.close()
           created.dispose()
         },
       }

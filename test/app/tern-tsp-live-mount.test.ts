@@ -2177,7 +2177,6 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
     sessionCwd: () => home,
     diag: createDiag({ stderrLevel: 'off' }),
     isCleanedUp: () => false,
-    recallAuthority: 'direct',
   })
   // One-to-one observation of the settlement ON THE PRODUCTION CONSUMER: the
   // mounted renderer's own seam member is saved UNBOUND, re-called through the
