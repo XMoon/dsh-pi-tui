@@ -1889,3 +1889,22 @@ test('an unconfirmed form Back warns before discarding local edits', () => {
   const after = render(page, 100, 14).join('\n')
   assert.match(after, /Outcome unconfirmed/u, 'the prior receipt remains visible')
 })
+
+test('a body verb painted inside a focused form row activates instead of selecting', () => {
+  const { page } = makePage(snapshot({
+    editor: editorSnapshot(),
+    config: { kind: 'ready', generation: {}, revision: 3, entries: [] },
+  }))
+  // Focus is already covered by the navigation cases; pin the Arg 1 row here
+  // so this case isolates the overlapping hit target.
+  ;(page as unknown as { formFocus: number }).formFocus = 6
+  const lines = render(page, 44, 20)
+  const row = lines.findIndex(line => /Arg 1:/u.test(line) && /Edit \[Enter\]/u.test(line))
+  const suffix = row < 0 ? -1 : lines[row]!.indexOf('Edit [Enter]')
+  assert.ok(row >= 0 && suffix >= 0, `the narrow bar must drop the Arg 1 body verb:\n${lines.join('\n')}`)
+  const base = mouseBase(44, 20)
+  page.handleMouse({ ...base, type: 'press', x: suffix + 1, y: row })
+  page.handleMouse({ ...base, type: 'click', x: suffix + 1, y: row })
+  const after = render(page, 44, 20).join('\n')
+  assert.match(after, /^edit:/mu, `the suffix must open the explicit input, not just select the row:\n${after}`)
+})

@@ -1094,8 +1094,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (event.height !== bodyRows && event.height !== paint.rows) return undefined
     const current = paint.identity === this.gestureIdentity()
     const modal = this.modalOwned()
-    const hit = paint.targets.find(candidate => candidate.row === event.y
-      && event.x >= candidate.startCol && event.x < candidate.endCol)
+    const hitAt = (kind?: McpPaintedTarget['kind']): McpPaintedTarget | undefined => paint.targets.find(candidate => candidate.row === event.y
+      && event.x >= candidate.startCol && event.x < candidate.endCol
+      && (kind === undefined || candidate.kind === kind))
+    // The focused row's explicit verb is painted INSIDE the row's full-width
+    // target; the more specific suffix wins, otherwise a pointer-only form
+    // would select the field instead of invoking the advertised verb.
+    const hit = hitAt('form-verb') ?? hitAt()
     const target = modal
       ? hit !== undefined && this.isModalTarget(hit) ? hit : undefined
       : hit
@@ -1649,6 +1654,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const rendered = renderMcpConfigForm(editor, width, Math.max(1, fieldRows), this.formFocus, this.formOffset,
       (field, key) => this.controller.dictValueForm(field, key),
       (field, key) => this.controller.canRemoveDictKey(field, key))
+    const fieldTop = lines.length
     lines.push(...rendered.lines.slice(0, fieldRows))
     // The bar's explicit verb is the primary route; when the bar really drops
     // it, the focused row paints its OWN complete verb span (same sink).
@@ -1660,19 +1666,24 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       const painted = rendered.painted.find(candidate => candidate.row.id === row?.id)
       if (row !== undefined && verb !== undefined && painted !== undefined && painted.line >= this.formOffset
         && painted.line < this.formOffset + fieldRows) {
-        const line = lines[lines.length - fieldRows + (painted.line - this.formOffset)]
+        const index = fieldTop + (painted.line - this.formOffset)
+        const line = lines[index]
         const suffix = ` ${verb}`
-        if (line !== undefined && visibleWidth(stripAnsi(line) + suffix) <= width) {
-          const index = lines.length - fieldRows + (painted.line - this.formOffset)
-          lines[index] = line + color.textMuted(suffix)
+        // The form renderer returns width-padded cells; append after the
+        // visible content, never after that padding.
+        const base = line?.replace(/\s+$/u, '')
+        if (base !== undefined && visibleWidth(stripAnsi(base) + suffix) <= width) {
+          const paintedLine = base + color.textMuted(suffix)
+          lines[index] = paintedLine + ' '.repeat(Math.max(0, width - visibleWidth(stripAnsi(paintedLine))))
           const indexField = allRows.findIndex(candidate => candidate.id === row.id)
+          const suffixStart = visibleWidth(stripAnsi(base)) + 1
           targets.push({
             kind: 'form-verb',
             id: row.id,
             index: indexField,
             row: index,
-            startCol: Math.max(0, width - visibleWidth(suffix)),
-            endCol: width,
+            startCol: suffixStart,
+            endCol: suffixStart + visibleWidth(verb),
           })
         }
       }
