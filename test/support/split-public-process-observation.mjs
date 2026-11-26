@@ -31,8 +31,6 @@ import { isAbsolute, join } from 'node:path'
 import {
   DARWIN_BSDINFO_BYTES,
   classifyDarwinReadOutcome,
-  readDarwinBootSessionUuid,
-  readDarwinSessionId,
   readDarwinUniqueInfo,
 } from '../../src/runtime/native-process/darwin.ts'
 
@@ -1369,14 +1367,6 @@ function createDarwinBridge(koffiEntry) {
     }
   }
 
-  function readBootUuid() {
-    return readDarwinBootSessionUuid()
-  }
-
-  function readSessionId(pid) {
-    return readDarwinSessionId(pid)
-  }
-
   function argmax() {
     const bytes = Buffer.alloc(4)
     const length = [4]
@@ -1479,8 +1469,6 @@ function createDarwinBridge(koffiEntry) {
     readBsd,
     readShortBsd,
     readUnique,
-    readBootUuid,
-    readSessionId,
     procargsSize,
     classifyProcargsErrno,
     readProcargs,

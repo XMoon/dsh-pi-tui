@@ -336,6 +336,7 @@ test.skipIf(process.env.SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL !== '1')(
       expect(facts.cleanup.sentinelGone).toBe(true)
       expect(facts.cleanup.leaked).toBe(0)
       expect(facts.cleanup.unknown).toBe(0)
+      expect(facts.cleanup.unregistered).toEqual([])
       expect(facts.cleanup.closeErrors).toEqual([])
       if (process.platform === 'darwin') {
         expect(facts.probe.bsdBytes).toBe(136)
