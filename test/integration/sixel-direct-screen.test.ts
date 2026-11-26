@@ -721,6 +721,11 @@ test('a shared graphics probe is drained, never used as the Auto palette decisio
     const { terminal, app, store } = await startSixelApp(t, { holdBackgroundReplies: true })
     setTheme('dark')
     app.noteThemeSelection('auto')
+    // A DISTINCT installed palette makes the app-side commit observable: a
+    // dropped follow-up stays custom, a stale drain would show light.
+    const custom = { ...darkColors, primary: '#123456' }
+    app.applyPalette(custom)
+    assert.equal(app.currentTheme(), 'custom', 'precondition: a non-builtin installed palette')
     const applied: string[] = []
     app.onThemeChanged(() => applied.push(app.currentTheme()))
     terminal.writes.length = 0
@@ -732,12 +737,13 @@ test('a shared graphics probe is drained, never used as the Auto palette decisio
     // a drain only and may never colour the surface.
     terminal.sendInput('\x1b]11;rgb:f5f5/f5f5/f5f5\x07')
     await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the committable observation after the drain')
-    assert.deepEqual(applied, [], 'the drained answer never colours the surface')
+    assert.equal(app.currentTheme(), 'custom', 'the drained answer committed nothing')
+    assert.deepEqual(applied, [], 'no theme commit from the drained answer')
     terminal.sendInput('\x1b]11;rgb:2828/2a2a/3636\x07')
     await tick()
-    assert.equal(app.currentTheme(), 'dark', 'the real dark background keeps the dark palette')
+    assert.equal(app.currentTheme(), 'dark', 'the fresh real sample commits the dark family')
     assert.equal(currentPalette, darkColors, 'and the installed palette is the dark family')
-    assert.deepEqual(applied, [], 'the installed family was already dark: no spurious repaint')
+    assert.deepEqual(applied, ['dark'], 'exactly the fresh builtin commit, not the stale drain')
 
     // The graphics owner must still receive the REAL background after the shared
     // probe was drained: a later report re-observes it, and a semi-transparent
