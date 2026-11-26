@@ -104,6 +104,16 @@ test('an official manifest cannot point its bin outside the installation root', 
   assert.equal(resolveOfficialCliEntry(f.installAnchor), undefined)
 })
 
+test('a leading-dash or control-bearing Profile is never placed into argv', t => {
+  const f = fixture(t)
+  const inherited = launchFrom({ OSC7577_TOKEN: { value: TOKEN, source: 'process' } })
+  for (const name of ['-danger', 'bad\nname', '']) {
+    assert.equal(directProgramResumeCapability(directInput(f, inherited, {
+      profileContext: { ...f.profileContext, name },
+    })), undefined, name)
+  }
+})
+
 test('the direct capability uses only the inherited token and the exact official CLI target', t => {
   const f = fixture(t)
   const capability = directProgramResumeCapability(directInput(f, launchFrom({
