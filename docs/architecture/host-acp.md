@@ -1128,16 +1128,20 @@ explicit attach may follow.
 
 A Session this connection holds NO View for is the standard ACP v1 not-active
 class: JSON-RPC `-32002` carrying the REQUESTED `sessionId` plus the existing
-`LOCAL_ACP_VIEW_*` diagnostic `data.code`. This applies to `session/prompt`,
-`session/set_mode`, `session/set_config_option`, and to a `session/resume` /
-`session/load` whose official `resolveAgent` returns a definite
-`session/not-found` (`LOCAL_ACP_VIEW_SESSION_NOT_FOUND`); the requested id is
-never replaced by a Host guess. A HELD View whose claim is still transient
-(attaching, or detached with an unproven Host terminal) is not that class: it
-answers the retryable `LOCAL_ACP_VIEW_BUSY`. Malformed parameters (empty id,
-invalid cwd, unsupported mode/config value, malformed MCP declaration) keep
-their own `-32602` invalid-params classes and their existing precedence, and a
-Session held by ANOTHER connection's View keeps the conflict class
+`LOCAL_ACP_VIEW_*` diagnostic `data.code`. For `session/prompt`,
+`session/set_mode` and `session/set_config_option` this class also covers a
+Session this connection holds only as a transient or detached-with-fence claim
+(still attaching, or retired with an unproven Host terminal) — that is the same
+"not active on this connection" fact, and it carries the requested id. A
+`session/resume` / `session/load` whose official `resolveAgent` returns a
+definite `session/not-found` (`LOCAL_ACP_VIEW_SESSION_NOT_FOUND`) answers the
+same class; a `session/resume` / `session/load` for a Session this connection
+holds as a transient or detached-with-fence claim instead answers the retryable
+`LOCAL_ACP_VIEW_BUSY` (see "Same-connection reattach"). The requested id is
+never replaced by a Host guess. Malformed parameters (empty id, invalid cwd,
+unsupported mode/config value, malformed MCP declaration) keep their own
+`-32602` invalid-params classes and their existing precedence, and a Session
+held by ANOTHER connection's View keeps the conflict class
 (`LOCAL_ACP_VIEW_ALREADY_ATTACHED`, `-32602`) for `resume`/`load`. An unknown, inactive or foreign
 `session/close` remains the standard empty `{}` with no Host side effect, and
 `session/cancel` for such a Session stays a no-op. Real Host failures (internal
