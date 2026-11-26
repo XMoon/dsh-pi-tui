@@ -7,7 +7,7 @@
  *
  *   1. an INHERITED (base-layer) server is shown as `Inherited` and its Detail
  *      offers Edit/Disable but never Delete;
- *   2. `a Add` writes a User-added stdio server (mock process) and a
+ *   2. `Add [A]` writes a User-added stdio server (mock process) and a
  *      User-added streamable-http server (mock TCP endpoint): each commit is ONE
  *      official revision-checked mutation, the profile patch gains the entry and
  *      the manager's own watch brings the server to `Connected` — a saved
@@ -160,9 +160,9 @@ async function typeValue(client, value, label) {
   void label
 }
 
-/** The focused form row label, read from the painted marker (`▸ <label>:`). */
+/** The focused form row label, read from the painted marker (`> <label>:`). */
 function focusedRowLabel(frame) {
-  const match = /▸ ([^:\n]+):/u.exec(frame)
+  const match = /> ([^:\n]+):/u.exec(frame)
   return match === null ? undefined : (match[1] ?? '').trim()
 }
 
@@ -308,7 +308,7 @@ export async function runMcpServersFr4(context) {
     // The disclosure names the server; its compacted form keeps the server and
     // the capability fact.
     await waitForPattern(client, /can execute an external command/u, 'FR4 add stdio disclosure')
-    assert(/Save fr4-user\?/u.test(await frameOf(client)),
+    assert(/Save server fr4-user\./u.test(await frameOf(client)),
       'FR4: the stdio confirmation must name the exact server')
     client.send('y')
     await waitForSaved(client, 'FR4 add stdio')
@@ -330,7 +330,7 @@ export async function runMcpServersFr4(context) {
     await sleep(150)
     await typeValue(client, USER_HTTP, 'FR4 add http name')
     await focusRow(client, 'Transport', 'FR4 add http')
-    client.send('\r') // switch to streamable-http
+    client.send('\r') // explicit Switch verb
     await sleep(300)
     await waitForPattern(client, /Transport: streamable-http/u, 'FR4 http transport selected')
     await focusRow(client, 'URL', 'FR4 add http')
@@ -340,13 +340,13 @@ export async function runMcpServersFr4(context) {
     client.send('s')
     // The disclosure names the SERVER and the TARGET HOST (never a credential,
     // path or query). On a tight bar it compacts to `<server> · <host>`.
-    await waitForPattern(client, /Save fr4-http\?/u, 'FR4 add http confirmation')
+    await waitForPattern(client, /Save server fr4-http\./u, 'FR4 add http confirmation')
     const disclosure = await frameOf(client)
     assert(/can send data to an external service/u.test(disclosure),
       'FR4: the HTTP confirmation must state the capability in the body')
     assert(disclosure.includes('Target:'), 'FR4: the HTTP confirmation must name its target marker')
     assert(disclosure.includes('127.0.0.1'), 'FR4: the HTTP confirmation must name its target host')
-    assert(/Y confirm/u.test(disclosure), 'FR4: the HTTP confirmation must offer the decision')
+    assert(/Confirm \[Y\]/u.test(disclosure), 'FR4: the HTTP confirmation must offer the decision')
     assert(!/credential/u.test(disclosure), 'FR4: the disclosure must never show a credential')
     client.send('y')
     await waitForSaved(client, 'FR4 add http')
@@ -376,7 +376,7 @@ export async function runMcpServersFr4(context) {
     await typeValue(client, '--fr4-edited', 'FR4 edit arg')
     client.send('s')
     await waitForPattern(client, /can execute an external command/u, 'FR4 edit disclosure')
-    assert(/Save fr4-user\?/u.test(await frameOf(client)),
+    assert(/Save server fr4-user\./u.test(await frameOf(client)),
       'FR4: the edit confirmation must name the exact server')
     client.send('y')
     await waitForSaved(client, 'FR4 edit')
@@ -393,14 +393,14 @@ export async function runMcpServersFr4(context) {
     // (4) Disable, then Enable.
     await openRow(client, USER_STDIO, 'FR4 toggle')
     client.send('t')
-    await waitForPattern(client, /Change (saved configuration|config)\?/u, 'FR4 toggle confirmation')
+    await waitForPattern(client, /Disable server fr4-user|Enable server fr4-user/u, 'FR4 toggle confirmation')
     client.send('y')
     await waitForScreenText(client, 'Configuration saved · the server will stop', 'FR4 disabled saved')
     await waitForScreenText(client, 'State: Disabled', 'FR4 disabled state')
     const disabledRow = await mcpManagerRow(host, 'FR4 after disable')
     assert(disabledRow.fiberUid === row.fiberUid, 'FR4: Disable must not replace the manager fiber')
     client.send('t')
-    await waitForPattern(client, /Change (saved configuration|config)\?/u, 'FR4 enable confirmation')
+    await waitForPattern(client, /Disable server fr4-user|Enable server fr4-user/u, 'FR4 enable confirmation')
     client.send('y')
     await waitForScreenText(client, 'Configuration saved · the server will start', 'FR4 enabled saved')
     // The manager reconciles the enabled entry itself; the page waits for the
@@ -424,7 +424,7 @@ export async function runMcpServersFr4(context) {
 
     // Override it (Disable), then Reset to the inherited configuration.
     client.send('t')
-    await waitForPattern(client, /Change (saved configuration|config)\?/u, 'FR4 override confirmation')
+    await waitForPattern(client, /Disable server fr4-user|Enable server fr4-user/u, 'FR4 override confirmation')
     client.send('y')
     await waitForScreenText(client, 'State: Disabled', 'FR4 inherited overridden state')
     await waitForScreenText(client, 'Configuration: Overridden (user)', 'FR4 inherited now overridden')
@@ -474,7 +474,7 @@ export async function runMcpServersFr4(context) {
 
     // B disables the same server, moving the namespace revision.
     clientB.send('t')
-    await waitForPattern(clientB, /Change (saved configuration|config)\?/u, 'FR4 B toggle confirmation')
+    await waitForPattern(clientB, /Disable server fr4-user|Enable server fr4-user/u, 'FR4 B toggle confirmation')
     clientB.send('y')
     await waitForScreenText(clientB, 'Configuration saved · the server will stop', 'FR4 B saved')
 
@@ -486,7 +486,7 @@ export async function runMcpServersFr4(context) {
     client.send('s')
     // The disclosure comes FIRST (it is a question about the draft, not about
     // the revision); answering it is when the stale revision is discovered.
-    await waitForPattern(client, /Save fr4-http\?/u, 'FR4 A save disclosure')
+    await waitForPattern(client, /Save server fr4-http\./u, 'FR4 A save disclosure')
     client.send('y')
     await waitForPattern(client, /Not saved · (configuration changed|the Host authority changed)/u, 'FR4 A stale-save refusal')
     const conflictFrame = await frameOf(client)
@@ -540,8 +540,8 @@ export async function runMcpServersFr4(context) {
  *
  * The page's own ACTION BAR is the view authority: a scrolled Detail does not
  * paint its `Server:` row, so the visible content cannot tell the two views
- * apart. `a Add`/`Enter details` exist only on the list; `p probe`/`e edit`
- * only on a Detail; `s Save` only in the form.
+ * apart. `Add [A]`/`Open [Enter]` exist only on the list; `Probe [P]`/`Edit [E]`
+ * only on a Detail; `Save [S]` only in the form.
  */
 async function backToList(client) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -552,9 +552,9 @@ async function backToList(client) {
       continue
     }
     const bar = frame.split('\n').filter(line => /Back \[Esc\]/u.test(line)).at(-1) ?? ''
-    const inForm = /Identity|Connection|Parameters/u.test(frame) && /s Save/u.test(bar)
-    const inDetail = /p probe|e edit|d delete/u.test(bar)
-    if (!inForm && !inDetail && /a Add|Enter details/u.test(bar)) return
+    const inForm = /Identity|Connection|Parameters/u.test(frame) && /Save \[S\]/u.test(bar)
+    const inDetail = /Probe \[P\]|Edit \[E\]|Delete \[D\]/u.test(bar)
+    if (!inForm && !inDetail && /Open \[Enter\]|Add \[A\]/u.test(bar)) return
     client.send('\x1b')
     await sleep(320)
   }
@@ -569,7 +569,7 @@ async function backToList(client) {
  */
 async function openRow(client, name, label) {
   await backToList(client)
-  const marker = () => new RegExp(`▸ ${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?=\\s|$)`, 'u')
+  const marker = () => new RegExp(`> ${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?=\\s|$)`, 'u')
   // Probe upward for the first row, then walk down to the target.
   for (let step = 0; step < 10; step += 1) {
     if (marker().test(await frameOf(client))) break

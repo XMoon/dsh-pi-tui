@@ -1675,135 +1675,129 @@ backend has no registry evidence.
 
 ### MCP servers page
 
-`/settings → Tools → MCP servers` is ONE embedded specialist page inside the
+`/settings → Tools → MCP servers` is ONE embedded Adaptive Workbench inside the
 shared Settings lease (no second alt-screen, modal or Settings workspace). It
-lists the ONE Host manager's servers in the manager's own order with `Name`,
-`Status` and `Source`; a row's Detail shows `Server`, `Source`, `Transport`
-(always `Not exposed` — the official list publishes no transport), `State`, the
-`Tool count` only when connected, `Attempt/retry` when the Host reports one, a
-sanitized `Last error`, and the last probe's stage/closure facts. Status words
-are the official ones; there is no invented `connected-ish`/`installed` flag.
-`Source` is `Configured`, `Plugin-owned`, `Retained/removed` or `Unknown`, and a
-non-current settings read never becomes `Plugin-owned`.
+lists the ONE Host manager's servers in the manager's own order; a row's Detail
+shows `Server`, `Source`, `Transport` (always `Not exposed` — the official list
+publishes no transport), `State`, the `Tool count` only when connected,
+`Attempt/retry` when the Host reports one, a sanitized `Last error`, and the last
+probe's stage/closure facts. Status words are the official ones; there is no
+invented `connected-ish`/`installed` flag. `Source` is `Configured`,
+`Plugin-owned`, `Retained/removed` or `Unknown`, and a non-current settings read
+never becomes `Plugin-owned`.
 
-For a server the SAME current Host settings descriptor proves configuration-owned,
-the Detail also offers `Edit`, Enable/Disable, permanent `Delete`
-(User-added entries only) and `Reset to inherited` (entries whose effective
-configuration differs from the base only). `Add` is a LIST action (the `a`
-key); Add and Edit open a whole-page scrollable form inside the same specialist.
-The form's FIXED identity line is painted INSIDE the body grant (the Root grants
-no pane-header row on a narrow layout): wide shows
-`<name> · Add/Edit · <source>`, narrow degrades source → mode and keeps the full
-NAME and mode as the last facts — never the server selected in the list before
-Add started: `Identity` (name/transport/enabled),
-`Connection` (stdio command/working dir or HTTP URL), `Parameters` (one row per
-argument or key/value pair) and a `Status` line with the fixed `Save`/`Esc` bar.
+The workbench shares the Web UI workbench's ONE Root seat, rail grant and
+physical last row. The Root owns the Categories rail and the ONE Action Bar; the
+page owns only its local List/Detail region, its full-width form and its
+questions. `W ≥ 120` and `H ≥ 6` paint `Categories(C) │ MCP List(34) │ 2 │
+Details(D)` with `D = W − C − 38` (the Detail keeps its `≥ 40` floor). At
+`76 ≤ W < 120` the rail focus paints `Categories(22) │ MCP List(W − 24)` with no
+Detail; the child focus paints `MCP List(34) │ 2 │ Details(W − 36)` and the rail
+steps aside. Any `W < 76` or `H < 6` paints exactly ONE current region: the rail
+when the rail owns the keyboard, otherwise the page's current List/Detail/form
+region. At `H = 0` only the truthful bar row remains: a rail or browse frame
+offers the real `Back [Esc]`, a form `Back`/`Keep` (or the saving notice), and a
+confirmation only its real `Cancel`/`Keep`; no body target exists. A form or a
+risk question takes the WHOLE body at every width, so no rail, List or Detail
+cell stays clickable behind it.
+
+The List paints `Name` and the complete Status at its real width; a long status
+wraps on the item's own physical line(s), never abbreviated into another word.
+The Source is in the readable Detail; a single-region List may add it when the
+34-cell-or-wider grant can hold the whole 17-cell label beside at least 12 name
+cells. Long names may tail-omit in the List, but the Detail, confirmation and
+identity line always carry the complete name. The List scrolls in physical rows.
+
+A row click or keyboard move only SELECTS; `Open [Enter]`/`Enter`/`Right` is the
+ONE explicit entry into the selected server's Detail. `Tab`/`Shift+Tab` is a
+pure focus transfer: List ↔ Detail while both are painted; the untouched List
+may yield to the rail and return to the SAME List. `Tab` is inert in a
+one-region projection. `Esc`/`Left` returns Detail → List and List → the REAL
+initiating level (Rows or Detail); a form or question owns its own Back ladder.
+
+The Detail Action Bar carries `Probe [P] · Restart [X] · Edit [E] ·
+Enable/Disable [T] · Delete [D] · Reset [U] · Refresh [R] · Back [Esc]`, with only
+the actions the controller really admits. Whole segments are dropped, never cut;
+a secondary action the bar had to drop moves as its complete label into the
+scrollable Detail body and uses the SAME action sink. Long diagnostics are
+wrapped (hard-splitting an unbreakable token) and remain reachable through the
+physical scroll.
+
+For a server the SAME current Host settings descriptor proves config-owned, the
+Detail also offers `Edit`, Enable/Disable, permanent `Delete` (User-added
+entries only) and `Reset to inherited` (entries whose effective configuration
+differs from the base only). `Add` is a List action (the `a` key). Add and Edit
+open a whole-page scrollable form inside the same specialist; the form's FIXED
+identity line is painted INSIDE the body grant and names the exact target:
+`<name> · Add/Edit · <source>`, degrading source → mode at narrow widths while
+keeping the full name and mode. A form row click only SELECTS the field; its
+complete explicit verb (`Edit [Enter]`, `Switch [Enter]`, `Toggle [Enter]`,
+`Add [Enter]`, `Remove [Backspace]`) activates the existing intent. Add returns
+to the page's REAL origin, the List; Edit returns to the original server's
+active Detail while that exact target is still listable, otherwise to the List
+with the truthful unavailable/refusal status.
+
 An Edit keeps the name read-only; a rename is two explicit actions. A stored
 plain value is shown only as `Set (hidden)` in a non-editing row, while a
 `${credential:REF}` reference stays verbatim. The form's draft, validation,
 focus, discard confirmation and one configuration status are Client-local and
-die with the page. A dirty `Esc` asks `Discard changes?` with Keep editing as the
+die with the page. A dirty `Esc` asks `Discard changes?` with Keep as the
 default; only an explicit discard drops the draft with zero writes. A Save whose
 draft can reach outside the Host asks ONE explicit question before writing —
 `Enabling this server can execute an external command.` for a stdio entry, and
 `Enabling this server can send data to an external service. Target: <host>` for
 an HTTP entry (the host only, never a credential) — and only an affirmative
-answer dispatches the write. EVERY dangerous confirmation — Save,
-Enable/Disable, Delete, Reset and Restart — paints the same target / action /
-consequence body in the view that hosts it (the form for Save and discard, the
-Detail for the rest), wrapped at THAT column's real width with unbreakable
-tokens hard-split, so a narrow frame with a long server name or HTTP host still
-shows the whole fact; the Action Bar carries only the decision
-(`y confirm · Esc cancel`). A confirmation is executable only while its entire
-fact set fits the rows the current grant really gives it, and only for the
-specific question INSTANCE the last painted frame admitted: each opening gets
-a fresh instance identity (including a same-name/same-revision question after a
-Host generation replacement, and a discard prompt reopened before repaint).
-The Host generation is retired with its open question; a new question cannot
-inherit an older frame's admission. A question that opened but has not painted
-yet is refused exactly like a blocked one, so a key arriving inside a render
-window can never commit an unreviewed write. Otherwise the bar
-paints no affirmative key, says `Resize to review…`, and both the key and the
-pointer refuse — an uninformed `y` is never accepted. A pointer obeys the same
-modal authority as the keyboard: while a confirmation, discard prompt, restart
-question or search owns the surface, no click can change the draft, and every
-painted Action-Bar segment — including the input bar's `Enter apply` — is a
-pointer target for its own intent. A search is the ONE modal whose filtered
-RESULT rows stay pointer-selectable: a result-row click only selects (the query
-and the search stay open and no Host intent runs), a wheel moves that filtered
-selection only, and the search's `Done [Enter]` / the list's `Search [/]` replay
-the SAME Enter and `/` sinks — the single `Cancel [Esc]` is never a second span,
-it is the Root's physical escape. An ACTIVE form input is such a modal too: the
-body cannot be clicked behind it, while its own `Enter apply` / `Esc cancel`
-stay reachable. Every env/header value carries an EXPLICIT storage
-form the user chooses — `Credential reference` (the default, written as the
-official `${credential:REF}` token) or `Literal (stored in profile)` — shown on
-its own row and never inferred from the typed text; the disclosure's HTTP target
-is the host alone and fails closed to `Unknown target` when the URL cannot be
-parsed, so no path, query or credential can be echoed. Per-key Remove is offered
-for keys the BASE layer does not own only: the official per-key `unset` on a
-base-owned key RESTORES the inherited value (it cannot delete it), so such rows
-state `Inherited · cannot remove here` and a backspace on them is inert. The
-CURRENTLY FOCUSED removable row also paints a complete `Remove [Backspace]`
-segment beside `s Save` (dropped by the layout only when the row cannot hold it
-whole) whose click is the same Backspace intent; an active input, an open
-question or an unsettled save never offers it.
+answer dispatches the write. A zero-diff Save reports `No changes` and performs
+no mutation, never `Saved`.
 
-Keys: list `↑/↓` move, `Enter` opens the detail, `a` begins Add from the LIST
-when the Host settings are current and no configuration write is unsettled, `/`
-filters by name, `r` re-observes, `Esc` cancels search / returns to Tools; detail `p` probes, `x` asks
-`Restart <name>? Live tools may be interrupted` (only `y` dispatches, `Esc`
-cancels), `e` edits, `t` asks
-`Change saved configuration? The MCP process may stop or start`, `d` asks the
-exact-name Delete confirmation, `u` asks the Reset-to-inherited confirmation,
-`r` refreshes, `Esc` returns to the list. In a form, `↑/↓`/`Tab` move focus,
-`Enter` activates a field or row (a click on a painted field row is the same
-intent, under the same last-painted press/release rule), `s` asks to save (an
-external-capability acknowledgement first, naming the exact server, when the
-draft can reach outside the Host), `Esc` leaves an input or asks the discard
-confirmation — except while a Save is unsettled, where `Esc` reports that the
-dispatched write cannot be cancelled here instead of offering a discard. While
-an input is active `a/e/t/d/u/s` are text. An empty Enter on a `Literal` value
-commits the empty string (the only way to override an inherited value with
-nothing, since a base-owned key cannot be removed); an empty Enter on a
-`Credential reference` keeps the current value.
-Delete/Reset/toggle/Save confirmations respond only to `y` or `Esc`. While searching,
-`p/x/r/y` and every CRUD key are query text only. Probe/Restart require a
-current manager observation, a live (not retained) listed entry and no in-flight
-operation; they do NOT depend on the configuration descriptor. Every
-configuration edit additionally requires the same-generation current settings
-descriptor and that entry's config source; `loading`/`stale`/`unavailable`
-states explain themselves and expose no executable action. A write uses ONE official
-revision-checked settings mutation; the result is `Saving configuration…`,
-`Saved · waiting for Host reconcile`, a revision conflict, an unavailable Host,
-a proven refusal, or `Outcome unconfirmed …` after a lost settlement. A saved
-configuration is NEVER reported as Connected; the manager's watch remains the
-only status authority, and Probe/Restart results never overwrite the saved
-configuration fact. Probe reports a positive result only when the official
-result is `ok` AND cleanup is confirmed; a connected-but-unclean probe is its
-own `cleanup not confirmed` fact. A settled restart says
-`Restart settled · awaiting connected status` and waits for the watch; a lost
-settlement says `Outcome unconfirmed; refresh Host status before
-retrying` and is never retried.
+EVERY dangerous confirmation — Save, Enable/Disable, Delete, Reset and
+Restart — paints the same exact target / action / consequence body in the view
+that hosts it (the form for Save and discard, the Detail for the rest), wrapped
+at the real body width with unbreakable tokens hard-split. The Action Bar carries
+only the decision (`Confirm [Y] · Cancel [Esc]`, or `Discard [D] · Keep [Esc]`
+for a dirty form). A confirmation is executable only while its entire fact set
+fits the rows the current grant really gives it, and only for the specific
+question INSTANCE the last painted frame admitted: each opening gets a fresh
+instance identity (including a same-name/same-revision question after a Host
+generation replacement, and a discard prompt reopened before repaint). The Host
+generation is retired with its open question; a new question cannot inherit an
+older frame's admission. A question that opened but has not painted yet is
+refused exactly like a blocked one, so a key arriving inside a render window can
+never commit an unreviewed write.
 
-Layouts: `≥108` columns paint the list and the selected server side by side with
-one focus (`Enter` switches to the detail actions, `Esc` back to the list);
-`76–107` paint one compact column with a selected-row summary and an in-page
-detail state; `≤75` paint the list only. `44×8` keeps the selected row, its
-status and the complete `Back [Esc]`; the form keeps the current field, its
-status and `Save`/`Esc` reachable. Mouse targets are the last painted cells and
-a press whose frame repaints never completes. A wheel reaches only the region
-under the pointer: the list moves its selection, the Detail scrolls itself, the
-form moves its OWN field focus (never the hidden list selection or detail
-offset), and a search wheel moves only the filtered result selection; ANY
-effective wheel — a boundary/no-op one or one a modal ignores — retires the
-pending press. The pointer identity additionally carries the page revision and
-the READ-ONLY Host roster / configuration-read epochs, so a press recorded
-before a Host replacement (even one with identical names, statuses and row
-count) or before a configuration re-read is refused until the next frame
-paints. That is UI anti-replay only: the Host manager generation, the official
-settings revision CAS and the write terminal settlement remain the sole write
-authority.
+While a configuration write is unsettled, the page keeps only the truthful
+`Saving configuration…` status and a real `Esc` notice; it offers no discard and
+no false Back. A dispatched write is never cancelled or replayed. A write that
+loses its settlement paints `Outcome unconfirmed …` and keeps the prior receipt;
+an unconfirmed configuration write closes the local configuration admission and
+a lost restart settlement closes blind restart retry until an EXPLICIT `R`
+re-observes the Host. The configuration gate re-opens only after that refresh has
+produced a newer current roster AND a same-generation ready descriptor read; the
+restart gate after the newer current roster. A background roster publication
+alone never re-opens either. The prior unknown notice is retained (never
+rewritten as Saved, Cancelled or Connected); a new Add/Edit/confirm/restart is
+then a fresh explicit decision. A form Back while the write is unknown asks
+`Leave form? The change may have been applied. Discarding local edits does not
+undo it.` and only an explicit leave drops the local draft. With no form open,
+Detail → List stays legal, but the List's parent leave first states that the
+prior outcome may have been applied and offers the explicit leave or `Refresh`.
+Leaving the page still never retries, cancels or rewrites the dispatched Host
+operation.
+
+Pointer ownership is the last painted frame's. A List click, including the
+passive rail preview, only selects and hands the keyboard to the List; a Detail
+click only transfers focus; a form-row click only selects its field. The form's
+body verb, the bar's complete spans and the Detail body fallback all use the ONE
+existing action sink. The wheel reaches only the region under the pointer inside
+the REAL child body box (translated with the child's own width/height): the List
+moves its selection, the Detail scrolls its own physical offset, the form moves
+only its field focus, and a confirmation/input/saving state is inert. A
+gutter/header/blank does nothing. ANY effective wheel — a boundary/no-op one or
+one a modal ignores — retires the pending press. A press whose frame repaints,
+whose Host generation/roster/configuration-read epoch changed, or whose
+full-width transition has not painted never completes. This is UI anti-replay
+only: the Host manager generation, the official settings revision CAS and the
+write terminal settlement remain the sole write authority.
 
 Authority: `src/app/command/mcp-servers.ts` (`McpServersController`),
 `src/tui/panels/mcp-servers-page.ts`, the `McpServerPort`,

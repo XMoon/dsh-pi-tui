@@ -17,7 +17,6 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import {
   McpServersPage,
   mcpServerStatusText,
-  mcpServersLayoutFor,
 } from '../../src/tui/panels/mcp-servers-page.ts'
 import type { McpServersController, McpServersSnapshot } from '../../src/app/command/mcp-servers.ts'
 
@@ -69,7 +68,18 @@ class StubController {
       },
     }
   }
-  beginEdit(): void { this.calls.push('beginEdit') }
+  beginEdit(): void {
+    this.calls.push('beginEdit')
+    if (this.snapshotValue.editor === undefined) {
+      this.snapshotValue = {
+        ...this.snapshotValue,
+        editor: {
+          mode: 'edit', name: 'alpha', nameEditable: false, transport: 'stdio', command: '/bin/echo', args: [],
+          env: [], cwd: '', url: '', headers: [], enabled: true, dirty: false, issues: [], capturedRevision: 3,
+        },
+      }
+    }
+  }
   beginToggle(): void { this.calls.push('beginToggle') }
   beginDelete(): void { this.calls.push('beginDelete') }
   beginReset(): void { this.calls.push('beginReset') }
@@ -130,12 +140,21 @@ function makePage(state: McpServersSnapshot, done: () => void = () => {}): {
     requestRender: () => {},
     done,
   })
+  page.focused = true
   return { page, controller }
 }
 
-/** Render at one size and return the plain painted lines. */
+/** Render at one size through a realistic workbench grant. Page-level cases
+ *  supply the grant explicitly; the Root projection itself is proved by the
+ *  mounted suite. */
 function render(page: McpServersPage, width: number, rows: number): string[] {
-  page.setMaxRows(rows)
+  const bodyRows = Math.max(0, rows - 1)
+  page.setWebWorkbenchGrant({
+    width,
+    rows: bodyRows,
+    barWidth: width,
+    allowDual: width >= 108 && bodyRows >= 5,
+  })
   return page.render(width).map(line => stripTerminalSequences(line))
 }
 
@@ -178,27 +197,20 @@ function clickBodyCell(page: McpServersPage, width: number, rows: number, y: num
   page.handleMouse({ ...base, type: 'click', x: 1, y })
 }
 
-/** Reach the editor at the compact (100-column) layout: list -> detail -> editor. */
+/** Reach the editor: list -> detail -> editor. A snapshot that already carries
+ *  an open editor is ALREADY the form view; do not replay an activation the
+ *  controller did not receive. */
 function openEditor(page: McpServersPage, key: 'e' | 'a' = 'e', width = 100, rows = 16): string[] {
-  render(page, width, rows)
+  let frame = render(page, width, rows)
+  if (frame.some(line => /· (Edit|Add) ·/u.test(line))) return frame
   if (key === 'e') {
     page.handleInput('\r')
-    render(page, width, rows)
+    frame = render(page, width, rows)
+    if (frame.some(line => /· Edit ·/u.test(line))) return frame
   }
   page.handleInput(key)
   return render(page, width, rows)
 }
-
-test('the frozen breakpoints: >=108 wide, 76..107 medium, <=75 narrow; a short body degrades to one column', () => {
-  assert.equal(mcpServersLayoutFor(120, 20), 'wide')
-  assert.equal(mcpServersLayoutFor(108, 20), 'wide')
-  assert.equal(mcpServersLayoutFor(107, 20), 'medium')
-  assert.equal(mcpServersLayoutFor(76, 20), 'medium')
-  assert.equal(mcpServersLayoutFor(75, 20), 'narrow')
-  assert.equal(mcpServersLayoutFor(44, 8), 'narrow')
-  // A two-column frame with fewer than five body rows would hide both columns.
-  assert.equal(mcpServersLayoutFor(120, 4), 'medium')
-})
 
 test('status vocabulary is the official one — no invented connected-ish label', () => {
   assert.equal(mcpServerStatusText({ state: 'connected', toolCount: 3, connectedAt: 1 }), 'Connected')
@@ -210,15 +222,18 @@ test('the wide frame paints the list and the selected detail, one marker and no 
   const { page } = makePage(snapshot())
   const lines = render(page, 120, 20)
   const frame = lines.join('\n')
-  assert.match(frame, /Name\s+Status\s+Source/u)
-  assert.match(frame, /▸ alpha/u)
+  // The 34-cell List keeps Name + Status; Source stays in the readable Detail.
+  assert.match(frame, /Name\s+Status/u)
+  assert.doesNotMatch(frame, /Name\s+Status\s+Source/u)
+  assert.match(frame, /Source: Configured/u)
+  assert.match(frame, /> alpha/u)
   assert.match(frame, /beta/u)
   assert.match(frame, /Server: alpha/u)
   assert.match(frame, /Transport: Not exposed/u)
   assert.match(frame, /State: Connected/u)
   assert.match(frame, /Tool count: 2/u)
   assert.match(frame, /Back \[Esc\]/u)
-  assert.equal(lines.filter(line => line.startsWith('▸ ')).length, 1, 'ONE selected-row marker')
+  assert.equal(lines.filter(line => line.startsWith('> ')).length, 1, 'ONE selected-row marker')
   for (const line of lines) assert.ok(visibleWidth(line) <= 120)
   assert.equal(lines.length, 20, 'the page fills its exact grant')
 })
@@ -274,8 +289,8 @@ test('a restart confirmation owns the keyboard: only y executes, every other key
   let done = 0
   const { page, controller } = makePage(snapshot({ confirmingName: 'alpha' }), () => { done += 1 })
   const lines = render(page, 88, 12)
-  assert.match(lines.join('\n'), /Restart alpha\? Live tools may be interrupted/u)
-  assert.match(lines.join('\n'), /Y confirm · Esc cancel/u)
+  assert.match(lines.join('\n'), /Restart server alpha\. Live tools may be interrupted while it rebuilds\./u)
+  assert.match(lines.join('\n'), /Confirm \[Y\] · Cancel \[Esc\]/u)
   page.handleInput('p')
   page.handleInput('r')
   page.handleInput('\r')
@@ -316,8 +331,8 @@ test('a retained cleanup record advertises no Probe/Restart affordance', () => {
   }))
   const bar = render(page, 88, 12).at(-1) ?? ''
   assert.match(bar, /Back \[Esc\]/u)
-  assert.doesNotMatch(bar, /p probe|probe/u)
-  assert.doesNotMatch(bar, /x restart|restart/u)
+  assert.doesNotMatch(bar, /Probe \[P\]|probe/u)
+  assert.doesNotMatch(bar, /Restart \[X\]|restart/u)
 })
 
 test('search filters by name only and p/x/r are query text while searching', () => {
@@ -335,7 +350,7 @@ test('search filters by name only and p/x/r are query text while searching', () 
   assert.equal(controller.calls.includes('probe'), false)
   assert.equal(controller.calls.includes('beginRestart'), false)
   assert.equal(controller.calls.includes('refresh'), false)
-  // Esc cancels the query without leaving the page.
+  // Cancel [Esc]s the query without leaving the page.
   page.handleInput('\x1b')
   const restored = render(page, 88, 12).join('\n')
   assert.match(restored, /alpha/u)
@@ -376,7 +391,7 @@ test('Search stays a Client filter while the Host observation is not ready; Add 
   assert.equal(spans.includes('bar:add'), false, 'Add needs a current descriptor')
   clickBarSpan(loading.page, 'bar:start-search', 100, 14)
   assert.match(render(loading.page, 100, 14).join('\n'), /search: \//u)
-  assert.doesNotMatch(render(loading.page, 100, 14).at(-1) ?? '', /a Add/u)
+  assert.doesNotMatch(render(loading.page, 100, 14).at(-1) ?? '', /Add \[A\]/u)
 })
 
 test('a search-result row click only selects; the query and the search stay', () => {
@@ -437,7 +452,7 @@ test('a non-zero wheel revokes a pending press even when it scrolls nothing or a
   }))
   const modalLines = render(modal.page, 100, 14)
   const barRow = modalLines.length - 1
-  const col = (modalLines[barRow] ?? '').indexOf('Y confirm') + 1
+  const col = (modalLines[barRow] ?? '').indexOf('Confirm [Y]') + 1
   assert.ok(col > 0, `the confirm affordance must paint: ${modalLines[barRow]}`)
   modal.page.handleMouse({ ...base, type: 'press', x: col, y: barRow })
   modal.page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 2, y: 2 })
@@ -452,7 +467,7 @@ test('a non-zero wheel revokes a pending press even when it scrolls nothing or a
   }))
   const zeroLines = render(zero.page, 100, 14)
   const zeroBar = zeroLines.length - 1
-  const zeroCol = (zeroLines[zeroBar] ?? '').indexOf('Y confirm') + 1
+  const zeroCol = (zeroLines[zeroBar] ?? '').indexOf('Confirm [Y]') + 1
   zero.page.handleMouse({ ...base, type: 'press', x: zeroCol, y: zeroBar })
   zero.page.handleMouse({ ...base, type: 'wheel', wheelDelta: 0, x: 2, y: 2 })
   zero.page.handleMouse({ ...base, type: 'click', x: zeroCol, y: zeroBar })
@@ -489,7 +504,7 @@ test('a configuration read result between press and release refuses the old draf
   page.handleInput('\r')
   const lines = render(page, 100, 14)
   const barRow = lines.length - 1
-  const col = (lines[barRow] ?? '').indexOf('e edit') + 1
+  const col = (lines[barRow] ?? '').indexOf('Edit [E]') + 1
   assert.ok(col > 0, `the Edit affordance must paint: ${lines[barRow]}`)
   const base = mouseBase(100, 14)
   page.handleMouse({ ...base, type: 'press', x: col, y: barRow })
@@ -505,7 +520,7 @@ test('a configuration read result between press and release refuses the old draf
   // A fresh press on the repainted frame opens the draft.
   const fresh = render(page, 100, 14)
   const freshBar = fresh.length - 1
-  const freshCol = (fresh[freshBar] ?? '').indexOf('e edit') + 1
+  const freshCol = (fresh[freshBar] ?? '').indexOf('Edit [E]') + 1
   page.handleMouse({ ...base, type: 'press', x: freshCol, y: freshBar })
   page.handleMouse({ ...base, type: 'click', x: freshCol, y: freshBar })
   assert.deepEqual(controller.calls, ['beginEdit'], 'a fresh gesture reads the current revision')
@@ -558,7 +573,7 @@ test('removing the last draft row re-centers the row that becomes focused', () =
     }),
   }))
   openEditor(page, 'e', 44, 8)
-  wheelFocusUntil(page, 44, 8, frame => /▸ Env key: E/u.test(frame))
+  wheelFocusUntil(page, 44, 8, frame => /> Env key: E/u.test(frame))
   // The draft loses the whole env entry (key + value + form rows) with no
   // repaint: the focused index now points past the form.
   controller.snapshotValue = {
@@ -566,7 +581,7 @@ test('removing the last draft row re-centers the row that becomes focused', () =
     editor: editorSnapshot({ args: [], env: [], dirty: true }),
   }
   const frame = render(page, 44, 8).join('\n')
-  assert.match(frame, /▸ [^:\n]+:/u, `a focused field stays painted after the removal: ${frame}`)
+  assert.match(frame, /> [^:\n]+:/u, `a focused field stays painted after the removal: ${frame}`)
 })
 
 test('a restarted refresh/grant change invalidates the previous pointer gesture', () => {
@@ -623,9 +638,9 @@ function editorSnapshot(overrides: Partial<NonNullable<McpServersSnapshot['edito
   }
 }
 
-test('the list offers `a Add` only with a current descriptor, and search swallows it', () => {
+test('the list offers `Add [A]` only with a current descriptor, and search swallows it', () => {
   const ready = makePage(snapshot({ config: { kind: 'ready', generation: {}, revision: 1, entries: [] } }))
-  assert.match(render(ready.page, 100, 14).at(-1) ?? '', /a Add/u)
+  assert.match(render(ready.page, 100, 14).at(-1) ?? '', /Add \[A\]/u)
   const unavailable = makePage(snapshot({ config: { kind: 'unavailable', reason: 'not read' } }))
   // The page asks the CONTROLLER, so the stub's own gate decides.
   unavailable.controller.addable = false
@@ -647,11 +662,11 @@ test('a config-owned detail offers e/t/d/u beside the FR3 p/x; a plugin-owned ro
   render(owned.page, 100, 14)
   owned.page.handleInput('\r')
   const bar = render(owned.page, 100, 14).at(-1) ?? ''
-  assert.match(bar, /e edit/u)
-  assert.match(bar, /t (toggle|enable\/disable)/u)
-  assert.match(bar, /d delete/u)
-  assert.match(bar, /p probe/u)
-  assert.match(bar, /x restart/u)
+  assert.match(bar, /Edit \[E\]/u)
+  assert.match(bar, /Enable\/Disable \[T\]/u)
+  assert.match(bar, /Delete \[D\]/u)
+  assert.match(bar, /Probe \[P\]/u)
+  assert.match(bar, /Restart \[X\]/u)
   owned.page.handleInput('e')
   assert.deepEqual(owned.controller.calls.filter(call => ['beginEdit', 'beginToggle', 'beginDelete'].includes(call)), ['beginEdit'])
   const toggle = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
@@ -674,14 +689,14 @@ test('a config-owned detail offers e/t/d/u beside the FR3 p/x; a plugin-owned ro
   render(pluginOwned.page, 100, 14)
   pluginOwned.page.handleInput('\r')
   const pluginBar = render(pluginOwned.page, 100, 14).at(-1) ?? ''
-  assert.doesNotMatch(pluginBar, /e edit|t toggle|d delete|u reset/u)
+  assert.doesNotMatch(pluginBar, /Edit \[E\]|Enable\/Disable \[T\]|Delete \[D\]|Reset \[U\]/u)
   pluginOwned.page.handleInput('e')
   pluginOwned.page.handleInput('d')
   pluginOwned.page.handleInput('u')
   assert.deepEqual(pluginOwned.controller.calls.filter(call => ['beginEdit', 'beginDelete', 'beginReset'].includes(call)), [])
 })
 
-test('the editor paints grouped fields and keeps Save + Esc reachable at 44x8', () => {
+test('the editor paints grouped fields and keeps Save [S] + Back [Esc] reachable at 44x8', () => {
   const { page } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
   page.handleInput('e')
   // Put the page into the editor view through the Add intent of the stub.
@@ -694,14 +709,14 @@ test('the editor paints grouped fields and keeps Save + Esc reachable at 44x8', 
   assert.match(frame, /\(unnamed\) · Add/u)
   assert.match(frame, /Name/u)
   assert.match(frame, /Transport/u)
-  assert.match(frame, /s Save/u)
+  assert.match(frame, /Save \[S\]/u)
   assert.match(frame, /Back \[Esc\]/u)
   assert.equal(lines.length, 8)
   for (const line of lines) assert.ok(visibleWidth(line) <= 44)
 })
 
 test('while a form input is active, a/e/t/d/u/s are INPUT characters, never page actions', () => {
-  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
   openEditor(page)
   // Focus the Command row and open its input (rows: name, transport, enabled, command...).
   page.handleInput('\x1b[B')
@@ -723,9 +738,9 @@ test('a dirty form Esc opens the discard confirmation; only `d` drops the draft'
   openEditor(page)
   page.handleInput('\x1b')
   const confirm = render(page, 100, 16).join('\n')
-  assert.match(confirm, /Discard changes\? \[Keep editing\] \[Discard d\]/u)
-  // The bar now offers BOTH the keep and the discard affordance to a pointer.
-  assert.match(confirm, /Keep editing · (d \()?Discard|Keep editing · Discard/u)
+  assert.match(confirm, /Discard changes\? Unsaved edits are dropped/u)
+  // The affirmative is the explicit D verb; Esc is the default Keep.
+  assert.match(confirm, /Discard \[D\] · Keep \[Esc\]/u)
   // Enter keeps editing: nothing is discarded and no write happens.
   page.handleInput('\r')
   assert.equal(controller.calls.includes('discardEditor'), false)
@@ -750,8 +765,8 @@ test('the delete confirmation names the exact server and only `y` dispatches', (
     configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
-  assert.match(frame, /Delete alpha\? This removes your added configuration permanently/u)
-  assert.match(frame, /Y confirm · Esc cancel/u)
+  assert.match(frame, /Permanently delete server alpha from this profile\./u)
+  assert.match(frame, /Confirm \[Y\] · Cancel \[Esc\]/u)
   page.handleInput('e')
   page.handleInput('x')
   page.handleInput('\r')
@@ -766,7 +781,7 @@ test('the reset confirmation never uses Delete wording', () => {
     configConfirm: { question: 1, kind: 'reset', name: 'alpha', capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
-  assert.match(frame, /Remove your override and restore the inherited configuration for alpha\?/u)
+  assert.match(frame, /Reset server alpha to its inherited configuration\./u)
   assert.doesNotMatch(frame, /Delete/u)
 })
 
@@ -776,7 +791,7 @@ test('the toggle confirmation says the process may change', () => {
     configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
   }))
   const frame = render(page, 100, 14).join('\n')
-  assert.match(frame, /Change saved configuration\? The MCP process may stop or start/u)
+  assert.match(frame, /Disable server alpha\. The MCP process may stop; live tools may be interrupted\./u)
 })
 
 test('the form status reports the captured revision and never claims a connection', () => {
@@ -798,7 +813,7 @@ test('a conflict status stays an error and keeps the draft visible', () => {
   }))
   const frame = openEditor(page).join('\n')
   assert.match(frame, /Not saved · configuration changed; refresh to review/u)
-  assert.match(frame, /s Save/u, 'the form stays open so the user can re-read and save')
+  assert.match(frame, /Save \[S\]/u, 'the form stays open so the user can re-read and save')
 })
 
 test('a control-byte/CJK server name is sanitized in the confirmation bar', () => {
@@ -809,34 +824,33 @@ test('a control-byte/CJK server name is sanitized in the confirmation bar', () =
   const lines = render(page, 100, 14)
   const frame = lines.join('\n')
   assert.doesNotMatch(frame, /\u0007/u)
-  assert.match(frame, /Delete bad ?name日本\?/u)
+  assert.match(frame, /Permanently delete server bad ?name日本 from this profile/u)
   for (const line of lines) assert.ok(visibleWidth(line) <= 100)
 })
 
-test('a confirmation bar never drops its target sentence, even at 100 columns', () => {
-  // Regression: the confirmation SUBJECT used to be the lowest-priority
-  // segment, so at 100 columns the user was left with `Y confirm · Esc cancel`
-  // and no readable question. The target is a safety fact and outranks the
-  // answer hints.
+test('the confirmation target stays readable in the BODY at every width', () => {
+  // The body carries the exact target/consequence; the bar carries only the
+  // decision, so a target is never truncated into a different question.
   for (const width of [100, 80, 72, 44]) {
     const deletePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 1 } }))
-    const deleteBar = render(deletePage.page, width, 14).at(-1) ?? ''
-    assert.match(deleteBar, /Delete alpha\?/u, `width ${String(width)}: the Delete subject must survive`)
+    const deleteFrame = render(deletePage.page, width, 14).join('\n').replace(/\s+/gu, ' ')
+    assert.match(deleteFrame, /delete server alpha from this profile/u, `width ${String(width)}: the Delete subject must survive`)
+    assert.match(deleteFrame, /Confirm \[Y\] · Cancel \[Esc\]/u, `width ${String(width)}: the decision survives`)
 
     const resetPage = makePage(snapshot({
       selectedConfig: { ...CONFIG_FACET, canDelete: false, canReset: true, provenance: 'overridden' },
       configConfirm: { question: 1, kind: 'reset', name: 'alpha', capturedRevision: 1 },
     }))
-    const resetBar = render(resetPage.page, width, 14).at(-1) ?? ''
-    assert.match(resetBar, /override|Reset alpha\?/u, `width ${String(width)}: the Reset subject must survive`)
+    const resetFrame = render(resetPage.page, width, 14).join('\n').replace(/\s+/gu, ' ')
+    assert.match(resetFrame, /Reset server alpha to its inherited configuration/u, `width ${String(width)}: the Reset subject must survive`)
 
     const togglePage = makePage(snapshot({ selectedConfig: CONFIG_FACET, configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 } }))
-    const toggleBar = render(togglePage.page, width, 14).at(-1) ?? ''
-    assert.match(toggleBar, /Change (saved configuration|config)\?/u, `width ${String(width)}: the toggle subject must survive`)
+    const toggleFrame = render(togglePage.page, width, 14).join('\n').replace(/\s+/gu, ' ')
+    assert.match(toggleFrame, /Disable server alpha/u, `width ${String(width)}: the toggle subject must survive`)
 
     const restartPage = makePage(snapshot({ confirmingName: 'alpha' }))
-    const restartBar = render(restartPage.page, width, 14).at(-1) ?? ''
-    assert.match(restartBar, /Restart alpha\?/u, `width ${String(width)}: the Restart subject must survive`)
+    const restartFrame = render(restartPage.page, width, 14).join('\n').replace(/\s+/gu, ' ')
+    assert.match(restartFrame, /Restart server alpha/u, `width ${String(width)}: the Restart subject must survive`)
   }
 })
 
@@ -845,8 +859,9 @@ test('a dirty-discard prompt keeps its question at every narrow width', () => {
     const { page } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
     openEditor(page, 'e', width, 16)
     page.handleInput('\x1b')
-    const bar = render(page, width, 16).at(-1) ?? ''
-    assert.match(bar, /Discard(\?| changes\?)/u, `width ${String(width)}: the discard question must survive`)
+    const frame = render(page, width, 16).join('\n')
+    assert.match(frame, /Discard changes\? Unsaved edits are dropped/u, `width ${String(width)}: the discard question must survive`)
+    assert.match(frame, /Discard \[D\] · Keep \[Esc\]/u, `width ${String(width)}: the explicit decision must survive`)
   }
 })
 
@@ -863,13 +878,13 @@ test('a Save confirmation paints the external-capability subject at every width'
         capturedRevision: 1,
       },
     }))
-    const bar = render(page, width, 16).at(-1) ?? ''
-    // The question names the SERVER and keeps the capability fact.
-    assert.match(bar, /alpha/u, `width ${String(width)}: the exact server must be named`)
-    assert.match(bar, /[Ee]xternal|Save alpha/u,
-      `width ${String(width)}: the disclosure must be readable`)
-    assert.match(bar, /Y confirm|y/u, `width ${String(width)}: the affirmative key is advertised`)
-    assert.match(bar, /Esc/u, `width ${String(width)}: the cancel key is advertised`)
+    const frame = render(page, width, 16).join('\n')
+    // The full-width view names the SERVER and keeps the capability fact in the
+    // body; the bar carries the decision.
+    assert.match(frame, /alpha/u, `width ${String(width)}: the exact server must be named`)
+    assert.match(frame, /external command/u, `width ${String(width)}: the disclosure must be readable`)
+    assert.match(frame, /Confirm \[Y\]/u, `width ${String(width)}: the affirmative key is advertised`)
+    assert.match(frame, /Cancel \[Esc\]/u, `width ${String(width)}: the cancel key is advertised`)
   }
 })
 
@@ -901,7 +916,7 @@ test('a compacted HTTP confirmation keeps the host in the body and the decision 
     assert.match(frame, /external service/u, `width ${String(width)}: the capability fact must be in the body`)
     assert.match(frame, /mcp\.example\.test/u, `width ${String(width)}: the target host must be in the body`)
     // The BAR keeps the decision keys, whatever the name/host length.
-    assert.match(frame, /Y confirm|\by\b/u, `width ${String(width)}: the affirmative key survives`)
+    assert.match(frame, /Confirm \[Y\]|\by\b/u, `width ${String(width)}: the affirmative key survives`)
     assert.match(frame, /Esc/u, `width ${String(width)}: the escape key survives`)
   }
 })
@@ -920,7 +935,7 @@ test('the form exposes an explicit storage-form row that the user can switch', (
   assert.match(frame, /stored as: Credential reference/u)
   // Walk to that row and switch it.
   for (let step = 0; step < 14; step += 1) {
-    const current = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    const current = /> ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
     if (current !== null && (current[1] ?? '').trim().startsWith('Env TOKEN stored as')) break
     page.handleInput('\x1b[B')
   }
@@ -949,13 +964,13 @@ test('the focused field stays visible while walking the form at short grants', (
     for (let step = 0; step < 24; step += 1) {
       page.handleInput('\x1b[B')
       const frame = render(page, width, rows).join('\n')
-      const focused = /▸ ([^:\n]+):/u.exec(frame)
+      const focused = /> ([^:\n]+):/u.exec(frame)
       assert.ok(focused !== null, `${width}x${rows} step ${String(step)}: a focused row must be painted`)
       assert.notEqual((focused[1] ?? '').trim(), '', `${width}x${rows} step ${String(step)}: the focus marker labels a field`)
     }
     // Save and Esc remain reachable at the floor after walking.
     const final = render(page, width, rows).join('\n')
-    assert.match(final, /s Save/u, `${width}x${rows}: Save stays reachable`)
+    assert.match(final, /Save \[S\]/u, `${width}x${rows}: Save stays reachable`)
     assert.match(final, /Back \[Esc\]/u, `${width}x${rows}: Esc stays reachable`)
   }
 })
@@ -973,7 +988,7 @@ test('adding rows keeps later fields reachable and the focus visible', () => {
   for (let step = 0; step < 20; step += 1) {
     page.handleInput('\x1b[B')
     const frame = render(page, 80, 10).join('\n')
-    assert.match(frame, /▸ [^:\n]+:/u, `step ${String(step)}: the focused field is painted`)
+    assert.match(frame, /> [^:\n]+:/u, `step ${String(step)}: the focused field is painted`)
   }
 })
 
@@ -993,7 +1008,7 @@ test('a base-owned env key states it cannot be removed and backspace does nothin
     'the base-owned key states why Remove is absent')
   // Focus the BASE_KEY row and press backspace: nothing is removed.
   for (let step = 0; step < 14; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(page, 120, 24).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(page, 120, 24).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim() === 'Env key') {
       const withBase = render(page, 120, 24).join('\n').includes('BASE_KEY · Inherited')
       if (withBase) break
@@ -1013,10 +1028,10 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   render(userAdded.page, 120, 20)
   userAdded.page.handleInput('\r')
   const userBar = render(userAdded.page, 120, 20).at(-1) ?? ''
-  for (const hint of [/p probe/u, /x restart/u, /e edit/u, /t (toggle|enable\/disable)/u, /d delete/u]) {
+  for (const hint of [/Probe \[P\]/u, /Restart \[X\]/u, /Edit \[E\]/u, /Enable\/Disable \[T\]/u, /Delete \[D\]/u]) {
     assert.match(userBar, hint, `user-added bar must offer ${String(hint)}`)
   }
-  assert.doesNotMatch(userBar, /u reset/u, 'user-added has no override to reset')
+  assert.doesNotMatch(userBar, /Reset \[U\]/u, 'user-added has no override to reset')
 
   // Inherited (unmodified): edit + toggle, NEITHER delete nor reset.
   const inherited = makePage(snapshot({
@@ -1025,10 +1040,10 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   render(inherited.page, 120, 20)
   inherited.page.handleInput('\r')
   const inheritedBar = render(inherited.page, 120, 20).at(-1) ?? ''
-  assert.match(inheritedBar, /e edit/u)
-  assert.match(inheritedBar, /t (toggle|enable\/disable)/u)
-  assert.doesNotMatch(inheritedBar, /d delete/u, 'an inherited entry offers no Delete')
-  assert.doesNotMatch(inheritedBar, /u reset/u, 'an unmodified inherited entry offers no Reset')
+  assert.match(inheritedBar, /Edit \[E\]/u)
+  assert.match(inheritedBar, /Enable\/Disable \[T\]/u)
+  assert.doesNotMatch(inheritedBar, /Delete \[D\]/u, 'an inherited entry offers no Delete')
+  assert.doesNotMatch(inheritedBar, /Reset \[U\]/u, 'an unmodified inherited entry offers no Reset')
 
   // Overridden: edit + toggle + reset, no Delete.
   const overridden = makePage(snapshot({
@@ -1037,8 +1052,8 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   render(overridden.page, 120, 20)
   overridden.page.handleInput('\r')
   const overriddenBar = render(overridden.page, 120, 20).at(-1) ?? ''
-  assert.match(overriddenBar, /u reset/u)
-  assert.doesNotMatch(overriddenBar, /d delete/u)
+  assert.match(overriddenBar, /Reset \[U\]/u)
+  assert.doesNotMatch(overriddenBar, /Delete \[D\]/u)
 
   // Plugin-owned: NO CRUD, but the FR3 Probe/Restart ARE available.
   const pluginOwned = makePage(snapshot({ selectedConfig: undefined }))
@@ -1046,9 +1061,9 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   render(pluginOwned.page, 120, 20)
   pluginOwned.page.handleInput('\r')
   const pluginBar = render(pluginOwned.page, 120, 20).at(-1) ?? ''
-  assert.match(pluginBar, /p probe/u, 'a plugin-owned server is still probeable (FR3)')
-  assert.match(pluginBar, /x restart/u, 'a plugin-owned server is still restartable (FR3)')
-  assert.doesNotMatch(pluginBar, /e edit|t toggle|d delete|u reset/u)
+  assert.match(pluginBar, /Probe \[P\]/u, 'a plugin-owned server is still probeable (FR3)')
+  assert.match(pluginBar, /Restart \[X\]/u, 'a plugin-owned server is still restartable (FR3)')
+  assert.doesNotMatch(pluginBar, /Edit \[E\]|Enable\/Disable \[T\]|Delete \[D\]|Reset \[U\]/u)
 
   // Retained cleanup record: no CRUD and no Probe/Restart.
   const retained = makePage(snapshot({
@@ -1060,9 +1075,9 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   render(retained.page, 120, 20)
   retained.page.handleInput('\r')
   const retainedBar = render(retained.page, 120, 20).at(-1) ?? ''
-  assert.doesNotMatch(retainedBar, /p probe|x restart|e edit|d delete|u reset/u)
+  assert.doesNotMatch(retainedBar, /Probe \[P\]|Restart \[X\]|Edit \[E\]|Delete \[D\]|Reset \[U\]/u)
 
-  // A write in flight: the editor bar no longer advertises `s Save`.
+  // A write in flight: the editor bar no longer advertises `Save [S]`.
   const saving = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ dirty: true }),
@@ -1070,7 +1085,7 @@ test('the Detail Action Bar advertises exactly the actions the controller allows
   }))
   openEditor(saving.page, 'e')
   const savingBar = render(saving.page, 120, 20).at(-1) ?? ''
-  assert.doesNotMatch(savingBar, /s Save/u, 'a frozen draft must not advertise Save')
+  assert.doesNotMatch(savingBar, /Save \[S\]/u, 'a frozen draft must not advertise Save')
   assert.match(savingBar, /Saving/u)
   assert.match(savingBar, /Esc/u)
 })
@@ -1088,9 +1103,9 @@ test('a config write in flight removes every detail CRUD affordance from the bar
   render(page, 120, 20)
   page.handleInput('\r')
   const bar = render(page, 120, 20).at(-1) ?? ''
-  assert.doesNotMatch(bar, /e edit/u, 'no Edit while a write is unsettled')
-  assert.match(bar, /p probe/u, 'Probe is independent of the config write')
-  assert.match(bar, /x restart/u)
+  assert.doesNotMatch(bar, /Edit \[E\]/u, 'no Edit while a write is unsettled')
+  assert.match(bar, /Probe \[P\]/u, 'Probe is independent of the config write')
+  assert.match(bar, /Restart \[X\]/u)
   assert.match(bar, /Back \[Esc\]/u)
 })
 
@@ -1103,7 +1118,7 @@ test('an explicit empty Enter commits an empty literal, while Esc keeps the valu
   openEditor(page, 'e')
   // Focus the Env value row, open the input, press Enter on the empty text.
   for (let step = 0; step < 14; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
     page.handleInput('\x1b[B')
   }
@@ -1112,7 +1127,7 @@ test('an explicit empty Enter commits an empty literal, while Esc keeps the valu
   assert.ok(controller.calls.includes('setDictValue:env:E=:literal'),
     `an explicit empty literal must be committed: ${controller.calls.join(',')}`)
 
-  // Esc cancels the edit without touching the value.
+  // Cancel [Esc]s the edit without touching the value.
   controller.calls.length = 0
   page.handleInput('\r')
   page.handleInput('\x1b')
@@ -1128,7 +1143,7 @@ test('an empty Enter on a credential reference keeps the value (a blank ref is i
   controller.formValue = 'reference'
   openEditor(page, 'e')
   for (let step = 0; step < 14; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
     page.handleInput('\x1b[B')
   }
@@ -1138,26 +1153,23 @@ test('an empty Enter on a credential reference keeps the value (a blank ref is i
     'a blank credential reference is not committed')
 })
 
-test('the page header always names the FORM target, never the previously selected server', () => {
-  const { page } = makePage(snapshot({
+test('the FORM body always names its target, never the previously selected server', () => {
+  const add = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ mode: 'add', name: '', nameEditable: true, dirty: true }),
   }))
-  page.handleInput('a')
-  // Wide: the header right side is the form identity, not `alpha`.
-  page.setMaxRows(24)
-  const header = stripTerminalSequences(page.paneHeader(120))
-  assert.match(header, /\(unnamed\)\s+· Add · new user server/u, `the Add target must be named: ${header}`)
-  assert.doesNotMatch(header, /alpha/u, 'the old selection must not be presented as the Add target')
+  const addFrame = render(add.page, 120, 20).join('\n')
+  const addIdentity = addFrame.split('\n').find(line => /· Add ·/u.test(line)) ?? ''
+  assert.match(addIdentity, /\(unnamed\) · Add · new user server/u, `the Add target must be named: ${addIdentity}`)
+  assert.doesNotMatch(addIdentity, /alpha/u, 'the old selection must not be presented as the Add target')
 
-  const editPage = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
-  editPage.page.handleInput('e')
-  editPage.page.setMaxRows(24)
-  const editHeader = stripTerminalSequences(editPage.page.paneHeader(120))
-  assert.match(editHeader, /alpha\s+· Edit · /u, `the Edit target must be named: ${editHeader}`)
+  const edit = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
+  const editFrame = render(edit.page, 120, 20).join('\n')
+  const editIdentity = editFrame.split('\n').find(line => /· Edit ·/u.test(line)) ?? ''
+  assert.match(editIdentity, /alpha · Edit · /u, `the Edit target must be named: ${editIdentity}`)
 })
 
-test('a form-row click activates the same intent as Enter, and a repaint refuses the gesture', () => {
+test('a form-row click only SELECTS; the explicit field verb runs the intent', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ dirty: true }),
@@ -1165,16 +1177,22 @@ test('a form-row click activates the same intent as Enter, and a repaint refuses
   openEditor(page, 'e')
   const lines = render(page, 100, 20)
   const mouseBase = { button: 'left' as const, screenX: 1, screenY: 1, shift: false, alt: false, ctrl: false }
-  // Find the painted "Transport" row (Enter switches the transport).
+  // Find the painted "Transport" row (its explicit verb switches transport).
   const transportLine = lines.findIndex(line => line.includes('Transport:'))
   assert.ok(transportLine >= 0)
   page.handleMouse({ ...mouseBase, type: 'press', x: 2, y: transportLine, width: 100, height: 19 })
   page.handleMouse({ ...mouseBase, type: 'click', x: 2, y: transportLine, width: 100, height: 19 })
-  assert.ok(controller.calls.includes('setTransport'),
-    `a form-row click must run the Enter intent: ${controller.calls.join(',')}`)
+  assert.equal(controller.calls.includes('setTransport'), false,
+    'a row click only selects the field')
+  const selected = render(page, 100, 20).join('\n')
+  assert.match(selected, /> Transport:/u, 'the clicked row is now the focused field')
+  // The complete explicit verb is a real delegated span and runs the intent.
+  assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:activate-field:transport'),
+    'the focused field publishes its complete verb')
+  page.activateBarSpan('bar:activate-field:transport')
+  assert.ok(controller.calls.includes('setTransport'), 'the explicit verb runs the Enter intent')
 
-  // A press whose frame repaints before the release never completes. The
-  // identity line shifts the painted geometry, so the row is re-found.
+  // A press whose frame repaints before the release never completes.
   controller.calls.length = 0
   const refreshed = render(page, 100, 18)
   const transportAgain = refreshed.findIndex(line => line.includes('Transport:'))
@@ -1189,31 +1207,30 @@ test('a pointer cannot change the draft while a confirmation owns the page', () 
   const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
   openEditor(page, 'e')
   controller.calls.length = 0
-  // The user presses `s`: the disclosure question opens over the SAME draft.
+  // The user presses `s`: the disclosure question opens over the SAME draft but
+  // takes the whole body; no form field is painted or targetable behind it.
   controller.snapshotValue = {
     ...controller.snapshotValue,
     configConfirm: { question: 1, kind: 'save', name: 'alpha', warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
-  const lines = render(page, 100, 20)
-  const transportLine = lines.findIndex(line => line.includes('Transport:'))
-  assert.ok(transportLine >= 0)
+  const frame = render(page, 100, 20).join('\n')
+  assert.doesNotMatch(frame, /Transport:/u, 'the full-width question hides the form body')
   const mouse = { button: 'left' as const, screenX: 1, screenY: 1, width: 100, height: 19, shift: false, alt: false, ctrl: false }
-  // Every pointer gesture is refused while the question is open: no draft
-  // change can slip in between the disclosure and the answer.
-  page.handleMouse({ ...mouse, type: 'press', x: 2, y: transportLine })
-  page.handleMouse({ ...mouse, type: 'click', x: 2, y: transportLine })
+  page.handleMouse({ ...mouse, type: 'press', x: 2, y: 0 })
+  page.handleMouse({ ...mouse, type: 'click', x: 2, y: 0 })
   assert.deepEqual(controller.calls, [], 'no draft mutation may bypass the open confirmation')
-  assert.equal(page.handleMouse({ ...mouse, type: 'click', x: 2, y: transportLine }), undefined)
+  assert.equal(page.handleMouse({ ...mouse, type: 'click', x: 2, y: 0 }), undefined)
 
-  // After the question is answered, the SAME click works again (positive
-  // control: the lock is the modal, not a broken mouse path).
+  // After the question is answered, the SAME field click selects again
+  // (positive control: the lock is the modal, not a broken mouse path).
   const plain = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
   openEditor(plain.page, 'e')
   const plainLines = render(plain.page, 100, 20)
   const plainTransport = plainLines.findIndex(line => line.includes('Transport:'))
   plain.page.handleMouse({ ...mouse, type: 'press', x: 2, y: plainTransport })
   plain.page.handleMouse({ ...mouse, type: 'click', x: 2, y: plainTransport })
-  assert.ok(plain.controller.calls.includes('setTransport'), 'a non-modal field click still works')
+  assert.match(render(plain.page, 100, 20).join('\n'), /> Transport:/u,
+    'a non-modal field click still selects')
 })
 
 test('a delegated last-row span reaches the page through the Root seam', () => {
@@ -1232,14 +1249,17 @@ test('the page-local bar targets and the Root seam publish the same affordances'
   const lines = render(page, 100, 20)
   // A page-local click still works through the child's own hit map…
   const mouse = { button: 'left' as const, screenX: 1, screenY: 1, shift: false, alt: false, ctrl: false }
-  const y = lines.findIndex(line => line.includes('a Add'))
+  const y = lines.findIndex(line => line.includes('Add [A]'))
   assert.ok(y >= 0)
-  const col = (lines[y] ?? '').indexOf('a Add') + 1
+  const col = (lines[y] ?? '').indexOf('Add [A]') + 1
   page.handleMouse({ ...mouse, type: 'press', x: col, y, width: 100, height: 19 })
   page.handleMouse({ ...mouse, type: 'click', x: col, y, width: 100, height: 19 })
   // …and the published spans match the bar segments that really painted.
+  render(page, 100, 20)
   const published = page.paintedBarSpans().map(span => span.id)
-  assert.ok(published.includes('bar:back'), `Esc-adjacent spans publish: ${published.join(',')}`)
+  assert.equal(published.includes('bar:back'), false, 'Esc is the ONE Root-owned target, never a delegated duplicate')
+  assert.ok(page.paintedEscapeSpan() !== undefined, 'the painted Esc span is published to the Root')
+  assert.ok(published.includes('bar:save'), `the form's non-Esc spans publish: ${published.join(',')}`)
 })
 
 test('the Save disclosure lives in the body at 44 columns, not only in the bar', () => {
@@ -1254,7 +1274,7 @@ test('the Save disclosure lives in the body at 44 columns, not only in the bar',
   // 32-character name and the narrow bar cannot hold it.
   assert.match(frame, /execute an external\s+command\./u, `the capability must be in the body: ${frame}`)
   // The decision keys survive even when the question segment drops.
-  assert.match(frame, /(Y confirm|y)\b/u, `the affirmative key must survive: ${frame}`)
+  assert.match(frame, /Confirm \[Y\]/u, `the affirmative key must survive: ${frame}`)
   assert.match(frame, /Esc/u)
   // POSITIVE control: at 44x8 the whole fact set fits, so `y` really dispatches.
   page.handleInput('y')
@@ -1264,31 +1284,31 @@ test('the Save disclosure lives in the body at 44 columns, not only in the bar',
   // NEGATIVE control on the same frame budget: when the granted rows cannot show
   // the facts, no affirmative key is painted and `y` is refused.
   const small = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
-  openEditor(small.page, 'e', 44, 4)
+  openEditor(small.page, 'e', 44, 3)
   small.controller.snapshotValue = {
     ...small.controller.snapshotValue,
     configConfirm: { question: 1, kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
-  const smallFrame = render(small.page, 44, 4).join('\n')
-  assert.doesNotMatch(smallFrame, /Y confirm/u, `no affirmative key on an unreviewable frame: ${smallFrame}`)
+  const smallFrame = render(small.page, 44, 3).join('\n')
+  assert.doesNotMatch(smallFrame, /Confirm \[Y\]/u, `no affirmative key on an unreviewable frame: ${smallFrame}`)
   assert.match(smallFrame, /Resize to review/u)
   small.page.handleInput('y')
   assert.deepEqual(small.controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
     'an unreviewable confirmation must refuse the key')
 })
 
-test('the narrow header keeps the form target identity at every width', () => {
-  // The identity is projected from the OPEN editor snapshot, so the header is
-  // checked directly (entering via `a` would replace it with an empty draft).
+test('the narrow form keeps the target identity at every width', () => {
   const { page } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ mode: 'add', name: 'a'.repeat(32), nameEditable: true, dirty: true }),
   }))
-  page.setMaxRows(8)
   for (const width of [44, 72, 80, 120]) {
-    const header = stripTerminalSequences(page.paneHeader(width))
-    assert.match(header, new RegExp('a'.repeat(32)), `width ${String(width)}: the name must survive: ${header}`)
-    assert.ok(visibleWidth(header) <= width, `width ${String(width)}: the header must not overflow`)
+    const lines = render(page, width, 12)
+    const frame = lines.join('\n')
+    assert.match(frame, new RegExp('a'.repeat(32)), `width ${String(width)}: the name must survive: ${frame}`)
+    const identity = lines.find(line => /· Add\b/u.test(line)) ?? ''
+    assert.match(identity, /a{6}/u, `width ${String(width)}: the identity names the add target: ${identity}`)
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${String(width)}: no line may overflow`)
   }
 })
 
@@ -1300,7 +1320,7 @@ test('the value input hint states what an empty Enter really does per storage fo
   literalPage.controller.formValue = 'literal'
   openEditor(literalPage.page, 'e')
   for (let step = 0; step < 14; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(literalPage.page, 100, 20).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(literalPage.page, 100, 20).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
     literalPage.page.handleInput('\x1b[B')
   }
@@ -1317,7 +1337,7 @@ test('the value input hint states what an empty Enter really does per storage fo
   referencePage.controller.formValue = 'reference'
   openEditor(referencePage.page, 'e')
   for (let step = 0; step < 14; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(referencePage.page, 100, 20).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(referencePage.page, 100, 20).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
     referencePage.page.handleInput('\x1b[B')
   }
@@ -1330,7 +1350,7 @@ test('the value input hint states what an empty Enter really does per storage fo
 test('a Detail confirmation (toggle) paints its consequence body and blocks when it cannot fit', () => {
   // The Detail hosts the Toggle/Delete/Reset/Restart confirmations. The
   // confirmation body is painted at the TOP of the Detail, so the user reads
-  // the target and consequence before reaching the `Y confirm` bar.
+  // the target and consequence before reaching the `Confirm [Y]` bar.
   const wide = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     configConfirm: { question: 1, kind: 'toggle', name: 'alpha', nextEnabled: false, capturedRevision: 1 },
@@ -1340,7 +1360,7 @@ test('a Detail confirmation (toggle) paints its consequence body and blocks when
   const wideFrame = render(wide.page, 100, 24).join('\n')
   assert.match(wideFrame, /Disable server alpha\./u, 'the toggle consequence is painted in the Detail body')
   assert.match(wideFrame, /may stop/u)
-  assert.match(wideFrame, /Y confirm/u)
+  assert.match(wideFrame, /Confirm \[Y\]/u)
 
   // At 44x5 the fact set still fits its 4 body rows, so it stays confirmable.
   const fits = makePage(snapshot({
@@ -1350,7 +1370,7 @@ test('a Detail confirmation (toggle) paints its consequence body and blocks when
   ;(fits.page as unknown as { view: string }).view = 'detail'
   const fitsFrame = render(fits.page, 44, 5).join('\n')
   assert.match(fitsFrame, /may stop/u, 'the whole consequence is visible at 44x5')
-  assert.match(fitsFrame, /Y confirm/u, 'a fully visible confirmation stays executable')
+  assert.match(fitsFrame, /Confirm \[Y\]/u, 'a fully visible confirmation stays executable')
 
   // A grant that cannot show the whole consequence paints NO affirmative key
   // and says why: the admission is the VISIBLE content, not the wrap result.
@@ -1360,7 +1380,7 @@ test('a Detail confirmation (toggle) paints its consequence body and blocks when
   }))
   ;(tiny.page as unknown as { view: string }).view = 'detail'
   const tinyFrame = render(tiny.page, 44, 3).join('\n')
-  assert.doesNotMatch(tinyFrame, /Y confirm/u, 'an unreviewable confirmation paints no affirmative key')
+  assert.doesNotMatch(tinyFrame, /Confirm \[Y\]/u, 'an unreviewable confirmation paints no affirmative key')
   assert.match(tinyFrame, /Resize to review/u)
   assert.match(tinyFrame, /Esc/u)
 })
@@ -1381,7 +1401,7 @@ test('a fully painted long HTTP host is NOT blocked (the split inserted no space
   assert.ok(joined.includes(host), `the whole 63-character host must be painted:\n${frame}`)
   // …so the decision is executable, not blocked.
   assert.doesNotMatch(frame, /Resize to review/u, 'a fully painted long host must not be blocked')
-  assert.match(frame, /Y confirm|\by\b/u)
+  assert.match(frame, /Confirm \[Y\]|\by\b/u)
 })
 
 test('the input-mode bar commits through the SAME path as the keyboard Enter', () => {
@@ -1392,12 +1412,12 @@ test('the input-mode bar commits through the SAME path as the keyboard Enter', (
   controller.formValue = 'literal'
   openEditor(page, 'e')
   for (let step = 0; step < 14; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim() === 'Env E') break
     page.handleInput('\x1b[B')
   }
   page.handleInput('\r')
-  // The input bar publishes `Enter apply` as a real pointer intent; the spans
+  // The input bar publishes `Apply [Enter]` as a real pointer intent; the spans
   // are captured from the frame that really painted the input.
   render(page, 100, 20)
   const spans = page.paintedBarSpans()
@@ -1416,16 +1436,17 @@ test('a discard whose fact set cannot be painted refuses `d` like any other conf
   roomy.page.handleInput('\x1b')
   const roomyFrame = render(roomy.page, 100, 20).join('\n')
   assert.match(roomyFrame, /nothing has been written yet/u, 'the discard body states what is dropped')
+  assert.match(roomyFrame, /Discard \[D\] · Keep \[Esc\]/u, 'the complete decision is painted')
   roomy.page.handleInput('d')
   assert.ok(roomy.controller.calls.includes('discardEditor'), 'a fully visible discard is executable')
 
   // A grant too small for the fact set: no affirmative affordance and `d` is
-  // refused — the bar offers only cancel.
+  // refused — the bar offers only the real Keep.
   const tight = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
-  openEditor(tight.page, 'e', 44, 3)
+  openEditor(tight.page, 'e', 44, 2)
   tight.page.handleInput('\x1b')
-  const tightFrame = render(tight.page, 44, 3).join('\n')
-  assert.doesNotMatch(tightFrame, /Discard \[d\]|Discard changes\? \[Keep/u,
+  const tightFrame = render(tight.page, 44, 2).join('\n')
+  assert.doesNotMatch(tightFrame, /Discard \[D\]/u,
     `no executable discard affordance on an unreviewable frame: ${tightFrame}`)
   assert.match(tightFrame, /Resize to review/u)
   tight.page.handleInput('d')
@@ -1438,7 +1459,7 @@ test('an active form input owns the body: a pointer cannot switch fields behind 
   openEditor(page, 'e', 100, 20)
   // Focus the Command row (an Edit's Name is read-only) and open its input.
   for (let step = 0; step < 6; step += 1) {
-    const focused = /▸ ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
+    const focused = /> ([^:\n]+):/u.exec(render(page, 100, 20).join('\n'))
     if (focused !== null && (focused[1] ?? '').trim().startsWith('Command')) break
     page.handleInput('\x1b[B')
   }
@@ -1457,7 +1478,8 @@ test('an active form input owns the body: a pointer cannot switch fields behind 
   // …while its OWN apply/cancel spans stay reachable.
   const spans = page.paintedBarSpans().map(span => span.id)
   assert.ok(spans.includes('bar:apply-input'), `the input bar publishes apply: ${spans.join(',')}`)
-  assert.ok(spans.includes('bar:cancel'), `the input bar publishes cancel: ${spans.join(',')}`)
+  assert.equal(spans.includes('bar:cancel'), false, 'Cancel is the ONE Root-owned Esc target')
+  assert.ok(page.paintedEscapeSpan() !== undefined, 'the input bar publishes its Esc span to the Root')
 })
 
 test('a question that has not painted yet is not executable (no cross-question authorisation)', () => {
@@ -1506,13 +1528,13 @@ test('a question that has not painted yet is not executable (no cross-question a
 
 test('a blocked question refuses both the key and the pointer confirm intent', () => {
   const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET, editor: editorSnapshot({ dirty: true }) }))
-  openEditor(page, 'e', 44, 4)
+  openEditor(page, 'e', 44, 3)
   controller.calls.length = 0
   controller.snapshotValue = {
     ...controller.snapshotValue,
     configConfirm: { question: 1, kind: 'save', name: 'a'.repeat(32), warning: 'Enabling this server can execute an external command.', capturedRevision: 1 },
   }
-  const frame = render(page, 44, 4).join('\n')
+  const frame = render(page, 44, 3).join('\n')
   assert.match(frame, /Resize to review/u)
   page.handleInput('y')
   page.activateBarSpan('bar:confirm')
@@ -1521,7 +1543,7 @@ test('a blocked question refuses both the key and the pointer confirm intent', (
 })
 
 test('a grant with no body rows can never confirm: nothing was painted to review', () => {
-  // 200x2 leaves the Root one header row and one Action Bar row — zero body.
+  // 200x1 is a TRUE zero-body grant: only the one truthful bar row remains.
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,
     editor: editorSnapshot({ dirty: true }),
@@ -1529,14 +1551,13 @@ test('a grant with no body rows can never confirm: nothing was painted to review
   }))
   // The editor is open before the question arrives (as a user's would be).
   openEditor(page, 'e', 100, 20)
-  ;(page as unknown as { view: string }).view = 'editor'
   controller.calls.length = 0
-  const lines = render(page, 200, 2)
+  const lines = render(page, 200, 1)
   const frame = lines.join('\n')
-  const body = lines.slice(0, -1).join('\n')
-  assert.doesNotMatch(body, /Short\./u, `the fact cannot be painted in a zero-row body: ${frame}`)
-  assert.doesNotMatch(frame, /Y confirm/u, `a zero-row grant paints no affirmative key: ${frame}`)
-  assert.match(frame, /Resize to review/u)
+  assert.equal(lines.length, 1, 'a zero-row grant paints exactly the physical bar')
+  assert.doesNotMatch(frame, /Short\./u, `the fact cannot be painted in a zero-row body: ${frame}`)
+  assert.doesNotMatch(frame, /Confirm \[Y\]/u, `a zero-row grant paints no affirmative key: ${frame}`)
+  assert.match(frame, /Cancel \[Esc\]/u, 'the real cancel stays the only decision')
   page.handleInput('y')
   assert.deepEqual(controller.calls.filter(call => call.startsWith('answerConfigConfirm')), [],
     'a zero-row grant must refuse the answer')
@@ -1587,35 +1608,40 @@ test('the editor wheel moves only the current form focus, never the hidden list 
   // The WIDE layout still holds the list model behind the whole-page form.
   openEditor(page, 'e', 120, 24)
   const base = mouseBase(120, 24)
-  assert.match(render(page, 120, 24).join('\n'), /▸ Name:/u, 'the focus starts on the first field')
+  assert.match(render(page, 120, 24).join('\n'), /> Name:/u, 'the focus starts on the first field')
   // The LEFT region (where the hidden list would live) moves the FORM focus.
   page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 4, y: 5 })
-  assert.match(render(page, 120, 24).join('\n'), /▸ Transport:/u,
+  assert.match(render(page, 120, 24).join('\n'), /> Transport:/u,
     'the left-region wheel advances the form field')
   // The RIGHT region (where the hidden Detail would live) moves the FORM focus.
   page.handleMouse({ ...base, type: 'wheel', wheelDelta: 1, x: 100, y: 5 })
-  assert.match(render(page, 120, 24).join('\n'), /▸ Enabled:/u,
+  assert.match(render(page, 120, 24).join('\n'), /> Enabled:/u,
     'the right-region wheel advances the form field')
   assert.deepEqual(controller.calls.filter(call => call.startsWith('move:') || call.startsWith('select:')), [],
     'the wheel never moves the hidden list selection')
   assert.equal(controller.snapshotValue.selectedName, 'alpha', 'the hidden selection is untouched')
 })
 
-test('the short editor wheel reaches a field that was not painted, and clicking it opens its Enter intent', () => {
+test('the short editor wheel reaches an off-screen field; the explicit Enter opens its intent', () => {
   for (const [width, rows] of [[44, 20], [44, 8]] as const) {
     const { page, controller } = makePage(snapshot({
       selectedConfig: CONFIG_FACET,
       editor: editorSnapshot({ args: ['--one', '--two', '--three'], dirty: true }),
     }))
     openEditor(page, 'e', width, rows)
-    wheelFocusUntil(page, width, rows, frame => /▸ Arg 2:/u.test(frame))
+    wheelFocusUntil(page, width, rows, frame => /> Arg 2:/u.test(frame))
     const lines = render(page, width, rows)
-    const focusRow = lines.findIndex(line => line.includes('▸ Arg 2'))
+    const focusRow = lines.findIndex(line => line.includes('> Arg 2'))
     assert.ok(focusRow >= 0, `${width}x${rows}: the wheeled-to field must be painted`)
     controller.calls.length = 0
+    // A body-row click only SELECTS the field; it never opens its editor.
     clickBodyCell(page, width, rows, focusRow)
+    assert.doesNotMatch(render(page, width, rows).join('\n'), /edit: >/u,
+      `${width}x${rows}: a row click never opens the field's input`)
+    // The explicit Enter verb runs the same row intent.
+    page.handleInput('\r')
     assert.match(render(page, width, rows).join('\n'), /edit: >/u,
-      `${width}x${rows}: the pointer opened the field's own input`)
+      `${width}x${rows}: the explicit verb opened the field's own input`)
     page.handleInput('Z')
     page.handleInput('\r')
     assert.deepEqual(controller.calls.filter(call => call.startsWith('setArg')), [`setArg:1=--twoZ`],
@@ -1629,7 +1655,7 @@ test('a painted Remove deletes exactly the focused removable row and writes noth
     editor: editorSnapshot({ args: ['--flag'], env: [{ key: 'E', value: '${credential:E}' }], dirty: true }),
   }))
   openEditor(page, 'e', 100, 20)
-  focusUntil(page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  focusUntil(page, 100, 20, frame => /> Arg 1:/u.test(frame))
   const bar = render(page, 100, 20).at(-1) ?? ''
   assert.match(bar, /Remove \[Backspace\]/u, 'the removable row advertises Remove')
   assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'))
@@ -1659,7 +1685,7 @@ test('an inherited key never paints or runs Remove, while a user-added key right
   // The real controller refuses removal of exactly the base-owned key.
   controller.canRemoveDictKey = (_field: string, key: string) => key !== 'BASE'
   openEditor(page, 'e', 100, 32)
-  focusUntil(page, 100, 32, frame => /▸ Env key: BASE · Inherited/u.test(frame))
+  focusUntil(page, 100, 32, frame => /> Env key: BASE · Inherited/u.test(frame))
   const inheritedBar = render(page, 100, 32).at(-1) ?? ''
   assert.doesNotMatch(inheritedBar, /Remove/u, 'an inherited key offers no Remove affordance')
   assert.equal(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'), false)
@@ -1670,7 +1696,7 @@ test('an inherited key never paints or runs Remove, while a user-added key right
   assert.deepEqual(controller.calls.filter(call => call.startsWith('removeDict')), [],
     'the inherited key is never removed')
   // The user-added key beside it paints Remove and removes ONLY that key.
-  focusUntil(page, 100, 32, frame => /▸ Env key: USER/u.test(frame))
+  focusUntil(page, 100, 32, frame => /> Env key: USER/u.test(frame))
   const userBar = render(page, 100, 32).at(-1) ?? ''
   assert.match(userBar, /Remove/u)
   controller.calls.length = 0
@@ -1685,10 +1711,10 @@ test('Remove is absent while an input, a discard prompt or a save owns the edito
     editor: editorSnapshot({ args: ['--flag'], dirty: true }),
   }))
   openEditor(input.page, 'e', 100, 20)
-  focusUntil(input.page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  focusUntil(input.page, 100, 20, frame => /> Arg 1:/u.test(frame))
   input.page.handleInput('\r')
   const inputBar = render(input.page, 100, 20).at(-1) ?? ''
-  assert.match(inputBar, /Enter apply/u)
+  assert.match(inputBar, /Apply \[Enter\]/u)
   assert.doesNotMatch(inputBar, /Remove/u)
   // (b) an unsettled Save freezes the draft and offers no Remove.
   const saving = makePage(snapshot({
@@ -1718,7 +1744,7 @@ test('a wheel between the Remove press and its release never removes', () => {
     editor: editorSnapshot({ args: ['--flag'], dirty: true }),
   }))
   openEditor(page, 'e', 100, 20)
-  focusUntil(page, 100, 20, frame => /▸ Arg 1:/u.test(frame))
+  focusUntil(page, 100, 20, frame => /> Arg 1:/u.test(frame))
   const span = page.paintedBarSpans().find(candidate => candidate.id === 'bar:remove-form-row')
   assert.ok(span !== undefined)
   const base = mouseBase(100, 20)
@@ -1741,14 +1767,125 @@ test('44 columns keeps the COMPLETE Remove [Backspace] beside Save and Back for 
     editor: editorSnapshot({ args: ['--flag'], dirty: true }),
   }))
   openEditor(page, 'e', 44, 20)
-  wheelFocusUntil(page, 44, 20, frame => /▸ Arg 1:/u.test(frame))
+  wheelFocusUntil(page, 44, 20, frame => /> Arg 1:/u.test(frame))
   const bar = render(page, 44, 20).at(-1) ?? ''
   // The layout drops the BROWING hints first and keeps the three actions whole.
-  assert.match(bar, /s Save/u)
+  assert.match(bar, /Save \[S\]/u)
   assert.match(bar, /Remove \[Backspace\]/u, `the full Remove literal must survive: ${bar}`)
   assert.match(bar, /Back \[Esc\]/u)
   assert.doesNotMatch(bar, /Enter edit|Tab next|↑\/↓ field/u, 'the browsing hints yield first')
   assert.ok(visibleWidth(bar) <= 44, `no overflow at 44 columns: ${bar}`)
   assert.ok(page.paintedBarSpans().some(span => span.id === 'bar:remove-form-row'),
     'the complete Remove is a real target')
+})
+
+test('a long status wraps whole and the Detail can scroll a long name and last error', () => {
+  const name = 'server-with-a-very-long-name-that-must-wrap-fully'
+  const tail = 'final-diagnostic-tail'
+  const { page } = makePage(snapshot({
+    rows: [{
+      name,
+      configured: true,
+      status: { state: 'failed', reason: 'unclosed-generation', lastError: `${'diagnostic '.repeat(12)}${tail}` },
+      source: 'Configured',
+    }],
+    selectedName: name,
+  }))
+  const list = render(page, 34, 10)
+  const listFrame = list.join('\n')
+  // The official status is never abbreviated into a different word; it wraps
+  // into the item's own extra physical line.
+  assert.match(listFrame, /Failed \(unclosed/u)
+  assert.match(listFrame, /generation\)/u)
+  assert.doesNotMatch(listFrame, /Failed \(unclosed gen/u)
+  for (const line of list) assert.ok(visibleWidth(line) <= 34)
+  // Detail carries the WHOLE name and the scrollable last error.
+  page.handleInput('\r')
+  const detail = render(page, 34, 10)
+  const joined = detail.join('\n')
+  assert.match(joined.replace(/\s+/gu, ' '), /Server: server-with-a-very-long-na me-that-must-wrap-fully/u)
+  assert.match(joined, /Last error: diagnostic/u)
+  for (let step = 0; step < 30; step += 1) {
+    page.handleInput('\x1b[B')
+    if (render(page, 34, 10).join('\n').includes(tail)) break
+  }
+  assert.match(render(page, 34, 10).join('\n'), new RegExp(tail, 'u'),
+    'the full diagnostic is reachable through the real physical scroll')
+})
+
+test('a narrow Detail keeps every dropped action reachable through the body', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 44, 16)
+  page.handleInput('\r')
+  const lines = render(page, 44, 16)
+  const frame = lines.join('\n')
+  // The frozen bar cannot hold the secondary actions whole at 44 cells; their
+  // complete labels move into the scrollable body with the SAME intents.
+  assert.match(frame, /Actions/u, `the body carries the dropped actions: ${frame}`)
+  assert.match(frame, /Enable\/Disable \[T\]/u)
+  const row = lines.findIndex(line => line.includes('Enable/Disable [T]'))
+  assert.ok(row >= 0)
+  controller.calls.length = 0
+  clickBodyCell(page, 44, 16, row)
+  assert.deepEqual(controller.calls, ['beginToggle'], 'the body fallback uses the bar action sink once')
+})
+
+test('a dual child grant names BOTH local regions with the one active device', () => {
+  const { page } = makePage(snapshot())
+  page.setWebWorkbenchGrant({ width: 80, rows: 21, barWidth: 80, allowDual: true })
+  page.render(80)
+  const listHeader = stripTerminalSequences(page.paneHeader(80))
+  assert.match(listHeader, /\[MCP servers \(2\)\]/u)
+  assert.match(listHeader, /Details/u)
+  assert.doesNotMatch(listHeader, /\[Details\]/u, 'the List owns the active device while it is the current region')
+  assert.ok(visibleWidth(listHeader) <= 80)
+  page.handleInput('\r')
+  page.render(80)
+  const detailHeader = stripTerminalSequences(page.paneHeader(80))
+  assert.match(detailHeader, /MCP servers \(2\)/u)
+  assert.match(detailHeader, /\[Details\]/u, 'the Detail owns the active device after Open')
+  assert.ok(visibleWidth(detailHeader) <= 80)
+})
+
+test('an unconfirmed outcome is never silently abandoned from the browse frame', () => {
+  let done = 0
+  const { page, controller } = makePage(snapshot({
+    configStatus: { kind: 'unconfirmed', text: 'Outcome unconfirmed; inspect the Host configuration before retrying' },
+    configOutcomeUnconfirmed: true,
+  }), () => { done += 1 })
+  render(page, 100, 14)
+  page.handleInput('\x1b')
+  const warning = render(page, 100, 14).join('\n')
+  assert.match(warning, /Outcome unconfirmed/u)
+  assert.match(warning, /Refresh \[R\]/u)
+  assert.match(warning, /Leave \[D\]/u)
+  assert.match(warning, /Keep \[Esc\]/u)
+  page.handleInput('\x1b')
+  assert.equal(done, 0, 'Esc keeps the warning open, never leaves')
+  page.handleInput('\x1b')
+  page.handleInput('d')
+  assert.equal(done, 1, 'only the explicit leave closes the page')
+  assert.equal(controller.calls.includes('refresh'), false, 'leaving does not replay the unknown write')
+  assert.equal(controller.calls.some(call => /save|toggle|delete|reset|restart/u.test(call)), false)
+})
+
+test('an unconfirmed form Back warns before discarding local edits', () => {
+  let done = 0
+  const { page, controller } = makePage(snapshot({
+    editor: editorSnapshot({ dirty: true }),
+    configStatus: { kind: 'unconfirmed', text: 'Outcome unconfirmed; inspect the Host configuration before retrying' },
+    configOutcomeUnconfirmed: true,
+  }), () => { done += 1 })
+  render(page, 100, 14)
+  page.handleInput('\x1b')
+  const warning = render(page, 100, 14).join('\n')
+  assert.match(warning, /Leave form\? The change may have been applied/u)
+  assert.match(warning, /Discard \[D\]/u)
+  assert.match(warning, /Keep \[Esc\]/u)
+  page.handleInput('d')
+  assert.equal(done, 0, 'the page stays open after dropping only the local draft')
+  assert.equal(controller.calls.includes('discardEditor'), true)
+  assert.equal(controller.calls.some(call => /save|toggle|delete|reset|restart/u.test(call)), false)
+  const after = render(page, 100, 14).join('\n')
+  assert.match(after, /Outcome unconfirmed/u, 'the prior receipt remains visible')
 })

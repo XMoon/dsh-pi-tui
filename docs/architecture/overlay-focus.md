@@ -974,13 +974,20 @@ owns only the lease, focus and write-lifecycle mechanics.
   the admission for every body press; the parent gutters/header/blank bar stay
   inert). This is the documented exception to
   "a mounted specialist owns the whole body": it is not a second screen, lease
-  or focus owner. The `Web Search / Fetch` Adaptive Workbench is the SECOND
-  documented exception: its page is mounted in the SAME lease while the REAL
-  Categories rail stays painted beside its own local List/Detail grant; the
-  Root's ONE focus state seats either the rail or the child's current region,
-  and only the page's last-painted body box admits a body press. Its exact
-  geometry, active device, explicit Open separation, local `Tab`, parent
-  leave/return and ONE physical Action Bar grammar are owned by
+  or focus owner. The `Web Search / Fetch` and `MCP servers` Adaptive
+  Workbench pages are the SECOND documented exception (one shared workbench
+  contract): a page is mounted in the SAME lease while the REAL Categories rail
+  stays painted beside its own local List/Detail grant; the Root's ONE focus
+  state seats either the rail or the child's current region, and only the
+  page's last-painted body box admits a body press. A workbench page may also
+  declare its CURRENT sub-view FULL-WIDTH (the MCP configuration form and every
+  risk question): the Root then paints no rail/List/Detail background and
+  publishes no target outside that child. While such a full-width transition,
+  a focus transfer or a grant change has not painted, only the real Esc and an
+  explicit read-only `R` re-observation are admitted; no business action may
+  run against the previous frame. The exact geometry, active device, explicit
+  Open separation, local `Tab`, full-width rule, parent leave/return and ONE
+  physical Action Bar grammar are owned by
   [surface-settings.md](./surface-settings.md#settings-workspace); this section
   owns only that shared seat rule. The pointer, `Tab`/`Shift+Tab` and
   pane-activation parent paths ask the page's ONE leave query before any
@@ -992,7 +999,11 @@ owns only the lease, focus and write-lifecycle mechanics.
   (until the user's own local Cancel) and refuse parent clicks/Tab while a
   dispatched runtime/config write (or the ACP page's Client-local copy) is
   pending — their explicit page Back stays the documented pending exit and the
-  write/copy owner still settles and diagnoses it. The agent single value's Root-managed Tab is still a region-focus
+  write/copy owner still settles and diagnoses it. The MCP workbench blocks a
+  parent route while its form/risk question, a dispatched operation or an
+  unconfirmed-outcome recovery owns the page; its explicit Back and `R`
+  re-observation path is owned by its own section in
+  [surface-settings.md](./surface-settings.md). The agent single value's Root-managed Tab is still a region-focus
   transaction; the Shell and Subagent groups' Tab is a LOCAL field move that
   the Root never takes (a zero-body frame refuses it inside the child), and the
   Web and ACP pages' Tab is the same Root-managed transaction only while they
