@@ -1089,10 +1089,12 @@ before any Host effect:
 - A held claim that is NOT a settled attached generation — still attaching, or
   detached-but-fenced by a close/disposal whose exact Host terminal is still
   unproven — also refuses `LOCAL_ACP_VIEW_BUSY` and keeps that transient state
-  and its fence. The standard not-active error below is only for a Session this
-  connection holds NO claim for.
-- The request itself must be legal first; a Session this connection does not
-  hold is the standard not-active error below, never a reattach.
+  and its fence. For `session/resume` and `session/load`, the standard
+  not-active error below is only for a Session this connection holds NO claim
+  for (the Session-scoped error section owns the other methods' class).
+- The request itself must be legal first; a Session unknown to this Host is the
+  standard not-active error below, a Session another View already holds keeps
+  the conflict class, and neither is a reattach.
 - A repeat request that declares MCP servers is refused
   (`LOCAL_ACP_VIEW_BUSY`) after full request validation, even when the current
   lease declares the same servers: changing MCP is the explicit
