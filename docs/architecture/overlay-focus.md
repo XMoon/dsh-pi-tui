@@ -1602,11 +1602,13 @@ second authority:
   tenant cleanup failure is routed to the owned-failure reporting channel and can
   never roll back or mask the already-published Session. The logical fence is the
   owner commit itself; this port only performs the physical close.
-- **Accept reentrancy.** `openHistorySearch`'s `onAccept` closes its OWN lease,
-  then re-reads the captured scope (not the now-closed panel instance) and the
-  live blocker / newer-optional-tenant / focused-capturing-overlay facts before
-  `setEditorText`; a newer owner that took the seat during the close keeps the
-  keyboard and the current editor.
+- **Accept reentrancy.** `openHistorySearch`'s `onAccept` retires the History
+  seat/request owner, keeps the exact Remote scope observation through the
+  close, then re-proves that scope plus the captured Session scope (not the
+  now-closed panel instance) and the live blocker / newer-optional-tenant /
+  focused-capturing-overlay facts before `setEditorText`; a newer owner or a
+  same-id transport/binding replacement in the close window keeps the keyboard
+  and writes no draft. The scope is released in a `finally` after the decision.
 
 Evidence: `test/app/history-seat-lifecycle.test.ts` (H3B-01…H3B-12: the real
 `SessionScopeAuthority` + ownership core + `bindSessionRuntime` publication over

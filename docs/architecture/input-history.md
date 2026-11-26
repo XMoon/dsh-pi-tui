@@ -380,18 +380,20 @@ Client's JSONL files are neither read nor written.
 
 - **Open capture.** ONE atomic `SessionScopeAuthority` capture fixes the
   Session identity for the open. When a Session is live, the capture subscribes
-  the exact retained binding's official `workingDirectory` face BEFORE its one
-  passive projection cut. Any relevant publication permanently invalidates the
+  the exact retained binding's official `workingDirectory` face BEFORE one
+  official exact Session Inspector passive **ready** cut (`asOfSeq` and the
+  proven effective cwd). Any relevant publication permanently invalidates the
   open, including A→B→A where the final value equals the initial one; a
   same-id binding/generation replacement, a lost token, a removed binding or a
-  failed/replaced passive cut revokes it too. The capture never polls and never
-  compares cwd values. `Directory` is selectable only while that exact cut is
-  available; a sessionless Client instead requires a CONFIRMED Workspace
-  intent and the seat-lifetime official `workspace.follow` baseline for that
-  exact WorkspaceId/path. A later status/revision/list change, a different
-  path, a removal, a lost generation or a stream end retires the open; the live
-  Session's immutable header cwd and the Client process cwd are never
-  substituted.
+  failed/stale/replaced cut revokes it too. A missing/stale cut refuses
+  `Directory` while leaving `Session`/`All` usable; the capture never polls,
+  compares cwd values or substitutes the Session header/status cwd or the
+  Client process cwd. A sessionless Client's `All` is fenced by the same
+  connection generation and, once a CONFIRMED Workspace intent exists, by the
+  seat-lifetime official `workspace.follow` baseline for that exact
+  WorkspaceId/path. A later status/revision/list change, a different path, a
+  removal, a lost generation or a stream end retires the open; a different
+  path is never grafted into the old capture.
 - **Scopes and order.** `Session` filters the captured Session; `Directory`
   filters the confirmed effective Host directory; `All` is the Host-wide
   accepted history. Rows are returned newest-first by Host acceptance time;
@@ -402,9 +404,12 @@ Client's JSONL files are neither read nor written.
   PiTui `PgDn` key at the loaded tail, the TSP `↓` key at the loaded tail), reads
   at most one further page, keeps the
   current rows/selection/scroll while in flight and appends only a
-  same-generation continuation. A stale continuation discards the chain and
-  may perform at most ONE automatic fresh first-page search; a second
-  non-ready answer surfaces `Retry`, which always restarts at the first page.
+  same-generation continuation. A query/scope replacement and a non-ready
+  append clear the prior rows, selection, body and cursor; a stale continuation
+  discards the chain and may perform at most ONE automatic fresh first-page
+  search under a NEW query revision; a second non-ready answer surfaces
+  `Retry`, which always restarts at the first page. While a `More` request is
+  in flight, row selection and `Retry` are refused.
   The opaque cursor is v2: incarnation + revision + a digest of the exact
   request context + a canonical signed 64-bit SQLite row anchor, bounded by
   2048 bytes. It carries no query, path, official id or whole row, and a
@@ -421,7 +426,10 @@ Client's JSONL files are neither read nor written.
   text matches the declared length/hash. A changed length, a non-contiguous
   offset, an unterminated body, a hash mismatch or a non-ready answer fails
   closed. Copy and Restore keep their existing exact-payload semantics and
-  never submit; attachment-only rows remain visible with `hasNonText`.
+  never submit; attachment-only rows remain visible with `hasNonText`. An
+  accepted Restore retires the visual/request seat but keeps the exact Remote
+  scope observation through the close and re-proves it before the draft write;
+  a replacement in that window writes nothing.
 - **Zero file IO.** The Split Client's Ctrl+R open composes this Host read; no
   Client history file is opened, read, appended, truncated or re-inode'd, and
   the old JSONL rows are never imported into ↑/↓ or the Host search.
