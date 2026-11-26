@@ -3768,3 +3768,41 @@ test('a buffered region round-trip cannot replay a stale credential Enter', asyn
   await settlePainted(h, 'the fresh credential deeplink', frame =>
     frame.includes('Settings · Models') && frame.includes('DEEPSEEK_API_KEY'))
 })
+
+test('a new press on a retired credential body is refused', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 8) // active credential Detail with a visible Configure target
+  assert.match(h.view(), /› Configure in Models…/u)
+  const configure = paintedWordCell(h, '› Configure in Models…')
+  // The legitimate Detail Back retires the frame; NO destination frame paints.
+  h.vt.sendInput('\x1b')
+  pointerClick(h, configure.row, configure.column + 1)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'a press on the retired credential body never navigates')
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u)
+  assert.match(h.view(), /Open \[Enter\]/u, 'the legitimate List return stays')
+})
+
+test('a new press on the retired physical Back does not close the workbench', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 8) // active credential Detail; its bar paints Back
+  assert.match(h.view(), /Back \[Esc\]/u)
+  const back = paintedWordCell(h, 'Back [Esc]')
+  // The legitimate Detail Back retires the frame; NO destination frame paints.
+  h.vt.sendInput('\x1b')
+  pointerClick(h, back.row, back.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'a click on the retired Back does not close the workbench')
+  assert.match(h.view(), /Open \[Enter\]/u, 'the List is the legitimate seat, not the close')
+  // A FRESH painted Back still closes to the real origin.
+  await settlePointerClick(h)
+  const freshBack = paintedWordCell(h, 'Back [Esc]')
+  pointerClick(h, freshBack.row, freshBack.column + 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Rows/u, 'a current-frame Back still works')
+})

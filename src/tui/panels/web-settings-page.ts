@@ -518,6 +518,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
     this.paintedDecision = undefined
+    this.paintedCredentialAction = undefined
+    this.paintedCredentialRevision = undefined
   }
 
   private bodyRows(): number {
@@ -540,6 +542,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   private liveBodyRows(): number {
     return this.paint?.bodyRows ?? this.bodyRows()
+  }
+
+  /** Whether the LAST painted frame's hit map and action authority are still
+   *  current. Any key, wheel, semantic commit or grant change retires it until
+   *  the next real render publishes a new frame. This is the SAME stamp the
+   *  bar's actions already use; it is not a new revision. */
+  pointerFrameCurrent(): boolean {
+    return this.paint !== undefined && this.paintedBarRevision === this.revision
   }
 
   /** Whether the LAST painted grant is still the live one. The Root admits no
@@ -2286,6 +2296,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       return { handled: true }
     }
     if (event.type === 'press') {
+      if (!this.pointerFrameCurrent()) return undefined
       this.pressed = {
         x: event.x,
         y: event.y,

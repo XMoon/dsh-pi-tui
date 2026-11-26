@@ -6966,7 +6966,13 @@ export class SettingsWorkspacePanel implements Component {
       // configuration observation change that landed without repainting). The
       // release may never carry such a press onto the newer frame.
       if (this.specialistPage?.grantAwaitingPaint?.() === true) return
-      if (this.specialistPage?.pointerFrameCurrent?.() === false) return
+      // A child-derived bar span belongs to the child frame that painted it.
+      // The Root-owned rail and zero-body Back are proved by the Root's own
+      // painted map instead (an invisible child paints no body stamp).
+      if (this.specialistPage?.pointerFrameCurrent?.() === false) {
+        if (!this.webWorkbenchActive()) return
+        if (this.focus === 'detail' && this.webWorkbenchLiveContentRows() >= 1) return
+      }
       this.recordGesture(barTarget)
       return
     }
@@ -6978,8 +6984,11 @@ export class SettingsWorkspacePanel implements Component {
       // own category/row/pane map below); the gutters/header/blank bar publish
       // no target there, so they stay inert.
       if (box !== undefined && contentBoxContains(box, x, y)) {
-        // A press may only arm against a body whose CURRENT grant painted.
+        // A press may only arm against a body whose CURRENT grant AND CURRENT
+        // painted frame still exist. A key/region change after paint retires
+        // the old hit map even though the grant geometry is unchanged.
         if (this.specialistPage.grantAwaitingPaint?.() === true) return
+        if (this.webWorkbenchActive() && this.specialistPage.pointerFrameCurrent?.() === false) return
         this.specialistPressed = {
           x,
           y,
