@@ -390,7 +390,8 @@ function redactText(text) {
 }
 
 function boundedErrorText(error) {
-  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  const code = error !== null && typeof error === 'object' && 'code' in error ? `[${String(error.code)}]` : ''
+  const text = error instanceof Error ? `${error.name}${code}: ${error.message}` : String(error)
   return text.slice(0, 800)
 }
 
@@ -2138,7 +2139,7 @@ async function cleanup(reason, options = {}) {
         const compensation = options.failure === undefined ? undefined : {
           attempted: true,
           completed: clean,
-          failure: boundedError(options.failure),
+          failure: boundedErrorText(options.failure),
           attemptedAt: now(),
         }
         if (!clean) {
