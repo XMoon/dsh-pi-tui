@@ -92,6 +92,7 @@ import {
   openWin32StopSignal,
   waitWin32Handle,
   win32PrivateFileSafe,
+  type Win32StopSignal,
 } from '../../runtime/native-process/win32.ts'
 
 /** The public management verbs (the fixed M6-2C set). */
@@ -1180,7 +1181,7 @@ async function stopWin32FromSnapshot(snapshot: Snapshot, deps: DaemonControlDeps
       throw new DaemonControlError('IDENTITY_OR_OWNERSHIP_REFUSED', 'the recorded Host process is not alive for the stop dispatch')
     }
     assertNotAborted(deps.signal)
-    let event
+    let event: Win32StopSignal
     try {
       event = openWin32StopSignal(snapshot.scope.scopeId, record.instanceId)
     } catch (error) {

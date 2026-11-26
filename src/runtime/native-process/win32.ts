@@ -378,8 +378,8 @@ function readSecurityInfo(handle: Win32Handle, objectType: number): Win32Securit
   const sacl = Buffer.alloc(8)
   const sd = Buffer.alloc(8)
   if (bridge.getSecurityInfo(handle, objectType, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, owner, group, dacl, sacl, sd) !== 0) return undefined
+  if (sd.readBigUInt64LE(0) === 0n) return undefined
   const sdPtr = sd.readBigUInt64LE(0) as unknown as Win32Handle
-  if (sd === undefined || sd.readBigUInt64LE(0) === 0n) return undefined
   try {
     const length = bridge.getSecurityDescriptorLength(sdPtr)
     if (length === 0) return undefined
@@ -584,11 +584,20 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
   const eventName = win32StopEventName(scopeId, instanceId)
   let stopHandle: Win32Handle | null
   let cancelHandle: Win32Handle | null
+  let stopExists = false
+  let cancelExists = false
   try {
     stopHandle = bridge.createEventW(security.attributes, 0, 0, eventName)
+    stopExists = stopHandle !== null && lastError(bridge) === 183
     cancelHandle = bridge.createEventW(security.attributes, 0, 0, win32CancelEventName(scopeId, instanceId))
+    cancelExists = cancelHandle !== null && lastError(bridge) === 183
   } finally {
     bridge.localFree(security.sd)
+  }
+  if (stopExists || cancelExists) {
+    if (stopHandle !== null && stopHandle !== undefined) bridge.closeHandle(stopHandle)
+    if (cancelHandle !== null && cancelHandle !== undefined) bridge.closeHandle(cancelHandle)
+    throw new Error('native win32: a stale per-instance stop event already exists')
   }
   if (stopHandle === null || stopHandle === undefined || cancelHandle === null || cancelHandle === undefined) {
     if (stopHandle !== null && stopHandle !== undefined) bridge.closeHandle(stopHandle)
@@ -733,7 +742,10 @@ export function ensureWin32PrivateDirectory(path: string): void {
   } finally {
     bridge.localFree(security.sd)
   }
-  if (created) return
+  if (created) {
+    if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: the created private directory did not retain its owner-only descriptor')
+    return
+  }
   const error = lastError(bridge)
   if (error !== 183) throw new Error(`native win32: the private directory could not be created (${String(error)})`)
   if (!win32PrivateDirectorySafe(path)) throw new Error('native win32: an existing private directory is not owner-only')
