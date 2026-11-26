@@ -1069,9 +1069,12 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         return { handled: true }
       }
       // The full-width form's wheel moves ONLY the current field focus; the
-      // hidden list selection and Detail offset never move.
+      // hidden list selection and Detail offset never move. An active text
+      // input owns every input (keyboard or wheel), so it stays put.
       if (this.controller.snapshot().editor !== undefined) {
-        this.handleEditorInput(event.wheelDelta < 0 ? '\x1b[A' : '\x1b[B', this.controller.snapshot())
+        if (this.formInput === undefined) {
+          this.handleEditorInput(event.wheelDelta < 0 ? '\x1b[A' : '\x1b[B', this.controller.snapshot())
+        }
         return { handled: true }
       }
       if (this.allowDual() && event.x >= this.detailX() && event.x < this.detailX() + this.detailWidth()) {

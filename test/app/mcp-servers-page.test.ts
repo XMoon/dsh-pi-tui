@@ -1908,3 +1908,23 @@ test('a body verb painted inside a focused form row activates instead of selecti
   const after = render(page, 44, 20).join('\n')
   assert.match(after, /^edit:/mu, `the suffix must open the explicit input, not just select the row:\n${after}`)
 })
+
+test('the form wheel is inert while a text input owns the form keys', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    editor: editorSnapshot({ dirty: true }),
+  }))
+  openEditor(page, 'e', 120, 24)
+  focusUntil(page, 120, 24, frame => /> Command:/u.test(frame))
+  page.handleInput('\r')
+  const before = render(page, 120, 24).join('\n')
+  assert.match(before, /^edit:/mu, 'the explicit field verb opens the input')
+  const focus = (page as unknown as { formFocus: number }).formFocus
+  page.handleMouse({ ...mouseBase(120, 24), type: 'wheel', wheelDelta: 1, x: 4, y: 5 })
+  const after = render(page, 120, 24).join('\n')
+  assert.equal((page as unknown as { formFocus: number }).formFocus, focus,
+    'a wheel must not move the field focus while the input owns the keys')
+  assert.equal(after, before, 'the input and its frame stay put')
+  assert.deepEqual(controller.calls.filter(call => call.startsWith('setEditor')), [],
+    'the wheel stages no draft')
+})
