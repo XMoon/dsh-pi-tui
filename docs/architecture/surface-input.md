@@ -521,12 +521,16 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   Direct Host exposes ONLY literal-path completion through the SAME Host path
   bridge the split Host uses: relative `.\\`/`..\\`, separator-relative,
   drive-absolute, plain/quoted path arguments and unquoted `~\\`/`~/` are
-  completed; a bare command position never fakes a command candidate,
-  command/variable/git positions are explicitly unavailable, and a quoted `~`
-  stays a literal filename (never home). Drive-relative `C:foo`, PowerShell
+  completed from a simple single-line argument position; leading whitespace
+  never changes the command role, only an explicit initial `&` call operator
+  admits executable-position completion, and compound/operator prefixes are
+  refused. A bare command position never fakes a command candidate,
+  command/variable/git-subcommand positions are explicitly unavailable, and a
+  quoted `~` stays a literal filename (never home). Drive-relative `C:foo`, PowerShell
   provider/PSDrive paths and UNC/network spellings are refused instead of
   guessed. An accepted candidate is ONE single-quoted PowerShell literal
-  (apostrophe doubled) replacing the exact raw token including a matching
+  (every recognized single-quote character — ASCII and U+2018/U+2019/U+201A/
+  U+201B — doubled) replacing the exact raw token including a matching
   closing quote; a directory keeps its closing quote and parks the caret before
   it. Backslash is ordinary filename content, `$`/backtick/subexpression/mixed
   quoting/here-string/uncertain token boundaries yield no candidates at all and

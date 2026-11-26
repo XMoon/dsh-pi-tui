@@ -1191,6 +1191,15 @@ test('PowerShell literal-path context admits relative, drive-absolute, quoted an
     priorWords: [],
     word: { valuePrefix: '.\\script.ps1', quote: undefined, closingQuoteAfterCursor: false },
   })
+  // Leading whitespace before an ordinary command does not steal its
+  // argument role.
+  assert.equal(context('! Get-Content .\\fi')?.kind, 'paths')
+  // The adapter's own directory literal contains doubled recognized smart
+  // quotes; the scanner must treat that pair as literal content.
+  const smartDoubled = "!Get-Content 'O\u201A\u201ABrien"
+  assert.deepEqual(context(smartDoubled)?.word?.valuePrefix, 'O\u201ABrien')
+  const smartOtherClass = "!Get-Content 'O\u201B\u201BBrien"
+  assert.deepEqual(context(smartOtherClass)?.word?.valuePrefix, 'O\u201BBrien')
 })
 
 test('PowerShell uncertain or non-literal contexts yield no candidates at all', () => {
@@ -1224,10 +1233,23 @@ test('PowerShell uncertain or non-literal contexts yield no candidates at all', 
   }
   // A path argument after the git subcommand remains an ordinary path.
   assert.equal(powershellCompletionContext('!git status .\\fi', '!git status .\\fi'.length)?.kind, 'paths')
-  // A raw typographic quote is a PowerShell delimiter this adapter refuses to
-  // reparse; candidates containing one are encoded by doubling (below).
-  const smart = "!Get-Content 'O\u2019Brien"
-  assert.equal(powershellCompletionContext(smart, smart.length), undefined)
+  // A raw typographic single quote is a delimiter; a SINGLE one closes the
+  // literal and is refused, while the doubled form is literal content above.
+  for (const quote of ['\u2018', '\u2019', '\u201A', '\u201B']) {
+    const raw = `!Get-Content 'O${quote}Brien`
+    assert.equal(powershellCompletionContext(raw, raw.length), undefined, raw)
+    const closed = `!Get-Content 'O${quote}Brien'`
+    assert.equal(powershellCompletionContext(closed, closed.length), undefined, closed)
+  }
+  // Unterminated double-quoted content with interpolation to the RIGHT of the
+  // caret has no proven replaced range.
+  const interpolatedRight = '!Get-Content "C:\\a$x'
+  const rightCaret = interpolatedRight.indexOf('$')
+  assert.equal(powershellCompletionContext(interpolatedRight, rightCaret), undefined)
+  // A caret splitting a doubled quote pair is unproven.
+  const splitPair = "!Get-Content 'O''Brien"
+  const splitCaret = splitPair.indexOf("'Brien")
+  assert.equal(powershellCompletionContext(splitPair, splitCaret), undefined)
   // Non-shell lines never produce a context.
   assert.equal(powershellCompletionContext('Get-ChildItem .\\x', 18), undefined)
 })
@@ -1321,7 +1343,7 @@ test('a PowerShell host path candidate is a single-quoted literal with doubled a
   assert.equal(suggestions?.items[0]?.label, ".\\中文$稿's.txt")
 })
 
-test('a PowerShell candidate containing typographic single quotes is doubled too', async () => {
+test('a PowerShell candidate containing every typographic single quote is doubled', async () => {
   const line = '!Get-Content .\\O'
   const context = powershellCompletionContext(line, line.length)
   assert.ok(context !== undefined)
@@ -1330,13 +1352,13 @@ test('a PowerShell candidate containing typographic single quotes is doubled too
     pathLiteralDialect: 'powershell',
     async complete({ request }) {
       return request.kind === 'paths'
-        ? { kind: 'ok', candidates: ['.\\O\u2019\u2018Brien.txt'] }
+        ? { kind: 'ok', candidates: ['.\\O\u2018\u2019\u201A\u201BBrien.txt'] }
         : { kind: 'ok', candidates: [] }
     },
   }
   const suggestions = await suggestShellCompletion(context, port, { kind: 'session', sessionId: 'session-a' }, { signal: abort, force: true })
-  assert.equal(suggestions?.items[0]?.value, "'.\\O\u2019\u2019\u2018\u2018Brien.txt'")
-  assert.equal(suggestions?.items[0]?.label, ".\\O\u2019\u2018Brien.txt")
+  assert.equal(suggestions?.items[0]?.value, "'.\\O\u2018\u2018\u2019\u2019\u201A\u201A\u201B\u201BBrien.txt'")
+  assert.equal(suggestions?.items[0]?.label, ".\\O\u2018\u2019\u201A\u201BBrien.txt")
 })
 
 test('the PowerShell provider refuses mixed, comment, bare-command, git-subcommand and multiline positions without a Host request', async (t) => {
@@ -1350,6 +1372,10 @@ test('the PowerShell provider refuses mixed, comment, bare-command, git-subcomma
     { line: '.\\script.ps1', col: 12 },
     { line: 'git ch', col: 6 },
     { line: 'Get-Content --% .\\fi', col: 'Get-Content --% .\\fi'.length },
+    // A leading space never turns a bare executable into an argument.
+    { line: ' .\\script.ps1', col: ' .\\script.ps1'.length },
+    // A separator/compound prefix has no bounded command/argument role.
+    { line: 'Get-Content a; .\\script.ps1', col: 'Get-Content a; .\\script.ps1'.length },
   ]
   for (const entry of cases) {
     assert.equal(await provider.getSuggestions([entry.line], 0, entry.col, { signal: abort, force: true }), null,
@@ -1369,4 +1395,45 @@ test('the PowerShell provider refuses mixed, comment, bare-command, git-subcomma
   assert.ok(suggestions !== null)
   const applied = positiveProvider.applyCompletion([line], 0, col, suggestions.items[0]!, suggestions.prefix)
   assert.deepEqual(applied.lines, ["Get-Content 'C:\\Program Files\\file.txt' tail"])
+})
+
+test('a PowerShell explicit initial call operator keeps the operator and inserts a literal', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-powershell-call-operator-')
+  const { port } = powershellShellPort(prefix => prefix === '.\\script.ps1' ? ['.\\script.ps1'] : [])
+  const provider = powershellProvider(root, port)
+  const line = '& .\\script.ps1'
+  const suggestions = await provider.getSuggestions([line], 0, line.length, { signal: abort, force: true })
+  assert.ok(suggestions !== null)
+  assert.equal(suggestions.items[0]?.value, "'.\\script.ps1'")
+  const applied = provider.applyCompletion([line], 0, line.length, suggestions.items[0]!, suggestions.prefix)
+  assert.deepEqual(applied.lines, ["& '.\\script.ps1'"])
+})
+
+test('a PowerShell emitted smart-quote directory literal continues into its file on the second Tab', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-powershell-smart-dir-')
+  const directory = '.\\O\u201ABrien\\'
+  const file = '.\\O\u201ABrien\\marker.txt'
+  const { port, requests } = powershellShellPort(prefix => {
+    if (prefix === '.\\O') return [directory]
+    if (prefix.includes('O\u201ABrien')) return [file]
+    return []
+  })
+  const provider = powershellProvider(root, port)
+  const line = 'Get-Content .\\O'
+  const first = await provider.getSuggestions([line], 0, line.length, { signal: abort, force: true })
+  assert.ok(first !== null)
+  const directoryApply = provider.applyCompletion([line], 0, line.length, first.items[0]!, first.prefix)
+  assert.deepEqual(directoryApply.lines, ["Get-Content '.\\O\u201A\u201ABrien\\'"])
+  assert.equal(directoryApply.cursorCol, directoryApply.lines[0]!.length - 1,
+    'the caret sits before the closing quote for the next completion')
+  const second = await provider.getSuggestions(directoryApply.lines, 0, directoryApply.cursorCol, { signal: abort, force: true })
+  assert.ok(second !== null, 'the adapter accepts its own doubled smart-quote directory literal')
+  const fileApply = provider.applyCompletion(directoryApply.lines, 0, directoryApply.cursorCol, second.items[0]!, second.prefix)
+  assert.deepEqual(fileApply.lines, ["Get-Content '.\\O\u201A\u201ABrien\\marker.txt'"])
+  assert.deepEqual(requests, [
+    { kind: 'paths', prefix: '.\\O' },
+    { kind: 'paths', prefix: '.\\O\u201ABrien\\' },
+  ])
 })
