@@ -918,8 +918,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       let result: WebCommitResult
       switch (outcome.kind) {
         case 'no-changes':
-          // A validated no-op is not a save. Its actual comes from the
-          // admission observation; the fresh read only supplies current facts.
+          // A validated no-op is not a save. Its actual is the fresh
+          // observation when available (else the admission fact), while its
+          // RECEIPT is bound to the admission observation so a replacement
+          // after the no-op retires it.
           result = {
             kind: 'no-changes',
             actual: after !== undefined ? webDecisionActual(after, request) : webDecisionActual(base, request),
