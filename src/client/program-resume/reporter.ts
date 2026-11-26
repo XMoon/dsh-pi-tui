@@ -137,8 +137,10 @@ export function createProgramResumeReporter(input: {
       try {
         emitClear()
         lastKind = 'clear'
-      } catch {
-        // The exit path is not allowed to fail on a best-effort terminal offer.
+      } catch (error) {
+        // Best-effort terminal offer: the business exit still proceeds, but
+        // the failed write is recorded with no token/argv.
+        try { input.diag.warn('program resume: human-exit clear failed', { error: error instanceof Error ? error.message : 'unknown' }) } catch { /* no lower sink */ }
       }
     },
     unsupportedReloadAccepted: () => {
@@ -150,8 +152,9 @@ export function createProgramResumeReporter(input: {
       try {
         emitClear()
         lastKind = 'clear'
-      } catch {
-        // Reload acceptance must not fail on the terminal offer.
+      } catch (error) {
+        // Reload acceptance must not fail on the terminal offer; record it.
+        try { input.diag.warn('program resume: unsupported-reload clear failed', { error: error instanceof Error ? error.message : 'unknown' }) } catch { /* no lower sink */ }
       }
     },
     dispose: () => {
