@@ -611,20 +611,20 @@ async function writeWebSettingsThroughTui(
   await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
     'the real Web Search / Fetch page')
   // Row 1: Enter opens the Detail, Down highlights DeepSeek Search API, Enter
-  // is the ONE explicit confirm. The painted Verified proves the read-back.
+  // is the ONE explicit confirm. The painted Saved proves the read-back.
   for (const key of [KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
     await renderFrames(app)
   }
-  await app.waitFor(() => app.view().includes('Current: DeepSeek Search API') && app.view().includes('Verified'),
-    'the verified search provider write')
+  await app.waitFor(() => app.view().includes('Current: DeepSeek Search API') && app.view().includes('Saved'),
+    'the saved search provider write')
   // Back to the list, then row 3 (Search API Result Count): 10 -> 20.
   for (const key of [KEY.esc, KEY.home, KEY.down, KEY.down, KEY.enter, KEY.down, KEY.enter]) {
     app.vt.sendInput(key)
     await renderFrames(app)
   }
-  await app.waitFor(() => app.view().includes('Current: 20') && app.view().includes('Verified'),
-    'the verified count write')
+  await app.waitFor(() => app.view().includes('Current: 20') && app.view().includes('Saved'),
+    'the saved count write')
 
   /** Back to the page list, first row. */
   const listTop = async (): Promise<void> => {
@@ -646,8 +646,8 @@ async function writeWebSettingsThroughTui(
     app.vt.sendInput(KEY.down) // on -> off
     app.vt.sendInput(KEY.enter)
     await renderFrames(app)
-    await app.waitFor(() => app.view().includes('Current: off') && app.view().includes('Verified'),
-      'the verified Share Original Question off write')
+    await app.waitFor(() => app.view().includes('Current: off') && app.view().includes('Saved'),
+      'the saved Share Original Question off write')
   }
   if (writes.fetchDeepSeekApi === true) {
     await listTop()
@@ -655,8 +655,8 @@ async function writeWebSettingsThroughTui(
     app.vt.sendInput(KEY.down) // HTTP -> DeepSeek Fetch API
     app.vt.sendInput(KEY.enter)
     await renderFrames(app)
-    await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
-      'the verified fetch provider write')
+    await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Saved'),
+      'the saved fetch provider write')
   }
   app.vt.sendInput(KEY.esc) // Detail -> list
   await renderFrames(app)
@@ -760,19 +760,30 @@ test('an EXTERNAL custom provider installed after the page read is never overwri
   }).mutate('web', [{ op: 'set', path: ['searchProvider'], value: 'acme-search' }])
   assert.equal((await config.read())?.searchProvider, 'acme-search', 'the external writer really landed')
 
-  // Confirm a stale candidate: the queue head re-reads the Host, sees the
-  // custom route and refuses with ZERO writes instead of overwriting it.
-  // (The Detail opened on the Automatic state, whose highlight starts at the
-  // first candidate; Down moves it to DeepSeek Search API, and Enter submits
-  // that painted candidate into the guard.)
-  app.vt.sendInput(KEY.down) // first candidate (server-side) -> DeepSeek Search API
+  // The page now holds a stale Automatic observation. A repaint must demote it
+  // to last-known read-only and offer no Confirm; the stale Enter cannot reach
+  // the command owner or overwrite the external custom route.
+  app.vt.sendInput(KEY.down)
   app.vt.sendInput(KEY.enter)
   await app.settle()
-  await app.waitFor(() => app.view().includes('Not saved') && app.view().includes('custom route'),
-    'the external custom route refusal')
+  await app.waitFor(() => /Last-known · read-only: Automatic/u.test(app.view()),
+    'the stale Automatic observation demoted to last-known read-only')
+  assert.doesNotMatch(app.view(), /Confirm \[Enter\]/u,
+    'a stale known observation offers no Confirm')
   assert.equal((await config.read())?.searchProvider, 'acme-search', 'the external custom provider is preserved')
-  assert.match(app.view(), /Current: acme-search/u, 'the fresh authority facts replace the stale snapshot')
-  assert.equal(transport.requests.length, 0, 'no HTTP request is made for a refused settings write')
+  assert.equal(transport.requests.length, 0, 'no HTTP request is made for the rejected stale gesture')
+
+  // An explicit fresh read replaces the observation; the custom effective id is
+  // shown verbatim and no explicit provider replacement is confirmable. A
+  // deployment restore, if the page offers one, remains legal and is not
+  // asserted away here.
+  app.vt.sendInput('r')
+  await app.settle()
+  await app.waitFor(() => app.view().includes('Current: acme-search'),
+    'the fresh read shows the external custom provider')
+  assert.doesNotMatch(app.view(), /Confirm \[Enter\]/u,
+    'a custom effective id has no confirmable explicit provider replacement')
+  assert.equal(transport.requests.length, 0, 'no HTTP request is made after the fresh custom read')
 })
 
 test('a TUI Web settings write reaches the NEXT real tool call and the mounted transcript', { skip: skippedInstallationReason([]) }, async t => {
@@ -990,8 +1001,8 @@ test('the Web credential deeplink completes a real store set and clear and the p
     app.vt.sendInput(key)
     await renderFrames(app)
   }
-  await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Verified'),
-    'the verified DeepSeek Fetch API write')
+  await app.waitFor(() => app.view().includes('Current: DeepSeek Fetch API') && app.view().includes('Saved'),
+    'the saved DeepSeek Fetch API write')
   await closeSettingsInApp(app)
   await assert.rejects(web.fetch({ url: 'https://example.test/no-key-fetch' }), (error: unknown) => {
     assert.equal((error as { code?: string }).code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
