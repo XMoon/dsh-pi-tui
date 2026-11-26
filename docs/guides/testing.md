@@ -752,12 +752,22 @@ The installed-public-entry anchor
 (`test/integration/split-process/business/public-daemon-entry.vitest.ts`) joins
 that same checkpoint explicitly. It drives the packed public
 `dsh --profile ...` CLI under a real PTY and proves the Direct default, the
-daemon cold start, public Session/preset/peer/alias/Settings paths and the
-public refusal boundary; the positive terminal cases are Linux-only and skip
-on Darwin, while the public Client is observed through the real OS
-process tree and the public daemon CLI, never an internal JSONL sink. Its cold
-anchor runs first in the file; the remaining public business cases run after
-the overlap. Select both files in ONE Vitest invocation (the Worker parent-edge
+daemon cold start, public Session/preset/peer/alias/Settings paths, the public
+refusal boundary and the two-cold convergent launch on Linux and macOS arm64.
+The public Client is observed through the real OS process tree and the public
+daemon CLI, never an internal JSONL sink. Its cold anchor runs first in the
+file; the remaining public business cases run after the overlap.
+
+The public observation seam is test-only. The production kernel readers remain
+the single birth/liveness authority; the seam adds exact argv/env framing,
+controlling-tty facts and bounded enumeration, and one admission predicate is
+shared by normal, late and destructive callers. The opt-in authority control
+(`SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL=1`) drives fixed controlled
+parent/child/sibling processes through the real Supervisor; it never accepts an
+arbitrary command, PID or environment. The CLI-only TERM order proof lives in
+the same Supervisor handler as the real TERM: it samples the Client/CLI kernel
+identities immediately after the signal and fails a CLI-first or same-sample
+indeterminate outcome instead of inferring order from timestamps. Select both files in ONE Vitest invocation (the Worker parent-edge
 check requires one real Vitest main), set
 `SPLIT_VITEST_PARALLEL_AUDIT_PAIR=public-daemon-entry`, and use a fresh run id:
 
@@ -790,7 +800,8 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 `qualification-client-spawned`, `host-artifact-absent-started`,
 `identity-witness-spawned` (Linux only), `finalize-compensation-started`,
 `public-daemon-before-registry`, `public-daemon-before-ready-ack` and
-`public-daemon-ownership-refused` (the last three Linux only).
+`public-daemon-ownership-refused`. The three public windows run on both Linux
+and macOS; the same-birth zombie window stays Linux-only.
 Each installed-entry window binds one exact business test and only holds after
 the Supervisor registered the real live child identities. `host-contenders-spawned`
 is the batch of concurrent Host contenders, `qualification-client-spawned` a
@@ -818,8 +829,8 @@ path and finalize. A checkpoint reached without an external signal fails; an
 unrun window is `NOT_RUN`, never a pass.
 
 The two positive public windows bind the cold installed-public positive test
-(`starts one real public daemon Client and Host from the installed CLI`);
-`public-daemon-ownership-refused` binds the separate negative test
+(`starts one real public daemon Client and Host from the installed CLI`) on
+both platforms; `public-daemon-ownership-refused` binds the separate negative test
 (`refuses an unproven public Host ownership signal and compensates truthfully`).
 The `public-daemon-before-registry` hold is after the detached Host/CLI/Client
 are real but before the product registry is published. The external observer

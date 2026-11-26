@@ -20,8 +20,6 @@ import {
   type SplitProcessScene,
 } from '../../../support/split-process-fixture.ts'
 
-const linuxOnly = process.platform === 'linux'
-
 async function frameText(launch: PublicDaemonLaunch): Promise<string> {
   return await launch.text()
 }
@@ -95,7 +93,7 @@ async function exitPublicLaunch(
   return exit
 }
 
-test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the installed CLI', async () => {
+test('starts one real public daemon Client and Host from the installed CLI', async () => {
   const scene = await createSplitProcessScene()
   let launch: PublicDaemonLaunch | undefined
   let testError: unknown
@@ -144,7 +142,13 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
     expect(status.fields.host, `public daemon status host (${JSON.stringify(status.fields)})`).toBe('ready')
     expect(status.fields.manager).toBe('process')
     expect(status.fields.unit).toBe('none')
+    expect(status.fields['unit-state']).toBe('not-found')
+    expect(status.fields.compatibility).toBe('compatible')
     expect(status.fields['user-manager'], `public daemon user-manager (${JSON.stringify(status.fields)})`).toBe('not-checked')
+    expect(launch.host?.schema, 'the real published Host identity schema').toBe(process.platform === 'darwin' ? 2 : 1)
+    expect(launch.hostAttempt, 'the launch projected its real Host attempt').not.toBeNull()
+    expect(launch.hostAttempt?.winner).toBe(true)
+    expect(launch.hostAttempt?.published).toBe(true)
 
     const before = new Set(await scene.sessionIds())
     await launch.submit('public cold start')
@@ -197,19 +201,169 @@ test.skipIf(!linuxOnly)('starts one real public daemon Client and Host from the 
   }
 })
 
-const ownershipRefusalProbe = process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'public-daemon-ownership-refused'
-
-test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the split backend', async () => {
+test('two cold public daemon launches converge on one authenticated Host', async () => {
   const scene = await createSplitProcessScene()
-  let launch: PublicDaemonLaunch | undefined
+  const launches: PublicDaemonLaunch[] = []
   let testError: unknown
   try {
-    launch = await scene.startPublicDaemon({ label: 'direct-default', cols: 120, rows: 36 })
+    const pair = await scene.startPublicDaemonColdPair({
+      launches: [{ label: 'cold-pair-a', backend: 'daemon', cols: 140, rows: 40 }, { label: 'cold-pair-b', backend: 'daemon', cols: 120, rows: 36 }],
+    })
+    launches.push(...pair.launches)
+    expect(pair.winner.published, 'the resolved winner is published').toBe(true)
+    expect(pair.winner.winner, 'the resolved Host is the unique winner').toBe(true)
+    expect(pair.winner.instanceId, 'the winner is authenticated with an instance').toBeTruthy()
+    for (const launch of pair.launches) {
+      expect(launch.ready, `${launch.label}: reached a real usable surface`).toBe(true)
+      expect(launch.refused).toBe(false)
+      expect(launch.host?.pid, `${launch.label}: shares the published winner`).toBe(pair.winner.pid)
+      expect(launch.host?.birth).toBe(pair.winner.birth)
+      expect(launch.host?.instanceId).toBe(pair.winner.instanceId)
+      expect(launch.hostAttempt, `${launch.label}: captured a real Host attempt`).not.toBeNull()
+      expect(launch.hostAttempt?.attemptByLaunchId).toBe(launch.launchId)
+      await waitForFrame(launch, '❯', `${launch.label} composer`)
+    }
+    const attempts = pair.launches.map(launch => launch.hostAttempt)
+    const attemptKeys = attempts.map(attempt => `${String(attempt?.pid)}:${String(attempt?.birth)}`)
+    expect(new Set(attemptKeys).size, `two distinct real Host attempts (${JSON.stringify(attemptKeys)})`).toBe(2)
+    expect(attempts.filter(attempt => attempt?.winner === true)).toHaveLength(1)
+    const contender = attempts.find(attempt => attempt?.winner !== true)
+    expect(contender, 'one real contender attempt').toBeDefined()
+    expect(contender?.published).toBe(false)
+    expect(contender?.settled, 'the unpublished contender settled naturally').toBe(true)
+    expect(contender?.terminalOutcome).toBe('candidate-exited')
+
+    await pair.launches[0].type('pair-a')
+    await waitForFrame(pair.launches[0], 'pair-a', 'pair A input')
+    await pair.launches[0].press('Ctrl+U')
+    await pair.launches[1].type('pair-b')
+    await waitForFrame(pair.launches[1], 'pair-b', 'pair B input')
+    await pair.launches[1].press('Ctrl+U')
+
+    const hostPid = pair.winner.pid
+    const hostBirth = pair.winner.birth
+    await exitPublicLaunch(pair.launches[0], 'cold pair launch A')
+    const survivor = await pair.launches[1].kernelState()
+    expect(survivor.hostPid, 'the surviving Client keeps the same Host').toBe(hostPid)
+    expect(survivor.hostState, 'the Host survives the first Client exit').toBe('alive')
+    expect(survivor.clientState, 'the second Client stays live').toBe('alive')
+    await pair.launches[1].type('pair-b-after-a')
+    await waitForFrame(pair.launches[1], 'pair-b-after-a', 'pair B remains usable after A exits')
+    await pair.launches[1].press('Ctrl+U')
+
+    const before = new Set(await scene.sessionIds())
+    await pair.launches[1].submit('cold pair convergence')
+    const sessionId = await scene.waitForNewSessionId(before, 'cold pair Session')
+    await scene.waitForSessionEvent(sessionId, 0,
+      event => event.type === 'assistant/message' && JSON.stringify(event.data ?? {}).includes('stub answer'),
+      'cold pair answer')
+    expect([...(await scene.sessionIds())].sort(), 'the pair created exactly one Session')
+      .toEqual([...before, sessionId].sort())
+    await exitPublicLaunch(pair.launches[1], 'cold pair launch B')
+    const after = await pair.launches[1].kernelState()
+    expect(after.hostPid).toBe(hostPid)
+    expect(after.hostState, 'the Host survives the last Client exit').toBe('alive')
+    expect(after.hostInstanceId).toBe(pair.winner.instanceId)
+    const status = await pair.launches[1].daemonStatus()
+    expect(status.fields.host, `the Host stays ready before the one stop (${JSON.stringify(status.fields)})`).toBe('ready')
+    const stopped = await pair.launches[1].stopHost()
+    expect(stopped.reclaimed).toBe(true)
+    expect(stopped.normalStop).toBe(true)
+    expect(stopped.birth).toBe(hostBirth)
+  } catch (error) {
+    testError = error
+    throw error
+  } finally {
+    const teardown: Error[] = []
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
+      try {
+        await launch.reclaim()
+      } catch (error) {
+        teardown.push(asError(error))
+      }
+    }
+    try {
+      await scene.dispose()
+    } catch (error) {
+      teardown.push(asError(error))
+    }
+    if (teardown.length > 0) {
+      if (testError !== undefined) {
+        throw new AggregateError([testError, ...teardown],
+          'the cold-pair test failed and its Scene cleanup also failed')
+      }
+      throw new AggregateError(teardown, 'the cold-pair test cleanup failed')
+    }
+  }
+})
+
+test.skipIf(process.env.SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL !== '1')(
+  'rejects unproven native public process observations',
+  async () => {
+    const scene = await createSplitProcessScene()
+    try {
+      const facts = await scene.runPublicAuthorityControl()
+      expect(facts.platform).toBe(process.platform)
+      expect(facts.negative.wrongBirth).toBe('birth-mismatch')
+      expect(facts.negative.wrongEntry).toBe('canonical-entry-mismatch')
+      expect(facts.negative.wrongHome).toBe('dsh-home-mismatch')
+      expect(facts.negative.wrongProfile).toBe('split-process-profile-mismatch')
+      expect(facts.negative.wrongAnchor).toBe('split-process-dsh-anchor-mismatch')
+      expect(facts.negative.wrongTty).toBe('tty-mismatch')
+      expect(facts.negative.missingEnv).toBe('env-missing')
+      expect(facts.negative.duplicateEnv).toBe('observation-unknown')
+      expect(facts.negative.malformedEnv).toBe('observation-unknown')
+      expect(facts.negative.goneChild).toBe('gone')
+      expect(facts.negative.unknownRead).toMatch(/unknown/iu)
+      expect(facts.registry.present).toBe('present')
+      expect(facts.registry.absent).toBe('absent')
+      expect(facts.registry.unknown).toBe('unknown')
+      expect(facts.enumeration.after.count).toBeGreaterThan(facts.enumeration.before.count)
+      expect(facts.signalAdmission.positive).toBe('passed')
+      expect(facts.signalAdmission.wrongBirth).not.toBe('UNEXPECTED_PASS')
+      expect(facts.signalAdmission.gone).not.toBe('UNEXPECTED_PASS')
+      expect(facts.signalAdmission.signalAttempts).toBe(0)
+      expect(facts.sentinel.after).toBe(facts.sentinel.birth)
+      expect(facts.cleanup.sentinelGone).toBe(true)
+      expect(facts.cleanup.leaked).toBe(0)
+      if (process.platform === 'darwin') {
+        expect(facts.probe.bsdBytes).toBe(136)
+        expect(facts.probe.procargs.querySize).toBe(facts.probe.procargs.used)
+        expect(facts.probe.procargs.used).toBeGreaterThan(0)
+      }
+    } finally {
+      await scene.dispose()
+    }
+  },
+)
+
+const ownershipRefusalProbe = process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'public-daemon-ownership-refused'
+
+test('keeps the default Direct launch independent of the split backend', async () => {
+  const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
+  let testError: unknown
+  try {
+    const peer = await scene.startPublicDaemon({ label: 'direct-warm-host', backend: 'daemon' })
+    launches.push(peer)
+    await waitForFrame(peer, '❯', 'the warm peer composer')
+    expect(peer.host, 'the warm peer owns a real Host').not.toBeNull()
+    expect(peer.client, 'the warm peer owns a real Client').not.toBeNull()
+    const peerBefore = await peer.kernelState()
+    const instanceBefore = peer.host?.instanceId
+
+    const launch = await scene.startPublicDaemon({ label: 'direct-default', cols: 120, rows: 36 })
+    launches.push(launch)
     expect(launch.ready, 'the default Direct launch reached a usable surface').toBe(true)
+    expect(launch.backend, 'the launch really followed the persisted default, not an env selector').toBeNull()
     expect(launch.host, 'a Direct launch owns no split Host').toBeNull()
     expect(launch.client, 'a Direct launch owns no split Client').toBeNull()
-    expect(existsSync(join(scene.scopeDir, 'instance.json')),
-      'a Direct launch published no split Host registry').toBe(false)
+    expect(launch.hostAttempt, 'a Direct launch captured no Host attempt').toBeNull()
+    const peerDuring = await peer.kernelState()
+    expect(peerDuring.hostPid, 'the warm Host was not replaced by the Direct launch').toBe(peerBefore.hostPid)
+    expect(peerDuring.hostInstanceId).toBe(instanceBefore)
+    expect(peerDuring.clientState, 'the warm Client stays live during the Direct launch').toBe('alive')
     await launch.type('direct default')
     await waitForFrame(launch, 'direct default', 'default Direct composer accepts input')
     await launch.press('Ctrl+U')
@@ -218,14 +372,24 @@ test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the spli
     expect(exit.code, 'the default Direct CLI exit code').toBe(0)
     expect(exit.signal).toBe(null)
     await launch.close()
+    const peerAfter = await peer.kernelState()
+    expect(peerAfter.hostPid, 'the Direct exit did not stop the warm Host').toBe(peerBefore.hostPid)
+    expect(peerAfter.hostState).toBe('alive')
+    expect(peerAfter.clientState, 'the warm peer is still usable after the Direct exit').toBe('alive')
+    await peer.type('warm-peer-after-direct')
+    await waitForFrame(peer, 'warm-peer-after-direct', 'the warm peer accepts input after the Direct exit')
+    await peer.press('Ctrl+U')
+    await exitPublicLaunch(peer, 'warm peer')
+    await peer.stopHost()
   } catch (error) {
     testError = error
     throw error
   } finally {
     const teardown: Error[] = []
-    if (launch !== undefined) {
+    for (const launch of [...launches].reverse()) {
+      if (launch.closed) continue
       try {
-        if (!launch.closed) await launch.reclaim()
+        await launch.reclaim()
       } catch (error) {
         teardown.push(asError(error))
       }
@@ -245,14 +409,16 @@ test.skipIf(!linuxOnly)('keeps the default Direct launch independent of the spli
   }
 })
 
-test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a split Host', async () => {
+test('refuses illegal public backend inputs before creating a split Host', async () => {
   const scene = await createSplitProcessScene()
+  const launches: PublicDaemonLaunch[] = []
   let launch: PublicDaemonLaunch | undefined
   let testError: unknown
   try {
     for (const [label, backend] of [['refuse-wire-local', 'wire-local'], ['refuse-empty-env', '']] as const) {
       const before = await scene.sessionIds()
       launch = await scene.startPublicDaemon({ label, backend })
+      launches.push(launch)
       expect(launch.refused, `${label}: the invalid backend was accepted`).toBe(true)
       expect(launch.exit, `${label}: the invalid backend produced a real exit`).not.toBeNull()
       expect(launch.exit?.signal, `${label}: the invalid backend must exit normally`).toBeNull()
@@ -289,6 +455,7 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
         continue: true,
       },
     })
+    launches.push(launch)
     expect(launch.refused, '--session and -c together must be refused by the product').toBe(true)
     expect(launch.exit?.signal, 'the mutually exclusive launch must exit normally').toBeNull()
     expect(typeof launch.exit?.code, 'the mutually exclusive launch exit code type').toBe('number')
@@ -302,14 +469,41 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
       'the mutually exclusive launch published a Host registry').toBe(false)
     expect(await scene.sessionIds(), 'the mutually exclusive launch created a Session').toEqual(beforeMutual)
     await launch.close()
+
+    // Warm control: a real authenticated Host/Client is already live, so the
+    // same true non-TTY daemon command must refuse without changing it.
+    const peer = await scene.startPublicDaemon({ label: 'refuse-warm-host', backend: 'daemon' })
+    launches.push(peer)
+    await waitForFrame(peer, '❯', 'the warm refusal peer composer')
+    const warmBefore = await peer.kernelState()
+    expect(warmBefore.hostState).toBe('alive')
+    expect(warmBefore.clientState).toBe('alive')
+    const warmHeadless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless-warm', backend: 'daemon' })
+    expect(warmHeadless.exit.signal, 'the warm non-TTY daemon launch must exit normally').toBeNull()
+    expect(warmHeadless.exit.code, 'the warm non-TTY daemon launch exit code').toBeGreaterThan(0)
+    expect(warmHeadless.text, `the warm non-TTY refusal text (${warmHeadless.text})`).toMatch(
+      /not a (?:TTY|terminal)|non-interactive|requires (?:an? )?(?:TTY|terminal)|interactive terminal/iu,
+    )
+    const warmAfter = await peer.kernelState()
+    expect(warmAfter.hostPid, 'the warm non-TTY refusal did not replace the Host').toBe(warmBefore.hostPid)
+    expect(warmAfter.hostInstanceId).toBe(warmBefore.hostInstanceId)
+    expect(warmAfter.clientPid, 'the warm non-TTY refusal did not replace the Client').toBe(warmBefore.clientPid)
+    expect(warmAfter.hostState).toBe('alive')
+    expect(warmAfter.clientState).toBe('alive')
+    await peer.type('warm-refusal-peer')
+    await waitForFrame(peer, 'warm-refusal-peer', 'the warm peer stays usable after the refusal')
+    await peer.press('Ctrl+U')
+    await exitPublicLaunch(peer, 'warm refusal peer')
+    await peer.stopHost()
   } catch (error) {
     testError = error
     throw error
   } finally {
     const teardown: Error[] = []
-    if (launch !== undefined) {
+    for (const handle of [...launches].reverse()) {
+      if (handle.closed) continue
       try {
-        if (!launch.closed) await launch.reclaim()
+        await handle.reclaim()
       } catch (error) {
         teardown.push(asError(error))
       }
@@ -329,7 +523,7 @@ test.skipIf(!linuxOnly)('refuses illegal public backend inputs before creating a
   }
 })
 
-test.skipIf(!linuxOnly)('resumes a durable public Session through --session and -c without another Session', async () => {
+test('resumes a durable public Session through --session and -c without another Session', async () => {
   const scene = await createSplitProcessScene()
   const launches: PublicDaemonLaunch[] = []
   let testError: unknown
@@ -466,7 +660,7 @@ test.skipIf(!linuxOnly)('resumes a durable public Session through --session and 
   }
 })
 
-test.skipIf(!linuxOnly)('applies --preset minimal to the first public Session header', async () => {
+test('applies --preset minimal to the first public Session header', async () => {
   const scene = await createSplitProcessScene()
   const launches: PublicDaemonLaunch[] = []
   let testError: unknown
@@ -535,7 +729,7 @@ test.skipIf(!linuxOnly)('applies --preset minimal to the first public Session he
   }
 })
 
-test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after the other Client leaves', async () => {
+test('keeps the surviving public peer and its Session after the other Client leaves', async () => {
   const scene = await createSplitProcessScene()
   const launches: PublicDaemonLaunch[] = []
   let testError: unknown
@@ -569,39 +763,20 @@ test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after t
     expect(second.host?.pid).toBe(first.host?.pid)
     expect((await second.kernelState()).hostState, 'the shared Host is live').toBe('alive')
 
-    await first.signalCli()
-    let cliGone = false
-    let clientGone = false
-    let clientFirst = false
-    const trace: Array<{ cli: string; client: string }> = []
-    const started = Date.now()
-    for (;;) {
-      const state = await first.kernelState()
-      const cliTerminal = state.cliState === 'gone' || state.cliState === 'reused'
-      const clientTerminal = state.clientState === 'gone' || state.clientState === 'reused'
-      trace.push({ cli: state.cliState, client: state.clientState })
-      if (clientTerminal && !cliTerminal) clientFirst = true
-      if (cliTerminal && !clientTerminal) {
-        throw new Error(`the foreground Client was observed alive after its CLI settled: ${JSON.stringify(trace.slice(-5))}`)
-      }
-      cliGone = cliGone || cliTerminal
-      clientGone = clientGone || clientTerminal
-      if (cliGone && clientGone) break
-      if (Date.now() - started >= 120_000) {
-        throw new Error(`the TERM'd public CLI/Client did not reach terminal facts: ${JSON.stringify(trace.slice(-5))}`)
-      }
-      await sleep(50)
-    }
-    expect(clientGone, `the foreground Client reached a terminal fact (${JSON.stringify(trace.slice(-5))})`).toBe(true)
-    expect(cliGone, `the foreground CLI reached a terminal fact (${JSON.stringify(trace.slice(-5))})`).toBe(true)
-    // clientFirst === true is a strict client-first observation. When both
-    // processes disappear between two 50ms reads the trace cannot order them;
-    // in that case the loop above has still rejected any observation of a live
-    // Client after the CLI was gone. No local Date.now() fiction is used.
-    if (!clientFirst) {
-      expect(trace.length).toBeGreaterThan(0)
-      console.log(`public peer detach order indeterminate: ${JSON.stringify(trace.slice(-5))}`)
-    }
+    const term = await first.signalCli()
+    // The Supervisor owns the strict order oracle: it samples the real kernel
+    // identities immediately after TERM and refuses a same-sample or CLI-first
+    // outcome itself. The Worker only consumes the recorded outcome.
+    expect(term.outcome.clientTerminalWhileCliLive,
+      `the real Client must be terminal while the exact CLI birth is live: ${JSON.stringify(term.outcome)}`).toBe(true)
+    expect(term.outcome.order).toBe('client-terminal-while-cli-live')
+    expect(term.outcome.sameSampleGone).toBe(false)
+    expect(term.outcome.cliLiveBirthAtClientTerminal).toBe(first.cli?.birth)
+    expect(term.outcome.clientGoneAt, 'a real Client terminal timestamp').not.toBeNull()
+    expect(term.outcome.cliGoneAt, 'a real CLI terminal timestamp').not.toBeNull()
+    const afterTerm = await first.kernelState()
+    expect(['gone', 'reused']).toContain(afterTerm.cliState)
+    expect(['gone', 'reused']).toContain(afterTerm.clientState)
     const surviving = await second.kernelState()
     expect(surviving.hostState, 'the Host survives the peer CLI TERM').toBe('alive')
     expect(surviving.clientState, 'the surviving Client stays live').toBe('alive')
@@ -667,7 +842,7 @@ test.skipIf(!linuxOnly)('keeps the surviving public peer and its Session after t
   }
 })
 
-test.skipIf(!linuxOnly)('pins the public alias resume command and replays it against the live Host', async () => {
+test('pins the public alias resume command and replays it against the live Host', async () => {
   const scene = await createSplitProcessScene()
   const launches: PublicDaemonLaunch[] = []
   const alias = 'public-alias'
@@ -776,7 +951,7 @@ test.skipIf(!linuxOnly)('pins the public alias resume command and replays it aga
   }
 })
 
-test.skipIf(!linuxOnly)('persists the public daemon preference for the next launch without restarting the current Host', async () => {
+test('persists the public daemon preference for the next launch without restarting the current Host', async () => {
   const scene = await createSplitProcessScene()
   const launches: PublicDaemonLaunch[] = []
   let testError: unknown
@@ -799,11 +974,25 @@ test.skipIf(!linuxOnly)('persists the public daemon preference for the next laun
     await waitForFrame(current, 'Daemon', 'the Daemon candidate')
     await current.press('Down')
     await current.press('Enter')
-    await waitForFrame(current, 'Status      Verified', 'the same-generation Verified backend write')
+    // The optional OS-supervision prompt is a real platform representation:
+    // Linux may write the preference without it, while macOS offers the
+    // LaunchAgent install and defaults to "Not now". The durable preference
+    // write is the same; only the prompt dismissal is platform-shaped.
+    await waitForFrameMatch(current,
+      frame => frame.includes('Status      Verified') || frame.includes('Install service'),
+      'the backend write result or optional supervision prompt')
     const installFrame = await current.text()
     if (installFrame.includes('> Not now')) await current.press('Enter')
-    await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
-    await waitForFrame(current, 'Status      Verified', 'the backend stays Verified')
+    if (process.platform === 'linux') {
+      await waitForFrame(current, 'Status      Verified', 'the same-generation Verified backend write')
+      await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
+      await waitForFrame(current, 'Status      Verified', 'the backend stays Verified')
+    } else {
+      // macOS replaces the transient write row with the optional LaunchAgent
+      // prompt; the authoritative readback and next-launch scope are the
+      // durable facts, and the next real launch below proves the write.
+      await waitForFrame(current, 'Value       Daemon', 'the authoritative backend readback')
+    }
     await waitForFrame(current, 'Applies on next launch; current TUI/Host remains', 'the next-launch-only statement')
     await waitForFrame(current, 'Current launch: daemon (environment override)', 'the current launch override fact')
 
@@ -875,7 +1064,7 @@ test.skipIf(!linuxOnly)('persists the public daemon preference for the next laun
   }
 })
 
-test.skipIf(!linuxOnly || !ownershipRefusalProbe)(
+test.skipIf(!ownershipRefusalProbe)(
   'refuses an unproven public Host ownership signal and compensates truthfully',
   async () => {
     const scene = await createSplitProcessScene()
