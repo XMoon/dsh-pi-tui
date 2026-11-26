@@ -21,8 +21,10 @@
  * The SDK's default NDJSON stream uses an unbounded `LineBuffer` and no output
  * backpressure, so this module wraps the socket in TWO bounded streams: an
  * input reader that scans raw UTF-8 bytes for newlines under a per-frame and a
- * queued-byte cap, and an output writer that refuses a frame or a buffered
- * total above its cap. A cap breach closes only the offending connection.
+ * queued-byte cap, and an output writer that paces every frame under a fixed
+ * unwritten-backlog bound. A decoded-stream reply-debt admission also bounds
+ * the requests whose responses are still waiting for that transport; a breach
+ * closes only the offending connection.
  *
  * @module app/remote-process/local-acp-listener
  */
@@ -39,6 +41,8 @@ import {
   RequestError,
   type AgentConnection,
   type AgentContext,
+  type AnyMessage,
+  type Stream,
   type SessionConfigOption,
   type SessionModeState,
 } from '@agentclientprotocol/sdk'
@@ -212,10 +216,19 @@ export function deriveImageOutputBounds(limits: AcpImageLimits | undefined): num
 const MAX_OUTPUT_FRAME_BYTES = 256 * 1024
 /** Total bytes buffered in the socket awaiting flush on ONE connection. */
 const MAX_OUTPUT_BUFFER_BYTES = 256 * 1024
-/** A frame above the legacy cap is written to the socket in bounded chunks. */
+/** The bounded output writer emits at most this many bytes per socket chunk. */
 const OUTPUT_WRITE_CHUNK_BYTES = 64 * 1024
-/** The longest ONE kernel-drain wait of a chunked frame may block the writer. */
+/** The longest one kernel-drain wait may block the output writer. */
 const OUTPUT_DRAIN_TIMEOUT_MS = 30_000
+
+/**
+ * One connection may hold at most this many response-producing records before
+ * a response has actually settled on the public SDK writable. The existing
+ * lanes admit at most 8 ordinary + 4 control + 8 close = 20 concurrent
+ * requests; the other 20 is completion/refusal headroom, so a healthy reader's
+ * transient socket backlog cannot turn into an unbounded reply queue.
+ */
+const REPLY_DEBT_LIMIT = 20 + 20
 /** How long a short stale-socket connect probe may run before it is treated as inert-unknown. */
 const CONNECT_PROBE_TIMEOUT_MS = 500
 /** The logical socket file name inside the 0700 scope directory. */
@@ -589,13 +602,13 @@ function waitForOutputDrain(socket: Socket, fail: (code: string) => void): Promi
 }
 
 /**
- * Write ONE frame above the legacy cap in bounded chunks. The connection's
- * unwritten backlog may never exceed `MAX_OUTPUT_BUFFER_BYTES`: before each
- * chunk the writer waits (bounded) for the kernel to drain, and a refused
- * `socket.write()` waits for its own `drain` before the next chunk. A reader
- * that never drains the socket therefore closes THIS connection on the existing
- * backpressure class; the Host, the Agent and every sibling connection are
- * untouched, and no Host prompt is retried.
+ * Write ONE frame in bounded chunks. The connection's unwritten backlog may
+ * never exceed `MAX_OUTPUT_BUFFER_BYTES`: before every chunk the writer waits
+ * (bounded) for the kernel to drain, and a refused `socket.write()` waits for
+ * its own `drain` before the next chunk. A reader that never drains the socket
+ * therefore closes THIS connection on the existing backpressure class; the
+ * Host, the Agent and every sibling connection are untouched, and no Host
+ * prompt is retried.
  */
 async function writeChunkedFrame(socket: Socket, frame: Uint8Array, fail: (code: string) => void): Promise<void> {
   let offset = 0
@@ -618,15 +631,14 @@ async function writeChunkedFrame(socket: Socket, frame: Uint8Array, fail: (code:
  *
  * Node reflects bytes accepted but not yet flushed to the kernel in
  * `socket.writableLength`, so the pre-write cap on `writableLength + frame` is
- * the enforced bound on "unwritten output": it closes a slow reader's
- * connection instead of letting the queue grow without limit. Frames up to the
- * legacy cap keep the original accept-then-resolve behavior. A larger frame —
- * only possible when the connection derived a bounded budget from the Host's
- * attachment limits — is written in 64 KiB chunks under the same backlog bound
- * and a bounded kernel drain, so ONE legal committed image can reach a reading
- * client without letting a stalled reader grow memory.
+ * the enforced bound on "unwritten output". Every frame — not only one above
+ * the legacy per-frame cap — is written through the same bounded chunk loop:
+ * `false` means the bytes were accepted but the writer must wait for drain,
+ * never that the current frame failed. A reader that does not drain is closed
+ * by the existing bounded wait; a healthy reader is not disconnected merely
+ * because a legal burst temporarily fills the kernel queue.
  */
-function createBoundedOutput(
+export function createBoundedOutput(
   socket: Socket,
   fail: (code: string) => void,
   maxOutputFrameBytes: number,
@@ -640,17 +652,160 @@ function createBoundedOutput(
         fail('LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE')
         throw new Error('local acp: output frame exceeds the connection frame budget')
       }
-      if (frame.byteLength <= MAX_OUTPUT_FRAME_BYTES) {
-        if (socket.writableLength + frame.byteLength > MAX_OUTPUT_BUFFER_BYTES) {
-          fail('LOCAL_ACP_OUTPUT_BACKPRESSURE')
-          throw new Error('local acp: output backlog exceeds the connection cap')
-        }
-        socket.write(frame)
-        return
-      }
       await writeChunkedFrame(socket, frame, fail)
     },
   }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_OUTPUT_BUFFER_BYTES }))
+}
+
+export interface ReplyDebtFailureDetail {
+  readonly reason: 'reply-debt-limit'
+  readonly limit: number
+  readonly observedCount: number
+}
+
+type ReplyDebtKind = 'request' | 'response' | 'notification'
+
+function replyDebtKind(message: AnyMessage): ReplyDebtKind {
+  const record = message as Record<string, unknown>
+  // Match the pinned SDK's envelope predicates exactly. In particular, a
+  // malformed record that merely contains a method string is NOT a
+  // notification, and a malformed record with a non-string method is NOT
+  // response-shaped. Both are invalid requests that the SDK answers with
+  // -32600, so they must consume one reply credit and release it on that write.
+  if (record.jsonrpc === '2.0' && typeof record.method === 'string' && !('id' in record)) return 'notification'
+  if (!('method' in record) && ('id' in record || 'result' in record || 'error' in record)) return 'response'
+  return 'request'
+}
+
+/**
+ * Bound the decoded SDK records that can produce a response before their
+ * response bytes have actually reached the transport. The wrapper is demand
+ * driven and does not parse or re-encode NDJSON: direct `ndJsonStream` parser
+ * errors bypass it exactly as they bypass the SDK application, so they can
+ * never release a credit they never held.
+ *
+ * A response is credited only after the underlying public SDK writable has
+ * settled. A reverse request, notification and response-shaped inbound record
+ * are not requests and do not consume credit. The 41st request-producing
+ * record is refused before it is handed to the SDK, closes this one connection
+ * through the existing failure owner, and never dispatches a handler.
+ *
+ * @internal Exported for the owner-level public-SDK Stream test, following
+ * `createBoundedInput`'s existing internal-test seam.
+ */
+export function createReplyDebtStream(
+  stream: Stream,
+  options: {
+    readonly isClosed: () => boolean
+    readonly fail: (code: string, detail: ReplyDebtFailureDetail) => void
+  },
+): Stream {
+  let debt = 0
+  let terminal = false
+  let inputDone = false
+  const reader = stream.readable.getReader()
+  let readerReleased = false
+  const releaseReader = (): void => {
+    if (readerReleased) return
+    readerReleased = true
+    try { reader.releaseLock() } catch { /* a settled reader may already be released */ }
+  }
+  const endInput = async (reason?: unknown): Promise<void> => {
+    if (inputDone) return
+    inputDone = true
+    try { await reader.cancel(reason) } catch { /* the underlying stream may already be gone */ }
+    releaseReader()
+  }
+
+  const readable = new ReadableStream<AnyMessage>({
+    async pull(controller) {
+      if (terminal || options.isClosed()) {
+        try { controller.close() } catch { /* already closed */ }
+        await endInput('closed')
+        return
+      }
+      let next: Awaited<ReturnType<typeof reader.read>>
+      try {
+        next = await reader.read()
+      } catch (error) {
+        terminal = true
+        try { controller.error(error) } catch { /* already errored */ }
+        await endInput(error)
+        return
+      }
+      if (terminal || options.isClosed()) {
+        try { controller.close() } catch { /* already closed */ }
+        await endInput('closed')
+        return
+      }
+      if (next.done) {
+        terminal = true
+        inputDone = true
+        try { controller.close() } catch { /* already closed */ }
+        releaseReader()
+        return
+      }
+      const kind = replyDebtKind(next.value)
+      if (kind === 'request') {
+        if (debt >= REPLY_DEBT_LIMIT) {
+          terminal = true
+          options.fail('LOCAL_ACP_OUTPUT_BACKPRESSURE', {
+            reason: 'reply-debt-limit',
+            limit: REPLY_DEBT_LIMIT,
+            observedCount: debt,
+          })
+          try { controller.error(new Error('local acp: reply debt limit exceeded')) } catch { /* already errored */ }
+          await endInput('reply-debt-limit')
+          return
+        }
+        debt += 1
+      }
+      try {
+        controller.enqueue(next.value)
+      } catch (error) {
+        terminal = true
+        await endInput(error)
+      }
+    },
+    cancel(reason) {
+      terminal = true
+      return endInput(reason)
+    },
+  }, { highWaterMark: 0 })
+
+  const writable = new WritableStream<AnyMessage>({
+    async write(message) {
+      if (terminal || options.isClosed()) throw new Error('local acp: reply stream already closed')
+      const response = replyDebtKind(message) === 'response'
+      // The SDK shutdown path cancels its receive reader but does not close
+      // this outer writable. Hold the public SDK writer only for the operation
+      // that needs it; a connection-long lock would survive the real terminal.
+      const writer = stream.writable.getWriter()
+      try {
+        await writer.write(message)
+      } finally {
+        try { writer.releaseLock() } catch { /* already released */ }
+      }
+      if (response) {
+        if (debt <= 0) throw new Error('local acp: reply debt underflow')
+        debt -= 1
+      }
+    },
+    async close() {
+      terminal = true
+      if (stream.writable.locked) return
+      const writer = stream.writable.getWriter()
+      try { await writer.close() } finally { try { writer.releaseLock() } catch { /* already released */ } }
+    },
+    async abort(reason) {
+      terminal = true
+      if (stream.writable.locked) return
+      const writer = stream.writable.getWriter()
+      try { await writer.abort(reason) } finally { try { writer.releaseLock() } catch { /* already released */ } }
+    },
+  })
+
+  return { readable, writable }
 }
 
 /** Drop routing-only slots that hold neither an operation nor a Host claim. */
@@ -1370,10 +1525,10 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
   let tornDown = false
   let connection: AgentConnection | undefined
 
-  const fail = (code: string): void => {
+  const fail = (code: string, detail?: ReplyDebtFailureDetail): void => {
     if (state.closed) return
     state.closed = true
-    context.diag.warn('local-acp.error', { code, connections: context.connections.size })
+    context.diag.warn('local-acp.error', { code, ...(detail ?? {}), connections: context.connections.size })
     socket.destroy()
   }
 
@@ -1415,7 +1570,10 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
   const input = createBoundedInput(socket, state, fail)
   const output = createBoundedOutput(socket, fail, state.maxOutputFrameBytes)
   const app = buildAgentApp(state, context, fail)
-  const stream = ndJsonStream(output, input)
+  const stream = createReplyDebtStream(ndJsonStream(output, input), {
+    isClosed: () => state.closed || socket.destroyed,
+    fail: (code, detail) => fail(code, detail),
+  })
   connection = app.connect(stream)
   const connected = connection
   // Observe the SDK connection's own close so a peer close tears down this ONE

@@ -461,11 +461,15 @@ profile's independent `autoStart` preference enables it (see below).
     Each socket has independent accounting and a breach closes only that
     connection; the reader assembles each fragmented NDJSON line with one
     concatenation rather than repeatedly copying the pending image frame.
-  - **Bounded output.** Each connection bounds its own buffered output. Frames
-    up to the legacy 256 KiB single-frame cap keep the original
-    accept-then-resolve behavior under the same 256 KiB unwritten-backlog bound.
-    When the Host mounts the official Attachment Store, the connection derives
-    ONCE at establish time a larger single-frame budget from that Host's
+  - **Bounded output.** Each connection bounds its own buffered output. Every
+    frame is written through ONE bounded chunk loop under the 256 KiB
+    unwritten-backlog bound. A `socket.write()` `false` means those bytes were
+    accepted but the writer must wait for `drain`; it is not a frame failure,
+    a health threshold for a reading peer, or a reason to fail the connection.
+    The independent single-frame budget still refuses a frame before its first
+    byte when that frame is too large. When the Host mounts the official
+    Attachment Store, the connection derives ONCE at establish time a larger
+    single-frame budget from that Host's
     boot-frozen `attachments.imageLimits`. Each committed image is bounded by the
     Store's per-object admission ceiling (`maxImageBytes`) and is Base64-encoded
     ON ITS OWN, so the batch term sums the per-image encoded ceilings
@@ -476,9 +480,8 @@ profile's independent `autoStart` preference enables it (see below).
     governs prompt admission, not a stored output image. That derivation is a
     TRANSPORT resource bound — never an image acceptance policy, never a reason
     to drop, shrink, re-encode or re-describe a committed image, and never
-    derived from `initialize.promptCapabilities.image`. A frame above the legacy
-    cap is written in 64 KiB chunks under the same unwritten-backlog bound,
-    waiting at most 30 seconds per kernel drain.
+    derived from `initialize.promptCapabilities.image`. Chunked writes wait at
+    most 30 seconds per kernel drain under that same backlog bound.
     - **The same budget bounds one event's generic files.** The connection's
       single-frame budget and the runtime string/Buffer representation boundary
       are the ONLY inputs to the per-event file materialization check above; the
@@ -501,6 +504,23 @@ profile's independent `autoStart` preference enables it (see below).
       adds a second Attachment Store, or affects the Host, an Agent, a Session,
       the TUI or another ACP connection. A true all-content guarantee requires an
       upstream DSH stored-byte contract, which this phase does not invent.
+    - **Bounded pending replies.** Between the SDK's decoded stream and the
+      application, each connection admits at most 40 response-producing records
+      whose response has not yet settled on the public SDK writable. A response
+      releases its credit only after that writable write settles; a
+      notification, a reverse request, or an inbound response-shaped record
+      consumes none. The 41st record is refused before it reaches SDK
+      application dispatch and closes only this connection with
+      `LOCAL_ACP_OUTPUT_BACKPRESSURE`, reason `reply-debt-limit` and the fixed
+      limit/count. A malformed JSON-RPC envelope that is neither a valid
+      notification nor response-shaped is an invalid request: it consumes one
+      credit, and the SDK's own `-32600` response releases it. Direct
+      `ndJsonStream` parser errors bypass this decoded adapter and therefore
+      cannot release a credit they never held. This is a Host transport
+      admission policy, not an ACP standard limit and not a
+      replacement for the existing ordinary (8), control (4) and close (8)
+      lanes. It bounds pending response-producing records, not total SDK or
+      process heap.
     - A reader that never drains is closed as `LOCAL_ACP_OUTPUT_BACKPRESSURE`; a
       socket close/error ends that drain wait immediately and keeps its real
       errno as the diagnostic. Every one of these affects ONLY that connection
