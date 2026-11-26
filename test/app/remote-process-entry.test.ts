@@ -51,6 +51,7 @@ import {
   REMOTE_HOST_PREREQUISITE_SERVICES,
 } from '../../src/app/remote/host-prerequisites.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { decodeProgramResumeHandoff, PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV } from '../../src/client/program-resume/handoff.ts'
 
 test('the Host-only overlay disables the TUI runner and the Client UI rows only', () => {
   // The value matters as much as the id: matching only `- id:` lets a broken
@@ -577,12 +578,13 @@ const CONNECTED_STATUS: LocalClientStatus = {
 }
 
 /** Write one minimal real replacement-package fixture. */
-function writePackage(root: string, options: { version?: string; dshVersion?: string; name?: string } = {}): void {
+function writePackage(root: string, options: { version?: string; dshVersion?: string; name?: string; programResumeHandoff?: boolean } = {}): void {
   mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
   writeFileSync(join(root, 'package.json'), `${JSON.stringify({
     name: options.name ?? '@xmoon76/dsh-pi-tui',
     version: options.version ?? '0.5.4-pr3new.1',
     devDependencies: { '@deepseek-ai/dsh-agent': options.dshVersion ?? '0.2.1-rc.4' },
+    ...(options.programResumeHandoff === true ? { dshPiTuiInternalCapabilities: { osc7577ClientHandoff: 1 } } : {}),
   })}\n`)
   writeFileSync(join(root, 'dist', 'index.mjs'), 'export const value = 1\n')
   writeFileSync(join(root, 'dist', 'local-client.mjs'), 'export {}\n')
@@ -617,6 +619,7 @@ test('the reexec target must be a real package pinned to the same DSH runtime', 
   assert.equal(target.packageRoot, realpathSync(packageRoot))
   assert.equal(target.entry, join(realpathSync(packageRoot), 'dist', 'local-client.mjs'))
   assert.equal(target.bundleVersion, '0.5.4-pr3new.1')
+  assert.equal(target.programResumeHandoff, false)
   assert.match(target.buildId, /^[0-9a-f]{64}$/u)
 
   const wrongName = join(root, 'wrong-name')
@@ -937,6 +940,78 @@ test('the ONE reexec latch separates the manual command from the qualification s
   assert.deepEqual(reverse.request('manual'), { kind: 'accepted' })
   assert.deepEqual(reverse.request('qualification'), { kind: 'refused', reason: 'stopping' })
   assert.deepEqual(reverseSources, ['manual'])
+})
+
+test('the replacement target marker is read from the real manifest and gates the private handoff', t => {
+  const root = testLifecycle(t).tempDir('dsh-pr3-osc-handoff-')
+  const supportedRoot = join(root, 'supported')
+  writePackage(supportedRoot, { programResumeHandoff: true })
+  const supported = inspectClientReexecTarget(supportedRoot, '0.2.1-rc.4')
+  assert.equal(supported.programResumeHandoff, true)
+
+  const missingRoot = join(root, 'missing')
+  writePackage(missingRoot)
+  assert.equal(inspectClientReexecTarget(missingRoot, '0.2.1-rc.4').programResumeHandoff, false)
+
+  const wrongRoot = join(root, 'wrong')
+  writePackage(wrongRoot)
+  const manifestPath = join(wrongRoot, 'package.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  manifest.dshPiTuiInternalCapabilities = { osc7577ClientHandoff: '1' }
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  assert.equal(inspectClientReexecTarget(wrongRoot, '0.2.1-rc.4').programResumeHandoff, false)
+})
+
+test('a v1 replacement receives the capability; an old target and ACP never do', t => {
+  const root = testLifecycle(t).tempDir('dsh-pr3-osc-env-')
+  const packageRoot = join(root, 'package')
+  writePackage(packageRoot, { programResumeHandoff: true })
+  const target = inspectClientReexecTarget(packageRoot, '0.2.1-rc.4')
+  const intent: ClientReexecIntent = {
+    expectedInstanceId: REEXEC_HOST_INSTANCE,
+    sessionId: 'session-s',
+    dshAnchor: join(root, 'dsh', 'package.json'),
+    profile: 'pi-tui',
+    dshVersion: '0.2.1-rc.4',
+    targetPackageRoot: target.packageRoot,
+    targetEntry: target.entry,
+    targetBuildId: target.buildId,
+    targetBundleVersion: target.bundleVersion,
+    targetProgramResumeHandoff: true,
+  }
+  const capability = {
+    token: 'dummy-token-replace-me',
+    facts: {
+      version: 1 as const,
+      ownerPid: 4242,
+      home: '/home/user/.dsh',
+      profile: 'pi-tui',
+      backend: 'daemon' as const,
+      cwd: '/home/user/project',
+      nodePath: '/usr/local/bin/node',
+      cliPath: '/opt/dsh/lib/bin.js',
+    },
+  }
+  const source = {
+    PATH: '/bin',
+    [PROGRAM_RESUME_TOKEN_ENV]: 'stale-token',
+    [PROGRAM_RESUME_HANDOFF_ENV]: '{"stale":true}',
+  }
+  const env = createClientReexecChildEnvironment(intent, source, capability)
+  assert.equal(env[PROGRAM_RESUME_TOKEN_ENV], capability.token)
+  assert.deepEqual(decodeProgramResumeHandoff(env[PROGRAM_RESUME_HANDOFF_ENV] as string), capability.facts)
+  assert.equal(source[PROGRAM_RESUME_TOKEN_ENV], 'stale-token')
+
+  const unsupported = createClientReexecChildEnvironment(
+    { ...intent, targetProgramResumeHandoff: false },
+    source,
+    capability,
+  )
+  assert.equal(unsupported[PROGRAM_RESUME_TOKEN_ENV], undefined)
+  assert.equal(unsupported[PROGRAM_RESUME_HANDOFF_ENV], undefined)
+
+  // The ACP relay path is not part of this suite; its producer strips both
+  // fields in the daemon-launcher unit test.
 })
 
 test('the replacement Client environment strips old qualification state and carries only handoff facts', t => {

@@ -29,6 +29,7 @@ import {
 } from '../../src/app/remote-process/daemon-launcher.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV } from '../../src/client/program-resume/handoff.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -71,6 +72,22 @@ test('buildChildEnvironment strips SPLIT_PROCESS_* and role markers, sets the fo
   assert.equal(env.SPLIT_PROCESS_CLIENT_LAUNCH_V1, 'ENVELOPE')
   assert.equal(env.PATH, '/usr/bin', 'the ordinary environment is preserved')
   assert.equal(env.DSH_PI_TUI_PRESET, 'keep-me', 'the preset env is preserved')
+})
+
+test('the public child builder strips both OSC 7577 fields; ACP does too', () => {
+  const source = {
+    PATH: '/bin',
+    [PROGRAM_RESUME_TOKEN_ENV]: 'inherited-token',
+    [PROGRAM_RESUME_HANDOFF_ENV]: '{"stale":true}',
+  }
+  const plain = buildChildEnvironment(PROFILE, 'ENVELOPE', source)
+  assert.equal(plain[PROGRAM_RESUME_TOKEN_ENV], undefined)
+  assert.equal(plain[PROGRAM_RESUME_HANDOFF_ENV], undefined)
+  assert.equal(source[PROGRAM_RESUME_TOKEN_ENV], 'inherited-token', 'the source environment is not mutated')
+
+  const acp = buildAcpStdioEnvironment('/private/acp.sock', source)
+  assert.equal(acp[PROGRAM_RESUME_TOKEN_ENV], undefined)
+  assert.equal(acp[PROGRAM_RESUME_HANDOFF_ENV], undefined)
 })
 
 test('resolveClientEntry keeps the named dist entry for legal shared-store and symlinked layouts', (t: TestContext) => {

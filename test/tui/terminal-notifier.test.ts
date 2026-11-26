@@ -161,3 +161,20 @@ test('guardedStreamWriter keeps the notifier usable end-to-end', () => {
   notifier.notify('bell', 'DSH', 'Turn complete')
   assert.deepEqual(writes, ['\x07'])
 })
+
+test('guardedStreamWriter forwards one write completion error through the production wrapper', () => {
+  const writes: string[] = []
+  const stream = new EventEmitter() as EventEmitter & {
+    write(data: string, callback?: (error?: Error | null) => void): unknown
+  }
+  stream.write = (data, callback) => {
+    writes.push(data)
+    callback?.(new Error('EPIPE'))
+    return true
+  }
+  const writer = guardedStreamWriter(stream as never)
+  let observed: Error | null | undefined
+  writer.write('\x07', error => { observed = error })
+  assert.deepEqual(writes, ['\x07'])
+  assert.equal(observed?.message, 'EPIPE', 'the per-write callback is the observable failure seam')
+})

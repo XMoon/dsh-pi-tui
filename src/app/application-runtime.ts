@@ -412,6 +412,16 @@ export interface RemoteApplicationOverride {
   readonly releaseTransport?: () => Promise<void>
 }
 
+/** The process-private OSC 7577 owner shared by the Client entry and bootstrap. */
+export interface ProgramResumeClientHandle {
+  readonly capability: import('../client/program-resume/target.ts').ProgramResumeCapability
+  attach(reporter: import('../client/program-resume/reporter.ts').ProgramResumeReporter): void
+  /** An accepted reload targets a build without the v1 Client handoff. */
+  unsupportedReloadAccepted(): void
+  /** The exact capability a compatible replacement Client may receive. */
+  forReexec(): import('../client/program-resume/target.ts').ProgramResumeCapability
+}
+
 /**
  * The structural daemon-administration port the composition passes (M6 UX PR2).
  * Only the two EXPLICIT, user-authorized actions exist: install this Profile's
@@ -498,6 +508,13 @@ export interface RunnerStartupSettlement {
    * `stale-revision` refusal. Absent on Direct (no presence owner exists).
    */
   presencePeerScope?: object
+  /**
+   * Split-Client only: the process-local OSC 7577 owner the Client entry
+   * captured from its private supervisor handoff. Direct proves its own
+   * capability from the official profile/launch snapshot and leaves this
+   * absent. It is never a Host service, wire object or public declaration.
+   */
+  programResume?: ProgramResumeClientHandle
   /**
    * M4 PR4: the split Client's ONE process-owned manual-reload request. It
    * returns the process preflight's synchronous decision; the caller

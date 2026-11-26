@@ -48,6 +48,44 @@ terminal-sanitized display projection. Rendering is a disposable projection
 over it: the same raw
 value can be copied byte-exactly and also painted safely.
 
+## Program resume (OSC 7577)
+
+OSC 7577 is the ONE Client-local program-resume output. It is
+application-generated terminal protocol, not display material: the sender is
+`src/client/program-resume/**`, it never consumes transcript, tool, model or
+other untrusted text, and it is never passed through either sanitizer. The
+composition offers a record only while the real PiTUI Client owns the physical
+terminal, using the inherited `OSC7577_TOKEN` and the official Profile, DSH
+home, backend, launch cwd, Node executable and `@deepseek-ai/dsh` entry; the
+command is exactly
+`/usr/bin/env DSH_HOME=… DSH_PI_TUI_BACKEND=… <node> <dsh-bin.js> --profile <p>
+--session <canonical-id>` with the cwd carried by the protocol field. An
+overlay, explicit preset, telemetry override, special Node option, multiplexer/
+SSH topology, non-TTY launch, an explicit `DSH_PI_TUI_RENDERER=tsp` opt-in
+(including an SDK decline that later mounts the PiTUI fallback), or a
+non-canonical Session id fails closed and never guesses a target.
+
+The token is a capability, never a Session/Profile secret: it is removed from
+the ambient environment at the first synchronous Client/Host step, is never
+placed in argv, a log, a Session event, a Host DTO or the private handoff JSON,
+and only an admitted foreground Client receives it. The Host never writes OSC
+7577. Report and clear share the same grant: the reporter must be installed on
+the real mounted PiTUI surface, not suspended, and the application must own the
+tty. No bytes are written before that mount or while an external editor holds
+the terminal. A sessionless/unrepresentable target, a human exit and an accepted
+reload whose replacement cannot consume the v1 handoff use the protocol's
+clear, but only under that same grant; signal, PTY loss, fatal, generic disposal
+and a compatible Client reexec never withdraw the record. A valid report whose
+terminal write fails leaves the previous record in place and is retried only on
+the next legitimate owner notification or regain; it is never converted to a
+clear. A synchronous write throw and the write-completion failure reported by
+the existing guarded writer share the same state: the offer is marked dirty and
+the next legitimate owner notification or terminal regain reoffers the current
+target. A late failure from an older offer never overwrites a newer offer or a
+closed reporter. The protocol has no ACK: neither the write completion nor the
+absence of an error means that the terminal accepted a record, and the sender
+never claims that a later resume succeeded.
+
 ## The two policies
 
 `src/tui/presentation/terminal-text.ts` is the only implementation. It is a

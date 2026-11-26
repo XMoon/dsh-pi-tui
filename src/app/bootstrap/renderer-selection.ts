@@ -15,14 +15,10 @@ import type { DisplayState } from '../../domain/display/preset.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
-/** What the selection needs from the composition root. */
-/** Whether this boot asked for the experimental TSP renderer. The composition
- *  reads the SAME predicate: application-side terminal writes are suspended only
- *  for a boot that actually attempts TSP, so the default PiTui path never loses
- *  output in an async selection window. */
-export function tspRequested(env: { readonly DSH_PI_TUI_RENDERER?: string | undefined }): boolean {
-  return env.DSH_PI_TUI_RENDERER === 'tsp'
-}
+/** The opt-in predicate is shared with application owners outside the
+ *  composition zone; re-exported here for the selection's existing importers. */
+import { tspRequested } from '../renderer-opt-in.ts'
+export { tspRequested }
 
 export interface RendererSelectionDeps {
   /** Diagnostics sink for the selection's own lifecycle facts. */

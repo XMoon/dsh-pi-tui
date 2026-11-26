@@ -22,6 +22,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
+import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import {
   closeSync,
   constants,
@@ -612,10 +613,13 @@ export function runLaunchctl(
     }
     let child
     try {
+      const env: NodeJS.ProcessEnv = { ...process.env }
+      // launchctl is a manager helper, never an OSC 7577 reporter.
+      scrubProgramResumeEnvironment(env)
       child = spawn(LAUNCHCTL, [...args], {
         shell: false,
         stdio: options.discardStdout === true ? ['ignore', 'ignore', 'pipe'] : ['ignore', 'pipe', 'pipe'],
-        env: process.env,
+        env,
       })
     } catch (error) {
       settle({ kind: 'spawn-error', error: error as NodeJS.ErrnoException })

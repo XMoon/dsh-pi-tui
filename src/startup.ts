@@ -888,6 +888,16 @@ function installModelListingLogInterceptor(): () => void {
  * @param ctx - plugin context carrying the command line.
  */
 export function apply(ctx: Context, config?: Config): void {
+  // OSC 7577 capability: the inherited/`.env` value has already been captured
+  // by the official launch snapshot. Remove BOTH the protocol token and the
+  // private supervisor handoff from the ambient environment as the FIRST
+  // synchronous step, before any parse, publish or PiTUI child spawn. This is
+  // the one early withdrawal that keeps Helpers (`$EDITOR`, footer, clipboard,
+  // compgen, Herdr, URL opener, ...) from inheriting the capability. The
+  // snapshot is immutable and remains the Direct/daemon launcher's trusted
+  // provenance source.
+  delete process.env.OSC7577_TOKEN
+  delete process.env.SPLIT_PROCESS_OSC7577_V1
   const program = tuiCommand(ctx)
   program.action(() => {
     // The CLI grammar is read and validated FIRST: a conflicting Session

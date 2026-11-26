@@ -94,6 +94,13 @@ import { runDetached, runOwned } from '../runtime/process/tasks.ts'
 import { captureScheduleSessionSwitch, openScheduleWorkspace } from './schedule/runtime.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
 import { createHerdrReporter } from '../client/herdr/reporter.ts'
+import { createProgramResumeReporter, type ProgramResumeReporter } from '../client/program-resume/reporter.ts'
+import {
+  directProgramResumeCapability,
+  type ProgramResumeCapability,
+  type ProgramResumeLaunchEnvironment,
+  type ProgramResumeProfileContext,
+} from '../client/program-resume/target.ts'
 import { herdrSessionProjection, type HerdrResumeTarget } from '../client/herdr/session.ts'
 import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
@@ -152,6 +159,7 @@ import { createClientExtensionMountOwner, type ClientExtensionMountOwner } from 
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from './bootstrap/visual-snapshot.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
+import { admitProgramResume } from './program-resume-admission.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
 import {
   createPluginManagerWorkspacePanel,
@@ -930,6 +938,43 @@ export function applyRunnerWithRuntime(
       }, { once: true })
       observeCurrentSession()
     }
+    /**
+     * OSC 7577 is a Client-local terminal capability. Direct proves it from the
+     * official launch snapshot/profile context; a Split Client receives the
+     * already-admitted private handoff through the in-process composition.
+     * An absent/unsupported provenance creates no reporter, no writer and no
+     * background resource. The reporter observes the SAME committed ownership
+     * source as the Herdr projection.
+     */
+    const programResumeCapability: ProgramResumeCapability | undefined = override === undefined
+      ? admitProgramResume(process.env, () => {
+          const profileContext = ctx.get('profileContext') as ProgramResumeProfileContext | undefined
+          const launchEnvironment = ctx.get('launchEnvironment') as ProgramResumeLaunchEnvironment | undefined
+          if (profileContext === undefined || launchEnvironment === undefined) return undefined
+          return directProgramResumeCapability({
+            profileContext,
+            launch: launchEnvironment,
+            presetId: (startup as { readonly presetId?: string }).presetId,
+            env: process.env,
+            execArgv: process.execArgv,
+            argv: process.argv,
+            execPath: process.execPath,
+            stdinIsTTY: process.stdin.isTTY === true,
+            stdoutIsTTY: process.stdout.isTTY === true,
+            platform: process.platform,
+          })
+        })
+      : startupSettlement?.programResume?.capability
+    const programResumeReporter: ProgramResumeReporter | undefined = programResumeCapability === undefined
+      ? undefined
+      : createProgramResumeReporter({
+          capability: programResumeCapability,
+          currentSessionId: () => ownership.currentSessionId(),
+          canWrite: () => terminalOutput.applicationOwnsTerminal(),
+          write: (frame, callback) => { notificationWriter.write(frame, callback) },
+          diag,
+        })
+    if (programResumeReporter !== undefined) startupSettlement?.programResume?.attach(programResumeReporter)
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
@@ -3484,6 +3529,7 @@ export function applyRunnerWithRuntime(
       // H1: the ONE Client-local Pane reporter is released inside the same
       // ordered, non-truncating surface batch (before the mounted app dies).
       disposeHerdrReporter: () => { herdrReporter?.dispose() },
+      disposeProgramResume: () => { programResumeReporter?.dispose() },
       disposeRemoteProgressGeneration: retireRemoteProgressGeneration,
       retireOwnedSession: sessionRuntime.retireOwnedSession,
       disposeSelectedTransport,
@@ -3711,6 +3757,10 @@ export function applyRunnerWithRuntime(
       }),
       commit: ({ workStopped, hostStopRequested }) => {
         exitWorkStopped = workStopped
+        // The ONE human-exit clear: BEFORE the exit controller latches and
+        // before the generic disposal chain (which never clears). A signal,
+        // PTY EOF, fatal, HMR or Client reexec never reaches this callback.
+        programResumeReporter?.humanExit()
         requestExit(hostStopRequested === true ? { hostStopRequested: true } : undefined)
       },
       presenter: () => surface.exitChoice,
@@ -4387,6 +4437,14 @@ export function applyRunnerWithRuntime(
       // exit key rule. It is a read, never a cache, and is shared by PiTui and
       // the TSP input binding.
       events: { ...applicationEvents.events, sessionActivity: () => exitIntent.activity() },
+      ...(programResumeReporter === undefined
+        ? {}
+        : {
+            onTerminalOwnership: (owned: boolean) => {
+              if (owned) programResumeReporter.resume()
+              else programResumeReporter.suspend()
+            },
+          }),
       terminalPastedPath: pastedImageIntake,
       ...(rendererMount === undefined ? {} : { renderer: rendererMount }),
       workspaceRoot: cwd,
@@ -4623,6 +4681,24 @@ export function applyRunnerWithRuntime(
     // Host handshake at the top of this root — is the split Client's real
     // surface-readiness proof.
     startupSettlement?.surfaceReady()
+    // OSC 7577 starts only at the REAL mounted PiTUI boundary. The initial
+    // sample covers a startup Resume that committed before this subscription;
+    // the payload-less ownership notifications may be generation-only, so the
+    // reporter re-reads the committed id every time.
+    if (programResumeReporter !== undefined && rendererMount === undefined) {
+      if (lifecycleController.signal.aborted) {
+        programResumeReporter.dispose()
+      } else {
+        const unsubscribe = ownership.subscribeScopeInvalidation(() => { programResumeReporter.observe() })
+        let observing = true
+        lifecycleController.signal.addEventListener('abort', () => {
+          if (!observing) return
+          observing = false
+          unsubscribe()
+        }, { once: true })
+        programResumeReporter.install()
+      }
+    }
     // The mounted surface is now live. On the PiTui branch the runner borrows
     // the TuiApp reference (the surface owner keeps the lifetime); the TSP
     // renderer branch has NO TuiApp (the slot stays undefined: command

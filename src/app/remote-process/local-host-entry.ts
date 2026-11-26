@@ -34,6 +34,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlChannel } from './entry-control.ts'
+import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { initializeHostEnvironment } from './host-environment.ts'
 import { HostActivityObserver } from './host-activity.ts'
 import { PI_TUI_WEB_ACCESS_ROWS } from '../host/features/web-roster.ts'
@@ -2180,6 +2181,11 @@ async function publishLocalHost(
  * finally, so a synchronous exit mirror below removes the same owned scratch.
  */
 export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
+  // The Host is a real independent process. Before the official profile boot
+  // snapshots the environment, remove any OSC capability that could only be
+  // destined for a foreground reporting Client. This runs before any
+  // loadLayeredEnv/runProfile call.
+  scrubProgramResumeEnvironment(process.env)
   const owned: HostScratchOwner = {}
   process.once('exit', () => {
     // A forced `process.exit()` from the launcher's native signal handler

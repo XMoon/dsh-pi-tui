@@ -1380,6 +1380,19 @@ only through the official local discovery/authentication; an absent Host is
 whatever the public daemon CLI starts for that Profile. The Host remains the
 sole Session owner throughout.
 
+OSC 7577 program-resume reporting is the Client-local terminal counterpart of
+that Session fact. Direct reports from its own process; the public daemon
+supervisor gives an admitted foreground Client ONE versioned, non-secret
+launch-facts handoff plus the protocol token, and the record's owning PID is
+the stable supervisor PID (not the disposable Client or Host PID). The Client
+entry captures and deletes both private fields before ensuring a Host, and the
+Host/manager/ACP/fallback environments never receive them. The Host never
+writes OSC 7577. A supported Client reexec forwards the capability only when
+the replacement manifest declares the internal v1 handoff; an accepted reload
+to an older target withdraws the old record instead. The exact output
+projection, fail-closed launch scope and human-exit-vs-generic-disposal clear
+rule are owned by [terminal-output.md](./terminal-output.md).
+
 The Host Gateway's pending forwarded events are the ONE recovery channel for a
 Question or Approval that was waiting when the Client left. A Client surface
 teardown must not settle a Host-owned forwarded request: it drops its local

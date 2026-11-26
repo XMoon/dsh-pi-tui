@@ -28,6 +28,10 @@ import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
 import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
+import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
+import { daemonProgramResumeCapability } from '../../client/program-resume/target.ts'
+import { admitProgramResume } from '../program-resume-admission.ts'
+import { applyProgramResumeChildEnvironment } from './program-resume-child.ts'
 
 /**
  * The read-only ACP stdio launch target, structurally identical to the
@@ -58,6 +62,16 @@ interface ProfileContextLike {
   readonly home: string
   readonly installAnchor: string
   readonly cwd: string
+  readonly overlays?: readonly unknown[]
+  readonly telemetryDisabledEnv?: string | undefined
+}
+
+/** The small launch-environment view used only to build the private capability. */
+interface LaunchEnvironmentLike {
+  getFrom(
+    name: string,
+    sources: readonly ('process' | 'project-env' | 'user-env')[],
+  ): { readonly value: string; readonly source: string } | undefined
 }
 
 /** The one-shot public launch envelope encoded for the Client child. */
@@ -164,6 +178,10 @@ export function buildChildEnvironment(
   delete env.DSH_PI_TUI_ROLE
   delete env.DSH_PI_TUI_HOST_ENTRY
   delete env.DSH_PI_TUI_BACKEND
+  // The OSC capability is process-private and never inherited by a generic
+  // Split child. Only an admitted foreground Client receives the protocol
+  // token and the non-secret v1 launch facts.
+  scrubProgramResumeEnvironment(env)
   env.SPLIT_PROCESS_DSH_ANCHOR = profileContext.installAnchor
   env.SPLIT_PROCESS_PROFILE = profileContext.name
   env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
@@ -189,6 +207,8 @@ export function buildAcpStdioEnvironment(
   delete env.DSH_PI_TUI_ROLE
   delete env.DSH_PI_TUI_HOST_ENTRY
   delete env.DSH_PI_TUI_BACKEND
+  // ACP stdio is a pure relay: it is never a program-resume reporter.
+  scrubProgramResumeEnvironment(env)
   delete env[ACP_STDIO_SOCKET_ENV]
   env[ACP_STDIO_SOCKET_ENV] = socketPath
   return env
@@ -709,7 +729,30 @@ export function apply(ctx: Context): void {
 
   const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const entry = resolveClientEntry(packageRoot)
-  const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup))
+  const launchEnvironment = ctx.get('launchEnvironment') as LaunchEnvironmentLike | undefined
+  const programResume = admitProgramResume(process.env, () => launchEnvironment === undefined
+    ? undefined
+    : daemonProgramResumeCapability({
+        profileContext: {
+          name: profileContext.name,
+          home: profileContext.home,
+          cwd: profileContext.cwd,
+          installAnchor: profileContext.installAnchor,
+          overlays: profileContext.overlays ?? [],
+          telemetryDisabledEnv: profileContext.telemetryDisabledEnv,
+        },
+        launch: launchEnvironment,
+        presetId: startup.presetId,
+        env: process.env,
+        execArgv: process.execArgv,
+        argv: process.argv,
+        execPath: process.execPath,
+        stdinIsTTY: process.stdin.isTTY === true,
+        stdoutIsTTY: process.stdout.isTTY === true,
+        platform: process.platform,
+      }))
+  const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup), process.env)
+  if (programResume !== undefined) applyProgramResumeChildEnvironment(env, programResume)
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
   const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }
