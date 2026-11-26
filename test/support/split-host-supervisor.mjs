@@ -8014,9 +8014,14 @@ async function handlePublicScopeState() {
   assertLifecycleOpen('PUBLIC_SCOPE_STATE')
   const registry = publicPathPresence(join(processScope.dir, 'instance.json'), 'PUBLIC_SCOPE_STATE registry')
   const launch = publicPathPresence(join(processScope.dir, 'launch.json'), 'PUBLIC_SCOPE_STATE launch')
-  const hosts = livePublicHostPids()
-  // A live Host legitimately holds the seat. Only a no-Host state is expected
-  // to be seat-free; the test compares the whole result for no-effect cases.
+  // Prefer the captured scope ledger: it is the exact Host set this Scene
+  // created. The global entry-name scan is only needed for the cold no-Host
+  // proof; a live ledger Host legitimately holds the seat and may not be
+  // discoverable by a candidate-specific entry name.
+  const ledgerHosts = publicHosts
+    .filter(host => publicHostStillLive(host))
+    .map(host => ({ pid: host.pid, birth: host.birth }))
+  const hosts = ledgerHosts.length > 0 ? ledgerHosts : livePublicHostPids()
   if (hosts.length === 0) {
     await assertSceneHostSeatFree('PUBLIC_SCOPE_STATE')
     await assertClientSeatFree(scene.installation, processScope.scopeId, 'PUBLIC_SCOPE_STATE')
