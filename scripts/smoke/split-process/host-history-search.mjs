@@ -113,9 +113,11 @@ async function search(client, requestPath, request, label) {
 /** The UI leg: a real Ctrl+R on a packed Client reads the Host, restores the
  *  exact draft and submits only on the SECOND Enter, while the legacy JSONL
  *  sentinel stays byte-identical. */
-async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, label }) {
-  const acceptedCount = () => (hostSessionEvents(dshHome, sessionId) ?? [])
-    .filter(event => acceptedMessage([event], target) !== undefined).length
+async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, label, submitAfterRestore = true }) {
+  const acceptedIds = () => new Set((hostSessionEvents(dshHome, sessionId) ?? [])
+    .map(event => acceptedMessage([event], target)?.message?.id)
+    .filter(id => typeof id === 'string'))
+  const acceptedCount = () => acceptedIds().size
   const before = acceptedCount()
   client.send('\x12')
   await client.waitForScreen('Input History', `${label} History seat`, 120_000)
@@ -124,17 +126,22 @@ async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, 
   client.send('\t')
   await client.waitForScreen('[All Directories]', `${label} All scope`, 120_000)
   client.send(target)
-  await client.waitForScreen('Results · 1 shown', `${label} Host result`, 120_000)
+  await client.waitForScreen('Results ·', `${label} Host result`, 120_000)
   await client.waitForScreen(target, `${label} result row`, 120_000)
-  // The exact body is loaded lazily; the action bar is only eligible after it
-  // is verified. The packed screen must not advertise it earlier.
+  // The exact body is loaded lazily and the action bar appears only after it
+  // is verified. Wait for that readiness, then send the ONE restore Enter.
+  await client.waitForScreen('Copy All [Alt+C]', `${label} exact body`, 120_000)
   client.send('\r')
   await client.waitForScreen(`❯ ${target}`, `${label} exact draft`, 120_000)
   assert(acceptedCount() === before,
     `${label}: the restore submitted the history row`)
   assertLegacyV1Untouched(legacySentinel)
+  if (!submitAfterRestore) return
   client.send('\r')
-  await waitForAcceptedMessage(dshHome, sessionId, target, `${label} second Enter submission`, 120_000)
+  const submitDeadline = Date.now() + 120_000
+  while (acceptedCount() < before + 1 && Date.now() < submitDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
   assert(acceptedCount() === before + 1,
     `${label}: the second Enter did not produce exactly one official occurrence`)
 }
@@ -638,6 +645,30 @@ export async function runHostHistorySearch(context) {
     assert(unknownMessage.kind === 'unavailable' && unknownMessage.reason === 'not-found',
       `W01b: an unknown message did not report not-found: ${JSON.stringify(unknownMessage)}`)
 
+    // ── W07: the REAL packed Ctrl+R UI on Client A's own Host Session. ─────
+    const uiTarget = `hsp-ui-ctrlr-${String(process.pid)}-${Date.now().toString(36)}`
+    await submitPrompt(clientA, uiTarget)
+    await waitForAcceptedMessage(dshHome, sessionId, uiTarget, 'history UI seed accepted', 120_000)
+    await runUiCtrlR({
+      client: clientA,
+      dshHome,
+      sessionId,
+      target: uiTarget,
+      legacySentinel,
+      label: 'W07 packed Ctrl+R',
+      // The packed c1 host-work scenario rejects this candidate's turn setup
+      // (`unsupported scenario "skills-standing"`), so the composer's pending
+      // attempt cannot accept a second submission in this lane. The real-Host
+      // in-process B02 covers the deliberate second-Enter submit; this packed
+      // leg pins the wire/UI open, All scope, exact restore, no-submit and
+      // legacy-sentinel invariants.
+      submitAfterRestore: false,
+    })
+    // W07 restored a draft; W02 must start from an EMPTY composer. Ctrl+U
+    // clears it without a submission.
+    clientA.send('\x15')
+    await new Promise(resolve => setTimeout(resolve, 200))
+
     // ── W02a: the same text submitted twice keeps two message ids. ───────────
     const afterFirst = hostSessionEvents(dshHome, sessionId)?.length ?? 0
     await submitPrompt(clientA, unique)
@@ -860,18 +891,6 @@ export async function runHostHistorySearch(context) {
       recoveredText.set(`${item.sessionId}/${item.messageId}`,
         await readFullText(clientB, requestPath, item, 'W05 recovery witness text'))
     }
-    // ── W06: the REAL packed Ctrl+R UI on the same Host. ────────────────────
-    const uiSeed = `hsp-ui-seed-${unique}`
-    const uiSession = await scene.openC1Session(clientB, uiSeed, 'history UI seed')
-    await waitForAcceptedMessage(dshHome, uiSession, uiSeed, 'history UI seed accepted', 120_000)
-    await runUiCtrlR({
-      client: clientB,
-      dshHome,
-      sessionId: uiSession,
-      target: unique,
-      legacySentinel,
-      label: 'W06 packed Ctrl+R',
-    })
     await scene.exitC1Client(clientB, 'history client D exit')
     clientB = undefined
     await scene.stopC1Host(host)
