@@ -30,7 +30,7 @@ import { createEntryDiag } from './entry-control.ts'
 import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
 import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
 import { daemonProgramResumeCapability } from '../../client/program-resume/target.ts'
-import { admitProgramResume } from '../bootstrap/program-resume-admission.ts'
+import { admitProgramResume } from '../program-resume-admission.ts'
 import { applyProgramResumeChildEnvironment } from './program-resume-child.ts'
 
 /**

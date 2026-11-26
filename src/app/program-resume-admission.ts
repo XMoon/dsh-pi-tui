@@ -7,7 +7,7 @@
  * @module @xmoon76/dsh-pi-tui/app/bootstrap/program-resume-admission
  */
 
-import { tspRequested } from './renderer-selection.ts'
+import { tspRequested } from './renderer-opt-in.ts'
 
 /** True only when this boot never requested the experimental TSP renderer. */
 export function programResumeAdmitted(env: { readonly DSH_PI_TUI_RENDERER?: string | undefined }): boolean {

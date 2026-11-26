@@ -159,7 +159,7 @@ import { createClientExtensionMountOwner, type ClientExtensionMountOwner } from 
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from './bootstrap/visual-snapshot.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
-import { admitProgramResume } from './bootstrap/program-resume-admission.ts'
+import { admitProgramResume } from './program-resume-admission.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
 import {
   createPluginManagerWorkspacePanel,

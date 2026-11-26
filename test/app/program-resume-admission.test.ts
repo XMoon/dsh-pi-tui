@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { admitProgramResume, programResumeAdmitted } from '../../src/app/bootstrap/program-resume-admission.ts'
+import { admitProgramResume, programResumeAdmitted } from '../../src/app/program-resume-admission.ts'
 
 test('the explicit TSP opt-in disables OSC 7577 even when PiTui later falls back', () => {
   assert.equal(programResumeAdmitted({ DSH_PI_TUI_RENDERER: 'tsp' }), false)

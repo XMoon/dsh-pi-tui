@@ -49,7 +49,7 @@ import {
 } from '../../client/program-resume/target.ts'
 import type { ProgramResumeReporter } from '../../client/program-resume/reporter.ts'
 import type { ProgramResumeClientHandle } from '../application-runtime.ts'
-import { programResumeAdmitted } from '../bootstrap/program-resume-admission.ts'
+import { programResumeAdmitted } from '../program-resume-admission.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
   clientDiagnosticLocation,
