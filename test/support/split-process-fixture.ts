@@ -264,10 +264,13 @@ export interface PublicDaemonLaunchFacts {
   backend: PublicDaemonBackend | null
   shellPid: number | null
   shellBirth: string | null
+  shellTty: { platform: string; eTdev?: number; ttyNr?: number } | null
   cli: PublicProcessIdentity | null
   client: PublicProcessIdentity | null
   host: PublicDaemonHostFacts | null
   hostAttempt: PublicDaemonHostFacts | null
+  registryAbsentBefore: boolean
+  registryAbsentAfter: boolean
   ready: boolean
   refused: boolean
   exit: { code: number | null; signal: string | null } | null
@@ -338,10 +341,13 @@ export interface PublicDaemonLaunch {
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
   readonly shellBirth: string | null
+  readonly shellTty: { platform: string; eTdev?: number; ttyNr?: number } | null
   readonly cli: PublicProcessIdentity | null
   readonly client: PublicProcessIdentity | null
   readonly host: PublicDaemonHostFacts | null
   readonly hostAttempt: PublicDaemonHostFacts | null
+  readonly registryAbsentBefore: boolean
+  readonly registryAbsentAfter: boolean
   readonly ready: boolean
   readonly refused: boolean
   readonly surface: PublicDaemonSurfaceFacts | null
@@ -995,10 +1001,13 @@ class PublicDaemon implements PublicDaemonLaunch {
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
   readonly shellBirth: string | null
+  readonly shellTty: { platform: string; eTdev?: number; ttyNr?: number } | null
   readonly cli: PublicProcessIdentity | null
   readonly client: PublicProcessIdentity | null
   readonly host: PublicDaemonHostFacts | null
   readonly hostAttempt: PublicDaemonHostFacts | null
+  readonly registryAbsentBefore: boolean
+  readonly registryAbsentAfter: boolean
   readonly ready: boolean
   readonly refused: boolean
   readonly surface: PublicDaemonSurfaceFacts | null
@@ -1018,10 +1027,13 @@ class PublicDaemon implements PublicDaemonLaunch {
     this.backend = (payload.backend ?? null) as PublicDaemonBackend | null
     this.shellPid = payload.shellPid === null || payload.shellPid === undefined ? null : Number(payload.shellPid)
     this.shellBirth = payload.shellBirth === null || payload.shellBirth === undefined ? null : String(payload.shellBirth)
+    this.shellTty = payload.shellTty ?? null
     this.cli = payload.cli ?? null
     this.client = payload.client ?? null
     this.host = payload.host ?? null
     this.hostAttempt = payload.hostAttempt ?? null
+    this.registryAbsentBefore = payload.registryAbsentBefore === true
+    this.registryAbsentAfter = payload.registryAbsentAfter === true
     this.ready = payload.ready === true
     this.refused = payload.refused === true
     this.surface = payload.surface ?? null
@@ -1096,10 +1108,13 @@ class PublicDaemon implements PublicDaemonLaunch {
         backend: this.backend,
         shellPid: this.shellPid,
         shellBirth: this.shellBirth,
+        shellTty: this.shellTty,
         cli: this.cli,
         client: this.client,
         host: this.host,
         hostAttempt: this.hostAttempt,
+        registryAbsentBefore: this.registryAbsentBefore,
+        registryAbsentAfter: this.registryAbsentAfter,
         ready: this.ready,
         refused: this.refused,
         exit: this.#exitFacts ?? null,
@@ -1122,10 +1137,13 @@ class PublicDaemon implements PublicDaemonLaunch {
       backend: this.backend,
       shellPid: this.shellPid,
       shellBirth: this.shellBirth,
+      shellTty: this.shellTty,
       cli: this.cli,
       client: this.client,
       host: this.host,
       hostAttempt: this.hostAttempt,
+      registryAbsentBefore: this.registryAbsentBefore,
+      registryAbsentAfter: this.registryAbsentAfter,
       ready: this.ready,
       refused: this.refused,
       exit: this.#exitFacts ?? null,
@@ -1151,10 +1169,13 @@ class PublicDaemon implements PublicDaemonLaunch {
       backend: this.backend,
       shellPid: this.shellPid,
       shellBirth: this.shellBirth,
+      shellTty: this.shellTty,
       cli: this.cli,
       client: this.client,
       host: this.host,
       hostAttempt: this.hostAttempt,
+      registryAbsentBefore: this.registryAbsentBefore,
+      registryAbsentAfter: this.registryAbsentAfter,
       ready: this.ready,
       refused: this.refused,
       exit: this.#exitFacts,

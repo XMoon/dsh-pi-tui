@@ -6086,6 +6086,7 @@ function publicLaunchFacts(handle) {
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth ?? null,
     shellPgid: handle.shellIdentity?.identity.pgid ?? null,
+    shellTty: handle.shellTty ?? null,
     nativeRunAttempted: handle.nativeRunAttempted === true,
     nativeSessionTerminal: handle.nativeSessionTerminal === true,
     foregroundGroupTerminal: handle.foregroundGroupTerminal === true,
@@ -6324,6 +6325,7 @@ async function waitForPublicProfileBackendKind(handle, label, timeoutMs = 120_00
 
 async function waitForPublicHostChildOrUsableSurface(handle, existing, label, surface) {
   const started = Date.now()
+  let lastUnknown = []
   for (;;) {
     assertPublicAdmissionOpen(label)
     const hostScan = scanPublicProcessTree(handle.client.pid, 'local-host.mjs', `${label} new Host child`, {
@@ -6339,6 +6341,8 @@ async function waitForPublicHostChildOrUsableSurface(handle, existing, label, su
     if (hostScan.kind === 'found') {
       return { kind: 'new', host: { ...hostScan.process } }
     }
+    if (hostScan.kind === 'none') lastUnknown = hostScan.unknown
+    if (hostScan.kind === 'unknown') lastUnknown = [{ code: hostScan.code ?? 'unknown' }]
     const state = await withProcessNativeOperation('public-daemon-reuse-state', handle.launchId,
       () => handle.terminal.state()).catch(() => undefined)
     if (state !== undefined && state.exited !== null) {
@@ -6346,6 +6350,13 @@ async function waitForPublicHostChildOrUsableSurface(handle, existing, label, su
     }
     const frame = await withProcessNativeOperation('public-daemon-reuse-frame', handle.launchId,
       () => handle.terminal.text({ full: false })).catch(() => '')
+    if (lastUnknown.length > 0) {
+      if (Date.now() - started >= 180_000) {
+        throw new Error(`${label}: a reusable surface appeared while the Host-child scan had unresolved unknowns: ${JSON.stringify(lastUnknown)}`)
+      }
+      await sleep(50)
+      continue
+    }
     if (surface === 'workspace') {
       if (frame.includes('Choose workspace') || frame.includes('Sessions')) {
         return {
@@ -6500,7 +6511,38 @@ function assertPublicHostRecord(host, registry, launch) {
  * PID AND kernel birth. A published PID that is not a captured attempt is
  * NOT_VERIFIED; the loser is never inferred from a numeric pid alone.
  */
+function assertPublicPairColdFacts(pair) {
+  if (pair.handles.length !== 2) {
+    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: both cold producers must be registered')
+  }
+  const attempts = pair.handles.map(handle => handle.hostCandidate)
+  if (attempts.some(attempt => attempt === undefined)) {
+    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: both cold producers must capture a real Host attempt before publication')
+  }
+  if (new Set(attempts.map(attempt => attempt.birth)).size !== 2) {
+    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the two cold producers did not capture distinct Host births')
+  }
+  for (const handle of pair.handles) {
+    if (handle.registryAbsentBefore !== true || handle.registryAbsentAfter !== true) {
+      throw new Error(`PUBLIC_PAIR_NOT_VERIFIED: ${handle.label} did not record strict registry ENOENT on both sides of its live attempt capture`)
+    }
+    if (handle.openedAt === undefined || handle.nativeRunAttempted !== true) {
+      throw new Error(`PUBLIC_PAIR_NOT_VERIFIED: ${handle.label} was not a real native cold producer`)
+    }
+  }
+  const tty = pair.handles[0].shellTty
+  const other = pair.handles[1].shellTty
+  const device = value => value?.platform === 'darwin' ? value.eTdev : value?.ttyNr
+  const firstDevice = device(tty)
+  const secondDevice = device(other)
+  if (firstDevice === undefined || secondDevice === undefined || firstDevice === secondDevice
+    || firstDevice === 0 || firstDevice === 0xffffffff || secondDevice === 0 || secondDevice === 0xffffffff) {
+    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the two cold producers do not have distinct controlling-terminal devices')
+  }
+}
+
 function bindPublicPairWinner(pair, registry) {
+  assertPublicPairColdFacts(pair)
   const publishedBirth = serializeKernelIdentity(publishedKernelIdentity(registry))
   const candidates = publicHosts.filter(host => host.pid === registry.hostPid)
   if (candidates.length !== 1) {
@@ -6510,15 +6552,25 @@ function bindPublicPairWinner(pair, registry) {
   if (winner.birth !== publishedBirth) {
     throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the published kernel birth is not the captured Host attempt birth')
   }
-  if (pair.handles.length !== 2
-    || pair.handles.some(handle => handle.hostCandidate === undefined)) {
-    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: both cold producers must capture a real Host attempt before publication')
-  }
   if (pair.winner !== undefined && pair.winner !== winner) {
     throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the batch resolved two different winners')
   }
+  if (pair.pendingWinner !== undefined && pair.pendingWinner !== winner) {
+    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the batch resolved two different pending winners')
+  }
   if (publicIdentityState({ pid: winner.pid, birth: winner.birth, entry: 'local-host.mjs' }) !== 'alive') {
     throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the published winner is not the captured live kernel process')
+  }
+  pair.pendingWinner = winner
+  for (const handle of pair.handles) handle.host = winner
+  return winner
+}
+
+function commitPublicPairWinner(pair) {
+  const winner = pair.pendingWinner
+  if (winner === undefined) throw new Error('PUBLIC_PAIR_NOT_VERIFIED: no pending published winner was resolved')
+  if (pair.winner !== undefined && pair.winner !== winner) {
+    throw new Error('PUBLIC_PAIR_NOT_VERIFIED: the batch committed two different winners')
   }
   pair.winner = winner
   winner.published = true
@@ -6725,9 +6777,24 @@ function livePublicHostPids() {
     }
     if (uid !== undefined && light.uid !== uid) continue
     if (light.name !== nodeName && light.name !== 'node') continue
+    const identity = obs.observe(pid)
+    if (identity.kind === 'gone') continue
+    if (identity.kind !== 'alive') {
+      throw new Error(`PUBLIC_COLD_SCAN_UNKNOWN: PID ${String(pid)} identity is unreadable (${String(identity.code)})`)
+    }
+    // A public Host candidate is always its own detached group/session leader.
+    // A non-leader Node process is positively not a Host candidate.
+    if (identity.pgid !== pid || identity.sid !== pid) continue
     const argv = obs.argvEntry(pid)
     if (argv.kind === 'gone') continue
     if (argv.kind !== 'ok') {
+      // A same-name Node process whose absolute entry lies outside this
+      // Scene's installed home is a different installation, not an unresolved
+      // candidate. A path inside the home with an unreadable canonical entry
+      // still fails closed.
+      const candidateEntry = argv.argv?.[1]
+      if (typeof candidateEntry === 'string' && isAbsolute(candidateEntry)
+        && !candidateEntry.startsWith(`${home}${sep}`)) continue
       throw new Error(`PUBLIC_COLD_SCAN_UNKNOWN: PID ${String(pid)} argv is unreadable (${argv.code})`)
     }
     if (argv.entry !== entry) continue
@@ -7071,6 +7138,12 @@ async function handleStartPublicDaemonColdPair(message) {
           birth: handle.hostCandidate.birth,
           winner: handle.hostCandidate === pair.winner,
           settled: handle.hostCandidate.settled === true,
+          registryAbsentBefore: handle.registryAbsentBefore === true,
+          registryAbsentAfter: handle.registryAbsentAfter === true,
+          shellTty: handle.shellTty === undefined ? null : {
+            platform: handle.shellTty.platform,
+            device: handle.shellTty.platform === 'darwin' ? handle.shellTty.eTdev : handle.shellTty.ttyNr,
+          },
         }),
       },
     })
@@ -7352,6 +7425,8 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
         throw new Error(`${label}: a warm launch started a new Host instead of reusing the registered one`)
       }
     } else {
+      const registryPathBefore = join(processScope.dir, 'instance.json')
+      handle.registryAbsentBefore = publicPathPresence(registryPathBefore, `${label}: registry absence before capture`) === 'absent'
       hostChild = await waitForPublicHostChild(handle.client.pid, handle.client.birth, `${label} public Host`, 180_000, handle.profile)
     }
     if (hostChild !== undefined) {
@@ -7361,7 +7436,8 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       writeReceipt({ phase: 'PUBLIC_DAEMON_HOST_CAPTURED' })
     }
     const registryPath = join(processScope.dir, 'instance.json')
-    const registryAbsent = publicPathPresence(registryPath, `${label}: registry absence`) === 'absent'
+    handle.registryAbsentAfter = publicPathPresence(registryPath, `${label}: registry absence after capture`) === 'absent'
+    const registryAbsent = handle.registryAbsentAfter
     if (hostChild !== undefined && process.env.SPLIT_VITEST_PROCESS_PROBE_POINT === 'public-daemon-before-registry') {
       await processProbeHold('public-daemon-before-registry', {
         launchId: handle.launchId,
@@ -7380,6 +7456,8 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
         scopeId: processScope.scopeId,
         registryPath,
         registryAbsent,
+        registryAbsentBefore: handle.registryAbsentBefore === true,
+        registryAbsentAfter: handle.registryAbsentAfter === true,
         ackOutstanding: true,
       })
     }
@@ -7390,6 +7468,7 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     if (pair !== undefined) {
       pair.authentication ??= waitForPublicHostAuthentication(pair.handles[0], material.registry, material.launch)
       authentication = await pair.authentication
+      commitPublicPairWinner(pair)
     } else {
       authentication = await waitForPublicHostAuthentication(handle, material.registry, material.launch)
     }
@@ -7403,8 +7482,10 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
     host.launchPath = material.launchPath
     host.authenticatedAt = authentication.authenticatedAt
     host.identity = authentication.identity
-    host.published = true
-    host.winner = true
+    if (pair === undefined || host === pair.winner) {
+      host.published = true
+      host.winner = true
+    }
     syncPublicLaunchReceipt()
     writeReceipt({ phase: 'PUBLIC_DAEMON_HOST_AUTHENTICATED' })
     if (loaderDumpPath !== undefined) {
@@ -7468,6 +7549,7 @@ function publicLaunchReturnFacts(handle) {
     shellPid: handle.shellPid,
     shellBirth: handle.shellIdentity?.birth ?? null,
     shellPgid: handle.shellIdentity?.identity.pgid ?? null,
+    shellTty: handle.shellTty ?? null,
     nativeRunAttempted: handle.nativeRunAttempted === true,
     nativeSessionTerminal: handle.nativeSessionTerminal === true,
     foregroundGroupTerminal: handle.foregroundGroupTerminal === true,
@@ -7475,6 +7557,8 @@ function publicLaunchReturnFacts(handle) {
     client: handle.client ?? null,
     host: handle.host == null ? null : publicDaemonHostFacts(handle.host),
     hostAttempt: handle.hostCandidate == null ? null : publicDaemonHostFacts(handle.hostCandidate),
+    registryAbsentBefore: handle.registryAbsentBefore === true,
+    registryAbsentAfter: handle.registryAbsentAfter === true,
     ready: handle.readyAt !== undefined,
     refused: handle.refused === true,
     exit: handle.exitResult ?? null,
@@ -7970,6 +8054,8 @@ async function handlePublicAuthorityControl(message) {
   const sentinelBirth = sentinelObs.birth
   const ownedGroups = [{ pid: sentinel.pid, birth: sentinelBirth, kind: 'sentinel' }]
   const terminals = []
+  const triggerPaths = []
+  let parentFixtureResource
   let terminal
   let authoritySignals = 0
   const facts = {
@@ -7982,6 +8068,27 @@ async function handlePublicAuthorityControl(message) {
     cleanup: {},
     sentinel: { pid: sentinel.pid, birth: sentinelBirth },
   }
+  function registerAuthorityResource(pid, kind) {
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error(`PUBLIC_AUTHORITY_CONTROL: ${kind} has no real PID`)
+    const existing = ownedGroups.find(candidate => candidate.pid === pid)
+    if (existing !== undefined) return existing
+    const observation = obs.observe(pid)
+    if (observation.kind !== 'alive') {
+      throw new Error(`PUBLIC_AUTHORITY_CONTROL: ${kind} PID ${String(pid)} is ${observation.kind}/${String(observation.code)}`)
+    }
+    const entry = { pid, birth: observation.birth, kind }
+    ownedGroups.push(entry)
+    return entry
+  }
+
+  function refreshAuthorityResourceBirth(resource, kind) {
+    const current = obs.observe(resource.pid)
+    if (current.kind !== 'alive') return
+    resource.births ??= [resource.birth]
+    if (!resource.births.includes(current.birth)) resource.births.push(current.birth)
+    resource.birth = current.birth
+  }
+
   try {
     const split = createSplitTerminal({
       prefix: 'public-authority',
@@ -8015,6 +8122,7 @@ async function handlePublicAuthorityControl(message) {
       P1D_AUTH_SPACE: 'a b c',
       P1D_AUTH_ASSIGN: 'x=y=z',
     }
+    triggerPaths.push(out.trigger, baseEnv.P1D_AUTH_SIBLING_TRIGGER)
     const opened = await withProcessNativeOperation('public-authority-run', 'public-authority',
       () => terminal.run(process.execPath, [files.parent], {
         cwd: dir, cols: 120, rows: 40, waitReady: false, env: baseEnv,
@@ -8023,7 +8131,9 @@ async function handlePublicAuthorityControl(message) {
     if (!Number.isInteger(shellPid) || shellPid <= 0) throw new Error('PUBLIC_AUTHORITY_CONTROL: the native PTY has no shell PID')
     const shellIdentity = captureShellIdentity(shellPid, 'PUBLIC_AUTHORITY_CONTROL shell')
     const shellTty = capturePublicShellTty(shellPid, 'PUBLIC_AUTHORITY_CONTROL shell')
+    const shellResource = registerAuthorityResource(shellPid, 'parent')
     const parentGround = await waitForAuthorityFile(out.parent, 'authority parent')
+    parentFixtureResource = registerAuthorityResource(parentGround.pid, 'parent-fixture')
     const parentObservation = obs.observeFull(shellPid)
     if (parentObservation.kind !== 'alive') {
       throw new Error(`PUBLIC_AUTHORITY_CONTROL: the controlled parent is ${parentObservation.kind}/${String(parentObservation.code)}`)
@@ -8042,6 +8152,7 @@ async function handlePublicAuthorityControl(message) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the controlled parent did not pass the public admission')
     }
     const childGround = await waitForAuthorityFile(out.child, 'authority child')
+    registerAuthorityResource(childGround.pid, 'child')
     const childObservation = obs.observeFull(childGround.pid, { parentPid: shellPid })
     if (childObservation.kind !== 'alive') {
       throw new Error(`PUBLIC_AUTHORITY_CONTROL: the controlled child is ${childObservation.kind}/${String(childObservation.code)}`)
@@ -8081,14 +8192,17 @@ async function handlePublicAuthorityControl(message) {
       facts.probe = { ...obs.probe(), procargs: childObservation.procargs, ctty: childObservation.tty }
     }
 
-    ownedGroups.push({ pid: shellPid, birth: shellIdentity.birth, kind: 'parent' })
-    ownedGroups.push({ pid: childGround.pid, birth: childObservation.birth, kind: 'child' })
+    if (shellResource.birth !== shellIdentity.birth) {
+      throw new Error('PUBLIC_AUTHORITY_CONTROL: the native shell birth changed before registration')
+    }
+    registerAuthorityResource(childGround.pid, 'child')
     const childPids = obs.children(shellPid)
     if (childPids.kind !== 'ok' || !childPids.pids.includes(childGround.pid)) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the real child enumeration did not include the controlled child')
     }
     writeFileSync(out.trigger, '', { mode: 0o600 })
     const second = await waitForAuthorityFile(join(dir, 'second-pid.json'), 'authority second child')
+    registerAuthorityResource(second.pid, 'second-child')
     const secondGround = await waitForAuthorityFile(out.second, 'authority second facts')
     const grown = obs.children(shellPid)
     if (grown.kind !== 'ok' || !grown.pids.includes(childGround.pid) || !grown.pids.includes(secondGround.pid)) {
@@ -8100,6 +8214,8 @@ async function handlePublicAuthorityControl(message) {
     }
 
     writeFileSync(join(dir, 'spawn-sibling'), '', { mode: 0o600 })
+    const siblingPid = await waitForAuthorityFile(join(dir, 'sibling-pid.json'), 'authority sibling pid')
+    registerAuthorityResource(siblingPid.pid, 'sibling')
     const siblingGround = await waitForAuthorityFile(out.sibling, 'authority sibling')
     const siblingObservation = obs.observeFull(siblingGround.pid)
     if (siblingObservation.kind !== 'alive') throw new Error('PUBLIC_AUTHORITY_CONTROL: the detached sibling is not observable')
@@ -8113,7 +8229,6 @@ async function handlePublicAuthorityControl(message) {
     if (obs.admit(siblingObservation, siblingExpected).admitted !== true) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the real detached sibling did not pass the public admission')
     }
-    ownedGroups.push({ pid: siblingGround.pid, birth: siblingObservation.birth, kind: 'sibling' })
     const siblingGroup = obs.groupMembers(siblingGround.pid)
     if (siblingGroup.kind !== 'ok' || !siblingGroup.members.some(member => member.pid === siblingGround.pid)) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the real detached sibling group does not contain the exact birth member')
@@ -8135,11 +8250,11 @@ async function handlePublicAuthorityControl(message) {
       cwd: dir, stdio: 'ignore', detached: true,
       env: { ...missingEnv, P1D_AUTH_OUT: missingOut },
     })
-    ownedGroups.push({ pid: missingChild.pid, birth: undefined, kind: 'missing-env' })
+    const missingResource = registerAuthorityResource(missingChild.pid, 'missing-env')
     const missingGround = await waitForAuthorityFile(missingOut, 'missing-env child')
+    refreshAuthorityResourceBirth(missingResource, 'missing-env')
     const missingObservation = obs.observeFull(missingGround.pid)
     if (missingObservation.kind !== 'alive') throw new Error('PUBLIC_AUTHORITY_CONTROL: the missing-env child is not observable')
-    ownedGroups[ownedGroups.length - 1].birth = missingObservation.birth
     facts.negative.missingEnv = reason(missingObservation, { ...parentExpected, birth: missingObservation.birth, entry: files.child })
 
     const execEnv = Object.entries({
@@ -8156,10 +8271,10 @@ async function handlePublicAuthorityControl(message) {
       cwd: dir, stdio: 'ignore', detached: true,
       env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv) },
     })
-    ownedGroups.push({ pid: duplicateChild.pid, birth: undefined, kind: 'execve-control' })
+    const duplicateResource = registerAuthorityResource(duplicateChild.pid, 'execve-control')
     const duplicateOut = await waitForAuthorityFile(join(dir, 'duplicate.json'), 'duplicate-env child')
+    refreshAuthorityResourceBirth(duplicateResource, 'execve-control')
     const duplicateObservation = obs.observeFull(duplicateOut.pid)
-    ownedGroups[ownedGroups.length - 1].birth = duplicateObservation.kind === 'alive' ? duplicateObservation.birth : undefined
     facts.negative.duplicateEnv = duplicateObservation.kind === 'alive'
       ? reason(duplicateObservation, { ...parentExpected, birth: duplicateObservation.birth, entry: files.child })
       : duplicateObservation.code
@@ -8174,10 +8289,10 @@ async function handlePublicAuthorityControl(message) {
       cwd: dir, stdio: 'ignore', detached: true,
       env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: malformedOut },
     })
-    ownedGroups.push({ pid: malformedChild.pid, birth: undefined, kind: 'malformed-env' })
+    const malformedResource = registerAuthorityResource(malformedChild.pid, 'malformed-env')
     const malformedGround = await waitForAuthorityFile(malformedOut, 'malformed-env child')
+    refreshAuthorityResourceBirth(malformedResource, 'malformed-env')
     const malformedObservation = obs.observeFull(malformedGround.pid)
-    ownedGroups[ownedGroups.length - 1].birth = malformedObservation.kind === 'alive' ? malformedObservation.birth : undefined
     facts.negative.malformedEnv = malformedObservation.kind === 'alive'
       ? reason(malformedObservation, { ...parentExpected, birth: malformedObservation.birth, entry: files.child })
       : malformedObservation.code
@@ -8237,74 +8352,108 @@ async function handlePublicAuthorityControl(message) {
     }
     return facts
   } finally {
-    // Cleanup is owned: close the native PTY, then signal only captured groups
-    // whose exact ownership is re-proved. Never a bare numeric group.
-    for (const split of terminals.reverse()) {
-      await split.terminal.closeQuiet().catch(() => undefined)
-    }
-    const kernel = processKernelReaders()
-    // Only an entry with a recorded birth is a signal candidate. A missing
-    // birth is not replaced by a fresh self-proving read; it stays unproven and
-    // is left to the native PTY close / Scene audit.
-    for (const entry of [...ownedGroups].reverse()) {
-      if (!Number.isInteger(entry.pid) || entry.pid <= 0 || typeof entry.birth !== 'string') continue
-      const fresh = obs.observe(entry.pid)
-      if (fresh.kind !== 'alive' || fresh.birth !== entry.birth) continue
-      if (fresh.pgid !== entry.pid || fresh.sid !== entry.pid) continue
+    // Cleanup is owned by the same native terminal/registered-resource ledger.
+    // There is no destructive global sweep: a process is signalled only when it
+    // was registered at spawn/capture with a real production birth.
+    const closeErrors = []
+    // Remove the fixture's spawn triggers before closing the PTY so the parent
+    // cannot create a new detached child after the owned-resource audit.
+    for (const path of triggerPaths) {
       try {
-        assertKernelGroupSignalOwnership(kernel, entry.pid, entry.birth, `PUBLIC_AUTHORITY_CONTROL cleanup ${entry.kind}`)
-        process.kill(-entry.pid, 'SIGTERM')
-        authoritySignals += 1
-      } catch {
-        // Already gone or no longer the proved group: leave it.
+        unlinkSync(path)
+      } catch (error) {
+        if (error?.code !== 'ENOENT') closeErrors.push(`trigger ${path}: ${boundedErrorText(error)}`)
       }
     }
-    // Sweep only THIS fixed fixture directory: the parent spawns its detached
-    // sibling/children asynchronously, so an early failure can precede their
-    // ledger entry. The unique canonical entry path is the ownership proof.
-    const swept = []
-    const listing = obs.allPids()
-    if (listing.kind === 'ok') {
-      for (const pid of listing.pids) {
-        if (pid === process.pid || pid === process.ppid) continue
-        const light = obs.basic(pid)
-        if (light.kind !== 'ok' || light.name !== sceneNodeName()) continue
-        const argv = obs.argvEntry(pid)
-        if (argv.kind !== 'ok') continue
-        const entry = [files.child, files.parent].find(candidate => argv.entry === obs.canonicalEntry(candidate))
-        if (entry === undefined) continue
-        const captured = obs.capture(pid, { entry, uid: typeof process.getuid === 'function' ? process.getuid() : undefined, requireEnv: false })
-        if (captured.kind === 'captured') {
-          const fresh = obs.observe(pid)
-          if (fresh.kind === 'alive' && fresh.birth === captured.process.birth) {
-            swept.push({ pid, entry, birth: captured.process.birth })
-            try {
-              process.kill(pid, 'SIGTERM')
-              authoritySignals += 1
-            } catch { /* gone */ }
-          }
+    // Stop the fixture parent first: after its spawn triggers are gone it must
+    // not be able to create another detached child while the terminal closes.
+    if (parentFixtureResource !== undefined) {
+      const parentNow = obs.observe(parentFixtureResource.pid)
+      if (parentNow.kind === 'alive' && parentNow.birth === parentFixtureResource.birth) {
+        try {
+          process.kill(parentFixtureResource.pid, 'SIGKILL')
+          authoritySignals += 1
+        } catch { /* already gone */ }
+        for (let i = 0; i < 100; i += 1) {
+          const check = obs.observe(parentFixtureResource.pid)
+          if (check.kind !== 'alive' || check.birth !== parentFixtureResource.birth) break
+          await sleep(20)
         }
       }
     }
-    await sleep(250)
-    for (const entry of swept) {
+    for (const split of terminals.reverse()) {
+      try {
+        await split.terminal.closeQuiet()
+      } catch (error) {
+        closeErrors.push(boundedErrorText(error))
+      }
+    }
+    const kernel = processKernelReaders()
+    const resourceBirths = entry => entry.births ?? [entry.birth]
+    for (const entry of [...ownedGroups].reverse()) {
+      if (!Number.isInteger(entry.pid) || entry.pid <= 0) continue
       const fresh = obs.observe(entry.pid)
-      if (fresh.kind === 'alive' && fresh.birth === entry.birth) {
-        try {
+      if (fresh.kind !== 'alive' || !resourceBirths(entry).includes(fresh.birth)) continue
+      try {
+        if (fresh.pgid === entry.pid && fresh.sid === entry.pid) {
+          assertKernelGroupSignalOwnership(kernel, entry.pid, entry.birth, `PUBLIC_AUTHORITY_CONTROL cleanup ${entry.kind}`)
+          process.kill(-entry.pid, 'SIGTERM')
+        } else {
+          process.kill(entry.pid, 'SIGTERM')
+        }
+        authoritySignals += 1
+      } catch {
+        // Already gone or not the proved resource: the audit below reports it.
+      }
+    }
+    await sleep(250)
+    for (const entry of ownedGroups) {
+      if (!Number.isInteger(entry.pid) || entry.pid <= 0) continue
+      const fresh = obs.observe(entry.pid)
+      if (fresh.kind !== 'alive' || !resourceBirths(entry).includes(fresh.birth)) continue
+      try {
+        if (fresh.pgid === entry.pid && fresh.sid === entry.pid) {
+          assertKernelGroupSignalOwnership(kernel, entry.pid, entry.birth, `PUBLIC_AUTHORITY_CONTROL escalation ${entry.kind}`)
+          process.kill(-entry.pid, 'SIGKILL')
+        } else {
           process.kill(entry.pid, 'SIGKILL')
-          authoritySignals += 1
-        } catch { /* gone */ }
+        }
+        authoritySignals += 1
+      } catch {
+        // The audit below is the authority on whether anything remains.
       }
     }
     await sleep(100)
+    const knownPids = new Set(ownedGroups.map(entry => entry.pid))
+    const unregistered = []
+    const listing = obs.allPids()
+    if (listing.kind === 'ok') {
+      for (const pid of listing.pids) {
+        if (knownPids.has(pid) || pid === process.pid || pid === process.ppid) continue
+        const argv = obs.argvEntry(pid)
+        if (argv.kind !== 'ok' || argv.entry === null) continue
+        const expected = [files.child, files.parent].map(candidate => obs.canonicalEntry(candidate))
+        if (!expected.includes(argv.entry)) continue
+        unregistered.push({ pid, entry: argv.entry })
+      }
+    }
+    const leaked = []
+    const unknownResources = []
+    for (const entry of ownedGroups) {
+      const fresh = obs.observe(entry.pid)
+      if (fresh.kind === 'alive' && resourceBirths(entry).includes(fresh.birth)) leaked.push({ pid: entry.pid, kind: entry.kind })
+      else if (fresh.kind === 'unknown') unknownResources.push({ pid: entry.pid, kind: entry.kind, code: fresh.code })
+    }
     facts.cleanup = {
-      ownedGroups: ownedGroups.length,
-      swept: swept.length,
-      leaked: swept.filter(entry => {
-        const fresh = obs.observe(entry.pid)
-        return fresh.kind === 'alive' && fresh.birth === entry.birth
-      }).length,
+      registered: ownedGroups.length,
+      leaked: leaked.length,
+      leakedResources: leaked,
+      unknown: unknownResources.length,
+      unknownResources,
+      unregistered,
+      registeredResources: ownedGroups.map(entry => ({ pid: entry.pid, kind: entry.kind })),
       signalsSent: authoritySignals,
+      closeErrors,
       sentinelGone: readKernelProcess(sentinel.pid).kind === 'gone',
     }
     writeReceipt({ publicAuthorityControl: facts })
@@ -8397,7 +8546,7 @@ async function waitForPublicHostTerminal(host, reason, timeoutMs = 30_000) {
  * DSH home, and (when published) the product registry naming this instance.
  * An absent registry is admitted only through the captured pre-registry edge.
  */
-function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
+function assertPublicHostOwnership(host, reason, expectedBirth = host.birth, options = {}) {
   const observation = requirePublicObservation(reason).observeFull(host.pid)
   if (observation.kind === 'gone') throw new Error(`${reason}: the public Host is gone`)
   if (observation.kind !== 'alive') {
@@ -8442,6 +8591,16 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
     const files = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
     if (files.registryMode !== 0o600 || files.launchMode !== 0o600) {
       throw new Error(`${reason}: the public Host material is not 0600 (${String(files.registryMode)}/${String(files.launchMode)})`)
+    }
+    if (files.registry.hostPid !== host.pid) {
+      const other = options.allowOtherWinner
+      if (other === undefined || other === host || other.authenticatedAt === undefined
+        || files.registry.hostPid !== other.pid) {
+        throw new Error(`${reason}: the public Host material names another owner`)
+      }
+      assertPublicHostRecord(other, files.registry, files.launch)
+      assertPublishedHostMatchesKernel(files.registry, `${reason}: other winner`)
+      return { birth, identity, otherWinner: other }
     }
     if (host.authenticatedAt === undefined) {
       throw new Error(`${reason}: the published public Host was never authenticated`)
@@ -8498,6 +8657,26 @@ async function bindLatePublicHostRegistry(host, reason, timeoutMs = 15_000) {
   host.launchPath = launchPath
   host.authenticatedAt = authentication.authenticatedAt
   host.identity = authentication.identity
+  const pair = host.pairId === null || host.pairId === undefined
+    ? undefined
+    : publicLaunches.find(candidate => candidate.pair?.pairId === host.pairId)?.pair
+  if (pair !== undefined) {
+    if (pair.winner !== undefined && pair.winner !== host) {
+      throw new Error(`${reason}: the late publication is a second pair winner`)
+    }
+    if (pair.winner === undefined) {
+      pair.winner = host
+      host.published = true
+      host.winner = true
+      for (const candidate of pair.handles) candidate.host = host
+      appendNote('public-daemon-late-winner-bound', {
+        pairId: pair.pairId,
+        pid: host.pid,
+        birth: host.birth,
+        instanceId: host.instanceId,
+      })
+    }
+  }
   syncPublicLaunchReceipt()
   appendNote('public-daemon-late-registry-bound', {
     launchId: handle.launchId,
@@ -8575,9 +8754,16 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
     return
   }
   if (candidateOnly) {
+    const candidatePair = host.pairId === null || host.pairId === undefined
+      ? undefined
+      : publicLaunches.find(candidate => candidate.pair?.pairId === host.pairId)?.pair
     const ownership = assertPublicHostOwnership(host, `reclaimPublicHost:${reason}`,
-      options.expectedBirth ?? host.birth)
-    const foregroundLive = publicLaunches.some(handle => handle.host === host && !handle.closed)
+      options.expectedBirth ?? host.birth, { allowOtherWinner: candidatePair?.winner })
+    const relatedHandles = candidatePair === undefined
+      ? publicLaunches.filter(handle => handle.launchId === host.attemptByLaunchId)
+      : candidatePair.handles
+    const foregroundLive = relatedHandles.some(handle => handle.closed !== true
+      && handle.nativeSessionTerminal !== true)
     if (foregroundLive) throw new Error(`reclaimPublicHost:${reason}: a public foreground session is still live`)
     appendNote('public-daemon-loser-terminated', { pid: host.pid, birth: ownership.birth, reason, signal: 'SIGTERM' })
     publicSignalAttempts += 1
@@ -8612,6 +8798,13 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
     options.expectedBirth ?? host.birth)
   const foregroundLive = publicLaunches.some(handle => handle.host === host && !handle.closed)
   if (foregroundLive) throw new Error(`reclaimPublicHost:${reason}: a public foreground session is still live`)
+  const freshFiles = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
+  const authHandle = publicLaunches.find(handle => handle.launchId === host.attemptByLaunchId)
+  if (authHandle === undefined) throw new Error(`reclaimPublicHost:${reason}: the published Host has no owning launch`)
+  const freshAuth = await waitForPublicHostAuthentication(authHandle, freshFiles.registry, freshFiles.launch, 30_000, { allowClosed: true })
+  if (freshAuth.identity === undefined || host.instanceId !== freshFiles.registry.instanceId) {
+    throw new Error(`reclaimPublicHost:${reason}: the fresh official authentication did not bind the published instance`)
+  }
   appendNote('public-host-terminated', { pid: host.pid, birth: ownership.birth, reason, signal: 'SIGTERM' })
   publicSignalAttempts += 1
   process.kill(host.pid, 'SIGTERM')

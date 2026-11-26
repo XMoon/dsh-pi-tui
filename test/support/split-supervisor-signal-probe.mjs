@@ -32,7 +32,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -430,6 +430,96 @@ async function loadKernelHelpers() {
     groupMembers: identity.listKernelGroupMembers,
   }
   return kernelHelpers
+}
+
+let publicObservationCache
+async function loadPublicObservation(receipt) {
+  const anchor = receipt?.installation?.anchor
+  if (typeof anchor !== 'string' || anchor === '') fail('the receipt carries no installed DSH anchor')
+  if (publicObservationCache?.anchor === anchor) return publicObservationCache.observation
+  const [seam, identity, darwin, contract] = await Promise.all([
+    import('./split-public-process-observation.mjs'),
+    import('../../src/runtime/native-process/identity.ts'),
+    import('../../src/runtime/native-process/darwin.ts'),
+    import('./split-upgrade-native-contract.mjs'),
+  ])
+  const observation = seam.createPublicObservation({
+    anchor,
+    koffiEntry: process.platform === 'darwin' ? darwin.resolveDshKoffi(anchor) : undefined,
+    kernel: {
+      read: identity.readKernelProcess,
+      serialize: contract.serializeKernelIdentity,
+      classify: contract.classifyKernelLiveness,
+      listMembers: identity.listKernelGroupMembers,
+    },
+  })
+  publicObservationCache = { anchor, observation }
+  return observation
+}
+
+function exactPathAbsent(path, label) {
+  try {
+    lstatSync(path)
+    fail(`${label}: the path exists but must be strictly absent`)
+    return false
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true
+    fail(`${label}: the path presence is not ENOENT (${String(error?.code)}), so absence is unproven`)
+    return false
+  }
+}
+
+async function assertPublicChain(receipt, launch, at, options = {}) {
+  const obs = await loadPublicObservation(receipt)
+  const installation = receipt.installation
+  const home = installation?.dshHome
+  const anchor = installation?.anchor
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  const shellTty = options.shellTty ?? obs.ttyCompareFacts(launch.shellPid) ?? undefined
+  const expected = (facts, role, extra = {}) => {
+    const base = {
+      birth: facts.birth,
+      entry: role === 'cli' ? facts.entryRealpath : installation.entries[role],
+      receiptEntry: role,
+      home,
+      profile: facts.officialProfile ?? launch.profile,
+      anchor: role === 'cli' ? undefined : anchor,
+      uid,
+      requireEnv: true,
+      ...extra,
+    }
+    return base
+  }
+  const cliExtra = {}
+  if (launch.cli.pid !== launch.shellPid) {
+    cliExtra.parentPid = launch.shellPid
+    cliExtra.parentBirth = launch.shellBirth
+  }
+  if (shellTty !== undefined) cliExtra.tty = { kind: 'foreground', shell: shellTty }
+  const cli = obs.capture(launch.cli.pid, expected(launch.cli, 'cli', cliExtra))
+  if (cli.kind !== 'captured') fail(`${at}: the public CLI is not the complete live installed identity (${cli.kind}/${String(cli.code ?? cli.reason)})`)
+  const client = obs.capture(launch.client.pid, expected(launch.client, 'client', {
+    parentPid: launch.cli.pid,
+    parentBirth: launch.cli.birth,
+    tty: shellTty === undefined ? undefined : { kind: 'foreground', shell: shellTty },
+  }))
+  if (client.kind !== 'captured') fail(`${at}: the public Client is not the complete live direct child (${client.kind}/${String(client.code ?? client.reason)})`)
+  const host = obs.capture(launch.host.pid, expected(launch.host, 'host', {
+    parentPid: launch.client.pid,
+    parentBirth: launch.client.birth,
+    tty: { kind: 'detached' },
+    groupLeader: true,
+    forbidEnv: ['DSH_PI_TUI_BACKEND'],
+  }))
+  if (host.kind !== 'captured') fail(`${at}: the public Host is not the complete live detached identity (${host.kind}/${String(host.code ?? host.reason)})`)
+  if (host.process.birth !== launch.host.birth || host.process.pid !== launch.host.pid) {
+    fail(`${at}: the public Host capture did not bind the receipt PID/birth`)
+  }
+  if (launch.cli.pid !== launch.shellPid) {
+    const edge = obs.parentEdge(launch.cli.pid, launch.shellPid, launch.shellBirth)
+    if (edge.proven !== true) fail(`${at}: the CLI/shell edge is not the current direct child (${String(edge.reason)})`)
+  }
+  return { obs, cli, client, host }
 }
 
 /**
@@ -1218,7 +1308,7 @@ try {
             ? current : undefined
         }, 'a registered live discovery-fallback Host', 900_000)
       } else if (at === 'public-daemon-before-registry' || at === 'public-daemon-before-ready-ack') {
-        receipt = await waitUntil(() => {
+        receipt = await waitUntil(async () => {
           const current = latestProcessReceipt(tmpBase, runId)
           if (current?.phase === 'NOT_QUIESCED') {
             fail(`${String(at)}: the Supervisor failed before reaching the requested window (${String(current.errorName ?? 'unknown')})`)
@@ -1243,13 +1333,15 @@ try {
             fail(`${String(at)}: the checkpoint note names another public Host`)
           }
           if (at === 'public-daemon-before-registry') {
-            if (note.detail?.registryAbsent !== true) {
-              fail('public-daemon-before-registry: the registry was already published before the window')
+            if (note.detail?.registryAbsent !== true || note.detail?.registryAbsentBefore !== true
+              || note.detail?.registryAbsentAfter !== true) {
+              fail('public-daemon-before-registry: strict registry ENOENT was not recorded on both sides of the live capture')
             }
             if (launch.readyAt !== undefined) fail('public-daemon-before-registry: the launch already reached ready')
-            if (typeof note.detail?.registryPath !== 'string' || existsSync(note.detail.registryPath)) {
-              fail('public-daemon-before-registry: the registry path exists at the trigger')
+            if (typeof note.detail?.registryPath !== 'string') {
+              fail('public-daemon-before-registry: the checkpoint carries no registry path')
             }
+            exactPathAbsent(note.detail.registryPath, 'public-daemon-before-registry')
           } else {
             if (launch.readyAt === undefined || launch.host.instanceId === undefined) return undefined
             if (note.detail?.registryPublished !== true || note.detail?.authenticated !== true
@@ -1258,14 +1350,17 @@ try {
             }
             const registryPath = join(current.installation.dshHome, 'run', 'dsh-pi-tui',
               launch.host.scopeId, 'instance.json')
-            if (!existsSync(registryPath)) {
-              fail('public-daemon-before-ready-ack: the published registry is not on disk at the trigger')
+            try {
+              lstatSync(registryPath)
+            } catch (error) {
+              fail(`public-daemon-before-ready-ack: the published registry is not strictly present (${String(error?.code)})`)
             }
             const registry = JSON.parse(readFileSync(registryPath, 'utf8'))
             if (registry.hostPid !== launch.host.pid || registry.instanceId !== launch.host.instanceId) {
               fail('public-daemon-before-ready-ack: the registry does not name the checkpoint Host')
             }
           }
+          await assertPublicChain(current, launch, String(at))
           return current
         }, `${String(at)} public daemon checkpoint`, 900_000)
       } else if (at === 'public-daemon-ownership-refused') {
@@ -1465,10 +1560,17 @@ try {
           if (typeof registryPath !== 'string' || registryPath === '') {
             fail('public-daemon-before-registry: the hold carries no registry path')
           }
-          if (existsSync(registryPath)) {
-            fail('public-daemon-before-registry: NOT_VERIFIED — the registry was already published immediately before the SIGKILL; the window was missed')
+          exactPathAbsent(registryPath, 'public-daemon-before-registry immediately before SIGKILL')
+        } else {
+          const registryPath = join(receipt.installation.dshHome, 'run', 'dsh-pi-tui',
+            launch.host.scopeId, 'instance.json')
+          try {
+            lstatSync(registryPath)
+          } catch (error) {
+            fail(`public-daemon-before-ready-ack: the registry is not strictly present immediately before SIGKILL (${String(error?.code)})`)
           }
         }
+        await assertPublicChain(receipt, launch, String(at))
         for (const [kind, identity] of [['CLI', launch.cli], ['Client', launch.client], ['Host', launch.host]]) {
           if (identity === undefined || identity === null
             || identityLiveness(kernel, identity.pid, identity.birth) !== 'live') {
@@ -1512,7 +1614,50 @@ try {
         if (typeof refused.sceneRoot !== 'string' || !existsSync(refused.sceneRoot)) {
           fail('public-daemon-ownership-refused: the refused root was not retained')
         }
+        const refusedObs = await loadPublicObservation(refused)
+        const refusedLaunch = (refused.publicLaunches ?? []).find(value => value.launchId === refusedHost.attemptByLaunchId)
+        if (refusedLaunch === undefined) fail('public-daemon-ownership-refused: the refused Host has no owning launch')
+        const refusedCurrent = refusedObs.capture(refusedHost.pid, {
+          birth: refusedHost.birth,
+          entry: refused.installation.entries.host,
+          home: refused.installation.dshHome,
+          profile: refusedHost.officialProfile ?? refusedLaunch.profile,
+          anchor: refused.installation.anchor,
+          uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
+          requireEnv: true,
+          tty: { kind: 'detached' },
+          groupLeader: true,
+          forbidEnv: ['DSH_PI_TUI_BACKEND'],
+        })
+        if (refusedCurrent.kind !== 'captured') {
+          fail(`public-daemon-ownership-refused: the refused Host is not the complete current identity (${refusedCurrent.kind}/${String(refusedCurrent.code ?? refusedCurrent.reason)})`)
+        }
+        const refusedRegistry = join(refused.installation.dshHome, 'run', 'dsh-pi-tui',
+          refusedHost.scopeId, 'instance.json')
+        try {
+          lstatSync(refusedRegistry)
+        } catch (error) {
+          fail(`public-daemon-ownership-refused: the refused material is not strictly present (${String(error?.code)})`)
+        }
         writeFileSync(publicRefusalReleaseFile, 'release\n', { mode: 0o600 })
+        const compensated = await waitUntil(() => {
+          const current = latestProcessReceipt(tmpBase, runId)
+          return current?.publicOwnershipRefused?.compensationCompleted === true ? current : undefined
+        }, 'the ownership-refusal compensation terminal', 120_000)
+        const refusedAfter = refusedObs.observe(refusedHost.pid)
+        if (refusedAfter.kind === 'alive' && refusedAfter.birth === refusedHost.birth) {
+          fail('public-daemon-ownership-refused: the refused Host is still live after compensation')
+        }
+        if (refusedAfter.kind === 'unknown') {
+          fail(`public-daemon-ownership-refused: the refused Host terminal is unknown (${String(refusedAfter.code)})`)
+        }
+        const refusedGroup = refusedObs.groupMembers(refusedHost.pgid)
+        if (refusedGroup.kind !== 'ok' || refusedGroup.members.length !== 0) {
+          fail('public-daemon-ownership-refused: the refused Host group is not terminal after compensation')
+        }
+        if (compensated.publicOwnershipRefused?.signalSent !== false) {
+          fail('public-daemon-ownership-refused: compensation lost the zero-signal fact')
+        }
       }
     }
   } else if (upgradeMode) {

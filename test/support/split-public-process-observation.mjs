@@ -26,7 +26,7 @@
 
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
 import {
   DARWIN_BSDINFO_BYTES,
@@ -591,13 +591,28 @@ export function admitPublicObservation(observation, expected = {}) {
   }
   if (expected.parentPid !== undefined) {
     const edge = observation.parentEdge
-    if (edge?.proven !== true) return { admitted: false, reason: 'parent-edge-unproven', detail: edge?.reason }
+    if (edge?.proven !== true) {
+      return { admitted: false, reason: 'parent-edge-unproven', detail: edge?.reason, definitive: edge?.definitive === true }
+    }
     if (edge.parentPid !== expected.parentPid) return { admitted: false, reason: 'parent-edge-unproven' }
     if (expected.parentBirth !== undefined && edge.parentBirth !== expected.parentBirth) {
       return { admitted: false, reason: 'parent-edge-unproven' }
     }
   }
   return { admitted: true, reason: 'admitted' }
+}
+
+const DEFINITIVE_ADMISSION_REASONS = new Set([
+  'birth-mismatch', 'canonical-entry-mismatch', 'uid-mismatch', 'dsh-home-mismatch',
+  'split-process-profile-mismatch', 'split-process-dsh-anchor-mismatch',
+  'forbidden-env-present', 'tty-mismatch', 'group-not-leader',
+])
+
+/** admitted | not-target | unknown; only a positively read mismatch may exclude. */
+export function publicAdmissionDisposition(admitted) {
+  if (admitted?.admitted === true) return 'admitted'
+  if (admitted?.definitive === true || DEFINITIVE_ADMISSION_REASONS.has(admitted?.reason)) return 'not-target'
+  return 'unknown'
 }
 
 function publicTtyFacts(tty) {
@@ -751,16 +766,32 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     }
   }
 
+  function bsdBindsIdentity(bsd, identity) {
+    return bsd.ppid === identity.ppid && bsd.pgid === identity.pgid && bsd.uid === identity.uid
+      && bsd.startSec === identity.startSec && bsd.startUsec === identity.startUsec
+      && bsd.status === identity.state
+  }
+
+  function linuxStatBindsIdentity(statFields, identity) {
+    return statFields.ppid === identity.ppid && statFields.pgid === identity.pgid
+      && statFields.sid === identity.sid && statFields.starttime === identity.startTicks
+  }
+
   /** One light observation: production identity plus controlling-tty facts. */
   function observe(pid) {
     if (!Number.isInteger(pid) || pid <= 0) return { kind: 'unknown', code: 'INPUT_UNQUALIFIED' }
     if (platform === 'darwin') {
+      const stateBefore = kernelState(pid)
+      if (stateBefore.state !== 'alive') return stateBefore.state === 'gone' ? gone() : unknown(stateBefore.code)
       const before = darwin.readBsd(pid)
       if (before.kind !== 'ok') return before
-      const state = kernelState(pid)
-      if (state.state !== 'alive') return state.state === 'gone' ? gone() : unknown(state.code)
+      if (!bsdBindsIdentity(before.value, stateBefore.identity)) return unknown('TORN_OBSERVATION')
+      const stateAfter = kernelState(pid)
+      if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
+      if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
       const after = darwin.readBsd(pid)
       if (after.kind !== 'ok') return after
+      if (!bsdBindsIdentity(after.value, stateAfter.identity)) return unknown('TORN_OBSERVATION')
       const a = before.value
       const b = after.value
       if (a.startSec !== b.startSec || a.startUsec !== b.startUsec || a.ppid !== b.ppid
@@ -771,75 +802,93 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       return {
         kind: 'alive',
         pid,
-        birth: state.birth,
-        identity: state.identity,
-        ppid: a.ppid,
-        pgid: a.pgid,
-        sid: state.identity.sid,
-        uid: a.uid,
+        birth: stateAfter.birth,
+        identity: stateAfter.identity,
+        ppid: stateAfter.identity.ppid,
+        pgid: stateAfter.identity.pgid,
+        sid: stateAfter.identity.sid,
+        uid: stateAfter.identity.uid,
         name: a.name,
         comm: a.comm,
         tty: ttyFromDarwin(a),
       }
     }
+    const stateBefore = kernelState(pid)
+    if (stateBefore.state !== 'alive') return stateBefore.state === 'gone' ? gone() : unknown(stateBefore.code)
     const before = readLinuxTty(pid)
     if (before.kind !== 'ok') return before
-    const state = kernelState(pid)
-    if (state.state !== 'alive') return state.state === 'gone' ? gone() : unknown(state.code)
+    if (!linuxStatBindsIdentity(before.stat, stateBefore.identity)) return unknown('TORN_OBSERVATION')
+    const uidBefore = readLinuxUid(pid)
+    if (!Number.isInteger(uidBefore) || uidBefore < 0) return unknown('ACCESS_DENIED')
+    const stateAfter = kernelState(pid)
+    if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
+    if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
     const after = readLinuxTty(pid)
     if (after.kind !== 'ok') return after
+    if (!linuxStatBindsIdentity(after.stat, stateAfter.identity)) return unknown('TORN_OBSERVATION')
+    const uidAfter = readLinuxUid(pid)
+    if (!Number.isInteger(uidAfter) || uidAfter < 0) return unknown('ACCESS_DENIED')
     const a = before.stat
     const b = after.stat
     if (a.starttime !== b.starttime || a.ppid !== b.ppid || a.pgid !== b.pgid
-      || a.sid !== b.sid || a.ttyNr !== b.ttyNr) {
+      || a.sid !== b.sid || a.ttyNr !== b.ttyNr || uidBefore !== uidAfter) {
       return unknown('TORN_OBSERVATION')
     }
-    const uid = readLinuxUid(pid)
-    if (!Number.isInteger(uid) || uid < 0) return unknown('ACCESS_DENIED')
     return {
       kind: 'alive',
       pid,
-      birth: state.birth,
-      identity: state.identity,
-      ppid: a.ppid,
-      pgid: a.pgid,
-      sid: a.sid,
-      uid,
+      birth: stateAfter.birth,
+      identity: stateAfter.identity,
+      ppid: stateAfter.identity.ppid,
+      pgid: stateAfter.identity.pgid,
+      sid: stateAfter.identity.sid,
+      uid: uidAfter,
       name: readLinuxComm(pid) ?? '',
       tty: before.value,
     }
   }
 
-  function readParentEdge(pid, parentPid, parentBirth, expectedUid) {
+  function readParentEdge(pid, parentPid, parentBirth, expectedUid, childBirth) {
     const parentBefore = observe(parentPid)
     if (parentBefore.kind !== 'alive') {
-      return { proven: false, reason: `parent-${parentBefore.kind === 'gone' ? 'gone' : 'unknown'}` }
+      return { proven: false, definitive: false, reason: `parent-${parentBefore.kind === 'gone' ? 'gone' : 'unknown'}` }
     }
     if (parentBirth !== undefined && parentBefore.birth !== parentBirth) {
-      return { proven: false, reason: 'parent-birth-mismatch' }
+      return { proven: false, definitive: true, reason: 'parent-birth-mismatch' }
     }
     if (expectedUid !== undefined && parentBefore.uid !== expectedUid) {
-      return { proven: false, reason: 'parent-uid-mismatch' }
+      return { proven: false, definitive: true, reason: 'parent-uid-mismatch' }
     }
     const child = observe(pid)
-    if (child.kind !== 'alive') return { proven: false, reason: `child-${child.kind}` }
-    if (child.ppid !== parentPid) return { proven: false, reason: 'ppid-mismatch' }
-    if (child.uid !== parentBefore.uid) return { proven: false, reason: 'uid-mismatch' }
+    if (child.kind !== 'alive') return { proven: false, definitive: false, reason: `child-${child.kind}` }
+    if (typeof childBirth === 'string' && child.birth !== childBirth) {
+      return { proven: false, definitive: false, reason: 'child-changed' }
+    }
+    if (child.ppid !== parentPid) return { proven: false, definitive: true, reason: 'ppid-mismatch' }
+    if (child.uid !== parentBefore.uid) return { proven: false, definitive: true, reason: 'uid-mismatch' }
     if (platform === 'darwin') {
       const childUnique = darwin.readUnique(pid)
-      if (childUnique.kind !== 'ok') return { proven: false, reason: `child-unique-${childUnique.kind}` }
+      if (childUnique.kind !== 'ok') return { proven: false, definitive: false, reason: `child-unique-${childUnique.kind}` }
       if (childUnique.value.parentUniqueId !== parentBefore.identity.uniqueId) {
-        return { proven: false, reason: 'parent-unique-id-mismatch' }
+        return { proven: false, definitive: true, reason: 'parent-unique-id-mismatch' }
       }
     }
+    const listedBefore = children(parentPid)
+    if (listedBefore.kind !== 'ok') {
+      return { proven: false, definitive: false, reason: `children-${listedBefore.kind}` }
+    }
+    if (!listedBefore.pids.includes(pid)) return { proven: false, definitive: true, reason: 'not-a-direct-child' }
     const parentAfter = observe(parentPid)
     if (parentAfter.kind !== 'alive' || parentAfter.birth !== parentBefore.birth) {
-      return { proven: false, reason: 'parent-changed' }
+      return { proven: false, definitive: false, reason: 'parent-changed' }
     }
     const childAfter = observe(pid)
     if (childAfter.kind !== 'alive' || childAfter.birth !== child.birth || childAfter.ppid !== parentPid) {
-      return { proven: false, reason: 'child-changed' }
+      return { proven: false, definitive: false, reason: 'child-changed' }
     }
+    const listedAfter = children(parentPid)
+    if (listedAfter.kind !== 'ok') return { proven: false, definitive: false, reason: `children-${listedAfter.kind}` }
+    if (!listedAfter.pids.includes(pid)) return { proven: false, definitive: true, reason: 'not-a-direct-child' }
     return {
       proven: true,
       parentPid,
@@ -851,17 +900,17 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
   }
 
   /**
-   * Full observation: argv/env/ctty are read INSIDE the birth bracket; a parent
-   * edge (when requested) is bracketed by fresh parent and child re-reads.
+   * Full observation: production identity is read before and after the narrow
+   * platform facts, and every returned field must bind to those identities.
+   * A parent edge is bracketed by fresh parent/child/child-enumeration reads.
    */
   function observeFull(pid, options = {}) {
     if (platform === 'darwin') {
-      const bootBefore = darwin.readBootUuid()
-      if (bootBefore.kind !== 'ok') return bootBefore
+      const stateBefore = kernelState(pid)
+      if (stateBefore.state !== 'alive') return stateBefore.state === 'gone' ? gone() : unknown(stateBefore.code)
       const before = darwin.readBsd(pid)
       if (before.kind !== 'ok') return before
-      const unique = darwin.readUnique(pid)
-      if (unique.kind !== 'ok') return unique
+      if (!bsdBindsIdentity(before.value, stateBefore.identity)) return unknown('TORN_OBSERVATION')
       const queried = darwin.procargsSize(pid)
       if (queried.rc !== 0) {
         return unknown(darwin.classifyProcargsErrno(queried.errno, pid), { stage: 'size' })
@@ -871,13 +920,12 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       if (queried.size !== parsed.used) {
         return unknown('PROCARGS_LENGTH_MISMATCH', { query: queried.size, used: parsed.used })
       }
+      const stateAfter = kernelState(pid)
+      if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
+      if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
       const after = darwin.readBsd(pid)
       if (after.kind !== 'ok') return after
-      const session = darwin.readSessionId(pid)
-      if (session.kind !== 'ok') return session
-      const bootAfter = darwin.readBootUuid()
-      if (bootAfter.kind !== 'ok') return bootAfter
-      if (bootBefore.value !== bootAfter.value) return unknown('TORN_BOOT')
+      if (!bsdBindsIdentity(after.value, stateAfter.identity)) return unknown('TORN_OBSERVATION')
       const a = before.value
       const b = after.value
       if (a.startSec !== b.startSec || a.startUsec !== b.startUsec || a.ppid !== b.ppid
@@ -885,17 +933,15 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
         || a.eTpgid !== b.eTpgid || a.status !== b.status) {
         return unknown('TORN_OBSERVATION')
       }
-      const state = kernelState(pid)
-      if (state.state !== 'alive') return state.state === 'gone' ? gone() : unknown(state.code)
       const observation = {
         kind: 'alive',
         pid,
-        birth: state.birth,
-        identity: state.identity,
-        ppid: a.ppid,
-        pgid: a.pgid,
-        sid: session.value,
-        uid: a.uid,
+        birth: stateAfter.birth,
+        identity: stateAfter.identity,
+        ppid: stateAfter.identity.ppid,
+        pgid: stateAfter.identity.pgid,
+        sid: stateAfter.identity.sid,
+        uid: stateAfter.identity.uid,
         tty: ttyFromDarwin(a),
         execPath: parsed.execPath,
         argv: parsed.argv,
@@ -907,15 +953,18 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
         procargs: { querySize: queried.size, used: parsed.used, argmax: parsed.argmax },
       }
       if (options.parentPid !== undefined) {
-        observation.parentEdge = readParentEdge(pid, options.parentPid, options.parentBirth, observation.uid)
+        observation.parentEdge = readParentEdge(pid, options.parentPid, options.parentBirth, observation.uid, observation.birth)
       }
       return observation
     }
 
-    const before = readLinuxTty(pid)
-    if (before.kind !== 'ok') return before
     const stateBefore = kernelState(pid)
     if (stateBefore.state !== 'alive') return stateBefore.state === 'gone' ? gone() : unknown(stateBefore.code)
+    const before = readLinuxTty(pid)
+    if (before.kind !== 'ok') return before
+    if (!linuxStatBindsIdentity(before.stat, stateBefore.identity)) return unknown('TORN_OBSERVATION')
+    const uidBefore = readLinuxUid(pid)
+    if (!Number.isInteger(uidBefore) || uidBefore < 0) return unknown('ACCESS_DENIED')
     let cmdline
     let environ
     try {
@@ -932,28 +981,29 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (parsedArgv.kind !== 'ok') return parsedArgv
     const parsedEnv = parseLinuxEnvironment(environ)
     if (parsedEnv.kind !== 'ok') return parsedEnv
-    const after = readLinuxTty(pid)
-    if (after.kind !== 'ok') return after
     const stateAfter = kernelState(pid)
     if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
-    if (stateBefore.birth !== stateAfter.birth) return unknown('TORN_OBSERVATION')
+    if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
+    const after = readLinuxTty(pid)
+    if (after.kind !== 'ok') return after
+    if (!linuxStatBindsIdentity(after.stat, stateAfter.identity)) return unknown('TORN_OBSERVATION')
+    const uidAfter = readLinuxUid(pid)
+    if (!Number.isInteger(uidAfter) || uidAfter < 0) return unknown('ACCESS_DENIED')
     const a = before.stat
     const b = after.stat
     if (a.starttime !== b.starttime || a.ppid !== b.ppid || a.pgid !== b.pgid
-      || a.sid !== b.sid || a.ttyNr !== b.ttyNr) {
+      || a.sid !== b.sid || a.ttyNr !== b.ttyNr || uidBefore !== uidAfter) {
       return unknown('TORN_OBSERVATION')
     }
-    const uid = readLinuxUid(pid)
-    if (!Number.isInteger(uid) || uid < 0) return unknown('ACCESS_DENIED')
     const observation = {
       kind: 'alive',
       pid,
       birth: stateAfter.birth,
       identity: stateAfter.identity,
-      ppid: a.ppid,
-      pgid: a.pgid,
-      sid: a.sid,
-      uid,
+      ppid: stateAfter.identity.ppid,
+      pgid: stateAfter.identity.pgid,
+      sid: stateAfter.identity.sid,
+      uid: uidAfter,
       tty: before.value,
       execPath: parsedArgv.argv[0],
       argv: parsedArgv.argv,
@@ -964,7 +1014,7 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       argc: parsedArgv.argv.length,
     }
     if (options.parentPid !== undefined) {
-      observation.parentEdge = readParentEdge(pid, options.parentPid, options.parentBirth, observation.uid)
+      observation.parentEdge = readParentEdge(pid, options.parentPid, options.parentBirth, observation.uid, observation.birth)
     }
     return observation
   }
@@ -978,7 +1028,14 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (platform === 'darwin') {
       const parsed = darwin.readProcargs(pid, { argvOnly: true })
       if (parsed.kind !== 'ok') return parsed
-      return { kind: 'ok', entry: canonicalEntry(parsed.argv[1]), argv: parsed.argv }
+      if (!Array.isArray(parsed.argv) || parsed.argv.length < 2
+        || typeof parsed.argv[1] !== 'string' || parsed.argv[1] === ''
+        || !isAbsolute(parsed.argv[1])) {
+        return { kind: 'ok', entry: null, argv: parsed.argv }
+      }
+      const entry = canonicalEntry(parsed.argv[1])
+      if (entry === undefined) return unknown('ENTRY_UNREADABLE', { argv: parsed.argv })
+      return { kind: 'ok', entry, argv: parsed.argv }
     }
     let cmdline
     try {
@@ -988,7 +1045,14 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     }
     const parsed = parseLinuxCommandLine(cmdline)
     if (parsed.kind !== 'ok') return parsed
-    return { kind: 'ok', entry: canonicalEntry(parsed.argv[1]), argv: parsed.argv }
+    if (!Array.isArray(parsed.argv) || parsed.argv.length < 2
+      || typeof parsed.argv[1] !== 'string' || parsed.argv[1] === ''
+      || !isAbsolute(parsed.argv[1])) {
+      return { kind: 'ok', entry: null, argv: parsed.argv }
+    }
+    const entry = canonicalEntry(parsed.argv[1])
+    if (entry === undefined) return unknown('ENTRY_UNREADABLE', { argv: parsed.argv })
+    return { kind: 'ok', entry, argv: parsed.argv }
   }
 
   function capture(pid, expected = {}) {
@@ -1004,8 +1068,14 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     })
     if (full.kind === 'gone') return { kind: 'gone' }
     if (full.kind !== 'alive') return { kind: 'unknown', pid, code: full.code }
+    if (full.birth !== light.birth) return { kind: 'unknown', pid, code: 'TORN_OBSERVATION' }
     const admitted = admitPublicObservation(full, expected)
-    if (admitted.admitted !== true) return { kind: 'not-target', pid, reason: admitted.reason, detail: admitted }
+    if (admitted.admitted !== true) {
+      if (publicAdmissionDisposition(admitted) === 'not-target') {
+        return { kind: 'not-target', pid, reason: admitted.reason, detail: admitted }
+      }
+      return { kind: 'unknown', pid, code: `ADMISSION_${String(admitted.reason).toUpperCase().replaceAll('-', '_')}`, detail: admitted }
+    }
     return { kind: 'captured', pid, process: publicProcessFacts(full, expected), observation: full }
   }
 

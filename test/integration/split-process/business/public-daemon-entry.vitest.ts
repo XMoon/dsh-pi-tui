@@ -8,7 +8,7 @@
  * reaches a private record sink: a public Client legitimately has none.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -221,11 +221,18 @@ test('two cold public daemon launches converge on one authenticated Host', async
       expect(launch.host?.instanceId).toBe(pair.winner.instanceId)
       expect(launch.hostAttempt, `${launch.label}: captured a real Host attempt`).not.toBeNull()
       expect(launch.hostAttempt?.attemptByLaunchId).toBe(launch.launchId)
+      expect(launch.registryAbsentBefore, `${launch.label}: strict registry ENOENT before its live attempt capture`).toBe(true)
+      expect(launch.registryAbsentAfter, `${launch.label}: strict registry ENOENT after its live attempt capture`).toBe(true)
       await waitForFrame(launch, '❯', `${launch.label} composer`)
     }
     const attempts = pair.launches.map(launch => launch.hostAttempt)
     const attemptKeys = attempts.map(attempt => `${String(attempt?.pid)}:${String(attempt?.birth)}`)
     expect(new Set(attemptKeys).size, `two distinct real Host attempts (${JSON.stringify(attemptKeys)})`).toBe(2)
+    const cttyDevices = pair.launches.map(launch => launch.shellTty?.platform === 'darwin'
+      ? launch.shellTty.eTdev
+      : launch.shellTty?.ttyNr)
+    expect(new Set(cttyDevices).size, `two distinct controlling-terminal devices (${JSON.stringify(cttyDevices)})`).toBe(2)
+    expect(cttyDevices.every(device => typeof device === 'number' && device > 0 && device !== 0xffffffff)).toBe(true)
     expect(attempts.filter(attempt => attempt?.winner === true)).toHaveLength(1)
     const contender = attempts.find(attempt => attempt?.winner !== true)
     expect(contender, 'one real contender attempt').toBeDefined()
@@ -328,6 +335,8 @@ test.skipIf(process.env.SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL !== '1')(
       expect(facts.sentinel.after).toBe(facts.sentinel.birth)
       expect(facts.cleanup.sentinelGone).toBe(true)
       expect(facts.cleanup.leaked).toBe(0)
+      expect(facts.cleanup.unknown).toBe(0)
+      expect(facts.cleanup.closeErrors).toEqual([])
       if (process.platform === 'darwin') {
         expect(facts.probe.bsdBytes).toBe(136)
         expect(facts.probe.procargs.querySize).toBe(facts.probe.procargs.used)
@@ -346,6 +355,27 @@ test('keeps the default Direct launch independent of the split backend', async (
   const launches: PublicDaemonLaunch[] = []
   let testError: unknown
   try {
+    // Cold default Direct must be proven with no existing split Host/Client.
+    const cold = await scene.startPublicDaemon({ label: 'direct-cold-default', cols: 120, rows: 36 })
+    launches.push(cold)
+    expect(cold.ready, 'the cold default Direct launch reached a usable surface').toBe(true)
+    expect(cold.backend, 'the cold launch really followed the persisted default').toBeNull()
+    expect(cold.host, 'a cold Direct launch owns no split Host').toBeNull()
+    expect(cold.client, 'a cold Direct launch owns no split Client').toBeNull()
+    expect(cold.hostAttempt, 'a cold Direct launch captured no Host attempt').toBeNull()
+    expect(existsSync(join(scene.scopeDir, 'instance.json')), 'a cold Direct launch published no split registry').toBe(false)
+    expect(existsSync(join(scene.scopeDir, 'launch.json')), 'a cold Direct launch published no split launch material').toBe(false)
+    await waitForFrame(cold, '❯', 'the cold Direct composer')
+    await cold.type('cold direct')
+    await waitForFrame(cold, 'cold direct', 'the cold Direct composer accepts input')
+    await cold.press('Ctrl+U')
+    await cold.submit('/exit')
+    const coldExit = await cold.waitForExit(60_000)
+    expect(coldExit.code, 'the cold Direct CLI exit code').toBe(0)
+    expect(coldExit.signal).toBe(null)
+    await cold.close()
+    expect(existsSync(join(scene.scopeDir, 'instance.json')), 'the cold Direct exit created no split registry').toBe(false)
+
     const peer = await scene.startPublicDaemon({ label: 'direct-warm-host', backend: 'daemon' })
     launches.push(peer)
     await waitForFrame(peer, '❯', 'the warm peer composer')
@@ -353,11 +383,13 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(peer.client, 'the warm peer owns a real Client').not.toBeNull()
     const peerBefore = await peer.kernelState()
     const instanceBefore = peer.host?.instanceId
+    const registryBefore = readFileSync(join(scene.scopeDir, 'instance.json'), 'utf8')
+    const launchBefore = readFileSync(join(scene.scopeDir, 'launch.json'), 'utf8')
 
-    const launch = await scene.startPublicDaemon({ label: 'direct-default', cols: 120, rows: 36 })
+    const launch = await scene.startPublicDaemon({ label: 'direct-warm-default', cols: 120, rows: 36 })
     launches.push(launch)
-    expect(launch.ready, 'the default Direct launch reached a usable surface').toBe(true)
-    expect(launch.backend, 'the launch really followed the persisted default, not an env selector').toBeNull()
+    expect(launch.ready, 'the warm default Direct launch reached a usable surface').toBe(true)
+    expect(launch.backend, 'the warm launch really followed the persisted default, not an env selector').toBeNull()
     expect(launch.host, 'a Direct launch owns no split Host').toBeNull()
     expect(launch.client, 'a Direct launch owns no split Client').toBeNull()
     expect(launch.hostAttempt, 'a Direct launch captured no Host attempt').toBeNull()
@@ -376,6 +408,8 @@ test('keeps the default Direct launch independent of the split backend', async (
     const peerAfter = await peer.kernelState()
     expect(peerAfter.hostPid, 'the Direct exit did not stop the warm Host').toBe(peerBefore.hostPid)
     expect(peerAfter.hostState).toBe('alive')
+    expect(readFileSync(join(scene.scopeDir, 'instance.json'), 'utf8'), 'the Direct launch changed no split registry content').toBe(registryBefore)
+    expect(readFileSync(join(scene.scopeDir, 'launch.json'), 'utf8'), 'the Direct launch changed no split launch content').toBe(launchBefore)
     expect(peerAfter.clientState, 'the warm peer is still usable after the Direct exit').toBe('alive')
     await peer.type('warm-peer-after-direct')
     await waitForFrame(peer, 'warm-peer-after-direct', 'the warm peer accepts input after the Direct exit')

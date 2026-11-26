@@ -20,6 +20,7 @@ import {
   parseDarwinProcargs,
   parseLinuxCommandLine,
   parseLinuxEnvironment,
+  publicAdmissionDisposition,
   publicPathPresence,
 } from '../support/split-public-process-observation.mjs'
 
@@ -226,4 +227,16 @@ test('admission refuses gone, unknown, unproven parent edge and a foreground tty
     },
     parentEdge: { proven: true, parentPid: 4320, parentBirth: 'parent-birth' },
   }), expected).reason, 'tty-mismatch')
+})
+
+
+test('only a positive admission mismatch may exclude a candidate', () => {
+  assert.equal(publicAdmissionDisposition({ admitted: true, reason: 'admitted' }), 'admitted')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'tty-mismatch' }), 'not-target')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'canonical-entry-mismatch' }), 'not-target')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'tty-unproven' }), 'unknown')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'parent-edge-unproven' }), 'unknown')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'parent-edge-unproven', definitive: true }), 'not-target')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'canonical-entry-unreadable' }), 'unknown')
+  assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'observation-unknown' }), 'unknown')
 })
