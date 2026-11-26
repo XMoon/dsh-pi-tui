@@ -44,6 +44,7 @@ import {
   decodeHistorySearchCursor,
   encodeHistorySearchCursor,
   historyReadTextChunk,
+  historySearchRequestHash,
   parseHistoryReadTextRequest,
   parseHistorySearchRequest,
   type HistoryReadTextResponse,
@@ -679,6 +680,7 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       : exact.scope === 'directory'
         ? normalizeHistoryCwd(exact.cwd)
         : null
+    const requestHash = historySearchRequestHash(exact.scope, exact.query, scopeId)
     let after: HistorySearchAfter | undefined
     if (exact.cursor !== undefined) {
       let cursor
@@ -690,13 +692,20 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
       if (
         cursor.incarnation !== this.incarnation
         || cursor.revision !== this.revision
-        || cursor.scope !== exact.scope
-        || cursor.query !== exact.query
-        || cursor.scopeId !== scopeId
+        || cursor.requestHash !== requestHash
       ) {
         return { kind: 'stale', reason: 'cursor-stale' }
       }
-      after = cursor.after
+      after = index.resolveSearchAnchor(cursor.afterRowId, {
+        scope: exact.scope,
+        ...(exact.scope === 'session' ? { sessionId: exact.sessionId } : {}),
+        ...(exact.scope === 'directory' ? { cwd: scopeId as string } : {}),
+        query: exact.query,
+      })
+      // The anchor row was deleted, rebuilt, or no longer matches this exact
+      // scope/query: the cursor position cannot be resumed. This is stale, not
+      // an exhausted page.
+      if (after === undefined) return { kind: 'stale', reason: 'cursor-stale' }
     }
     const page = index.search({
       scope: exact.scope,
@@ -711,18 +720,11 @@ export class PiTuiHistorySearchHostService extends TypertRemoteService {
     const last = page.rows.at(-1)
     const nextCursor = page.hasMore && last !== undefined
       ? encodeHistorySearchCursor({
-        v: 1,
+        v: 2,
         incarnation: this.incarnation,
         revision: this.revision,
-        scope: exact.scope,
-        query: exact.query,
-        scopeId,
-        after: {
-          acceptedAt: last.acceptedAt,
-          sessionId: last.sessionId,
-          firstEventSeq: last.firstEventSeq,
-          messageId: last.messageId,
-        },
+        requestHash,
+        afterRowId: last.rowId,
       })
       : null
     return {

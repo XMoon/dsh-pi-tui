@@ -19,6 +19,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/pi-tui-history-search-contract
  */
 
+import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type {
   InvocationDescriptor,
@@ -125,20 +126,20 @@ export type HistoryReadTextResponse =
   | { readonly kind: 'incomplete'; readonly reason: HistorySearchIncompleteReason }
   | { readonly kind: 'unavailable'; readonly reason: HistoryReadTextUnavailableReason }
 
-/** The decoded keyset cursor; never accepted across incarnation/revision. */
+/**
+ * The decoded keyset-position cursor. It carries the Host's SQLite row anchor
+ * (a signed 64-bit primary key rendered as canonical decimal) instead of raw
+ * Session/Message ids, so no legal query, directory or official id can push the
+ * token past {@link HISTORY_SEARCH_CURSOR_MAX_BYTES}. The request context is
+ * bound by {@link historySearchRequestHash}, never by copied fields.
+ */
 export interface HistorySearchCursor {
-  readonly v: 1
+  readonly v: 2
   readonly incarnation: string
   readonly revision: number
-  readonly scope: HistorySearchScope
-  readonly query: string
-  readonly scopeId: string | null
-  readonly after: {
-    readonly acceptedAt: number
-    readonly sessionId: string
-    readonly firstEventSeq: number
-    readonly messageId: string
-  }
+  readonly requestHash: string
+  /** SQLite `INTEGER PRIMARY KEY`, canonical signed 64-bit decimal string. */
+  readonly afterRowId: string
 }
 
 const REQUEST_LABEL = 'piTuiHistorySearch/search request'
@@ -385,12 +386,57 @@ export function parseHistoryReadTextResponse(value: unknown): HistoryReadTextRes
   throw new TypeError(`${READ_ANSWER_LABEL}: unknown kind ${JSON.stringify(record.kind)}`)
 }
 
+const SIGNED_64_MIN = -(2n ** 63n)
+const SIGNED_64_MAX = 2n ** 63n - 1n
+const CANONICAL_SIGNED_64 = /^(?:0|-?[1-9][0-9]*)$/u
+
+/**
+ * Validate one SQLite row anchor as a canonical signed 64-bit decimal string.
+ * SQLite's own `CAST` silently clamps out-of-range text and accepts `+1`/`012`,
+ * so this check is load-bearing BEFORE the value reaches `CAST(? AS INTEGER)`.
+ */
+export function parseHistorySearchRowId(value: unknown, label = `${CURSOR_LABEL} afterRowId`): string {
+  if (typeof value !== 'string' || !CANONICAL_SIGNED_64.test(value)) {
+    throw new TypeError(`${label}: expected a canonical signed 64-bit decimal string`)
+  }
+  const parsed = BigInt(value)
+  if (parsed < SIGNED_64_MIN || parsed > SIGNED_64_MAX) {
+    throw new TypeError(`${label}: the value is outside the signed 64-bit range`)
+  }
+  return value
+}
+
+/**
+ * The ONE request binding of a continuation: the exact scope, literal query and
+ * normalized scope id. The cursor carries only this digest, so the request
+ * context cannot be silently recombined from copied fields.
+ */
+export function historySearchRequestHash(
+  scope: HistorySearchScope,
+  query: string,
+  normalizedScopeId: string | null,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify([scope, query, normalizedScopeId]), 'utf8')
+    .digest('hex')
+}
+
+function parseRequestHash(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/u.test(value)) {
+    throw new TypeError(`${CURSOR_LABEL} requestHash: expected a lowercase hex SHA-256`)
+  }
+  return value
+}
+
 /** Encode one validated keyset cursor as base64url JSON. */
 export function encodeHistorySearchCursor(cursor: HistorySearchCursor): string {
-  if (cursor.v !== 1) throw new TypeError(`${CURSOR_LABEL}: v must be 1`)
+  if (cursor.v !== 2) throw new TypeError(`${CURSOR_LABEL}: v must be 2`)
+  nonEmptyString(cursor.incarnation, `${CURSOR_LABEL} incarnation`)
   if (!Number.isSafeInteger(cursor.revision) || cursor.revision < 0) {
     throw new TypeError(`${CURSOR_LABEL}: revision must be a non-negative safe integer`)
   }
+  parseRequestHash(cursor.requestHash)
+  parseHistorySearchRowId(cursor.afterRowId)
   const encoded = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
   if (Buffer.byteLength(encoded, 'utf8') > HISTORY_SEARCH_CURSOR_MAX_BYTES) {
     throw new TypeError(`${CURSOR_LABEL}: encoded cursor exceeds ${HISTORY_SEARCH_CURSOR_MAX_BYTES} bytes`)
@@ -410,32 +456,15 @@ export function decodeHistorySearchCursor(value: string): HistorySearchCursor {
     throw new TypeError(`${CURSOR_LABEL}: the value is not base64url JSON`)
   }
   const record = recordOf(decoded, CURSOR_LABEL)
-  exactKeys(record, ['v', 'incarnation', 'revision', 'scope', 'query', 'scopeId', 'after'], CURSOR_LABEL)
-  requiredKeys(record, ['v', 'incarnation', 'revision', 'scope', 'query', 'scopeId', 'after'], CURSOR_LABEL)
-  if (record.v !== 1) throw new TypeError(`${CURSOR_LABEL}: unsupported version ${JSON.stringify(record.v)}`)
-  if (typeof record.scope !== 'string' || !(SCOPES as readonly string[]).includes(record.scope)) {
-    throw new TypeError(`${CURSOR_LABEL}: unknown scope ${JSON.stringify(record.scope)}`)
-  }
-  if (record.scopeId !== null && typeof record.scopeId !== 'string') {
-    throw new TypeError(`${CURSOR_LABEL}: scopeId must be a string or null`)
-  }
-  if (typeof record.query !== 'string') throw new TypeError(`${CURSOR_LABEL}: query must be a string`)
-  const after = recordOf(record.after, `${CURSOR_LABEL} after`)
-  exactKeys(after, ['acceptedAt', 'sessionId', 'firstEventSeq', 'messageId'], `${CURSOR_LABEL} after`)
-  requiredKeys(after, ['acceptedAt', 'sessionId', 'firstEventSeq', 'messageId'], `${CURSOR_LABEL} after`)
+  exactKeys(record, ['v', 'incarnation', 'revision', 'requestHash', 'afterRowId'], CURSOR_LABEL)
+  requiredKeys(record, ['v', 'incarnation', 'revision', 'requestHash', 'afterRowId'], CURSOR_LABEL)
+  if (record.v !== 2) throw new TypeError(`${CURSOR_LABEL}: unsupported version ${JSON.stringify(record.v)}`)
   return {
-    v: 1,
+    v: 2,
     incarnation: nonEmptyString(record.incarnation, `${CURSOR_LABEL} incarnation`),
     revision: nonNegativeInteger(record.revision, `${CURSOR_LABEL} revision`),
-    scope: record.scope as HistorySearchScope,
-    query: record.query,
-    scopeId: record.scopeId,
-    after: {
-      acceptedAt: nonNegativeInteger(after.acceptedAt, `${CURSOR_LABEL} after acceptedAt`),
-      sessionId: nonEmptyString(after.sessionId, `${CURSOR_LABEL} after sessionId`),
-      firstEventSeq: nonNegativeInteger(after.firstEventSeq, `${CURSOR_LABEL} after firstEventSeq`),
-      messageId: nonEmptyString(after.messageId, `${CURSOR_LABEL} after messageId`),
-    },
+    requestHash: parseRequestHash(record.requestHash),
+    afterRowId: parseHistorySearchRowId(record.afterRowId),
   }
 }
 
