@@ -3025,7 +3025,7 @@ function createRemoteWebPort(): {
   readonly writeLifetime: RemoteConfigWriteLifetime
   /** Replace the Host identity while keeping the SAME numeric revisions and
    *  (unless requested) the SAME values: the exact wrong-Host negative control. */
-  readonly replaceHost: (requested?: 'search' | 'fetch') => void
+  readonly replaceHost: (requested?: 'search' | 'fetch' | 'base') => void
   /** Hold the NEXT official mutate after it entered the mirror queue, so a
    *  queued decision can be replaced before its queue turn. */
   readonly holdNextMutation: () => { readonly entered: Promise<void>; readonly release: () => void }
@@ -3134,7 +3134,7 @@ function createRemoteWebPort(): {
     remote,
     connection: { generation: { getSnapshot: () => generation, subscribe: () => () => {} } },
   } as never, { writeLifetime })
-  const replaceHost = (requested?: 'search' | 'fetch'): void => {
+  const replaceHost = (requested?: 'search' | 'fetch' | 'base'): void => {
     generation = { id: 'web-t3-generation-b' }
     phase = 'B'
     // A and B are INDEPENDENT stores: every namespace is cloned before B's
@@ -3149,6 +3149,11 @@ function createRemoteWebPort(): {
     } else if (requested === 'fetch') {
       value.fetchProvider = 'deepseek-fetch-api'
       user.fetchProvider = 'deepseek-fetch-api'
+    } else if (requested === 'base') {
+      value.searchProvider = 'deepseek-official'
+      user.searchProvider = 'deepseek-official'
+      value.fetchProvider = 'http'
+      user.fetchProvider = 'http'
     }
     namespaces.set('web', { ...web, value, user })
   }
@@ -3370,6 +3375,10 @@ test('an invoked unknown receipt stays outcome-unconfirmed even when the write a
   await openWebPage(h)
   await openWebRow(h, 0) // provider
   await chooseCandidate(h, 2)
+  // A applied the write; the Host then reports an unknown post-persist failure
+  // and B is at its BASE value. The requested value is not B's, so a
+  // value-based guess can never turn this into verified.
+  remote.setAfterMutation(() => { remote.replaceHost('base') })
   remote.failAfterApply('settings/rejected: post-persist Loader failure')
   await key(h, ENTER)
   const frame = await settlePainted(h, 'the invoked unknown receipt', f =>
@@ -3378,8 +3387,38 @@ test('an invoked unknown receipt stays outcome-unconfirmed even when the write a
   assert.ok(h.diagnostics.some(entry => entry.level === 'warn'
     && (entry.detail as { outcome?: string }).outcome === 'outcome-unconfirmed'),
   'the command owner keeps the invoked unknown receipt distinct from a proven refusal')
-  assert.equal(remote.mutateCalls.filter(call => call.ns === 'web').length, 1,
-    'the invocation happened exactly once and was never replayed')
+  const webWrites = remote.mutateCalls.filter(call => call.ns === 'web')
+  assert.equal(webWrites.length, 1, 'the invocation happened exactly once and was never replayed')
+  assert.equal(webWrites[0]?.destination, 'A', 'the one invocation belongs to A')
   assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider,
-    'deepseek-search-api', 'the applied value is visible but not attributed as a save')
+    'deepseek-official', 'B is at its base value, not the requested value')
+})
+
+test('a real Remote unknown receipt held across page disposal is diagnosed once and never replayed', async t => {
+  const remote = createRemoteWebPort()
+  await remote.port.describe()
+  const h = setup({ remoteConfig: remote.port })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2)
+  const held = remote.holdNextMutation()
+  await key(h, ENTER)
+  await held.entered
+  // The page is disposed while the actual invocation is still held. The write
+  // must settle once in its original owner, replace B at base and stay unknown.
+  remote.setAfterMutation(() => { remote.replaceHost('base') })
+  remote.failAfterApply('settings/rejected: post-persist Loader failure')
+  h.dispose()
+  held.release()
+  for (let attempt = 0; attempt < 300 && h.diagnostics.length === 0; attempt += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(h.diagnostics.length, 1, 'the original owner diagnosed the late unknown receipt once')
+  assert.equal((h.diagnostics[0]!.detail as { outcome?: string }).outcome, 'outcome-unconfirmed')
+  const webWrites = remote.mutateCalls.filter(call => call.ns === 'web')
+  assert.equal(webWrites.length, 1, 'the held invocation ran exactly once')
+  assert.equal(webWrites[0]?.destination, 'A')
+  assert.equal((remote.namespaces.get('web')!.value as Record<string, unknown>).searchProvider,
+    'deepseek-official', 'B is at base and the late result never claims a save')
 })

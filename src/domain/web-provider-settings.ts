@@ -283,9 +283,10 @@ export function webBillingEligibility(
   return reason === undefined ? { ok: true } : { ok: false, reason }
 }
 
-/** Whether two Web observations belong to the SAME Host authority observation
- *  (opaque generation identity + both revisions). A→B→A is three distinct
- *  observations even when the numeric revisions and values repeat. */
+/** Whether two Web observations belong to the SAME Host authority observation:
+ *  the opaque generation always, plus the target namespace revision(s) (`both`
+ *  by default). A→B→A is three distinct observations even when the numeric
+ *  revisions and values repeat. */
 export function sameWebAuthority(
   a: { readonly generation: object; readonly webRevision: number; readonly apiRevision: number } | undefined,
   b: { readonly generation: object; readonly webRevision: number; readonly apiRevision: number } | undefined,

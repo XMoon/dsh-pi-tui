@@ -199,7 +199,22 @@ async function frameOf(client) {
  * match can only describe the selected Detail.
  */
 function pageDetailText(frame) {
-  return frame.split('\n').join('\n').replace(/\s+/gu, ' ').trim()
+  const lines = frame.split('\n')
+  // The Detail cell starts at the left edge of its own tokens; the list cell
+  // never prints `Current:`, `› `, a success word, `Reference:` or the Detail
+  // notes. Slice from the earliest such token so the oracle reads the selected
+  // Detail region, not the whole page.
+  const markers = ['Current: ', '› ', 'Saved', 'No changes', 'Reference: ',
+    'Billing is ', 'Results requested', 'Overridden by Host YAML:']
+  let start = Number.POSITIVE_INFINITY
+  for (const line of lines) {
+    for (const marker of markers) {
+      const index = line.indexOf(marker)
+      if (index >= 0) start = Math.min(start, index)
+    }
+  }
+  const body = Number.isFinite(start) ? lines.map(line => line.slice(start)).join('\n') : lines.join('\n')
+  return body.replace(/\s+/gu, ' ').trim()
 }
 
 /** The profile document the official Settings service persists into. It is

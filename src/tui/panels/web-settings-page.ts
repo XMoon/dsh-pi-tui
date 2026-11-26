@@ -894,7 +894,6 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return WEB_SETTINGS_ROW_IDS[this.cursor]
   }
 
-  /** The CONFIGURED row behind the cursor (`undefined` for the credential row). */
   /** Which namespace revision a confirmed decision actually depends on. */
   private authorityTarget(kind: WebSettingsDecision['kind']): 'both' | 'web' | 'api' {
     if (kind === 'provider-select' || kind === 'provider-restore') return 'web'
@@ -902,6 +901,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return 'api'
   }
 
+  /** The CONFIGURED row behind the cursor (`undefined` for the credential row). */
   private selectedSettingId(): WebSettingRowId | undefined {
     const rowId = this.selectedRowId()
     return rowId === undefined || rowId === 'web-credential' ? undefined : rowId
