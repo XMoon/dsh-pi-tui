@@ -992,9 +992,20 @@ export async function runWebProviderSettingsF3(context) {
       fetchAdvanced: OVERRIDE_UNSET_FACT,
       credentialState: 'Configured',
     }
-    const staleB = pageDetailText(await frameOf(clientB))
-    assert(staleB.includes(`Last-known · read-only: ${String(SEED_COUNT)}`),
-      `UI_L6 B: a stale cached count must be painted Last-known read-only, never Current: ${JSON.stringify(staleB)}`)
+    // B must actually OBSERVE the Host's new revision before its cached A
+    // value is demoted. A harmless repaint key never performs a Web read or
+    // changes the selection; wait on the painted frame (not a timer) for the
+    // last-known state, then require no Confirm.
+    const lastKnownB = `Last-known · read-only: ${String(SEED_COUNT)}`
+    let staleB = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      clientB.send('x')
+      await sleep(150)
+      staleB = pageDetailText(await frameOf(clientB))
+      if (staleB.includes(lastKnownB)) break
+    }
+    assert(staleB.includes(lastKnownB),
+      `UI_L6 B: after observing the Host update, a cached count must be Last-known read-only, never Current: ${JSON.stringify(staleB)}`)
     assert(!hasConfirmAffordance(actionBarOf(await frameOf(clientB))),
       'UI_L6 B: a stale cached count must not offer a Confirm affordance')
     clientB.send('r')
