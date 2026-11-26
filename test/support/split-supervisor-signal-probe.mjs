@@ -685,14 +685,20 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
       && launch.host.parentBirthAtCapture !== launch.client?.birth) {
       problems.push(`public daemon launch ${String(launch.label)} Host parent birth is not the Client`)
     }
+    const expectedAnchor = receipt.installation?.anchor
     if (launch.client !== null && launch.client !== undefined
-      && (launch.client.officialProfile !== launch.profile || typeof launch.client.officialAnchor !== 'string')) {
+      && (launch.client.officialProfile !== launch.profile
+        || typeof launch.client.officialAnchor !== 'string'
+        || launch.client.officialAnchor === ''
+        || launch.client.officialAnchor !== expectedAnchor)) {
       problems.push(`public daemon launch ${String(launch.label)} Client official profile/anchor is unproven`)
     }
     if (launch.host !== null && launch.host !== undefined
       && (launch.host.officialProfile !== launch.profile
         || launch.host.reservedProfile !== launch.profile
-        || typeof launch.host.officialAnchor !== 'string')) {
+        || typeof launch.host.officialAnchor !== 'string'
+        || launch.host.officialAnchor === ''
+        || launch.host.officialAnchor !== expectedAnchor)) {
       problems.push(`public daemon launch ${String(launch.label)} Host official profile/anchor is unproven`)
     }
     if (launch.shellPid !== null && launch.shellPid !== undefined) {
@@ -707,12 +713,14 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
     if (launch.foregroundGroupTerminal !== true) {
       problems.push(`public daemon launch ${String(launch.label)} has no foreground-group terminal fact`)
     }
-    if (!Number.isInteger(launch.shellPgid)) {
-      problems.push(`public daemon launch ${String(launch.label)} has no captured foreground group id`)
-    } else {
-      const groupState = processGroupTerminalState(kernel, launch.shellPgid)
-      if (groupState !== 'terminal') {
-        problems.push(`public daemon launch ${String(launch.label)} foreground group is ${groupState}: ${String(launch.shellPgid)}`)
+    if (launch.nativeRunAttempted !== false) {
+      if (!Number.isInteger(launch.shellPgid)) {
+        problems.push(`public daemon launch ${String(launch.label)} has no captured foreground group id`)
+      } else {
+        const groupState = processGroupTerminalState(kernel, launch.shellPgid)
+        if (groupState !== 'terminal') {
+          problems.push(`public daemon launch ${String(launch.label)} foreground group is ${groupState}: ${String(launch.shellPgid)}`)
+        }
       }
     }
   }
@@ -1448,31 +1456,33 @@ try {
         assertProcessTargetStillLive(kernel, receipt, 'clients-ready target at the signal trigger')
         assertProcessSiblingStillLive(kernel, siblingSnapshot, 'clients-ready sibling at the signal trigger')
       }
-      if (processMode && at === 'public-daemon-before-registry') {
+      if (processMode && (at === 'public-daemon-before-registry' || at === 'public-daemon-before-ready-ack')) {
         const note = processNote(receipt, 'process-probe-hold', at)
-        const registryPath = note?.detail?.registryPath
-        if (typeof registryPath !== 'string' || registryPath === '') {
-          fail('public-daemon-before-registry: the hold carries no registry path')
+        const launch = (receipt.publicLaunches ?? []).find(value => value.launchId === note?.detail?.launchId)
+        if (launch === undefined) fail(`${at}: no public launch at the trigger`)
+        if (at === 'public-daemon-before-registry') {
+          const registryPath = note?.detail?.registryPath
+          if (typeof registryPath !== 'string' || registryPath === '') {
+            fail('public-daemon-before-registry: the hold carries no registry path')
+          }
+          if (existsSync(registryPath)) {
+            fail('public-daemon-before-registry: NOT_VERIFIED — the registry was already published immediately before the SIGKILL; the window was missed')
+          }
         }
-        if (existsSync(registryPath)) {
-          fail('public-daemon-before-registry: NOT_VERIFIED — the registry was already published immediately before the SIGKILL; the window was missed')
-        }
-        const launch = (receipt.publicLaunches ?? []).find(value => value.launchId === note.detail?.launchId)
-        if (launch === undefined) fail('public-daemon-before-registry: no public launch at the trigger')
         for (const [kind, identity] of [['CLI', launch.cli], ['Client', launch.client], ['Host', launch.host]]) {
           if (identity === undefined || identity === null
             || identityLiveness(kernel, identity.pid, identity.birth) !== 'live') {
-            fail(`public-daemon-before-registry: the captured ${kind} edge is not live immediately before SIGKILL`)
+            fail(`${at}: the captured ${kind} edge is not live immediately before SIGKILL`)
           }
         }
         if (launch.cli.pid !== launch.shellPid) {
           assertLiveParentEdge(kernel, launch.cli.pid, launch.cli.birth,
-            launch.shellPid, launch.shellBirth, 'public-daemon-before-registry: CLI/shell')
+            launch.shellPid, launch.shellBirth, `${at}: CLI/shell`)
         }
         assertLiveParentEdge(kernel, launch.client.pid, launch.client.birth,
-          launch.cli.pid, launch.cli.birth, 'public-daemon-before-registry: Client/CLI')
+          launch.cli.pid, launch.cli.birth, `${at}: Client/CLI`)
         assertLiveParentEdge(kernel, launch.host.pid, launch.host.birth,
-          launch.client.pid, launch.client.birth, 'public-daemon-before-registry: Host/Client')
+          launch.client.pid, launch.client.birth, `${at}: Host/Client`)
       }
       if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
