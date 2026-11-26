@@ -192,31 +192,34 @@ test('an empty text block list still produces a browsable occurrence', () => {
 
 test('an explicit user message with a malformed required payload fails the source read', () => {
   // The existing parser rejects these shapes; the fold must not then report a
-  // complete source that silently omitted them.
+  // complete source that silently omitted them. Assert the fail-closed error
+  // identity, not incidental wording.
+  const payloadError = (error: unknown): boolean =>
+    error instanceof Error && error.name === 'HostAdmissionPayloadError'
   assert.throws(
     () => classifyHostAdmission(OPTIONS, [
       inbox(0, 1000, [{ id: 'bad-text', role: 'user', content: [{ type: 'text' }], source: { kind: 'user' } }]),
     ]),
-    /text block without text/u,
+    payloadError,
   )
   assert.throws(
     () => classifyHostAdmission(OPTIONS, [
       userMessageEvent(0, 1000, { id: 'bad-content', role: 'user', content: 'not-an-array', source: { kind: 'user' } }),
     ]),
-    /no content array/u,
+    payloadError,
   )
   assert.throws(
     () => classifyHostAdmission(OPTIONS, [
       inbox(0, 1000, [{ id: '', role: 'user', content: [], source: { kind: 'user' } }]),
     ]),
-    /no message id/u,
+    payloadError,
   )
   // A recognized inbox mutation without its required array is the same class.
   assert.throws(
     () => classifyHostAdmission(OPTIONS, [
       { type: 'agent/inbox/spliced', seq: 0, time: 1000, data: { target: 'next-turn', start: 0 } },
     ]),
-    /no inserted array/u,
+    payloadError,
   )
 })
 

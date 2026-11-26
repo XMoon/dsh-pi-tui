@@ -99,7 +99,7 @@ export interface HostAdmissionFoldOptions {
  * whole source read must fail closed: silently skipping it would report a
  * complete corpus that omitted accepted input.
  */
-export class HostAdmissionPayloadError extends Error {
+class HostAdmissionPayloadError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'HostAdmissionPayloadError'
