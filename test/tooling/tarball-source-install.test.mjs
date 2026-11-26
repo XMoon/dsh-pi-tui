@@ -2,8 +2,12 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { spawn, spawnSync } from 'node:child_process'
 import {
+  existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -126,6 +130,10 @@ function candidateFiles() {
 
 function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]: `>=${VERSION}` }, schemaVersion = 1 } = {}) {
   const root = life.tempDir('tarball-source-install-')
+  // The npm fixture candidate lives inside `root`; the cache must be an
+  // independent sibling, never inside the candidate input directory or the
+  // checkout, so the real smoke can create and reuse its own npm child.
+  const cacheRoot = realpathSync(life.tempDir('tarball-npm-cache-'))
   const distribution = join(root, 'distribution')
   mkdirSync(distribution, { recursive: true })
   const packages = {}
@@ -187,7 +195,7 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
     // would fail a production manifest contract for the wrong reason.
     engines: { node: '^22.19.0 || >=24', dsh: `>=${COMPAT_MATRIX.matrix.at(-1).dshFrom}` },
   }, candidateFiles())
-  return { root, distribution, candidate, registryTarball }
+  return { root, distribution, candidate, registryTarball, cacheRoot }
 }
 
 function smokeEnvironment(fixture, registry = 'http://127.0.0.1:9/') {
@@ -226,8 +234,8 @@ function smokeEnvironment(fixture, registry = 'http://127.0.0.1:9/') {
   return env
 }
 
-function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDistribution, registry, skipInstall = false } = {}) {
-  const env = smokeEnvironment(fixture, registry)
+function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDistribution, registry, skipInstall = false, environment = {} } = {}) {
+  const env = { ...smokeEnvironment(fixture, registry), ...environment }
   if (skipInstall) env.TARBALL_SMOKE_SKIP_INSTALL = '1'
   else delete env.TARBALL_SMOKE_SKIP_INSTALL
   if (envDistribution !== undefined) env.DSH_SOURCE_DISTRIBUTION = envDistribution
@@ -243,7 +251,11 @@ function runSourceSmoke(fixture, { cliDistribution = fixture.distribution, envDi
 }
 
 function runNpmSmoke(fixture, environment = {}) {
-  const env = { ...smokeEnvironment(fixture), ...environment }
+  const env = {
+    ...smokeEnvironment(fixture),
+    DSH_TEST_INSTALL_CACHE_ROOT: fixture.cacheRoot,
+    ...environment,
+  }
   delete env.TARBALL_SMOKE_SKIP_INSTALL
   const cwd = join(fixture.root, 'clean-cwd')
   mkdirSync(cwd, { recursive: true })
@@ -324,7 +336,9 @@ async function stopRegistry(registry) {
 test('source mode installs a fresh candidate and proves local DSH provenance', (t) => {
   const life = testLifecycle(t)
   const fixture = makeFixture(life)
-  const result = runSourceSmoke(fixture)
+  // An explicit empty standalone override is an invalid install-cache input.
+  // Source Mode must never read or qualify it.
+  const result = runSourceSmoke(fixture, { environment: { DSH_TEST_INSTALL_CACHE_ROOT: '' } })
   const output = outputOf(result)
   assert.equal(result.status, 0, output)
   assert.match(output, /source distribution fresh install \(pnpm\)/)
@@ -333,6 +347,8 @@ test('source mode installs a fresh candidate and proves local DSH provenance', (
   assert.match(output, /all exports entries import/)
   assert.match(output, /DSH source SHA\s+: a{40}/)
   assert.match(output, /package count\s+: 2/)
+  assert.equal(existsSync(join(fixture.cacheRoot, 'npm-cache')), false,
+    'the Source branch must not qualify or create the standalone npm cache child')
 })
 
 test('source mode accepts DSH_SOURCE_DISTRIBUTION without a CLI argument', (t) => {
@@ -398,6 +414,28 @@ test('npm mode without a distribution keeps the existing fresh npm install path'
   assert.equal(result.status, 0, output)
   assert.match(output, /tarball installs standalone \(npm install --omit=dev\)/)
   assert.match(output, /all exports entries import/)
+  const npmCache = join(fixture.cacheRoot, 'npm-cache')
+  const npmCacheStats = lstatSync(npmCache)
+  assert.equal(npmCacheStats.isDirectory(), true)
+  assert.equal(npmCacheStats.mode & 0o777, 0o700)
+  assert.equal(readdirSync(npmCache).length > 0, true,
+    'the qualified npm cache child must receive real npm writes, not just exist')
+  assert.equal(existsSync(join(npmCache, '_logs')), true,
+    'npm must write its real debug log into the qualified npm cache')
+})
+
+test('npm mode refuses an install cache override that overlaps the candidate input', (t) => {
+  const life = testLifecycle(t)
+  const fixture = makeFixture(life, { candidatePeers: {} })
+  const sentinel = join(fixture.root, 'sentinel')
+  writeFileSync(sentinel, 'owned\n', { mode: 0o600 })
+  const result = runNpmSmoke(fixture, { DSH_TEST_INSTALL_CACHE_ROOT: fixture.root })
+  const output = outputOf(result)
+  assert.notEqual(result.status, 0, output)
+  assert.match(output, /INPUT_UNQUALIFIED: install cache root/u)
+  assert.equal(existsSync(join(fixture.root, 'npm-cache')), false,
+    'a refused override must not create the npm cache child')
+  assert.equal(readFileSync(sentinel, 'utf8'), 'owned\n')
 })
 
 test('npm mode keeps the probe isolated when TMPDIR is inside the checkout', (t) => {

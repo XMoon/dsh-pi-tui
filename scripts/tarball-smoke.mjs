@@ -67,6 +67,7 @@ import {
 } from './lib/dsh-distribution.mjs'
 import { COMPAT_MATRIX } from './lib/dsh-compat.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
+import { prepareNpmInstallCache } from './lib/test-install-cache.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 /** The dsh-pi-tui package root (the workspace checkout). */
@@ -647,6 +648,14 @@ function main() {
         const sourceInstall = runSourceInstall(tarball, pkg, sourceDistribution, probeDir)
         installSucceeded = sourceInstall.installed
       } else {
+        // Qualify the account-level download cache before creating the probe:
+        // only the npm child is shared, while this run's probe package, install
+        // tree and resolution stay private.
+        const npmCacheDirectory = prepareNpmInstallCache({
+          tmpBase: workDir,
+          override: process.env.DSH_TEST_INSTALL_CACHE_ROOT,
+          candidateTarballs: [tarball],
+        })
         mkdirSync(probeDir)
         const dshPeers = Object.keys(pkg.peerDependencies ?? {}).filter(isDshPackage)
         let installLabel = 'tarball installs standalone (npm install --omit=dev)'
@@ -672,7 +681,7 @@ function main() {
         }
         const install = run('npm', [
           'install', '--omit=dev', '--no-save',
-          '--cache', join(workDir, 'npm-cache'),
+          '--cache', npmCacheDirectory,
           tarball,
         ], { cwd: probeDir, timeout: 180_000 })
         installSucceeded = install.status === 0
