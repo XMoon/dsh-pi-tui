@@ -74,8 +74,9 @@ Consequences that are part of the contract:
   backend's real `partial` or `full` enforcement. A missing official shell
   capability refuses before any spawn — never a bare `pwsh`, `cmd`, Git Bash,
   WSL or sandbox downgrade, and `partial` is never advertised as full. Windows
-  Remote user-shell execution stays closed with the Windows daemon tier; PR3
-  owns real Host dialect provenance and the wire, never a Client-OS guess.
+  Remote user-shell execution is not available in this release: the Windows
+  daemon tier remains guarded, and a real Host dialect/wire is future work,
+  never a Client-OS guess.
 
 ## Semantic ports and composition
 

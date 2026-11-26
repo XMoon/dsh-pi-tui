@@ -1183,6 +1183,14 @@ test('PowerShell literal-path context admits relative, drive-absolute, quoted an
   const closedLine = '!Get-Content "C:\\Program Files\\fi" tail'
   const closed = powershellCompletionContext(closedLine, closedLine.indexOf('fi"') + 2)
   assert.deepEqual(closed?.word, { valuePrefix: 'C:\\Program Files\\fi', quote: '"', closingQuoteAfterCursor: true })
+  // The explicit call operator makes the path an invocation argument; a
+  // quoted literal there remains a valid command invocation.
+  assert.deepEqual(context('!& .\\script.ps1'), {
+    kind: 'paths',
+    prefix: '.\\script.ps1',
+    priorWords: [],
+    word: { valuePrefix: '.\\script.ps1', quote: undefined, closingQuoteAfterCursor: false },
+  })
 })
 
 test('PowerShell uncertain or non-literal contexts yield no candidates at all', () => {
@@ -1200,10 +1208,26 @@ test('PowerShell uncertain or non-literal contexts yield no candidates at all', 
   for (const line of uncertain) {
     assert.equal(powershellCompletionContext(line, line.length), undefined, line)
   }
-  // Bare command positions never fake a command candidate; a path-shaped
-  // command word stays a path.
+  // A bare command position never fakes a command candidate, and quoting a
+  // bare executable path would turn it into a string expression; only the
+  // explicit call operator admits a path there.
   assert.equal(powershellCompletionContext('!Get-Ch', 7), undefined)
-  assert.equal(powershellCompletionContext('!.\\script.ps1', 15)?.kind, 'paths')
+  assert.equal(powershellCompletionContext('!.\\script.ps1', 15), undefined)
+  // A closing quote followed by adjacent text is a mixed token; replacing
+  // only the quoted part would leave another mixed token.
+  const mixed = "!Get-Content 'file'tail"
+  assert.equal(powershellCompletionContext(mixed, mixed.indexOf("'tail")), undefined)
+  // Comment, block comment, stop-parsing and the first git subcommand have no
+  // proven literal-path boundary/source.
+  for (const line of ['!Get-Content # .\\fi', '!Get-Content <# .\\fi', '!Get-Content --% .\\fi', '!git ch', '!git ']) {
+    assert.equal(powershellCompletionContext(line, line.length), undefined, line)
+  }
+  // A path argument after the git subcommand remains an ordinary path.
+  assert.equal(powershellCompletionContext('!git status .\\fi', '!git status .\\fi'.length)?.kind, 'paths')
+  // A raw typographic quote is a PowerShell delimiter this adapter refuses to
+  // reparse; candidates containing one are encoded by doubling (below).
+  const smart = "!Get-Content 'O\u2019Brien"
+  assert.equal(powershellCompletionContext(smart, smart.length), undefined)
   // Non-shell lines never produce a context.
   assert.equal(powershellCompletionContext('Get-ChildItem .\\x', 18), undefined)
 })
@@ -1295,4 +1319,54 @@ test('a PowerShell host path candidate is a single-quoted literal with doubled a
   const suggestions = await suggestShellCompletion(context, port, { kind: 'session', sessionId: 'session-a' }, { signal: abort, force: true })
   assert.equal(suggestions?.items[0]?.value, "'.\\中文$稿''s.txt'")
   assert.equal(suggestions?.items[0]?.label, ".\\中文$稿's.txt")
+})
+
+test('a PowerShell candidate containing typographic single quotes is doubled too', async () => {
+  const line = '!Get-Content .\\O'
+  const context = powershellCompletionContext(line, line.length)
+  assert.ok(context !== undefined)
+  const port: HostShellCompletionPort = {
+    pathAuthority: 'host',
+    pathLiteralDialect: 'powershell',
+    async complete({ request }) {
+      return request.kind === 'paths'
+        ? { kind: 'ok', candidates: ['.\\O\u2019\u2018Brien.txt'] }
+        : { kind: 'ok', candidates: [] }
+    },
+  }
+  const suggestions = await suggestShellCompletion(context, port, { kind: 'session', sessionId: 'session-a' }, { signal: abort, force: true })
+  assert.equal(suggestions?.items[0]?.value, "'.\\O\u2019\u2019\u2018\u2018Brien.txt'")
+  assert.equal(suggestions?.items[0]?.label, ".\\O\u2019\u2018Brien.txt")
+})
+
+test('the PowerShell provider refuses mixed, comment, bare-command, git-subcommand and multiline positions without a Host request', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-powershell-provider-neg-')
+  const { port, requests } = powershellShellPort(() => ['.\\file.txt'])
+  const provider = powershellProvider(root, port)
+  const cases: Array<{ line: string; col: number }> = [
+    { line: "Get-Content 'file'tail", col: "Get-Content 'file".length },
+    { line: 'Get-Content # .\\fi', col: 'Get-Content # .\\fi'.length },
+    { line: '.\\script.ps1', col: 12 },
+    { line: 'git ch', col: 6 },
+    { line: 'Get-Content --% .\\fi', col: 'Get-Content --% .\\fi'.length },
+  ]
+  for (const entry of cases) {
+    assert.equal(await provider.getSuggestions([entry.line], 0, entry.col, { signal: abort, force: true }), null,
+      `an ambiguous PowerShell position must offer nothing: ${entry.line}`)
+  }
+  assert.deepEqual(requests, [], 'no Host path request may be issued for an ambiguous position')
+  // A second shell-mode line has no proven PowerShell single-line boundary.
+  assert.equal(await provider.getSuggestions(['git status', 'Get-Content .\\fi'], 1, 'Get-Content .\\fi'.length, { signal: abort, force: true }), null,
+    'PowerShell shell-mode completion on a later line is refused')
+  // A separated quoted token remains a normal positive and the following
+  // argument is preserved by the real provider acceptance.
+  const positive = powershellShellPort(prefix => prefix.startsWith('C:\\Program Files\\') ? ['C:\\Program Files\\file.txt'] : [])
+  const positiveProvider = powershellProvider(root, positive.port)
+  const line = 'Get-Content \'C:\\Program Files\\fi\' tail'
+  const col = line.indexOf('fi\'') + 2
+  const suggestions = await positiveProvider.getSuggestions([line], 0, col, { signal: abort, force: true })
+  assert.ok(suggestions !== null)
+  const applied = positiveProvider.applyCompletion([line], 0, col, suggestions.items[0]!, suggestions.prefix)
+  assert.deepEqual(applied.lines, ["Get-Content 'C:\\Program Files\\file.txt' tail"])
 })

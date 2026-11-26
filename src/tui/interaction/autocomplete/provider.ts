@@ -306,21 +306,24 @@ export class MentionProvider implements AutocompleteProvider {
     // a session/workspace switch mid-request must not bake the NEW scope
     // into this request's snapshot — the apply fence compares it).
     const requestScope = this.scopeOf()
-    // An OPEN shell continuation (the previous physical line leaves a quote,
-    // backtick, substitution or trailing backslash unfinished) has no
-    // trustworthy single-line boundary. Offer NOTHING for it: no guessed shell
-    // candidate, no Client path fallback and no stale dropdown.
-    if (this.inputModeSource() !== 'prompt' && cursorLine > 0
-      && shellCommandIsOpen(lines.slice(0, cursorLine))) {
-      if (generation === this.requestGeneration) this.requestSnapshot = null
-      return null
+    const shellDialect = this.hostShellCompletion?.pathLiteralDialect ?? 'bash'
+    // A PowerShell shell-mode line after the first has no proven single-line
+    // boundary: the Bash continuation scanner does not model PowerShell block
+    // comments, here-strings or subexpressions. Refuse that unproven multiline
+    // context rather than borrowing Bash proof. An OPEN Bash continuation keeps
+    // its existing refusal. Prompt lines are independent, so they stay usable.
+    if (this.inputModeSource() !== 'prompt' && cursorLine > 0) {
+      if (shellDialect === 'powershell'
+        || shellCommandIsOpen(lines.slice(0, cursorLine))) {
+        if (generation === this.requestGeneration) this.requestSnapshot = null
+        return null
+      }
     }
     // 1. The shell grammar runs before file/attachment completion. Direct keeps
     // the existing fork path provider; Remote routes every shell word/path only
     // through the authenticated Host port.
     const wire = this.virtualWireShellContext(lines, cursorLine, cursorCol)
     const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
-    const shellDialect = this.hostShellCompletion?.pathLiteralDialect ?? 'bash'
     const shellContext = this.hostShellCompletion === undefined
       ? undefined
       : shellDialect === 'powershell'

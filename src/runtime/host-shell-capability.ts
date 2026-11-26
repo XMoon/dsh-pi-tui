@@ -130,8 +130,8 @@ export async function hostShellLocalForAttempt(options: {
 }): Promise<HostShellLocal | undefined> {
   if (options.platform !== 'win32') return { dialect: 'bash' }
   const shell = options.shell
-  if (shell === undefined || typeof shell.pwshPath !== 'string' || shell.pwshPath === '') return undefined
-  const executable = shell.pwshPath
+  const executable = shell?.pwshPath
+  if (typeof executable !== 'string' || executable === '') return undefined
   const capability = await resolvePwshHostShellModule(options.anchor)
   return {
     dialect: 'pwsh',

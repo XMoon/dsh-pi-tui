@@ -462,7 +462,7 @@ test('the sandbox preference without a composition sandbox capability fails clos
   assert.ok(!view.includes('[exit 0]'), `an unavailable sandbox policy must not execute the command:\n${view}`)
 })
 
-test('an unsupported Host shell refuses the gesture before Session creation and keeps the draft', async (t) => {
+test('an unsupported Host shell refuses the gesture and keeps the draft', async (t) => {
   const mounted = await mountSandboxRunner(t, undefined)
   const text = '!!printf unavailable'
   const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')

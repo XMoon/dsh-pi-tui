@@ -8,7 +8,6 @@
 import type { AutocompleteSuggestions } from '@xmoon76/pi-tui'
 import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { parseShellWords } from '../../../client/shell/words.ts'
-import { unsupportedWindowsPathToken } from '../../../domain/file-completion/query.ts'
 
 const MAX_SHELL_CANDIDATES = 50
 
@@ -400,6 +399,9 @@ interface PowerShellWordScan {
   readonly quote: "'" | '"' | undefined
   readonly closingQuoteAfterCursor: boolean
   readonly commandPosition: boolean
+  /** The command position follows the explicit PowerShell call operator `&`;
+   * a quoted literal there is an invocation argument, not a bare command. */
+  readonly callOperatorArgument: boolean
   /** Whether the token STARTED with a quote (its whole value is quoted). */
   readonly startedQuoted: boolean
   readonly uncertain: boolean
@@ -412,13 +414,23 @@ function scanPowerShellWord(line: string, prefixLength: number, col: number): Po
   let rawLength = 0
   let quote: "'" | '"' | undefined
   let nextIsCommand = true
+  let nextIsCallOperator = false
   let wordIsCommand = true
+  let wordIsCallOperatorArgument = false
   let startedQuoted = false
   let closedQuote = false
   let uncertain = false
   let index = prefixLength
   while (index < col) {
     const character = line[index]!
+    // PowerShell 5.1 and 7 both accept typographic single quotes as string
+    // delimiters. This bounded adapter does not reconstruct that grammar, so
+    // it refuses any raw token carrying one instead of guessing its boundary.
+    if (character === '\u2018' || character === '\u2019'
+      || character === '\u201C' || character === '\u201D') {
+      uncertain = true
+      break
+    }
     if (quote === "'") {
       if (character === "'") {
         if (line[index + 1] === "'") {
@@ -469,13 +481,27 @@ function scanPowerShellWord(line: string, prefixLength: number, col: number): Po
       quote = undefined
       startedQuoted = false
       closedQuote = false
-      if (isPowerShellCommandSeparator(character)) nextIsCommand = true
+      nextIsCommand = isPowerShellCommandSeparator(character)
+      nextIsCallOperator = character === '&'
       index += 1
       continue
     }
     if (rawLength === 0) {
       wordIsCommand = nextIsCommand
+      wordIsCallOperatorArgument = nextIsCallOperator
       nextIsCommand = false
+      nextIsCallOperator = false
+      // A word-start `#` is a PowerShell comment, not an argument; `--%`
+      // stops PowerShell parsing for a native command. Neither position has
+      // a trustworthy literal-path boundary.
+      if (character === '#') {
+        uncertain = true
+        break
+      }
+      if (character === '-' && line.startsWith('--%', index)) {
+        uncertain = true
+        break
+      }
     }
     if (character === "'" || character === '"') {
       if (rawLength > 0) uncertain = true
@@ -513,14 +539,20 @@ function scanPowerShellWord(line: string, prefixLength: number, col: number): Po
       } else {
         const tail = line.slice(col, closing)
         if (quote === '"' && (tail.includes('$') || tail.includes('`'))) uncertain = true
+        if (tail.includes('\u2018') || tail.includes('\u2019')) uncertain = true
         end = closing + 1
+        // A closing quote adjacent to more unquoted text is a MIXED token;
+        // replacing only the quoted part would leave a second mixed token.
+        if (end < line.length && !isPowerShellWordDelimiter(line[end]!)) uncertain = true
       }
     } else {
       let tailIndex = col
       while (tailIndex < line.length) {
         const character = line[tailIndex]!
         if (isPowerShellWordDelimiter(character)) break
-        if (character === '$' || character === '`' || character === "'" || character === '"') {
+        if (character === '$' || character === '`' || character === "'" || character === '"'
+          || character === '\u2018' || character === '\u2019'
+          || character === '\u201C' || character === '\u201D') {
           uncertain = true
           break
         }
@@ -536,6 +568,7 @@ function scanPowerShellWord(line: string, prefixLength: number, col: number): Po
     quote,
     closingQuoteAfterCursor,
     commandPosition: rawLength === 0 ? nextIsCommand : wordIsCommand,
+    callOperatorArgument: rawLength === 0 ? nextIsCallOperator : wordIsCallOperatorArgument,
     startedQuoted,
     uncertain,
     end,
@@ -545,7 +578,16 @@ function scanPowerShellWord(line: string, prefixLength: number, col: number): Po
 /** Whether a decoded PowerShell token is an unambiguous literal PATH word.
  * A bare command position never fakes a command candidate; an ordinary
  * argument position always addresses a path (a `-Parameter` word does not). */
-function isPowerShellPathValue(value: string, commandPosition: boolean, startedQuoted: boolean): boolean {
+function isPowerShellPathValue(
+  value: string,
+  commandPosition: boolean,
+  startedQuoted: boolean,
+  callOperatorArgument: boolean,
+): boolean {
+  // A bare executable path at a command position would be turned into a
+  // string expression by quoting. Only `& <literal path>` is an explicit,
+  // already-literal invocation argument this adapter may complete.
+  if (commandPosition && !callOperatorArgument) return false
   if (value === '') return !commandPosition
   if (!startedQuoted && value.startsWith('-')) return false
   if (value === '.' || value === '..') return true
@@ -563,7 +605,11 @@ export function powershellCompletionContext(line: string, col: number): ShellCom
   if (col < prefixLength) return undefined
   const scan = scanPowerShellWord(line, prefixLength, col)
   if (scan.uncertain) return undefined
-  if (!isPowerShellPathValue(scan.value, scan.commandPosition, scan.startedQuoted)) return undefined
+  // The first argument after `git` is a subcommand position, which this
+  // adapter does not source. It must stay unavailable, never fall back to
+  // Host path candidates.
+  if (!scan.commandPosition && /^git$/iu.test(line.slice(prefixLength, scan.start).trim())) return undefined
+  if (!isPowerShellPathValue(scan.value, scan.commandPosition, scan.startedQuoted, scan.callOperatorArgument)) return undefined
   return {
     kind: 'paths',
     prefix: line.slice(scan.start, col),
@@ -584,10 +630,12 @@ export function powershellWordRange(line: string, prefixLength: number, col: num
   return { start: scan.start, end: scan.end }
 }
 
-/** Encode one literal path as a PowerShell single-quoted literal; the only
- * escape is a doubled apostrophe. */
+/** Encode one literal path as a PowerShell single-quoted literal. PowerShell
+ * 5.1 and 7 both treat ASCII and typographic single quotes as delimiters; each
+ * delimiter is escaped by doubling it, so a filesystem-origin name cannot
+ * change the parse of the user's command. */
 export function powershellPathLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`
+  return `'${value.replace(/['\u2018\u2019]/gu, quote => `${quote}${quote}`)}'`
 }
 
 /** The RAW range a WHOLE-WORD acceptance replaces: the raw word start, and the
