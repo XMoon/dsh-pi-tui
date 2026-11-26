@@ -478,6 +478,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  input-path rebase) must never advance it before the screen shows the new
    *  action. */
   private paintedCredentialAction: 'configure' | 'clear' | undefined
+  private paintedCredentialRevision: number | undefined
   /** True only inside the real `render()` call (not for input-path
    *  projections). */
   private painting = false
@@ -566,6 +567,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // The Root forwards a body key only while this page owns the keyboard. A
     // key that arrives in the passive preview has no visible owner and is inert.
     if (!this.focused) return
+    // The key is ADMITTED against the frame painted before this key: capture
+    // that revision, then start the new semantic frame it invalidates.
+    const admittedRevision = this.revision
     // Every real key starts a new semantic frame: a bar press that began
     // before it can never complete against the state this key changes (or
     // re-affirms). The painted target is re-published by the next render.
@@ -575,7 +579,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedBarRevision = -1
     if (matchesKey(data, 'escape') || matchesKey(data, 'left')) {
       if (this.region === 'detail') {
-        this.commitPresentation(() => { this.region = 'list' })
+        // An explicit Detail Back ends the unsubmitted choice. Pure Tab may
+        // preserve a same-row draft; the Back ladder returns the Detail to the
+        // authoritative Host observation, so a later Tab/Enter cannot revive
+        // the abandoned candidate.
+        this.commitPresentation(() => {
+          this.region = 'list'
+          this.abandonDetailDraft()
+        })
         return
       }
       this.intents.done()
@@ -591,7 +602,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     }
     if (matchesKey(data, 'enter')) {
       if (this.region === 'list') this.openSelectedRow()
-      else this.confirmSelected()
+      else this.confirmSelected(admittedRevision)
       return
     }
     if (matchesKey(data, 'right')) {
@@ -746,6 +757,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
     this.paintedDecision = undefined
+    this.paintedCredentialAction = undefined
+    this.paintedCredentialRevision = undefined
     this.paintedBarSpansValue = []
     this.paintedBarRevision = -1
     this.grant = undefined
@@ -890,19 +903,32 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     })
   }
 
+  /** Return the Detail-local draft to the authoritative observation after an
+   *  explicit Back. Tab deliberately does NOT call this: it preserves the
+   *  intended same-row local selection. */
+  private abandonDetailDraft(): void {
+    const facts = this.intents.readFacts()
+    this.choiceIndex = this.currentChoiceIndex(facts)
+    this.actionIndex = 0
+    this.detailOffset = 0
+  }
+
   /** Enter in the Detail: confirm the EXACT decision the last painted frame
    *  offered (choice rows) or activate one credential deeplink. The read-only
    *  override rows offer no candidate, so their Enter only re-proves the
    *  painted frame (nothing writes). Nothing else writes. */
-  private confirmSelected(): void {
+  private confirmSelected(admittedRevision: number): void {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
     if (rowId === 'web-credential') {
-      this.activateCredentialAction()
+      this.activateCredentialAction(undefined, admittedRevision)
       return
     }
     const painted = this.paintedDecision
     if (painted === undefined || painted.rowId !== rowId) return
+    // A region round trip, a row/candidate/viewport move or any other local
+    // transition retires this decision; only a fresh paint may republish it.
+    if (painted.revision !== admittedRevision) return
     if (painted.choiceIndex !== this.choiceIndex) return
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
@@ -1300,7 +1326,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  action (an external clear while the cursor sat on Clear) REFUSES this
    *  gesture and repaints first — the reconciled Configure is selected for the
    *  NEXT gesture, never activated by the stale one. */
-  private activateCredentialAction(clicked?: 'configure' | 'clear'): void {
+  private activateCredentialAction(clicked?: 'configure' | 'clear', admittedRevision?: number): void {
+    // Keyboard Enter may only run the action the frame it was admitted against
+    // painted. The bar path already proves its own frame revision before this.
+    if (clicked === undefined && admittedRevision !== undefined
+      && this.paintedCredentialRevision !== admittedRevision) {
+      this.commitPresentation(() => {})
+      return
+    }
     const selectable = this.selectableCredentialActions()
     const index = clicked === undefined
       ? this.reconcileCredentialCursor()
@@ -1434,13 +1467,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private renderFrame(width: number): string[] {
     // The marker belongs to THIS frame only: a list/non-credential frame must
     // never retain the credential action an earlier Detail painted.
-    this.paintedCredentialAction = undefined
     // Same rule for the bar's clickable geometry: a frame that paints no
     // complete Esc affordance or Confirm target (a dropped wording, a
     // saving/loading fact) must not leave the previous frame's spans alive.
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
     this.paintedDecision = undefined
+    this.paintedCredentialAction = undefined
+    this.paintedCredentialRevision = undefined
     this.paintedBarSpansValue = []
     this.paintedBarRevision = -1
     // A fresh read can invalidate the credential cursor before this frame: clamp
@@ -2170,7 +2204,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         continue
       }
       const active = selectable === activeIndex
-      if (active && this.focused && this.region === 'detail' && this.painting) this.paintedCredentialAction = action.action
+      if (active && this.focused && this.region === 'detail' && this.painting) {
+        this.paintedCredentialAction = action.action
+        this.paintedCredentialRevision = this.revision
+      }
       const marker = active ? (this.focused && this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
       const label = `${marker}${active && this.focused && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
       lines.push({ text: truncateToWidth(label, Math.max(1, width), '…', false), action: action.action, enabled: true })

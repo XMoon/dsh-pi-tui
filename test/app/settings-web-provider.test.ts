@@ -3686,3 +3686,85 @@ test('a passive single-region wheel moves the visible list, never the hidden Det
   assert.match(h.view(), /> Fetch API Override/u,
     `the wheel moved the visible list cursor:\n${h.view()}`)
 })
+
+test('an admitted pointer handoff keeps the real Esc valid before the child frame paints', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await key(h, '\x1b[Z') // the painted rail owns the keyboard
+  assert.match(h.view(), /\[Categories \(10\)\]/u)
+  const readsBefore = h.readCount()
+  const rows = h.view().split('\n')
+  const headerRow = rows.findIndex(line => line.includes('Current / Detail'))
+  assert.ok(headerRow >= 0, `the pane header is painted:\n${h.view()}`)
+  const label = rows[headerRow]!.indexOf('Web Search / Fetch')
+  const listStart = rows[headerRow]![label - 1] === '[' ? label - 1 : label
+  const contentRow = headerRow + 1
+  // The real row click is admitted by the child; the Root commits the child
+  // seat. The REAL Esc arrives before the destination frame paints.
+  pointerClick(h, contentRow, listStart + 2)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Settings · Tools · Rows/u,
+    `the admitted pointer handoff must return to the real origin:\n${h.view()}`)
+  assert.equal(h.readCount(), readsBefore, 'the pointer handoff and Back start no Host read')
+  assert.equal(h.writes.length, 0)
+})
+
+test('a buffered region round-trip cannot replay a stale Confirm', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2) // the visible, genuinely changed candidate
+  assert.equal(h.writes.length, 0)
+  // Two Tabs retire and re-enter the active Detail with NO intervening paint:
+  // the earlier frame's typed decision must not be consumed by the buffered
+  // Enter.
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.equal(h.writes.length, 0, 'the stale decision writes nothing')
+  // The fresh frame republishes the decision; the next Enter confirms once.
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  await settlePainted(h, 'the verified provider Detail', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Saved'))
+})
+
+test('an explicit Detail Back abandons the unsubmitted candidate', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 2) // DeepSeek Search API draft
+  assert.match(h.view(), /› DeepSeek Search API/u)
+  await key(h, ESC) // explicit Detail Back ends the unsubmitted choice
+  assert.match(h.view(), /Open \[Enter\]/u)
+  await key(h, '\t') // list -> Detail again
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u)
+  assert.match(h.view(), /› DeepSeek server-side search/u,
+    'the authoritative current candidate owns the cursor')
+  assert.doesNotMatch(h.view(), /› DeepSeek Search API/u, 'the abandoned draft is not revived')
+  assert.equal(h.writes.length, 0)
+})
+
+test('a buffered region round-trip cannot replay a stale credential Enter', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 8) // the credential Detail with a visible Configure action
+  assert.match(h.view(), /› Configure in Models…/u)
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\t')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale credential action does not navigate')
+  assert.match(h.view(), /Settings · Tools · Web Search \/ Fetch/u)
+  // The fresh frame's Enter still runs the painted action exactly once.
+  await key(h, ENTER)
+  await settlePainted(h, 'the fresh credential deeplink', frame =>
+    frame.includes('Settings · Models') && frame.includes('DEEPSEEK_API_KEY'))
+})

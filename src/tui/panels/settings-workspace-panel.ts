@@ -4416,16 +4416,22 @@ export class SettingsWorkspacePanel implements Component {
    *  page WITHOUT re-mounting, re-reading or activating anything. */
   private focusWebWorkbench(): void {
     if (!this.webWorkbenchActive()) return
-    this.focus = 'detail'
-    // The logical seat is committed BEFORE the frame paints: the page's own Esc
-    // ladder must work in the unpainted handoff window. Renderer ink/targets
-    // still come only from the next real frame.
-    if (this.specialistPage !== undefined) this.specialistPage.focused = true
+    this.commitWebSeat('detail')
     this.pressedGesture = undefined
     this.specialistPressed = undefined
     this.contentPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  /** Commit the mounted Web page's keyboard seat synchronously. The logical
+   *  owner changes NOW; the next frame merely publishes it. Used by every
+   *  transition where that instance survives: rail Open/Tab, an admitted
+   *  list-row pointer handoff, a same-category yield and the initial mount. */
+  private commitWebSeat(focus: SettingsWorkspaceFocus): void {
+    if (!this.webWorkbenchActive()) return
+    this.focus = focus
+    if (this.specialistPage !== undefined) this.specialistPage.focused = focus === 'detail'
   }
 
   /** Hand the keyboard from the untouched Web list back to the visible rail.
@@ -4435,8 +4441,7 @@ export class SettingsWorkspacePanel implements Component {
     if (page === undefined || !this.webWorkbenchActive()) return
     if (page.webWorkbenchCanYieldToRail?.() !== true) return
     page.cancelPointer?.()
-    page.focused = false
-    this.focus = 'categories'
+    this.commitWebSeat('categories')
     this.pressedGesture = undefined
     this.specialistPressed = undefined
     this.contentPressed = undefined
@@ -4579,7 +4584,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPage = page
     this.specialistRow = row.id
     this.webReturnLevel = row.specialist === 'web-settings' ? (webOrigin ?? 'detail') : undefined
-    if (row.specialist === 'web-settings') page.focused = this.focus === 'detail'
+    if (row.specialist === 'web-settings') this.commitWebSeat(this.focus)
     this.pressedGesture = undefined
     this.contentPressed = undefined
     this.bumpRevision()
@@ -6104,6 +6109,9 @@ export class SettingsWorkspacePanel implements Component {
     // the content-focus click), whose own hook admits exactly one read.
     if (category === 'about' && changed && this.paintsDirectContent()) this.intents.onAboutEnter?.()
     this.focus = focus
+    // A same-category reselect keeps the mounted Web page: project the logical
+    // seat onto it synchronously, exactly like the explicit handoff helper.
+    if (!changed) this.commitWebSeat(focus)
     // The direct page is mounted only when its content column is PAINTED: a
     // narrow terminal that still shows the category list has no right column,
     // and browsing an invisible category must not start a Host watch.
@@ -7156,9 +7164,14 @@ export class SettingsWorkspacePanel implements Component {
         const seat = this.focus
         const accepted = owner?.handleMouse?.(click)
         if (accepted?.handled === true && this.specialistPage === owner && this.focus === seat) {
-          if (seat === 'categories') this.focus = 'detail'
-          this.bumpRevision()
-          this.intents.requestRender()
+          if (seat === 'categories') {
+            // WP2 ordering: the child's admission moved the list selection;
+            // only now does the Root commit the child keyboard seat.
+            this.focusWebWorkbench()
+          } else {
+            this.bumpRevision()
+            this.intents.requestRender()
+          }
         }
         return
       }
