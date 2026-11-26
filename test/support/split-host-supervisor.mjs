@@ -6188,8 +6188,8 @@ function publicPathPresence(path, reason) {
 }
 
 /** The captured shell's controlling-tty facts for foreground admission. */
-function assertPublicParentEdge(pid, parentPid, parentBirth, label) {
-  const edge = requirePublicObservation(label).parentEdge(pid, parentPid, parentBirth)
+function assertPublicParentEdge(pid, parentPid, parentBirth, label, childBirth) {
+  const edge = requirePublicObservation(label).parentEdge(pid, parentPid, parentBirth, childBirth)
   if (edge.proven !== true) {
     throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the PID ${String(pid)} parent edge is not proven (${String(edge.reason)})`)
   }
@@ -6788,13 +6788,6 @@ function livePublicHostPids() {
     const argv = obs.argvEntry(pid)
     if (argv.kind === 'gone') continue
     if (argv.kind !== 'ok') {
-      // A same-name Node process whose absolute entry lies outside this
-      // Scene's installed home is a different installation, not an unresolved
-      // candidate. A path inside the home with an unreadable canonical entry
-      // still fails closed.
-      const candidateEntry = argv.argv?.[1]
-      if (typeof candidateEntry === 'string' && isAbsolute(candidateEntry)
-        && !candidateEntry.startsWith(`${home}${sep}`)) continue
       throw new Error(`PUBLIC_COLD_SCAN_UNKNOWN: PID ${String(pid)} argv is unreadable (${argv.code})`)
     }
     if (argv.entry !== entry) continue
@@ -7336,7 +7329,7 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
       throw new Error(`CLIENT_IDENTITY_UNVERIFIED: ${label}: the public CLI is not a direct child of the native shell`)
     }
     if (handle.cli.pid !== handle.shellPid) {
-      assertPublicParentEdge(handle.cli.pid, handle.shellPid, handle.shellIdentity.birth, `${label} public CLI`)
+      assertPublicParentEdge(handle.cli.pid, handle.shellPid, handle.shellIdentity.birth, `${label} public CLI`, handle.cli.birth)
     }
     if (handle.cli.pid === handle.shellPid) {
       // A direct native spawn has no intermediate shell; the same kernel
@@ -7988,14 +7981,8 @@ const child = process.env.P1D_AUTH_CHILD
 const shared = { ...process.env }
 const first = spawn(process.execPath, [child], { stdio: 'inherit', env: { ...shared, P1D_AUTH_OUT: process.env.P1D_AUTH_CHILD_OUT } })
 writeFileSync(process.env.P1D_AUTH_PARENT_OUT, JSON.stringify({ pid: process.pid, ppid: process.ppid, child: first.pid }))
-let sibling
 let second
 setInterval(() => {
-  if (sibling === undefined && existsSync(process.env.P1D_AUTH_SIBLING_TRIGGER)) {
-    sibling = spawn(process.execPath, [child], { stdio: 'ignore', detached: true, env: { ...shared, P1D_AUTH_OUT: process.env.P1D_AUTH_SIBLING_OUT } })
-    sibling.unref()
-    writeFileSync(process.env.P1D_AUTH_SIBLING_PID_OUT, JSON.stringify({ pid: sibling.pid }))
-  }
   if (second === undefined && existsSync(process.env.P1D_AUTH_TRIGGER)) {
     second = spawn(process.execPath, [child], { stdio: 'ignore', env: { ...shared, P1D_AUTH_OUT: process.env.P1D_AUTH_SECOND_OUT } })
     writeFileSync(process.env.P1D_AUTH_SECOND_PID_OUT, JSON.stringify({ pid: second.pid }))
@@ -8037,6 +8024,12 @@ function authorityAdmissionReason(obs, observation, expected) {
   return result.admitted === true ? 'admitted' : result.reason
 }
 
+function registerAuthorityHelper({ entryId, kind, label, child, dir }) {
+  const handle = registerHelperHandle({ entryId, kind, label, child, dir })
+  handle.authorityKind = kind
+  return handle
+}
+
 /** One fixed, fully controlled native authority-control run. */
 async function handlePublicAuthorityControl(message) {
   requireProcessScene('PUBLIC_AUTHORITY_CONTROL')
@@ -8047,17 +8040,12 @@ async function handlePublicAuthorityControl(message) {
   const files = writePublicAuthorityFixtures(dir)
   const home = join(dir, 'home')
   mkdirSync(home, { recursive: true, mode: 0o700 })
-  const sentinel = spawn('/bin/sleep', ['120'], { stdio: 'ignore', detached: true })
-  sentinel.unref()
-  const sentinelObs = obs.observe(sentinel.pid)
-  if (sentinelObs.kind !== 'alive') throw new Error('PUBLIC_AUTHORITY_CONTROL: the foreign sentinel is not observable')
-  const sentinelBirth = sentinelObs.birth
-  const ownedGroups = [{ pid: sentinel.pid, birth: sentinelBirth, kind: 'sentinel' }]
-  const terminals = []
-  const triggerPaths = []
-  let parentFixtureResource
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  const helpers = []
+  const closeErrors = []
   let terminal
-  let authoritySignals = 0
+  let sentinel
+  let sentinelHandle
   const facts = {
     kind: 'PUBLIC_AUTHORITY_CONTROL',
     platform: process.platform,
@@ -8066,42 +8054,30 @@ async function handlePublicAuthorityControl(message) {
     enumeration: {},
     registry: {},
     cleanup: {},
-    sentinel: { pid: sentinel.pid, birth: sentinelBirth },
+    sentinel: {},
   }
-  function registerAuthorityResource(pid, kind) {
-    if (!Number.isInteger(pid) || pid <= 0) throw new Error(`PUBLIC_AUTHORITY_CONTROL: ${kind} has no real PID`)
-    const existing = ownedGroups.find(candidate => candidate.pid === pid)
-    if (existing !== undefined) return existing
-    const observation = obs.observe(pid)
-    if (observation.kind !== 'alive') {
-      throw new Error(`PUBLIC_AUTHORITY_CONTROL: ${kind} PID ${String(pid)} is ${observation.kind}/${String(observation.code)}`)
-    }
-    const entry = { pid, birth: observation.birth, kind }
-    ownedGroups.push(entry)
-    return entry
-  }
-
-  function refreshAuthorityResourceBirth(resource, kind) {
-    const current = obs.observe(resource.pid)
-    if (current.kind !== 'alive') return
-    resource.births ??= [resource.birth]
-    if (!resource.births.includes(current.birth)) resource.births.push(current.birth)
-    resource.birth = current.birth
-  }
-
   try {
+    sentinel = spawn('/bin/sleep', ['120'], { stdio: 'ignore', detached: true })
+    sentinelHandle = registerAuthorityHelper({
+      entryId: 'public-authority-sentinel', kind: 'authority-sentinel', label: 'authority sentinel',
+      child: sentinel, dir,
+    })
+    helpers.push(sentinelHandle)
+    facts.sentinel = { pid: sentinel.pid, birth: sentinelHandle.birth }
     const split = createSplitTerminal({
       prefix: 'public-authority',
       traceDirectory: join(scene.workDir, 'trace'),
       artifactsDirectory: join(scene.workDir, 'artifacts'),
     })
-    terminals.push(split)
     terminal = split.terminal
     const out = {
       parent: join(dir, 'parent.json'),
       child: join(dir, 'child.json'),
-      sibling: join(dir, 'sibling.json'),
       second: join(dir, 'second.json'),
+      detached: join(dir, 'detached.json'),
+      missing: join(dir, 'missing.json'),
+      duplicate: join(dir, 'duplicate.json'),
+      malformed: join(dir, 'malformed.json'),
       trigger: join(dir, 'spawn-second'),
     }
     const baseEnv = {
@@ -8112,17 +8088,13 @@ async function handlePublicAuthorityControl(message) {
       P1D_AUTH_CHILD: files.child,
       P1D_AUTH_PARENT_OUT: out.parent,
       P1D_AUTH_CHILD_OUT: out.child,
-      P1D_AUTH_SIBLING_OUT: out.sibling,
       P1D_AUTH_TRIGGER: out.trigger,
-      P1D_AUTH_SIBLING_TRIGGER: join(dir, 'spawn-sibling'),
-      P1D_AUTH_SIBLING_PID_OUT: join(dir, 'sibling-pid.json'),
       P1D_AUTH_SECOND_OUT: out.second,
       P1D_AUTH_SECOND_PID_OUT: join(dir, 'second-pid.json'),
       P1D_AUTH_DUPLICATE: 'first',
       P1D_AUTH_SPACE: 'a b c',
       P1D_AUTH_ASSIGN: 'x=y=z',
     }
-    triggerPaths.push(out.trigger, baseEnv.P1D_AUTH_SIBLING_TRIGGER)
     const opened = await withProcessNativeOperation('public-authority-run', 'public-authority',
       () => terminal.run(process.execPath, [files.parent], {
         cwd: dir, cols: 120, rows: 40, waitReady: false, env: baseEnv,
@@ -8131,9 +8103,7 @@ async function handlePublicAuthorityControl(message) {
     if (!Number.isInteger(shellPid) || shellPid <= 0) throw new Error('PUBLIC_AUTHORITY_CONTROL: the native PTY has no shell PID')
     const shellIdentity = captureShellIdentity(shellPid, 'PUBLIC_AUTHORITY_CONTROL shell')
     const shellTty = capturePublicShellTty(shellPid, 'PUBLIC_AUTHORITY_CONTROL shell')
-    const shellResource = registerAuthorityResource(shellPid, 'parent')
     const parentGround = await waitForAuthorityFile(out.parent, 'authority parent')
-    parentFixtureResource = registerAuthorityResource(parentGround.pid, 'parent-fixture')
     const parentObservation = obs.observeFull(shellPid)
     if (parentObservation.kind !== 'alive') {
       throw new Error(`PUBLIC_AUTHORITY_CONTROL: the controlled parent is ${parentObservation.kind}/${String(parentObservation.code)}`)
@@ -8144,7 +8114,7 @@ async function handlePublicAuthorityControl(message) {
       home,
       profile: 'pi-tui',
       anchor: scene.installation.anchor,
-      uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
+      uid,
       tty: { kind: 'foreground', shell: shellTty },
       requireEnv: true,
     }
@@ -8152,7 +8122,6 @@ async function handlePublicAuthorityControl(message) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the controlled parent did not pass the public admission')
     }
     const childGround = await waitForAuthorityFile(out.child, 'authority child')
-    registerAuthorityResource(childGround.pid, 'child')
     const childObservation = obs.observeFull(childGround.pid, { parentPid: shellPid })
     if (childObservation.kind !== 'alive') {
       throw new Error(`PUBLIC_AUTHORITY_CONTROL: the controlled child is ${childObservation.kind}/${String(childObservation.code)}`)
@@ -8192,17 +8161,12 @@ async function handlePublicAuthorityControl(message) {
       facts.probe = { ...obs.probe(), procargs: childObservation.procargs, ctty: childObservation.tty }
     }
 
-    if (shellResource.birth !== shellIdentity.birth) {
-      throw new Error('PUBLIC_AUTHORITY_CONTROL: the native shell birth changed before registration')
-    }
-    registerAuthorityResource(childGround.pid, 'child')
     const childPids = obs.children(shellPid)
     if (childPids.kind !== 'ok' || !childPids.pids.includes(childGround.pid)) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the real child enumeration did not include the controlled child')
     }
     writeFileSync(out.trigger, '', { mode: 0o600 })
     const second = await waitForAuthorityFile(join(dir, 'second-pid.json'), 'authority second child')
-    registerAuthorityResource(second.pid, 'second-child')
     const secondGround = await waitForAuthorityFile(out.second, 'authority second facts')
     const grown = obs.children(shellPid)
     if (grown.kind !== 'ok' || !grown.pids.includes(childGround.pid) || !grown.pids.includes(secondGround.pid)) {
@@ -8213,27 +8177,35 @@ async function handlePublicAuthorityControl(message) {
       after: { count: grown.count, capacity: grown.capacity, secondPid: second.pid },
     }
 
-    writeFileSync(join(dir, 'spawn-sibling'), '', { mode: 0o600 })
-    const siblingPid = await waitForAuthorityFile(join(dir, 'sibling-pid.json'), 'authority sibling pid')
-    registerAuthorityResource(siblingPid.pid, 'sibling')
-    const siblingGround = await waitForAuthorityFile(out.sibling, 'authority sibling')
-    const siblingObservation = obs.observeFull(siblingGround.pid)
-    if (siblingObservation.kind !== 'alive') throw new Error('PUBLIC_AUTHORITY_CONTROL: the detached sibling is not observable')
-    const siblingExpected = {
+    // The one fixed detached target is owned by the common tracked-helper
+    // lifecycle, not by a parent fixture or a local signal loop.
+    const detachedChild = spawn(process.execPath, [files.child], {
+      cwd: dir, stdio: 'ignore', detached: true,
+      env: { ...baseEnv, P1D_AUTH_OUT: out.detached },
+    })
+    const detachedHandle = registerAuthorityHelper({
+      entryId: 'public-authority-detached', kind: 'authority-detached', label: 'authority detached target',
+      child: detachedChild, dir,
+    })
+    helpers.push(detachedHandle)
+    const detachedGround = await waitForAuthorityFile(out.detached, 'authority detached target')
+    const detachedObservation = obs.observeFull(detachedGround.pid)
+    if (detachedObservation.kind !== 'alive') throw new Error('PUBLIC_AUTHORITY_CONTROL: the detached target is not observable')
+    const detachedExpected = {
       ...parentExpected,
-      birth: siblingObservation.birth,
+      birth: detachedObservation.birth,
       entry: files.child,
       tty: { kind: 'detached' },
       groupLeader: true,
     }
-    if (obs.admit(siblingObservation, siblingExpected).admitted !== true) {
-      throw new Error('PUBLIC_AUTHORITY_CONTROL: the real detached sibling did not pass the public admission')
+    if (obs.admit(detachedObservation, detachedExpected).admitted !== true) {
+      throw new Error('PUBLIC_AUTHORITY_CONTROL: the real detached target did not pass the public admission')
     }
-    const siblingGroup = obs.groupMembers(siblingGround.pid)
-    if (siblingGroup.kind !== 'ok' || !siblingGroup.members.some(member => member.pid === siblingGround.pid)) {
-      throw new Error('PUBLIC_AUTHORITY_CONTROL: the real detached sibling group does not contain the exact birth member')
+    const detachedGroup = obs.groupMembers(detachedGround.pid)
+    if (detachedGroup.kind !== 'ok' || !detachedGroup.members.some(member => member.pid === detachedGround.pid)) {
+      throw new Error('PUBLIC_AUTHORITY_CONTROL: the detached target group does not contain the exact birth member')
     }
-    facts.group = { pid: siblingGround.pid, birth: siblingObservation.birth, members: siblingGroup.members.length }
+    facts.group = { pid: detachedGround.pid, birth: detachedObservation.birth, members: detachedGroup.members.length }
 
     const reason = (observation, expected) => authorityAdmissionReason(obs, observation, expected)
     facts.negative.wrongBirth = reason(childObservation, { ...childExpected, birth: `${childObservation.birth}-mismatch` })
@@ -8245,53 +8217,60 @@ async function handlePublicAuthorityControl(message) {
 
     const missingEnv = { ...baseEnv }
     delete missingEnv.SPLIT_PROCESS_DSH_ANCHOR
-    const missingOut = join(dir, 'missing.json')
     const missingChild = spawn(process.execPath, [files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...missingEnv, P1D_AUTH_OUT: missingOut },
+      env: { ...missingEnv, P1D_AUTH_OUT: out.missing },
     })
-    const missingResource = registerAuthorityResource(missingChild.pid, 'missing-env')
-    const missingGround = await waitForAuthorityFile(missingOut, 'missing-env child')
-    refreshAuthorityResourceBirth(missingResource, 'missing-env')
+    const missingHandle = registerAuthorityHelper({
+      entryId: 'public-authority-missing-env', kind: 'authority-missing-env', label: 'authority missing-env',
+      child: missingChild, dir,
+    })
+    helpers.push(missingHandle)
+    const missingGround = await waitForAuthorityFile(out.missing, 'missing-env child')
     const missingObservation = obs.observeFull(missingGround.pid)
     if (missingObservation.kind !== 'alive') throw new Error('PUBLIC_AUTHORITY_CONTROL: the missing-env child is not observable')
     facts.negative.missingEnv = reason(missingObservation, { ...parentExpected, birth: missingObservation.birth, entry: files.child })
 
     const execEnv = Object.entries({
       ...baseEnv,
-      P1D_AUTH_OUT: join(dir, 'duplicate.json'),
+      P1D_AUTH_OUT: out.duplicate,
       P1D_AUTH_DUPLICATE: 'first',
       FOO: 'one',
       FOO: 'two',
     }).map(([key, value]) => `${key}=${value}`)
-    // Object entries cannot duplicate; append the real duplicate and the real
-    // malformed entry as separate execve environment bytes.
     execEnv.push('FOO=two')
     const duplicateChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
       env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv) },
     })
-    const duplicateResource = registerAuthorityResource(duplicateChild.pid, 'execve-control')
-    const duplicateOut = await waitForAuthorityFile(join(dir, 'duplicate.json'), 'duplicate-env child')
-    refreshAuthorityResourceBirth(duplicateResource, 'execve-control')
-    const duplicateObservation = obs.observeFull(duplicateOut.pid)
+    const duplicateHandle = registerAuthorityHelper({
+      entryId: 'public-authority-duplicate-env', kind: 'authority-duplicate-env', label: 'authority duplicate-env',
+      child: duplicateChild, dir,
+    })
+    helpers.push(duplicateHandle)
+    const duplicateGround = await waitForAuthorityFile(out.duplicate, 'duplicate-env child')
+    duplicateHandle.birth = captureEntryBirth(duplicateChild, 'authority duplicate-env post-exec')
+    const duplicateObservation = obs.observeFull(duplicateGround.pid)
     facts.negative.duplicateEnv = duplicateObservation.kind === 'alive'
       ? reason(duplicateObservation, { ...parentExpected, birth: duplicateObservation.birth, entry: files.child })
       : duplicateObservation.code
 
-    const malformedOut = join(dir, 'malformed.json')
     const malformedOnly = [
       ...execEnv.filter(item => !item.startsWith('FOO=') && !item.startsWith('P1D_AUTH_OUT=')),
-      `P1D_AUTH_OUT=${malformedOut}`,
+      `P1D_AUTH_OUT=${out.malformed}`,
       'NOEQUALS',
     ]
     const malformedChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: malformedOut },
+      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: out.malformed },
     })
-    const malformedResource = registerAuthorityResource(malformedChild.pid, 'malformed-env')
-    const malformedGround = await waitForAuthorityFile(malformedOut, 'malformed-env child')
-    refreshAuthorityResourceBirth(malformedResource, 'malformed-env')
+    const malformedHandle = registerAuthorityHelper({
+      entryId: 'public-authority-malformed-env', kind: 'authority-malformed-env', label: 'authority malformed-env',
+      child: malformedChild, dir,
+    })
+    helpers.push(malformedHandle)
+    const malformedGround = await waitForAuthorityFile(out.malformed, 'malformed-env child')
+    malformedHandle.birth = captureEntryBirth(malformedChild, 'authority malformed-env post-exec')
     const malformedObservation = obs.observeFull(malformedGround.pid)
     facts.negative.malformedEnv = malformedObservation.kind === 'alive'
       ? reason(malformedObservation, { ...parentExpected, birth: malformedObservation.birth, entry: files.child })
@@ -8301,8 +8280,7 @@ async function handlePublicAuthorityControl(message) {
     gone.unref()
     await new Promise(resolve => gone.once('exit', resolve))
     await sleep(30)
-    const goneObservation = obs.observeFull(gone.pid)
-    facts.negative.goneChild = goneObservation.kind
+    facts.negative.goneChild = obs.observeFull(gone.pid).kind
     const foreign = obs.observeFull(1)
     facts.negative.unknownRead = foreign.kind === 'alive' ? 'alive' : `${foreign.kind}/${String(foreign.code)}`
 
@@ -8324,10 +8302,10 @@ async function handlePublicAuthorityControl(message) {
     }
 
     const kernel = processKernelReaders()
-    assertKernelGroupSignalOwnership(kernel, siblingGround.pid, siblingObservation.birth, 'PUBLIC_AUTHORITY_CONTROL positive admission')
+    assertKernelGroupSignalOwnership(kernel, detachedGround.pid, detachedObservation.birth, 'PUBLIC_AUTHORITY_CONTROL positive admission')
     let wrongBirthRefusal
     try {
-      assertKernelGroupSignalOwnership(kernel, siblingGround.pid, `${siblingObservation.birth}-mismatch`, 'PUBLIC_AUTHORITY_CONTROL wrong birth')
+      assertKernelGroupSignalOwnership(kernel, detachedGround.pid, `${detachedObservation.birth}-mismatch`, 'PUBLIC_AUTHORITY_CONTROL wrong birth')
       wrongBirthRefusal = 'UNEXPECTED_PASS'
     } catch (error) {
       wrongBirthRefusal = boundedErrorText(error)
@@ -8343,88 +8321,31 @@ async function handlePublicAuthorityControl(message) {
       positive: 'passed',
       wrongBirth: wrongBirthRefusal,
       gone: goneRefusal,
-      signalsSent: authoritySignals,
+      signalsSent: 0,
     }
     const sentinelAfter = obs.observe(sentinel.pid)
     facts.sentinel.after = sentinelAfter.kind === 'alive' ? sentinelAfter.birth : `${sentinelAfter.kind}/${String(sentinelAfter.code)}`
-    if (sentinelAfter.kind !== 'alive' || sentinelAfter.birth !== sentinelBirth) {
+    if (sentinelAfter.kind !== 'alive' || sentinelAfter.birth !== sentinelHandle.birth) {
       throw new Error('PUBLIC_AUTHORITY_CONTROL: the foreign sentinel changed birth')
     }
     return facts
   } finally {
-    // Cleanup is owned by the same native terminal/registered-resource ledger.
-    // There is no destructive global sweep: a process is signalled only when it
-    // was registered at spawn/capture with a real production birth.
-    const closeErrors = []
-    // Remove the fixture's spawn triggers before closing the PTY so the parent
-    // cannot create a new detached child after the owned-resource audit.
-    for (const path of triggerPaths) {
-      try {
-        unlinkSync(path)
-      } catch (error) {
-        if (error?.code !== 'ENOENT') closeErrors.push(`trigger ${path}: ${boundedErrorText(error)}`)
-      }
+    for (const path of [join(dir, 'spawn-second')]) {
+      try { unlinkSync(path) } catch (error) { if (error?.code !== 'ENOENT') closeErrors.push(`trigger ${path}: ${boundedErrorText(error)}`) }
     }
-    // Stop the fixture parent first: after its spawn triggers are gone it must
-    // not be able to create another detached child while the terminal closes.
-    if (parentFixtureResource !== undefined) {
-      const parentNow = obs.observe(parentFixtureResource.pid)
-      if (parentNow.kind === 'alive' && parentNow.birth === parentFixtureResource.birth) {
-        try {
-          process.kill(parentFixtureResource.pid, 'SIGKILL')
-          authoritySignals += 1
-        } catch { /* already gone */ }
-        for (let i = 0; i < 100; i += 1) {
-          const check = obs.observe(parentFixtureResource.pid)
-          if (check.kind !== 'alive' || check.birth !== parentFixtureResource.birth) break
-          await sleep(20)
-        }
-      }
+    if (terminal !== undefined) {
+      try { await terminal.closeQuiet() } catch (error) { closeErrors.push(boundedErrorText(error)) }
     }
-    for (const split of terminals.reverse()) {
-      try {
-        await split.terminal.closeQuiet()
-      } catch (error) {
-        closeErrors.push(boundedErrorText(error))
-      }
+    const terminationProblems = await terminateAllProcessEntries('PUBLIC_AUTHORITY_CONTROL cleanup')
+    for (const handle of qualificationHelpers) {
+      if (handle.exited) handle.finished = true
     }
-    const kernel = processKernelReaders()
-    const resourceBirths = entry => entry.births ?? [entry.birth]
-    for (const entry of [...ownedGroups].reverse()) {
-      if (!Number.isInteger(entry.pid) || entry.pid <= 0) continue
-      const fresh = obs.observe(entry.pid)
-      if (fresh.kind !== 'alive' || !resourceBirths(entry).includes(fresh.birth)) continue
-      try {
-        if (fresh.pgid === entry.pid && fresh.sid === entry.pid) {
-          assertKernelGroupSignalOwnership(kernel, entry.pid, entry.birth, `PUBLIC_AUTHORITY_CONTROL cleanup ${entry.kind}`)
-          process.kill(-entry.pid, 'SIGTERM')
-        } else {
-          process.kill(entry.pid, 'SIGTERM')
-        }
-        authoritySignals += 1
-      } catch {
-        // Already gone or not the proved resource: the audit below reports it.
-      }
-    }
-    await sleep(250)
-    for (const entry of ownedGroups) {
-      if (!Number.isInteger(entry.pid) || entry.pid <= 0) continue
-      const fresh = obs.observe(entry.pid)
-      if (fresh.kind !== 'alive' || !resourceBirths(entry).includes(fresh.birth)) continue
-      try {
-        if (fresh.pgid === entry.pid && fresh.sid === entry.pid) {
-          assertKernelGroupSignalOwnership(kernel, entry.pid, entry.birth, `PUBLIC_AUTHORITY_CONTROL escalation ${entry.kind}`)
-          process.kill(-entry.pid, 'SIGKILL')
-        } else {
-          process.kill(entry.pid, 'SIGKILL')
-        }
-        authoritySignals += 1
-      } catch {
-        // The audit below is the authority on whether anything remains.
-      }
-    }
-    await sleep(100)
-    const knownPids = new Set(ownedGroups.map(entry => entry.pid))
+    const liveHelpers = qualificationHelpers.filter(handle => !handle.exited || handle.finished !== true)
+    const unknownHelpers = liveHelpers.filter(handle => {
+      const observation = readKernelProcess(handle.child.pid)
+      return observation.kind === 'unknown'
+    })
+    const knownPids = new Set(qualificationHelpers.map(handle => handle.child.pid))
     const unregistered = []
     const listing = obs.allPids()
     if (listing.kind === 'ok') {
@@ -8432,28 +8353,20 @@ async function handlePublicAuthorityControl(message) {
         if (knownPids.has(pid) || pid === process.pid || pid === process.ppid) continue
         const argv = obs.argvEntry(pid)
         if (argv.kind !== 'ok' || argv.entry === null) continue
-        const expected = [files.child, files.parent].map(candidate => obs.canonicalEntry(candidate))
-        if (!expected.includes(argv.entry)) continue
-        unregistered.push({ pid, entry: argv.entry })
+        if ([files.child, files.parent].some(candidate => obs.canonicalEntry(candidate) === argv.entry)) {
+          unregistered.push({ pid, entry: argv.entry })
+        }
       }
     }
-    const leaked = []
-    const unknownResources = []
-    for (const entry of ownedGroups) {
-      const fresh = obs.observe(entry.pid)
-      if (fresh.kind === 'alive' && resourceBirths(entry).includes(fresh.birth)) leaked.push({ pid: entry.pid, kind: entry.kind })
-      else if (fresh.kind === 'unknown') unknownResources.push({ pid: entry.pid, kind: entry.kind, code: fresh.code })
-    }
     facts.cleanup = {
-      registered: ownedGroups.length,
-      leaked: leaked.length,
-      leakedResources: leaked,
-      unknown: unknownResources.length,
-      unknownResources,
+      registered: helpers.length,
+      leaked: liveHelpers.length,
+      unknown: unknownHelpers.length,
+      leakedResources: liveHelpers.map(handle => ({ entryId: handle.entryId, pid: handle.child.pid, kind: handle.authorityKind ?? null })),
       unregistered,
-      registeredResources: ownedGroups.map(entry => ({ pid: entry.pid, kind: entry.kind })),
-      signalsSent: authoritySignals,
       closeErrors,
+      terminationProblems,
+      helpersTerminal: liveHelpers.length === 0,
       sentinelGone: readKernelProcess(sentinel.pid).kind === 'gone',
     }
     writeReceipt({ publicAuthorityControl: facts })
@@ -8757,6 +8670,19 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
     const candidatePair = host.pairId === null || host.pairId === undefined
       ? undefined
       : publicLaunches.find(candidate => candidate.pair?.pairId === host.pairId)?.pair
+    if (candidatePair !== undefined && candidatePair.winner === undefined) {
+      // Reverse cleanup order can reach a non-publishing candidate before the
+      // actual winner has been reconciled. Bind that winner through its own
+      // authenticated late record first; never infer a winner from iteration.
+      const registryPresent = publicPathPresence(registryPath, `reclaimPublicHost:${reason}: pair registry`) === 'present'
+      const launchPresent = publicPathPresence(goneLaunchPath, `reclaimPublicHost:${reason}: pair launch`) === 'present'
+      if (registryPresent && launchPresent) {
+        const pairFiles = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
+        const published = publicHosts.find(candidate => candidate !== host
+          && candidate.pid === pairFiles.registry.hostPid && candidate.pairId === host.pairId)
+        if (published !== undefined) await bindLatePublicHostRegistry(published, `reclaimPublicHost:${reason}: pair winner`)
+      }
+    }
     const ownership = assertPublicHostOwnership(host, `reclaimPublicHost:${reason}`,
       options.expectedBirth ?? host.birth, { allowOtherWinner: candidatePair?.winner })
     const relatedHandles = candidatePair === undefined
@@ -8774,7 +8700,7 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
       // A mid-boot candidate can be slow to settle on one platform/product
       // build. Re-prove the captured identity, then escalate exactly once.
       const fresh = assertPublicHostOwnership(host, `reclaimPublicHost:${reason}: candidate escalation`,
-        options.expectedBirth ?? host.birth)
+        options.expectedBirth ?? host.birth, { allowOtherWinner: candidatePair?.winner })
       appendNote('public-daemon-loser-escalated', { pid: host.pid, birth: fresh.birth, reason, signal: 'SIGKILL' })
       publicSignalAttempts += 1
       process.kill(host.pid, 'SIGKILL')
@@ -8805,6 +8731,9 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
   if (freshAuth.identity === undefined || host.instanceId !== freshFiles.registry.instanceId) {
     throw new Error(`reclaimPublicHost:${reason}: the fresh official authentication did not bind the published instance`)
   }
+  // The authentication is an await: re-prove the exact current material and
+  // captured identity immediately before the destructive effect.
+  assertPublicHostOwnership(host, `reclaimPublicHost:${reason}: post-auth`, options.expectedBirth ?? host.birth)
   appendNote('public-host-terminated', { pid: host.pid, birth: ownership.birth, reason, signal: 'SIGTERM' })
   publicSignalAttempts += 1
   process.kill(host.pid, 'SIGTERM')

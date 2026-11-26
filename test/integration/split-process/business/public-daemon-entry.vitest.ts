@@ -8,6 +8,7 @@
  * reaches a private record sink: a public Client legitimately has none.
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -22,6 +23,10 @@ import {
 
 async function frameText(launch: PublicDaemonLaunch): Promise<string> {
   return await launch.text()
+}
+
+function fileDigest(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
 async function waitForFrame(
@@ -331,7 +336,7 @@ test.skipIf(process.env.SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL !== '1')(
       expect(facts.signalAdmission.wrongBirth).toMatch(/birth|replaced/iu)
       expect(facts.signalAdmission.gone).toMatch(/gone/iu)
       expect(facts.signalAdmission.signalsSent).toBe(0)
-      expect(facts.cleanup.signalsSent).toBeGreaterThan(0)
+      expect(facts.cleanup.helpersTerminal).toBe(true)
       expect(facts.sentinel.after).toBe(facts.sentinel.birth)
       expect(facts.cleanup.sentinelGone).toBe(true)
       expect(facts.cleanup.leaked).toBe(0)
@@ -357,6 +362,7 @@ test('keeps the default Direct launch independent of the split backend', async (
   let testError: unknown
   try {
     // Cold default Direct must be proven with no existing split Host/Client.
+    const sessionsAtStart = [...await scene.sessionIds()].sort()
     const cold = await scene.startPublicDaemon({ label: 'direct-cold-default', cols: 120, rows: 36 })
     launches.push(cold)
     expect(cold.ready, 'the cold default Direct launch reached a usable surface').toBe(true)
@@ -376,6 +382,7 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(coldExit.signal).toBe(null)
     await cold.close()
     expect(existsSync(join(scene.scopeDir, 'instance.json')), 'the cold Direct exit created no split registry').toBe(false)
+    expect([...(await scene.sessionIds())].sort(), 'the cold Direct launch created no Session').toEqual(sessionsAtStart)
 
     const peer = await scene.startPublicDaemon({ label: 'direct-warm-host', backend: 'daemon' })
     launches.push(peer)
@@ -384,8 +391,9 @@ test('keeps the default Direct launch independent of the split backend', async (
     expect(peer.client, 'the warm peer owns a real Client').not.toBeNull()
     const peerBefore = await peer.kernelState()
     const instanceBefore = peer.host?.instanceId
-    const registryBefore = readFileSync(join(scene.scopeDir, 'instance.json'), 'utf8')
-    const launchBefore = readFileSync(join(scene.scopeDir, 'launch.json'), 'utf8')
+    const registryBefore = fileDigest(join(scene.scopeDir, 'instance.json'))
+    const launchBefore = fileDigest(join(scene.scopeDir, 'launch.json'))
+    const sessionsBeforeWarmDirect = [...await scene.sessionIds()].sort()
 
     const launch = await scene.startPublicDaemon({ label: 'direct-warm-default', cols: 120, rows: 36 })
     launches.push(launch)
@@ -409,8 +417,9 @@ test('keeps the default Direct launch independent of the split backend', async (
     const peerAfter = await peer.kernelState()
     expect(peerAfter.hostPid, 'the Direct exit did not stop the warm Host').toBe(peerBefore.hostPid)
     expect(peerAfter.hostState).toBe('alive')
-    expect(readFileSync(join(scene.scopeDir, 'instance.json'), 'utf8'), 'the Direct launch changed no split registry content').toBe(registryBefore)
-    expect(readFileSync(join(scene.scopeDir, 'launch.json'), 'utf8'), 'the Direct launch changed no split launch content').toBe(launchBefore)
+    expect(fileDigest(join(scene.scopeDir, 'instance.json')), 'the Direct launch changed no split registry content').toBe(registryBefore)
+    expect(fileDigest(join(scene.scopeDir, 'launch.json')), 'the Direct launch changed no split launch content').toBe(launchBefore)
+    expect([...(await scene.sessionIds())].sort(), 'the warm Direct launch created no Session').toEqual(sessionsBeforeWarmDirect)
     expect(peerAfter.clientState, 'the warm peer is still usable after the Direct exit').toBe('alive')
     await peer.type('warm-peer-after-direct')
     await waitForFrame(peer, 'warm-peer-after-direct', 'the warm peer accepts input after the Direct exit')
@@ -514,6 +523,9 @@ test('refuses illegal public backend inputs before creating a split Host', async
     const warmBefore = await peer.kernelState()
     expect(warmBefore.hostState).toBe('alive')
     expect(warmBefore.clientState).toBe('alive')
+    const warmRegistry = fileDigest(join(scene.scopeDir, 'instance.json'))
+    const warmLaunch = fileDigest(join(scene.scopeDir, 'launch.json'))
+    const warmSessions = [...await scene.sessionIds()].sort()
     const warmHeadless = await scene.runPublicDaemonHeadless({ label: 'refuse-headless-warm', backend: 'daemon' })
     expect(warmHeadless.exit.signal, 'the warm non-TTY daemon launch must exit normally').toBeNull()
     expect(warmHeadless.exit.code, 'the warm non-TTY daemon launch exit code').toBeGreaterThan(0)
@@ -526,6 +538,9 @@ test('refuses illegal public backend inputs before creating a split Host', async
     expect(warmAfter.clientPid, 'the warm non-TTY refusal did not replace the Client').toBe(warmBefore.clientPid)
     expect(warmAfter.hostState).toBe('alive')
     expect(warmAfter.clientState).toBe('alive')
+    expect(fileDigest(join(scene.scopeDir, 'instance.json')), 'the warm non-TTY refusal changed no registry').toBe(warmRegistry)
+    expect(fileDigest(join(scene.scopeDir, 'launch.json')), 'the warm non-TTY refusal changed no launch material').toBe(warmLaunch)
+    expect([...(await scene.sessionIds())].sort(), 'the warm non-TTY refusal created no Session').toEqual(warmSessions)
     await peer.type('warm-refusal-peer')
     await waitForFrame(peer, 'warm-refusal-peer', 'the warm peer stays usable after the refusal')
     await peer.press('Ctrl+U')

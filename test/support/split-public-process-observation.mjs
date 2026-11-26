@@ -613,6 +613,15 @@ export function publicAdmissionDisposition(admitted) {
   return 'unknown'
 }
 
+/** The ONE capture classification: gone/unknown/captured/not-target. */
+export function publicCaptureDisposition(light, full, admitted) {
+  if (full?.kind === 'gone' || light?.kind === 'gone') return 'gone'
+  if (full?.kind !== 'alive' || light?.kind !== 'alive') return 'unknown'
+  if (light.birth !== full.birth) return 'unknown'
+  if (admitted?.admitted === true) return 'captured'
+  return publicAdmissionDisposition(admitted)
+}
+
 function publicTtyFacts(tty) {
   if (tty === undefined) return null
   return tty.platform === 'darwin'
@@ -775,6 +784,16 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       && statFields.sid === identity.sid && statFields.starttime === identity.startTicks
   }
 
+  function identityTopologyMatches(left, right) {
+    if (left.pid !== right.pid || left.ppid !== right.ppid || left.pgid !== right.pgid
+      || left.sid !== right.sid || left.uid !== right.uid) return false
+    if (left.platform === 'darwin' || right.platform === 'darwin') {
+      return left.platform === 'darwin' && right.platform === 'darwin'
+        && left.parentUniqueId === right.parentUniqueId
+    }
+    return true
+  }
+
   /** One light observation: production identity plus controlling-tty facts. */
   function observe(pid) {
     if (!Number.isInteger(pid) || pid <= 0) return { kind: 'unknown', code: 'INPUT_UNQUALIFIED' }
@@ -786,7 +805,8 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       if (!bsdBindsIdentity(before.value, stateBefore.identity)) return unknown('TORN_OBSERVATION')
       const stateAfter = kernelState(pid)
       if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
-      if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
+      if (stateAfter.birth !== stateBefore.birth
+        || !identityTopologyMatches(stateBefore.identity, stateAfter.identity)) return unknown('TORN_OBSERVATION')
       const after = darwin.readBsd(pid)
       if (after.kind !== 'ok') return after
       if (!bsdBindsIdentity(after.value, stateAfter.identity)) return unknown('TORN_OBSERVATION')
@@ -820,7 +840,8 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (!Number.isInteger(uidBefore) || uidBefore < 0) return unknown('ACCESS_DENIED')
     const stateAfter = kernelState(pid)
     if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
-    if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
+    if (stateAfter.birth !== stateBefore.birth
+      || !identityTopologyMatches(stateBefore.identity, stateAfter.identity)) return unknown('TORN_OBSERVATION')
     const after = readLinuxTty(pid)
     if (after.kind !== 'ok') return after
     if (!linuxStatBindsIdentity(after.stat, stateAfter.identity)) return unknown('TORN_OBSERVATION')
@@ -920,7 +941,8 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       }
       const stateAfter = kernelState(pid)
       if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
-      if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
+      if (stateAfter.birth !== stateBefore.birth
+        || !identityTopologyMatches(stateBefore.identity, stateAfter.identity)) return unknown('TORN_OBSERVATION')
       const after = darwin.readBsd(pid)
       if (after.kind !== 'ok') return after
       if (!bsdBindsIdentity(after.value, stateAfter.identity)) return unknown('TORN_OBSERVATION')
@@ -981,7 +1003,8 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     if (parsedEnv.kind !== 'ok') return parsedEnv
     const stateAfter = kernelState(pid)
     if (stateAfter.state !== 'alive') return stateAfter.state === 'gone' ? gone() : unknown(stateAfter.code)
-    if (stateAfter.birth !== stateBefore.birth) return unknown('TORN_OBSERVATION')
+    if (stateAfter.birth !== stateBefore.birth
+      || !identityTopologyMatches(stateBefore.identity, stateAfter.identity)) return unknown('TORN_OBSERVATION')
     const after = readLinuxTty(pid)
     if (after.kind !== 'ok') return after
     if (!linuxStatBindsIdentity(after.stat, stateAfter.identity)) return unknown('TORN_OBSERVATION')
@@ -1064,15 +1087,19 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
       parentPid: expected.parentPid,
       parentBirth: expected.parentBirth,
     })
-    if (full.kind === 'gone') return { kind: 'gone' }
-    if (full.kind !== 'alive') return { kind: 'unknown', pid, code: full.code }
-    if (full.birth !== light.birth) return { kind: 'unknown', pid, code: 'TORN_OBSERVATION' }
-    const admitted = admitPublicObservation(full, expected)
-    if (admitted.admitted !== true) {
-      if (publicAdmissionDisposition(admitted) === 'not-target') {
-        return { kind: 'not-target', pid, reason: admitted.reason, detail: admitted }
+    const admitted = full.kind === 'alive' ? admitPublicObservation(full, expected) : undefined
+    const disposition = publicCaptureDisposition(light, full, admitted)
+    if (disposition === 'gone') return { kind: 'gone' }
+    if (disposition === 'not-target') {
+      return { kind: 'not-target', pid, reason: admitted.reason, detail: admitted }
+    }
+    if (disposition === 'unknown') {
+      return {
+        kind: 'unknown',
+        pid,
+        code: full.kind !== 'alive' ? full.code : (full.birth !== light.birth ? 'TORN_OBSERVATION' : `ADMISSION_${String(admitted.reason).toUpperCase().replaceAll('-', '_')}`),
+        detail: admitted,
       }
-      return { kind: 'unknown', pid, code: `ADMISSION_${String(admitted.reason).toUpperCase().replaceAll('-', '_')}`, detail: admitted }
     }
     return { kind: 'captured', pid, process: publicProcessFacts(full, expected), observation: full }
   }
@@ -1080,6 +1107,11 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
   function children(pid, options = {}) {
     if (platform === 'darwin') {
       const listed = darwin.listPids('child', pid, options.startCapacity ?? 64)
+      if (listed.kind !== 'ok' || listed.pids.length > 0) return listed
+      // Zero is an empty child set only when the parent is still current; a
+      // list API success alone does not distinguish an exited parent.
+      const state = kernelState(pid)
+      if (state.state !== 'alive') return state.state === 'gone' ? gone() : unknown(state.code)
       return listed
     }
     let raw
@@ -1201,8 +1233,8 @@ export function createPublicObservation({ anchor, koffiEntry, kernel, platform =
     observe,
     observeFull,
     admit: admitPublicObservation,
-    parentEdge(pid, parentPid, parentBirth) {
-      return readParentEdge(pid, parentPid, parentBirth)
+    parentEdge(pid, parentPid, parentBirth, childBirth) {
+      return readParentEdge(pid, parentPid, parentBirth, undefined, childBirth)
     },
     capture,
     argvEntry,

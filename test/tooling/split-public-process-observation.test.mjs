@@ -21,6 +21,7 @@ import {
   parseLinuxCommandLine,
   parseLinuxEnvironment,
   publicAdmissionDisposition,
+  publicCaptureDisposition,
   publicPathPresence,
 } from '../support/split-public-process-observation.mjs'
 
@@ -239,4 +240,15 @@ test('only a positive admission mismatch may exclude a candidate', () => {
   assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'parent-edge-unproven', definitive: true }), 'not-target')
   assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'canonical-entry-unreadable' }), 'unknown')
   assert.equal(publicAdmissionDisposition({ admitted: false, reason: 'observation-unknown' }), 'unknown')
+})
+
+
+test('capture rejects a torn birth and an unproven admission as unknown', () => {
+  const light = { kind: 'alive', pid: 7, birth: 'linux:100' }
+  const full = { kind: 'alive', pid: 7, birth: 'linux:100' }
+  assert.equal(publicCaptureDisposition(light, full, { admitted: true, reason: 'admitted' }), 'captured')
+  assert.equal(publicCaptureDisposition(light, { ...full, birth: 'linux:101' }, { admitted: true, reason: 'admitted' }), 'unknown')
+  assert.equal(publicCaptureDisposition(light, full, { admitted: false, reason: 'tty-unproven' }), 'unknown')
+  assert.equal(publicCaptureDisposition(light, full, { admitted: false, reason: 'tty-mismatch' }), 'not-target')
+  assert.equal(publicCaptureDisposition(light, { kind: 'unknown', code: 'TORN_OBSERVATION' }, { admitted: false, reason: 'tty-unproven' }), 'unknown')
 })

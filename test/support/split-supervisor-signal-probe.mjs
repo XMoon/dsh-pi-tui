@@ -32,9 +32,9 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import { isBootstrapInstallInProgress, isSideNewInstallInProgress } from './split-upgrade-install-state.mjs'
@@ -476,10 +476,15 @@ async function assertPublicChain(receipt, launch, at, options = {}) {
   const anchor = installation?.anchor
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   const shellTty = options.shellTty ?? obs.ttyCompareFacts(launch.shellPid) ?? undefined
+  if (shellTty === undefined) fail(`${at}: the shell controlling-tty identity is unavailable`)
+  if (launch.cli.pid === launch.shellPid && launch.cli.birth !== launch.shellBirth) {
+    fail(`${at}: the CLI=shell identity is not the same birth`)
+  }
+  const cliEntry = realpathSync(join(dirname(anchor), 'lib', 'bin.js'))
   const expected = (facts, role, extra = {}) => {
     const base = {
       birth: facts.birth,
-      entry: role === 'cli' ? facts.entryRealpath : installation.entries[role],
+      entry: role === 'cli' ? cliEntry : installation.entries[role],
       receiptEntry: role,
       home,
       profile: role === 'cli' ? undefined : (facts.officialProfile ?? launch.profile),
@@ -516,7 +521,7 @@ async function assertPublicChain(receipt, launch, at, options = {}) {
     fail(`${at}: the public Host capture did not bind the receipt PID/birth`)
   }
   if (launch.cli.pid !== launch.shellPid) {
-    const edge = obs.parentEdge(launch.cli.pid, launch.shellPid, launch.shellBirth)
+    const edge = obs.parentEdge(launch.cli.pid, launch.shellPid, launch.shellBirth, launch.cli.birth)
     if (edge.proven !== true) fail(`${at}: the CLI/shell edge is not the current direct child (${String(edge.reason)})`)
   }
   return { obs, cli, client, host }
@@ -1555,36 +1560,39 @@ try {
         const note = processNote(receipt, 'process-probe-hold', at)
         const launch = (receipt.publicLaunches ?? []).find(value => value.launchId === note?.detail?.launchId)
         if (launch === undefined) fail(`${at}: no public launch at the trigger`)
+        await assertPublicChain(receipt, launch, String(at))
         if (at === 'public-daemon-before-registry') {
           const registryPath = note?.detail?.registryPath
           if (typeof registryPath !== 'string' || registryPath === '') {
             fail('public-daemon-before-registry: the hold carries no registry path')
           }
+          // The exact absence is the decisive final fact immediately before the
+          // Worker-only SIGKILL; no other read may run between it and the kill.
           exactPathAbsent(registryPath, 'public-daemon-before-registry immediately before SIGKILL')
         } else {
           const registryPath = join(receipt.installation.dshHome, 'run', 'dsh-pi-tui',
             launch.host.scopeId, 'instance.json')
+          const launchPath = join(receipt.installation.dshHome, 'run', 'dsh-pi-tui',
+            launch.host.scopeId, 'launch.json')
+          let registry
+          let launchMaterial
+          try {
+            registry = JSON.parse(readFileSync(registryPath, 'utf8'))
+            launchMaterial = JSON.parse(readFileSync(launchPath, 'utf8'))
+          } catch (error) {
+            fail(`public-daemon-before-ready-ack: the current material is unreadable (${String(error?.code)})`)
+          }
+          if (registry?.hostPid !== launch.host.pid || registry?.instanceId !== launch.host.instanceId
+            || registry?.scopeId !== launch.host.scopeId || registry?.buildId !== launch.host.buildId
+            || launchMaterial?.instanceId !== launch.host.instanceId) {
+            fail('public-daemon-before-ready-ack: the current registry/launch does not name the checkpoint Host')
+          }
           try {
             lstatSync(registryPath)
           } catch (error) {
             fail(`public-daemon-before-ready-ack: the registry is not strictly present immediately before SIGKILL (${String(error?.code)})`)
           }
         }
-        await assertPublicChain(receipt, launch, String(at))
-        for (const [kind, identity] of [['CLI', launch.cli], ['Client', launch.client], ['Host', launch.host]]) {
-          if (identity === undefined || identity === null
-            || identityLiveness(kernel, identity.pid, identity.birth) !== 'live') {
-            fail(`${at}: the captured ${kind} edge is not live immediately before SIGKILL`)
-          }
-        }
-        if (launch.cli.pid !== launch.shellPid) {
-          assertLiveParentEdge(kernel, launch.cli.pid, launch.cli.birth,
-            launch.shellPid, launch.shellBirth, `${at}: CLI/shell`)
-        }
-        assertLiveParentEdge(kernel, launch.client.pid, launch.client.birth,
-          launch.cli.pid, launch.cli.birth, `${at}: Client/CLI`)
-        assertLiveParentEdge(kernel, launch.host.pid, launch.host.birth,
-          launch.client.pid, launch.client.birth, `${at}: Host/Client`)
       }
       if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
@@ -1634,10 +1642,22 @@ try {
         }
         const refusedRegistry = join(refused.installation.dshHome, 'run', 'dsh-pi-tui',
           refusedHost.scopeId, 'instance.json')
+        const refusedLaunchPath = join(refused.installation.dshHome, 'run', 'dsh-pi-tui',
+          refusedHost.scopeId, 'launch.json')
+        let refusedRegistryFacts
+        let refusedLaunchFacts
         try {
-          lstatSync(refusedRegistry)
+          refusedRegistryFacts = JSON.parse(readFileSync(refusedRegistry, 'utf8'))
+          refusedLaunchFacts = JSON.parse(readFileSync(refusedLaunchPath, 'utf8'))
         } catch (error) {
-          fail(`public-daemon-ownership-refused: the refused material is not strictly present (${String(error?.code)})`)
+          fail(`public-daemon-ownership-refused: the refused material is unreadable (${String(error?.code)})`)
+        }
+        if (refusedRegistryFacts?.hostPid !== refusedHost.pid
+          || refusedRegistryFacts?.instanceId !== refusedHost.instanceId
+          || refusedRegistryFacts?.scopeId !== refusedHost.scopeId
+          || refusedRegistryFacts?.buildId !== refusedHost.buildId
+          || refusedLaunchFacts?.instanceId !== refusedHost.instanceId) {
+          fail('public-daemon-ownership-refused: the current material does not name the refused Host')
         }
         writeFileSync(publicRefusalReleaseFile, 'release\n', { mode: 0o600 })
         const compensated = await waitUntil(() => {
