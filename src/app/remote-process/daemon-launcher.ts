@@ -28,8 +28,10 @@ import { installedPackageRootFromEntry, readInstalledDshVersion } from './local-
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { createEntryDiag } from './entry-control.ts'
 import type { TuiAcpControlStartup, TuiAcpStdioStartup, TuiDaemonClientStartup, TuiDaemonControlStartup, TuiDaemonStartupValues, TuiWebControlStartup } from '../../startup.ts'
-import { encodeProgramResumeHandoff, PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV, scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
-import { daemonProgramResumeCapability, type ProgramResumeCapability, type ProgramResumeLaunchEnvironment } from '../../client/program-resume/target.ts'
+import { scrubProgramResumeEnvironment } from '../../client/program-resume/handoff.ts'
+import { daemonProgramResumeCapability } from '../../client/program-resume/target.ts'
+import { admitProgramResume } from '../bootstrap/program-resume-admission.ts'
+import { applyProgramResumeChildEnvironment } from './program-resume-child.ts'
 
 /**
  * The read-only ACP stdio launch target, structurally identical to the
@@ -62,6 +64,14 @@ interface ProfileContextLike {
   readonly cwd: string
   readonly overlays?: readonly unknown[]
   readonly telemetryDisabledEnv?: string | undefined
+}
+
+/** The small launch-environment view used only to build the private capability. */
+interface LaunchEnvironmentLike {
+  getFrom(
+    name: string,
+    sources: readonly ('process' | 'project-env' | 'user-env')[],
+  ): { readonly value: string; readonly source: string } | undefined
 }
 
 /** The one-shot public launch envelope encoded for the Client child. */
@@ -160,7 +170,6 @@ export function buildChildEnvironment(
   profileContext: ProfileContextLike,
   launchEnvelope: string,
   source: NodeJS.ProcessEnv = process.env,
-  programResume?: ProgramResumeCapability,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...source }
   for (const key of Object.keys(env)) {
@@ -177,10 +186,6 @@ export function buildChildEnvironment(
   env.SPLIT_PROCESS_PROFILE = profileContext.name
   env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
   env[CLIENT_LAUNCH_ENVELOPE_ENV] = launchEnvelope
-  if (programResume !== undefined) {
-    env[PROGRAM_RESUME_TOKEN_ENV] = programResume.token
-    env[PROGRAM_RESUME_HANDOFF_ENV] = encodeProgramResumeHandoff(programResume.facts)
-  }
   return env
 }
 
@@ -724,8 +729,8 @@ export function apply(ctx: Context): void {
 
   const packageRoot = resolveProfilePackageRoot(profileContext.dir)
   const entry = resolveClientEntry(packageRoot)
-  const launchEnvironment = ctx.get('launchEnvironment') as ProgramResumeLaunchEnvironment | undefined
-  const programResume = launchEnvironment === undefined
+  const launchEnvironment = ctx.get('launchEnvironment') as LaunchEnvironmentLike | undefined
+  const programResume = admitProgramResume(process.env, () => launchEnvironment === undefined
     ? undefined
     : daemonProgramResumeCapability({
         profileContext: {
@@ -745,8 +750,9 @@ export function apply(ctx: Context): void {
         stdinIsTTY: process.stdin.isTTY === true,
         stdoutIsTTY: process.stdout.isTTY === true,
         platform: process.platform,
-      })
-  const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup), process.env, programResume)
+      }))
+  const env = buildChildEnvironment(profileContext, encodeLaunchEnvelope(startup), process.env)
+  if (programResume !== undefined) applyProgramResumeChildEnvironment(env, programResume)
   // The daemon supervisor paints nothing: keep its diagnostics off the terminal.
   const diag = createEntryDiag('host', () => {})
   const reportFatal = (line: string): void => { try { process.stderr.write(`${line}\n`) } catch { /* best effort */ } }

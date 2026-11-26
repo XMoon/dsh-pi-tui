@@ -49,6 +49,7 @@ import {
 } from '../../client/program-resume/target.ts'
 import type { ProgramResumeReporter } from '../../client/program-resume/reporter.ts'
 import type { ProgramResumeClientHandle } from '../application-runtime.ts'
+import { programResumeAdmitted } from '../bootstrap/program-resume-admission.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryControlRequest, type EntryRecordSink } from './entry-control.ts'
 import {
   clientDiagnosticLocation,
@@ -1292,7 +1293,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // decoded envelope) or the existing expected-instance reexec. A
   // qualification/peer/manual surface never gets a reporter.
   const programResumeHandle: ProgramResumeClientHandle | undefined =
-    options.mode === 'surface' && (launchEnvelope !== undefined || expectedHostInstanceId !== undefined)
+    options.mode === 'surface' && programResumeAdmitted(process.env) && (launchEnvelope !== undefined || expectedHostInstanceId !== undefined)
       ? (() => {
           const capability = clientProgramResumeCapability({
             token: programResumeCapture.token,

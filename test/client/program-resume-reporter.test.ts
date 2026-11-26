@@ -202,13 +202,21 @@ test('human exit clears once; generic dispose never clears', () => {
   assert.equal(signal.frames.length, 1)
 })
 
-test('a human exit before the first install still withdraws any earlier record', () => {
+test('a human exit before the first install writes nothing', () => {
   const h = harness(SESSION_A)
   h.reporter.humanExit()
-  assert.equal(h.frames.length, 1)
-  assert.match(bodyOf(h.frames[0] as string).body, /clear=1$/u)
+  assert.equal(h.frames.length, 0, 'no mounted PiTUI grant means no clear')
   h.reporter.install()
-  assert.equal(h.frames.length, 1, 'a closed reporter never installs')
+  assert.equal(h.frames.length, 0, 'a closed reporter never installs')
+})
+
+test('a human exit while the terminal is suspended writes nothing', () => {
+  const h = harness(SESSION_A)
+  h.reporter.install()
+  assert.equal(h.frames.length, 1)
+  h.reporter.suspend()
+  h.reporter.humanExit()
+  assert.equal(h.frames.length, 1, 'the editor owns the tty; no clear')
 })
 
 test('a human exit never writes while the terminal is not owned', () => {
@@ -216,6 +224,18 @@ test('a human exit never writes while the terminal is not owned', () => {
   h.reporter.install()
   h.reporter.humanExit()
   assert.equal(h.frames.length, 0)
+})
+
+test('an accepted unsupported reload before install or while suspended writes nothing', () => {
+  const before = harness(SESSION_A)
+  before.reporter.unsupportedReloadAccepted()
+  assert.equal(before.frames.length, 0)
+
+  const suspended = harness(SESSION_A)
+  suspended.reporter.install()
+  suspended.reporter.suspend()
+  suspended.reporter.unsupportedReloadAccepted()
+  assert.equal(suspended.frames.length, 1)
 })
 
 test('an accepted unsupported reload clears once and stops publication', () => {
@@ -237,6 +257,35 @@ test('canWrite=false emits nothing and the next real commit succeeds', () => {
   writable = true
   h.reporter.observe()
   assert.equal(h.frames.length, 1)
+})
+
+test('a report sink failure preserves the old record and never clears', () => {
+  let current = SESSION_A
+  let fail = false
+  const frames: string[] = []
+  const reporter = createProgramResumeReporter({
+    capability: capability(),
+    currentSessionId: () => current,
+    canWrite: () => true,
+    write: frame => {
+      if (fail) {
+        fail = false
+        throw new Error('transient terminal failure')
+      }
+      frames.push(frame)
+    },
+    diag,
+  })
+  reporter.install()
+  assert.equal(frames.length, 1)
+  current = SESSION_B
+  fail = true
+  reporter.observe()
+  assert.equal(frames.length, 1, 'the failed B write must not fall back to clear')
+  reporter.observe()
+  assert.equal(frames.length, 2)
+  assert.deepEqual(decodedArgv(bodyOf(frames[1] as string).body).slice(-1), [SESSION_B])
+  assert.equal(frames.some(frame => /clear=1$/u.test(bodyOf(frame).body)), false)
 })
 
 test('a failed write is not recorded as offered and the next observation retries', () => {

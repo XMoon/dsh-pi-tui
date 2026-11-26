@@ -61,19 +61,28 @@ command is exactly
 `/usr/bin/env DSH_HOME=… DSH_PI_TUI_BACKEND=… <node> <dsh-bin.js> --profile <p>
 --session <canonical-id>` with the cwd carried by the protocol field. An
 overlay, explicit preset, telemetry override, special Node option, multiplexer/
-SSH topology, non-TTY launch or non-canonical Session id fails closed and
-never guesses a target.
+SSH topology, non-TTY launch, an explicit `DSH_PI_TUI_RENDERER=tsp` opt-in
+(including an SDK decline that later mounts the PiTUI fallback), or a
+non-canonical Session id fails closed and never guesses a target.
 
 The token is a capability, never a Session/Profile secret: it is removed from
 the ambient environment at the first synchronous Client/Host step, is never
 placed in argv, a log, a Session event, a Host DTO or the private handoff JSON,
 and only an admitted foreground Client receives it. The Host never writes OSC
-7577. A sessionless/unrepresentable target, a human exit and an accepted reload
-whose replacement cannot consume the v1 handoff use the protocol's clear;
-signal, PTY loss, fatal, generic disposal and a compatible Client reexec never
-withdraw the record. The protocol has no ACK:
-the sender never claims that the terminal accepted a record or that a later
-resume succeeded.
+7577. Report and clear share the same grant: the reporter must be installed on
+the real mounted PiTUI surface, not suspended, and the application must own the
+tty. No bytes are written before that mount or while an external editor holds
+the terminal. A sessionless/unrepresentable target, a human exit and an accepted
+reload whose replacement cannot consume the v1 handoff use the protocol's
+clear, but only under that same grant; signal, PTY loss, fatal, generic disposal
+and a compatible Client reexec never withdraw the record. A valid report whose
+terminal write fails leaves the previous record in place and is retried only on
+the next legitimate owner notification or regain; it is never converted to a
+clear. Asynchronous stream errors are owned by the existing process-wide
+`guardedStreamWriter` error listener and cannot be attributed to one OSC write,
+so the sender makes no per-write asynchronous-delivery or ACK claim. The protocol
+has no ACK: the sender never claims that the terminal accepted a record or that a
+later resume succeeded.
 
 ## The two policies
 

@@ -159,6 +159,7 @@ import { createClientExtensionMountOwner, type ClientExtensionMountOwner } from 
 import { createVisualEventSnapshotProvider, type VisualEventSnapshotProvider } from './bootstrap/visual-snapshot.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
+import { admitProgramResume } from './bootstrap/program-resume-admission.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
 import {
   createPluginManagerWorkspacePanel,
@@ -946,7 +947,7 @@ export function applyRunnerWithRuntime(
      * source as the Herdr projection.
      */
     const programResumeCapability: ProgramResumeCapability | undefined = override === undefined
-      ? (() => {
+      ? admitProgramResume(process.env, () => {
           const profileContext = ctx.get('profileContext') as ProgramResumeProfileContext | undefined
           const launchEnvironment = ctx.get('launchEnvironment') as ProgramResumeLaunchEnvironment | undefined
           if (profileContext === undefined || launchEnvironment === undefined) return undefined
@@ -962,7 +963,7 @@ export function applyRunnerWithRuntime(
             stdoutIsTTY: process.stdout.isTTY === true,
             platform: process.platform,
           })
-        })()
+        })
       : startupSettlement?.programResume?.capability
     const programResumeReporter: ProgramResumeReporter | undefined = programResumeCapability === undefined
       ? undefined

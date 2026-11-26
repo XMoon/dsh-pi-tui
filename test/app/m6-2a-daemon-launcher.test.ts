@@ -29,7 +29,7 @@ import {
 } from '../../src/app/remote-process/daemon-launcher.ts'
 import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { decodeProgramResumeHandoff, PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV } from '../../src/client/program-resume/handoff.ts'
+import { PROGRAM_RESUME_HANDOFF_ENV, PROGRAM_RESUME_TOKEN_ENV } from '../../src/client/program-resume/handoff.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -74,7 +74,7 @@ test('buildChildEnvironment strips SPLIT_PROCESS_* and role markers, sets the fo
   assert.equal(env.DSH_PI_TUI_PRESET, 'keep-me', 'the preset env is preserved')
 })
 
-test('the foreground Client alone receives the OSC 7577 token and non-secret v1 facts', () => {
+test('the public child builder strips both OSC 7577 fields; ACP does too', () => {
   const source = {
     PATH: '/bin',
     [PROGRAM_RESUME_TOKEN_ENV]: 'inherited-token',
@@ -84,25 +84,6 @@ test('the foreground Client alone receives the OSC 7577 token and non-secret v1 
   assert.equal(plain[PROGRAM_RESUME_TOKEN_ENV], undefined)
   assert.equal(plain[PROGRAM_RESUME_HANDOFF_ENV], undefined)
   assert.equal(source[PROGRAM_RESUME_TOKEN_ENV], 'inherited-token', 'the source environment is not mutated')
-
-  const capability = {
-    token: 'dummy-token-replace-me',
-    facts: {
-      version: 1 as const,
-      ownerPid: 4242,
-      home: '/home/user/.dsh',
-      profile: 'pi-tui',
-      backend: 'daemon' as const,
-      cwd: '/home/user/project',
-      nodePath: '/usr/local/bin/node',
-      cliPath: '/opt/dsh/lib/bin.js',
-    },
-  }
-  const env = buildChildEnvironment(PROFILE, 'ENVELOPE', source, capability)
-  assert.equal(env[PROGRAM_RESUME_TOKEN_ENV], capability.token)
-  const facts = decodeProgramResumeHandoff(env[PROGRAM_RESUME_HANDOFF_ENV] as string)
-  assert.deepEqual(facts, capability.facts)
-  assert.equal(JSON.stringify(facts).includes(capability.token), false, 'the private facts never repeat the secret')
 
   const acp = buildAcpStdioEnvironment('/private/acp.sock', source)
   assert.equal(acp[PROGRAM_RESUME_TOKEN_ENV], undefined)
