@@ -15,7 +15,7 @@
  * MEASURED, never relied upon: the projection does not depend on them.
  * @module scripts/tern-gui-tool-result-image
  */
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { containedXY, rect } from './tern-pane-geometry.mjs'
 
@@ -64,6 +64,51 @@ export default async function (h) {
     return
   }
 
+  // The acceptance is captured in the client's OWN resolved appearance. A
+  // fresh profile may resolve either appearance, so do not assume light: read
+  // the client's resolved `state` AND `dump`, switch only when required, and
+  // wait a bounded time for the client to settle. A slot alone never repaints
+  // a live window, and a repeated action would be a second input.
+  const resolvedAppearance = () => {
+    const state = h.ctl('state')
+    const dump = h.ctl('dump')
+    return { state: state?.theme ?? null, dump: dump?.header?.theme ?? null }
+  }
+  const waitForAppearance = async (expected) => {
+    const deadline = Date.now() + 5000
+    for (;;) {
+      const now = resolvedAppearance()
+      if (now.state === expected && now.dump === expected) return now
+      if (Date.now() >= deadline) return now
+      await h.sleep(100)
+    }
+  }
+  const switchAppearance = async (expected) => {
+    const now = resolvedAppearance()
+    if (now.state === expected && now.dump === expected) return now
+    h.send('plugins', 'run', `appearance:${expected}`)
+    return await waitForAppearance(expected)
+  }
+  /** The client writes its own layout next to the PNG under THIS run's
+   *  `client-shots`; the driver copies only the PNG into `shots/`. */
+  const layoutOf = (captureId) => {
+    const file = join(h.root, 'client-shots', 'live', `${captureId}.layout.json`)
+    let theme = null
+    if (existsSync(file)) {
+      try {
+        theme = JSON.parse(readFileSync(file, 'utf8'))?.theme ?? null
+      } catch {
+        theme = null
+      }
+    }
+    return { file, theme }
+  }
+
+  const light = await switchAppearance('light')
+  h.check('the window resolved the light appearance before the acceptance checks',
+    light.state === 'light' && light.dump === 'light', JSON.stringify(light))
+  h.measure('the light appearance', JSON.stringify(light))
+
   const snap = h.snapshot()
   h.check('the identity line is painted', h.has(snap, '[IMAGE] shot.png'),
     h.texts(snap).join(' | '))
@@ -80,33 +125,53 @@ export default async function (h) {
   h.check('the image is NOT clipped by any ancestor', containedXY(snap.chains, image),
     `box=${JSON.stringify(rect(image))}`)
 
-  h.capture('prc-gui-image-light', 'the production tool-result image in a real Tern GUI window')
+  const lightCapture = h.capture('prc-gui-image-light', 'the production tool-result image in a real Tern GUI window')
+  const lightLayout = layoutOf(lightCapture)
+  h.check('the light capture layout is the client light theme',
+    lightLayout.theme === 'light', JSON.stringify(lightLayout))
+  h.measure('the light capture layout', JSON.stringify(lightLayout))
 
   // The client's OWN appearance: the LIVE-WINDOW switch, not the `theme` slot.
   // A live window keeps its saved Appearance when only a theme slot is set, so
   // the dark acceptance must send the `appearance:dark` action ONCE and prove
   // the resolved appearance before capturing. The slot is still set so the
   // named dark theme is the one the switch paints.
-  const state = h.ctl('state')
-  const darkTheme = Array.isArray(state?.theme_dark) && state.theme_dark.length > 0 ? state.theme_dark[0] : 'titanium'
+  const bootState = h.ctl('state')
+  const darkTheme = Array.isArray(bootState?.theme_dark) && bootState.theme_dark.length > 0 ? bootState.theme_dark[0] : 'titanium'
   h.ctl('theme', 'dark', darkTheme)
   h.measure('the dark theme slot', String(darkTheme))
-  h.send('plugins', 'run', 'appearance:dark')
-  const darkState = h.ctl('state')
-  h.check('the live window switched to the dark appearance', darkState?.theme === 'dark',
-    JSON.stringify({ before: state?.theme, after: darkState?.theme }))
-  h.measure('the dark appearance', JSON.stringify({
-    state: darkState?.theme ?? null,
-    dump: h.ctl('dump')?.header?.theme ?? null,
-  }))
-  const dark = h.snapshot()
-  const darkImage = dark.nodes.find((node) => node.tag === 'img')
+  const darkAppearance = await switchAppearance('dark')
+  h.check('the live window switched to the dark appearance',
+    darkAppearance.state === 'dark' && darkAppearance.dump === 'dark', JSON.stringify(darkAppearance))
+  h.measure('the dark appearance', JSON.stringify(darkAppearance))
+  const darkSnap = h.snapshot()
+  const darkImage = darkSnap.nodes.find((node) => node.tag === 'img')
   h.check('the image is still drawn in the client own dark theme', darkImage !== undefined,
-    JSON.stringify(dark.nodes.filter((node) => node.tag === 'img').map((node) => node.rect)))
+    JSON.stringify(darkSnap.nodes.filter((node) => node.tag === 'img').map((node) => node.rect)))
   h.check('the identity line is still readable in the client dark theme',
-    h.has(dark, '[IMAGE] shot.png'),
-    h.texts(dark).join(' | '))
-  h.capture('prc-gui-image-dark', 'the same projection in the client own dark theme')
+    h.has(darkSnap, '[IMAGE] shot.png'),
+    h.texts(darkSnap).join(' | '))
+  const darkCapture = h.capture('prc-gui-image-dark', 'the same projection in the client own dark theme')
+  const darkLayout = layoutOf(darkCapture)
+  h.check('the dark capture layout is the client dark theme',
+    darkLayout.theme === 'dark', JSON.stringify(darkLayout))
+  h.measure('the dark capture layout', JSON.stringify(darkLayout))
+
+  // The pointer journey must run on the CURRENT frame: restore light once,
+  // observe the resolved appearance, and take a fresh snapshot whose chains
+  // index the same node that is visible now.
+  const restored = await switchAppearance('light')
+  h.check('the window resolved the light appearance again after the dark capture',
+    restored.state === 'light' && restored.dump === 'light', JSON.stringify(restored))
+  const current = h.snapshot()
+  const currentImage = current.nodes.find((node) => node.tag === 'img')
+  h.check('the restored light frame still carries the native image element',
+    currentImage !== undefined, JSON.stringify(current.nodes.filter((node) => node.tag === 'img').map((node) => node.rect)))
+  h.check('the restored light frame image is NOT clipped by any ancestor',
+    currentImage !== undefined && containedXY(current.chains, currentImage),
+    JSON.stringify(currentImage === undefined ? null : rect(currentImage)))
+  h.measure('the restored light image box', JSON.stringify(currentImage === undefined ? null : rect(currentImage)))
+  if (currentImage === undefined) return
 
   // The ACCESSIBILITY tree: the image is a real node for a screen reader,
   // with a real box and the client's own actions. Its ACCESSIBLE NAME is
@@ -125,12 +190,13 @@ export default async function (h) {
   h.measure('the inline image accessible name (this client build)',
     JSON.stringify(inlineImages.map((element) => element.name ?? null)))
 
-  // A control-injected pointer on the image: the client's own image viewer. `image` came
-  // from `snap`, so its chains must come from `snap` too: the oracle indexes by
-  // node identity, and chains from another snapshot do not contain this node.
-  const hovered = await h.hover(snap.chains, image)
+  // A control-injected pointer on the image: the client's own image viewer.
+  // `currentImage` and `current.chains` come from the SAME restored-light
+  // snapshot: the oracle indexes by node identity, and a pre-switch snapshot
+  // would not contain the node that is visible now.
+  const hovered = await h.hover(current.chains, currentImage)
   h.measure('the pointer over the image', JSON.stringify(hovered ?? null))
-  const clicked = await h.click(snap.chains, image)
+  const clicked = await h.click(current.chains, currentImage)
   h.check('a control-injected pointer click on the image is delivered', clicked === true, JSON.stringify({ clicked }))
   const viewer = viewerOf(h.ctl('a11y'))
   h.check('the client opens its OWN image viewer on that click', viewer !== undefined,
