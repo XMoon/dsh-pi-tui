@@ -1029,7 +1029,7 @@ async function hostSeatHeld(seat, reason) {
  * the SAME while discovery material stays separate. No registry, launch or log
  * may exist before the Client's real spawn.
  */
-function reserveCrossHomeSeat(clientDir) {
+function reserveCrossHomeSeat(clientDir, scratch) {
   const home = join(clientDir, 'alias-home')
   mkdirSync(home, { mode: 0o700 })
   chmodSync(home, 0o700)
@@ -1070,6 +1070,9 @@ function reserveCrossHomeSeat(clientDir) {
     hostLogPath: join(scope.dir, 'host.log'),
     seat: qualificationSeatDescriptor(scope.scopeId, home),
     entry: realpathSync(scene.installFacts.entries.host),
+    scratch,
+    producerPid: undefined,
+    producerStart: undefined,
     reservedAt: now(),
     settled: false,
     facts: undefined,
@@ -1116,6 +1119,9 @@ function readCrossHomeHostLog(reservation, reason) {
   if (stats.isSymbolicLink() || !stats.isFile()) {
     throw new Error(`${reason}: the alias Host log is not a regular file`)
   }
+  if ((stats.mode & 0o077) !== 0) {
+    throw new Error(`${reason}: the alias Host log is not private (mode 0600)`)
+  }
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
     throw new Error(`${reason}: the alias Host log is not owned by this user`)
   }
@@ -1159,6 +1165,70 @@ function validateCrossHomeConflict(reservation, records, reason) {
   return { pid: conflict.pid, scopeId: conflict.scopeId, error: conflict.error }
 }
 
+/** The comparable kernel start instant of one live process. */
+function processStartFacts(identity) {
+  if (identity?.platform === 'linux') return { platform: 'linux', ticks: String(identity.startTicks) }
+  if (identity?.platform === 'darwin') {
+    return { platform: 'darwin', sec: String(identity.startSec), usec: String(identity.startUsec) }
+  }
+  return undefined
+}
+
+/** Whether `identity` started at or after the reservation's producer Client. */
+function startedAtOrAfterReservation(identity, reservation) {
+  const baseline = reservation.producerStart
+  if (baseline === undefined) return true
+  const current = processStartFacts(identity)
+  if (current === undefined || current.platform !== baseline.platform) return true
+  if (current.platform === 'linux') return BigInt(current.ticks) >= BigInt(baseline.ticks)
+  const currentMicros = BigInt(current.sec) * 1_000_000n + BigInt(current.usec)
+  const baselineMicros = BigInt(baseline.sec) * 1_000_000n + BigInt(baseline.usec)
+  return currentMicros >= baselineMicros
+}
+
+/** Read the live start instant of one PID; gone/unknown is never absence. */
+function readProcessStartFacts(pid) {
+  let observation
+  try {
+    observation = readKernelProcess(pid)
+  } catch {
+    return { kind: 'unknown', code: 'READ_FAILED' }
+  }
+  if (observation.kind === 'gone') return { kind: 'gone' }
+  if (observation.kind === 'unknown') return { kind: 'unknown', code: observation.code }
+  return { kind: 'alive', identity: observation.identity, start: processStartFacts(observation.identity) }
+}
+
+/**
+ * A private alias directory that must be uid-owned 0700 and canonical; a
+ * symlink, foreign owner or other mode is a real failure, never absence.
+ */
+function assertCrossHomeAliasDirectory(reservation, reason, required) {
+  let stats
+  try {
+    stats = lstatSync(reservation.scopeDir)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      if (required) throw new Error(`${reason}: the alias scope directory is absent`)
+      return false
+    }
+    throw new Error(`${reason}: the alias scope directory presence is unprovable (${String(error?.code ?? 'unknown')})`)
+  }
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error(`${reason}: the alias scope directory is not a real directory`)
+  }
+  if (realpathSync(reservation.scopeDir) !== reservation.scopeDir) {
+    throw new Error(`${reason}: the alias scope directory is not canonical`)
+  }
+  if ((stats.mode & 0o777) !== 0o700) {
+    throw new Error(`${reason}: the alias scope directory is not 0700`)
+  }
+  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
+    throw new Error(`${reason}: the alias scope directory is not owned by this user`)
+  }
+  return true
+}
+
 /**
  * Enumerate and fully capture any live detached alias Host candidate through
  * the EXISTING public observation seam. Ownership is proven from the alias
@@ -1167,20 +1237,34 @@ function validateCrossHomeConflict(reservation, records, reason) {
  */
 function scanCrossHomeCandidates(reservation, reason) {
   const observation = requirePublicObservation(reason)
-  // The exact candidate set is every process whose real command line runs this
-  // Scene's installed Host entry. This is not a name/comm or path-prefix
-  // exclusion: the entry under the Scene root appears in the argv of any
-  // process that can be the detached Host, and full admission below then binds
-  // the alias home/profile/anchor.
-  const candidates = sceneLocalHostCandidates()
+  const all = observation.allPids()
+  if (all.kind !== 'ok') {
+    throw new Error(`${reason}: the alias scan cannot enumerate processes (${String(all.code ?? 'unknown')})`)
+  }
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   const found = []
   const unknown = []
-  for (const pid of candidates) {
+  const recordUnknown = (pid, code) => {
+    // A process that provably started BEFORE the producer Client, or whose
+    // kernel parent is neither the producer nor the reparenting init/launchd,
+    // cannot be a candidate spawned by it. Every other unreadable fact fails
+    // closed.
+    const start = readProcessStartFacts(pid)
+    if (start.kind === 'gone') return
+    if (start.kind === 'unknown') {
+      unknown.push({ pid, code: start.code ?? 'START_UNKNOWN' })
+      return
+    }
+    if (start.identity.ppid !== 1 && start.identity.ppid !== reservation.producerPid) return
+    if (!startedAtOrAfterReservation(start.identity, reservation)) return
+    unknown.push({ pid, code })
+  }
+  for (const pid of all.pids) {
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
     const basic = observation.basic(pid)
     if (basic.kind === 'gone') continue
     if (basic.kind !== 'ok') {
-      unknown.push({ pid, code: basic.code ?? 'UNKNOWN' })
+      recordUnknown(pid, basic.code ?? 'BASIC_UNKNOWN')
       continue
     }
     if (uid !== undefined && basic.uid !== uid) continue
@@ -1188,7 +1272,7 @@ function scanCrossHomeCandidates(reservation, reason) {
     const argv = observation.argvEntry(pid)
     if (argv.kind === 'gone') continue
     if (argv.kind !== 'ok') {
-      unknown.push({ pid, code: argv.code ?? 'UNKNOWN' })
+      recordUnknown(pid, argv.code ?? 'ARGV_UNKNOWN')
       continue
     }
     if (argv.entry !== reservation.entry) continue
@@ -1202,12 +1286,16 @@ function scanCrossHomeCandidates(reservation, reason) {
       groupLeader: true,
     })
     if (captured.kind === 'captured') {
-      found.push(captured.process)
+      const scratch = captured.observation?.envMap?.get('SPLIT_PROCESS_SCRATCH')
+      if (scratch !== reservation.scratch) {
+        throw new Error(`${reason}: the alias Host candidate PID ${String(pid)} does not carry the registered Client scratch`)
+      }
+      found.push({ ...captured.process, scratch })
       continue
     }
     if (captured.kind === 'gone') continue
     if (captured.kind === 'unknown') {
-      unknown.push({ pid, code: captured.code ?? 'UNKNOWN' })
+      recordUnknown(pid, captured.code ?? 'CAPTURE_UNKNOWN')
       continue
     }
     // A definitive not-target (foreign home/profile/anchor/UID) is excluded.
@@ -1280,7 +1368,12 @@ async function settleCrossHomeReservation(handle, reason) {
     if (live !== undefined) {
       noSpawnSince = undefined
       if (reservation.observedCandidate === undefined) {
-        reservation.observedCandidate = { pid: live.pid, birth: live.birth }
+        reservation.observedCandidate = {
+          pid: live.pid,
+          birth: live.birth,
+          pgid: live.pgid,
+          sid: live.sid,
+        }
         appendNote('cross-home-candidate-observed', {
           entryId: handle.entryId,
           pid: live.pid,
@@ -1313,6 +1406,22 @@ async function settleCrossHomeReservation(handle, reason) {
   if (finalScan.unknown.length > 0 || finalScan.found.length > 0) {
     throw new Error(`${reason}: the alias scan is not terminal (${JSON.stringify(finalScan)})`)
   }
+  // A present log means the Client committed a spawn and the alias scope
+  // directory MUST be a private real directory; an absent log is the only
+  // admissible no-spawn branch and the directory may not exist yet.
+  assertCrossHomeAliasDirectory(reservation, reason, seenHostLog)
+  const finalLog = readCrossHomeHostLog(reservation, reason)
+  if (finalLog.kind === 'absent') {
+    if (seenHostLog) throw new Error(`${reason}: the alias Host log disappeared during settlement`)
+    if (conflict !== null) throw new Error(`${reason}: the alias conflict state is inconsistent with the absent log`)
+  } else if (finalLog.kind === 'records') {
+    const finalConflict = validateCrossHomeConflict(reservation, finalLog.records, reason)
+    if (conflict === null || finalConflict === null) {
+      throw new Error(`${reason}: the alias Host log has no complete product conflict`)
+    }
+  } else {
+    throw new Error(`${reason}: the alias Host log still has an incomplete trailing record`)
+  }
   assertPathAbsent(reservation.registryPath, `${reason}: the alias registry`)
   assertPathAbsent(reservation.launchPath, `${reason}: the alias launch`)
   if (reservation.observedCandidate !== undefined) {
@@ -1324,6 +1433,23 @@ async function settleCrossHomeReservation(handle, reason) {
       && classifyKernelLiveness(observation).state === 'alive'
       && serializeKernelIdentity(observation.identity) === reservation.observedCandidate.birth) {
       throw new Error(`${reason}: the observed alias candidate is still the live process`)
+    }
+    const pgid = reservation.observedCandidate.pgid
+    if (!Number.isInteger(pgid) || pgid <= 0) {
+      throw new Error(`${reason}: the observed alias candidate has no detached group identity`)
+    }
+    const members = listKernelGroupMembers(pgid)
+    if (!Array.isArray(members)) {
+      throw new Error(`${reason}: the observed alias candidate group terminal is unverifiable`)
+    }
+    for (const member of members) {
+      const state = classifyKernelLiveness(member).state
+      if (state === 'unknown') {
+        throw new Error(`${reason}: the observed alias candidate group member state is unverifiable`)
+      }
+      if (state === 'alive') {
+        throw new Error(`${reason}: the observed alias candidate group still has a live member`)
+      }
     }
   }
   await assertClientSeatFree({ dshHome: reservation.home }, reservation.scopeId, `${reason}: alias`)
@@ -1340,6 +1466,7 @@ async function settleCrossHomeReservation(handle, reason) {
     aliasRegistryAbsent: true,
     aliasLaunchAbsent: true,
     aliasSeatFree: true,
+    scratchProvenance: true,
     ...primary,
   }
   reservation.settled = true
@@ -1365,6 +1492,41 @@ async function settleCrossHomeObligations(reason) {
     if (handle.crossHome === undefined) continue
     await settleCrossHomeReservation(handle, reason)
   }
+}
+
+/**
+ * Fresh closure of one already-settled alias obligation before the Scene is
+ * allowed to release the primary Host or remove its root: no late publication,
+ * no late candidate, the expected terminal branch, the private scope directory
+ * and the alias qualification seat still hold.
+ */
+async function assertCrossHomeFreshTerminal(handle, reason) {
+  const reservation = handle.crossHome
+  if (reservation === undefined) return
+  if (reservation.settled !== true || reservation.facts === undefined) {
+    throw new Error(`${reason}: the cross-home reservation ${String(handle.label)} is not settled`)
+  }
+  assertPathAbsent(reservation.registryPath, `${reason}: the alias registry`)
+  assertPathAbsent(reservation.launchPath, `${reason}: the alias launch`)
+  const log = readCrossHomeHostLog(reservation, reason)
+  if (log.kind === 'absent') {
+    if (reservation.facts.terminal !== 'no-spawn') {
+      throw new Error(`${reason}: the settled alias conflict lost its Host log`)
+    }
+  } else if (log.kind === 'records') {
+    const conflict = validateCrossHomeConflict(reservation, log.records, reason)
+    if (conflict === null || reservation.facts.terminal !== 'seat-conflict') {
+      throw new Error(`${reason}: the settled alias Host log no longer carries the product conflict`)
+    }
+  } else {
+    throw new Error(`${reason}: the alias Host log has an incomplete trailing record`)
+  }
+  assertCrossHomeAliasDirectory(reservation, reason, log.kind !== 'absent')
+  const scan = scanCrossHomeCandidates(reservation, reason)
+  if (scan.unknown.length > 0 || scan.found.length > 0) {
+    throw new Error(`${reason}: a late alias candidate is not terminal (${JSON.stringify(scan)})`)
+  }
+  await assertClientSeatFree({ dshHome: reservation.home }, reservation.scopeId, `${reason}: alias`)
 }
 
 /** Await ONE official qualification record; a failure record fails immediately. */
@@ -9695,6 +9857,17 @@ async function handleFinalize(message) {
         preconditions.push(`the Host attempt ${String(handle.label)} is not finished`)
       }
     }
+    // The alias obligation was settled during FINISH_ENTRY; re-read the real
+    // material/candidate/seat before the primary Host is released so a late
+    // publication or candidate can never ride a stale `settled` boolean.
+    for (const handle of qualificationClients) {
+      if (handle.crossHome === undefined) continue
+      try {
+        await assertCrossHomeFreshTerminal(handle, 'FINALIZE: pre-stop')
+      } catch (error) {
+        preconditions.push(boundedError(error))
+      }
+    }
     if (preconditions.length > 0) {
       throw new Error(`FINALIZE: Process terminal preconditions failed before Host stop: ${preconditions.join('; ')}`)
     }
@@ -10180,9 +10353,12 @@ function entryRecordsOf(handle) {
     entryId: handle.entryId,
     kind: handle.kind,
     mode: handle.mode ?? null,
+    pid: handle.child?.pid ?? handle.pid ?? null,
+    birth: handle.birth ?? null,
     exited: handle.exited === true,
     exitCode: handle.exitResult?.code ?? null,
     exitSignal: handle.exitResult?.signal ?? null,
+    exitWallMs: handle.exitWallMs ?? null,
     stderrMarkers,
     stderrBytes: (handle.stderrText ?? '').length,
     records,
@@ -10750,6 +10926,12 @@ async function handleStartQualificationClients(message) {
     if (qualificationClients.some(handle => handle.crossHome !== undefined)) {
       throw new Error(`START_QUALIFICATION_CLIENTS: this Scene already owns a fixed cross-home reservation`)
     }
+    if (activeHost === undefined) {
+      throw new Error(`START_QUALIFICATION_CLIENTS: ${CROSS_HOME_MODE} requires the one accepted primary Host`)
+    }
+    if (publicLaunches.some(handle => !handle.closed)) {
+      throw new Error(`START_QUALIFICATION_CLIENTS: ${CROSS_HOME_MODE} requires no live public daemon launch`)
+    }
   }
   const clients = []
   for (let index = 0; index < count; index += 1) {
@@ -10763,7 +10945,7 @@ async function handleStartQualificationClients(message) {
     // no ChildProcess and therefore no producer: the Scene root removal owns
     // the private alias directories, and there is no candidate obligation to
     // settle. Once the child exists, the same handle/ledger owns the obligation.
-    const reservation = crossHome ? reserveCrossHomeSeat(clientDir) : undefined
+    const reservation = crossHome ? reserveCrossHomeSeat(clientDir, scratch) : undefined
     const entry = pristineClientEntry()
     const env = qualificationClientEnv(mode, clientDir, scratch, barrierPath)
     if (reservation !== undefined) env.DSH_HOME = reservation.home
@@ -10810,7 +10992,7 @@ async function handleStartQualificationClients(message) {
       expectedHostId: discovered ? null : activeHost?.hostId ?? null,
       startedAt: now(),
       starttime: readHostStarttime(child.pid),
-      birth: captureEntryBirth(child, 'qualification Client'),
+      birth: undefined,
       closePromise,
       closedAt: undefined,
       exited: false,
@@ -10824,6 +11006,18 @@ async function handleStartQualificationClients(message) {
     }
     qualificationClients.push(handle)
     clients.push(handle)
+    handle.birth = captureEntryBirth(child, 'qualification Client')
+    if (reservation !== undefined) {
+      reservation.producerPid = child.pid
+      const producer = readKernelProcess(child.pid)
+      if (producer.kind !== 'alive') {
+        throw new Error(`START_QUALIFICATION_CLIENTS: ${handle.label} has no live producer kernel identity at spawn`)
+      }
+      reservation.producerStart = processStartFacts(producer.identity)
+      if (reservation.producerStart === undefined) {
+        throw new Error(`START_QUALIFICATION_CLIENTS: ${handle.label} has no comparable producer start identity`)
+      }
+    }
     if (reservation !== undefined) {
       appendNote('cross-home-seat-reserved', {
         entryId,
@@ -11192,11 +11386,12 @@ async function validateQualificationClientTerminal(handle, exit) {
   }
   const mode = handle.mode
   if (mode === CROSS_HOME_MODE) {
+    const failures = (handle.records ?? []).filter(record => record?.m4a0 === 'failure')
     expect(exit.code === 1 && exit.signal === null, 'the cross-home discovery refusal must exit 1 with no signal')
     expect(ready === undefined, 'the cross-home discovery refusal emitted Ready')
-    expect(failure !== undefined, 'the cross-home discovery refusal reported no official failure record')
-    expect(failure.code === 'HOST_START_TIMEOUT',
-      `the cross-home discovery refusal reported code=${String(failure.code ?? 'none')} phase=${String(failure.phase ?? 'none')}`)
+    expect(failures.length === 1, `the cross-home discovery refusal reported ${String(failures.length)} official failure records`)
+    expect(failures[0].code === 'HOST_START_TIMEOUT',
+      `the cross-home discovery refusal reported code=${String(failures[0].code ?? 'none')} phase=${String(failures[0].phase ?? 'none')}`)
     expect(cleanupCompleted.length === 1, 'the cross-home discovery refusal reported no completed cleanup')
     expect(cleanupFailures.length === 0, 'the cross-home discovery refusal reported a cleanup failure')
     const facts = handle.crossHome?.facts
@@ -11206,7 +11401,7 @@ async function validateQualificationClientTerminal(handle, exit) {
     return {
       outcome: 'startup-refusal',
       mode,
-      code: failure.code,
+      code: failures[0].code,
       crossHome: facts,
       readyEmitted: false,
       cleanupCompleted: cleanupCompleted.length,
@@ -11290,14 +11485,19 @@ async function finishHostAttempt(handle) {
 }
 
 async function finishQualificationClient(handle) {
-  if (handle.signalIntent !== undefined) return await waitForEntryClose(handle, 'FINISH_ENTRY')
-  if (handle.mode === 'identity-changed') return await waitForEntryClose(handle, 'FINISH_ENTRY')
+  const close = async () => {
+    const exit = await waitForEntryClose(handle, 'FINISH_ENTRY')
+    handle.exitWallMs ??= Date.now()
+    return exit
+  }
+  if (handle.signalIntent !== undefined) return await close()
+  if (handle.mode === 'identity-changed') return await close()
   const ready = (handle.records ?? []).some(record => record?.m4a0 === 'ready')
   if (ready && !handle.exited && handle.child.exitCode === null && handle.child.signalCode === null) {
     // The one-shot qualification Client owns the official stdin shutdown op.
     handle.child.stdin.write(`${JSON.stringify({ op: 'shutdown' })}\n`)
   }
-  return await waitForEntryClose(handle, 'FINISH_ENTRY')
+  return await close()
 }
 
 async function handleFinishEntry(message) {
@@ -11372,6 +11572,7 @@ async function handleFinishEntry(message) {
     kind: handle.kind,
     mode: handle.mode ?? null,
     exit: { code: exit.code, signal: exit.signal },
+    exitWallMs: handle.exitWallMs ?? null,
     records: entryRecordsOf(handle).records,
     stderrMarkers: entryStderrMarkers(handle),
   }
@@ -12327,13 +12528,7 @@ async function handleAssertEntrySeatsFree() {
   }
   for (const handle of qualificationClients) {
     if (handle.crossHome === undefined) continue
-    if (handle.crossHome.settled !== true) {
-      throw new Error(`ASSERT_ENTRY_SEATS_FREE: cross-home reservation ${handle.label} is not settled`)
-    }
-    assertPathAbsent(handle.crossHome.registryPath, 'ASSERT_ENTRY_SEATS_FREE alias registry')
-    assertPathAbsent(handle.crossHome.launchPath, 'ASSERT_ENTRY_SEATS_FREE alias launch')
-    await assertClientSeatFree({ dshHome: handle.crossHome.home }, handle.crossHome.scopeId,
-      'ASSERT_ENTRY_SEATS_FREE alias')
+    await assertCrossHomeFreshTerminal(handle, 'ASSERT_ENTRY_SEATS_FREE')
   }
   const liveFallback = sceneLocalHostCandidates()
   if (liveFallback.length > 0) {

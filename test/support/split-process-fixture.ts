@@ -516,9 +516,12 @@ export interface EntryRecordFacts {
   entryId: string
   kind: string
   mode: string | null
+  pid: number | null
+  birth: string | null
   exited: boolean
   exitCode: number | null
   exitSignal: string | null
+  exitWallMs?: number | null
   stderrMarkers: EntryStderrMarkers
   stderrBytes: number
   records: EntryRecord[]
@@ -1375,9 +1378,12 @@ class ProcessScene implements SplitProcessScene {
       entryId: String(payload.entryId),
       kind: String(payload.kind),
       mode: payload.mode === null || payload.mode === undefined ? null : String(payload.mode),
+      pid: payload.pid === null || payload.pid === undefined ? null : Number(payload.pid),
+      birth: payload.birth === null || payload.birth === undefined ? null : String(payload.birth),
       exited: payload.exited === true,
       exitCode: payload.exitCode === null || payload.exitCode === undefined ? null : Number(payload.exitCode),
       exitSignal: payload.exitSignal === null || payload.exitSignal === undefined ? null : String(payload.exitSignal),
+      exitWallMs: payload.exitWallMs === null || payload.exitWallMs === undefined ? null : Number(payload.exitWallMs),
       stderrMarkers: payload.stderrMarkers as EntryStderrMarkers,
       stderrBytes: Number(payload.stderrBytes),
       records: (payload.records ?? []) as EntryRecord[],

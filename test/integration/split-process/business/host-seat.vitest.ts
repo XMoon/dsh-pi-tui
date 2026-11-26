@@ -492,6 +492,21 @@ test('refuses cross-home discovery for the same canonical profile while the Host
     await assertAuthenticatedHost(scene, host)
     await assertPrimaryHostSeatHeld(scene)
 
+    // One fixed input-boundary negative: a forbidden combination is refused
+    // before any qualification directory/process exists.
+    const qualificationsDir = join(scene.workDir, 'qualification-clients')
+    const qualificationsBefore = existsSync(qualificationsDir)
+      ? readdirSync(qualificationsDir).sort()
+      : []
+    await expect(scene.request('START_QUALIFICATION_CLIENTS', {
+      mode: 'cross-home-seat-refusal',
+      foundationBarrier: true,
+    })).rejects.toThrow(/does not accept foundationBarrier/u)
+    const qualificationsAfter = existsSync(qualificationsDir)
+      ? readdirSync(qualificationsDir).sort()
+      : []
+    expect(qualificationsAfter).toEqual(qualificationsBefore)
+
     const [started] = await scene.startQualificationClients({ mode: 'cross-home-seat-refusal' })
     client = started!
     const reservation = (await scene.entryRecordFacts(client)).crossHome
@@ -521,6 +536,18 @@ test('refuses cross-home discovery for the same canonical profile while the Host
     expect(facts?.primarySeatBusy).toBe(true)
     expect(facts?.primaryPid).toBe(hostPid)
     expect(facts?.primaryInstanceId).toBe(hostInstanceId)
+    expect(facts?.scratchProvenance).toBe(true)
+
+    const clientRecords = (await scene.entryRecordFacts(client)).records
+    const clientFailures = clientRecords.filter(record => record.m4a0 === 'failure')
+    expect(clientFailures, 'the cross-home Client reported more than one failure').toHaveLength(1)
+    expect(clientFailures[0]?.code).toBe('HOST_START_TIMEOUT')
+    for (const recordName of ['host-authenticated', 'context-ready', 'ready', 'cleanup-failure']) {
+      expect(clientRecords.some(record => record.m4a0 === recordName),
+        `the cross-home Client reported ${recordName}`).toBe(false)
+    }
+    expect(clientRecords.filter(record => record.m4a0 === 'cleanup' && record.status === 'completed'),
+      'the cross-home Client did not report exactly one completed cleanup').toHaveLength(1)
 
     // The Worker independently reads the REAL new alias Host log: exactly the
     // one product seat-conflict record, the same canonical scope, and no
@@ -544,6 +571,12 @@ test('refuses cross-home discovery for the same canonical profile while the Host
       || record.m4a0 === 'cleanup-failure' || record.m4a0 === 'profile-booted')).toBe(false)
     for (const path of [join(aliasScopePath, 'instance.json'), join(aliasScopePath, 'launch.json')]) {
       expect(existsSync(path), `the alias published ${path}`).toBe(false)
+    }
+    if (process.platform === 'darwin') {
+      // The Darwin Host seat belongs to the account-home scope; the alias
+      // discovery scope directory must never contain a Host seat file.
+      expect(readdirSync(aliasScopePath).some(name => name.startsWith('seat-host-')),
+        'the alias scope created a second Darwin Host seat').toBe(false)
     }
 
     // The primary Host material and identity are untouched, and its real seat is

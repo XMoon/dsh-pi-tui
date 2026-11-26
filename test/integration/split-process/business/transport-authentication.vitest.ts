@@ -918,6 +918,7 @@ test('cancels an installed Client during an in-flight authentication without dis
   let peer: SplitProcessClient | undefined
   let cancelled: QualificationClientHandle | undefined
   let cancelledFinished = false
+  let targetTerminalProven = false
   let listener: ReturnType<typeof createHttpServer> | undefined
   let listenerSockets: Set<Socket> = new Set()
   let privateSnapshot: { registryPath: string; registry: PrivateFileSnapshot; launchPath: string; launch: PrivateFileSnapshot } | undefined
@@ -954,6 +955,7 @@ test('cancels an installed Client during an in-flight authentication without dis
     }
     await scene.finishEntry(cancelled)
     cancelledFinished = true
+    targetTerminalProven = true
   }
 
   try {
@@ -991,6 +993,7 @@ test('cancels an installed Client during an in-flight authentication without dis
     const requests: Array<{ method: string; pathname: string; token: string | null; interactions: string | null; keys: string[] }> = []
     let requestSocket: Socket | undefined
     let requestArrivedAt: number | undefined
+    let requestArrivedWallMs: number | undefined
     let unexpected: Error | undefined
     let resolveFirstRequest: (() => void) | undefined
     const firstRequest = new Promise<void>(resolve => { resolveFirstRequest = resolve })
@@ -1019,7 +1022,13 @@ test('cancels an installed Client during an in-flight authentication without dis
         && record.interactions === 'answer'
         && keys.length === 2
       if (!valid) {
-        unexpected ??= new Error(`the in-flight authentication request is not the one expected /connect transaction: ${JSON.stringify(record)}`)
+        unexpected ??= new Error(`the in-flight authentication request is not the one expected /connect transaction: ${JSON.stringify({
+          method: record.method,
+          pathname: record.pathname,
+          interactions: record.interactions,
+          keys: record.keys,
+          tokenMatches: record.token === syntheticToken,
+        })}`)
         request.resume()
         response.writeHead(400)
         response.end()
@@ -1028,6 +1037,7 @@ test('cancels an installed Client during an in-flight authentication without dis
       }
       requestSocket = request.socket
       requestArrivedAt = performance.now()
+      requestArrivedWallMs = Date.now()
       resolveFirstRequest?.()
       // Deliberately hold the response: no status line, headers or body.
     })
@@ -1061,6 +1071,10 @@ test('cancels an installed Client during an in-flight authentication without dis
 
     const [target] = await scene.startQualificationClients({ mode: 'attach' })
     cancelled = target!
+    const targetFacts = await scene.entryRecordFacts(cancelled)
+    expect(targetFacts.exited, 'the registered cancellation target is already terminal').toBe(false)
+    expect(targetFacts.pid, 'the registered cancellation target has no PID').toBeGreaterThan(0)
+    expect(typeof targetFacts.birth, 'the registered cancellation target has no kernel birth').toBe('string')
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('the in-flight authentication never reached the controlled listener')), 30_000)
       void firstRequest.then(() => {
@@ -1070,7 +1084,8 @@ test('cancels an installed Client during an in-flight authentication without dis
     })
     if (unexpected !== undefined) throw unexpected
     const arrivedAt = requestArrivedAt
-    if (arrivedAt === undefined || requestSocket === undefined) {
+    const arrivedWallMs = requestArrivedWallMs
+    if (arrivedAt === undefined || arrivedWallMs === undefined || requestSocket === undefined) {
       throw new Error('the controlled listener did not record the real request arrival and socket')
     }
     expect(requestSocket.destroyed).toBe(false)
@@ -1084,11 +1099,17 @@ test('cancels an installed Client during an in-flight authentication without dis
         `the cancelled Client reported ${recordName} before the request was held`).toBe(false)
     }
 
+    const signalWallMs = Date.now()
     await scene.signalEntry(cancelled, 'SIGTERM')
     const terminal = await scene.finishEntry(cancelled)
     cancelledFinished = true
-    const exitedAt = performance.now()
-    expect(exitedAt - arrivedAt, 'the cancelled Client did not exit within 5s of the real request arrival').toBeLessThan(5_000)
+    targetTerminalProven = true
+    const exitWallMs = terminal.exitWallMs
+    if (typeof exitWallMs !== 'number' || !Number.isFinite(exitWallMs)) {
+      throw new Error('the cancelled Client terminal did not carry its real exit wall time')
+    }
+    expect(exitWallMs - arrivedWallMs, 'the cancelled Client did not exit within 5s of the real request arrival').toBeLessThan(5_000)
+    expect(exitWallMs - signalWallMs, 'the cancelled Client did not exit within 5s of the real SIGTERM').toBeLessThan(5_000)
     expect(terminal.exit).toEqual({ code: 0, signal: null })
     expect(terminal.outcome).toBe('signal')
 
@@ -1097,6 +1118,7 @@ test('cancels an installed Client during an in-flight authentication without dis
       expect(recordsAfter.some(record => record.m4a0 === recordName),
         `the cancelled Client reported ${recordName} after its terminal`).toBe(false)
     }
+    expect(requests, 'the cancellation listener received more than one request').toHaveLength(1)
     const signals = recordsAfter.filter(record => record.m4a0 === 'signal' && record.signal === 'SIGTERM')
     expect(signals, 'exactly one real SIGTERM record').toHaveLength(1)
     const shutdown = recordsAfter.filter(record => record.m4a0 === 'shutdown-stage' && record.phase === 'cleanup-complete')
@@ -1122,6 +1144,16 @@ test('cancels an installed Client during an in-flight authentication without dis
     expect(peerState.businessStates.every(state => state.state === 'alive')).toBe(true)
     const peerFrame = await peer.text()
     expect(peerFrame.length).toBeGreaterThan(0)
+
+    // A post-cancel Host-backed peer operation, not just a live process or the
+    // last painted frame: the Session Workspace asks the authenticated Host for
+    // its Session roster before the test opens and closes it.
+    await peer.type('/sessions')
+    await peer.press('Enter')
+    await waitForFrame(peer, 'Sessions ·', 'the peer Host Session Workspace', 30_000)
+    await waitForFrameGone(peer, 'Loading sessions…', 'the peer Host Session listing', 30_000)
+    await peer.press('Escape')
+    await waitForFrameGone(peer, 'Sessions ·', 'the peer Host Session Workspace close', 30_000)
 
     // A fresh qualification Client must authenticate the same Host after the
     // cancelled entry released its qualification seat.
@@ -1153,15 +1185,15 @@ test('cancels an installed Client during an in-flight authentication without dis
     } catch (error) {
       cleanupErrors.push(asError(error))
     }
-    try {
-      restorePrivate()
-    } catch (error) {
-      cleanupErrors.push(asError(error))
-    }
-    try {
-      await closeListener()
-    } catch (error) {
-      cleanupErrors.push(asError(error))
+    if (targetTerminalProven || cancelled === undefined) {
+      try {
+        restorePrivate()
+      } catch (error) {
+        cleanupErrors.push(asError(error))
+      }
+    } else if (privateSnapshot !== undefined) {
+      cleanupErrors.push(new Error(
+        'the private discovery files were left mutated because the cancelled Client terminal was not proven'))
     }
     if (peer !== undefined) {
       try {
@@ -1174,6 +1206,14 @@ test('cancels an installed Client during an in-flight authentication without dis
       await scene.dispose()
     } catch (cleanupError) {
       cleanupErrors.push(asError(cleanupError))
+    }
+    // The listener is closed only after the target Client is terminal or the
+    // existing Scene compensation has ended it; it is never the thing that
+    // fabricates the cancellation.
+    try {
+      await closeListener()
+    } catch (error) {
+      cleanupErrors.push(asError(error))
     }
     if (cleanupErrors.length > 0) {
       if (testError !== undefined) {

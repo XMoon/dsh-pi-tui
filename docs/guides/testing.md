@@ -643,7 +643,7 @@ user journey and never claims a real GUI. The same-birth Linux zombie
 classification is a Linux-only case (explicit `N/A` on Darwin); Darwin uses the
 real dead-Host schema-2 recovery path instead of fabricating `/proc` state.
 
-Two further non-PTY contracts are fixed:
+Two further non-PTY contracts are fixed (Linux and macOS):
 
 - An in-flight authentication cancellation is keyed by the REAL pending
   `/connect` request, never by a spawn timestamp or sleep. A test-owned loopback
@@ -827,9 +827,10 @@ mise exec -- node test/support/split-supervisor-signal-probe.mjs --mode process-
 and macOS; the same-birth zombie window stays Linux-only.
 `--case cross-home-seat-refusal` is accepted ONLY together with
 `--mode process-worker-kill --at qualification-client-spawned`. It binds the
-host-seat cross-home refusal test instead of the default startup/exit test and
-requires the same external kill to end in the alias-settlement/absence/seat
-facts below; any other case value or mode/at combination is refused.
+host-seat cross-home refusal test (Linux and macOS) instead of the default
+startup/exit test and requires the same external kill to end in the
+alias-settlement/absence/seat facts below; any other case value or mode/at
+combination is refused.
 Each installed-entry window binds one exact business test and only holds after
 the Supervisor registered the real live child identities. `host-contenders-spawned`
 is the batch of concurrent Host contenders, `qualification-client-spawned` a

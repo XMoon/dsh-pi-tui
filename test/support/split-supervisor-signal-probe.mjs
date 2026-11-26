@@ -464,6 +464,10 @@ let publicObservationCache
 let crossHomeObservation
 /** The installed Host entry captured while the cross-home root still exists. */
 let crossHomeExpectedEntry
+/** The producer Client's live start instant, captured before the Worker kill. */
+let crossHomeProducerStart
+/** The producer Client PID captured before the Worker kill. */
+let crossHomeProducerPid
 async function loadPublicObservation(receipt) {
   const anchor = receipt?.installation?.anchor
   if (typeof anchor !== 'string' || anchor === '') fail('the receipt carries no installed DSH anchor')
@@ -938,6 +942,22 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
  * possible detached candidate is terminal, and a fresh all-PID observation
  * finds no live alias Host candidate with the alias DSH_HOME.
  */
+function probeStartFacts(identity) {
+  if (identity?.platform === 'linux') return { platform: 'linux', ticks: String(identity.startTicks) }
+  if (identity?.platform === 'darwin') {
+    return { platform: 'darwin', sec: String(identity.startSec), usec: String(identity.startUsec) }
+  }
+  return undefined
+}
+
+function probeStartedAtOrAfter(identity, baseline) {
+  const current = probeStartFacts(identity)
+  if (current === undefined || baseline === undefined || current.platform !== baseline.platform) return true
+  if (current.platform === 'linux') return BigInt(current.ticks) >= BigInt(baseline.ticks)
+  return BigInt(current.sec) * 1_000_000n + BigInt(current.usec)
+    >= BigInt(baseline.sec) * 1_000_000n + BigInt(baseline.usec)
+}
+
 async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
   const rows = Array.isArray(receipt.cleanup?.crossHome) ? receipt.cleanup.crossHome : []
   if (rows.length !== 1) fail(`cross-home probe: expected one settled reservation, got ${String(rows.length)}`)
@@ -992,27 +1012,51 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
       fail(`cross-home probe: the captured alias candidate is ${state}`)
     }
   }
-  // Independent observation of the exact candidate set: every process whose
-  // real command line runs this Scene's installed Host entry. Unreadable
-  // alias-matching candidates are unknown, never absence.
+  // Independent observation of the exact candidate set: every current PID is
+  // read; unreadable aliases that started before the producer are provably
+  // foreign, every other unknown fails closed.
   const obs = observation ?? await loadPublicObservation(receipt)
   if (typeof receipt.sceneRoot !== 'string' || receipt.sceneRoot === '') {
     fail('cross-home probe: the receipt has no Scene root')
   }
-  const candidates = [...processTable().values()]
-    .filter(row => row.command.includes('local-host.mjs') && row.command.includes(receipt.sceneRoot))
+  if (crossHomeProducerStart === undefined) {
+    fail('cross-home probe: the producer Client start instant was not captured before the kill')
+  }
+  const all = obs.allPids()
+  if (all.kind !== 'ok') fail(`cross-home probe: the alias scan cannot enumerate processes (${String(all.code ?? 'unknown')})`)
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   const entry = crossHomeExpectedEntry ?? realpathSync(receipt.installation.entries.host)
-  for (const candidate of candidates) {
-    const basic = obs.basic(candidate.pid)
+  const failUnknown = (pid, code) => {
+    let identity
+    try {
+      identity = kernel.read(pid)
+    } catch {
+      fail(`cross-home probe: the unknown PID ${String(pid)} (${String(code)}) has no readable kernel identity`)
+    }
+    if (identity.kind === 'gone') return
+    if (identity.kind !== 'alive') fail(`cross-home probe: the unknown PID ${String(pid)} (${String(code)}) is unverifiable`)
+    if (identity.identity.ppid !== 1 && identity.identity.ppid !== crossHomeProducerPid) return
+    if (!probeStartedAtOrAfter(identity.identity, crossHomeProducerStart)) return
+    fail(`cross-home probe: the alias candidate PID ${String(pid)} is unverifiable (${String(code)})`)
+  }
+  for (const pid of all.pids) {
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+    const basic = obs.basic(pid)
     if (basic.kind === 'gone') continue
-    if (basic.kind !== 'ok') fail(`cross-home probe: the process basic read for ${String(candidate.pid)} is unknown`)
+    if (basic.kind !== 'ok') {
+      failUnknown(pid, basic.code ?? 'BASIC_UNKNOWN')
+      continue
+    }
     if (uid !== undefined && basic.uid !== uid) continue
-    if (basic.pgid !== candidate.pid) continue
-    const argv = obs.argvEntry(candidate.pid)
-    if (argv.kind === 'unknown') fail(`cross-home probe: the argv read for ${String(candidate.pid)} is unknown`)
-    if (argv.kind !== 'ok' || argv.entry !== entry) continue
-    const captured = obs.capture(candidate.pid, {
+    if (basic.pgid !== pid) continue
+    const argv = obs.argvEntry(pid)
+    if (argv.kind === 'gone') continue
+    if (argv.kind !== 'ok') {
+      failUnknown(pid, argv.code ?? 'ARGV_UNKNOWN')
+      continue
+    }
+    if (argv.entry !== entry) continue
+    const captured = obs.capture(pid, {
       entry,
       home: row.aliasHome,
       profile: 'pi-tui',
@@ -1021,8 +1065,8 @@ async function assertCrossHomeProbeTerminal(receipt, kernel, observation) {
       requireEnv: true,
       groupLeader: true,
     })
-    if (captured.kind === 'captured') fail(`cross-home probe: a live alias Host candidate remains: ${String(candidate.pid)}`)
-    if (captured.kind === 'unknown') fail(`cross-home probe: the alias candidate capture for ${String(candidate.pid)} is unknown`)
+    if (captured.kind === 'captured') fail(`cross-home probe: a live alias Host candidate remains: ${String(pid)}`)
+    if (captured.kind === 'unknown') failUnknown(pid, captured.code ?? 'CAPTURE_UNKNOWN')
   }
 }
 
@@ -1664,6 +1708,21 @@ try {
             if (await hostSeatFree(receipt.scope?.hostSeat)) {
               fail('cross-home case: the primary Host seat reports free while the primary Host is live')
             }
+            const supervisor = receipt.supervisor
+            if (!Number.isInteger(supervisor?.pid) || typeof supervisor.birth !== 'string') {
+              fail('cross-home case: the receipt has no live Supervisor parent identity')
+            }
+            assertLiveParentEdge(kernel, reserved.pid, reserved.birth, supervisor.pid, supervisor.birth,
+              'cross-home case Client parent')
+            const producerObservation = kernel.read(reserved.pid)
+            if (producerObservation.kind !== 'alive') {
+              fail('cross-home case: the registered producer Client is not the live kernel process')
+            }
+            crossHomeProducerStart = probeStartFacts(producerObservation.identity)
+            if (crossHomeProducerStart === undefined) {
+              fail('cross-home case: the producer Client has no comparable start instant')
+            }
+            crossHomeProducerPid = reserved.pid
             crossHomeObservation = await loadPublicObservation(receipt)
             crossHomeExpectedEntry = realpathSync(receipt.installation.entries.host)
           }
