@@ -6170,6 +6170,17 @@ function capturePublicProcess(pid, marker, label, options = {}) {
   }
 }
 
+/** present | absent for one exact path; an unreadable path is unknown, never absent. */
+function publicPathPresence(path, reason) {
+  try {
+    lstatSync(path)
+    return 'present'
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'absent'
+    throw new Error(`${reason}: the path is unreadable/unknown: ${path}`)
+  }
+}
+
 /** The product's own spawned-child identity facts, read from the real child. */
 function assertPublicOfficialChildEnvironment(pid, profile, label) {
   const actualProfile = processEnvironmentValue(pid, 'SPLIT_PROCESS_PROFILE')
@@ -6509,7 +6520,8 @@ async function waitForPublicHostRegistry(handle, timeoutMs = 180_000) {
   let lastMaterialError
   for (;;) {
     assertPublicAdmissionOpen(`${handle.label} public Host registry`)
-    if (existsSync(registryPath) && existsSync(launchPath)) {
+    if (publicPathPresence(registryPath, 'public Host registry') === 'present'
+      && publicPathPresence(launchPath, 'public Host launch') === 'present') {
       try {
         const files = readScopeFiles(scene.installation.dshHome, processScope.scopeId)
         if (files.registryMode !== 0o600 || files.launchMode !== 0o600) {
@@ -6749,8 +6761,8 @@ async function assertPublicColdStartOwnership(label, profile) {
   await assertSceneHostSeatFree(`${label}: cold Host seat`)
   await assertClientSeatFree(scene.installation, processScope.scopeId, `${label}: cold qualification seat`)
   for (const name of ['instance.json', 'launch.json']) {
-    if (existsSync(join(processScope.dir, name))) {
-      throw new Error(`${label}: a cold start found existing public Host material ${name}`)
+    if (publicPathPresence(join(processScope.dir, name), `${label}: cold material`) !== 'absent') {
+      throw new Error(`${label}: a cold start found existing/unknown public Host material ${name}`)
     }
   }
   const liveHosts = livePublicHostPids()
@@ -7542,10 +7554,12 @@ async function handlePublicDaemonStop(message) {
   }
   const registryPath = join(processScope.dir, 'instance.json')
   const launchPath = join(processScope.dir, 'launch.json')
-  if (existsSync(registryPath) || existsSync(launchPath)) {
-    // A normal product stop must leave the scope material absent. Foreign or
-    // leftover material is not deleted to manufacture a clean normal stop.
-    throw new Error(`PUBLIC_DAEMON_STOP: scope material remains after product stop: registry=${existsSync(registryPath)} launch=${existsSync(launchPath)}`)
+  const registryPresence = publicPathPresence(registryPath, 'PUBLIC_DAEMON_STOP registry')
+  const launchPresence = publicPathPresence(launchPath, 'PUBLIC_DAEMON_STOP launch')
+  if (registryPresence !== 'absent' || launchPresence !== 'absent') {
+    // A normal product stop must leave the scope material absent. Foreign,
+    // unreadable or leftover material is not deleted to manufacture a pass.
+    throw new Error(`PUBLIC_DAEMON_STOP: scope material remains after product stop: registry=${registryPresence} launch=${launchPresence}`)
   }
   await assertSceneHostSeatFree('PUBLIC_DAEMON_STOP')
   await assertClientSeatFree(scene.installation, processScope.scopeId, 'PUBLIC_DAEMON_STOP')
@@ -7622,8 +7636,8 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
   }
   const registryPath = join(processScope.dir, 'instance.json')
   const launchPath = join(processScope.dir, 'launch.json')
-  const hasRegistry = existsSync(registryPath)
-  const hasLaunch = existsSync(launchPath)
+  const hasRegistry = publicPathPresence(registryPath, `${reason}: registry`) === 'present'
+  const hasLaunch = publicPathPresence(launchPath, `${reason}: launch`) === 'present'
   if (hasRegistry || hasLaunch) {
     if (!hasRegistry || !hasLaunch) {
       throw new Error(`${reason}: the public Host left incomplete registry/launch material`)
@@ -7655,8 +7669,8 @@ async function bindLatePublicHostRegistry(host, reason) {
   const launchPath = join(processScope.dir, 'launch.json')
   const deadline = Date.now() + 15_000
   for (;;) {
-    const hasRegistry = existsSync(registryPath)
-    const hasLaunch = existsSync(launchPath)
+    const hasRegistry = publicPathPresence(registryPath, `${reason}: late registry`) === 'present'
+    const hasLaunch = publicPathPresence(launchPath, `${reason}: late launch`) === 'present'
     if (hasRegistry && hasLaunch) break
     if (Date.now() >= deadline) return
     await sleep(50)
@@ -7705,8 +7719,8 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
         throw new Error(`reclaimPublicHost:${reason}: the gone public Host group still has live members: ${JSON.stringify(remaining)}`)
       }
     }
-    const hasRegistry = existsSync(registryPath)
-    const hasLaunch = existsSync(goneLaunchPath)
+    const hasRegistry = publicPathPresence(registryPath, `reclaimPublicHost:${reason}: gone registry`) === 'present'
+    const hasLaunch = publicPathPresence(goneLaunchPath, `reclaimPublicHost:${reason}: gone launch`) === 'present'
     if (hasRegistry || hasLaunch) {
       if (!hasRegistry || !hasLaunch || host.instanceId === undefined) {
         throw new Error(`reclaimPublicHost:${reason}: the gone public Host left incomplete/unowned material`)
@@ -7758,9 +7772,11 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
   await assertSceneHostSeatFree(`reclaimPublicHost:${reason}`)
   await assertClientSeatFree(scene.installation, processScope.scopeId, `reclaimPublicHost:${reason}`)
   const launchPath = join(processScope.dir, 'launch.json')
-  if (existsSync(registryPath) || existsSync(launchPath)) {
-    if (!existsSync(registryPath) || !existsSync(launchPath)) {
-      throw new Error(`reclaimPublicHost:${reason}: the stopped public Host left incomplete registry/launch material`)
+  const registryPresence = publicPathPresence(registryPath, `reclaimPublicHost:${reason}: registry`)
+  const launchPresence = publicPathPresence(launchPath, `reclaimPublicHost:${reason}: launch`)
+  if (registryPresence !== 'absent' || launchPresence !== 'absent') {
+    if (registryPresence !== 'present' || launchPresence !== 'present') {
+      throw new Error(`reclaimPublicHost:${reason}: the stopped public Host left incomplete/unknown registry/launch material`)
     }
     const after = readJson(registryPath, 'public Host registry after stop')
     const launch = readJson(launchPath, 'public Host launch after stop')
