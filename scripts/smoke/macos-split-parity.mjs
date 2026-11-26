@@ -1407,6 +1407,19 @@ function isEmptyAcpResult(response) {
     && Object.keys(response.result).length === 0
 }
 
+/**
+ * A session/resume success: no error and a real non-array object result.
+ * ACP v1 legal fields such as `modes`/`configOptions` are protocol output, not
+ * an empty-object contract; this predicate never enumerates them.
+ */
+function isAttachResult(response) {
+  return response?.error === undefined
+    && response?.result !== undefined
+    && typeof response.result === 'object'
+    && response.result !== null
+    && !Array.isArray(response.result)
+}
+
 /** One real non-TUI qualification Peer process driving the production ACP port. */
 class AcpPeer {
   constructor(options) {
@@ -1872,7 +1885,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   const initA = await connA.initialize(1)
   assert(initA?.result?.protocolVersion === 1, 'M05: initialize failed')
   const resumeA = await connA.request(2, 'session/resume', { sessionId: sessionA, cwd: realpathSync(projectA) })
-  assert(isEmptyAcpResult(resumeA), `M05: session/resume(A) must return {} (got ${JSON.stringify(resumeA?.error ?? resumeA?.result)})`)
+  assert(isAttachResult(resumeA), `M05: session/resume(A) must return a real attach result (got ${JSON.stringify(resumeA?.error ?? resumeA?.result)})`)
   const frameA = tmuxCapture(tui, 'M05 TUI frame')
   assert(frameA.includes('d2acp tui session marker'), 'M05: the real TUI lost Session A after the ACP resume')
   const connDup = await openAcp('M05 duplicate connection')
@@ -1950,7 +1963,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   const connResumeB = await openAcp('M06 resume B connection')
   await connResumeB.initialize(1)
   const resumeB = await connResumeB.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
-  assert(isEmptyAcpResult(resumeB), `M06: B must stay resumable after close (got ${JSON.stringify(resumeB?.error ?? resumeB?.result)})`)
+  assert(isAttachResult(resumeB), `M06: B must stay resumable after close (got ${JSON.stringify(resumeB?.error ?? resumeB?.result)})`)
   connResumeB.close()
   await connResumeB.closed
   row('M06', {
@@ -2011,7 +2024,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   const connDisconnect = await openAcp('M07 disconnect View')
   await connDisconnect.initialize(1)
   const resumeBForDisconnect = await connDisconnect.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
-  assert(isEmptyAcpResult(resumeBForDisconnect),
+  assert(isAttachResult(resumeBForDisconnect),
     `M07: the disconnect probe must attach Session B first (got ${JSON.stringify(resumeBForDisconnect?.error ?? resumeBForDisconnect?.result)})`)
   const heldText = 'd2acp m07 held tui during acp disconnect'
   // The fixture's userText is the WHOLE conversation truncated to 400 bytes, so
@@ -2061,13 +2074,13 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     while (Date.now() < fenceDeadline) {
       fenceAttempts += 1
       fenceResult = await teardownFence.request(2, 'session/resume', { sessionId: sessionB, cwd: acpWorkspaceReal })
-      if (isEmptyAcpResult(fenceResult)) break
+      if (isAttachResult(fenceResult)) break
       const fenceCode = fenceResult?.error?.data?.code
       assert(fenceCode === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
         `M07 teardown fence: the Host answered the resume with ${JSON.stringify(fenceResult?.error ?? fenceResult?.result)} instead of releasing the old View`)
       await sleep(100)
     }
-    assert(isEmptyAcpResult(fenceResult),
+    assert(isAttachResult(fenceResult),
       `M07: the Host never released the disconnected View before the barrier release (attempts=${String(fenceAttempts)})`)
     teardownFence.close()
     await teardownFence.closed
@@ -2133,7 +2146,7 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
   const connOn = await openAcp('M08 resumed connection')
   await connOn.initialize(1)
   const resumeOn = await connOn.request(2, 'session/resume', { sessionId: sessionA, cwd: realpathSync(projectA) })
-  assert(isEmptyAcpResult(resumeOn), `M08: the original Session must stay resumable after Off/On (got ${JSON.stringify(resumeOn?.error ?? resumeOn?.result)})`)
+  assert(isAttachResult(resumeOn), `M08: the original Session must stay resumable after Off/On (got ${JSON.stringify(resumeOn?.error ?? resumeOn?.result)})`)
   connOn.close()
   await connOn.closed
   assert(requireHost('M08 host').instanceId === hostAtStart.instanceId, 'M08: Off/On must never replace the Host instance')

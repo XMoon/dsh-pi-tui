@@ -9,15 +9,18 @@
  * Attachment Store, and every asserted notification is compared against the
  * durable committed Session event of the exact claimed turn.
  *
- * Positive proofs (L6-C01..C04): assistant text/image/text order, image-only
- * output, one ordered tool_call_update with text/JSON/image content and the
- * official failed status, all with exact stored bytes/digests and one standard
- * ACP frame above the legacy 256 KiB cap.
+ * Positive proofs (L6-C01..C03): committed assistant text/image/text and ONE
+ * large ordered tool_call_update with a text/image/text result, all with exact
+ * stored bytes/digests/MIME and one standard ACP frame above the legacy 256 KiB
+ * cap. The large tool image is a distinct real Host Store object and keeps the
+ * `toolRef` association the later two-image overflow negative needs.
  *
- * Negative/lifecycle proofs (L6-C05..C06): a format-valid but absent image
- * reference fails ONLY its own flight, and a slow reader that stops draining a
+ * Negative/lifecycle proofs (L6-C06..C07): a slow reader that stops draining a
  * large frame is closed by the bounded drain while the sibling ACP connection
- * and the real TUI keep completing their own turns on the same Host.
+ * and the real TUI keep completing their own turns on the same Host; a
+ * two-image tool result above the connection allowance fails closed. Ordinary
+ * image-only / failed-tool / missing-object content semantics are owned by the
+ * independent official SDK content case, not repeated here.
  *
  * @module split-process/acp-po4c-content-output
  */
@@ -30,7 +33,7 @@ import { join } from 'node:path'
 import sharp from 'sharp'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
+import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { installedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
@@ -46,20 +49,10 @@ const LEGACY_FRAME_BYTES = 256 * 1024
 /** The fixture's frozen committed-content samples (mirrored from the C1 fixture). */
 const MARKERS = Object.freeze({
   assistantMixed: 'po4c:assistant-mixed:v1',
-  assistantImageOnly: 'po4c:assistant-image-only:v1',
   toolContent: 'po4c:tool-content:v1',
-  toolFailed: 'po4c:tool-failed:v1',
-  missingImage: 'po4c:missing-image:v1',
   health: 'po4c:health',
   toolTwoImages: 'po4c:tool-two-images:v1',
 })
-const TEXT_BEFORE = 'before\r\n'
-const TEXT_AFTER = 'after 中文🙂\n'
-const TOOL_TAIL = 'tool-tail\n'
-const A2UI_TEXT = 'A2UI_JSON={"version":"popo.a2ui/1","components":[{"kind":"text","value":"透明"}]}'
-const TOOL_ANSWER = 'tool completed\n'
-const TOOL_FAILED_ANSWER = 'tool failed\n'
-const TOOL_NAME = 'po4c_output_tool'
 
 /**
  * F1 (Owner amendment A1) capacity qualification: a legal, independent Host
@@ -92,6 +85,52 @@ function withDeadline(promise, timeoutMs, label) {
 
 function authoredText(message) {
   return (message?.content ?? []).map(part => typeof part?.text === 'string' ? part.text : '').join('')
+}
+
+/**
+ * The canonical TEXT bytes of one committed content block list, in committed
+ * block order. A legal streaming segmentation may split these bytes into any
+ * number of chunks; the concatenated delivered text must equal this exactly.
+ */
+function committedText(message) {
+  return (message?.content ?? [])
+    .filter(block => block?.type === 'text')
+    .map(block => block.text)
+    .join('')
+}
+
+/**
+ * One clean text-only flight on a reattached View: every delivered update
+ * belongs to the exact attached Session, carries a non-empty stable ACP
+ * message id, and the concatenated text equals the committed canonical text.
+ * Any foreign Session, image, non-text content or extra/duplicated text fails;
+ * legal streaming segmentation is tolerated.
+ */
+function assertCleanTextFlight(result, sessionId, label) {
+  const updates = result.settled.updates
+  assert(updates.length > 0, `${label}: the clean turn must deliver at least one update`)
+  for (const entry of updates) {
+    assertStrict.equal(entry.message.params.sessionId, sessionId,
+      `${label}: every update belongs to the exact attached Session`)
+    assertStrict.equal(entry.message.params.update.sessionUpdate, 'agent_message_chunk',
+      `${label}: a clean text turn delivers only standard message chunks`)
+    assertStrict.equal(entry.message.params.update.content.type, 'text',
+      `${label}: a clean text turn delivers only text content`)
+    assertStrict.equal(typeof entry.message.params.update.messageId, 'string',
+      `${label}: every streamed message carries an ACP message id`)
+    assert(entry.message.params.update.messageId.length > 0,
+      `${label}: the ACP message id must be non-empty`)
+  }
+  const ids = new Set(updates.map(entry => entry.message.params.update.messageId))
+  assertStrict.equal(ids.size, 1,
+    `${label}: one attempt uses ONE stable ACP message id (got ${JSON.stringify([...ids])})`)
+  const committed = result.turnEvents
+    .filter(event => event.type === 'assistant/message')
+    .map(event => committedText(event.data.message))
+    .join('')
+  assert(committed.length > 0, `${label}: the clean turn commits non-empty assistant text`)
+  assertStrict.equal(updates.map(entry => entry.message.params.update.content.text).join(''), committed,
+    `${label}: the delivered text bytes equal the committed canonical text (no loss or duplication)`)
 }
 
 /** One raw NDJSON client that keeps the exact wire byte length of every frame. */
@@ -386,18 +425,19 @@ export async function runAcpPo4cContentOutput(context) {
     const attached = await resume(acp, sessionId, 'PO-4C attach the TUI Session')
     assertStrict.equal(attached.error, undefined,
       `PO-4C: attaching the TUI Session must succeed (got ${JSON.stringify(attached.error)})`)
-    // Current contract: an attached View answers the connection-owned model
-    // options; no business payload of the Session may ride along.
-    const attachedResult = attached.result ?? {}
-    assertStrict.deepEqual(Object.keys(attachedResult).filter(key => key !== 'configOptions'), [],
-      `PO-4C: resume must not carry a business payload (got ${JSON.stringify(attachedResult)})`)
-    assert(attachedResult.configOptions === undefined || Array.isArray(attachedResult.configOptions),
-      'PO-4C: only the optional connection-owned config options may accompany resume')
+    // An attach success is a real non-array object; legal ACP v1 fields such as
+    // `modes`/`configOptions` are protocol output, not a business-payload
+    // allowlist. The following real prompt/turn facts are the actual proof.
+    assert(attached.result !== undefined && typeof attached.result === 'object' && attached.result !== null
+      && !Array.isArray(attached.result),
+    `PO-4C: resume must return a real attach object (got ${JSON.stringify(attached.result)})`)
 
-    // L6-C01: committed assistant text/image/text. The transient contract sends
-    // the two standard text deltas as they arrive and appends the never-streamed
-    // durable IMAGE at the exact-seq join, under one stable ACP message id and
-    // with a standard image frame above the legacy 256 KiB cap.
+    // L6-C01: committed assistant text/image/text. The transient contract may
+    // segment the text into ANY number of legal chunks; the wire facts are ONE
+    // stable ACP message id, the concatenated delivered text equal to the
+    // committed canonical text (no loss/duplication), and the never-streamed
+    // durable IMAGE appended exactly once after the delivered text, in a
+    // standard frame above the legacy 256 KiB cap.
     const mixed = await runPrompt(acp, sessionId, MARKERS.assistantMixed, 'PO-4C assistant text/image/text')
     assertEndTurn(mixed.settled, 'PO-4C assistant text/image/text')
     const mixedMessages = mixed.turnEvents.filter(event => event.type === 'assistant/message')
@@ -405,19 +445,47 @@ export async function runAcpPo4cContentOutput(context) {
     const mixedCommitted = mixedMessages[0].data.message
     assertStrict.deepEqual(mixedCommitted.content.map(block => block.type), ['text', 'image', 'text'],
       'PO-4C: the durable assistant content is text/image/text')
-    assertStrict.equal(mixedCommitted.content[0].text, TEXT_BEFORE)
-    assertStrict.equal(mixedCommitted.content[2].text, TEXT_AFTER)
     const mixedRef = imageRefOf(mixedCommitted.content[1])
-    assertStrict.equal(mixed.settled.updates.length, 3, 'PO-4C: two streamed text deltas plus the durable image, no more')
-    const mixedKinds = mixed.settled.updates.map(entry => entry.message.params.update.sessionUpdate)
-    assertStrict.deepEqual(mixedKinds, ['agent_message_chunk', 'agent_message_chunk', 'agent_message_chunk'])
-    const mixedMessageIds = new Set(mixed.settled.updates.map(entry => entry.message.params.update.messageId))
+    const mixedCanonicalText = committedText(mixedCommitted)
+    assert(mixedCanonicalText.length > 0, 'PO-4C: the committed assistant text must be non-empty')
+    const mixedUpdates = mixed.settled.updates
+    for (const entry of mixedUpdates) {
+      assertStrict.equal(entry.message.params.sessionId, sessionId,
+        'PO-4C: every mixed-turn update belongs to the exact attached Session')
+    }
+    const mixedChunks = mixedUpdates
+      .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk')
+    assertStrict.equal(mixedChunks.length, mixedUpdates.length,
+      'PO-4C: a pure assistant turn delivers only standard message chunks')
+    for (const entry of mixedChunks) {
+      assertStrict.equal(typeof entry.message.params.update.messageId, 'string',
+        'PO-4C: every streamed mixed message carries an ACP message id')
+      assert(entry.message.params.update.messageId.length > 0,
+        'PO-4C: the ACP message id must be non-empty')
+    }
+    const mixedTextChunks = mixedChunks
+      .filter(entry => entry.message.params.update.content.type === 'text')
+    const mixedImageChunks = mixedChunks
+      .filter(entry => entry.message.params.update.content.type === 'image')
+    assertStrict.equal(mixedTextChunks.length + mixedImageChunks.length, mixedChunks.length,
+      'PO-4C: the mixed turn delivers no unexpected content type')
+    assert(mixedTextChunks.length > 0, 'PO-4C: the committed assistant text must be delivered')
+    assertStrict.equal(mixedTextChunks
+      .map(entry => entry.message.params.update.content.text).join(''), mixedCanonicalText,
+    'PO-4C: the delivered text bytes must equal the committed canonical text (no loss or duplication)')
+    assertStrict.equal(mixedImageChunks.length, 1,
+      'PO-4C: the committed assistant image is delivered exactly once')
+    const mixedImageEntry = mixedImageChunks[0]
+    const mixedMessageIds = new Set(mixedChunks.map(entry => entry.message.params.update.messageId))
     assertStrict.equal(mixedMessageIds.size, 1,
       `PO-4C: one attempt uses ONE stable ACP message id (got ${JSON.stringify([...mixedMessageIds])})`)
-    assertStrict.equal(mixed.settled.updates[0].message.params.update.content.text, TEXT_BEFORE)
-    assertStrict.equal(mixed.settled.updates[1].message.params.update.content.text, TEXT_AFTER)
-    const mixedImage = assertImageContent(mixed.settled.updates[2].message.params.update.content, mixedRef, 'PO-4C assistant image')
-    const mixedFrameBytes = mixed.settled.updates[2].rawBytes
+    assertStrict.equal(mixedImageEntry.message.params.update.messageId,
+      mixedTextChunks[0].message.params.update.messageId,
+    'PO-4C: the durable image belongs to the SAME ACP message as the delivered text')
+    assert(mixedChunks.at(-1) === mixedImageEntry,
+      'PO-4C: an append-only join appends the durable image after the delivered text chunks')
+    const mixedImage = assertImageContent(mixedImageEntry.message.params.update.content, mixedRef, 'PO-4C assistant image')
+    const mixedFrameBytes = mixedImageEntry.rawBytes
     assert(mixedFrameBytes > LEGACY_FRAME_BYTES,
       `PO-4C: the delivered image frame must exceed the legacy 256 KiB cap (got ${String(mixedFrameBytes)})`)
     const mixedStored = await waitForC1WorkEvent(workRoot,
@@ -444,15 +512,11 @@ export async function runAcpPo4cContentOutput(context) {
     assert(mixedFrameBytes <= Math.max(LEGACY_FRAME_BYTES, derivedBudget),
       `PO-4C: the delivered frame must fit the amended allowance (frame ${String(mixedFrameBytes)}, budget ${String(derivedBudget)})`)
 
-    // L6-C02: an image-only assistant message is real visible output.
-    const imageOnly = await runPrompt(acp, sessionId, MARKERS.assistantImageOnly, 'PO-4C assistant image-only')
-    assertEndTurn(imageOnly.settled, 'PO-4C assistant image-only')
-    const imageOnlyMessage = imageOnly.turnEvents.find(event => event.type === 'assistant/message')?.data.message
-    assertStrict.deepEqual(imageOnlyMessage.content.map(block => block.type), ['image'])
-    assertStrict.equal(imageOnly.settled.updates.length, 1)
-    assertImageContent(imageOnly.settled.updates[0].message.params.update.content, imageRefOf(imageOnlyMessage.content[0]), 'PO-4C image-only assistant')
-
-    // L6-C03: one ordered tool_call_update with text / JSON-byte sample / image.
+    // L6-C03: ONE large tool success turn. The durable call/result are the only
+    // authority: one start update, one ordered result update carrying the
+    // committed text/image/text (verified Store bytes), and the final assistant
+    // answer chunk. The tool image is a DISTINCT real Store object, so the later
+    // two-image overflow negative can correlate its own `toolRef`.
     const tool = await runPrompt(acp, sessionId, MARKERS.toolContent, 'PO-4C tool content')
     assertEndTurn(tool.settled, 'PO-4C tool content')
     const toolCallEvent = tool.turnEvents.find(event => event.type === 'tool/call')
@@ -460,79 +524,84 @@ export async function runAcpPo4cContentOutput(context) {
     assert(toolCallEvent !== undefined && toolResultEvent !== undefined, 'PO-4C: the tool turn commits one call and one result')
     const toolCallId = toolCallEvent.data.callId
     const toolResult = toolResultEvent.data.message
-    assertStrict.equal(toolResult.isError, false)
-    assertStrict.deepEqual(toolResult.content.map(block => block.type), ['text', 'image', 'text'])
-    assertStrict.equal(toolResult.content[0].text, A2UI_TEXT)
-    assertStrict.equal(toolResult.content[2].text, TOOL_TAIL)
+    assertStrict.equal(toolResult.isError, false, 'PO-4C: the retained tool turn is a real success')
+    assertStrict.deepEqual(toolResult.content.map(block => block.type), ['text', 'image', 'text'],
+      'PO-4C: the durable tool result content is text/image/text')
     const toolRef = imageRefOf(toolResult.content[1])
-    const toolKinds = tool.settled.updates.map(entry => entry.message.params.update.sessionUpdate)
-    assertStrict.deepEqual(toolKinds, ['tool_call', 'tool_call_update', 'agent_message_chunk'],
-      'PO-4C: exactly one start update, ONE result update and the final assistant chunk')
-    const startUpdate = tool.settled.updates[0].message.params.update
+    assert(toolRef.attachmentId !== mixedRef.attachmentId,
+      'PO-4C: the tool image must be an independent real Store object')
+    const toolUpdates = tool.settled.updates
+    for (const entry of toolUpdates) {
+      assertStrict.equal(entry.message.params.sessionId, sessionId,
+        'PO-4C: every tool-turn update belongs to the exact attached Session')
+    }
+    const toolStarts = toolUpdates.filter(entry => entry.message.params.update.sessionUpdate === 'tool_call')
+    const toolResults = toolUpdates.filter(entry => entry.message.params.update.sessionUpdate === 'tool_call_update')
+    const toolAnswerChunks = toolUpdates
+      .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk')
+    assertStrict.equal(toolStarts.length, 1, 'PO-4C: one durable tool/call produces exactly ONE start update')
+    assertStrict.equal(toolResults.length, 1, 'PO-4C: one durable tool/result produces exactly ONE result update')
+    assert(toolAnswerChunks.length > 0, 'PO-4C: the tool turn delivers its final assistant answer')
+    assert(toolUpdates.indexOf(toolStarts[0]) < toolUpdates.indexOf(toolResults[0]),
+      'PO-4C: the tool start precedes its result')
+    assert(toolUpdates.indexOf(toolResults[0]) < toolUpdates.indexOf(toolAnswerChunks[0]),
+      'PO-4C: the final assistant answer follows the completed tool result')
+    const startUpdate = toolStarts[0].message.params.update
     assertStrict.equal(startUpdate.toolCallId, toolCallId)
-    assertStrict.equal(startUpdate.title, TOOL_NAME)
+    assertStrict.equal(startUpdate.title, toolCallEvent.data.name,
+      'PO-4C: the start update carries the committed tool name')
     assertStrict.equal(startUpdate.kind, 'other')
     assertStrict.equal(startUpdate.status, 'in_progress')
-    const resultUpdate = tool.settled.updates[1].message.params.update
+    const resultUpdate = toolResults[0].message.params.update
     assertStrict.equal(resultUpdate.toolCallId, toolCallId)
-    assertStrict.equal(resultUpdate.status, 'completed')
-    assertStrict.equal(resultUpdate.content.length, 3, 'PO-4C: one tool_call_update carries the whole ordered content')
-    assertStrict.equal(resultUpdate.content[0].content.type, 'text')
-    assertStrict.equal(resultUpdate.content[0].content.text, A2UI_TEXT,
-      'PO-4C: the A2UI JSON sample stays ordinary text bytes (never parsed)')
-    assertImageContent(resultUpdate.content[1].content, toolRef, 'PO-4C tool image')
-    assertStrict.equal(resultUpdate.content[2].content.text, TOOL_TAIL)
-    const finalToolChunk = tool.settled.updates[2].message.params.update
+    assertStrict.equal(resultUpdate.status, 'completed',
+      'PO-4C: the result status comes from the official committed success, never a fabricated terminal')
+    assertStrict.equal(resultUpdate.content.length, toolResult.content.length,
+      'PO-4C: one tool_call_update carries the whole ordered committed content')
+    for (const [index, committed] of toolResult.content.entries()) {
+      const delivered = resultUpdate.content[index].content
+      assertStrict.equal(delivered.type, committed.type,
+        `PO-4C: the delivered tool content block ${String(index)} keeps its committed type`)
+      if (committed.type === 'text') {
+        assertStrict.equal(delivered.text, committed.text,
+          `PO-4C: the delivered tool text block ${String(index)} equals its committed bytes`)
+      }
+    }
+    const toolImage = assertImageContent(resultUpdate.content[1].content, toolRef, 'PO-4C tool image')
+    const toolResultFrameBytes = toolResults[0].rawBytes
+    assert(toolResultFrameBytes > LEGACY_FRAME_BYTES,
+      `PO-4C: the large tool result frame must exceed the legacy 256 KiB cap (got ${String(toolResultFrameBytes)})`)
+    assert(toolResultFrameBytes <= Math.max(LEGACY_FRAME_BYTES, derivedBudget),
+      `PO-4C: the large tool result frame must fit the amended allowance (frame ${String(toolResultFrameBytes)}, budget ${String(derivedBudget)})`)
+    assert(toolRef.bytes > CAPACITY_LIMITS.maxMessageImageBytes,
+      'PO-4C: the tool image must carry a real near-ceiling stored object')
     const finalToolMessage = tool.turnEvents.filter(event => event.type === 'assistant/message').at(-1)?.data.message
-    assertStrict.equal(finalToolChunk.content.text, TOOL_ANSWER)
-    // The tool answer streamed as provisional text under the attempt's opaque
-    // ACP message id: the proof is that the delivered bytes equal the committed
-    // answer and were never re-sent after the durable append.
-    assertStrict.equal(typeof finalToolChunk.messageId, 'string')
-    assertStrict.equal((finalToolMessage?.content ?? [])
-      .filter(block => block.type === 'text').map(block => block.text).join(''), TOOL_ANSWER,
-    'PO-4C: the committed tool answer equals the delivered text')
-    assertStrict.equal(tool.settled.updates
-      .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk').length, 1,
-    'PO-4C: the streamed tool answer is never re-sent')
-    assertStrict.equal(tool.settled.updates.filter(entry => entry.message.params.update.sessionUpdate === 'tool_call').length, 1,
-      'PO-4C: the assistant tool-call block never duplicates the durable tool/call start')
+    const toolAnswer = committedText(finalToolMessage)
+    assert(toolAnswer.length > 0, 'PO-4C: the committed tool answer must be non-empty')
+    for (const entry of toolAnswerChunks) {
+      assertStrict.equal(entry.message.params.update.content.type, 'text',
+        'PO-4C: the tool answer is delivered as standard text content')
+      assertStrict.equal(typeof entry.message.params.update.messageId, 'string',
+        'PO-4C: every streamed tool-answer message carries an ACP message id')
+      assert(entry.message.params.update.messageId.length > 0,
+        'PO-4C: the tool-answer ACP message id must be non-empty')
+    }
+    const toolAnswerIds = new Set(toolAnswerChunks.map(entry => entry.message.params.update.messageId))
+    assertStrict.equal(toolAnswerIds.size, 1,
+      `PO-4C: one tool answer uses ONE stable ACP message id (got ${JSON.stringify([...toolAnswerIds])})`)
+    assertStrict.equal(toolAnswerChunks.map(entry => entry.message.params.update.content.text).join(''), toolAnswer,
+      'PO-4C: the delivered tool answer bytes equal the committed canonical answer (no loss or duplication)')
     const toolStored = await waitForC1WorkEvent(workRoot,
       event => event.kind === 'po4c-image-stored' && event.name === 'tool.png' && event.pid === hostIdentity.hostPid,
       'PO-4C official Store tool image proof')
-    assert(toolStored.attachmentId === toolRef.attachmentId && toolStored.sha256 === toolRef.attachmentId.replace(/^sha256:/u, ''),
-      'PO-4C: the tool image wire bytes equal the verified stored object')
+    assert(toolStored.attachmentId === toolRef.attachmentId && toolStored.bytes === toolImage.length
+      && toolStored.sha256 === hash(toolImage) && toolStored.mediaType === toolRef.mediaType,
+    'PO-4C: the tool image wire bytes/digest/MIME equal the verified stored object')
 
-    // L6-C04: the failed status comes from the official isError fact only.
-    const failed = await runPrompt(acp, sessionId, MARKERS.toolFailed, 'PO-4C failed tool result')
-    assertEndTurn(failed.settled, 'PO-4C failed tool result')
-    const failedResult = failed.turnEvents.find(event => event.type === 'tool/result')?.data.message
-    assertStrict.equal(failedResult.isError, true, 'PO-4C: the durable tool result is a real failure')
-    const failedKinds = failed.settled.updates.map(entry => entry.message.params.update.sessionUpdate)
-    assertStrict.deepEqual(failedKinds, ['tool_call', 'tool_call_update', 'agent_message_chunk'])
-    const failedUpdate = failed.settled.updates[1].message.params.update
-    assertStrict.equal(failedUpdate.status, 'failed')
-    assertStrict.equal(failedUpdate.toolCallId, failedResult.toolCallId)
-    assertStrict.equal(failed.settled.updates[2].message.params.update.content.text, TOOL_FAILED_ANSWER)
-
-    // L6-C05: a format-valid but absent image reference fails ONLY this flight.
-    const missing = await runPrompt(acp, sessionId, MARKERS.missingImage, 'PO-4C missing image')
-    assert(missing.settled.response.error?.data?.code === 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED',
-      `PO-4C: an absent committed image must fail with the attachment-read class (got ${JSON.stringify(missing.settled.response.error ?? missing.settled.response.result)})`)
-    assert(missing.settled.response.result === undefined, 'PO-4C: a failed image read never answers a StopReason')
-    assert(missing.settled.updates.every(entry => entry.message.params.update.sessionUpdate !== 'agent_message_chunk'),
-      'PO-4C: no partial assistant chunk is sent for the failed event')
-    const missingMessage = missing.turnEvents.find(event => event.type === 'assistant/message')?.data.message
-    const missingRef = imageRefOf(missingMessage?.content?.[0])
-    const missingRejected = await waitForC1WorkEvent(workRoot,
-      event => event.kind === 'po4c-missing-image-rejected' && event.attachmentId === missingRef.attachmentId,
-      'PO-4C official Store absent-image rejection')
-    assert(missingRejected.code === 'ATTACHMENT_NOT_FOUND',
-      `PO-4C: the real official Store must reject the absent object (got ${String(missingRejected.code)})`)
-    const healthyAfterMissing = await runPrompt(acp, sessionId, MARKERS.health, 'PO-4C healthy prompt after the failure')
-    assertEndTurn(healthyAfterMissing.settled, 'PO-4C healthy prompt after the failure')
-    assertStrict.equal(healthyAfterMissing.settled.updates.length, 1,
-      'PO-4C: the failure is scoped to its own flight; the same view keeps working')
+    // Ordinary image-only / failed-tool / missing-object content semantics are
+    // owned by the independent official SDK content case, which runs against
+    // the same candidate. This case keeps only the transport-capacity scenes it
+    // alone can prove (near-ceiling frames, slow reader, late read, overflow).
 
     // L6-C06: a slow reader is closed by the bounded drain while a sibling ACP
     // connection and the real TUI keep completing their own turns.
@@ -615,9 +684,7 @@ export async function runAcpPo4cContentOutput(context) {
     }
     const clean = await runPrompt(reattached, victimSession, MARKERS.health, 'PO-4C clean prompt after reattach')
     assertEndTurn(clean.settled, 'PO-4C clean prompt after reattach')
-    assertStrict.equal(clean.settled.updates.length, 1,
-      'PO-4C: the new View receives exactly its own output, never a late read of the closed one')
-    assertStrict.equal(clean.settled.updates[0].message.params.update.content.type, 'text')
+    assertCleanTextFlight(clean, victimSession, 'PO-4C clean prompt after reattach')
 
     // L6-C06 (late read): the official Store read completes AFTER the ACP
     // connection was destroyed. The new View of that Session must never see
@@ -671,9 +738,7 @@ export async function runAcpPo4cContentOutput(context) {
     }
     const lateClean = await runPrompt(lateView, sessionId, MARKERS.health, 'PO-4C clean prompt after the late read')
     assertEndTurn(lateClean.settled, 'PO-4C clean prompt after the late read')
-    assertStrict.equal(lateClean.settled.updates.length, 1,
-      'PO-4C: the new View receives only its own output after a late Store read completion')
-    assertStrict.equal(lateClean.settled.updates[0].message.params.update.content.type, 'text')
+    assertCleanTextFlight(lateClean, sessionId, 'PO-4C clean prompt after the late read')
 
     // L6-C08 (F1 negative): the bounded allowance is finite. ONE committed tool
     // result carrying TWO independently stored images exceeds the count-1
@@ -732,8 +797,33 @@ export async function runAcpPo4cContentOutput(context) {
     const identityAfter = await scene.hostIdentityFacts(host)
     assert(identityAfter.hostPid === hostIdentity.hostPid && identityAfter.instanceId === hostIdentity.instanceId,
       'PO-4C: no Host process/instance was replaced or restarted')
-    const imageProbes = readC1WorkEvents(workRoot).filter(event => event.kind === 'po4c-image-stored')
-    assert(imageProbes.length === 2, `PO-4C: both fixture images were stored exactly once (got ${String(imageProbes.length)})`)
+    // The two NECESSARY Store objects are associated by their real ref/name,
+    // digest, bytes and writer Host identity. A global "exactly two probes"
+    // count is not the contract: unrelated legal observations are allowed.
+    const imageRefs = {
+      mixed: {
+        name: mixedStored.name,
+        attachmentId: mixedStored.attachmentId,
+        sha256: mixedStored.sha256,
+        bytes: mixedStored.bytes,
+        mediaType: mixedStored.mediaType,
+        writerPid: mixedStored.pid,
+      },
+      tool: {
+        name: toolStored.name,
+        attachmentId: toolStored.attachmentId,
+        sha256: toolStored.sha256,
+        bytes: toolStored.bytes,
+        mediaType: toolStored.mediaType,
+        writerPid: toolStored.pid,
+      },
+    }
+    assert(imageRefs.mixed.attachmentId !== imageRefs.tool.attachmentId,
+      'PO-4C: the mixed/tool image refs must stay two distinct real objects')
+    assert(imageRefs.mixed.writerPid === hostIdentity.hostPid && imageRefs.tool.writerPid === hostIdentity.hostPid,
+      'PO-4C: both Store writes must belong to the exact running Host process')
+    assert(imageRefs.mixed.sha256 === hash(mixedImage) && imageRefs.tool.sha256 === hash(toolImage),
+      'PO-4C: the associated Store digests must equal the decoded wire bytes')
 
     const evidence = {
       status: 'PASS',
@@ -752,18 +842,17 @@ export async function runAcpPo4cContentOutput(context) {
         storedBytes: mixedRef.bytes,
         wireFrameBytes: mixedFrameBytes,
         legacyFrameBytes: LEGACY_FRAME_BYTES,
-        blockSha256: [hash(TEXT_BEFORE), hash(TEXT_AFTER)].map(value => value),
+        blockSha256: [hash(mixedCommitted.content[0].text), hash(mixedCommitted.content[2].text)],
       },
       tool: {
         turn: tool.turn,
         callId: toolCallId,
         resultAttachmentId: toolRef.attachmentId,
         resultStoredBytes: toolRef.bytes,
-        a2uiSha256: hash(A2UI_TEXT),
+        resultMimeType: toolRef.mediaType,
+        resultFrameBytes: toolResultFrameBytes,
       },
-      failedTool: { turn: failed.turn, callId: failedResult.toolCallId, isError: failedResult.isError },
-      missingImage: { turn: missing.turn, attachmentId: missingRef.attachmentId, hostCode: missingRejected.code,
-        acpCode: missing.settled.response.error?.data?.code },
+      imageRefs,
       slowPeer: {
         backpressureCode: backpressure.code,
         victimSessionId: victimSession,
@@ -808,17 +897,13 @@ export async function runAcpPo4cContentOutput(context) {
         writerBacklogBoundBytes: WRITER_BACKLOG_BOUND_BYTES,
         sdkMaterializesWholeFrame: true,
       },
-      imageProbes,
     }
     trace('acp-po4c/evidence', evidence)
     return {
       status: 'PASS',
       scope: 'REAL_SPLIT_PROCESS_L6',
       assistantTextImageTextOrdered: true,
-      assistantImageOnlyAccepted: true,
-      toolResultOrderedContent: true,
-      toolFailedStatus: true,
-      missingImageRejected: true,
+      largeToolImageCapacity: true,
       largeImageFrameAboveLegacyCap: true,
       capacityPositive: true,
       capacityNegative: true,

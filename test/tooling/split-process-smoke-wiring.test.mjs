@@ -1063,7 +1063,6 @@ test('the ACP shared Session View selected verdict accepts only the complete rea
     closeKeepsSessionResumable: true,
     coldRestartResume: true,
     disconnectReleasesView: true,
-    runtimeToggleDisconnects: true,
     negativesRejected: true,
     hostIdentityKept: true,
     originalSplitClientIntact: true,
@@ -1291,14 +1290,12 @@ test('the ACP PO-4A content-input selected verdict requires the complete real-L6
 })
 
 test('the ACP PO-4C committed content-output selected verdict requires the complete real-L6 wire and Host evidence', () => {
+  const ref = digit => `sha256:${digit.repeat(64)}`
   const complete = {
     status: 'PASS',
     scope: 'REAL_SPLIT_PROCESS_L6',
     assistantTextImageTextOrdered: true,
-    assistantImageOnlyAccepted: true,
-    toolResultOrderedContent: true,
-    toolFailedStatus: true,
-    missingImageRejected: true,
+    largeToolImageCapacity: true,
     largeImageFrameAboveLegacyCap: true,
     capacityPositive: true,
     capacityNegative: true,
@@ -1318,35 +1315,52 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
       assistant: {
         turn: 11,
         messageId: 'm-po4c',
-        attachmentId: `sha256:${'a'.repeat(64)}`,
-        storedBytes: 1_400_000,
-        wireFrameBytes: 1_900_000,
+        attachmentId: ref('a'),
+        storedBytes: 3_550_000,
+        wireFrameBytes: 4_733_610,
         legacyFrameBytes: 256 * 1024,
         blockSha256: ['b'.repeat(64), 'c'.repeat(64)],
       },
       tool: {
         turn: 12,
         callId: 'po4c-tool-ok',
-        resultAttachmentId: `sha256:${'d'.repeat(64)}`,
-        resultStoredBytes: 12_000,
-        a2uiSha256: 'e'.repeat(64),
+        resultAttachmentId: ref('d'),
+        resultStoredBytes: 3_500_000,
+        resultMimeType: 'image/png',
+        resultFrameBytes: 4_733_610,
       },
-      failedTool: { turn: 13, callId: 'po4c-tool-failed', isError: true },
-      missingImage: { turn: 14, attachmentId: `sha256:${'f'.repeat(64)}`, hostCode: 'ATTACHMENT_NOT_FOUND', acpCode: 'LOCAL_ACP_PROMPT_ATTACHMENT_READ_FAILED' },
+      imageRefs: {
+        mixed: {
+          name: 'mixed.png',
+          attachmentId: ref('a'),
+          sha256: 'a'.repeat(64),
+          bytes: 3_550_000,
+          mediaType: 'image/png',
+          writerPid: 4242,
+        },
+        tool: {
+          name: 'tool.png',
+          attachmentId: ref('d'),
+          sha256: 'd'.repeat(64),
+          bytes: 3_500_000,
+          mediaType: 'image/png',
+          writerPid: 4242,
+        },
+      },
       capacity: {
         maxImageBytes: 4194304,
         maxImagesPerMessage: 1,
         maxMessageImageBytes: 524288,
-        storedBytes: 3550000,
-        base64Bytes: 4733336,
-        deliveredFrameBytes: 4733610,
-        derivedBudget: 6710616,
+        storedBytes: 3_550_000,
+        base64Bytes: 4_733_336,
+        deliveredFrameBytes: 4_733_610,
+        derivedBudget: 6_710_616,
         positive: true,
       },
       boundedTransport: {
         overBudgetCode: 'LOCAL_ACP_OUTPUT_FRAME_TOO_LARGE',
         overBudgetImageCount: 2,
-        overBudgetStoredBytes: [3550000, 3550000],
+        overBudgetStoredBytes: [3_550_000, 3_500_000],
         noContentOrStopReason: true,
         siblingAfterOverflow: true,
         tuiAlive: true,
@@ -1356,9 +1370,9 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
         rssBaselineBytes: 200000000,
         rssPeakBytes: 260000000,
         rssDeltaBytes: 60000000,
-        storedBytes: 3550000,
-        base64Bytes: 4733336,
-        sdkFrameBytes: 1_900_000,
+        storedBytes: 3_550_000,
+        base64Bytes: 4_733_336,
+        sdkFrameBytes: 4_733_610,
         writerBacklogBoundBytes: 262144,
         sdkMaterializesWholeFrame: true,
       },
@@ -1368,22 +1382,20 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
         tuiTurn: 15,
         reattachAttempts: 2,
         lateRead: {
-          attachmentId: `sha256:${'a'.repeat(64)}`,
+          attachmentId: ref('a'),
           hostCloseConnections: 2,
           claimHeldBeforeRelease: true,
           releasedAfterDisconnect: true,
           lateAttempts: 1,
         },
       },
-      imageProbes: [{ kind: 'po4c-image-stored' }, { kind: 'po4c-image-stored' }],
     },
   }
   assert.equal(assertSelectedVerdict('acp.po4c-content-output', complete), undefined)
   // A missing proof field is a rejected verdict: the selected PASS cannot be
   // assembled from `status: 'PASS'` alone.
   for (const field of [
-    'assistantTextImageTextOrdered', 'assistantImageOnlyAccepted', 'toolResultOrderedContent',
-    'toolFailedStatus', 'missingImageRejected', 'largeImageFrameAboveLegacyCap', 'slowPeerIsolated',
+    'assistantTextImageTextOrdered', 'largeToolImageCapacity', 'largeImageFrameAboveLegacyCap', 'slowPeerIsolated',
     'siblingAcpAndTuiUnaffected', 'reattachAfterFailureClean', 'lateReadAfterCloseInert', 'noForeignTurnProjected',
     'readImageVerified', 'capacityPositive', 'capacityNegative', 'memoryMeasured',
   ]) {
@@ -1398,9 +1410,33 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, assistant: { ...complete.evidence.assistant, wireFrameBytes: 256 * 1024 } },
   }), /selected acp\.po4c-content-output/u)
-  // The Host Store's own rejection code is required, not merely an ACP error.
+  // The necessary mixed Store ref must be the exact committed assistant object.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
-    ...complete, evidence: { ...complete.evidence, missingImage: { ...complete.evidence.missingImage, hostCode: 'READ_OK' } },
+    ...complete, evidence: {
+      ...complete.evidence,
+      imageRefs: { ...complete.evidence.imageRefs, mixed: { ...complete.evidence.imageRefs.mixed, attachmentId: ref('e') } },
+    },
+  }), /selected acp\.po4c-content-output/u)
+  // The two necessary images must stay two distinct real Store objects.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: {
+      ...complete.evidence,
+      imageRefs: { ...complete.evidence.imageRefs, tool: { ...complete.evidence.imageRefs.tool, attachmentId: ref('a'), sha256: 'a'.repeat(64) } },
+    },
+  }), /selected acp\.po4c-content-output/u)
+  // A Store write attributed to another Host process proves nothing here.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: {
+      ...complete.evidence,
+      imageRefs: { ...complete.evidence.imageRefs, mixed: { ...complete.evidence.imageRefs.mixed, writerPid: 9999 } },
+    },
+  }), /selected acp\.po4c-content-output/u)
+  // The associated Store byte count must be the committed object, not a lookalike.
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: {
+      ...complete.evidence,
+      imageRefs: { ...complete.evidence.imageRefs, mixed: { ...complete.evidence.imageRefs.mixed, bytes: 3_550_001 } },
+    },
   }), /selected acp\.po4c-content-output/u)
   // The slow-reader and the sibling session must be the real distinct facts.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
@@ -1418,12 +1454,19 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, slowPeer: { ...complete.evidence.slowPeer, lateRead: { ...complete.evidence.slowPeer.lateRead, hostCloseConnections: 0 } } },
   }), /selected acp\.po4c-content-output/u)
-  // F1 (Owner amendment A1): the capacity positive/negative and the real RSS
-  // measurement are required facts, not inferred from PASS.
+  // F1 (Owner amendment A1): the capacity positive/negative, the large TOOL
+  // result capacity and the real RSS measurement are required facts, not
+  // inferred from PASS.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, capacityNegative: false }),
     /selected acp\.po4c-content-output/u)
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, capacity: { ...complete.evidence.capacity, maxImageBytes: 524288 } },
+  }), /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, tool: { ...complete.evidence.tool, resultStoredBytes: 524288 } },
+  }), /selected acp\.po4c-content-output/u)
+  assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
+    ...complete, evidence: { ...complete.evidence, tool: { ...complete.evidence.tool, resultFrameBytes: 9_000_000 } },
   }), /selected acp\.po4c-content-output/u)
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', {
     ...complete, evidence: { ...complete.evidence, boundedTransport: { ...complete.evidence.boundedTransport, overBudgetCode: 'LOCAL_ACP_OUTPUT_BACKPRESSURE' } },
