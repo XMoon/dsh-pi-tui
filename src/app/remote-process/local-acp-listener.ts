@@ -70,6 +70,13 @@ const AGENT_NAME = 'dsh-pi-tui'
 const JSONRPC_INVALID_REQUEST = -32600
 /** JSON-RPC invalid-params code used by connection-local View admission refusals. */
 const JSONRPC_INVALID_PARAMS = -32602
+/**
+ * JSON-RPC resource-not-found code of the standard ACP v1 error table. A
+ * Session-scoped request for a Session this connection does not hold is a
+ * not-active Session (`-32002` with the requested `sessionId`), never a format
+ * rejection; `LOCAL_ACP_VIEW_ALREADY_ATTACHED` keeps its own conflict class.
+ */
+const JSONRPC_RESOURCE_NOT_FOUND = -32002
 /** JSON-RPC internal-error code used by a fail-closed reverse capability refusal. */
 const JSONRPC_INTERNAL_ERROR = -32603
 
@@ -862,11 +869,93 @@ function buildAgentApp(
       'the session/list request cwd or cursor is not representable',
       JSONRPC_INVALID_PARAMS,
     )
-    const notOwned = (): LocalAcpViewError => new LocalAcpViewError(
+    const notOwned = (sessionId: string): LocalAcpViewError => new LocalAcpViewError(
       'LOCAL_ACP_VIEW_NOT_OWNED',
       'this ACP connection holds no view for that session',
+      JSONRPC_RESOURCE_NOT_FOUND,
+      { sessionId },
+    )
+    /**
+     * The three View-borrowing methods keep the ACP request-shape contract: a
+     * Session id is opaque and non-empty, so an empty id is malformed
+     * parameters (`-32602`) before any routing or Host lookup — never the
+     * standard not-active Session, which names a real requested id.
+     */
+    const requireSessionId = (sessionId: string): void => {
+      if (sessionId.length === 0) {
+        throw new LocalAcpViewError(
+          'LOCAL_ACP_VIEW_INVALID_REQUEST',
+          'a non-empty sessionId is required',
+          JSONRPC_INVALID_PARAMS,
+        )
+      }
+    }
+    /**
+     * The listener-owned lifetime of the wire requests currently dispatched on
+     * ONE view slot: from request admission to the handler's `finally`,
+     * INCLUDING the post-attach initial config read. It is deliberately not a
+     * Host status mirror: a repeat request is only admitted when the target
+     * slot has no other unsettled request, and the exclusive `refreshing`
+     * marker makes competing same-slot requests refuse instead of being
+     * serialized behind an arbitrary Host await. Entries die with their slot.
+     */
+    interface SlotActivity {
+      pending: number
+      refreshing: boolean
+    }
+    const slotActivity = new WeakMap<ConnectionViewState, SlotActivity>()
+    const activityOf = (view: ConnectionViewState): SlotActivity => {
+      let activity = slotActivity.get(view)
+      if (activity === undefined) {
+        activity = { pending: 0, refreshing: false }
+        slotActivity.set(view, activity)
+      }
+      return activity
+    }
+    const slotBusy = (message: string): LocalAcpViewError => new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_BUSY',
+      message,
       JSONRPC_INVALID_PARAMS,
     )
+    /** Record ONE admitted slot-scoped request for its whole handler lifetime. */
+    const beginSlotRequest = (view: ConnectionViewState): void => {
+      activityOf(view).pending += 1
+    }
+    const endSlotRequest = (view: ConnectionViewState): void => {
+      activityOf(view).pending -= 1
+    }
+    /**
+     * Admit ONE ordinary same-slot request (prompt/mode/config). It is refused
+     * only while a reattach owns the slot; ordinary requests are NOT serialized
+     * behind each other — the existing per-claim Host obligations do that. The
+     * lifetime count is recorded BEFORE the refusal so the caller's `finally`
+     * has exactly one matching decrement on every path (including a refusal);
+     * the refused entry never outlives this synchronous frame.
+     */
+    const admitSameSlotRequest = (view: ConnectionViewState): void => {
+      const activity = activityOf(view)
+      activity.pending += 1
+      if (activity.refreshing) throw slotBusy('this ACP connection is refreshing that session view')
+    }
+    /**
+     * Reserve the EXCLUSIVE same-slot reattach gate. It is taken synchronously
+     * before the first await when the target slot has no other unsettled
+     * request, so a competing prompt/config/mode/repeat can never interleave a
+     * request admitted against the outgoing claim generation.
+     */
+    const beginSlotRefresh = (view: ConnectionViewState): void => {
+      const activity = activityOf(view)
+      if (activity.pending !== 0 || activity.refreshing) {
+        throw slotBusy('this ACP connection has an unsettled request for that session view')
+      }
+      activity.pending = 1
+      activity.refreshing = true
+    }
+    const endSlotRefresh = (view: ConnectionViewState): void => {
+      const activity = activityOf(view)
+      activity.pending -= 1
+      activity.refreshing = false
+    }
     /**
      * Read the initial complete config state of the EXACT View just attached by
      * this new/resume/load call. The optional model catalog omits only the
@@ -968,13 +1057,17 @@ function buildAgentApp(
       try {
         requireInitialized()
         view = createSessionViewSlot(slots, views)
+        beginSlotRequest(view)
         const result = await views.newSession(view, access, params, viewChannelsFor(client), signal)
         const config = await readConfigStateOrLog(result.sessionId, view)
         return { ...result, ...config }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        if (view !== undefined) {
+          endSlotRequest(view)
+          releaseIdleViewSlot(slots, views, view)
+        }
         endRequest('control')
       }
     })
@@ -983,23 +1076,42 @@ function buildAgentApp(
       let view: ConnectionViewState | undefined
       try {
         requireInitialized()
-        // The same physical connection may already hold this Session in an
-        // attaching, attached or fenced slot; do not allocate a second slot.
-        if (routeOwnedView(slots, views, params.sessionId) !== undefined) {
-          throw new LocalAcpViewError(
-            'LOCAL_ACP_VIEW_BUSY',
-            'this ACP connection already holds a view for that session',
-            JSONRPC_INVALID_PARAMS,
-          )
+        // The SAME physical connection may already hold this Session: reloading
+        // its own settled View is a reattach, not a conflict. It reuses the
+        // existing routing slot (never a ninth/ninth-new slot) and replaces only
+        // this connection's exact claim generation.
+        const existing = routeOwnedView(slots, views, params.sessionId)
+        if (existing !== undefined) {
+          beginSlotRefresh(existing)
+          view = existing
+          const result = await views.resumeSession(existing, access, params, viewChannelsFor(client), signal, true)
+          try {
+            const config = await readConfigStateOrLog(params.sessionId, existing)
+            signal.throwIfAborted()
+            return { ...result, ...config }
+          } catch (error) {
+            // The refresh already committed a fresh claim the client never saw
+            // succeed: a post-commit config failure or an abort retires ONLY
+            // that exact generation (never the old one, never a Host cancel or
+            // close). A concurrent close/EOF that already retired it is a no-op.
+            views.retireFailedRefresh(existing, params.sessionId)
+            signal.throwIfAborted()
+            throw error
+          }
         }
         view = createSessionViewSlot(slots, views)
+        beginSlotRequest(view)
         const result = await views.resumeSession(view, access, params, viewChannelsFor(client), signal)
         const config = await readConfigStateOrLog(params.sessionId, view)
         return { ...result, ...config }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        if (view !== undefined) {
+          if (activityOf(view).refreshing) endSlotRefresh(view)
+          else endSlotRequest(view)
+          releaseIdleViewSlot(slots, views, view)
+        }
         endRequest('control')
       }
     })
@@ -1020,21 +1132,38 @@ function buildAgentApp(
             JSONRPC_INVALID_PARAMS,
           )
         }
-        if (routeOwnedView(slots, views, params.sessionId) !== undefined) {
-          throw new LocalAcpViewError(
-            'LOCAL_ACP_VIEW_BUSY',
-            'this ACP connection already holds a view for that session',
-            JSONRPC_INVALID_PARAMS,
-          )
+        // Same-connection reattach: the whole canonical history is re-read for
+        // THIS request on a fresh claim generation; no new slot is allocated.
+        const existing = routeOwnedView(slots, views, params.sessionId)
+        if (existing !== undefined) {
+          beginSlotRefresh(existing)
+          view = existing
+          const result = await views.loadSession(existing, access, params, viewChannelsFor(client), signal, true)
+          try {
+            const config = await readConfigStateOrLog(params.sessionId, existing)
+            signal.throwIfAborted()
+            return { ...result, ...config }
+          } catch (error) {
+            // A replay success followed by a failed/aborted post-attach config
+            // read is still this refresh's fresh generation: retire exactly it.
+            views.retireFailedRefresh(existing, params.sessionId)
+            signal.throwIfAborted()
+            throw error
+          }
         }
         view = createSessionViewSlot(slots, views)
+        beginSlotRequest(view)
         const result = await views.loadSession(view, access, params, viewChannelsFor(client), signal)
         const config = await readConfigStateOrLog(params.sessionId, view)
         return { ...result, ...config }
       } catch (error) {
         throw asRequestError(error)
       } finally {
-        if (view !== undefined) releaseIdleViewSlot(slots, views, view)
+        if (view !== undefined) {
+          if (activityOf(view).refreshing) endSlotRefresh(view)
+          else endSlotRequest(view)
+          releaseIdleViewSlot(slots, views, view)
+        }
         endRequest('control')
       }
     })
@@ -1086,22 +1215,26 @@ function buildAgentApp(
     })
     app.onRequest(methods.agent.session.close, async ({ params }) => {
       beginRequest('close')
+      let view: ConnectionViewState | undefined
       try {
         requireInitialized()
-        const view = routeOwnedView(slots, views, params.sessionId)
+        view = routeOwnedView(slots, views, params.sessionId)
         // Unknown, inactive or foreign Session: the standard idempotent `{}`
         // without any Host operation.
         if (view === undefined) return {}
-        try {
-          return await views.closeSession(view, access, params.sessionId)
-        } finally {
-          // Only this exact slot can become reclaimable; another Session's View
-          // is never observed or mutated.
-          releaseIdleViewSlot(slots, views, view)
-        }
+        // Close is never blocked by the reattach marker: it must stay reachable
+        // while a refresh or another settled request holds the slot.
+        beginSlotRequest(view)
+        return await views.closeSession(view, access, params.sessionId)
       } catch (error) {
         throw asRequestError(error)
       } finally {
+        // Only this exact slot can become reclaimable; another Session's View
+        // is never observed or mutated.
+        if (view !== undefined) {
+          endSlotRequest(view)
+          releaseIdleViewSlot(slots, views, view)
+        }
         endRequest('close')
       }
     })
@@ -1111,10 +1244,13 @@ function buildAgentApp(
     // no last-active Session or mutable connection-wide view exists.
     app.onRequest(methods.agent.session.prompt, async ({ params, signal, client }) => {
       beginRequest()
+      let view: ConnectionViewState | undefined
       try {
         requireInitialized()
-        const view = routeOwnedView(slots, views, params.sessionId)
-        if (view === undefined) throw notOwned()
+        requireSessionId(params.sessionId)
+        view = routeOwnedView(slots, views, params.sessionId)
+        if (view === undefined) throw notOwned(params.sessionId)
+        admitSameSlotRequest(view)
         return await views.promptSession(view, access, params, signal, state.imageEnabled, async update => {
           await client.notify(methods.client.session.update, { sessionId: params.sessionId, update })
         }, async (permissionParams, options) => {
@@ -1127,6 +1263,7 @@ function buildAgentApp(
       } catch (error) {
         throw asRequestError(error)
       } finally {
+        if (view !== undefined) endSlotRequest(view)
         state.pendingRequests -= 1
       }
     })
@@ -1135,6 +1272,7 @@ function buildAgentApp(
     // official-maintenance admission before any Session write.
     app.onRequest(methods.agent.session.setMode, async ({ params, signal }) => {
       beginRequest('control')
+      let view: ConnectionViewState | undefined
       try {
         requireInitialized()
         // The standard mode vocabulary is validated as an ordinary shape
@@ -1144,12 +1282,15 @@ function buildAgentApp(
           const invalid = invalidPolicyOption('the requested session mode is not selectable')
           throw new LocalAcpViewError(invalid.code, invalid.message, invalid.rpcCode)
         }
-        const view = routeOwnedView(slots, views, params.sessionId)
-        if (view === undefined) throw notOwned()
+        requireSessionId(params.sessionId)
+        view = routeOwnedView(slots, views, params.sessionId)
+        if (view === undefined) throw notOwned(params.sessionId)
+        admitSameSlotRequest(view)
         return await views.setMode(view, access, params.sessionId, params.modeId, signal)
       } catch (error) {
         throw asRequestError(error)
       } finally {
+        if (view !== undefined) endSlotRequest(view)
         endRequest('control')
       }
     })
@@ -1158,15 +1299,19 @@ function buildAgentApp(
     // official policy and model/thought_level to the existing model service.
     app.onRequest(methods.agent.session.setConfigOption, async ({ params, signal }) => {
       beginRequest('control')
+      let view: ConnectionViewState | undefined
       try {
         requireInitialized()
-        const view = routeOwnedView(slots, views, params.sessionId)
-        if (view === undefined) throw notOwned()
+        requireSessionId(params.sessionId)
+        view = routeOwnedView(slots, views, params.sessionId)
+        if (view === undefined) throw notOwned(params.sessionId)
+        admitSameSlotRequest(view)
         const configOptions = await views.setConfigOption(view, access, params, signal)
         return { configOptions }
       } catch (error) {
         throw asRequestError(error)
       } finally {
+        if (view !== undefined) endSlotRequest(view)
         endRequest('control')
       }
     })

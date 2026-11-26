@@ -12,8 +12,10 @@
  *     cwd filter, and leaves NO View/claim and NO appended event behind — proven
  *     on an isolated control Session that is created, detached before the read
  *     and successfully loaded again from a fresh connection;
- *   - LOAD: a fresh connection replays the complete canonical history in
- *     `seq` order and only then answers, while `resume` replays NOTHING;
+ *   - REATTACH: the SAME connection refreshes its own settled View — `resume`
+ *     replays nothing and the repeat `load` replays the complete canonical
+ *     history in `seq` order, answering only after it drained — and the fresh
+ *     baseline connection keeps the capability-gated LOAD replay;
  *   - gating: the SAME durable history reaches a capability-negotiated client as
  *     `plan_update`/`compaction_update`, and a baseline client only as the
  *     standard legacy `plan` (no supplemental frame at all);
@@ -147,6 +149,11 @@ async function waitForFact(read, label, timeoutMs = 180_000) {
 /** The text of one durable user message event. */
 function userText(event) {
   return (event.data?.content ?? []).map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+}
+
+/** The concatenated text blocks of one durable message payload. */
+function messageText(message) {
+  return (message?.content ?? []).map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
 }
 
 /** Every `session/update` payload a connection received for one Session. */
@@ -447,19 +454,112 @@ export async function runAcpProtocolProjection(context) {
     const listReadsWithoutSideEffects = rootEventsAfterList === rootEventsBeforeList
       && coldProbeLoad !== undefined
 
-    // ── H) LOAD: the complete canonical history replays before the response.
-    await capable.request(acp.methods.agent.session.close, { sessionId: sessionP })
-    const resumeUpdates = []
-    const resumer = await openSdkClient(endpoint, params => { resumeUpdates.push(params) })
-    clients.push(resumer)
-    await resumer.request(acp.methods.agent.initialize, { protocolVersion: 1, clientCapabilities: { plan: {} } })
-    const resumed = await resumer.request(acp.methods.agent.session.resume, { sessionId: sessionP, cwd: hostCwd })
-    assert(resumed !== undefined, 'PP-08: resume must attach the existing Session')
-    await new Promise(resolveTick => setTimeout(resolveTick, 400))
-    assert(updatesOf(resumeUpdates, sessionP).length === 0,
-      `PP-08: resume NEVER replays history (${JSON.stringify(kindsOf(updatesOf(resumeUpdates, sessionP)))})`)
-    await resumer.request(acp.methods.agent.session.close, { sessionId: sessionP })
+    // ── H) REATTACH: the SAME capable connection refreshes the settled View it
+    // already holds. Both requests travel on the existing socket/slot: no new
+    // connection, no intermediate close and no fixed quiet window.
+    const CONVERSATION_HISTORY_KINDS = new Set([
+      'user_message_chunk', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update',
+    ])
+    const reattachResumeCut = updatesOf(capableUpdates, sessionP).length
+    const reattached = await capable.request(acp.methods.agent.session.resume, { sessionId: sessionP, cwd: hostCwd })
+    assert(reattached !== undefined, 'PP-08: the same connection must re-attach its own settled Session')
+    const resumeKinds = kindsOf(updatesOf(capableUpdates, sessionP).slice(reattachResumeCut))
+    const resumeReplayedNothing = resumeKinds.every(kind => !CONVERSATION_HISTORY_KINDS.has(kind))
+    assert(resumeReplayedNothing,
+      `PP-08: resume on the same connection replays no conversation history (${JSON.stringify(resumeKinds)})`)
 
+    // Freeze the CANONICAL cut this repeat load must replay, by real durable
+    // message identity: every human user message and every assistant text
+    // message of the Session at the request boundary. The durable log is
+    // write-behind, so the scene's existing stability helper is reused instead
+    // of a fixed sleep.
+    const canonicalCutSize = await stableEventCount(sessionP)
+    const canonicalEvents = eventsOf(sessionP).slice(0, canonicalCutSize)
+    const canonicalText = []
+    for (const event of canonicalEvents) {
+      if (event.type === 'user/message' && event.data?.source?.kind === 'user') {
+        const text = messageText(event.data)
+        if (text.length > 0) canonicalText.push({ kind: 'user_message_chunk', messageId: event.data.id, text })
+      } else if (event.type === 'assistant/message') {
+        const message = event.data?.message
+        const text = messageText(message)
+        if (text.length > 0) canonicalText.push({ kind: 'agent_message_chunk', messageId: message.id, text })
+      }
+    }
+    assert(canonicalText.filter(expected => expected.kind === 'user_message_chunk').length >= 2,
+      `PP-08: the canonical cut owns both real human prompts (${JSON.stringify(canonicalText.map(expected => [expected.kind, expected.messageId]))})`)
+    assert(canonicalText.some(expected => expected.kind === 'agent_message_chunk'),
+      'PP-08: the canonical cut owns at least one assistant answer')
+
+    // The repeat load on the SAME connection must replay the COMPLETE canonical
+    // history for THIS request, and the real response settles only after every
+    // replayed update was decoded by the official client.
+    const reattachLoadCut = updatesOf(capableUpdates, sessionP).length
+    const reattachLoad = await capable.request(acp.methods.agent.session.load, {
+      sessionId: sessionP, cwd: hostCwd, mcpServers: [],
+    })
+    assert(reattachLoad !== undefined, 'PP-08: the same connection must load its own settled Session again')
+    const capableHistory = updatesOf(capableUpdates, sessionP).slice(reattachLoadCut)
+    const capableHistoryKinds = kindsOf(capableHistory)
+    const firstReplayedHistory = capableHistory.find(update => CONVERSATION_HISTORY_KINDS.has(update.sessionUpdate))
+    assert(firstReplayedHistory?.sessionUpdate === 'user_message_chunk',
+      `PP-08: the replay starts at the oldest canonical fact (${JSON.stringify(capableHistoryKinds)})`)
+    assert(capableHistoryKinds.includes('tool_call') && capableHistoryKinds.includes('tool_call_update'),
+      `PP-08: the real tool call/result pair is replayed (${JSON.stringify(capableHistoryKinds)})`)
+    assert(capableHistoryKinds.includes('plan_update'), 'PP-08: the negotiated client receives plan_update in history')
+    assert(capableHistoryKinds.includes('compaction_update'),
+      `PP-08: and the real compaction lifecycle (${JSON.stringify(capableHistoryKinds)})`)
+    assert(capableHistoryKinds.filter(kind => kind === 'compaction_update').length >= 3,
+      'PP-08: start/summary/end all replay from the canonical log')
+    assert(capableHistoryKinds.every(kind => kind !== 'notice'), 'PP-08: no notice is ever fabricated')
+    const historyMessage = capableHistory.find(update => update.sessionUpdate === 'session_message')
+    assert(historyMessage !== undefined && historyMessage.senderSessionId === childId,
+      `PP-08: the canonical history replays the real agent message (${JSON.stringify(capableHistoryKinds)})`)
+    // Compare the DECODED frames of THIS repeat load with the frozen canonical
+    // cut by durable message identity, order and merged text. Chunk segmentation
+    // is free; a missing, duplicated or reordered message is not. The slice was
+    // taken at the moment the response was awaited, so nothing below can be
+    // filled in by the follow-up turn.
+    const decodedText = new Map()
+    const decodedOrder = []
+    for (const update of capableHistory) {
+      if (update.sessionUpdate !== 'user_message_chunk' && update.sessionUpdate !== 'agent_message_chunk') continue
+      assert(typeof update.messageId === 'string' && update.messageId.length > 0,
+        `PP-08: every replayed text message carries its durable id (${JSON.stringify(update)})`)
+      assert(update.content?.type === 'text' && typeof update.content.text === 'string',
+        `PP-08: every replayed text chunk is standard text (${JSON.stringify(update)})`)
+      const key = `${update.sessionUpdate}:${update.messageId}`
+      if (!decodedText.has(key)) decodedOrder.push(key)
+      decodedText.set(key, (decodedText.get(key) ?? '') + update.content.text)
+    }
+    const canonicalOrder = canonicalText.map(expected => `${expected.kind}:${expected.messageId}`)
+    assert(JSON.stringify(decodedOrder) === JSON.stringify(canonicalOrder),
+      `PP-08: the repeat load replays exactly the canonical message identities in order (${JSON.stringify({ decodedOrder, canonicalOrder })})`)
+    for (const expected of canonicalText) {
+      const actual = decodedText.get(`${expected.kind}:${expected.messageId}`)
+      assert(actual === expected.text,
+        `PP-08: message ${expected.messageId} replays its complete canonical text (${JSON.stringify({ expected: expected.text.slice(0, 120), actual: String(actual).slice(0, 120) })})`)
+    }
+    const repeatLoadCanonicalComplete = canonicalText.length > 0
+    // The complete canonical comparison above was read from the pre-response
+    // slice: the real response settled only after that ordered drain.
+    const loadAnsweredAfterDrain = repeatLoadCanonicalComplete
+
+    // A REAL following operation separates the replay window from later traffic
+    // without any sleep: the reattached View still owns the same Host Session.
+    const reattachMarker = 'acp-projection reattach follow-up'
+    const afterReattachTurn = await capable.request(acp.methods.agent.session.prompt, {
+      sessionId: sessionP, prompt: [{ type: 'text', text: reattachMarker }],
+    })
+    assert(afterReattachTurn?.stopReason === 'end_turn',
+      `PP-08: the reattached View completes a real turn on the same Session (${JSON.stringify(afterReattachTurn)})`)
+    await waitForFact(() => (eventsOf(sessionP).some(event => JSON.stringify(event).includes(reattachMarker))
+      ? true
+      : undefined), 'PP-08 the follow-up turn persisted on the same Session')
+    await capable.request(acp.methods.agent.session.close, { sessionId: sessionP })
+
+    // The BASELINE capability path is unchanged: a fresh connection receives the
+    // same canonical history with only the standard legacy plan.
     const loadBaselineUpdates = []
     const baselineLoader = await openSdkClient(endpoint, params => { loadBaselineUpdates.push(params) })
     clients.push(baselineLoader)
@@ -480,46 +580,6 @@ export async function runAcpProtocolProjection(context) {
     assert(baselineHistoryKinds[0] === 'user_message_chunk',
       `PP-08: the replay starts at the oldest canonical fact (${JSON.stringify(baselineHistoryKinds[0])})`)
     await baselineLoader.request(acp.methods.agent.session.close, { sessionId: sessionP })
-
-    // The capable loader receives the SAME history plus its negotiated frames.
-    const loadCapableUpdates = []
-    // The connection records the REAL wire order: every decoded update, then the
-    // load response when it finally settles.
-    const loadWireOrder = []
-    const capableLoader = await openSdkClient(endpoint, params => {
-      loadCapableUpdates.push(params)
-      loadWireOrder.push('update')
-    })
-    clients.push(capableLoader)
-    await capableLoader.request(acp.methods.agent.initialize, {
-      protocolVersion: 1,
-      clientCapabilities: { plan: {}, subagents: {}, session: { compaction: {} } },
-    })
-    const capableLoad = await capableLoader.request(acp.methods.agent.session.load, {
-      sessionId: sessionP, cwd: hostCwd, mcpServers: [],
-    })
-    loadWireOrder.push('load-response')
-    assert(capableLoad !== undefined, 'PP-09: the capable load must answer')
-    const capableHistory = updatesOf(loadCapableUpdates, sessionP)
-    const capableHistoryKinds = kindsOf(capableHistory)
-    assert(capableHistoryKinds.includes('plan_update'), 'PP-09: the negotiated client receives plan_update in history')
-    assert(capableHistoryKinds.includes('compaction_update'),
-      `PP-09: and the real compaction lifecycle (${JSON.stringify(capableHistoryKinds)})`)
-    assert(capableHistoryKinds.filter(kind => kind === 'compaction_update').length >= 3,
-      'PP-09: start/summary/end all replay from the canonical log')
-    assert(capableHistoryKinds.every(kind => kind !== 'notice'),
-      'PP-09: no notice is ever fabricated')
-    const historyMessage = capableHistory.find(update => update.sessionUpdate === 'session_message')
-    assert(historyMessage !== undefined && historyMessage.senderSessionId === childId,
-      `PP-09: the canonical history replays the real agent message (${JSON.stringify(capableHistoryKinds)})`)
-    // The response is the LAST frame on the wire: every replayed update was
-    // already decoded by the official client before the response settled.
-    assert(loadWireOrder.length > 1 && loadWireOrder.at(-1) === 'load-response'
-      && loadWireOrder.slice(0, -1).every(entry => entry === 'update'),
-    `PP-09: the load response follows every replayed update (${JSON.stringify(loadWireOrder)})`)
-    const loadAnsweredAfterDrain = loadWireOrder.at(-1) === 'load-response'
-      && loadWireOrder.slice(0, -1).every(entry => entry === 'update')
-      && capableHistory.length > 0
 
     // ── I) The Host and the Session authority are untouched.
     const hostAfter = await scene.hostIdentityFacts(host)
@@ -707,7 +767,8 @@ export async function runAcpProtocolProjection(context) {
       load: {
         baselineKinds: baselineHistoryKinds,
         capableKinds: capableHistoryKinds,
-        resumeKinds: kindsOf(updatesOf(resumeUpdates, sessionP)),
+        canonicalMessages: canonicalText.map(expected => `${expected.kind}:${expected.messageId}`),
+        resumeKinds,
       },
       live: {
         planEntries: firstPlan.plan.entries.length,
@@ -739,9 +800,9 @@ export async function runAcpProtocolProjection(context) {
       scope: 'REAL_SPLIT_PROCESS_L6',
       listAuthorizedRoster: listedIds.includes(sessionP) && !listedIds.includes(childId),
       listReadsWithoutSideEffects,
-      loadReplayedCanonicalHistory: baselineHistoryKinds.includes('user_message_chunk'),
+      loadReplayedCanonicalHistory: repeatLoadCanonicalComplete,
       loadAnsweredAfterDrain,
-      resumeReplayedNothing: updatesOf(resumeUpdates, sessionP).length === 0,
+      resumeReplayedNothing,
       planFromOfficialTodos: firstPlan.plan.entries.length === 2,
       usageFromOfficialContext: pressureUsage.size === PROJECTION_CONTEXT_WINDOW,
       titleFromDurableEvent: typeof infoUpdate.title === 'string',

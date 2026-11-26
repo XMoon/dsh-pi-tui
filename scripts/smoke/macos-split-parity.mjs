@@ -1956,8 +1956,10 @@ async function runD2AcpScene({ installation, workRoot, report, start, projectA, 
     sessionId: sessionB,
     prompt: [{ type: 'text', text: 'must not dispatch' }],
   })
-  assert(promptAfterClose?.error?.code === -32602 && promptAfterClose?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED',
-    `M06: a detached session/prompt must be LOCAL_ACP_VIEW_NOT_OWNED (got ${JSON.stringify(promptAfterClose?.error ?? promptAfterClose?.result)})`)
+  assert(promptAfterClose?.error?.code === -32002
+    && promptAfterClose?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED'
+    && promptAfterClose?.error?.data?.sessionId === sessionB,
+  `M06: a detached session/prompt must be the standard not-active -32002 with the requested id (got ${JSON.stringify(promptAfterClose?.error ?? promptAfterClose?.result)})`)
   connNew.close()
   await connNew.closed
   const connResumeB = await openAcp('M06 resume B connection')

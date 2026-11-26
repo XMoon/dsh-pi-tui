@@ -8446,3 +8446,435 @@ test('PR4D R3 A5: an ordinary-live child file EOF drops only that message, repor
   assert.equal(resource?.blob, Buffer.from(okBytes).toString('base64'))
   assert.equal(view.registry.hasClaim('PF-LIVE-EOF'), true, 'the View/claim stays live after the drop')
 })
+
+test('a settled View reattaches on the SAME exact Agent: resume replays nothing and load replays the whole canonical history again', async () => {
+  const access = new FakeAccess()
+  access.sessionReadReady = true
+  const agent = makeAgent('RE1', '/w')
+  access.seed(agent)
+  access.sessionHistory = {
+    header: { sessionId: 'RE1', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'earlier question' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'earlier answer' }] } } },
+      { seq: 2, type: 'todo/write', data: { todos: [{ content: 'ship it', status: 'pending' }] } },
+    ],
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const updates: SessionUpdate[] = []
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async (_sessionId, update) => {
+      if (update.sessionUpdate !== 'available_commands_update') updates.push(update)
+    },
+  }
+  const load = async (reattach: boolean): Promise<Record<string, never>> =>
+    await registry.loadSession(conn, access, { sessionId: 'RE1', cwd: '/w', mcpServers: [] }, channels, undefined, reattach)
+  const resume = async (reattach: boolean): Promise<Record<string, never>> =>
+    await registry.resumeSession(conn, access, { sessionId: 'RE1', cwd: '/w' }, channels, undefined, reattach)
+
+  await load(false)
+  assert.deepEqual(updates.map(update => update.sessionUpdate), ['user_message_chunk', 'agent_message_chunk', 'plan_update'])
+  updates.length = 0
+
+  // The SAME connection refreshes its own settled View: a fresh claim
+  // generation commits on the SAME borrowed Agent and replays the COMPLETE
+  // canonical history again (no leaked dedupe state, no stale history).
+  await load(true)
+  assert.deepEqual(updates.map(update => update.sessionUpdate), ['user_message_chunk', 'agent_message_chunk', 'plan_update'],
+    'the repeat load replays the whole history for THIS request')
+  assert.equal(access.historyCalls.length, 2, 'each load request performs its own canonical read')
+  assert.equal(access.createSessionCalls.length, 0, 'a reattach never creates a Host Session')
+  assert.deepEqual(access.resolveCalls, ['RE1', 'RE1'], 'exactly one official resolve per generation')
+  assert.equal(access.currentAgent('RE1'), agent, 'the reattach keeps the exact live Agent object')
+  assert.equal(registry.claimCount(), 1, 'one claim and one View slot for the Session')
+  assert.equal(registry.phaseOf(conn), 'attached')
+
+  // resume on the same settled View refreshes without replaying anything.
+  updates.length = 0
+  await resume(true)
+  assert.deepEqual(updates, [], 'resume still replays no conversation history')
+  assert.equal(access.historyCalls.length, 2, 'resume never reads canonical history')
+  assert.equal(access.currentAgent('RE1'), agent)
+})
+
+test('a catalog read started by the old generation never reaches the reattached View', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('RE2', '/w')
+  access.seed(agent)
+  access.readCommandCatalogImpl = () => commandCatalog(['feedback'])
+  const entered = deferred<void>()
+  const release = deferred<AcpNativeSkillCatalog>()
+  let reads = 0
+  access.readNativeSkillsImpl = async () => {
+    reads += 1
+    if (reads === 1) {
+      entered.resolve()
+      return await release.promise
+    }
+    return { kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'fresh', description: 'fresh' }] }
+  }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const delivered: string[] = []
+  const channels = (): AcpViewChannels => ({
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async (_sessionId, update) => {
+      if (update.sessionUpdate !== 'available_commands_update') return
+      for (const row of (update as { availableCommands: Array<{ name: string }> }).availableCommands) delivered.push(row.name)
+    },
+  })
+  const resume = async (reattach: boolean): Promise<Record<string, never>> =>
+    await registry.resumeSession(conn, access, { sessionId: 'RE2', cwd: '/w' }, channels(), undefined, reattach)
+
+  await resume(false)
+  await entered.promise
+  // A legal replacement commits while the old generation's catalog read is
+  // still held; its result must be dropped, not delivered to the new sink.
+  await resume(true)
+  await waitUntil(() => delivered.includes('fresh'), 'the reattached View delivers its own catalog')
+  release.resolve({ kind: 'available', cwd: '/w', skills: [{ kind: 'skill', name: 'stale', description: 'stale' }] })
+  await flushOutput()
+  assert.equal(delivered.includes('stale'), false, 'the old generation read never reaches the client')
+  assert.equal(delivered.filter(name => name === 'fresh').length, 1, 'the fresh generation delivers its own catalog exactly once')
+})
+
+test('a reattach refuses a View that still owns a prompt flight, a policy write, an MCP lease or an open reverse Form', async () => {
+  // 1. An unsettled prompt flight retains the original claim; once the real
+  // turn settles the SAME owner can reattach.
+  const promptCase = promptView('RE3')
+  await promptCase.attach()
+  const attempt = promptCase.start('work')
+  const request = promptCase.access.promptCalls[0]!
+  promptCase.insert(request.requestId, 'm-work')
+  await assert.rejects(
+    promptCase.registry.resumeSession(promptCase.conn, promptCase.access, { sessionId: 'RE3', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(promptCase.registry.claimCount(), 1, 'the prompt claim is retained')
+  assert.equal(promptCase.registry.phaseOf(promptCase.conn), 'attached', 'a refused reattach never detaches the View')
+  promptCase.claim('m-work', 1)
+  promptCase.commit('assistant/message', assistantData(1, 'm-work', [{ type: 'text', text: 'done' }]))
+  promptCase.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+  await promptCase.registry.resumeSession(promptCase.conn, promptCase.access, { sessionId: 'RE3', cwd: '/w' }, undefined, undefined, true)
+  assert.equal(promptCase.registry.phaseOf(promptCase.conn), 'attached', 'a settled owner reattaches')
+
+  // 2. A held policy write keeps the View busy until its ORIGINAL terminal.
+  const policyAccess = new FakeAccess()
+  policyAccess.seed(makeAgent('RE4', '/w'))
+  policyAccess.modelOptionsImpl = async () => modelOptionsFor('["p1","a"]')
+  const gate = deferred<AcpSessionPolicyState>()
+  policyAccess.selectSessionPolicyImpl = async () => await gate.promise
+  const policyRegistry = new AcpSessionViewRegistry(QUIET_DIAG)
+  policyRegistry.bindAccess(policyAccess)
+  const policyConn = policyRegistry.createConnection()
+  await policyRegistry.resumeSession(policyConn, policyAccess, { sessionId: 'RE4', cwd: '/w' })
+  const write = policyRegistry.setConfigOption(
+    policyConn,
+    policyAccess,
+    { sessionId: 'RE4', configId: 'mode', value: 'plan' },
+    new AbortController().signal,
+  )
+  await flushOutput()
+  await assert.rejects(
+    policyRegistry.resumeSession(policyConn, policyAccess, { sessionId: 'RE4', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(policyRegistry.claimCount(), 1)
+  gate.resolve({ mode: 'plan' })
+  await write
+  await policyRegistry.resumeSession(policyConn, policyAccess, { sessionId: 'RE4', cwd: '/w' }, undefined, undefined, true)
+  assert.equal(policyRegistry.phaseOf(policyConn), 'attached', 'the settled policy owner reattaches')
+
+  // 3. An owned scoped MCP lease is never released or restarted by a reattach.
+  const mcpCase = promptView('RE5', { mcp: true })
+  await mcpCase.attach()
+  await assert.rejects(
+    mcpCase.registry.resumeSession(mcpCase.conn, mcpCase.access, { sessionId: 'RE5', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(mcpCase.registry.claimCount(), 1, 'the MCP-backed claim is retained')
+  assert.deepEqual(mcpCase.access.retireScopedMcpCalls, [], 'the refusal never retires the exact lease')
+
+  // 4. An open reverse Form is an unsettled human obligation: it keeps the
+  // View busy and stays answerable after the refusal.
+  const channel = formChannel()
+  const formCase = promptView('RE6', { channels: { requestElicitation: channel.requester } })
+  formCase.access.questionService = true
+  formCase.access.questionSnapshotImpl = () => continuedQuestions([{ id: 'q', question: 'still there?' }], 'call-open')
+  await formCase.attach()
+  await flushOutput()
+  assert.equal(channel.forms.length, 1, 'the continued question Form is open')
+  await assert.rejects(
+    formCase.registry.resumeSession(formCase.conn, formCase.access, { sessionId: 'RE6', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(channel.forms[0]!.signal.aborted, false, 'the refused reattach keeps the open Form answerable')
+})
+
+test('a repeat resume with declared MCP servers is refused after full request validation and keeps the original lease', async () => {
+  const view = promptView('RE7', { mcp: true })
+  await view.attach()
+  const mounted = view.access.mountScopedMcpCalls.length
+  await assert.rejects(
+    view.registry.resumeSession(view.conn, view.access, {
+      sessionId: 'RE7',
+      cwd: '/w',
+      mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }],
+    }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(view.access.mountScopedMcpCalls.length, mounted, 'a repeat never starts a second MCP mount')
+  assert.equal(view.registry.claimCount(), 1, 'the original claim and lease are retained')
+  // The same malformed declaration is still the request-syntax refusal.
+  await assert.rejects(
+    view.registry.resumeSession(view.conn, view.access, {
+      sessionId: 'RE7',
+      cwd: '/w',
+      mcpServers: [{ name: 'sse', type: 'sse', url: 'http://127.0.0.1/x' }],
+    }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_MCP_INVALID_DECLARATION'),
+  )
+})
+
+test('a claim still fenced by an MCP retirement answers the retryable busy class and releases on its terminal', async () => {
+  const view = promptView('RE9', { mcp: true })
+  await view.attach()
+  const retireGate = deferred<void>()
+  view.access.retireScopedMcpImpl = async () => { await retireGate.promise }
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'RE9'), {})
+  assert.equal(view.registry.claimCount(), 1, 'the fenced claim is retained until its exact Host terminal')
+  await assert.rejects(
+    view.registry.resumeSession(view.conn, view.access, { sessionId: 'RE9', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(view.registry.claimCount(), 1, 'a refused reattach never drops the Host obligation fence')
+  retireGate.resolve()
+  await flushOutput()
+  assert.equal(view.registry.claimCount(), 0, 'the settled retirement releases the claim')
+  await view.registry.resumeSession(view.conn, view.access, { sessionId: 'RE9', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(view.conn), 'attached', 'a later ordinary attach works on the same connection')
+})
+
+test('a reattach whose live identity changed fails closed without resurrecting a different Agent', async () => {
+  const access = new FakeAccess()
+  const agentA = makeAgent('RE8', '/w')
+  access.seed(agentA)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'RE8', cwd: '/w' })
+  // 1. The exact live identity was replaced before the official resolver ran:
+  // the reattach fails closed and the ORIGINAL generation is preserved.
+  access.seed(makeAgent('RE8', '/w'))
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE8', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(registry.claimCount(), 1, 'a pre-admission identity loss keeps the original claim')
+  assert.equal(registry.phaseOf(conn), 'attached')
+  // 2. The Host replaces the live Agent BETWEEN the identity precheck and the
+  // official resolve, so the resolver legitimately returns the NEW live owner:
+  // the reattach must fail closed and release only its fresh reservation instead
+  // of attaching a different Host owner under this View.
+  access.seed(agentA)
+  const agentB = makeAgent('RE8', '/w')
+  access.resolveAgentImpl = async () => {
+    access.seed(agentB)
+    return { agent: agentB }
+  }
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE8', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(registry.claimCount(), 0, 'a post-admission mismatch releases only the fresh reservation')
+  assert.equal(registry.phaseOf(conn), 'idle', 'the connection is idle, ready for an explicit re-attach')
+})
+
+test('a failed refresh retires only its fresh claim and leaves the Session attachable', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('RE10', '/w')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async () => {},
+  }
+  await registry.resumeSession(conn, access, { sessionId: 'RE10', cwd: '/w' }, channels)
+  // The reattach commits its fresh generation, then the listener's post-attach
+  // phase fails; the exact generation must be retired, not left attached.
+  await registry.resumeSession(conn, access, { sessionId: 'RE10', cwd: '/w' }, channels, undefined, true)
+  assert.equal(registry.claimCount(), 1)
+  registry.retireFailedRefresh(conn, 'RE10')
+  assert.equal(registry.claimCount(), 0, 'the failed refresh leaves no claim behind')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  await registry.resumeSession(conn, access, { sessionId: 'RE10', cwd: '/w' }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached', 'a later ordinary attach succeeds')
+  // The retirement is exact: a foreign connection's claim is never touched.
+  const other = registry.createConnection()
+  registry.retireFailedRefresh(other, 'RE10')
+  assert.equal(registry.claimCount(), 1, 'another connection cannot retire this claim')
+})
+
+test('a pre-aborted repeat is refused before it can replace the held claim', async () => {
+  const access = new FakeAccess()
+  access.sessionReadReady = true
+  const agent = makeAgent('RE11', '/w')
+  access.seed(agent)
+  access.sessionHistory = { header: { sessionId: 'RE11', cwd: '/w' }, events: [] }
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async () => {},
+  }
+  await registry.loadSession(conn, access, { sessionId: 'RE11', cwd: '/w', mcpServers: [] }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached')
+  const resolvesBefore = access.resolveCalls.length
+  const aborted = new AbortController()
+  aborted.abort()
+  const isAbort = (error: unknown): boolean => error instanceof Error && error.name === 'AbortError'
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE11', cwd: '/w' }, undefined, aborted.signal, true),
+    isAbort,
+  )
+  await assert.rejects(
+    registry.loadSession(conn, access, { sessionId: 'RE11', cwd: '/w', mcpServers: [] }, undefined, aborted.signal, true),
+    isAbort,
+  )
+  assert.equal(registry.claimCount(), 1, 'the held claim survives both pre-aborted requests')
+  assert.equal(registry.phaseOf(conn), 'attached', 'the held View stays the attached generation')
+  assert.equal(access.resolveCalls.length, resolvesBefore, 'a pre-aborted request reaches no official resolve')
+})
+
+test('a repeat load cancelled during its canonical read retires only the fresh generation', async () => {
+  const access = new FakeAccess()
+  access.sessionReadReady = true
+  const agent = makeAgent('RE12', '/w')
+  access.seed(agent)
+  const history: AcpSessionHistory = {
+    header: { sessionId: 'RE12', cwd: '/w' },
+    events: [
+      { seq: 0, type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'old question' }], role: 'user' } },
+      { seq: 1, type: 'assistant/message', data: { message: { id: 'a1', content: [{ type: 'text', text: 'old answer' }] } } },
+    ],
+  }
+  access.sessionHistory = history
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const delivered: SessionUpdate[] = []
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async (_sessionId, update) => { delivered.push(update) },
+  }
+  const load = async (signal?: AbortSignal, reattach = false): Promise<Record<string, never>> =>
+    await registry.loadSession(conn, access, { sessionId: 'RE12', cwd: '/w', mcpServers: [] }, channels, signal, reattach)
+  await load()
+  assert.deepEqual(delivered.map(update => update.sessionUpdate), ['user_message_chunk', 'agent_message_chunk'])
+  delivered.length = 0
+  // The cancelled request waits on the REAL canonical read: the abort must stop
+  // its uncommitted replay and retire its fresh claim without waiting for a
+  // provider terminal.
+  const entered = deferred<void>()
+  const gate = deferred<AcpSessionHistory>()
+  access.readSessionHistoryImpl = async () => {
+    entered.resolve()
+    return await gate.promise
+  }
+  const controller = new AbortController()
+  const pending = load(controller.signal, true)
+  await entered.promise
+  controller.abort()
+  gate.resolve(history)
+  await assert.rejects(pending, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.deepEqual(delivered, [], 'the cancelled replay delivered no uncommitted history')
+  assert.equal(registry.claimCount(), 0, 'only the fresh generation was retired')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  access.readSessionHistoryImpl = async () => access.sessionHistory
+  await registry.resumeSession(conn, access, { sessionId: 'RE12', cwd: '/w' }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached', 'an explicit later attach succeeds on the same connection')
+})
+
+test('a repeat cancelled while the official resolve is pending returns the connection to idle', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('RE13', '/w')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' })
+  const entered = deferred<void>()
+  const gate = deferred<void>()
+  let held = false
+  access.resolveAgentImpl = async () => {
+    if (!held) {
+      held = true
+      entered.resolve()
+      await gate.promise
+    }
+    return { agent }
+  }
+  const controller = new AbortController()
+  const pending = registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' }, undefined, controller.signal, true)
+  await entered.promise
+  // The cancellation lands while the fresh claim is still ATTACHING: the claim
+  // retires and the connection returns to idle immediately.
+  controller.abort()
+  assert.equal(registry.claimCount(), 0, 'the fresh claim is retired by the cancellation')
+  assert.equal(registry.phaseOf(conn), 'idle', 'the attaching phase returns to idle')
+  gate.resolve()
+  await assert.rejects(pending, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.equal(registry.phaseOf(conn), 'idle', 'the late resolve never leaves an attaching orphan')
+  await registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' })
+  assert.equal(registry.phaseOf(conn), 'attached', 'a later explicit attach succeeds')
+})
+
+test('a reattach fails closed when the old-read retirement callback replaced the captured Agent', async () => {
+  const access = new FakeAccess()
+  const agentA = makeAgent('RE14', '/w')
+  access.seed(agentA)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const channels: AcpViewChannels = { capabilities: PR2_CAPABILITIES, notifyProjection: async () => {} }
+  // The settled View owns a REAL detached catalog read on its readAbort
+  // lifetime. Hold that read and let the replacement's retirement abort it: the
+  // fake Host replaces the captured live Agent at exactly that callback, i.e.
+  // the accepted pre-dispatch identity boundary.
+  const entered = deferred<void>()
+  let held = false
+  const originalSkills = access.readNativeSkillsImpl
+  access.readNativeSkillsImpl = async (agent, session, signal) => {
+    if (held) return await originalSkills(agent, session, signal)
+    held = true
+    entered.resolve()
+    return await new Promise<AcpNativeSkillCatalog>((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        access.seed(makeAgent('RE14', '/w'))
+        reject(signal.reason)
+      }, { once: true })
+    })
+  }
+  await registry.resumeSession(conn, access, { sessionId: 'RE14', cwd: '/w' }, channels)
+  await entered.promise
+  const resolvesBefore = access.resolveCalls.length
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE14', cwd: '/w' }, channels, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(access.resolveCalls.length, resolvesBefore,
+    'the official resolver is never dispatched after the retirement callback lost the captured identity')
+  assert.equal(registry.claimCount(), 0, 'only the fresh reservation is released')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  await registry.resumeSession(conn, access, { sessionId: 'RE14', cwd: '/w' }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached', 'a later explicit attach uses the real live owner')
+  assert.equal(registry.claimCount(), 1)
+})
