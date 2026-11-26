@@ -232,6 +232,11 @@ export interface PublicDaemonHostFacts {
   sid: number
   ppidAtCapture: number
   registeredAt: string
+  attemptByLaunchId?: string | null
+  published?: boolean
+  winner?: boolean
+  settled?: boolean
+  terminalOutcome?: string | null
   reclaimed: boolean
   normalStop: boolean
   stoppedAt?: string
@@ -259,9 +264,13 @@ export interface PublicDaemonLaunchFacts {
   backend: PublicDaemonBackend | null
   shellPid: number | null
   shellBirth: string | null
+  shellTty: { platform: string; eTdev?: number; ttyNr?: number } | null
   cli: PublicProcessIdentity | null
   client: PublicProcessIdentity | null
   host: PublicDaemonHostFacts | null
+  hostAttempt: PublicDaemonHostFacts | null
+  registryAbsentBefore: boolean
+  registryAbsentAfter: boolean
   ready: boolean
   refused: boolean
   exit: { code: number | null; signal: string | null } | null
@@ -315,6 +324,7 @@ export interface PublicDaemonKernelState {
   clientPid: number | null
   hostPid: number | null
   hostInstanceId: string | null
+  hostBirth: string | null
 }
 
 export interface PublicDaemonStatusFacts {
@@ -332,9 +342,13 @@ export interface PublicDaemonLaunch {
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
   readonly shellBirth: string | null
+  readonly shellTty: { platform: string; eTdev?: number; ttyNr?: number } | null
   readonly cli: PublicProcessIdentity | null
   readonly client: PublicProcessIdentity | null
   readonly host: PublicDaemonHostFacts | null
+  readonly hostAttempt: PublicDaemonHostFacts | null
+  readonly registryAbsentBefore: boolean
+  readonly registryAbsentAfter: boolean
   readonly ready: boolean
   readonly refused: boolean
   readonly surface: PublicDaemonSurfaceFacts | null
@@ -356,9 +370,47 @@ export interface PublicDaemonLaunch {
   daemonStatus(): Promise<PublicDaemonStatusFacts>
   stopHost(): Promise<PublicDaemonHostFacts>
   /** Send SIGTERM to the captured public CLI PID only (freshly re-proved). */
-  signalCli(): Promise<{ launchId: string; pid: number; birth: string; signal: 'SIGTERM' }>
+  signalCli(): Promise<{
+    launchId: string
+    pid: number
+    birth: string
+    signal: 'SIGTERM'
+    outcome: PublicDaemonTermOrder
+  }>
   /** Read the controlled Herdr fake's complete invocation lines. */
   readHerdrInvocations(): Array<{ ppid: number; argv: string[] }>
+}
+
+export interface PublicScopeStateFacts {
+  registry: 'present' | 'absent'
+  launch: 'present' | 'absent'
+  hosts: Array<{ pid: number; birth: string }>
+}
+
+export interface PublicDaemonTermOrder {
+  sentAt: string
+  observedAt: string
+  samples: number
+  clientGoneAt: string | null
+  cliGoneAt: string | null
+  clientTerminalWhileCliLive: boolean
+  cliLiveBirthAtClientTerminal: string | null
+  sameSampleGone: boolean
+  firstSampleBothGone: boolean
+  order: string
+}
+
+export interface PublicDaemonColdPairLaunchOptions {
+  label: string
+  backend: 'daemon'
+  cols?: number
+  rows?: number
+}
+
+export interface PublicDaemonColdPair {
+  pairId: string
+  winner: PublicDaemonHostFacts
+  launches: [PublicDaemonLaunch, PublicDaemonLaunch]
 }
 
 export interface StartProcessClientOptions {
@@ -547,6 +599,10 @@ export interface SplitProcessScene {
   startClient(options: StartProcessClientOptions): Promise<SplitProcessClient>
   /** Start the REAL installed public CLI under a native PTY (Linux qualification). */
   startPublicDaemon(options: StartPublicDaemonOptions): Promise<PublicDaemonLaunch>
+  /** Two real cold producers in one request; only daemon/chat/defaults. */
+  startPublicDaemonColdPair(options: {
+    launches: [PublicDaemonColdPairLaunchOptions, PublicDaemonColdPairLaunchOptions]
+  }): Promise<PublicDaemonColdPair>
   /** Run the public CLI without a TTY to prove the daemon TTY refusal. */
   runPublicDaemonHeadless(options: {
     label: string
@@ -554,6 +610,8 @@ export interface SplitProcessScene {
     args?: PublicDaemonArgs
   }): Promise<{ exit: { code: number | null; signal: string | null }; text: string }>
   /** Report the public side of the explicit host-file-completion audit pair. */
+  /** The fixed opt-in authority control (no caller-controlled command/PID/env). */
+  runPublicAuthorityControl(): Promise<Record<string, any>>
   publicDaemonParallelReady(launch: PublicDaemonLaunch): Promise<void>
   publicDaemonParallelRelease(): Promise<void>
   startHostAttempts(options: {
@@ -595,6 +653,7 @@ export interface SplitProcessScene {
   /** Release one Supervisor-preallocated qualification barrier (file existence). */
   releaseBarrier(handle: EntryQualificationHandle, name: string): void
   sessionIds(): Promise<string[]>
+  publicScopeState(): Promise<PublicScopeStateFacts>
   sessionEvents(sessionId: string): SessionEvent[] | undefined
   hostSessionLogCount(): number
   waitForNewSessionId(before: ReadonlySet<string>, label: string, timeoutMs?: number): Promise<string>
@@ -950,9 +1009,13 @@ class PublicDaemon implements PublicDaemonLaunch {
   readonly backend: PublicDaemonBackend | null
   readonly shellPid: number | null
   readonly shellBirth: string | null
+  readonly shellTty: { platform: string; eTdev?: number; ttyNr?: number } | null
   readonly cli: PublicProcessIdentity | null
   readonly client: PublicProcessIdentity | null
   readonly host: PublicDaemonHostFacts | null
+  readonly hostAttempt: PublicDaemonHostFacts | null
+  readonly registryAbsentBefore: boolean
+  readonly registryAbsentAfter: boolean
   readonly ready: boolean
   readonly refused: boolean
   readonly surface: PublicDaemonSurfaceFacts | null
@@ -972,9 +1035,13 @@ class PublicDaemon implements PublicDaemonLaunch {
     this.backend = (payload.backend ?? null) as PublicDaemonBackend | null
     this.shellPid = payload.shellPid === null || payload.shellPid === undefined ? null : Number(payload.shellPid)
     this.shellBirth = payload.shellBirth === null || payload.shellBirth === undefined ? null : String(payload.shellBirth)
+    this.shellTty = payload.shellTty ?? null
     this.cli = payload.cli ?? null
     this.client = payload.client ?? null
     this.host = payload.host ?? null
+    this.hostAttempt = payload.hostAttempt ?? null
+    this.registryAbsentBefore = payload.registryAbsentBefore === true
+    this.registryAbsentAfter = payload.registryAbsentAfter === true
     this.ready = payload.ready === true
     this.refused = payload.refused === true
     this.surface = payload.surface ?? null
@@ -1049,9 +1116,13 @@ class PublicDaemon implements PublicDaemonLaunch {
         backend: this.backend,
         shellPid: this.shellPid,
         shellBirth: this.shellBirth,
+        shellTty: this.shellTty,
         cli: this.cli,
         client: this.client,
         host: this.host,
+        hostAttempt: this.hostAttempt,
+        registryAbsentBefore: this.registryAbsentBefore,
+        registryAbsentAfter: this.registryAbsentAfter,
         ready: this.ready,
         refused: this.refused,
         exit: this.#exitFacts ?? null,
@@ -1074,9 +1145,13 @@ class PublicDaemon implements PublicDaemonLaunch {
       backend: this.backend,
       shellPid: this.shellPid,
       shellBirth: this.shellBirth,
+      shellTty: this.shellTty,
       cli: this.cli,
       client: this.client,
       host: this.host,
+      hostAttempt: this.hostAttempt,
+      registryAbsentBefore: this.registryAbsentBefore,
+      registryAbsentAfter: this.registryAbsentAfter,
       ready: this.ready,
       refused: this.refused,
       exit: this.#exitFacts ?? null,
@@ -1102,9 +1177,13 @@ class PublicDaemon implements PublicDaemonLaunch {
       backend: this.backend,
       shellPid: this.shellPid,
       shellBirth: this.shellBirth,
+      shellTty: this.shellTty,
       cli: this.cli,
       client: this.client,
       host: this.host,
+      hostAttempt: this.hostAttempt,
+      registryAbsentBefore: this.registryAbsentBefore,
+      registryAbsentAfter: this.registryAbsentAfter,
       ready: this.ready,
       refused: this.refused,
       exit: this.#exitFacts,
@@ -1122,9 +1201,15 @@ class PublicDaemon implements PublicDaemonLaunch {
     return await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_STOP', {}, 300_000) as PublicDaemonHostFacts
   }
 
-  async signalCli(): Promise<{ launchId: string; pid: number; birth: string; signal: 'SIGTERM' }> {
+  async signalCli(): Promise<{
+    launchId: string
+    pid: number
+    birth: string
+    signal: 'SIGTERM'
+    outcome: PublicDaemonTermOrder
+  }> {
     return await this.#scene.publicDaemonRequest(this.launchId, 'PUBLIC_DAEMON_TERMINATE_CLI', {}) as {
-      launchId: string; pid: number; birth: string; signal: 'SIGTERM'
+      launchId: string; pid: number; birth: string; signal: 'SIGTERM'; outcome: PublicDaemonTermOrder
     }
   }
 
@@ -1470,6 +1555,25 @@ class ProcessScene implements SplitProcessScene {
     return launch
   }
 
+  async startPublicDaemonColdPair(options: {
+    launches: [PublicDaemonColdPairLaunchOptions, PublicDaemonColdPairLaunchOptions]
+  }): Promise<PublicDaemonColdPair> {
+    const payload = await this.request('START_PUBLIC_DAEMON_COLD_PAIR', {
+      launches: options.launches,
+    }, 900_000)
+    const launches = (payload.launches ?? []).map((facts: Record<string, any>) => {
+      const launch = new PublicDaemon(this, facts)
+      this.#publicLaunches.push(launch)
+      return launch
+    })
+    if (launches.length !== 2) throw new Error('START_PUBLIC_DAEMON_COLD_PAIR did not return two launch handles')
+    return {
+      pairId: String(payload.pairId),
+      winner: payload.winner as PublicDaemonHostFacts,
+      launches: launches as [PublicDaemonLaunch, PublicDaemonLaunch],
+    }
+  }
+
   async runPublicDaemonHeadless(options: {
     label: string
     backend: 'daemon'
@@ -1489,6 +1593,10 @@ class ProcessScene implements SplitProcessScene {
     timeoutMs = 120_000,
   ): Promise<Record<string, any>> {
     return await this.request(type, { launchId, ...payload }, timeoutMs) as Record<string, any>
+  }
+
+  async runPublicAuthorityControl(): Promise<Record<string, any>> {
+    return await this.request('PUBLIC_AUTHORITY_CONTROL', {}, 300_000) as Record<string, any>
   }
 
   async publicDaemonParallelReady(launch: PublicDaemonLaunch): Promise<void> {
@@ -1604,6 +1712,10 @@ class ProcessScene implements SplitProcessScene {
 
   async sessionIds(): Promise<string[]> {
     return listSessionIds(this.installation.dshHome)
+  }
+
+  async publicScopeState(): Promise<PublicScopeStateFacts> {
+    return await this.request('PUBLIC_SCOPE_STATE', {}, 60_000) as PublicScopeStateFacts
   }
 
   sessionEvents(sessionId: string): SessionEvent[] | undefined {
