@@ -4,8 +4,9 @@
  * These cases pin the identity semantics the Host index depends on: one
  * occurrence per first `message.id`, queue edit/remove/steer never rewrite it,
  * fork-inherited prefix events never count, `working-directory/change` folds
- * per event, non-user sources are ignored and a user source without a standard
- * rpcId (or a malformed cwd change) is an explicit incomplete diagnostic.
+ * per event (an unusable value is the explicit unknown `null`), `source.kind`
+ * alone admits a user-sourced message (request correlation is ignored), and a
+ * malformed required payload of an explicit user message fails the source read.
  *
  * @module @xmoon76/dsh-pi-tui/host-history-admission.test
  */
@@ -21,7 +22,7 @@ import {
 interface TestMessage {
   readonly id: string
   readonly role: 'user'
-  readonly content: readonly { readonly type: string; readonly text?: string }[]
+  readonly content: readonly { readonly type: string; readonly text?: string }[] | unknown
   readonly source: { readonly kind: string; readonly rpcId?: string }
 }
 
@@ -33,15 +34,15 @@ function inbox(seq: number, time: number, inserted: readonly TestMessage[], extr
   return { type: 'agent/inbox/spliced', seq, time, data: { target: 'next-turn', start: 0, inserted, ...extra } }
 }
 
-function userMessageEvent(seq: number, time: number, value: TestMessage): HostAdmissionEventLike {
+function userMessageEvent(seq: number, time: number, value: unknown): HostAdmissionEventLike {
   return { type: 'user/message', seq, time, data: value }
 }
 
-function cwdChange(seq: number, time: number, cwd: string): HostAdmissionEventLike {
+function cwdChange(seq: number, time: number, cwd: unknown): HostAdmissionEventLike {
   return { type: 'working-directory/change', seq, time, data: { cwd } }
 }
 
-const OPTIONS = { sessionId: 'session-a', headerCwd: '/repo/a', inheritedEventCount: 0 }
+const OPTIONS = { sessionId: 'session-a', initialCwd: '/repo/a', inheritedEventCount: 0 }
 
 test('an inbox insertion plus its later user/message is ONE accepted occurrence', () => {
   const accepted = message('msg-1', 'hello host')
@@ -60,8 +61,6 @@ test('an inbox insertion plus its later user/message is ONE accepted occurrence'
     hasNonText: false,
   })
   assert.equal(snapshot.editedOccurrences, 0)
-  assert.equal(snapshot.unknownSourceCount, 0)
-  assert.equal(snapshot.invalidCwdCount, 0)
 })
 
 test('identical text with different message ids stays two occurrences', () => {
@@ -122,33 +121,49 @@ test('working-directory/change fixes each prompt at its event-time cwd', () => {
   assert.equal(snapshot.occurrences.find(item => item.messageId === 'msg-h2')?.firstEventSeq, 2)
 })
 
-test('a non-user producer notice is not a user prompt', () => {
+test('a non-user producer notice is not a user prompt, even when it carries rpcId', () => {
   const snapshot = classifyHostAdmission(OPTIONS, [
-    userMessageEvent(0, 1000, message('notice-1', 'working-directory notice', { kind: 'working-directory' })),
-    inbox(1, 1001, [message('msg-1', 'real prompt')]),
+    userMessageEvent(0, 1000, message('notice-1', 'working-directory notice', { kind: 'working-directory', rpcId: 'rpc-notice-1' })),
+    inbox(1, 1001, [message('notice-2', 'another notice', { kind: 'plan-mode', rpcId: 'rpc-notice-2' })]),
+    inbox(2, 1002, [message('msg-1', 'real prompt')]),
   ])
   assert.deepEqual(snapshot.occurrences.map(item => item.messageId), ['msg-1'])
-  assert.equal(snapshot.unknownSourceCount, 0)
 })
 
-test('a user-kind message without rpcId is an explicit incomplete source', () => {
+test('a user-sourced message without rpcId is ONE accepted occurrence across inbox and user/message', () => {
+  const uncorrelated = message('uncorrelated-1', 'no correlation', { kind: 'user' })
+  const correlated = message('correlated-1', 'correlated prompt', { kind: 'user', rpcId: 'rpc-correlated-1' })
   const snapshot = classifyHostAdmission(OPTIONS, [
-    inbox(0, 1000, [message('unknown-1', 'no correlation', { kind: 'user' })]),
-    inbox(1, 1001, [message('msg-1', 'normal prompt')]),
+    inbox(0, 1000, [uncorrelated, correlated]),
+    userMessageEvent(1, 1005, uncorrelated),
   ])
-  assert.deepEqual(snapshot.occurrences.map(item => item.messageId), ['msg-1'])
-  assert.equal(snapshot.unknownSourceCount, 1)
+  assert.deepEqual(snapshot.occurrences.map(item => item.messageId).sort(), ['correlated-1', 'uncorrelated-1'])
+  const occurrence = snapshot.occurrences.find(item => item.messageId === 'uncorrelated-1')
+  assert.equal(occurrence?.content, 'no correlation')
+  assert.equal(occurrence?.firstEventSeq, 0)
+  assert.equal(occurrence?.acceptedAt, 1000)
+  assert.equal(occurrence?.cwd, '/repo/a')
+  assert.equal(snapshot.occurrences.find(item => item.messageId === 'correlated-1')?.firstEventSeq, 0)
 })
 
-test('a malformed working-directory/change is an incomplete cwd fact', () => {
+test('an unusable working-directory/change makes that interval explicitly unknown', () => {
   const snapshot = classifyHostAdmission(OPTIONS, [
-    { type: 'working-directory/change', seq: 0, time: 1000, data: { cwd: '' } },
-    { type: 'working-directory/change', seq: 1, time: 1001, data: { cwd: 42 } },
-    cwdChange(2, 1002, '/repo/b'),
-    inbox(3, 1003, [message('msg-1', 'after valid cwd')]),
+    inbox(0, 1000, [message('msg-a', 'in a')]),
+    cwdChange(1, 1001, ''),
+    inbox(2, 1002, [message('msg-unknown-1', 'after an empty change')]),
+    cwdChange(3, 1003, 42),
+    inbox(4, 1004, [message('msg-unknown-2', 'after a non-string change')]),
+    cwdChange(5, 1005, 'relative/path'),
+    inbox(6, 1006, [message('msg-unknown-3', 'after a non-absolute change')]),
+    cwdChange(7, 1007, '/repo/b'),
+    inbox(8, 1008, [message('msg-b', 'in b')]),
   ])
-  assert.equal(snapshot.invalidCwdCount, 2)
-  assert.equal(snapshot.occurrences[0]?.cwd, '/repo/b')
+  const byId = (messageId: string) => snapshot.occurrences.find(item => item.messageId === messageId)
+  assert.equal(byId('msg-a')?.cwd, '/repo/a')
+  assert.equal(byId('msg-unknown-1')?.cwd, null)
+  assert.equal(byId('msg-unknown-2')?.cwd, null)
+  assert.equal(byId('msg-unknown-3')?.cwd, null)
+  assert.equal(byId('msg-b')?.cwd, '/repo/b')
 })
 
 test('a non-text block is preserved as hasNonText while text stays searchable', () => {
@@ -156,7 +171,7 @@ test('a non-text block is preserved as hasNonText while text stays searchable', 
     id: 'msg-image',
     role: 'user',
     content: [{ type: 'text', text: 'look at this' }, { type: 'image' }],
-    source: { kind: 'user', rpcId: 'rpc-image' },
+    source: { kind: 'user' },
   }
   const snapshot = classifyHostAdmission(OPTIONS, [inbox(0, 1000, [withImage])])
   assert.equal(snapshot.occurrences[0]?.content, 'look at this')
@@ -168,11 +183,41 @@ test('an empty text block list still produces a browsable occurrence', () => {
     id: 'msg-empty',
     role: 'user',
     content: [],
-    source: { kind: 'user', rpcId: 'rpc-empty' },
+    source: { kind: 'user' },
   }
   const snapshot = classifyHostAdmission(OPTIONS, [inbox(0, 1000, [empty])])
   assert.equal(snapshot.occurrences.length, 1)
   assert.equal(snapshot.occurrences[0]?.content, '')
+})
+
+test('an explicit user message with a malformed required payload fails the source read', () => {
+  // The existing parser rejects these shapes; the fold must not then report a
+  // complete source that silently omitted them.
+  assert.throws(
+    () => classifyHostAdmission(OPTIONS, [
+      inbox(0, 1000, [{ id: 'bad-text', role: 'user', content: [{ type: 'text' }], source: { kind: 'user' } }]),
+    ]),
+    /text block without text/u,
+  )
+  assert.throws(
+    () => classifyHostAdmission(OPTIONS, [
+      userMessageEvent(0, 1000, { id: 'bad-content', role: 'user', content: 'not-an-array', source: { kind: 'user' } }),
+    ]),
+    /no content array/u,
+  )
+  assert.throws(
+    () => classifyHostAdmission(OPTIONS, [
+      inbox(0, 1000, [{ id: '', role: 'user', content: [], source: { kind: 'user' } }]),
+    ]),
+    /no message id/u,
+  )
+  // A recognized inbox mutation without its required array is the same class.
+  assert.throws(
+    () => classifyHostAdmission(OPTIONS, [
+      { type: 'agent/inbox/spliced', seq: 0, time: 1000, data: { target: 'next-turn', start: 0 } },
+    ]),
+    /no inserted array/u,
+  )
 })
 
 test('an incremental fold continues after its committed seq and drains only new evidence', () => {
@@ -185,7 +230,7 @@ test('an incremental fold continues after its committed seq and drains only new 
 
   const continuation = new HostAdmissionFold({
     ...OPTIONS,
-    headerCwd: '/repo/b',
+    initialCwd: '/repo/b',
     startSeq: 1,
   })
   continuation.apply([

@@ -1817,15 +1817,15 @@ or the current Ctrl+R/↑↓ contract owned by
 
 | Fact | Authority |
 | --- | --- |
-| Accepted occurrence | the official durable `session/event`: an `agent/inbox/spliced.inserted[]` or `user/message` with `source.kind === 'user'` AND a non-empty `rpcId`; the FIRST event per `(sessionId, messageId)` is the one immutable occurrence |
-| Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing directory stays `null` (never the Client cwd) |
+| Accepted occurrence | the official durable `session/event`: an `agent/inbox/spliced.inserted[]` or `user/message` whose `source.kind === 'user'`; the FIRST event per `(sessionId, messageId)` is the one immutable occurrence. `source.kind` is the sole producer authority: request correlation (`rpcId`), principal, client time zone and presentation metadata are optional and never participate in admission, deduplication or completeness |
+| Event-time directory | Session header `cwd` folded with each `working-directory/change` in seq order at first acceptance; a missing header directory, or a delivered change whose value is not a usable absolute Host path, is the explicit unknown `null` for that interval (never the previous directory, never the Client cwd); a later valid change restores it |
 | Fork inheritance | the official `inheritedEventCount` cut: prefix events fold cwd but never create a child occurrence |
 | Official corpus roster | ONE `sessionPersistence.list` snapshot merged with the Host `sessions` live registry; a same-id live/persisted Header must pass the official `assertSessionHeadersCompatible` check, and the live Header is the visible one |
 | Derived index | ONE disposable SQLite projection under the running Profile (`$PROFILE/.dsh-pi-tui/history-search/v2.sqlite`, private directory/file modes); it is rebuilt from official reads whenever the official log and the projection disagree and is never a persistence authority |
 | Durable cold source proof | ONE row per Session in the same `v2.sqlite` records the exact official source path, opaque revision, install/config scope digest and checkpoint digest of one COMPLETE cold replay. Any checkpoint-changing batch, marker rewrite, reset or delete revokes it in the SAME transaction. An aborted transaction may restore the OLD valid proof together with the old checkpoint; a failed or partial NEW replay must never create a new proof |
 | Restart recovery | Only a qualified runtime/backend may compare a committed persisted proof across Host restarts; unqualified sources replay through official handles. The upstream revision API itself remains instance-scoped. A qualified hit performs no official `open`/`read`/`stat`/replay, releases no accepted obligation and settles only the per-ID round evidence; a stale or refused hit keeps the ordinary round barrier and hands the official replay to the existing repair owner |
 | Source binding | Proof eligibility is bound to the exact pass-scoped official persistence binding (raw service, official Symbol, Loader provider entry/activation, effective root/codec and installed release identity) plus the selected snapshot classification. A replaced service binding, an invalidated runtime authority, a missing required official service on a mounted index, or changed snapshot metadata retires prior-proof reuse and coverage; absence stays `unavailable` (`service-missing`) and a present observation only returns `incomplete`/unproven until a complete full pass replays and re-proves officially |
-| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round |
+| Completeness | the index publishes `loading`, `ready`, `incomplete` (`source-uncertain`, `reconciling`, `resource-limit`, `source-read-failed`) or `unavailable` (`index-unavailable`, `service-missing`); a partial or failing pass never answers an authoritative empty list. First/full coverage is proven only by a full round that visited and settled every authoritative Session; storage health and one-Session repair do not prove coverage, and a failed/partial pass remains `loading`/`incomplete` until a complete full round. A legal optional metadata absence (no correlation metadata, an unknown event-time directory, non-text content) is not a source fault; a malformed required payload of an explicit user message never becomes a silent omission |
 | Live growth | the official `session/event` plane feeds a bounded buffer; reaching the bound marks the affected Sessions dirty and re-reads the official source instead of dropping accepted rows |
 | Destructive round | before the first known destructive publication of a full round (deletion, rebuild or marker rewrite), the round establishes an `incomplete` barrier and holds it through every required deletion, accepted-payload/repair settlement and per-ID terminal commit. Read-only discovery preserves the prior `ready` epoch; the round-local deletion cut and its cut-bound witness fence derived deletion |
 | Full/point ownership | one full-inventory round and independent exact-ID repairs share ONE per-ID single-flight claim: a repair requested while the full round owns that id is coalesced and handed off after the full candidate settles. The terminal `commitWitness` is the second, non-substitutable fence |
@@ -1871,6 +1871,15 @@ authoritative replay first takes an ordinary pending remainder over as its own
 held obligation, so an unchanged backlog cannot refuse every reset; only after
 that ownership transfer may a stale candidate re-arm the same coalesced repair,
 and a mandatory source proof never falls back to the periodic timer.
+
+The occurrence projection and its nullable event-time directory are identified by
+the source-proof contract: a persisted proof recorded under a different
+projection/proof contract is never reused. The Host replays each affected
+Session from the official log through the existing replay path — replacing its
+derived rows and proof — instead of upgrading stored rows in place. A legal
+optional metadata absence never blocks that rebuild; a real source failure still
+stays incomplete. Downgrade compatibility is not promised: an older Host keeps
+its own admission and proof semantics.
 
 The search is a literal Unicode lower-case substring match over the first
 accepted text. `all` addresses every accessible Session of the authenticated

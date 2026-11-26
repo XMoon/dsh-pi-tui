@@ -42,7 +42,7 @@ export const HISTORY_SEARCH_SQLITE_USER_VERSION = 2
  * Semantic contract of one durable source proof. Bump only when the projection
  * or the proof semantics change: proofs from an older contract are not reused.
  */
-export const HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION = 1
+export const HISTORY_SEARCH_SOURCE_PROOF_CONTRACT_VERSION = 2
 
 const DATABASE_FILE = 'v2.sqlite'
 const PRIVATE_DIRECTORY = '.dsh-pi-tui'
@@ -171,6 +171,12 @@ export interface HistoryIndexCommitInput {
   readonly effectiveCwd: string | null
   readonly lastEventHash: string | null
   readonly sourceState: 'persisted' | 'live'
+  /**
+   * Old-v2 recovery compatibility only: a retained pre-upgrade uncertainty
+   * count delta. The current admission fold has no optional-metadata
+   * uncertainty and every production caller passes `0`; the physical column
+   * and its checkpoint equality stay until a future schema change.
+   */
   readonly uncertainSourcesDelta: number
   readonly occurrences: readonly HistoryOccurrenceInput[]
 }

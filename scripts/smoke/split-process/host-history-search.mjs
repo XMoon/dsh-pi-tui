@@ -50,22 +50,21 @@ function textOfMessage(value) {
   return content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text).join('\n')
 }
 
-/** Whether one durable message is a real user-rpc admission, never an injected notice. */
-function isUserRpcMessage(message) {
+/** Whether one durable message is an official user-sourced admission, never an injected notice. */
+function isAcceptedUserMessage(message) {
   return message !== null && typeof message === 'object'
     && typeof message.id === 'string' && message.id !== ''
     && message.source?.kind === 'user'
-    && typeof message.source.rpcId === 'string' && message.source.rpcId !== ''
 }
 
 /** The first durable accepted message for `text` and the event that proved it. */
 function acceptedMessage(events, text) {
   for (const event of events) {
     if (event.type === 'agent/inbox/spliced' && Array.isArray(event.data?.inserted)) {
-      const message = event.data.inserted.find(candidate => textOfMessage(candidate) === text && isUserRpcMessage(candidate))
+      const message = event.data.inserted.find(candidate => textOfMessage(candidate) === text && isAcceptedUserMessage(candidate))
       if (message !== undefined) return { event, message }
     }
-    if (event.type === 'user/message' && textOfMessage(event.data) === text && isUserRpcMessage(event.data)) {
+    if (event.type === 'user/message' && textOfMessage(event.data) === text && isAcceptedUserMessage(event.data)) {
       return { event, message: event.data }
     }
   }
@@ -354,7 +353,9 @@ try {
       id: event.id,
       role: 'user',
       content: [{ type: 'text', text: event.text }],
-      source: { kind: 'user', rpcId: event.rpcId },
+      // An uncorrelated input is an official legal user source: only the
+      // producer kind classifies it.
+      source: event.rpcId === undefined ? { kind: 'user' } : { kind: 'user', rpcId: event.rpcId },
     },
   }))
   if (events.length > 0) await handle.append(events)
@@ -407,7 +408,7 @@ async function runInstalledWriter(installation, workDir, spec) {
 }
 
 /** Create ONE cold official current-format Session with an installed child writer. */
-async function seedOfficialColdSession(installation, dshHome, workDir, { id, cwd, texts }) {
+async function seedOfficialColdSession(installation, dshHome, workDir, { id, cwd, texts, uncorrelatedTexts = [] }) {
   const facts = await runInstalledWriter(installation, workDir, {
     op: 'create',
     root: join(dshHome, 'sessions'),
@@ -417,7 +418,7 @@ async function seedOfficialColdSession(installation, dshHome, workDir, { id, cwd
       seq,
       id: `seed-${id}-${String(seq)}`,
       text,
-      rpcId: `seed-rpc-${id}-${String(seq)}`,
+      ...(uncorrelatedTexts.includes(text) ? {} : { rpcId: `seed-rpc-${id}-${String(seq)}` }),
     })),
   })
   return facts
@@ -639,7 +640,14 @@ export async function runHostHistorySearch(context) {
     // Host: neither is ever resumed, so their durable proof lifecycle is the
     // only thing the restarts exercise.
     const sentinelCwd = realpathSync(workDir)
-    await seedOfficialColdSession(context.installation, dshHome, workDir, { id: sentinelId, cwd: sentinelCwd, texts: sentinelTexts })
+    await seedOfficialColdSession(context.installation, dshHome, workDir, {
+      id: sentinelId,
+      cwd: sentinelCwd,
+      texts: sentinelTexts,
+      // ONE real official accepted input carries no request correlation; only
+      // its official `source.kind` may classify it.
+      uncorrelatedTexts: [sentinelTexts[1]],
+    })
     await seedOfficialColdSession(context.installation, dshHome, workDir, { id: emptySentinelId, cwd: sentinelCwd, texts: [] })
     legacySentinel = writeLegacyV1Sentinel(context.installation.profileDir)
 
@@ -667,8 +675,8 @@ export async function runHostHistorySearch(context) {
     const accepted = await waitForAcceptedMessage(dshHome, sessionId, unique, 'host history search first accepted message')
     firstEvent = accepted.event
     firstMessage = accepted.message
-    assert(isUserRpcMessage(firstMessage),
-      `host history search: the accepted message is not a user-rpc admission: ${JSON.stringify(firstMessage)}`)
+    assert(isAcceptedUserMessage(firstMessage),
+      `host history search: the accepted message is not a user-sourced admission: ${JSON.stringify(firstMessage)}`)
     assert(firstEvent.type === 'agent/inbox/spliced' || firstEvent.type === 'user/message',
       `host history search: unexpected acceptance event ${firstEvent.type}`)
 
@@ -762,10 +770,10 @@ export async function runHostHistorySearch(context) {
       'host history search second accepted message',
     )
     const secondMessage = secondAccepted.type === 'agent/inbox/spliced'
-      ? secondAccepted.data.inserted.find(candidate => textOfMessage(candidate) === unique && isUserRpcMessage(candidate))
+      ? secondAccepted.data.inserted.find(candidate => textOfMessage(candidate) === unique && isAcceptedUserMessage(candidate))
       : secondAccepted.data
-    assert(isUserRpcMessage(secondMessage) && secondMessage.id !== firstMessage.id,
-      `W02: the second submission did not produce a distinct user-rpc message id: ${JSON.stringify(secondMessage)}`)
+    assert(isAcceptedUserMessage(secondMessage) && secondMessage.id !== firstMessage.id,
+      `W02: the second submission did not produce a distinct accepted message id: ${JSON.stringify(secondMessage)}`)
     const duplicateAnswer = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'all', query: unique, limit: 25,
     }, 'host history search W02 duplicates'), 'W02 duplicates')
@@ -938,6 +946,18 @@ export async function runHostHistorySearch(context) {
       `W04: the reused cold sentinel projection returned ${JSON.stringify(sentinelAnswer.items)}`)
     assert(JSON.stringify(sentinelAnswer.items.map(item => item.preview).sort()) === JSON.stringify([...sentinelTexts].sort()),
       'W04: the reused cold sentinel changed its accepted previews')
+    // The independent oracle proves the sentinel's second accepted input was
+    // really written WITHOUT rpcId; the product must still index it exactly.
+    const sentinelEvents = hostSessionEvents(dshHome, sentinelId) ?? []
+    const sentinelBeta = acceptedMessage(sentinelEvents, sentinelTexts[1])
+    assert(sentinelBeta !== undefined, 'W04: the oracle found no durable no-rpcId sentinel input')
+    assert(sentinelBeta.message.source?.kind === 'user' && sentinelBeta.message.source?.rpcId === undefined,
+      `W04: the sentinel input is not an uncorrelated user source: ${JSON.stringify(sentinelBeta.message.source)}`)
+    const sentinelBetaItem = sentinelAnswer.items.find(item => item.messageId === sentinelBeta.message.id)
+    assert(sentinelBetaItem !== undefined, 'W04: the no-rpcId sentinel occurrence is missing from the projection')
+    const sentinelBetaText = await readFullText(clientB, requestPath, sentinelBetaItem, 'W04 no-rpcId sentinel text')
+    assert(sentinelBetaText === sentinelTexts[1],
+      `W04: readText did not recover the no-rpcId accepted text: ${JSON.stringify(sentinelBetaText)}`)
     const emptyAnswer = assertReady(await searchSettled(clientB, requestPath, {
       scope: 'session', sessionId: emptySentinelId, query: '', limit: 25,
     }, 'host history search W04 empty sentinel'), 'W04 empty sentinel')
