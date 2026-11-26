@@ -99,6 +99,40 @@ function committedText(message) {
     .join('')
 }
 
+/**
+ * One clean text-only flight on a reattached View: every delivered update
+ * belongs to the exact attached Session, carries a non-empty stable ACP
+ * message id, and the concatenated text equals the committed canonical text.
+ * Any foreign Session, image, non-text content or extra/duplicated text fails;
+ * legal streaming segmentation is tolerated.
+ */
+function assertCleanTextFlight(result, sessionId, label) {
+  const updates = result.settled.updates
+  assert(updates.length > 0, `${label}: the clean turn must deliver at least one update`)
+  for (const entry of updates) {
+    assertStrict.equal(entry.message.params.sessionId, sessionId,
+      `${label}: every update belongs to the exact attached Session`)
+    assertStrict.equal(entry.message.params.update.sessionUpdate, 'agent_message_chunk',
+      `${label}: a clean text turn delivers only standard message chunks`)
+    assertStrict.equal(entry.message.params.update.content.type, 'text',
+      `${label}: a clean text turn delivers only text content`)
+    assertStrict.equal(typeof entry.message.params.update.messageId, 'string',
+      `${label}: every streamed message carries an ACP message id`)
+    assert(entry.message.params.update.messageId.length > 0,
+      `${label}: the ACP message id must be non-empty`)
+  }
+  const ids = new Set(updates.map(entry => entry.message.params.update.messageId))
+  assertStrict.equal(ids.size, 1,
+    `${label}: one attempt uses ONE stable ACP message id (got ${JSON.stringify([...ids])})`)
+  const committed = result.turnEvents
+    .filter(event => event.type === 'assistant/message')
+    .map(event => committedText(event.data.message))
+    .join('')
+  assert(committed.length > 0, `${label}: the clean turn commits non-empty assistant text`)
+  assertStrict.equal(updates.map(entry => entry.message.params.update.content.text).join(''), committed,
+    `${label}: the delivered text bytes equal the committed canonical text (no loss or duplication)`)
+}
+
 /** One raw NDJSON client that keeps the exact wire byte length of every frame. */
 class AcpRawClient {
   constructor(socket) {
@@ -423,6 +457,12 @@ export async function runAcpPo4cContentOutput(context) {
       .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk')
     assertStrict.equal(mixedChunks.length, mixedUpdates.length,
       'PO-4C: a pure assistant turn delivers only standard message chunks')
+    for (const entry of mixedChunks) {
+      assertStrict.equal(typeof entry.message.params.update.messageId, 'string',
+        'PO-4C: every streamed mixed message carries an ACP message id')
+      assert(entry.message.params.update.messageId.length > 0,
+        'PO-4C: the ACP message id must be non-empty')
+    }
     const mixedTextChunks = mixedChunks
       .filter(entry => entry.message.params.update.content.type === 'text')
     const mixedImageChunks = mixedChunks
@@ -501,7 +541,7 @@ export async function runAcpPo4cContentOutput(context) {
       .filter(entry => entry.message.params.update.sessionUpdate === 'agent_message_chunk')
     assertStrict.equal(toolStarts.length, 1, 'PO-4C: one durable tool/call produces exactly ONE start update')
     assertStrict.equal(toolResults.length, 1, 'PO-4C: one durable tool/result produces exactly ONE result update')
-    assertStrict.equal(toolAnswerChunks.length, 1, 'PO-4C: the streamed tool answer is never re-sent')
+    assert(toolAnswerChunks.length > 0, 'PO-4C: the tool turn delivers its final assistant answer')
     assert(toolUpdates.indexOf(toolStarts[0]) < toolUpdates.indexOf(toolResults[0]),
       'PO-4C: the tool start precedes its result')
     assert(toolUpdates.indexOf(toolResults[0]) < toolUpdates.indexOf(toolAnswerChunks[0]),
@@ -538,9 +578,19 @@ export async function runAcpPo4cContentOutput(context) {
     const finalToolMessage = tool.turnEvents.filter(event => event.type === 'assistant/message').at(-1)?.data.message
     const toolAnswer = committedText(finalToolMessage)
     assert(toolAnswer.length > 0, 'PO-4C: the committed tool answer must be non-empty')
-    assertStrict.equal(toolAnswerChunks[0].message.params.update.content.text, toolAnswer,
-      'PO-4C: the delivered tool answer bytes equal the committed canonical answer')
-    assertStrict.equal(typeof toolAnswerChunks[0].message.params.update.messageId, 'string')
+    for (const entry of toolAnswerChunks) {
+      assertStrict.equal(entry.message.params.update.content.type, 'text',
+        'PO-4C: the tool answer is delivered as standard text content')
+      assertStrict.equal(typeof entry.message.params.update.messageId, 'string',
+        'PO-4C: every streamed tool-answer message carries an ACP message id')
+      assert(entry.message.params.update.messageId.length > 0,
+        'PO-4C: the tool-answer ACP message id must be non-empty')
+    }
+    const toolAnswerIds = new Set(toolAnswerChunks.map(entry => entry.message.params.update.messageId))
+    assertStrict.equal(toolAnswerIds.size, 1,
+      `PO-4C: one tool answer uses ONE stable ACP message id (got ${JSON.stringify([...toolAnswerIds])})`)
+    assertStrict.equal(toolAnswerChunks.map(entry => entry.message.params.update.content.text).join(''), toolAnswer,
+      'PO-4C: the delivered tool answer bytes equal the committed canonical answer (no loss or duplication)')
     const toolStored = await waitForC1WorkEvent(workRoot,
       event => event.kind === 'po4c-image-stored' && event.name === 'tool.png' && event.pid === hostIdentity.hostPid,
       'PO-4C official Store tool image proof')
@@ -634,9 +684,7 @@ export async function runAcpPo4cContentOutput(context) {
     }
     const clean = await runPrompt(reattached, victimSession, MARKERS.health, 'PO-4C clean prompt after reattach')
     assertEndTurn(clean.settled, 'PO-4C clean prompt after reattach')
-    assertStrict.equal(clean.settled.updates.length, 1,
-      'PO-4C: the new View receives exactly its own output, never a late read of the closed one')
-    assertStrict.equal(clean.settled.updates[0].message.params.update.content.type, 'text')
+    assertCleanTextFlight(clean, victimSession, 'PO-4C clean prompt after reattach')
 
     // L6-C06 (late read): the official Store read completes AFTER the ACP
     // connection was destroyed. The new View of that Session must never see
@@ -690,9 +738,7 @@ export async function runAcpPo4cContentOutput(context) {
     }
     const lateClean = await runPrompt(lateView, sessionId, MARKERS.health, 'PO-4C clean prompt after the late read')
     assertEndTurn(lateClean.settled, 'PO-4C clean prompt after the late read')
-    assertStrict.equal(lateClean.settled.updates.length, 1,
-      'PO-4C: the new View receives only its own output after a late Store read completion')
-    assertStrict.equal(lateClean.settled.updates[0].message.params.update.content.type, 'text')
+    assertCleanTextFlight(lateClean, sessionId, 'PO-4C clean prompt after the late read')
 
     // L6-C08 (F1 negative): the bounded allowance is finite. ONE committed tool
     // result carrying TWO independently stored images exceeds the count-1

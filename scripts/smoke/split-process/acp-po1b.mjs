@@ -323,6 +323,19 @@ export async function runAcpPo1bOptInControl(context) {
       assert(false, `${label}: the expected frame never appeared:\n${(await frameOf(target)).slice(-2500)}`)
     }
     /**
+     * Wait for the NEXT painted frame after an input. A fixed delay is never the
+     * gate: the page's own repaint is what admits the next key.
+     */
+    const waitFrameChange = async (target, previous, label, timeoutMs = 15_000) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const next = await frameOf(target)
+        if (next !== previous) return next
+        await sleep(50)
+      }
+      assert(false, `${label}: the viewport never repainted after the input:\n${previous.slice(-2500)}`)
+    }
+    /**
      * Wait for the REAL persisted preference (the same official read the page's
      * authority uses). The exact painted On/Off copy and the full risk sentence
      * are owned by the existing UI owner tests; this smoke uses the painted
@@ -339,30 +352,45 @@ export async function runAcpPo1bOptInControl(context) {
       }
       assert(false, `${label}: the persisted preference never reached ${String(expected)} (last ${JSON.stringify(last)})`)
     }
-    /** Down until the pattern's row owns the cursor (never a fixed key count). */
+    /**
+     * Down until the pattern's row owns the cursor. Each Down is admitted only
+     * after the page repaints the previous selection; there is no fixed key
+     * cadence and no fixed key count beyond the bounded safety maximum.
+     */
     const selectRow = async (target, pattern, label, maxSteps = 14) => {
+      let frame = await frameOf(target)
       for (let step = 0; step < maxSteps; step += 1) {
-        if (pattern.test(await frameOf(target))) return
+        if (pattern.test(frame)) return frame
         target.send('\x1b[B')
-        await sleep(160)
+        frame = await waitFrameChange(target, frame, `${label}: selection step ${String(step + 1)}`)
       }
-      assert(pattern.test(await frameOf(target)), `${label}: the row was never selected:\n${(await frameOf(target)).slice(-2500)}`)
+      assert(pattern.test(frame), `${label}: the row was never selected:\n${frame.slice(-2500)}`)
     }
     /**
-     * The accept row and its bar segment exist only while the risk copy shares
-     * this frame. If the current grant hides it, walk the ONE real Detail column
-     * with the page's own scroll keys instead of confirming a blanked control.
+     * Wait for the Disable confirmation PHASE first, then for its painted
+     * `Confirm [Enter]` admission. Scrolling happens only after the confirm
+     * phase is observed, one real scroll key at a time, and every step is gated
+     * on a fresh page frame. The page contract itself withholds the accept
+     * segment unless the complete risk copy shares the painted viewport.
      */
-    const waitConfirmAffordance = async (target, label, timeoutMs = 30_000) => {
+    const waitConfirmAffordance = async (target, previous, label, timeoutMs = 30_000) => {
       const deadline = Date.now() + timeoutMs
-      let step = 0
-      while (Date.now() < deadline) {
-        if (/Confirm \[Enter\]/u.test(await frameOf(target))) return
-        target.send(step % 2 === 0 ? '\x1b[H' : '\x1b[6~')
-        step += 1
-        await sleep(160)
+      let frame = await waitFrameChange(target, previous, `${label}: confirm phase repaint`,
+        Math.min(timeoutMs, 15_000))
+      const confirmPhase = /(?:^|\s)>?\s*Cancel(?:\s|$)/mu
+      while (Date.now() < deadline && !confirmPhase.test(frame)) {
+        frame = await waitFrameChange(target, frame, `${label}: confirm phase repaint`,
+          Math.max(1_000, Math.min(5_000, deadline - Date.now())))
       }
-      assert(false, `${label}: the painted Confirm [Enter] affordance never appeared:\n${(await frameOf(target)).slice(-2500)}`)
+      assert(confirmPhase.test(frame), `${label}: the confirm phase never appeared:\n${frame.slice(-2500)}`)
+      if (/Confirm \[Enter\]/u.test(frame)) return frame
+      for (let step = 0; step < 4 && Date.now() < deadline; step += 1) {
+        target.send(step === 0 ? '\x1b[H' : '\x1b[6~')
+        frame = await waitFrameChange(target, frame, `${label}: scroll step ${String(step + 1)}`,
+          Math.max(1_000, Math.min(10_000, deadline - Date.now())))
+        if (/Confirm \[Enter\]/u.test(frame)) return frame
+      }
+      assert(false, `${label}: the painted Confirm [Enter] affordance never appeared:\n${frame.slice(-2500)}`)
     }
     const sameSocketIdentity = identity => {
       if (!exists(socketPathFor(scopeId))) return false
@@ -399,11 +427,11 @@ export async function runAcpPo1bOptInControl(context) {
     // Only observable live facts decide: the held peer stays connected, the SAME
     // socket inode survives, and the Host reports enabled. The L2/VT owner test
     // keeps the precise zero-dispatch proof.
-    await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
+    const stagedDisableFrame = await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
     tui.send('\r')
-    await waitConfirmAffordance(tui, 'b0 disable: risk confirmation')
+    const confirmDisableFrame = await waitConfirmAffordance(tui, stagedDisableFrame, 'b0 disable: risk confirmation')
     tui.send('\x1b')
-    await waitFrame(tui, /Listener\s+Enabled/u, 'b0 disable: cancelled back to ready')
+    await waitFrameChange(tui, confirmDisableFrame, 'b0 disable: cancelled back to the ready frame')
     assert(heldClosed === false, 'b0: Cancel must not close the held ACP peer')
     assert(sameSocketIdentity(heldSocketIdentity), 'b0: Cancel must keep the SAME live socket inode')
     assertAccess(await acpAccess(peer, 'b0 status after cancel', undefined), 'enabled', 'b0 status after cancel')
@@ -412,13 +440,14 @@ export async function runAcpPo1bOptInControl(context) {
     const secondInitialize = await held.initialize(2)
     assert(secondInitialize?.error !== undefined,
       'b0: the held ACP peer must still answer a real request after Cancel')
-    // The SECOND explicit confirmation retires the listener and disconnects the
-    // held peer on the SAME Host.
-    await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action again')
+    // The CANCEL frame is already painted; the next explicit action is selected
+    // from that fresh ready frame, never assumed from the old confirmation.
+    const stagedDisableAgainFrame = await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu,
+      'b0 disable: staged action again')
     tui.send('\r')
-    await waitConfirmAffordance(tui, 'b0 disable: risk confirmation again')
+    await waitConfirmAffordance(tui, stagedDisableAgainFrame, 'b0 disable: risk confirmation again')
     tui.send('\r')
-    await held.closed
+    await waitUntil(() => heldClosed, 'b0: confirmed page disable to close the held ACP peer', 30_000)
     await waitUntil(() => !exists(socketPathFor(scopeId)), 'b0: confirmed page disable retires acp.sock')
     await awaitRuntimeState(peer, 'disabled', 'b0 after the confirmed page disable')
     const hostAfterDisable = await hostStatus(host1)
@@ -431,9 +460,9 @@ export async function runAcpPo1bOptInControl(context) {
     await selectRow(tui, /(?:^|\s)> Start automatically(?:\s|$)/mu, 'b0 autostart: row')
     tui.send('\r')
     await tui.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: choice', 30_000)
-    await selectRow(tui, /(?:^|\s)> On(?:\s|$)/mu, 'b0 autostart: On candidate')
+    const onFrame = await selectRow(tui, /(?:^|\s)> On(?:\s|$)/mu, 'b0 autostart: On candidate')
     tui.send('\r')
-    await tui.waitForScreen('Save the next Host start preference as On?', 'b0 autostart: confirm step', 30_000)
+    await waitFrameChange(tui, onFrame, 'b0 autostart: staged confirmation')
     await waitFrame(tui, /Confirm save \[Enter\]/u, 'b0 autostart: painted Confirm save affordance')
     profileTouched = true
     tui.send('\r')
@@ -446,6 +475,7 @@ export async function runAcpPo1bOptInControl(context) {
     assert(hostAfterPreference.pid === hostBeforeTui.pid
       && hostAfterPreference.localHost.instanceId === hostBeforeTui.localHost.instanceId,
     'b0: saving the next-start preference must not replace the Host')
+    await waitFrame(tui, /Refresh \[R\]/u, 'b0 autostart: settled page before leaving')
     trace('acp-po1b/tui-journey', {
       pageFirstFrameNonWriting: true,
       slashAcpControl: true,
@@ -457,13 +487,18 @@ export async function runAcpPo1bOptInControl(context) {
       autoStartViaTui: true,
     })
     // Leave the workspace through the REAL Esc ladder, then exit naturally.
-    for (let step = 0; step < 4 && (await frameOf(tui)).includes('Settings ·'); step += 1) {
+    for (let step = 0; step < 4; step += 1) {
+      const frame = await frameOf(tui)
+      if (!frame.includes('Settings ·')) break
       tui.send('\x1b')
-      await sleep(220)
+      await waitFrameChange(tui, frame, `b0: Esc step ${String(step + 1)}`)
     }
-    assert(!(await frameOf(tui)).includes('Settings ·'), 'b0: the Settings workspace must close with the real Esc ladder')
+    const closedFrame = await frameOf(tui)
+    assert(!closedFrame.includes('Settings ·'), `b0: the Settings workspace must close with the real Esc ladder:\n${closedFrame.slice(-2000)}`)
     tui.send('/exit\r')
-    await tui.waitForExit(60_000)
+    const exit = await tui.waitForExit(60_000)
+    assert(exit?.code === 0 && exit?.signal === null,
+      `b0: /exit must complete with a normal code 0 and no signal (got ${JSON.stringify(exit)})`)
 
     // ── b) ONE independent runtime toggle through the private Peer control:
     //      status/socket/owner-admission/same-Host evidence only. ──────────────

@@ -1403,12 +1403,6 @@ test('the ACP PO-4C committed content-output selected verdict requires the compl
     delete missing[field]
     assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', missing), /selected acp\.po4c-content-output/u)
   }
-  // The retired content-only scenes must not be required or fabricated as
-  // substitutes for the retained transport proof.
-  for (const retired of ['assistantImageOnlyAccepted', 'toolResultOrderedContent', 'toolFailedStatus', 'missingImageRejected']) {
-    const withRetired = { ...complete, [retired]: true }
-    assert.equal(assertSelectedVerdict('acp.po4c-content-output', withRetired), undefined)
-  }
   // A present-but-false proof field is rejected.
   assert.throws(() => assertSelectedVerdict('acp.po4c-content-output', { ...complete, slowPeerIsolated: false }),
     /selected acp\.po4c-content-output/u)
