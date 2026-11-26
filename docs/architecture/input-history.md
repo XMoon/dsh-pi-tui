@@ -386,10 +386,11 @@ Client's JSONL files are neither read nor written.
   proven effective cwd). Any relevant publication permanently invalidates the
   open, including A→B→A where the final value equals the initial one; a
   same-id binding/generation replacement, a lost token, a removed binding or a
-  failed/stale/replaced cut revokes it too. An ordinary Inspector `changed`
+  source replacement revokes the whole open. An ordinary Inspector `changed`
   (running/stats/other projection publications) is not a cwd change; only the
-  exact `workingDirectory` face owns that revocation. A missing/stale cut refuses
-  `Directory` while leaving `Session`/`All` usable; the capture never polls,
+  exact `workingDirectory` face owns that revocation. A missing, failed or
+  stale exact cut refuses `Directory` while leaving `Session`/`All` usable; it
+  does not by itself retire the open. The capture never polls,
   compares cwd values or substitutes the Session header/status cwd or the
   Client process cwd. A sessionless Client's `All` is fenced by the same
   connection generation and, once a CONFIRMED Workspace intent exists, by the

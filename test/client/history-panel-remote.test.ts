@@ -384,11 +384,25 @@ test('the painted More button loads the next page through the same seat action',
   const footerRow = frame.findLastIndex(line => line.includes('Cancel [Esc]'))
   const moreCol = frame[footerRow]?.indexOf('More · PgDn') ?? -1
   assert.ok(footerRow >= 0 && moreCol >= 0, `the More footer span must paint:\n${frame.join('\n')}`)
+  port.holdSearch = true
   assert.ok(panel.handleMouse(pointer('press', moreCol, footerRow, 120, height)) !== undefined)
   assert.ok(panel.handleMouse(pointer('click', moreCol, footerRow, 120, height)) !== undefined)
+  await renderUntil(panel, 120, () => port.searchCalls.length === 2, 'the pointer More request')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000a', 'More keeps the painted selection')
+  // A real result-row click while More is pending must be refused by the ONE
+  // owner and leave the painted row/Preview anchor untouched.
+  const pendingFrame = plain(panel.render(120))
+  const betaRow = pendingFrame.findIndex(line => line.includes('beta prompt'))
+  assert.ok(betaRow >= 0, `the second painted row must be available:\n${pendingFrame.join('\n')}`)
+  panel.handleMouse(pointer('press', 5, betaRow, 120, pendingFrame.length))
+  panel.handleMouse(pointer('click', 5, betaRow, 120, pendingFrame.length))
+  assert.equal(panel.selected()?.id, 'ses_a\u0000a',
+    'the More-pending row click cannot diverge from the owner-painted selection')
+  port.releaseSearch()
   await renderUntil(panel, 120, lines => lines.some(line => line.includes('Results · 3 shown')), 'the appended page')
   assert.equal(port.searchCalls.length, 2, 'the pointer More started exactly one page request')
   assert.equal(port.searchCalls[1]?.cursor, 'cursor-2')
+  assert.equal(panel.selected()?.id, 'ses_a\u0000a', 'the appended page keeps the original row')
 })
 
 test('a narrow Remote footer keeps More visible', async () => {

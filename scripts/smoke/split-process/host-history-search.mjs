@@ -110,6 +110,63 @@ async function search(client, requestPath, request, label) {
 }
 
 
+/** Reach the ACTIVE All-directory scope from the captured default without
+ *  assuming whether the resumed Session or a sessionless Directory default won
+ *  the open. The active label is bracketed; an inactive label is not. */
+async function reachAllScope(client, label) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const lines = await client.viewport()
+    const historyRow = lines.find(line => line.includes('Input History'))
+    if (historyRow?.includes('[All Directories]')) return
+    client.send('\t')
+    await new Promise(resolve => setTimeout(resolve, 120))
+  }
+  const lines = await client.viewport()
+  throw new SplitSmokeAssertionError(`${label}: History never reached the ACTIVE All scope: ${JSON.stringify(lines)}`)
+}
+
+/** Wait for the CURRENT Results region to paint the target's selected marker
+ *  and its verified exact body, stable across two real frames. The transcript
+ *  or query text alone is not a witness. */
+async function waitForStableHistoryResult(client, target, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  let previous = ''
+  for (;;) {
+    const lines = await client.viewport()
+    const frame = lines.join('\n')
+    const selected = lines.some(line => /^\s*>\s/u.test(line) && line.includes(target))
+    const bodyReady = lines.some(line => line.includes('Copy All [Alt+C]'))
+    const useReady = lines.some(line => line.includes('Use Selected [Enter]'))
+    const results = lines.some(line => line.includes('Results ·'))
+    if (selected && bodyReady && useReady && results && frame === previous) return lines
+    previous = frame
+    if (Date.now() - started > timeoutMs) {
+      throw new SplitSmokeAssertionError(`${label}: the selected exact result never became the stable painted frame: ${JSON.stringify(lines)}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 80))
+  }
+}
+
+/** The ACTUAL composer row (the last prompt line), not a transcript echo. */
+function composerDraftOf(lines) {
+  const row = lines.filter(line => line.trimStart().startsWith('❯')).at(-1)
+  if (row === undefined) return undefined
+  const at = row.indexOf('❯')
+  return row.slice(at + '❯'.length).trim()
+}
+
+async function waitForComposerDraft(client, target, label, timeoutMs = 30_000) {
+  const started = Date.now()
+  for (;;) {
+    const lines = await client.viewport()
+    if (composerDraftOf(lines) === target) return lines
+    if (Date.now() - started > timeoutMs) {
+      throw new SplitSmokeAssertionError(`${label}: the composer region does not hold the exact draft: ${JSON.stringify(lines)}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 40))
+  }
+}
+
 /** The UI leg: a real Ctrl+R on a packed Client reads the Host, restores the
  *  exact draft and submits only on the SECOND Enter, while the legacy JSONL
  *  sentinel stays byte-identical. */
@@ -122,34 +179,21 @@ async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, 
   const beforeIds = acceptedIds()
   client.send('\x12')
   await client.waitForScreen('Input History', `${label} History seat`, 120_000)
-  client.send('\t')
-  await client.waitForScreen('[Current Directory]', `${label} Directory scope`, 120_000)
-  client.send('\t')
-  await client.waitForScreen('[All Directories]', `${label} All scope`, 120_000)
+  await reachAllScope(client, `${label} All scope`)
   client.send(target)
-  await client.waitForScreen('Results ·', `${label} Host result`, 120_000)
-  await client.waitForScreen(target, `${label} result row`, 120_000)
-  // The exact body is loaded lazily and the action bar appears only after it
-  // is verified. Wait for that readiness, then send the ONE restore Enter.
-  await client.waitForScreen('Copy All [Alt+C]', `${label} exact body`, 120_000)
-  // The panel becomes the physical key owner asynchronously after the seat
-  // mount. A first Enter that lands before that focus handoff is an editor
-  // no-op; retry the SAME restore gesture once only while History is still
-  // mounted, then prove the seat is gone before the deliberate second Enter.
-  let restored = false
-  for (let attempt = 0; attempt < 2 && !restored; attempt += 1) {
-    client.send('\r')
-    const closeDeadline = Date.now() + 5_000
-    while (Date.now() < closeDeadline) {
-      if (!(await client.viewport()).some(line => line.includes('Input History'))) {
-        restored = true
-        break
-      }
-      await new Promise(resolve => setTimeout(resolve, 20))
+  await waitForStableHistoryResult(client, target, `${label} stable selected result`)
+  // ONE Restore Enter, admitted only against the stable selected marker and
+  // verified body. If History remains mounted, this is a real product/harness
+  // defect to record, never a reason to send the gesture twice.
+  client.send('\r')
+  const closeDeadline = Date.now() + 15_000
+  while ((await client.viewport()).some(line => line.includes('Input History'))) {
+    if (Date.now() > closeDeadline) {
+      assert(false, `${label}: History stayed mounted after ONE Restore Enter: ${JSON.stringify(await client.viewport())}`)
     }
+    await new Promise(resolve => setTimeout(resolve, 25))
   }
-  assert(restored, `${label}: History stayed mounted after Restore: ${JSON.stringify(await client.viewport())}`)
-  await client.waitForScreen(`❯ ${target}`, `${label} exact draft`, 120_000)
+  await waitForComposerDraft(client, target, `${label} exact composer draft`)
   assert(acceptedCount() === before,
     `${label}: the restore submitted the history row`)
   assertLegacyV1Untouched(legacySentinel)
@@ -165,6 +209,19 @@ async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, 
     const id = acceptedMessage([event], target)?.message?.id
     return typeof id === 'string' && !beforeIds.has(id)
   })
+}
+
+/** Wait until the official index has observed one already-durable occurrence. */
+async function waitForIndexedOccurrence(client, requestPath, request, messageId, label, timeoutMs = 120_000) {
+  const started = Date.now()
+  for (;;) {
+    const answer = assertReady(await searchSettled(client, requestPath, request, label), label)
+    if (answer.items.some(item => item.messageId === messageId)) return answer
+    if (Date.now() - started > timeoutMs) {
+      throw new SplitSmokeAssertionError(`${label}: the durable occurrence never entered the ready index: ${JSON.stringify(answer)}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
 }
 
 /** Read every page of one Owner search in order. */
@@ -682,6 +739,15 @@ export async function runHostHistorySearch(context) {
       legacySentinel,
       label: 'W07 packed Ctrl+R on independent Client B',
     })
+    assert(uiAccepted !== undefined, 'W07: the second Enter produced no accepted occurrence event')
+    const uiAcceptedMessage = acceptedMessage([uiAccepted], uiTarget)?.message
+    assert(uiAcceptedMessage !== undefined && typeof uiAcceptedMessage.id === 'string',
+      'W07: the second Enter produced no accepted user-rpc message')
+    // The durable event exists before the Host index observes it. Wait for the
+    // ready index to include this exact occurrence before the next query.
+    await waitForIndexedOccurrence(clientB, requestPath, {
+      scope: 'session', sessionId, query: unique, limit: 25,
+    }, uiAcceptedMessage.id, 'W07 indexed occurrence')
 
     // ── W02a: the same text submitted twice keeps two message ids. ───────────
     const afterFirst = hostSessionEvents(dshHome, sessionId)?.length ?? 0
@@ -801,18 +867,32 @@ export async function runHostHistorySearch(context) {
         before: beforeIds,
         after: restartAnswer.items.map(item => item.messageId).sort(),
       })}`)
-    assert(uiAccepted !== undefined, 'W07: the second Enter produced no accepted occurrence event')
-    const uiAcceptedMessage = acceptedMessage([uiAccepted], uiTarget)?.message
-    assert(uiAcceptedMessage !== undefined && typeof uiAcceptedMessage.id === 'string',
-      'W07: the second Enter produced no accepted user-rpc message')
+    const durableEvents = hostSessionEvents(dshHome, sessionId) ?? []
+    // The indexed acceptance time is the official inbox admission time (the
+    // first durable splice), not the later user/message projection.
+    const admissionTimeOf = id => durableEvents
+      .find(event => event.type === 'agent/inbox/spliced'
+        && Array.isArray(event.data?.inserted)
+        && event.data.inserted.some(message => message?.id === id))?.time
+    const firstAdmissionTime = admissionTimeOf(firstMessage.id)
+    const secondAdmissionTime = admissionTimeOf(secondMessage.id)
+    const uiAdmissionTime = admissionTimeOf(uiAcceptedMessage.id)
+    assert(firstAdmissionTime !== undefined, 'W01: the first occurrence has no durable admission event')
+    assert(secondAdmissionTime !== undefined, 'W02: the duplicate occurrence has no durable admission event')
+    assert(uiAdmissionTime !== undefined, 'W07: the accepted occurrence has no durable admission event')
     const expectedTimes = new Map([
-      [firstMessage.id, firstEvent.time],
-      [secondMessage.id, secondAccepted.time],
-      [uiAcceptedMessage.id, uiAccepted.time],
+      [firstMessage.id, firstAdmissionTime],
+      [secondMessage.id, secondAdmissionTime],
+      [uiAcceptedMessage.id, uiAdmissionTime],
     ])
     assert(restartAnswer.items.every(item => item.preview === unique && item.effectiveCwd === header.cwd
       && item.acceptedAt === expectedTimes.get(item.messageId)),
-    'W03: restart changed preview, event cwd or acceptedAt')
+    `W03: restart changed preview, event cwd or acceptedAt: ${JSON.stringify({
+      items: restartAnswer.items.map(item => ({ id: item.messageId, preview: item.preview,
+        cwd: item.effectiveCwd, acceptedAt: item.acceptedAt,
+        expected: expectedTimes.get(item.messageId) })),
+      headerCwd: header.cwd,
+    })}`)
     const restartText = await readFullText(clientB, requestPath, restartAnswer.items[0], 'W03 restart exact text')
     assert(restartText === unique, 'W03: restart changed the recoverable original text')
 
@@ -825,8 +905,7 @@ export async function runHostHistorySearch(context) {
     clientB.send('\t')
     await clientB.waitForScreen('[All Directories]', 'W03 restart All scope', 120_000)
     clientB.send(uiTarget)
-    await clientB.waitForScreen('Results ·', 'W03 restart Host result', 120_000)
-    await clientB.waitForScreen(uiTarget, 'W03 restart original accepted row', 120_000)
+    await waitForStableHistoryResult(clientB, uiTarget, 'W03 restart stable selected result')
     clientB.send('\x1b')
     await clientB.waitForScreen('❯', 'W03 restart History closed back to Composer', 30_000)
 

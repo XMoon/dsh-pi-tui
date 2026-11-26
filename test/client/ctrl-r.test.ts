@@ -927,3 +927,63 @@ test('Save Location cancel and confirm each restore the SAME file-backed History
   assert.equal(app.getDraft(), 'untouched draft', 'confirm leaves the draft untouched')
   assert.ok(strip(vt.getViewport()).includes('Search: > '), 'the query row is back')
 })
+
+test('a throwing PiTui History close releases the preserved Remote scope exactly once and writes no draft', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
+  const { TuiApp } = await import('../../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  let disposed = 0
+  const remote = {
+    initialScope: 'all' as const,
+    directory: () => ({ available: false, reason: 'directory-unavailable' }),
+    isCurrent: () => true,
+    subscribe: () => () => {},
+    dispose: () => { disposed += 1 },
+  }
+  const row = {
+    id: 'ses-a\u0000m1', sessionId: 'ses-a', messageId: 'm1', firstEventSeq: 1,
+    acceptedAt: 1, effectiveCwd: null, preview: 'restored exact text',
+    contentLength: 'restored exact text'.length,
+    contentSha256: '0'.repeat(64), hasNonText: false,
+  }
+  let closes = 0
+  class ExplodingSeat {
+    open(): void {}
+    setQuery(): void {}
+    setScope(): void {}
+    select(): void {}
+    more(): void {}
+    retry(): void {}
+    subscribe(): () => void { return () => {} }
+    view() {
+      return {
+        serial: 1, queryRevision: 1, scope: 'all' as const, query: '', status: 'ready' as const,
+        message: '', rows: [row], selectedId: row.id, hasMore: false, moreLoading: false,
+        directory: remote.directory(), body: { kind: 'ready' as const, row, text: 'restored exact text', hasNonText: false },
+      }
+    }
+    close(): void {
+      closes += 1
+      throw new Error('close exploded')
+    }
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true, remote }),
+    historySearchRead: { search: async () => { throw new Error('not used') }, readText: async () => { throw new Error('not used') } },
+    historySearchDiag: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} },
+    historySeatFactory: () => new ExplodingSeat(),
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  app.openHistorySearch()
+  await vt.waitForRender()
+  assert.throws(() => vt.sendInput('\r'), /close exploded/)
+  await vt.waitForRender()
+  assert.equal(closes, 1, 'the seat close is attempted once')
+  assert.equal(disposed, 1, 'the preserved Remote scope is released exactly once through the finally')
+  assert.equal(app.getDraft(), '', 'the failed close never writes the old Restore draft')
+})

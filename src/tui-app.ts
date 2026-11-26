@@ -10159,13 +10159,13 @@ export class TuiApp {
           const scope = captured
           if (scope === undefined) return
           const historyLease = lease
-          if (scope.remote !== undefined) {
-            // Close the seat but KEEP the exact Host scope through the close;
-            // the lease close below only clears the optional-seat record.
-            seat?.close({ preserveScope: true })
-          }
-          historyLease?.close()
           try {
+            if (scope.remote !== undefined) {
+              // Close the seat but KEEP the exact Host scope through the close;
+              // the lease close below only clears the optional-seat record.
+              seat?.close({ preserveScope: true })
+            }
+            historyLease?.close()
             if (scope.remote !== undefined && !scope.remote.isCurrent()) return
             if (!scope.isCurrent()) return
             // A new optional tenant, a Question/Approval/Save blocker or a
