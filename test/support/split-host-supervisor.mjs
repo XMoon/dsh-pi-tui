@@ -7788,7 +7788,7 @@ async function handlePublicDaemonTerminateCli(message) {
     if (Date.now() - started >= 60_000) break
     await sleep(5)
   }
-  const order = clientTerminalWhileCliLive && cliGoneAt !== null
+  const order = clientTerminalWhileCliLive && cliGoneAt !== undefined
     ? 'client-terminal-while-cli-live'
     : cliGoneAt !== undefined && clientGoneAt !== undefined && clientGoneAt < cliGoneAt
       ? 'client-first'
