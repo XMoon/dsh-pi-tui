@@ -1539,6 +1539,41 @@ test('a billing write reports Could not confirm save when the read-back is unrea
   assert.doesNotMatch(frame, /Saved/u, 'an unreadable read-back is never a save')
 })
 
+test('a settled unknown in the list is not a Detail task seat: a clean parent change retires the page', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // Search Billing
+  await chooseCandidate(h, 1)
+  // Force the write's verification readback unreadable, so the settled row is a
+  // visible unknown rather than a save or a refusal.
+  const releasePre = h.holdRead()
+  const readsBefore = h.readCount()
+  await key(h, ENTER)
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+    () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+  h.store.readUndefined = true
+  releasePre()
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+    () => h.vt.waitForRender(), 'the write readback to be issued')
+  await settlePainted(h, 'the settled unknown verdict', frame =>
+    frame.includes('Could not confirm save') && !frame.includes('Saving…'))
+  // The explicit Detail Back ends the local task seat; the warning stays on the
+  // list row but the user is now deliberately in the clean list.
+  await key(h, ESC)
+  assert.match(h.view(), /Could not confirm save/u, 'the list keeps the warning')
+  assert.match(h.view(), /Open \[Enter\]/u, 'the list owns the seat again')
+  const writesBefore = h.writes.length
+  const appearance = paintedWordCell(h, 'Appearance')
+  pointerClick(h, appearance.row, appearance.column + 1)
+  await waitForFrame(() => h.view(),
+    () => h.view().includes('Configured theme') && h.view().includes('Settings · Categories'),
+    () => h.vt.waitForRender(), 'the clean parent category change')
+  assert.doesNotMatch(h.view(), /Settings · Tools · Web Search \/ Fetch/u,
+    'the retired page is gone')
+  assert.equal(h.writes.length, writesBefore, 'the parent retire never replays or writes')
+})
+
 /** One SUPERSEDED billing-readback scenario over the frozen sizes: R1 (the
  *  write's verification read) observes an UNREADABLE Host and is held; R2 (the
  *  page's `r`) observes the NEWEST facts and is also held. R1 settles while R2

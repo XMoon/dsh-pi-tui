@@ -615,10 +615,10 @@ specialist-page contract below).
   `Categories │ List`) and return to the SAME list, and it is inert in a
   one-region projection. The Detail's own Back cancels the unsubmitted local
   candidate without a Host write; the rail's Back/Esc returns to the real
-  initiating level. A Saving row refuses a parent category/Tab jump; an active
-  choice or a visible unknown outcome refuses the parent retire, while a clean
-  browse or a truly read-only Detail allows it. A category change retires the
-  SAME instance exactly once.
+  initiating level. A Saving row refuses a parent category/Tab jump from every
+  seat; an active choice or a Detail-held unknown outcome refuses the parent
+  retire, while a clean browse or a truly read-only Detail allows it. A
+  category change retires the SAME instance exactly once.
 
   The ONE physical bar states only what THIS frame offers: list `Open [Enter] ·
   Refresh [R] · Back [Esc]`; writable Detail `Confirm [Enter] · Refresh [R] ·

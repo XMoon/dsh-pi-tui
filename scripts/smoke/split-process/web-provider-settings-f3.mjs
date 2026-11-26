@@ -391,10 +391,15 @@ async function waitForWebPage(client, label, timeoutMs = 60_000) {
  *  (`[Web Search / Fetch]` when the list owns the keyboard, or the passive
  *  label otherwise). The Categories rail is never this column. */
 function listColumnStart(frame) {
-  const header = frame.split('\n').find(line => line.includes(WEB_PAGE_TITLE))
+  // The pane header line, never the `Settings · Tools · …` breadcrumb: it names
+  // the columns and is aligned with them. A single-region frame has no pane
+  // header and its one column starts at 0.
+  const header = frame.split('\n').find(line => line.includes(WEB_PAGE_TITLE)
+    && !line.includes('Settings ·')
+    && (line.includes('Current / Detail') || line.includes('Categories (')))
   if (header === undefined) return 0
   const label = header.indexOf(WEB_PAGE_TITLE)
-  return header[label - 1] === '[' ? label - 1 : label
+  return label > 0 && header[label - 1] === '[' ? label - 1 : label
 }
 
 /** The page's Action Bar is its LAST non-empty body line; its wording is the

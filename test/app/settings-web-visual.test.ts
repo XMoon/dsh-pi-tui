@@ -1151,4 +1151,74 @@ test('a zero-body grant keeps only the real Back and admits no hidden body actio
   await waitForPainted(h, 'the restored list seat', frame =>
     frame.includes('Open [Enter]') && frame.includes('Web Search Provider'))
   assert.match(h.view(), /Open \[Enter\]/u)
+
+  // The RAIL seat has the same zero-body contract: only the truthful Back row,
+  // no rail browse bar and no hidden Tab transfer.
+  await key(h, '\x1b[Z') // list -> rail (the 120x40 pair really exists)
+  await waitForPainted(h, 'the rail pair', frame => frame.includes('[Categories (10)]'))
+  h.vt.resize(120, 2)
+  await h.vt.waitForRender()
+  const railBarOnly = h.view()
+  assert.match(railBarOnly, /Back \[Esc\]/u, 'the rail zero-body frame keeps the real Back')
+  assert.doesNotMatch(railBarOnly, /Up\/Down select|Tab focus|Open \[Enter\]|Web Search Provider/u,
+    `the zero-body rail bar never advertises a dead key:\n${railBarOnly}`)
+  await key(h, '\t')
+  assert.equal(h.reads(), readsBefore, 'Tab on a zero-body rail starts no read')
+  assert.match(h.view(), /Back \[Esc\]/u, 'Tab never seats a zero-body child')
+  await key(h, ESC) // the rail Back leaves the workbench for the real origin
+  assert.match(h.view(), /Settings · Tools · Rows/u)
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+})
+
+test('a one-region grant keeps Tab and Shift+Tab inert (44×20)', async t => {
+  const h = setup({ columns: 44, rows: 20 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  const readsBefore = h.reads()
+  assert.match(h.view(), /Open \[Enter\]/u)
+  assert.doesNotMatch(h.view(), /Categories \(10\)/u, 'the rail is not painted in one region')
+  await key(h, '\x1b[Z')
+  await key(h, '\t')
+  assert.equal(h.reads(), readsBefore, 'an inert Tab never re-reads the Host')
+  assert.match(h.view(), /> Web Search Provider/u, 'the list keeps the one visible seat')
+  assert.match(h.view(), /Open \[Enter\]/u)
+  assert.doesNotMatch(h.view(), /Categories \(10\)/u, 'Tab never paints a hidden rail')
+})
+
+test('Left is the same explicit Back verb as Esc from the Detail and the list', async t => {
+  const h = setup({ columns: 44, rows: 20 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  const readsBefore = h.reads()
+  await selectListRow(h, 0)
+  await key(h, ENTER)
+  assert.match(h.view(), /Confirm \[Enter\]/u)
+  await key(h, '\x1b[D') // Detail -> list
+  assert.match(h.view(), /Open \[Enter\]/u)
+  await key(h, '\x1b[D') // list -> the real Rows origin
+  assert.match(h.view(), /Settings · Tools · Rows/u)
+  assert.equal(h.reads(), readsBefore, 'the Back verb never re-reads or rebinds')
+})
+
+test('the Detail Configure Web entry returns to the Tools Detail before Rows', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openOtherRows(h)
+  await highlightWebRow(h)
+  const readsBefore = h.reads()
+  const configure = paintedWordPoint(h, 'Configure Web…')
+  press(h, configure.row, configure.column)
+  release(h, configure.row, configure.column)
+  await waitForPainted(h, 'the Web page from the Detail Manage entry', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+  assert.equal(h.reads(), readsBefore + 1, 'the explicit entry performs one fresh read')
+  await key(h, ESC) // list root -> the REAL Tools Detail origin
+  const detail = h.view()
+  assert.match(detail, /Settings · Tools · Web Search \/ Fetch/u)
+  assert.match(detail, /Categories \(10\)/u)
+  assert.match(detail, /Configure Web…/u, 'the row Detail owns the frame again')
+  assert.equal(h.reads(), readsBefore + 1, 'the return starts no Host read')
+  await key(h, ESC) // Detail -> Rows
+  assert.match(h.view(), /Settings · Tools · Rows/u)
 })

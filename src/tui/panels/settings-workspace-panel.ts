@@ -4384,6 +4384,13 @@ export class SettingsWorkspacePanel implements Component {
     return this.specialistPage !== undefined && this.specialistRow === 'web-settings'
   }
 
+  /** Whether the workbench really paints a SECOND region beside the current
+   *  seat (the 76+ / 6+ pair). A one-region grant makes Tab/Shift+Tab inert. */
+  private webWorkbenchPairAvailable(): boolean {
+    return this.intents.columns() >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS
+      && this.webWorkbenchLiveContentRows() >= 6
+  }
+
   /** The REAL content rows the LIVE chrome grants the Web workbench. A zero
    *  answer makes the frame a truthful Back row: no hidden body key is admitted. */
   private webWorkbenchLiveContentRows(): number {
@@ -4928,7 +4935,7 @@ export class SettingsWorkspacePanel implements Component {
       { text: 'Up/Down select', priority: 4 },
       { text: 'Enter open', priority: 5 },
       { text: 'Right open', priority: 6 },
-      ...this.regionActionBarHints('focus', false),
+      ...(this.webWorkbenchPairAvailable() ? this.regionActionBarHints('focus', false) : []),
       { text: 'Back [Esc]', priority: 8 },
     ], width, BAR_OPEN_HINTS)
   }
@@ -5018,7 +5025,11 @@ export class SettingsWorkspacePanel implements Component {
     // keyboard, otherwise the child's OWN semantic wording painted from column
     // 0 at the FULL frame width. A child that painted no bar line leaves the
     // truthful Back-only fallback (never an invented action).
-    if (plan.actionRows === 1) {
+    if (plan.actionRows === 1 && contentRows < 1) {
+      const bar = this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
+      lines.push(bar.line)
+      if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+    } else if (plan.actionRows === 1) {
       if (this.focus === 'categories') {
         const bar = this.renderWebWorkbenchRailBar(plan.width)
         lines.push(bar.line)
@@ -5543,9 +5554,10 @@ export class SettingsWorkspacePanel implements Component {
         // The visible Categories rail owns the keyboard: its normal root keys
         // (Up/Down/Enter/Right/Esc) keep running below. Either Tab hands the
         // keyboard back to the SAME mounted child region — never a remount, a
-        // Host read or an activation.
+        // Host read or an activation — but ONLY when a second region is really
+        // painted. A one-region/zero-body grant makes both keys inert.
         if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
-          this.focusWebWorkbench()
+          if (this.webWorkbenchPairAvailable()) this.focusWebWorkbench()
           return
         }
       } else {
@@ -5558,6 +5570,7 @@ export class SettingsWorkspacePanel implements Component {
         // a saving/active choice refuses the yield inside the page.
         if (this.webWorkbenchActive()
           && matchesKey(data, 'shift+tab')
+          && this.webWorkbenchPairAvailable()
           && this.specialistPage.webWorkbenchRegion?.() === 'list') {
           if (this.specialistPage.webWorkbenchCanYieldToRail?.() === true) this.yieldWebWorkbenchToRail()
           return

@@ -573,7 +573,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedConfirmTarget = undefined
     this.paintedBarSpansValue = []
     this.paintedBarRevision = -1
-    if (matchesKey(data, 'escape')) {
+    if (matchesKey(data, 'escape') || matchesKey(data, 'left')) {
       if (this.region === 'detail') {
         this.commitPresentation(() => { this.region = 'list' })
         return
@@ -631,7 +631,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return this.region
   }
 
-  /** Whether a USER parent navigation may retire the workbench right now. */
+  /** Whether a USER parent navigation may retire the workbench right now.
+   *  Saving blocks from EVERY seat. The other local tasks block only while the
+   *  Detail holds the keyboard: the list row keeps a settled warning visible,
+   *  but an explicit Detail Back has already ended that local task seat, so a
+   *  later parent navigation from the list is a deliberate new act. */
   webWorkbenchBlocksParentNavigation(): boolean {
     for (const phase of this.phases.values()) {
       if (phase.kind === 'saving') return true
