@@ -382,7 +382,7 @@ export async function runAcpPo1bOptInControl(context) {
     tui.send('/acp\r')
     await tui.waitForScreen('Settings · Host · ACP access', 'b0: /acp typed deep link', 60_000)
     const firstFrame = await waitFrame(tui, /Listener\s+Disabled/u, 'b0: settled disabled listener')
-    assert(/^> Enable ACP(?:\s|$)/mu.test(firstFrame),
+    assert(/(?:^|\s)> Enable ACP(?:\s|$)/mu.test(firstFrame),
       `b0: a disabled Host must focus its ONE real runtime action:\n${firstFrame}`)
     assert(!exists(socketPathFor(scopeId)), 'b0: merely opening /acp must not bind acp.sock')
     const prefBeforeTui = await acpPreference(peer, 'b0 preference read before journey', undefined)
@@ -409,12 +409,12 @@ export async function runAcpPo1bOptInControl(context) {
     // Only observable live facts decide: the held peer stays connected, the SAME
     // socket inode survives, and the Host reports enabled. The L2/VT owner test
     // keeps the precise zero-dispatch proof.
-    await selectRow(tui, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
+    await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
     tui.send('\r')
     await waitRiskSentence(tui, 'b0 disable: risk confirmation')
     await waitConfirmAffordance(tui, 'b0 disable: risk confirmation')
     tui.send('\x1b')
-    const afterCancel = await waitFrame(tui, /^> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
+    const afterCancel = await waitFrame(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
     assert(/Listener\s+Enabled/u.test(afterCancel), 'b0: Cancel must keep the listener enabled')
     assert(heldClosed === false, 'b0: Cancel must not close the held ACP peer')
     assert(sameSocketIdentity(heldSocketIdentity), 'b0: Cancel must keep the SAME live socket inode')
@@ -440,10 +440,10 @@ export async function runAcpPo1bOptInControl(context) {
     await waitFrame(tui, /Listener\s+Disabled/u, 'b0: settled disabled listener after the confirm')
     // NEXT HOST START: the SAME page edits the persisted preference Off→On
     // once; the visible choice and confirm are required (never a blind Enter).
-    await selectRow(tui, /^> Start automatically(?:\s|$)/mu, 'b0 autostart: row')
+    await selectRow(tui, /(?:^|\s)> Start automatically(?:\s|$)/mu, 'b0 autostart: row')
     tui.send('\r')
     await tui.waitForScreen('Choose the value the next Host start applies:', 'b0 autostart: choice', 30_000)
-    await selectRow(tui, /^> On(?:\s|$)/mu, 'b0 autostart: On candidate')
+    await selectRow(tui, /(?:^|\s)> On(?:\s|$)/mu, 'b0 autostart: On candidate')
     tui.send('\r')
     await tui.waitForScreen('Save the next Host start preference as On?', 'b0 autostart: confirm step', 30_000)
     await waitFrame(tui, /Confirm save \[Enter\]/u, 'b0 autostart: painted Confirm save affordance')
