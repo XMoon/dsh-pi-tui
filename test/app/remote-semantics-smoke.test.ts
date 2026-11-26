@@ -2318,9 +2318,8 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     type WebPageLevel = 'list' | 'detail'
     let pageLevel: WebPageLevel = 'list'
     const webListActionBars = [
-      '↑/↓ choose · Enter open · r refresh · Back [Esc]',
-      '↑/↓ · Enter open · r refresh · Back [Esc]',
-      '↑/↓ · Enter · Back [Esc]',
+      'Open [Enter] · Refresh [R] · Back [Esc]',
+      'Open [Enter] · Back [Esc]',
       'Back [Esc]',
     ]
     const isWebPage = (): boolean => page.view().includes('Settings · Tools · Web Search / Fetch')

@@ -570,26 +570,74 @@ specialist-page contract below).
   with the specific `Tools are not active` / `Tools are still active` reason.
   Remote has no registry read and states the runtime half as unobservable
   instead of claiming success.
-- `Web Search / Fetch` is an EMBEDDED SPECIALIST PAGE inside this same
-  workspace lease: `Enter`/`Right` on the row (or its ONE painted
-  `Configure Web…` action) mounts the page in the same body under the same
-  header/metadata/notice/Action Bar. It is never the legacy `SettingsList`, never
-  a second alt-screen overlay and never a second settings manager, and its `Esc`
-  ladder is `Detail → Web list → the Tools row → the category rail`.
+- `Web Search / Fetch` is the ONE Adaptive Web WORKBENCH inside this same
+  workspace lease: `Enter`/`Right` on the Tools row (or its ONE painted
+  `Configure Web…` action) mounts it once under the same header/metadata/notice
+  and the same ONE physical last-row Action Bar. The REAL Categories rail stays
+  painted beside the page's own List/Detail regions while the grant supports it;
+  the workbench is never the legacy `SettingsList`, a second alt-screen overlay,
+  a second settings manager, a fourth column or a new generic controller. Its
+  `Esc` ladder is `Web Detail → Web list → the REAL initiating level` — the
+  Tools Rows level for a Rows entry, the Tools Detail for a Detail
+  `Configure Web…` entry. The visible rail's Back leaves the workbench for that
+  same level; it never closes the whole Settings workspace.
+
+  The ONE real grant decides the projection (W = frame width, H =
+  `chromeGeometry(plan).contentRows`, C = the elastic Categories width, G = the
+  2-cell gutter); a page-local width breakpoint or a terminal-size guess never
+  does:
+  - `W ≥ 120` and `H ≥ 6`: `Categories(C) │ Web List(34) │ Details(D)` with
+    `D = W − C − G − 34 − G` (the wide frame always keeps `D ≥ 40`). The rail
+    stays painted while either the rail or the page owns the keyboard.
+  - `76 ≤ W < 120` and `H ≥ 6`: rail focus paints `Categories(22) │ Web
+    List(W − 24)` with the child list only; child focus paints `Web List(34) │
+    Details(W − 36)` and the rail steps aside.
+  - any `W < 76` or `H < 6`: exactly ONE current region — the Categories rail
+    while the rail owns the keyboard, otherwise the child's current list or
+    Detail region.
+  - `H = 0`: only the truthful Back physical row remains; no body cell is a
+    target and no page read, Tab, Open, refresh, credential or Confirm runs.
+  The child's local `List(34) │ 2-cell gutter │ remaining Detail` split is
+  measured from its granted BODY width, never the terminal width, and the ONE
+  physical Action Bar always starts at column 0 with the FULL frame width (the
+  page receives that bar width separately from its body grant). The body keeps
+  ONE active cursor/`[Label]` device per region; a cropped grant scrolls instead
+  of hiding an activation, and an Enter whose candidate is not inside the
+  painted viewport does nothing.
+
+  The Root owns the ONE seat and the child owns its ONE local region. A list row
+  click/keyboard selection — including a click on the visible passive preview
+  while the rail owns the keyboard — only SELECTS and hands the keyboard to the
+  Web list; `Enter`/`Right`/the painted `Open [Enter]` is the ONE explicit entry
+  into the selected row's Detail, and an option click only moves the draft.
+  `Tab`/`Shift+Tab` is a pure focus transfer: List ↔ Detail while the pair is
+  visible, the untouched list may yield to the rail (at 76–119 this reveals
+  `Categories │ List`) and return to the SAME list, and it is inert in a
+  one-region projection. The Detail's own Back cancels the unsubmitted local
+  candidate without a Host write; the rail's Back/Esc returns to the real
+  initiating level. A Saving row refuses a parent category/Tab jump; an active
+  choice or a visible unknown outcome refuses the parent retire, while a clean
+  browse or a truly read-only Detail allows it. A category change retires the
+  SAME instance exactly once.
+
+  The ONE physical bar states only what THIS frame offers: list `Open [Enter] ·
+  Refresh [R] · Back [Esc]`; writable Detail `Confirm [Enter] · Refresh [R] ·
+  Back [Esc]` (plus a muted candidate hint when it fits) only while the
+  highlighted candidate is inside the painted Detail viewport; read-only/
+  loading `Refresh [R] · Back [Esc]`; Saving `Saving… · Back [Esc]`; credential
+  Detail `Open in Models… [Enter] · Refresh [R] · Back [Esc]` while a selectable
+  credential action is really visible. Whole segments are dropped, never cut;
+  where nothing whole fits, the real Esc key remains the documented exit. Long
+  natural-prose explanations wrap to a comfortable reading width (about 72
+  cells); real values, identities and YAML facts keep the full granted width.
 
   The page paints exactly NINE rows in this frozen order: `Web Search Provider`,
   `Web Fetch Provider`, `Search API Result Count`, `Share Original Question`,
   `Search Billing`, `Fetch Billing`, `Search API Override` (read-only),
-  `Fetch API Override` (read-only), `DeepSeek API Key`. At ≥100 columns the row list
-  (max 34 columns) sits beside the selected row's Detail; at 65–99 columns the
-  list is stacked above it; below 65 columns exactly ONE region is painted at a
-  time and `Enter`/`Esc` move between the list and its Detail. The frame keeps
-  ONE active cursor (the focused region's), ONE pane header and the ONE shared
-  last-row Action Bar; a cropped grant scrolls instead of hiding an activation,
-  and an Enter whose candidate is not inside the painted viewport does nothing.
-  A candidate, state word or `[current]` chip is never painted partially, and
-  terminal-untrusted Host text (custom provider ids, URLs, credential source)
-  is painted through the existing sanitizers and width helpers.
+  `Fetch API Override` (read-only), `DeepSeek API Key`. A candidate, state word
+  or `[current]` chip is never painted partially, and terminal-untrusted Host
+  text (custom provider ids, URLs, credential source) is painted through the
+  existing sanitizers and width helpers.
 
   Authority is the Host `web` / `web-deepseek-api` sections through the
   `WebProviderConfig` read and its provider/count/question/Billing setters. A
@@ -674,10 +722,11 @@ specialist-page contract below).
   the complete, same-intent `Confirm [Enter]` span that this page painted in the
   LAST frame and the Settings workspace root delegates through its ONE physical
   Action Bar row — that enters the command owner's single Web FIFO. The bar
-  paints `Confirm [Enter] · Back [Esc]` (plus a muted `↑/↓ choose` hint when the
-  width allows) only while the highlighted candidate is inside the painted
-  Detail viewport and the latest authority is ready and writable; a candidate
-  row click only moves the draft highlight and writes nothing. A Confirm span
+  paints `Confirm [Enter] · Refresh [R] · Back [Esc]` (plus a muted `↑/↓ choose`
+  hint when the width allows) only while the highlighted candidate is inside the
+  painted Detail viewport and the latest authority is ready and writable; a
+  candidate row click only moves the draft highlight and writes nothing, and
+  the list's `Open [Enter]` is the explicit Detail entry. A Confirm span
   that is absent, cropped, from a previous frame or invalidated by any
   key/wheel/resize/refresh/save phase dispatches nothing. The confirmed decision
   carries the EXACT semantic action, raw candidate, row and original capture
@@ -717,8 +766,9 @@ specialist-page contract below).
 
   `DeepSeek API Key` shows ONLY the official credential reference
   (`DEEPSEEK_API_KEY`), its presence and its source layer — never the value.
-  Its two actions are `Configure in Models…` and `Clear in Models…` (the latter
-  only while the fresh official fact is configured), and both hand a typed
+  Its two body actions are `Configure in Models…` and `Clear in Models…` (the
+  latter only while the fresh official fact is configured), the bar names the
+  selectable one as `Open in Models… [Enter]`, and both hand a typed
   `ModelsInitialView` (the same reference, or its exact clear target) to the
   workspace root: the root retires the Web page FIRST, then switches to the
   existing Models page with that initial view in the SAME lease. The page never

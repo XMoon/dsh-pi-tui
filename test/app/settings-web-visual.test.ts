@@ -101,6 +101,8 @@ interface Harness {
   readonly view: () => string
   readonly plain: () => readonly string[]
   readonly invoke: (name?: string) => unknown
+  /** The number of REAL fresh Host reads the mounted page started. */
+  readonly reads: () => number
   readonly dispose: () => void
 }
 
@@ -114,6 +116,7 @@ function setup(options: {
 }): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
   const hostGeneration = {}
+  let freshReads = 0
   const store = {
     available: true,
     current: { both: true, web: true, api: true },
@@ -245,14 +248,17 @@ function setup(options: {
               authority: { ...store.web.authority },
             }
           : undefined,
-        readFresh: async () => store.available
-          ? {
-              ...store.web,
-              providerSelection: structuredClone(store.web.providerSelection),
-              api: { ...store.web.api },
-              authority: { ...store.web.authority },
-            }
-          : undefined,
+        readFresh: async () => {
+          freshReads += 1
+          return store.available
+            ? {
+                ...store.web,
+                providerSelection: structuredClone(store.web.providerSelection),
+                api: { ...store.web.api },
+                authority: { ...store.web.authority },
+              }
+            : undefined
+        },
         isObservationCurrent: (_capture: WebProviderSettings, target: 'both' | 'web' | 'api' = 'both') => store.current[target],
         setSearchProvider: async (id: string, _capture: WebProviderSettings) => {
           const selection = store.web.providerSelection.search
@@ -341,6 +347,7 @@ function setup(options: {
     view: () => plain().join('\n'),
     plain,
     invoke,
+    reads: () => freshReads,
     dispose: () => {
       startedApps.delete(app)
       if (!app.isDisposed()) app.dispose()
@@ -372,6 +379,40 @@ function clickWord(h: Harness, word: string): void {
   const point = paintedWordPoint(h, word)
   press(h, point.row, point.column + 1)
   release(h, point.row, point.column + 1)
+}
+
+/** The painted (row, cell) of ONE candidate row in the REAL local projection:
+ *  the dual Detail column, or the whole line on a single-region frame. The
+ *  first matching line is the candidate list itself (the prose notes that
+ *  mention the same provider name come later). */
+function paintedCandidatePoint(h: Harness, label: string): { readonly row: number; readonly column: number } {
+  const rows = h.plain()
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const pattern = new RegExp(`^\\s*(?:› )?${escaped}\\b`, 'u')
+  const header = rows.find(line => line.includes('Current / Detail'))
+  if (header === undefined) {
+    const row = rows.findIndex(line => pattern.test(line))
+    assert.ok(row >= 0, `${label} candidate is not painted:\n${h.view()}`)
+    return { row, column: rows[row]!.indexOf(label) }
+  }
+  const at = header.indexOf('Current / Detail')
+  const start = header[at - 1] === '[' ? at - 1 : at
+  const row = rows.findIndex(line => pattern.test(line.slice(start)))
+  assert.ok(row >= 0, `${label} candidate is not painted:\n${h.view()}`)
+  return { row, column: start + rows[row]!.slice(start).indexOf(label) }
+}
+
+/** The joined text of the painted DETAIL column. In a dual frame the Detail
+ *  shares physical rows with the List, so a sentence must be read from the
+ *  Detail's own column instead of the whole (interleaved) line. A single-region
+ *  frame has no second column and reads as a whole line. */
+function detailPaneText(h: Harness): string {
+  const rows = h.plain()
+  const header = rows.find(candidate => candidate.includes('Current / Detail'))
+  if (header === undefined) return h.view().replace(/\s+/gu, ' ')
+  const at = header.indexOf('Current / Detail')
+  const start = header[at - 1] === '[' ? at - 1 : at
+  return rows.map(line => line.slice(start)).join(' ').replace(/\s+/gu, ' ').trim()
 }
 
 /**
@@ -449,7 +490,7 @@ for (const [columns, rows] of SIZES) {
     // The nine frozen rows exist and the FIRST is always visible at the top; a
     // short grant crops/scolls the rest instead of inventing a compact mode.
     assert.match(frame, /Web Search Provider/u, 'the first frozen row is painted')
-    assert.match(frame, /Enter open/u, 'the list bar states the ONE action')
+    assert.match(frame, /Open \[Enter\]/u, 'the list bar states the ONE explicit Open action')
     const painted = h.plain()
     for (const line of painted) {
       assert.ok(visibleWidth(line) <= columns, `no frame line exceeds ${columns} cells: ${JSON.stringify(line)}`)
@@ -561,7 +602,7 @@ for (const [columns, rows] of [[120, 40], [80, 24], [44, 20], [44, 8]] as const)
     assert.match(frame, /Configured/u, 'presence/source come from the store')
     assert.match(frame, /Configure in Models…/u, 'Configure is painted')
     assert.match(frame, /Clear in Models…/u, 'Clear is painted (the reference is configured)')
-    assert.match(frame, /Enter open in Models/u, 'the ONE action bar names the Models deeplink')
+    assert.match(frame, /Open in Models… \[Enter\]/u, 'the ONE action bar names the Models deeplink')
     assert.doesNotMatch(frame, /sk-|secret value/iu, 'no secret is ever painted')
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
     assertBarIsLastRow(h.plain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Back [Esc]')
@@ -682,28 +723,33 @@ test('a LIVE palette switch re-paints the page with the NEW ink (no cached ANSI)
   }
 })
 
-test('a click on a list row opens its Detail; a press→resize→release never does', async t => {
+test('a list row click only selects; the painted Open is the ONE way into the Detail, and a straddling resize is refused', async t => {
   const h = setup({ columns: 120, rows: 40 })
   t.after(h.dispose)
   await openWebPage(h)
   const lines = h.plain()
-  const countRow = lines.findIndex(line => line.includes('Search API Result Count'))
-  assert.ok(countRow >= 0)
-  press(h, countRow, 4)
-  release(h, countRow, 4)
+  const count = paintedWordPoint(h, 'Search API Result Count')
+  press(h, count.row, count.column)
+  release(h, count.row, count.column)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Current: 10/u, `the clicked row opened its Detail:\n${h.view()}`)
+  // The click selected the row and kept the LIST seat: the explicit Open is
+  // still the advertised action and the Detail is a passive preview.
+  assert.match(h.view(), /Open \[Enter\]/u, 'the row click did not open the Detail')
+  assert.match(h.view(), /Current: 10/u, 'the selected row previews its authoritative fact')
+  assert.match(h.view(), /\[Web Search \/ Fetch\]/u, 'the list still owns the active device')
 
-  // Back to the list, then a gesture straddling a RESIZE is refused.
-  await key(h, ESC)
-  const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
-  assert.ok(providerRow >= 0)
-  press(h, providerRow, 4)
+  // The complete painted Open span is the explicit entry.
+  clickWord(h, 'Open [Enter]')
+  await waitForPainted(h, 'the explicit Open to reach the Detail', frame => frame.includes('Confirm [Enter]'))
+  await key(h, ESC) // Detail -> list
+  // A gesture straddling a RESIZE is refused and leaves the list seat intact.
+  const provider = paintedWordPoint(h, 'Web Search Provider')
+  press(h, provider.row, provider.column)
   h.vt.resize(100, 30)
   await h.vt.waitForRender()
-  release(h, providerRow, 4)
+  release(h, provider.row, provider.column)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Enter open/u, 'the refused gesture stays at the list (no Detail opened)')
+  assert.match(h.view(), /Open \[Enter\]/u, 'the refused gesture stays at the list (no Detail opened)')
 })
 
 test('a click on an option only highlights it; the explicit Confirm [Enter] click is the ONE write', async t => {
@@ -712,13 +758,12 @@ test('a click on an option only highlights it; the explicit Confirm [Enter] clic
   await openWebPage(h)
   await selectListRow(h, 0)
   await key(h, ENTER)
-  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · explicit · billed per Search API call'))
-  assert.ok(optionRow >= 0, `the candidate row is painted:\n${h.view()}`)
-  press(h, optionRow, 40)
-  release(h, optionRow, 40)
+  const option = paintedCandidatePoint(h, 'DeepSeek Search API')
+  press(h, option.row, option.column)
+  release(h, option.row, option.column)
   await h.vt.waitForRender()
   assert.equal(h.store.web.searchProvider, 'deepseek-official', 'an option click never writes')
-  assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u, 'the click only moved the draft')
+  assert.match(h.view(), /› DeepSeek Search API/u, 'the click only moved the draft')
   // The complete painted Confirm [Enter] is the ONE delegated target.
   clickWord(h, 'Confirm [Enter]')
   await waitForPainted(h, 'the confirmed write', frame => frame.includes('Saved'))
@@ -749,19 +794,20 @@ test('the AUTOMATIC page offers a complete pointer-only route: click the row, th
   assert.match(h.view(), /Current: Automatic/u, 'the page states the AUTOMATIC current fact')
   assert.match(h.view(), /› Automatic \[current\] · the Host selects per request/u,
     'the Automatic entry is the current choice under the official automatic routing')
-  const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
-  assert.ok(providerRow >= 0)
-  press(h, providerRow, 4)
-  release(h, providerRow, 4)
+  const provider = paintedWordPoint(h, 'Web Search Provider')
+  press(h, provider.row, provider.column)
+  release(h, provider.row, provider.column)
   await h.vt.waitForRender()
-  assert.match(h.view(), /Current: Automatic/u, 'the row click opened the provider Detail')
-  const optionRow = h.plain().findIndex(line => line.includes('DeepSeek Search API · explicit · billed per Search API call'))
-  assert.ok(optionRow >= 0, `the API candidate is painted under Automatic:\n${h.view()}`)
-  press(h, optionRow, 40)
-  release(h, optionRow, 40)
+  assert.match(h.view(), /Open \[Enter\]/u, 'the row click only selected the row')
+  clickWord(h, 'Open [Enter]')
+  await waitForPainted(h, 'the explicit Open to enter the provider Detail', frame =>
+    frame.includes('Confirm [Enter]') && frame.includes('Current: Automatic'))
+  const option = paintedCandidatePoint(h, 'DeepSeek Search API')
+  press(h, option.row, option.column)
+  release(h, option.row, option.column)
   await h.vt.waitForRender()
   assert.equal(h.store.web.searchProvider, undefined, 'the option click only moves the draft')
-  assert.match(h.view(), /› DeepSeek Search API · explicit · billed per Search API call/u)
+  assert.match(h.view(), /› DeepSeek Search API/u)
   clickWord(h, 'Confirm [Enter]')
   await waitForPainted(h, 'the verified explicit write', frame => frame.includes('Saved'))
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the ONE real Host write landed')
@@ -775,7 +821,7 @@ test('the AUTOMATIC page offers a complete pointer-only route: click the row, th
   await h.vt.waitForRender()
   release(h, back.row, back.column)
   await waitForPainted(h, 'the pointer Back to return to the list', frame =>
-    frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
+    frame.includes('Open [Enter]') && !frame.includes('Confirm [Enter]'))
 })
 
 for (const [columns, rows] of [[120, 40], [44, 20]] as const) {
@@ -783,18 +829,18 @@ for (const [columns, rows] of [[120, 40], [44, 20]] as const) {
     const h = setup({ columns, rows })
     t.after(h.dispose)
     await openWebPage(h)
-    // Row click opens the Detail.
-    const providerRow = h.plain().findIndex(line => line.includes('Web Search Provider'))
-    assert.ok(providerRow >= 0)
-    press(h, providerRow, 4)
-    release(h, providerRow, 4)
-    await waitForPainted(h, 'the provider Detail', frame => frame.includes('Current: DeepSeek server-side search'))
+    // Row click only selects; the painted Open span enters the Detail.
+    const provider = paintedWordPoint(h, 'Web Search Provider')
+    press(h, provider.row, provider.column)
+    release(h, provider.row, provider.column)
+    await h.vt.waitForRender()
+    clickWord(h, 'Open [Enter]')
+    await waitForPainted(h, 'the provider Detail', frame =>
+      frame.includes('Confirm [Enter]') && frame.includes('Current: DeepSeek server-side search'))
     // Option click only moves the draft to the Automatic (official reset) row.
-    const optionRow = h.plain().findIndex(line => line.includes('Automatic · the Host selects per request'))
-    assert.ok(optionRow >= 0, `the Automatic reset row is painted:\n${h.view()}`)
-    const optionColumn = h.plain()[optionRow]!.indexOf('Automatic')
-    press(h, optionRow, optionColumn + 1)
-    release(h, optionRow, optionColumn + 1)
+    const option = paintedCandidatePoint(h, 'Automatic')
+    press(h, option.row, option.column)
+    release(h, option.row, option.column)
     await h.vt.waitForRender()
     assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the option click never writes')
     assert.match(h.view(), /› Automatic · the Host selects per request/u)
@@ -810,7 +856,7 @@ for (const [columns, rows] of [[120, 40], [44, 20]] as const) {
     await h.vt.waitForRender()
     release(h, back.row, back.column)
     await waitForPainted(h, 'the pointer Back to the list', frame =>
-      frame.includes('Enter open') && !frame.includes('Confirm [Enter]'))
+      frame.includes('Open [Enter]') && !frame.includes('Confirm [Enter]'))
     for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
   })
 }
@@ -894,7 +940,7 @@ for (const [columns, rows] of [[80, 24], [44, 20], [44, 8]] as const) {
       await key(h, HOME) // Automatic -> server-side search
       await key(h, DOWN)
       const frame = h.view()
-      assert.match(frame, /Confirm \[Enter\] · Back \[Esc\]/u,
+      assert.match(frame, /Confirm \[Enter\] · .*Back \[Esc\]/u,
         `the complete delegated span is painted at ${columns}x${rows}:\n${frame}`)
       for (const line of h.plain()) assert.ok(visibleWidth(line) <= columns)
       clickWord(h, 'Confirm [Enter]')
@@ -957,7 +1003,7 @@ test('an unavailable authority paints the reason and offers no Confirm', async t
         frame.includes('Web Search Provider') && !frame.includes('Loading…'))
       assert.match(frame, /Unavailable/u, `the unreadable authority is stated:\n${frame}`)
       await key(h, ENTER) // the read-only Detail
-      const detail = h.view().replace(/\s+/gu, ' ')
+      const detail = detailPaneText(h)
       assert.match(detail, /the Host Web provider settings are not available on this backend/u,
         'the Detail names the real reason')
       assert.doesNotMatch(h.view(), /Confirm \[Enter\]/u, 'no Confirm affordance exists without an authority')
@@ -1043,4 +1089,66 @@ test('a Root press across a published new generation dispatches nothing; the fre
   const countRow = h.plain().find(line => line.includes('> Search API Result Count'))
   assert.ok(countRow !== undefined)
   assert.doesNotMatch(countRow, /Saved|No changes/u, 'the list row does not revive A\'s or the fresh receipt')
+})
+
+test('the rail/child pair keeps ONE page instance, its scroll seat and the real return level', async t => {
+  const h = setup({ columns: 80, rows: 24 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  // Child focus at 80×24 is the REAL pair `Web List(34) | Details(46)`; the
+  // Categories rail has stepped aside.
+  assert.match(h.view(), /\[Web Search \/ Fetch\]/u)
+  assert.match(h.view(), /Current \/ Detail/u, 'the passive Detail column is still named beside the active list')
+  assert.doesNotMatch(h.view(), /Categories \(10\)/u, 'the rail is not painted while the content owns the pair')
+  const readsBefore = h.reads()
+  // Shift+Tab from the untouched list yields to the visible rail: the SAME
+  // page instance, list cursor and Host facts stay, and NO new read starts.
+  await key(h, '\x1b[Z')
+  await waitForPainted(h, 'the rail + list pair', frame =>
+    frame.includes('[Categories (10)]') && frame.includes('Web Search Provider'))
+  assert.equal(h.reads(), readsBefore, 'yielding the focus never re-reads the Host')
+  assert.match(h.view(), /Categories \(10\)/u)
+  // Enter returns the keyboard to the SAME child list; no remount, no read.
+  await key(h, ENTER)
+  await waitForPainted(h, 'the child list seat', frame =>
+    frame.includes('[Web Search / Fetch]') && frame.includes('Current / Detail')
+    && frame.includes('Open [Enter]'))
+  assert.equal(h.reads(), readsBefore, 'returning to the child never re-reads the Host')
+  // The list root's Esc returns to the REAL initiating Rows level.
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Tools · Rows/u, 'the page returns to the level it was opened from')
+  assert.equal(h.reads(), readsBefore, 'the return itself starts no Host read')
+  // Reopening from those Rows mounts ONE new page and performs its own fresh read.
+  await key(h, ENTER)
+  await waitForPainted(h, 'the reopened page', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+  assert.equal(h.reads(), readsBefore + 1, 'the explicit reopen performs exactly one fresh read')
+})
+
+test('a zero-body grant keeps only the real Back and admits no hidden body action', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await selectListRow(h, 0)
+  await key(h, ENTER) // the provider Detail owns the choice
+  assert.match(h.view(), /Confirm \[Enter\]/u)
+  const readsBefore = h.reads()
+  h.vt.resize(120, 2)
+  await h.vt.waitForRender()
+  const barOnly = h.view()
+  assert.match(barOnly, /Back \[Esc\]/u, 'the zero-body frame still paints the real Back')
+  assert.doesNotMatch(barOnly, /Web Search Provider|Confirm \[Enter\]|Open \[Enter\]|Refresh \[R\]/u,
+    `no hidden body action is advertised without a body row:\n${barOnly}`)
+  // r / Tab / Enter are inert: no Host read and no hidden activation.
+  await key(h, 'r')
+  await key(h, '\t')
+  await key(h, ENTER)
+  assert.equal(h.reads(), readsBefore, 'a zero-body frame starts no Host read')
+  assert.match(h.view(), /Back \[Esc\]/u)
+  // The REAL Esc still runs the page's own Detail -> List ladder.
+  await key(h, ESC)
+  h.vt.resize(120, 40)
+  await waitForPainted(h, 'the restored list seat', frame =>
+    frame.includes('Open [Enter]') && frame.includes('Web Search Provider'))
+  assert.match(h.view(), /Open \[Enter\]/u)
 })

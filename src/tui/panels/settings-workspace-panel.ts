@@ -716,6 +716,23 @@ export interface SettingsAuthPage extends Component {
   dispose(): void
 }
 
+/**
+ * SUX-06B: the REAL Web-workbench grant the Root composes from ONE frame. The
+ * child paints its own local List/Detail regions inside these cells; the ONE
+ * physical Action Bar is a separate row that always starts at column 0 with the
+ * FULL frame width (`barWidth`), never the child body width.
+ */
+export interface WebWorkbenchGrant {
+  /** The child body columns (its own local List/Detail region). */
+  readonly width: number
+  /** The child body rows; the ONE physical Action Bar is NOT included. */
+  readonly rows: number
+  /** The complete physical last row's width. */
+  readonly barWidth: number
+  /** Whether the child may paint List and Detail side by side in `width`. */
+  readonly allowDual: boolean
+}
+
 /** The ONE embedded specialist page surface (C2-R3/C2-R4). It is an EXISTING
  *  interactive component (the subagent allowlist picker, the Web Search / Fetch
  *  settings page): the workspace root owns the screen/lease and gives it the
@@ -784,6 +801,28 @@ export interface EmbeddedSpecialistPage extends Component {
    * explicitly leaves. It never navigates or writes by itself.
    */
   requestParentLeave?(target: SpecialistParentLeaveTarget, leave: () => void): 'allow' | 'refuse'
+  /**
+   * SUX-06B: the Web workbench's ONE real body/bar grant for THIS frame. Only
+   * the mounted Web page implements this seam; every other specialist keeps its
+   * existing `setMaxRows` budget.
+   */
+  setWebWorkbenchGrant?(grant: WebWorkbenchGrant): void
+  /** SUX-06B: the Web page's current LOCAL region (list or Detail). The Root
+   *  routes Tab and pointer focus between the rail and this region. */
+  webWorkbenchRegion?(): 'list' | 'detail'
+  /**
+   * SUX-06B: whether a USER parent navigation may retire the Web workbench
+   * right now. The page owns this answer from its local region and phases: a
+   * saving write, an active choice/action, or a visible unknown outcome refuses;
+   * a clean browse or a truly read-only Detail allows the normal parent path.
+   */
+  webWorkbenchBlocksParentNavigation?(): boolean
+  /** SUX-06B: whether the Root may move the keyboard from the Web LIST to the
+   *  visible Categories rail without retiring the mounted page. Only the
+   *  untouched list root may yield; a saving row or the active Detail keeps it. */
+  webWorkbenchCanYieldToRail?(): boolean
+  /** Revoke one in-flight body press when another owner claims the gesture. */
+  cancelPointer?(): void
 }
 
 /** The exact destination one USER parent navigation asks for: typed captured
@@ -1359,6 +1398,10 @@ export class SettingsWorkspacePanel implements Component {
    *  survives a category change, and it owns no settings authority. */
   private specialistPage: EmbeddedSpecialistPage | undefined
   private specialistRow: SettingsWorkspaceRowId | undefined
+  /** SUX-06B: the ONE real initiating level of the mounted Web workbench. It is
+   *  captured BEFORE `enterDetail` moves the focus to the Detail seat, so the
+   *  child's own Esc and the rail Back return to the level the user came from. */
+  private webReturnLevel: 'rows' | 'detail' | undefined
   /** C2-R5: the typed deeplink page the FIRST real body grant consumes. The
    *  factory is invoked only after the workspace screen lease exists, never in
    *  this constructor. It is cleared before the factory call, so a synchronous
@@ -1995,6 +2038,10 @@ export class SettingsWorkspacePanel implements Component {
     // SUX-01/02/04 EXCEPTION: a Detail TENANT (numeric/Subagent/Web UI) is
     // hosted INSIDE the real Detail pane of the normal projection, so it keeps
     // painting the parent rail and Rows. It never takes this full-width route.
+    // SUX-06B: the mounted Web Search / Fetch page is the ONE Adaptive
+    // Workbench: it keeps the REAL Categories rail beside its own local
+    // List/Detail projection under the SAME lease, header and physical bar.
+    if (this.webWorkbenchActive()) return this.renderWebWorkbench(plan)
     if (this.specialistPage !== undefined && !this.detailTenantActive()) return this.renderSpecialistPage(plan)
     const lines: string[] = []
     const targets: HitTarget[] = []
@@ -3213,10 +3260,12 @@ export class SettingsWorkspacePanel implements Component {
   private categoryLine(id: SettingsWorkspaceCategoryId | undefined): string {
     if (id === undefined) return ''
     const selected = id === this.categoryId
-    // SUX-01/02: while the Detail tenant owns the active device, the parent rail
-    // is passive CONTEXT: the selected label stays bold textStrong but the
-    // primary navigation cursor is not painted on a pane the user is not driving.
-    const marker = selected && !this.detailTenantActive() ? color.primary('> ') : '  '
+    // SUX-01/02/06B: while the Detail tenant or the Web child owns the active
+    // device, the parent rail is passive CONTEXT: the selected label stays bold
+    // textStrong but the primary navigation cursor is not painted on a pane the
+    // user is not driving.
+    const passive = this.detailTenantActive() || (this.webWorkbenchActive() && this.focus !== 'categories')
+    const marker = selected && !passive ? color.primary('> ') : '  '
     const label = CATEGORY_LABELS[id]
     // Cursor glyph = role 6 (`primary`), the selected row's own text = role 8
     // (bold textStrong): two anchors, one meaning each.
@@ -4269,6 +4318,14 @@ export class SettingsWorkspacePanel implements Component {
    *  the case the page-owned query cannot: at narrow widths a yield leaves no
    *  page grant to arm, yet the Categories frame has not been painted either. */
   private rootProjectionAwaitingPaint(): boolean {
+    // SUX-06B: a workbench rail<->child focus transfer repaints a DIFFERENT
+    // active device, bar wording and hit map. Until the destination frame
+    // paints, only the real Esc may act (never a key that would navigate or
+    // activate against the previous seat).
+    if (this.webWorkbenchActive()) {
+      if (this.paintedLayout === undefined) return false
+      return this.paintedFocus !== this.focus
+    }
     // Scope: ONLY the embedded plugin page. It is the one direct page whose keys
     // the ROOT also intercepts (Shift+Tab) and whose yield swaps the narrow
     // projection; About/Models/Account own their gates and re-render synchronously,
@@ -4319,6 +4376,63 @@ export class SettingsWorkspacePanel implements Component {
   // ── the embedded specialist page (C2-R3) ──────────────────────────────────
 
   /**
+   * SUX-06B: the ONE Adaptive Workbench authority. It is the mounted specialist
+   * SLOT plus its row route — never the selected row, the category name, a
+   * painted label or the factory's mere presence.
+   */
+  private webWorkbenchActive(): boolean {
+    return this.specialistPage !== undefined && this.specialistRow === 'web-settings'
+  }
+
+  /** The REAL content rows the LIVE chrome grants the Web workbench. A zero
+   *  answer makes the frame a truthful Back row: no hidden body key is admitted. */
+  private webWorkbenchLiveContentRows(): number {
+    const plan = planSettingsChrome(
+      this.intents.columns(),
+      this.intents.rows(),
+      this.intents.notice() !== undefined,
+      this.choiceField() !== undefined,
+    )
+    return chromeGeometry(plan).contentRows
+  }
+
+  /** Retire the mounted Web workbench and restore the REAL initiating level. */
+  private closeWebWorkbench(): void {
+    const origin = this.webReturnLevel
+    this.closeSpecialist()
+    if (origin !== undefined) this.focus = origin
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Hand the keyboard from the visible Categories rail to the mounted Web
+   *  page WITHOUT re-mounting, re-reading or activating anything. */
+  private focusWebWorkbench(): void {
+    if (!this.webWorkbenchActive()) return
+    this.focus = 'detail'
+    this.pressedGesture = undefined
+    this.specialistPressed = undefined
+    this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Hand the keyboard from the untouched Web list back to the visible rail.
+   *  The page keeps its instance, list cursor, Detail draft and scroll. */
+  private yieldWebWorkbenchToRail(): void {
+    const page = this.specialistPage
+    if (page === undefined || !this.webWorkbenchActive()) return
+    if (page.webWorkbenchCanYieldToRail?.() !== true) return
+    page.cancelPointer?.()
+    this.focus = 'categories'
+    this.pressedGesture = undefined
+    this.specialistPressed = undefined
+    this.contentPressed = undefined
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /**
    * Mount the ONE embedded specialist page for a row that carries
    * `specialist` (the existing subagent allowlist picker, the Web Search /
    * Fetch settings page). The factory runs only on an explicit Manage/Enter; a
@@ -4326,7 +4440,14 @@ export class SettingsWorkspacePanel implements Component {
    * retires the instance exactly once. The panel never reads or writes the
    * settings section itself.
    */
-  private openSpecialist(row: SettingsWorkspaceRow, entry?: 'change' | 'details'): void {
+  private openSpecialist(
+    row: SettingsWorkspaceRow,
+    entry?: 'change' | 'details',
+    /** SUX-06B: the REAL level the explicit entry started from, captured before
+     *  `enterDetail` moved the focus to the Detail seat. Only the Web workbench
+     *  consumes it; every other embedded page keeps its existing return. */
+    webOrigin?: 'rows' | 'detail',
+  ): void {
     if (row.specialist === undefined) return
     // A row whose page is refused right now never starts Host or catalog IO.
     if (row.specialistAvailable === false) return
@@ -4374,6 +4495,12 @@ export class SettingsWorkspacePanel implements Component {
     // retired page can never close a newer one (instance-identity fence).
     const done = (): void => {
       if (this.specialistPage !== page) return
+      // SUX-06B: the Web workbench returns to the REAL level it was opened
+      // from (Rows or Detail), never to a guessed intermediate pane.
+      if (row.specialist === 'web-settings') {
+        this.closeWebWorkbench()
+        return
+      }
       this.closeSpecialist()
       // C2-R5: the two professional editors are opened FROM the row list and
       // closing one returns there — a second back key (Esc or `←`) steps to the
@@ -4439,6 +4566,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.specialistPage = page
     this.specialistRow = row.id
+    this.webReturnLevel = row.specialist === 'web-settings' ? (webOrigin ?? 'detail') : undefined
     this.pressedGesture = undefined
     this.contentPressed = undefined
     this.bumpRevision()
@@ -4501,6 +4629,7 @@ export class SettingsWorkspacePanel implements Component {
     if (page === undefined) return
     this.specialistPage = undefined
     this.specialistRow = undefined
+    this.webReturnLevel = undefined
     this.paintedSpecialistBox = undefined
     this.tenantBarLine = undefined
     page.focused = false
@@ -4718,6 +4847,220 @@ export class SettingsWorkspacePanel implements Component {
     ]
     this.paintedPanes = {}
     this.paintedContentBox = undefined
+    this.paintedRevision = this.revision
+    return lines.slice(0, plan.rows)
+  }
+
+  // ── SUX-06B: the Adaptive Web Search / Fetch Workbench ────────────────────
+
+  /**
+   * The frozen REAL projection of the Web workbench for THIS frame. Every cell
+   * derives from the live chrome grant, the root focus and the frozen §4.2
+   * thresholds — never from the terminal alone, the category name or the page's
+   * content. `paintChild` is false ONLY when the rail is the one current region
+   * (a narrow or short grant that cannot show a second pane).
+   */
+  private webWorkbenchProjection(plan: SettingsChromePlan): {
+    readonly railWidth: number
+    readonly childX: number
+    readonly childWidth: number
+    readonly childRows: number
+    readonly allowDual: boolean
+    readonly paintChild: boolean
+  } {
+    const width = plan.width
+    const rows = chromeGeometry(plan).contentRows
+    const railFocus = this.focus === 'categories'
+    if (rows < 1) {
+      return { railWidth: 0, childX: 0, childWidth: 0, childRows: 0, allowDual: false, paintChild: false }
+    }
+    // A short grant has one current logical region only: the rail, or the
+    // child's current local region. It never invents a second visible pane.
+    if (rows < 6) {
+      return railFocus
+        ? { railWidth: width, childX: 0, childWidth: 0, childRows: 0, allowDual: false, paintChild: false }
+        : { railWidth: 0, childX: 0, childWidth: width, childRows: rows, allowDual: false, paintChild: true }
+    }
+    // W >= 120: the rail stays beside the Web List and the Detail column. The
+    // child width is the full remaining grant, so its own 34-cell List split
+    // always leaves the 40-cell Detail floor.
+    if (width >= 120) {
+      const railWidth = wideCategoryWidth(width)
+      const childX = railWidth + COLUMN_GAP
+      return {
+        railWidth,
+        childX,
+        childWidth: Math.max(1, width - childX),
+        childRows: rows,
+        allowDual: true,
+        paintChild: true,
+      }
+    }
+    // 76..119: the adjacent pair moves with the keyboard. Rail focus shows
+    // `Categories | Web List`; child focus gives the whole frame to
+    // `Web List | Details`.
+    if (width >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS) {
+      if (railFocus) {
+        const railWidth = MEDIUM_CATEGORY_WIDTH
+        const childX = railWidth + COLUMN_GAP
+        return {
+          railWidth,
+          childX,
+          childWidth: Math.max(1, width - childX),
+          childRows: rows,
+          allowDual: false,
+          paintChild: true,
+        }
+      }
+      return { railWidth: 0, childX: 0, childWidth: width, childRows: rows, allowDual: true, paintChild: true }
+    }
+    // Below 76 columns exactly ONE column is painted.
+    return railFocus
+      ? { railWidth: width, childX: 0, childWidth: 0, childRows: 0, allowDual: false, paintChild: false }
+      : { railWidth: 0, childX: 0, childWidth: width, childRows: rows, allowDual: false, paintChild: true }
+  }
+
+  /** The Web workbench's ONE physical bar while the Categories rail owns the
+   *  keyboard: the Root's painted Open is the pointer analogue of Enter/Right,
+   *  and Back leaves the workbench for the REAL initiating level. */
+  private renderWebWorkbenchRailBar(width: number): PaintedBarLine {
+    return this.paintBar([
+      { text: 'Up/Down select', priority: 4 },
+      { text: 'Enter open', priority: 5 },
+      { text: 'Right open', priority: 6 },
+      ...this.regionActionBarHints('focus', false),
+      { text: 'Back [Esc]', priority: 8 },
+    ], width, BAR_OPEN_HINTS)
+  }
+
+  /**
+   * Paint the Adaptive Web workbench inside the SHARED Settings chrome: the
+   * Root keeps the ONE Header/Metadata/rule/notice, the ONE real Categories rail
+   * projected by the existing elastic rules, the ONE physical last-row Action
+   * Bar and the ONE pointer gesture authority. The child page paints only its
+   * own List/Detail body and its semantic bar wording — it never registers a
+   * second physical row, focus owner or hit map outside its real grant.
+   */
+  private renderWebWorkbench(plan: SettingsChromePlan): string[] {
+    const page = this.specialistPage
+    const lines: string[] = []
+    const targets: HitTarget[] = []
+    if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
+    if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
+    if (plan.ruleRows === 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    const geometry = chromeGeometry(plan)
+    const contentTop = geometry.contentTop
+    const contentRows = geometry.contentRows
+    const projection = this.webWorkbenchProjection(plan)
+    this.paintedViewport = Math.max(1, contentRows)
+    const childVisible = projection.paintChild && projection.childRows > 0 && page !== undefined
+    let child: readonly string[] = []
+    let childBar = ''
+    if (page !== undefined) {
+      // The child keeps the keyboard seat even on a zero-body frame: its own
+      // Esc ladder must still run through the real Back row. Every other body
+      // key is refused by the Root while the grant has no content row.
+      page.focused = this.focus === 'detail'
+      if (childVisible) {
+        page.setWebWorkbenchGrant?.({
+          width: projection.childWidth,
+          rows: projection.childRows,
+          barWidth: plan.width,
+          allowDual: projection.allowDual,
+        })
+        const rendered = page.render(projection.childWidth).slice(0, projection.childRows + 1)
+        child = rendered.slice(0, projection.childRows)
+        childBar = rendered[projection.childRows] ?? ''
+      }
+    }
+    if (plan.paneHeaderRows === 1) {
+      const railTitle = `Categories (${this.currentCategoryOrder().length})`
+      if (projection.railWidth > 0 && !projection.paintChild) {
+        // ONE current region: the rail's own header spans the frame; no empty
+        // second pane header is invented beside it.
+        lines.push(fit(this.paneHeader(railTitle, this.focus === 'categories'), plan.width))
+      } else {
+        const railHeader = projection.railWidth > 0
+          ? fit(this.paneHeader(railTitle, this.focus === 'categories'), projection.railWidth)
+          : ''
+        const childHeader = childVisible && page !== undefined
+          ? fit(page.paneHeader?.(projection.childWidth) ?? this.paneHeader(page.title, this.focus === 'detail'), projection.childWidth)
+          : ''
+        lines.push(projection.railWidth > 0
+          ? `${railHeader}${' '.repeat(COLUMN_GAP)}${childHeader}`
+          : fit(childHeader, plan.width))
+      }
+    }
+    const visible = projection.railWidth > 0 ? this.visibleCategories(contentRows) : []
+    for (let index = 0; index < contentRows; index += 1) {
+      const body = childVisible ? fit(child[index] ?? '', projection.childWidth) : ''
+      if (projection.railWidth === 0) {
+        lines.push(childVisible ? body : fit('', plan.width))
+        continue
+      }
+      const id = visible[index]
+      if (!projection.paintChild) {
+        // The rail is the ONE current region: it spans the whole frame width.
+        lines.push(fit(id === undefined ? '' : this.categoryLine(id), plan.width))
+        if (id !== undefined) {
+          targets.push({ kind: 'category', id, row: contentTop + index, startCol: 0, endCol: plan.width })
+        }
+        continue
+      }
+      const rail = fit(id === undefined ? '' : this.categoryLine(id), projection.railWidth)
+      lines.push(`${rail}${' '.repeat(COLUMN_GAP)}${body}`)
+      if (id !== undefined) {
+        targets.push({ kind: 'category', id, row: contentTop + index, startCol: 0, endCol: projection.railWidth })
+      }
+    }
+    // The ONE physical last row: the Root's rail bar while the rail owns the
+    // keyboard, otherwise the child's OWN semantic wording painted from column
+    // 0 at the FULL frame width. A child that painted no bar line leaves the
+    // truthful Back-only fallback (never an invented action).
+    if (plan.actionRows === 1) {
+      if (this.focus === 'categories') {
+        const bar = this.renderWebWorkbenchRailBar(plan.width)
+        lines.push(bar.line)
+        if (bar.span !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, bar.span))
+        if (bar.openSpan !== undefined) {
+          targets.push({ kind: 'bar-open', id: BAR_OPEN_ID, row: lines.length - 1, startCol: bar.openSpan.startCol, endCol: bar.openSpan.endCol })
+        }
+      } else {
+        let barLine = childBar
+        let escape = childVisible ? page?.paintedEscapeSpan?.() : undefined
+        const delegated = childVisible ? (page?.paintedBarSpans?.() ?? []) : []
+        if (barLine === '') {
+          const fallback = this.paintBar([{ text: 'Back [Esc]', priority: 8 }], plan.width)
+          barLine = fallback.line
+          escape = fallback.span
+        }
+        lines.push(fit(barLine, plan.width))
+        if (escape !== undefined) targets.push(this.barEscapeTarget(lines.length - 1, escape))
+        for (const span of delegated) {
+          targets.push({ kind: 'bar-span', id: span.id, row: lines.length - 1, startCol: span.startCol, endCol: span.endCol })
+        }
+      }
+    }
+    // The child's REAL body cells are its only pointer grant; the rail cells
+    // above are the Root's own category targets. A hidden child publishes no box.
+    this.paintedSpecialistBox = childVisible
+      ? { x: projection.childX, top: contentTop, width: projection.childWidth, rows: projection.childRows }
+      : undefined
+    const categories = this.currentCategoryOrder()
+    this.paintedPanes = projection.railWidth > 0
+      ? {
+          categories: {
+            x: 0,
+            width: projection.paintChild ? projection.railWidth : plan.width,
+            contentTop,
+            contentRows: Math.min(categories.length, contentRows),
+            maxOffset: Math.max(0, categories.length - contentRows),
+          },
+        }
+      : {}
+    this.paintedContentBox = undefined
+    this.paintedTargets = targets
     this.paintedRevision = this.revision
     return lines.slice(0, plan.rows)
   }
@@ -5196,44 +5539,67 @@ export class SettingsWorkspacePanel implements Component {
         this.intents.requestRender()
         return
       }
-      if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
-      // SUX-01/04/05: a pure region-focus Tab exit of the clean Agent single
-      // value, the clean Web UI page or the clean ACP access page is the ROOT's
-      // own focus transaction, so it runs through the tenant's ONE leave gate
-      // first. A page that keeps the keys (raw input, disclosure, saving, dirty,
-      // an open choice or a pending write) refuses and then consumes the key as
-      // its own local input.
-      // SUX-02: the Shell group's Tab is a LOCAL field move and is never taken
-      // by the Root — the child receives it (and refuses it at zero body rows).
-      if (this.detailTenantActive()
-        && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui' || this.specialistRow === 'acp-access')
-        && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
-        const tabForward = matchesKey(data, 'tab')
-        // A narrow frame paints ONE region: there is no second region to focus.
-        if (this.currentLayout() === 'narrow') return
-        const next: SettingsWorkspaceFocus = this.focus === 'categories'
-          ? (tabForward ? 'rows' : 'detail')
-          : this.focus === 'rows'
-            ? (tabForward ? 'detail' : 'categories')
-            : (tabForward ? 'categories' : 'rows')
-        // A frame that grants NO real content row at all (a wide OR medium
-        // zero-body grant) paints no parent pane and no body, so Tab could only
-        // focus an invisible region: refuse it. A frame that DOES grant content
-        // keeps the ordinary Tab path — a medium detail frame paints the sibling
-        // Rows pane even though the Categories destination belongs to the NEXT
-        // layout, so the check must be "does this frame grant any content row",
-        // never "is the destination pane painted in the CURRENT layout".
-        const granted = Object.values(this.paintedPanes)
-          .some(box => box !== undefined && box.contentRows >= 1)
-        if (!granted) { this.intents.requestRender(); return }
-        if (this.guardTenantLeave({ categoryId: this.categoryId, rowId: this.rowId, focus: next },
-          () => this.leaveDetailTo(next))) return
+      if (this.webWorkbenchActive() && this.focus === 'categories') {
+        // The visible Categories rail owns the keyboard: its normal root keys
+        // (Up/Down/Enter/Right/Esc) keep running below. Either Tab hands the
+        // keyboard back to the SAME mounted child region — never a remount, a
+        // Host read or an activation.
+        if (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab')) {
+          this.focusWebWorkbench()
+          return
+        }
+      } else {
+        // A zero-body workbench frame has no visible action: only the real Esc
+        // may run the page's own Back ladder (never a hidden refresh/Tab/Open).
+        if (this.webWorkbenchActive() && !matchesKey(data, 'escape') && this.webWorkbenchLiveContentRows() < 1) return
+        if (!matchesKey(data, 'escape') && this.specialistPage.grantAwaitingPaint?.() === true) return
+        // SUX-06B: the untouched Web list yields the keyboard to the visible
+        // rail; the Detail keeps Tab as its own local List/Detail toggle, and
+        // a saving/active choice refuses the yield inside the page.
+        if (this.webWorkbenchActive()
+          && matchesKey(data, 'shift+tab')
+          && this.specialistPage.webWorkbenchRegion?.() === 'list') {
+          if (this.specialistPage.webWorkbenchCanYieldToRail?.() === true) this.yieldWebWorkbenchToRail()
+          return
+        }
+        // SUX-01/04/05: a pure region-focus Tab exit of the clean Agent single
+        // value, the clean Web UI page or the clean ACP access page is the ROOT's
+        // own focus transaction, so it runs through the tenant's ONE leave gate
+        // first. A page that keeps the keys (raw input, disclosure, saving, dirty,
+        // an open choice or a pending write) refuses and then consumes the key as
+        // its own local input.
+        // SUX-02: the Shell group's Tab is a LOCAL field move and is never taken
+        // by the Root — the child receives it (and refuses it at zero body rows).
+        if (this.detailTenantActive()
+          && (this.specialistRow === 'agent-loop' || this.specialistRow === 'web-ui' || this.specialistRow === 'acp-access')
+          && (matchesKey(data, 'tab') || matchesKey(data, 'shift+tab'))) {
+          const tabForward = matchesKey(data, 'tab')
+          // A narrow frame paints ONE region: there is no second region to focus.
+          if (this.currentLayout() === 'narrow') return
+          const next: SettingsWorkspaceFocus = this.focus === 'categories'
+            ? (tabForward ? 'rows' : 'detail')
+            : this.focus === 'rows'
+              ? (tabForward ? 'detail' : 'categories')
+              : (tabForward ? 'categories' : 'rows')
+          // A frame that grants NO real content row at all (a wide OR medium
+          // zero-body grant) paints no parent pane and no body, so Tab could only
+          // focus an invisible region: refuse it. A frame that DOES grant content
+          // keeps the ordinary Tab path — a medium detail frame paints the sibling
+          // Rows pane even though the Categories destination belongs to the NEXT
+          // layout, so the check must be "does this frame grant any content row",
+          // never "is the destination pane painted in the CURRENT layout".
+          const granted = Object.values(this.paintedPanes)
+            .some(box => box !== undefined && box.contentRows >= 1)
+          if (!granted) { this.intents.requestRender(); return }
+          if (this.guardTenantLeave({ categoryId: this.categoryId, rowId: this.rowId, focus: next },
+            () => this.leaveDetailTo(next))) return
+        }
+        this.specialistPage.handleInput(data)
+        // The child's own model changed THIS frame's business content; the root
+        // owns the physical paint, so it schedules the frame the next key reads.
+        this.intents.requestRender()
+        return
       }
-      this.specialistPage.handleInput(data)
-      // The child's own model changed THIS frame's business content; the root
-      // owns the physical paint, so it schedules the frame the next key reads.
-      this.intents.requestRender()
-      return
     }
     // The CONTENT focus belongs to the direct page: the root never forwards a
     // navigation key to it, and the page never receives a key the root owns.
@@ -5753,6 +6119,13 @@ export class SettingsWorkspacePanel implements Component {
    *  A Host mutation owns the page: the workspace must not close (and the page
    *  must not be disposed) under an operation that is still in flight. */
   private goBack(): void {
+    // SUX-06B: from the visible workbench rail, Esc/Back leaves the WORKBENCH
+    // and restores the REAL initiating level — it is never the whole Settings
+    // close. The child's own Esc (Detail -> List -> origin) never reaches here.
+    if (this.webWorkbenchActive() && this.focus === 'categories') {
+      this.closeWebWorkbench()
+      return
+    }
     if (this.focus === 'detail') {
       // The tenant's own Esc never reaches here (the mounted page owns it), but
       // the ONE shared leave gate still applies if it ever does.
@@ -5859,6 +6232,12 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private confirm(): void {
+    // SUX-06B: the workbench rail's Open returns the keyboard to the SAME
+    // mounted child region; it never re-enters the row or starts a second page.
+    if (this.webWorkbenchActive() && this.focus === 'categories') {
+      this.focusWebWorkbench()
+      return
+    }
     if (this.focus === 'detail') {
       if (this.choiceField() !== undefined) return this.confirmChoice('keyboard')
       // C2-R3: the specialist row's ONLY action is its embedded page. It is
@@ -5866,7 +6245,7 @@ export class SettingsWorkspacePanel implements Component {
       // from the Rows level.
       const row = this.selectedRow()
       if (row?.specialist !== undefined) {
-        this.openSpecialist(row, this.singleAgentRow(row) ? 'change' : undefined)
+        this.openSpecialist(row, this.singleAgentRow(row) ? 'change' : undefined, 'detail')
         return
       }
       return this.beginChoice()
@@ -5893,9 +6272,13 @@ export class SettingsWorkspacePanel implements Component {
     // intent is captured here and the Root level/revision is committed BEFORE
     // the factory runs, so a synchronous callback never sees a stale state.
     if (row?.specialist !== undefined) {
+      // SUX-06B: capture the REAL initiating level BEFORE the focus moves to
+      // the Detail seat, so the workbench can return to the level the user
+      // came from (a Rows Enter vs an existing Detail Manage).
+      const origin = this.focus === 'detail' ? 'detail' : 'rows'
       this.focus = 'detail'
       this.bumpRevision()
-      this.openSpecialist(row, this.singleAgentRow(row) ? entry : undefined)
+      this.openSpecialist(row, this.singleAgentRow(row) ? entry : undefined, origin)
       return
     }
     if (this.focus === 'detail') return
@@ -6279,6 +6662,7 @@ export class SettingsWorkspacePanel implements Component {
     this.specialistPressed = undefined
     this.authPage?.cancelPointer?.()
     this.pluginPage?.cancelPointer()
+    this.specialistPage?.cancelPointer?.()
   }
 
   /** Wheel only: the pane under the pointer scrolls; everything else falls
@@ -6364,8 +6748,7 @@ export class SettingsWorkspacePanel implements Component {
         }
         // Outside the tenant body the visible parent Categories/Rows keep their
         // OWN wheel owner below (a hidden pane still owns nothing).
-      } else {
-        if (box === undefined || !inside) return undefined
+      } else if (box !== undefined && inside) {
         // A wheel may only scroll a body whose current grant really painted.
         if (this.specialistPage.grantAwaitingPaint?.() === true) {
           return event.type === 'wheel' ? { handled: true } : undefined
@@ -6379,6 +6762,20 @@ export class SettingsWorkspacePanel implements Component {
         })
         this.intents.requestRender()
         return result
+      } else if (this.webWorkbenchActive()) {
+        // SUX-06B: the workbench owns its whole frame for wheel input. The
+        // visible rail scrolls itself; the 2-cell gutter, the header and the
+        // blank bar row are inert (never a Detail scroll through the gutter).
+        if (event.type !== 'wheel') return undefined
+        const delta = event.wheelDelta ?? 0
+        if (delta === 0) return undefined
+        if (this.paneAt(event.x, event.y) === 'categories') {
+          this.scrollCategories(delta)
+          return { handled: true }
+        }
+        return { handled: true }
+      } else {
+        return undefined
       }
     }
     if (this.categoryId === 'plugins') {
@@ -6560,7 +6957,7 @@ export class SettingsWorkspacePanel implements Component {
         this.intents.requestRender()
         return
       }
-      if (!this.detailTenantActive()) return
+      if (!this.detailTenantActive() && !this.webWorkbenchActive()) return
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -6706,10 +7103,18 @@ export class SettingsWorkspacePanel implements Component {
           alt: false,
           ctrl: false,
         })
+        // SUX-06B: a completed Web-body gesture hands the keyboard to the
+        // child's REAL current region (a row click selected the List) without
+        // opening a Detail or dispatching a write. A click that retired the
+        // child (the credential Models deeplink) leaves its OWN focus intact.
+        if (this.webWorkbenchActive()) {
+          this.focus = 'detail'
+          this.bumpRevision()
+        }
         this.intents.requestRender()
         return
       }
-      if (!this.detailTenantActive()) return
+      if (!this.detailTenantActive() && !this.webWorkbenchActive()) return
     }
     if (this.categoryId === 'plugins') {
       const page = this.pluginPage
@@ -6874,7 +7279,7 @@ export class SettingsWorkspacePanel implements Component {
         // Detail tenant, never a second page and never the forward Enter route.
         if (this.focus === 'detail') {
           const row = this.selectedRow()
-          if (row?.id === target.id) this.openSpecialist(row, this.singleAgentRow(row) ? 'details' : undefined)
+          if (row?.id === target.id) this.openSpecialist(row, this.singleAgentRow(row) ? 'details' : undefined, 'detail')
           return
         }
         this.enterDetail('details')
@@ -6892,7 +7297,7 @@ export class SettingsWorkspacePanel implements Component {
       case 'manage': {
         this.takeColumnFocus('detail')
         const row = this.selectedRow()
-        if (row?.id === target.id) this.openSpecialist(row)
+        if (row?.id === target.id) this.openSpecialist(row, undefined, 'detail')
         return
       }
       case 'option': {

@@ -40,7 +40,7 @@ import { color } from '../theme/runtime.ts'
 import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
 import { paintActionSpan } from '../presentation/action-ink.ts'
 import type { ModelsInitialView } from './models-workspace-page.ts'
-import type { EmbeddedSpecialistPage } from './settings-workspace-panel.ts'
+import type { EmbeddedSpecialistPage, WebWorkbenchGrant } from './settings-workspace-panel.ts'
 
 /** The exact credential reference the official DeepSeek Search / Fetch API
  *  providers resolve (`apiKeyEnv`'s shipped default). Its VALUE never reaches
@@ -273,7 +273,6 @@ export interface WebSettingsPageIntents {
   readonly done: () => void
 }
 
-type WebPageLayout = 'wide' | 'medium' | 'narrow'
 type WebPageRegion = 'list' | 'detail'
 
 /** One painted line of the Detail pane that may carry a pointer target. */
@@ -304,11 +303,13 @@ interface PagePaint {
   readonly targetRows: readonly PageTarget[]
 }
 
-/** The frozen responsive breakpoints of THIS page (not a project rule). */
-function layoutForWidth(width: number): WebPageLayout {
-  if (width >= 100) return 'wide'
-  if (width >= 65) return 'medium'
-  return 'narrow'
+/** The comfortable reading width of a natural-prose explanation. The Detail's
+ *  REAL grant is never reduced; a long sentence simply does not run to a wide
+ *  column's far edge. Long identities, YAML facts and values still wrap at the
+ *  full granted width. */
+const PROSE_MAX_WIDTH = 72
+function proseWidth(width: number): number {
+  return Math.max(1, Math.min(width, PROSE_MAX_WIDTH))
 }
 
 /** Pad/truncate one painted line to exactly `width` cells. */
@@ -331,11 +332,14 @@ function composeRow(left: string, right: string, width: number): string {
 }
 
 /** One complete Action Bar segment and the ink role it paints with: a pure
- *  browsing HINT (muted, inert), the page's REAL confirm verb, or the root's
- *  Esc affordance. */
+ *  browsing HINT (muted, inert), the page's REAL action/confirm verb, or the
+ *  root's Esc affordance. `id` is the page-owned intent a delegated span
+ *  carries; a segment without an id (a pure hint or the root's Esc) publishes
+ *  no delegated target. */
 interface BarSegmentWording {
   readonly text: string
-  readonly ink: 'hint' | 'confirm' | 'escape'
+  readonly ink: 'hint' | 'action' | 'confirm' | 'escape'
+  readonly id?: string
 }
 
 /** One whole Action Bar wording: COMPLETE segments only (never truncated),
@@ -364,25 +368,6 @@ function barWording(parts: readonly BarSegmentWording[]): BarWording {
 
 /** The empty wording: a width that cannot paint even one complete segment. */
 const EMPTY_WORDING: BarWording = { text: '', segments: [] }
-
-/** Build one wording whose LAST segment is the real `Verb [Esc]` affordance
- *  (design §7.1), with its span measured from the painted string. */
-function escapeWording(lead: string, verb: string): BarWording {
-  return barWording([
-    ...lead === '' ? [] : [{ text: lead, ink: 'hint' as const }],
-    { text: `${verb} [Esc]`, ink: 'escape' as const },
-  ])
-}
-
-/** Build the page's explicit `Verb [Enter] · Back [Esc]` wording: the commit
- *  verb is the ONE delegated target and the Esc affordance stays the root's. */
-function confirmWording(lead: string): BarWording {
-  return barWording([
-    ...lead === '' ? [] : [{ text: lead, ink: 'hint' as const }],
-    { text: 'Confirm [Enter]', ink: 'confirm' as const },
-    { text: 'Back [Esc]', ink: 'escape' as const },
-  ])
-}
 
 /** The LONGEST wording that fits `width` WHOLE, or the empty one when none
  *  does. The chosen value is the SAME value the row paints, so its spans are
@@ -450,11 +435,26 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private actionIndex = 0
   private listOffset = 0
   private detailOffset = 0
+  /** SUX-06B: the REAL body/bar grant the Root composed for THIS frame. It is
+   *  the ONE owner of the local List/Detail projection; the page never reads a
+   *  terminal width or derives a breakpoint of its own. */
+  private grant: WebWorkbenchGrant | undefined
+  /** The grant the LAST completed render used. A changed grant has not painted
+   *  yet, so its previous bar/decision geometry is not actionable. */
+  private paintedGrant: WebWorkbenchGrant | undefined
+  /** The generic row budget of the non-Workbench contract (`setMaxRows`). It is
+   *  used only by a direct page mount; the real Web workbench always supplies
+   *  {@link grant}. */
   private rowGrant = 8
   private readonly phases = new Map<WebSettingRowId, WebRowPhase>()
   private disposed = false
   private revision = 0
   private paint: PagePaint | undefined
+  /** The page-owned Action-Bar intents of the LAST painted frame. They are in
+   *  PHYSICAL columns (the bar starts at x=0 with the full frame width), so the
+   *  Settings Root can delegate the release without translating cells. */
+  private paintedBarSpansValue: readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] = []
+  private paintedBarRevision = -1
   /** The complete Esc affordance of the LAST painted bar, in this page's
    *  own content columns. Cleared by a row-grant change and on dispose, so
    *  a resize never keeps the previous frame's geometry clickable. */
@@ -494,28 +494,64 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.intents = intents
   }
 
-  /** The root's row-budget seam: the granted lines INCLUDE the Action Bar. */
+  /** The generic row-budget seam of the non-Workbench embedded-page contract.
+   *  The real Web workbench always uses {@link setWebWorkbenchGrant}. */
   setMaxRows(rows: number): void {
     this.rowGrant = Math.max(1, Math.floor(rows))
-    // A new grant has not painted yet: the previous bar's geometry (including
-    // the delegated Confirm target) is stale.
+  }
+
+  /** SUX-06B: the Root's ONE explicit grant for this frame. The child paints
+   *  only inside it; the bar width is independent of the body width. */
+  setWebWorkbenchGrant(grant: WebWorkbenchGrant): void {
+    const changed = this.grant === undefined
+      || this.grant.width !== grant.width
+      || this.grant.rows !== grant.rows
+      || this.grant.barWidth !== grant.barWidth
+      || this.grant.allowDual !== grant.allowDual
+    this.grant = { ...grant }
+    if (!changed) return
+    // A new grant has not painted yet: the previous frame's bar/decision
+    // geometry belongs to different cells.
+    this.paintedBarSpansValue = []
+    this.paintedBarRevision = -1
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
     this.paintedDecision = undefined
   }
 
   private bodyRows(): number {
-    return Math.max(0, this.rowGrant - 1)
+    return this.grant === undefined ? Math.max(0, this.rowGrant - 1) : this.grant.rows
   }
 
-  /** The last PAINTED width, else the current grant's width guess. Keyboard and
-   *  pointer decisions always use the frame the user really sees. */
+  private bodyWidth(width: number): number {
+    return this.grant?.width ?? width
+  }
+
+  private barWidth(width: number): number {
+    return this.grant?.barWidth ?? width
+  }
+
+  /** The last PAINTED body width, else the live grant. Keyboard and pointer
+   *  decisions always use the frame the user really sees. */
   private liveWidth(): number {
-    return this.paint?.width ?? 0
+    return this.paint?.width ?? this.grant?.width ?? 0
   }
 
   private liveBodyRows(): number {
     return this.paint?.bodyRows ?? this.bodyRows()
+  }
+
+  /** Whether the LAST painted grant is still the live one. The Root admits no
+   *  body key except the real Esc until the destination frame paints. */
+  grantAwaitingPaint(): boolean {
+    const grant = this.grant
+    if (grant === undefined) return this.paint === undefined
+    const painted = this.paintedGrant
+    return painted === undefined
+      || painted.width !== grant.width
+      || painted.rows !== grant.rows
+      || painted.barWidth !== grant.barWidth
+      || painted.allowDual !== grant.allowDual
   }
 
   /** One state change: bump the gesture revision and repaint. */
@@ -527,11 +563,16 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   handleInput(data: string): void {
     if (this.disposed) return
+    // The Root forwards a body key only while this page owns the keyboard. A
+    // key that arrives in the passive preview has no visible owner and is inert.
+    if (!this.focused) return
     // Every real key starts a new semantic frame: a bar press that began
     // before it can never complete against the state this key changes (or
     // re-affirms). The painted target is re-published by the next render.
     this.revision += 1
     this.paintedConfirmTarget = undefined
+    this.paintedBarSpansValue = []
+    this.paintedBarRevision = -1
     if (matchesKey(data, 'escape')) {
       if (this.region === 'detail') {
         this.commitPresentation(() => { this.region = 'list' })
@@ -553,6 +594,12 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       else this.confirmSelected()
       return
     }
+    if (matchesKey(data, 'right')) {
+      // The list's explicit forward route is the SAME `openSelectedRow` sink
+      // as Enter; the Detail's Right is inert (it is not a commit).
+      if (this.region === 'list') this.openSelectedRow()
+      return
+    }
     if (matchesKey(data, 'up')) return this.move(-1)
     if (matchesKey(data, 'down')) return this.move(1)
     if (matchesKey(data, 'pageUp')) return this.page(-1)
@@ -571,36 +618,93 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return this.paintedEscapeSpanValue
   }
 
-  /** The NON-Esc Action-Bar span the LAST PAINTED frame really published: the
-   *  page's own `Confirm [Enter]`. The Settings root owns the ONE physical last
-   *  row and DELEGATES these cells through {@link activateBarSpan}; a frame
-   *  that painted no confirmable candidate publishes nothing. */
+  /** The NON-Esc Action-Bar intents the LAST PAINTED frame really published
+   *  (`Open`, `Refresh`, `Confirm`, the credential deep link). The Settings
+   *  root owns the ONE physical last row and DELEGATES these cells through
+   *  {@link activateBarSpan}; a passive (rail-focused) frame publishes none. */
   paintedBarSpans(): readonly { readonly id: string; readonly startCol: number; readonly endCol: number }[] {
-    const target = this.paintedConfirmTarget
-    return target === undefined
-      ? []
-      : [{ id: 'web:confirm', startCol: target.startCol, endCol: target.endCol }]
+    return this.focused ? this.paintedBarSpansValue : []
+  }
+
+  /** The Web page's current LOCAL region (`list`/`detail`). */
+  webWorkbenchRegion(): WebPageRegion {
+    return this.region
+  }
+
+  /** Whether a USER parent navigation may retire the workbench right now. */
+  webWorkbenchBlocksParentNavigation(): boolean {
+    for (const phase of this.phases.values()) {
+      if (phase.kind === 'saving') return true
+    }
+    if (this.region !== 'detail') return false
+    const rowId = this.selectedRowId()
+    if (rowId === undefined) return false
+    // A visible unknown/unverified outcome keeps the page until the user
+    // refreshes or makes a new decision; it is never silently abandoned.
+    const settingId = this.selectedSettingId()
+    const phase = settingId === undefined ? undefined : this.phases.get(settingId)?.kind
+    if (phase === 'unverified' || phase === 'outcome-unconfirmed') return true
+    if (rowId === 'web-credential') return this.selectableCredentialActions().length > 0
+    if (rowId === 'web-search-advanced' || rowId === 'web-fetch-advanced') return false
+    // A writable choice Detail owns the active local choice; only a truly
+    // read-only Detail (no confirmable candidate) may be left from the parent.
+    return this.choiceValues().length > 0
+  }
+
+  /** Whether the untouched LIST may yield the keyboard to the visible rail. */
+  webWorkbenchCanYieldToRail(): boolean {
+    if (this.region !== 'list') return false
+    for (const phase of this.phases.values()) {
+      if (phase.kind === 'saving') return false
+    }
+    return true
+  }
+
+  /** Revoke one in-flight body press (another owner claims the gesture). */
+  cancelPointer(): void {
+    this.pressed = undefined
+  }
+
+  /** The embedded-page contract the Settings Root consults before a USER
+   *  category change: it is the SAME answer the workbench owns. */
+  blocksParentNavigation(): boolean {
+    return this.webWorkbenchBlocksParentNavigation()
   }
 
   /**
-   * Invoke the ONE delegated confirm gesture. The id came from
-   * {@link paintedBarSpans} of the last frame; the pointer's own currentness is
-   * re-proven HERE against the LIVE page state before the EXISTING
-   * `confirmSelected()` sink runs:
+   * Invoke ONE delegated last-row intent. The id came from
+   * {@link paintedBarSpans} of the LAST painted frame, and the page re-proves
+   * that this frame is still current before running its EXISTING sink:
    *
    * - a new frame/gesture revision (any key, wheel, row/candidate/phase move,
    *   resize, dispose) makes the old press stale;
-   * - the LATEST authority read must still be ready and writable, and must
-   *   still offer the SAME raw candidate at the SAME choice index the frame
-   *   painted (the painted snapshot is never a commit base);
-   * - a saving row offers no second write, and the candidate must still be
-   *   inside the last-painted Detail viewport.
+   * - the intent must still be one this page really published;
+   * - the confirm path additionally re-proves the LATEST authority read, the
+   *   SAME raw candidate at the SAME choice index the frame painted, and the
+   *   candidate's real painted visibility.
    *
    * A refusal dispatches NOTHING (never a different candidate, never a
    * second command-layer entry).
    */
   activateBarSpan(id: string): void {
-    if (this.disposed || id !== 'web:confirm') return
+    if (this.disposed || !this.focused) return
+    if (this.paintedBarRevision !== this.revision) return
+    if (!this.paintedBarSpansValue.some(span => span.id === id)) return
+    if (id === 'web:refresh') {
+      this.intents.refresh()
+      return
+    }
+    if (id === 'web:open') {
+      if (this.region !== 'list') return
+      this.openSelectedRow()
+      return
+    }
+    if (id === 'web:credential') {
+      if (this.region !== 'detail') return
+      this.activateCredentialAction()
+      return
+    }
+    if (id !== 'web:confirm') return
     const target = this.paintedConfirmTarget
     const decision = this.paintedDecision
     if (target === undefined || decision === undefined) return
@@ -629,7 +733,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   gestureIdentity(): string {
     const rowId = this.selectedSettingId()
     const phase = rowId === undefined ? undefined : this.phases.get(rowId)?.kind
-    return `${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.choiceIndex}:${this.actionIndex}:${this.revision}`
+    return `${this.focused ? 'active' : 'passive'}:${this.region}:${rowId ?? ''}:${phase ?? ''}:${this.choiceIndex}:${this.actionIndex}:${this.revision}`
   }
 
   dispose(): void {
@@ -638,6 +742,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
     this.paintedDecision = undefined
+    this.paintedBarSpansValue = []
+    this.paintedBarRevision = -1
+    this.grant = undefined
+    this.paintedGrant = undefined
     this.paint = undefined
     this.pressed = undefined
     this.phases.clear()
@@ -646,16 +754,18 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   /** The page paints from the LIVE palette at render time: no cached ANSI. */
   invalidate(): void {}
 
-  /** The two-column layout paints both regions; the narrow one paints ONE. */
-  private paintsBothRegions(width: number, bodyRows: number): boolean {
-    return bodyRows >= 2 && layoutForWidth(width) !== 'narrow'
+  /** Whether the REAL grant paints the List and the Detail side by side. The
+   *  Root decides this from the live chrome; the page never re-derives it from
+   *  a terminal width. */
+  private paintsBothRegions(): boolean {
+    return this.grant?.allowDual === true && this.bodyRows() >= 2
   }
 
-  /** Tab / Shift+Tab move the REAL visible focus only: at a width that paints
-   *  one region there is no other visible region to own the keys. A focus move
-   *  never writes. */
+  /** Tab / Shift+Tab move the REAL visible local focus only: a single-region
+   *  grant has no second visible region to own the keys. A focus move never
+   *  writes and never re-reads the authority. */
   private toggleRegion(): void {
-    if (!this.paintsBothRegions(this.liveWidth(), this.liveBodyRows())) return
+    if (!this.paintsBothRegions()) return
     this.commitPresentation(() => {
       this.region = this.region === 'list' ? 'detail' : 'list'
     })
@@ -1212,29 +1322,23 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   // ── layout ────────────────────────────────────────────────────────────────
 
-  private listViewport(width: number, bodyRows: number): number {
-    if (!this.paintsBothRegions(width, bodyRows)) return bodyRows
-    if (layoutForWidth(width) === 'wide') return bodyRows
-    // Medium: the list is granted the top share, never more than its nine rows.
-    return Math.min(WEB_SETTINGS_ROW_IDS.length, Math.max(1, Math.floor((bodyRows - 1) / 2)))
+  private listViewport(_width: number, bodyRows: number): number {
+    return bodyRows
   }
 
-  private detailViewport(width: number, bodyRows: number): number {
-    if (!this.paintsBothRegions(width, bodyRows)) return bodyRows
-    if (layoutForWidth(width) === 'wide') return bodyRows
-    return Math.max(1, bodyRows - this.listViewport(width, bodyRows))
+  private detailViewport(_width: number, bodyRows: number): number {
+    return bodyRows
   }
 
   private listColumnWidth(width: number): number {
     return Math.min(34, Math.max(1, width))
   }
 
-  /** The REAL detail content width for the current projection (the wide
-   *  layout paints the Detail in its own column; the stacked and single-region
-   *  projections use the whole page width). */
-  private detailWidth(width: number, bodyRows: number): number {
-    if (!this.paintsBothRegions(width, bodyRows)) return width
-    if (layoutForWidth(width) !== 'wide') return width
+  /** The REAL Detail content width for the granted local projection. A dual
+   *  grant paints `List(34) | 2 | Details(rest)`; a single-region grant paints
+   *  its one region across the whole child body width. */
+  private detailWidth(width: number, _bodyRows: number): number {
+    if (!this.paintsBothRegions()) return width
     return Math.max(1, width - this.listColumnWidth(width) - 2)
   }
 
@@ -1333,12 +1437,15 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
     this.paintedDecision = undefined
+    this.paintedBarSpansValue = []
+    this.paintedBarRevision = -1
     // A fresh read can invalidate the credential cursor before this frame: clamp
     // it FIRST so the painted cursor, the bar and the Enter target agree.
     if (this.selectedRowId() === 'web-credential') {
       this.reconcileCredentialCursor()
     }
-    const grant = this.rowGrant
+    const bodyWidth = this.bodyWidth(width)
+    const barWidth = this.barWidth(width)
     const bodyRows = this.bodyRows()
     const facts = this.intents.readFacts()
     // A changed authority observation invalidates the previous gesture and
@@ -1348,43 +1455,46 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // Anchor the placeholder highlight on the FIRST readable authority so the
     // Automatic / deployment-default row is never painted as selected while a
     // different option carries `[current]`. A later read keeps the user's draft.
-    this.anchorAuthorityChoice(facts, width, bodyRows)
+    this.anchorAuthorityChoice(facts, bodyWidth, bodyRows)
     this.paintedFacts = facts
     const targets: PageTarget[] = []
     const lines: string[] = []
-    const both = this.paintsBothRegions(width, bodyRows)
-    if (both && layoutForWidth(width) === 'wide') {
-      const listWidth = this.listColumnWidth(width)
-      const detailWidth = this.detailWidth(width, bodyRows)
+    const dual = this.paintsBothRegions()
+    // A passive single-region grant is the rail's own `Categories │ Web List`
+    // preview: it always paints the list, never a Detail the pair does not show.
+    const passiveSingle = !this.focused && !dual
+    // Only the ACTIVE Detail publishes option/credential targets; the preview
+    // beside an active List is readable content without a write target.
+    const detailActive = this.focused && this.region === 'detail'
+    if (dual) {
+      const listWidth = this.listColumnWidth(bodyWidth)
+      const detailWidth = this.detailWidth(bodyWidth, bodyRows)
       const list = this.renderList(facts, listWidth, bodyRows)
       const detail = this.renderDetail(facts, detailWidth, bodyRows)
       for (let index = 0; index < bodyRows; index += 1) {
-        lines.push(composeRow(list.lines[index] ?? '', detail.lines[index] ?? '', width))
+        lines.push(composeRow(list.lines[index] ?? '', detail.lines[index] ?? '', bodyWidth))
       }
       targets.push(...list.targets)
-      for (const target of detail.targets) targets.push({ ...target, startCol: target.startCol + listWidth + 2 })
-    } else if (both) {
-      const listRows = this.listViewport(width, bodyRows)
-      const detailRows = this.detailViewport(width, bodyRows)
-      const list = this.renderList(facts, width, listRows)
-      const detail = this.renderDetail(facts, width, detailRows)
-      for (let index = 0; index < listRows; index += 1) lines.push(fit(list.lines[index] ?? '', width))
-      for (let index = 0; index < detailRows; index += 1) lines.push(fit(detail.lines[index] ?? '', width))
-      targets.push(...list.targets)
-      for (const target of detail.targets) targets.push({ ...target, row: target.row + listRows })
-    } else if (this.region === 'list') {
-      const list = this.renderList(facts, width, bodyRows)
-      lines.push(...list.lines.map(line => fit(line, width)))
+      if (detailActive) {
+        for (const target of detail.targets) targets.push({ ...target, startCol: target.startCol + listWidth + 2 })
+      }
+    } else if (this.region === 'list' || passiveSingle) {
+      const list = this.renderList(facts, bodyWidth, bodyRows)
+      lines.push(...list.lines.map(line => fit(line, bodyWidth)))
       targets.push(...list.targets)
     } else {
-      const detail = this.renderDetail(facts, width, bodyRows)
-      lines.push(...detail.lines.map(line => fit(line, width)))
-      targets.push(...detail.targets)
+      const detail = this.renderDetail(facts, bodyWidth, bodyRows)
+      lines.push(...detail.lines.map(line => fit(line, bodyWidth)))
+      if (detailActive) targets.push(...detail.targets)
     }
-    while (lines.length < bodyRows) lines.push(fit('', width))
-    const bar = this.actionBar(width, bodyRows)
+    while (lines.length < bodyRows) lines.push(fit('', bodyWidth))
+    const bar = this.actionBar(bodyWidth, bodyRows, barWidth)
     // `fit` below only pads (the chosen wording is already whole and in budget),
     // so the recorded spans are exactly the painted bar's geometry.
+    this.paintedBarSpansValue = bar.segments.flatMap(segment => segment.id === undefined
+      ? []
+      : [{ id: segment.id, startCol: segment.startCol, endCol: segment.endCol }])
+    this.paintedBarRevision = this.revision
     const escapeSegment = bar.segments.find(segment => segment.ink === 'escape')
     this.paintedEscapeSpanValue = escapeSegment === undefined
       ? undefined
@@ -1396,7 +1506,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // so neither Enter nor the bar can act on an unexecutable candidate.
     const paintedOption = candidate !== undefined
       && targets.some(target => target.kind === 'option' && target.id === candidate)
-    if (rowId !== undefined && candidate !== undefined && paintedOption) {
+    if (detailActive && rowId !== undefined && candidate !== undefined && paintedOption) {
       const request = this.commitRequestFor(rowId, candidate)
       if (request !== undefined) {
         this.paintedDecision = {
@@ -1409,7 +1519,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     const confirmSegment = bar.segments.find(segment => segment.ink === 'confirm')
-    if (confirmSegment !== undefined && this.paintedDecision !== undefined
+    if (detailActive && confirmSegment !== undefined && this.paintedDecision !== undefined
       && rowId !== undefined && candidate !== undefined) {
       this.paintedConfirmTarget = {
         revision: this.revision,
@@ -1419,9 +1529,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         endCol: confirmSegment.endCol,
       }
     }
-    lines.push(fit(this.paintBarWording(bar), width))
-    this.paint = { width, rows: grant, bodyRows, targetRows: targets }
-    return lines.slice(0, grant)
+    lines.push(fit(this.paintBarWording(bar), barWidth))
+    this.paint = { width: bodyWidth, rows: bodyRows + 1, bodyRows, targetRows: targets }
+    this.paintedGrant = this.grant === undefined ? undefined : { ...this.grant }
+    return lines.slice(0, bodyRows + 1)
   }
 
   /** A changed authority observation is a new semantic frame: bump the
@@ -1478,109 +1589,154 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     }
   }
 
-  /** The pane-header line the root paints inside the shared body grant. The
-   *  two-column projection names BOTH columns; exactly one is the active
-   *  device (§4.5) — the focused region's. */
+  /** The pane-header line the root paints inside the shared child grant. A dual
+   *  projection names BOTH columns and exactly one is the `[Label]` active
+   *  device (§4.5) — the focused region's. A passive preview names neither. */
   paneHeader(width: number): string {
-    if (!this.paintsBothRegions(width, this.bodyRows())) {
+    if (!this.paintsBothRegions()) {
       return this.focused
         ? color.textStrong(`[${WEB_SETTINGS_PAGE_TITLE}]`, 'primary')
         : color.textDim(WEB_SETTINGS_PAGE_TITLE)
     }
-    const listActive = this.region === 'list'
+    const listActive = this.focused && this.region === 'list'
+    const detailActive = this.focused && this.region === 'detail'
+    const listWidth = this.listColumnWidth(width)
+    const detailWidth = this.detailWidth(width, this.bodyRows())
     const left = listActive ? color.textStrong(`[${WEB_SETTINGS_PAGE_TITLE}]`, 'primary') : color.textDim(WEB_SETTINGS_PAGE_TITLE)
-    const right = listActive ? color.textDim('Current / Detail') : color.textStrong('[Current / Detail]', 'primary')
-    return composeRow(left, right, width)
+    const right = detailActive ? color.textStrong('[Current / Detail]', 'primary') : color.textDim('Current / Detail')
+    // The titles are the REAL pane headers: each starts at its own column and
+    // is fitted inside it (never right-aligned against a different pane).
+    return `${fit(left, listWidth)}${' '.repeat(2)}${fit(right, detailWidth)}`
   }
 
-  /** A choice row's Action Bar: the explicit `Confirm [Enter]` only while the
-   *  highlighted candidate is inside THIS render's Detail viewport (the same
-   *  gate the dispatch uses), so a resize can never advertise a Confirm it
-   *  will drop. The commit verb is painted with the real action ink and
-   *  published as the page's ONE delegated last-row span. */
-  private choiceActionBar(width: number, bodyRows: number): BarWording {
+  /** The truthful read-only/loading bar: the real Refresh delegate plus the
+   *  root's Back. No confirm affordance exists without a writable candidate. */
+  private readOnlyActionBar(barWidth: number): BarWording {
+    return wholeWording(
+      barWording([
+        { text: 'Refresh [R]', ink: 'action', id: 'web:refresh' },
+        { text: 'Back [Esc]', ink: 'escape' },
+      ]),
+      barWidth,
+      [barWording([{ text: 'Back [Esc]', ink: 'escape' }])],
+    )
+  }
+
+  /** The saving bar: the dispatched write owns the row; Back only hides it and
+   *  is never described as a cancel. */
+  private savingActionBar(barWidth: number): BarWording {
+    return wholeWording(
+      barWording([
+        { text: 'Saving…', ink: 'hint' },
+        { text: 'Back [Esc]', ink: 'escape' },
+      ]),
+      barWidth,
+      [barWording([{ text: 'Back [Esc]', ink: 'escape' }])],
+    )
+  }
+
+  /** A choice row's Action Bar: `Confirm [Enter]` only while the highlighted
+   *  candidate is inside THIS render's Detail viewport (the same gate the
+   *  dispatch uses); the real Refresh delegate and the root's Back are always
+   *  offered. The commit verb is the page's delegated last-row span. */
+  private choiceActionBar(width: number, bodyRows: number, barWidth: number): BarWording {
     // A dispatched write owns the row: the bar states it and never advertises a
     // Confirm that `confirmChoice()` would silently drop.
     const rowId = this.selectedSettingId()
     if (rowId !== undefined && this.phases.get(rowId)?.kind === 'saving') {
-      return wholeWording(escapeWording('Saving…', 'Back'), width, [escapeWording('', 'Back')])
+      return this.savingActionBar(barWidth)
     }
     const requested = this.choiceValues()[this.choiceIndex]
-    if (requested === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
+    if (requested === undefined) return this.readOnlyActionBar(barWidth)
     const viewport = this.detailViewport(width, bodyRows)
-    // The Detail pane really paints inside its OWN column in the wide layout:
-    // the visibility proof must wrap the SAME width the actual render used, or
-    // a long fact/verdict can crop the candidate under the bar's projection
-    // while the real frame no longer paints it.
+    // The Detail pane really paints inside its OWN column in a dual grant: the
+    // visibility proof must wrap the SAME width the actual render used, or a
+    // long fact/verdict can crop the highlighted candidate under the bar's
+    // projection while the real frame no longer paints it.
     const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
     const entry = projection.optionLines.find(line => line.value === requested)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
-    if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
+    if (!visible) return this.readOnlyActionBar(barWidth)
+    const confirm = { text: 'Confirm [Enter]', ink: 'confirm' as const, id: 'web:confirm' }
+    const refresh = { text: 'Refresh [R]', ink: 'action' as const, id: 'web:refresh' }
+    const back = { text: 'Back [Esc]', ink: 'escape' as const }
     return wholeWording(
-      confirmWording('↑/↓ choose'),
-      width,
-      [confirmWording(''), escapeWording('', 'Back')],
+      barWording([{ text: '↑/↓ choose', ink: 'hint' }, confirm, refresh, back]),
+      barWidth,
+      [
+        barWording([confirm, refresh, back]),
+        barWording([confirm, back]),
+        barWording([refresh, back]),
+        barWording([back]),
+      ],
     )
   }
 
   /** The credential row's Action Bar. It advertises the Models deeplink ONLY
    *  while the reconciled cursor owns a selectable action that is really inside
    *  the CURRENT render's Detail viewport — an off-screen or disabled target is
-   *  never described as an available Enter. `bodyRows` is THIS frame's grant,
-   *  never the previously painted one (a resize can shrink the grant before
-   *  `this.paint` is updated). */
-  private credentialActionBar(width: number, bodyRows: number): BarWording {
+   *  never described as available. */
+  private credentialActionBar(width: number, bodyRows: number, barWidth: number): BarWording {
     const active = this.selectableCredentialActions()[this.reconcileCredentialCursor()]
-    if (active === undefined) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
+    if (active === undefined) return this.readOnlyActionBar(barWidth)
     const viewport = this.detailViewport(width, bodyRows)
     const projection = this.detailProjection(this.detailWidth(width, bodyRows), viewport)
     const entry = projection.actionLines.find(line => line.value === active.action)
     const offset = Math.min(Math.max(0, this.detailOffset), projection.maxOffset)
     const visible = entry !== undefined && entry.line >= offset && entry.line < offset + viewport
-    if (!visible) return wholeWording(escapeWording('r refresh', 'Back'), width, [escapeWording('', 'Back')])
+    if (!visible) return this.readOnlyActionBar(barWidth)
+    const open = { text: 'Open in Models… [Enter]', ink: 'action' as const, id: 'web:credential' }
+    const refresh = { text: 'Refresh [R]', ink: 'action' as const, id: 'web:refresh' }
+    const back = { text: 'Back [Esc]', ink: 'escape' as const }
     return wholeWording(
-      escapeWording('↑/↓ choose · Enter open in Models', 'Back'),
-      width,
-      [escapeWording('Enter open in Models', 'Back'), escapeWording('Enter', 'Back'), escapeWording('', 'Back')],
+      barWording([{ text: '↑/↓ choose', ink: 'hint' }, open, refresh, back]),
+      barWidth,
+      [
+        barWording([open, refresh, back]),
+        barWording([open, back]),
+        barWording([refresh, back]),
+        barWording([back]),
+      ],
     )
   }
 
-  /** The ONE physical Action Bar line. Whole segments only: a hint that does
-   *  not fit is dropped, never cut into half a word. Its non-Esc segments keep
-   *  the hint role (§3.2 role 12) and only the real Esc affordance carries the
-   *  secondary ink, so its first cell is always real ink. */
-  private actionBar(width: number, bodyRows: number): BarWording {
+  /** The ONE physical Action Bar line of the Web workbench. Whole segments
+   *  only: a hint that does not fit is dropped, never cut into half a word.
+   *  Every real action carries its page-owned intent id so the Settings Root
+   *  can delegate the exact painted cells. */
+  private actionBar(width: number, bodyRows: number, barWidth: number): BarWording {
     const rowId = this.selectedRowId()
-    return this.region === 'list'
-      ? wholeWording(
-          escapeWording('↑/↓ choose · Enter open · r refresh', 'Back'),
-          width,
-          [
-            escapeWording('↑/↓ · Enter open · r refresh', 'Back'),
-            escapeWording('↑/↓ · Enter', 'Back'),
-            escapeWording('', 'Back'),
-          ],
-        )
-      : rowId === 'web-credential'
-        ? this.credentialActionBar(width, bodyRows)
-        // No confirmable candidate (a pending/unreadable authority, a custom
-        // provider route, a read-only override row or a Billing row owned by a
-        // YAML override) means NO Confirm affordance: the bar advertises only
-        // what the frame really offers, and a candidate cropped out of THIS
-        // frame's Detail viewport is not confirmable either (Enter is refused
-        // by the same painted-visibility gate).
-        : this.choiceActionBar(width, bodyRows)
+    if (this.region === 'list') {
+      const open = { text: 'Open [Enter]', ink: 'action' as const, id: 'web:open' }
+      const refresh = { text: 'Refresh [R]', ink: 'action' as const, id: 'web:refresh' }
+      const back = { text: 'Back [Esc]', ink: 'escape' as const }
+      return wholeWording(
+        barWording([open, refresh, back]),
+        barWidth,
+        [barWording([open, back]), barWording([back])],
+      )
+    }
+    return rowId === 'web-credential'
+      ? this.credentialActionBar(width, bodyRows, barWidth)
+      // No confirmable candidate (a pending/unreadable authority, a custom
+      // provider route, a read-only override row or a Billing row owned by a
+      // YAML override) means NO Confirm affordance: the bar advertises only
+      // what the frame really offers, and a candidate cropped out of THIS
+      // frame's Detail viewport is not confirmable either (Enter is refused
+      // by the same painted-visibility gate).
+      : this.choiceActionBar(width, bodyRows, barWidth)
   }
 
   /** Paint one chosen Action Bar wording: pure browsing hints and separators
-   *  stay muted, the page's real Confirm carries the primary action ink, and
-   *  the root's Esc affordance keeps the secondary verb ink (both `[Key]` caps
-   *  are muted by {@link paintActionSpan}). */
+   *  stay muted, the page's real action/confirm verbs carry the primary action
+   *  ink, and the root's Esc affordance keeps the secondary verb ink (both
+   *  `[Key]` caps are muted by {@link paintActionSpan}). */
   private paintBarWording(wording: BarWording): string {
     if (wording.segments.length === 0) return color.textMuted(wording.text)
     return wording.segments.map(segment => {
       switch (segment.ink) {
+        case 'action':
         case 'confirm': return paintActionSpan(segment.text, 'primary')
         case 'escape': return paintActionSpan(segment.text, 'secondary')
         case 'hint': return color.textMuted(segment.text)
@@ -1617,7 +1773,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  because a cut state word is a different claim. */
   private listRow(rowId: WebSettingsRowId, facts: WebSettingsFacts, width: number): string {
     const selected = rowId === this.selectedRowId()
-    const cursor = selected ? (this.region === 'list' ? color.primary('> ') : color.textMuted('> ')) : '  '
+    const cursor = selected ? (this.focused && this.region === 'list' ? color.primary('> ') : color.textMuted('> ')) : '  '
     const phase = rowId === 'web-credential' ? undefined : this.phases.get(rowId)
     const phaseWordText = phase === undefined || phase.kind === 'verified' || phase.kind === 'no-changes'
       ? undefined
@@ -1722,14 +1878,14 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         ...valueLines(value),
         // `facts.reason` is HOST-origin text: sanitize at the display boundary
         // (no raw ANSI/VT/CR/LF can ever reach the terminal) before wrapping.
-        ...wrapTextWithAnsi(sanitizedPhysicalLine(facts.reason), Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
+        ...wrapTextWithAnsi(sanitizedPhysicalLine(facts.reason), proseWidth(width)).map(text => ({ text: color.textDim(text) })),
       ]
     }
     const refusal = this.intents.writableRefusal(this.selectedSettingId())
     if (refusal !== undefined) {
       return [
         ...valueLines(value),
-        ...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })),
+        ...wrapTextWithAnsi(refusal, proseWidth(width)).map(text => ({ text: color.warning(text) })),
       ]
     }
     return valueLines(value)
@@ -1749,7 +1905,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     settings: WebProviderSettings | undefined,
   ): DetailLine {
     const selected = index === this.choiceIndex
-    const marker = selected ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
+    const marker = selected ? (this.focused && this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
     const providerChoice = settings === undefined || (rowId !== 'web-search-provider' && rowId !== 'web-fetch-provider')
       ? undefined
       : this.providerChoices(rowId, settings).find(choice => choice.key === value)
@@ -1937,7 +2093,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     if (notes.length === 0) return []
-    return ['', ...notes.flatMap(note => wrapTextWithAnsi(note, Math.max(1, width)))]
+    return ['', ...notes.flatMap(note => wrapTextWithAnsi(note, proseWidth(width)))]
   }
 
   /** The short state word plus its real reason, wrapped so a long Host failure
@@ -1956,7 +2112,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     } else {
       const separator = ' · '
       const headWidth = visibleWidth(word) + visibleWidth(separator)
-      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(phase.reason), Math.max(1, width - headWidth))
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(phase.reason), proseWidth(width - headWidth))
       if (wrapped.length === 0) {
         lines.push({ text: word })
       } else {
@@ -1969,7 +2125,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       }
     }
     if (phase.kind === 'unverified' || phase.kind === 'outcome-unconfirmed') {
-      lines.push(...wrapTextWithAnsi('The change may have been saved. Refresh and check.', Math.max(1, width))
+      lines.push(...wrapTextWithAnsi('The change may have been saved. Refresh and check.', proseWidth(width))
         .map(text => ({ text: color.textDim(text) })))
     }
     return lines
@@ -1991,7 +2147,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (actions.length === 0 && facts.kind === 'ready') {
       const refusal = this.intents.writableRefusal(this.selectedSettingId())
       if (refusal !== undefined) {
-        lines.push(...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })))
+        lines.push(...wrapTextWithAnsi(refusal, proseWidth(width)).map(text => ({ text: color.warning(text) })))
       } else {
         lines.push({ text: color.textDim('The official credential store is unavailable; no credential action is offered here.') })
       }
@@ -2010,16 +2166,16 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         continue
       }
       const active = selectable === activeIndex
-      if (active && this.region === 'detail' && this.painting) this.paintedCredentialAction = action.action
-      const marker = active ? (this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
-      const label = `${marker}${active && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
+      if (active && this.focused && this.region === 'detail' && this.painting) this.paintedCredentialAction = action.action
+      const marker = active ? (this.focused && this.region === 'detail' ? color.primary('› ') : color.textDim('› ')) : '  '
+      const label = `${marker}${active && this.focused && this.region === 'detail' ? color.textStrong(action.label) : action.label}`
       lines.push({ text: truncateToWidth(label, Math.max(1, width), '…', false), action: action.action, enabled: true })
     }
     lines.push({ text: '' })
     for (const note of wrapTextWithAnsi(
       `The key is stored as the official credential reference "${WEB_CREDENTIAL_REF}"; its value is never shown here. `
         + 'Models owns the masked input and the clear confirmation, in this same Settings workspace.',
-      Math.max(1, width),
+      proseWidth(width),
     )) {
       lines.push({ text: color.textDim(note) })
     }
@@ -2069,16 +2225,16 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       // before it can never complete against the scrolled frame.
       this.revision += 1
       this.paintedConfirmTarget = undefined
+      this.paintedBarSpansValue = []
+      this.paintedBarRevision = -1
       const width = this.liveWidth()
-      const bodyRows = this.liveBodyRows()
-      if (this.paintsBothRegions(width, bodyRows)) {
+      if (this.paintsBothRegions()) {
         // The COLUMN under the pointer owns the wheel, independently of which
-        // region currently owns the keyboard.
-        const listOwns = layoutForWidth(width) === 'wide'
-          ? event.x < this.listColumnWidth(width)
-          : event.y < this.listViewport(width, bodyRows)
-        if (listOwns) this.scrollList(delta)
-        else this.scrollDetail(delta)
+        // region currently owns the keyboard. The 2-cell gutter is inert and
+        // never falls through to the Detail.
+        const listWidth = this.listColumnWidth(width)
+        if (event.x < listWidth) this.scrollList(delta)
+        else if (event.x >= listWidth + 2) this.scrollDetail(delta)
         return { handled: true }
       }
       if (this.region === 'list') this.scrollList(delta)
@@ -2121,10 +2277,11 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (target.kind === 'row') {
       const index = WEB_SETTINGS_ROW_IDS.indexOf(target.id as WebSettingsRowId)
       if (index < 0) return
-      // Selecting a row is presentation only; activating it opens the SAME
-      // Detail the keyboard's Enter opens.
-      this.selectRowIndex(index)
-      this.openSelectedRow()
+      // SUX-06B: a row click only SELECTS and hands the keyboard to the Web
+      // list. Opening the Detail stays the explicit `Open [Enter]`/Enter/Right
+      // gesture; a preview click never becomes a hidden activation.
+      if (index !== this.cursor) this.selectRowIndex(index)
+      if (this.region !== 'list') this.commitPresentation(() => { this.region = 'list' })
       return
     }
     if (target.kind === 'option') {
