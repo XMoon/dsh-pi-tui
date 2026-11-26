@@ -511,7 +511,11 @@ export async function runMcpServersFr4(context) {
     client.send('d')
     await waitForPattern(client, new RegExp(`Permanently delete server ${USER_STDIO}\\b`, 'u'), 'FR4 delete confirmation')
     client.send('y')
-    await waitForScreenText(client, 'Config removed · waiting for Host reconcile', 'FR4 delete result')
+    // The adaptive List is 34 cells wide here, so the honest receipt wraps
+    // across two physical lines. Wait for the complete fact, not a contiguous
+    // single-line spelling.
+    await waitForScreenPattern(client, /Config removed[\s\S]*waiting for Host reconcile/u,
+      'FR4 delete result (wrapped receipt)')
     assert(!configuredNames(context.installation.profileDir).has(USER_STDIO),
       'FR4: a User-added Delete must remove the entry from the profile configuration')
     trace('fr4.delete-user', { removed: true })

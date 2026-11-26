@@ -1954,6 +1954,7 @@ test('a confirmed Delete returns to the List once the removed target is proven g
   const frame = render(page, 100, 16).join('\n')
   assert.doesNotMatch(frame, /Server: beta/u, 'the fallback Detail must not become the deleted target')
   assert.match(frame, /Config removed/u, 'the List keeps the honest receipt')
+  assert.match(frame, /waiting for Host reconcile/u, 'the narrow List receipt wraps instead of truncating')
 })
 
 test('every visible line of a wrapped form field is a selection target', () => {
@@ -1992,4 +1993,27 @@ test('a long removable field puts its dropped verb on a reachable body line', ()
   page.handleMouse({ ...base, type: 'click', x: 3, y: row })
   assert.match(render(page, 44, 20).join('\n'), /^edit:/mu,
     'the standalone verb line invokes the same explicit input intent')
+})
+
+test('a proven delete keeps its removal receipt when the controller retires the status', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }))
+  render(page, 100, 16)
+  page.handleInput('y')
+  const before = controller.snapshotValue
+  controller.snapshotValue = {
+    ...before,
+    configConfirm: undefined,
+    configStatus: undefined,
+    rows: before.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+    selectedConfig: undefined,
+  }
+  const frame = render(page, 100, 16).join('\n')
+  assert.match(frame, /Name/u)
+  assert.match(frame, /Config removed/u)
+  assert.match(frame, /waiting for Host reconcile/u,
+    'the List receipt stays visible after a generation-bound status retires')
 })

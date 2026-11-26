@@ -31,6 +31,7 @@
 
 import { Input, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import type { McpManagedServerStatus } from '@deepseek-ai/dsh-mcp-manager/types'
+import { MCP_CONFIG_TEXT } from '../../app/command/mcp-servers.ts'
 import type {
   McpConfigStatus,
   McpServerSourceLabel,
@@ -355,6 +356,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private formTargetName: string | undefined
   /** A delete that may remove the current Detail target; return to the List. */
   private detailRemovalTarget: string | undefined
+  /** The delete settlement must win even if an early frame cleared the target. */
+  private deleteReturnPending = false
+  /** Keep the confirmed removal visible when the controller's receipt retired. */
+  private deleteLocalReceipt = false
   /** The ACTIVE text input of the form (its row + the value being typed). */
   private formInput: { readonly row: McpFormRow; readonly input: Input; readonly initial: string } | undefined
   /** A pending discard question. `unknown` states that the write may already
@@ -590,7 +595,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       if (data === 'y' || data === 'Y') {
         if (this.confirmationVerdict(snapshot) === 'ready') {
-          if (snapshot.configConfirm?.kind === 'delete') this.detailRemovalTarget = snapshot.configConfirm.name
+          if (snapshot.configConfirm?.kind === 'delete') {
+            this.detailRemovalTarget = snapshot.configConfirm.name
+            this.deleteReturnPending = true
+          }
           this.controller.answerConfigConfirm(true)
         }
       }
@@ -814,19 +822,23 @@ export class McpServersPage implements EmbeddedSpecialistPage {
    *  old target gone, the Detail has no subject: return to the List with the
    *  receipt instead of presenting the nearest fallback server. */
   private reconcileDetailRemoval(snapshot: McpServersSnapshot): void {
+    if (!this.deleteReturnPending) return
+    const status = snapshot.configStatus
+    if (status !== undefined) this.deleteLocalReceipt = false
+    const savedDelete = status?.kind === 'saved' && status.text.startsWith('Config removed')
+    const refusedDelete = status?.kind === 'rejected'
+      || status?.kind === 'conflict'
+      || status?.kind === 'unconfirmed'
     const target = this.detailRemovalTarget
-    if (target === undefined) return
-    if (snapshot.configStatus?.kind === 'saving') return
-    const stillListed = snapshot.rows.some(row => row.name === target)
-    if (stillListed) {
-      // Keep the intent across the write window. Only a proven refusal ends it;
-      // a pre-dispatch/`saving`/`saved` frame must not clear it before the
-      // roster can prove the target gone.
-      if (snapshot.configStatus?.kind === 'rejected'
-        || snapshot.configStatus?.kind === 'conflict'
-        || snapshot.configStatus?.kind === 'unconfirmed') this.detailRemovalTarget = undefined
+    const targetGone = target !== undefined && !snapshot.rows.some(row => row.name === target)
+    if (!savedDelete && !targetGone && !refusedDelete) return
+    if (!savedDelete && !targetGone) {
+      this.deleteReturnPending = false
+      this.detailRemovalTarget = undefined
       return
     }
+    this.deleteReturnPending = false
+    this.deleteLocalReceipt = status === undefined
     this.detailRemovalTarget = undefined
     this.region = 'list'
     this.receiptRegion = 'list'
@@ -1249,7 +1261,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'confirm':
         if (this.confirmationVerdict(snapshot) !== 'ready') return
         if (snapshot.configConfirm !== undefined) {
-          if (snapshot.configConfirm.kind === 'delete') this.detailRemovalTarget = snapshot.configConfirm.name
+          if (snapshot.configConfirm.kind === 'delete') {
+            this.detailRemovalTarget = snapshot.configConfirm.name
+            this.deleteReturnPending = true
+          }
           this.controller.answerConfigConfirm(true)
         } else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
         return
@@ -1859,7 +1874,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     // An empty roster already paints its ONE truthful phase sentence; never
     // repeat it as a second bottom line.
     const phaseRows = snapshot.phase === 'ready' || visible.length === 0 ? 0 : 1
-    const configRows = snapshot.configStatus !== undefined && this.receiptRegion === 'list' ? 1 : 0
+    const configStatus = snapshot.configStatus ?? (this.deleteLocalReceipt
+      ? { kind: 'saved' as const, text: MCP_CONFIG_TEXT.deleted }
+      : undefined)
+    const configLines = configStatus !== undefined && this.receiptRegion === 'list'
+      ? wrapCellsHard(configStatus.text, Math.max(1, width), 2).lines
+      : []
+    const configRows = configLines.length
     const noticeRows = notice === undefined ? 0 : 1
     const summaryRows = !this.allowDual() && visible.length > 0 && rows > 4 ? 1 : 0
     const reserved = lines.length + phaseRows + configRows + noticeRows + summaryRows
@@ -1894,7 +1915,8 @@ export class McpServersPage implements EmbeddedSpecialistPage {
             : snapshot.phase === 'read-error'
               ? `READ ERROR · ${snapshot.phaseReason ?? 'observation lost'}`
               : 'No managed MCP servers'
-      const emptyLines = wrapCellsHard(text, Math.max(1, width), Math.max(1, rows - lines.length)).lines
+      const emptyLines = wrapCellsHard(text, Math.max(1, width),
+        Math.max(1, rows - lines.length - configRows - noticeRows - summaryRows)).lines
       for (const emptyLine of emptyLines) {
         lines.push(snapshot.phase === 'unavailable' || snapshot.phase === 'read-error'
           ? color.error(emptyLine)
@@ -1923,7 +1945,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       lines.push(fit(color.textDim(truncateToWidth(sanitizedPhysicalLine(text), width, '…', false)), width))
     }
     if (phaseRows === 1) lines.push(fit(this.phaseLine(snapshot, width), width))
-    if (configRows === 1 && snapshot.configStatus !== undefined) lines.push(fit(this.configStatusLine(snapshot.configStatus, width), width))
+    if (configRows > 0 && configStatus !== undefined) {
+      for (const configLine of configLines) {
+        lines.push(fit(this.configStatusInk({ ...configStatus, text: configLine }), width))
+      }
+    }
     if (noticeRows === 1 && notice !== undefined) lines.push(fit(this.noticeLine(notice, width), width))
     return lines.slice(0, rows)
   }
@@ -2002,11 +2028,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'rejected':
       case 'unavailable': return color.error(status.text)
     }
-  }
-
-  private configStatusLine(status: McpConfigStatus, width: number): string {
-    return truncateToWidth(sanitizedPhysicalLine(status.text), width, '…', false)
-      .replace(/^.*$/u, (text) => this.configStatusInk({ ...status, text }))
   }
 
   /** The detail lines of the selected server (fixed field order, wrapped). */
