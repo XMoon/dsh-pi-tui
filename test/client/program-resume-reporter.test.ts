@@ -95,6 +95,35 @@ test('the initial committed Session offers one exact report and duplicate observ
   assert.equal(h.frames.length, 1, 'a generation-only notification or repaint never duplicates the target')
 })
 
+test('a synchronous nested observation from the writer owns the newer state', () => {
+  let current: string | undefined
+  const frames: string[] = []
+  let reporterRef: ReturnType<typeof createProgramResumeReporter> | undefined
+  const reporter = createProgramResumeReporter({
+    capability: capability(),
+    currentSessionId: () => current,
+    canWrite: () => true,
+    write: frame => {
+      frames.push(frame)
+      if (frames.length === 1) {
+        current = SESSION_B
+        reporterRef?.observe()
+      }
+    },
+    diag,
+  })
+  reporterRef = reporter
+  reporter.install()
+  assert.equal(frames.length, 2)
+  assert.match(bodyOf(frames[0] as string).body, /clear=1$/u)
+  assert.deepEqual(decodedArgv(bodyOf(frames[1] as string).body).slice(-1), [SESSION_B])
+  reporter.observe()
+  assert.equal(frames.length, 2, 'the nested B observation is the current state')
+  reporter.humanExit()
+  assert.equal(frames.length, 3)
+  assert.match(bodyOf(frames[2] as string).body, /clear=1$/u)
+})
+
 test('a synchronous owner change inside the writer cannot desynchronize the offered target', () => {
   let current = SESSION_A
   const frames: string[] = []

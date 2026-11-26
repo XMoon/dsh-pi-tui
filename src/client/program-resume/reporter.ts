@@ -52,6 +52,14 @@ export function createProgramResumeReporter(input: {
   let lastSessionId: string | undefined
   /** A failed write keeps the intent dirty so the next legitimate event retries. */
   let dirty = false
+  /**
+   * Every emission owns one epoch. A synchronous callback inside the write may
+   * emit a newer target; the outer emission must then NOT commit its stale
+   * state over that newer observation.
+   */
+  let emissionEpoch = 0
+  const beginEmission = (): number => (emissionEpoch += 1)
+  const isCurrentEmission = (epoch: number): boolean => emissionEpoch === epoch
 
   const now = (): number => Math.floor(Date.now() / 1000)
 
@@ -76,18 +84,22 @@ export function createProgramResumeReporter(input: {
       // A sessionless/unrepresentable owner withdraws the previous target once.
       if (!force && (lastKind === 'clear' || lastKind === undefined)) return
       if (lastKind === 'clear' && !dirty) return
+      const epoch = beginEmission()
       try {
         emitClear()
       } catch (error) {
+        if (isCurrentEmission(epoch)) dirty = true
         try { input.diag.warn('program resume: clear write failed', { error: error instanceof Error ? error.message : 'unknown' }) } catch { /* no lower sink */ }
         return
       }
+      if (!isCurrentEmission(epoch)) return
       lastKind = 'clear'
       lastSessionId = undefined
       dirty = false
       return
     }
     if (!force && !dirty && lastKind === 'report' && lastSessionId === sessionId) return
+    const epoch = beginEmission()
     try {
       const frame = encodeProgramResumeReport({
         token: target.token,
@@ -98,19 +110,24 @@ export function createProgramResumeReporter(input: {
       })
       input.write(frame)
     } catch (error) {
+      // A callback inside the write may already have emitted a newer target;
+      // never overwrite it with this emission's fallback.
+      if (!isCurrentEmission(epoch)) return
       // An over-budget or otherwise unencodable command must not leave the old
       // target in place. A clear is the protocol's only legal substitute.
       try {
         emitClear()
+        if (!isCurrentEmission(epoch)) return
         lastKind = 'clear'
         lastSessionId = undefined
         dirty = false
       } catch {
-        dirty = true
+        if (isCurrentEmission(epoch)) dirty = true
         try { input.diag.warn('program resume: report and clear write failed', { error: error instanceof Error ? error.message : 'unknown' }) } catch { /* no lower sink */ }
       }
       return
     }
+    if (!isCurrentEmission(epoch)) return
     lastKind = 'report'
     lastSessionId = sessionId
     dirty = false
@@ -138,9 +155,10 @@ export function createProgramResumeReporter(input: {
       closed = true
       installed = false
       if (!shouldClear || !input.canWrite()) return
+      const epoch = beginEmission()
       try {
         emitClear()
-        lastKind = 'clear'
+        if (isCurrentEmission(epoch)) lastKind = 'clear'
       } catch (error) {
         // Best-effort terminal offer: the business exit still proceeds, but
         // the failed write is recorded with no token/argv.
@@ -153,9 +171,10 @@ export function createProgramResumeReporter(input: {
       closed = true
       installed = false
       if (!shouldClear || !input.canWrite()) return
+      const epoch = beginEmission()
       try {
         emitClear()
-        lastKind = 'clear'
+        if (isCurrentEmission(epoch)) lastKind = 'clear'
       } catch (error) {
         // Reload acceptance must not fail on the terminal offer; record it.
         try { input.diag.warn('program resume: unsupported-reload clear failed', { error: error instanceof Error ? error.message : 'unknown' }) } catch { /* no lower sink */ }
