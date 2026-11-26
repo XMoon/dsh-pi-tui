@@ -24,6 +24,8 @@ import {
   encodeHistorySearchCursor,
   historyReadTextChunk,
   historySearchPreview,
+  historySearchRequestHash,
+  parseHistorySearchRowId,
   parseHistoryReadTextRequest,
   parseHistoryReadTextResponse,
   parseHistorySearchRequest,
@@ -32,13 +34,11 @@ import {
 } from '../../../src/runtime/remote/pi-tui-history-search-contract.ts'
 
 const CURSOR: HistorySearchCursor = {
-  v: 1,
+  v: 2,
   incarnation: 'inc-1',
   revision: 7,
-  scope: 'all',
-  query: 'needle',
-  scopeId: null,
-  after: { acceptedAt: 1000, sessionId: 's1', firstEventSeq: 3, messageId: 'm1' },
+  requestHash: 'a'.repeat(64),
+  afterRowId: '42',
 }
 
 test('the contract owns exactly the two strict unary endpoints of the private namespace', () => {
@@ -76,20 +76,57 @@ test('every scope accepts exactly its own keys and rejects extra or foreign fiel
   assert.throws(() => parseHistorySearchRequest([]), /object/u)
 })
 
-test('the cursor round-trips and strictly rejects a foreign or extended payload', () => {
+test('the cursor round-trips and strictly rejects a foreign, legacy or extended payload', () => {
   const encoded = encodeHistorySearchCursor(CURSOR)
   assert.deepEqual(decodeHistorySearchCursor(encoded), CURSOR)
+  assert.ok(Buffer.byteLength(encoded, 'utf8') < HISTORY_SEARCH_CURSOR_MAX_BYTES)
   assert.throws(() => decodeHistorySearchCursor('not-base64-json'), /base64url JSON/u)
   const extended = Buffer.from(JSON.stringify({ ...CURSOR, extra: true }), 'utf8').toString('base64url')
   assert.throws(() => decodeHistorySearchCursor(extended), /unexpected field/u)
-  const missing = Buffer.from(JSON.stringify({ ...CURSOR, after: { acceptedAt: 1 } }), 'utf8').toString('base64url')
+  const missing = Buffer.from(JSON.stringify({ v: 2, incarnation: 'i', revision: 1, requestHash: 'a'.repeat(64) }), 'utf8').toString('base64url')
   assert.throws(() => decodeHistorySearchCursor(missing), /missing field/u)
-  const badVersion = Buffer.from(JSON.stringify({ ...CURSOR, v: 2 }), 'utf8').toString('base64url')
-  assert.throws(() => decodeHistorySearchCursor(badVersion), /version/u)
-  const badScope = Buffer.from(JSON.stringify({ ...CURSOR, scope: 'global' }), 'utf8').toString('base64url')
-  assert.throws(() => decodeHistorySearchCursor(badScope), /scope/u)
+  const legacy = Buffer.from(JSON.stringify({
+    v: 1,
+    incarnation: 'i',
+    revision: 1,
+    scope: 'all',
+    query: 'q',
+    scopeId: null,
+    after: { acceptedAt: 1, sessionId: 's1', firstEventSeq: 0, messageId: 'm1' },
+  }), 'utf8').toString('base64url')
+  assert.throws(() => decodeHistorySearchCursor(legacy), /unexpected field|version/u)
+  const badHash = Buffer.from(JSON.stringify({ ...CURSOR, requestHash: 'A'.repeat(64) }), 'utf8').toString('base64url')
+  assert.throws(() => decodeHistorySearchCursor(badHash), /SHA-256/u)
   assert.throws(() => decodeHistorySearchCursor('x'.repeat(HISTORY_SEARCH_CURSOR_MAX_BYTES + 1)), /exceeds/u)
   assert.throws(() => encodeHistorySearchCursor({ ...CURSOR, revision: -1 }), /non-negative/u)
+})
+
+test('the row anchor is canonical signed 64-bit and the request hash binds exact context', () => {
+  for (const valid of ['0', '1', '-1', '9223372036854775807', '-9223372036854775808']) {
+    assert.equal(parseHistorySearchRowId(valid), valid)
+  }
+  for (const invalid of ['', '+1', '-0', '00', '01', '1.0', '-', '9223372036854775808', '-9223372036854775809']) {
+    assert.throws(() => parseHistorySearchRowId(invalid), /signed 64-bit/u, invalid)
+  }
+  assert.throws(() => encodeHistorySearchCursor({ ...CURSOR, afterRowId: '00' }), /signed 64-bit/u)
+  const malformedAnchor = Buffer.from(JSON.stringify({ ...CURSOR, afterRowId: '9223372036854775808' }), 'utf8')
+    .toString('base64url')
+  assert.throws(() => decodeHistorySearchCursor(malformedAnchor), /signed 64-bit/u,
+    'a malformed row anchor never reaches CAST')
+  const hash = historySearchRequestHash('directory', 'deploy', '/repo/a')
+  assert.match(hash, /^[0-9a-f]{64}$/u)
+  assert.notEqual(hash, historySearchRequestHash('directory', 'DEPLOY', '/repo/a'))
+  assert.notEqual(hash, historySearchRequestHash('directory', 'deploy', '/repo/b'))
+  assert.notEqual(hash, historySearchRequestHash('session', 'deploy', '/repo/a'))
+  assert.notEqual(hash, historySearchRequestHash('all', 'deploy', null))
+  // A legal maximum-size cursor stays far below the wire bound: the raw
+  // IDs/query/directory no longer enter the token.
+  assert.ok(Buffer.byteLength(encodeHistorySearchCursor({
+    ...CURSOR,
+    incarnation: 'f'.repeat(36),
+    revision: Number.MAX_SAFE_INTEGER,
+    afterRowId: '-9223372036854775808',
+  }), 'utf8') < HISTORY_SEARCH_CURSOR_MAX_BYTES)
 })
 
 test('a ready search answer needs exact fields and a bounded preview', () => {

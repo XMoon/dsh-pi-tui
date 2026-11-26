@@ -32,6 +32,8 @@ import { createRemoteHostRuntime } from '../support/m3-inprocess/host-runtime.ts
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import {
+  HISTORY_SEARCH_CURSOR_MAX_BYTES,
+  HISTORY_SEARCH_QUERY_MAX_CHARS,
   PI_TUI_HISTORY_SEARCH_NAMESPACE,
   parseHistoryReadTextResponse,
   parseHistorySearchResponse,
@@ -1721,6 +1723,107 @@ test('deleting a derived Session invalidates its keyset cursor', async (t) => {
     assert.equal(reused.kind, 'stale', `a pre-deletion cursor must be stale: ${JSON.stringify(reused)}`)
     if (reused.kind !== 'stale') throw new Error('expected stale')
     assert.equal(reused.reason, 'cursor-stale')
+  } finally {
+    await service.dispose()
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a v2 row-anchor continuation walks every legal long-query match once and rejects a changed context', async (t) => {
+  const life = testLifecycle(t)
+  const profileDir = life.tempDir('dsh-history-search-v2-anchor-')
+  const longCwd = `/repo/${'d'.repeat(700)}`
+  const longSessionId = `history-${'s'.repeat(280)}`
+  const query = '长'.repeat(HISTORY_SEARCH_QUERY_MAX_CHARS)
+  const source = mutableSource(longCwd, longSessionId)
+  const acceptedAt = 1_700_000_000_000
+  source.events = Array.from({ length: 30 }, (_, index) => ({
+    type: 'agent/inbox/spliced',
+    seq: index,
+    time: acceptedAt,
+    data: {
+      target: 'next-turn',
+      start: index,
+      inserted: [{
+        id: `msg-${'m'.repeat(200)}-${String(index)}`,
+        role: 'user',
+        content: [{ type: 'text', text: `${query} occurrence ${String(index)}` }],
+        source: { kind: 'user', rpcId: `rpc-${'r'.repeat(200)}-${String(index)}` },
+      }],
+    },
+  }))
+  const { deps } = mutableDeps(source)
+  const ctx = new Context()
+  const service = directService(ctx, deps, profileDir)
+  const verify = () => (service as unknown as { verifySources(): Promise<void> }).verifySources()
+  try {
+    await waitDirectReady(service)
+    const request = { scope: 'directory' as const, cwd: longCwd, query, limit: 25 }
+    const first = await service.search(request, new AbortController().signal)
+    assert.equal(first.kind, 'ready', JSON.stringify(first))
+    if (first.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(first.items.length, 25)
+    assert.equal(typeof first.nextCursor, 'string')
+    assert.ok(Buffer.byteLength(first.nextCursor!, 'utf8') < HISTORY_SEARCH_CURSOR_MAX_BYTES,
+      'the legal maximum query and directory must fit the opaque cursor')
+    const second = await service.search({ ...request, cursor: first.nextCursor! }, new AbortController().signal)
+    assert.equal(second.kind, 'ready', JSON.stringify(second))
+    if (second.kind !== 'ready') throw new Error('expected ready')
+    assert.equal(second.items.length, 5)
+    assert.equal(second.nextCursor, null)
+    const combined = [...first.items, ...second.items]
+    assert.equal(new Set(combined.map(item => item.messageId)).size, 30, 'pages must not lose or duplicate a row')
+    assert.deepEqual(combined.map(item => item.firstEventSeq),
+      Array.from({ length: 30 }, (_, index) => 29 - index), 'the v2 anchor must preserve the exact Host keyset order')
+    assert.ok(combined.every(item => item.contentSha256.length === 64))
+
+    // The request hash binds scope/query/scope id; the anchor is also re-read
+    // against the live match set. A changed context or a Host content revision
+    // is stale, never a silently re-ranked page.
+    const staleContexts: Array<Record<string, unknown>> = [
+      { ...request, query: `${query.slice(1)}短`, cursor: first.nextCursor! },
+      { scope: 'all', query, limit: 25, cursor: first.nextCursor! },
+      { ...request, cursor: Buffer.from(JSON.stringify({
+        v: 1,
+        incarnation: 'legacy',
+        revision: 1,
+        scope: 'directory',
+        query: 'legacy',
+        scopeId: null,
+        after: { acceptedAt, sessionId: 'legacy', firstEventSeq: 0, messageId: 'legacy' },
+      }), 'utf8').toString('base64url') },
+      { ...request, cursor: Buffer.from(JSON.stringify({
+        v: 2,
+        incarnation: 'anchor',
+        revision: 0,
+        requestHash: 'a'.repeat(64),
+        afterRowId: '9223372036854775808',
+      }), 'utf8').toString('base64url') },
+    ]
+    for (const stale of staleContexts) {
+      const answer = await service.search(stale, new AbortController().signal)
+      assert.equal(answer.kind, 'stale', JSON.stringify(answer))
+    }
+
+    source.events.push({
+      type: 'agent/inbox/spliced',
+      seq: source.events.length,
+      time: acceptedAt + 1,
+      data: {
+        target: 'next-turn',
+        start: source.events.length,
+        inserted: [{
+          id: `msg-${'m'.repeat(200)}-new`,
+          role: 'user',
+          content: [{ type: 'text', text: `${query} newest` }],
+          source: { kind: 'user', rpcId: `rpc-${'r'.repeat(200)}-new` },
+        }],
+      },
+    })
+    source.revision += 1
+    await verify()
+    const afterRevision = await service.search({ ...request, cursor: first.nextCursor! }, new AbortController().signal)
+    assert.equal(afterRevision.kind, 'stale', JSON.stringify(afterRevision))
   } finally {
     await service.dispose()
     await ctx.fiber.dispose()

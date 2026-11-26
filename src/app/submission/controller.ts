@@ -237,11 +237,11 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     /** Open the same Browser only after the submission flow has restored a rejected first-session draft. */
     openWorkspaceChooserAfterRestore?(): void
   }
-  /** The input-history owner seams (the owner's write policy + the
-   *  deferred-start ordering gate). */
-  readonly history: {
+  /** The Direct-only file writer; absent on the Split Client (Feature History
+   *  PR2-B), whose history lives in the Host accepted-history index. */
+  readonly history?: {
     persist(record: { readonly text: string; readonly sessionId: string | undefined; readonly hasAttachments: boolean; readonly timestamp: number }): void
-    persistAfterSession(resolveSession: () => Promise<string | undefined>, persist: (sessionId: string | undefined) => void): Promise<void>
+    persistAfterSession?(resolveSession: () => Promise<string | undefined>, persist?: (sessionId: string | undefined) => void): Promise<void>
   }
   /** The subagent viewer guard. */
   readonly viewer: { isViewing(): boolean }
@@ -1398,24 +1398,28 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // failed) persists nothing — the submission never reached a
         // session; a resolution that resolves undefined (sessionless)
         // persists a row without a sessionId.
-        await deps.history.persistAfterSession(
-          async () => {
-            if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return undefined
-            await deps.session.ensureSession()
-            if (deps.isCleanedUp()) return undefined
-            return deps.liveAgent()?.session.id
-          },
-          (sessionId) => {
+        const resolveSession = async (): Promise<string | undefined> => {
+          if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return undefined
+          await deps.session.ensureSession()
+          if (deps.isCleanedUp()) return undefined
+          return deps.liveAgent()?.session.id
+        }
+        const sessionId = await resolveSession()
+        if (deps.isCleanedUp()) return
+        if (deps.history !== undefined) {
+          // PR2: the history row's completion boundary is the Host acceptance,
+          // never the submission attempt: a proven-unreceived prompt leaves no
+          // "sent" row. The row keeps the original submit timestamp and the
+          // FINAL session id. The Split Client has no file writer, so the
+          // resolver above still ran but this block is skipped.
+          const persist = (): void => {
             if (deps.isCleanedUp()) return
             if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return
-            // PR2: the history row's completion boundary is the Host
-            // acceptance, never the submission attempt: a proven-unreceived
-            // prompt leaves no "sent" row. The row keeps the original submit
-            // timestamp and the FINAL session id.
             if (activeHold !== undefined) activeHold.deferAccepted(() => persistHistory(sessionId))
             else persistHistory(sessionId)
-          },
-        )
+          }
+          persist()
+        }
         if (deps.isCleanedUp()) return
         const agent = deps.liveAgent()
         if (agent === undefined) {
@@ -2038,7 +2042,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       },
       takeSubmitTurn,
       pinDraftAttachments: (value) => pinDraftAttachments(value, deps.drafts.images, deps.drafts.files),
-      persistAfterSession: deps.history.persistAfterSession,
+      persistAfterSession: deps.history?.persistAfterSession,
       ensureSession: () => deps.session.ensureSession(),
       withPromptAdmission: (agent, hasImages, task) =>
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
@@ -2088,7 +2092,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const historyTs = Date.now()
     const historyHasAttachments = draftHasAttachments(text, deps.drafts.images, deps.drafts.files)
     return (sessionId: string | undefined): void => {
-      deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
+      deps.history?.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
     }
   }
 
@@ -2436,7 +2440,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
      * input-history owner's write policy.
      */
     const persistHistory = (sessionId: string | undefined): void => {
-      deps.history.persist({
+      deps.history?.persist({
         text,
         sessionId,
         hasAttachments: historyHasAttachments,

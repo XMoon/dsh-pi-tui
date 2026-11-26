@@ -52,6 +52,7 @@ import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../client/history/search.ts'
+import type { RemoteHistorySeat, RemoteHistorySeatView } from '../../runtime/history-search-seat-contract.ts'
 import { HISTORY_CHORDS, type HistoryChordId } from '../keybindings/hints.ts'
 import { ACTION_BAR_SEPARATOR, layoutActionBarRow, renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -262,9 +263,25 @@ export interface HistoryAcceptedSelection {
 
 /** Panel constructor options. */
 export interface HistoryPanelOptions {
-  /** The injected search source (the runner wires the file-backed one). */
-  source: HistorySearchSource
-  /** The working directory for the `current` scope. */
+  /**
+   * The injected DIRECT search source (the runner wires the file-backed one).
+   * Exactly one of `source` and `remote` must be present: Direct reads the
+   * Client-local history files, Remote consumes the committed Host seat view.
+   */
+  source?: HistorySearchSource
+  /**
+   * The ONE Remote accepted-history seat created by the host at open. The panel
+   * never calls a Host read directly: it forwards query/scope/More/Retry into
+   * the seat and maps the committed view into its own presentation state.
+   */
+  remote?: RemoteHistorySeat
+  /**
+   * The Remote-only default scope decided at open (`session` for an active
+   * Session, `all` for a sessionless open). Direct keeps its historical
+   * derivation (`session` with a live identity, `current` otherwise).
+   */
+  defaultScope?: HistoryScope
+  /** The working directory for the Direct `current` scope. */
   cwd: string
   /**
    * The live session identity, captured ONCE at open time. When defined, the
@@ -312,10 +329,41 @@ export interface HistoryPanelOptions {
   expanded?: boolean
 }
 
+/** How far the exact Remote body for the SELECTED row has progressed. Direct
+ *  rows are always `ready` because their file read already returned the exact
+ *  source. `none` means the seat has not committed an exact body yet; the
+ *  bounded preview stays readable but is never copyable/restorable. */
+type HistoryRowBody = 'ready' | 'loading' | 'failed' | 'none'
+
+/**
+ * ONE display row: the uniform projection of a Direct file result and a Remote
+ * committed Host row. Remote rows carry the bounded preview as `summary` and,
+ * once verified, the exact body text as `content`; Direct rows use the exact
+ * source for both. The panel's list/Preview/metadata/acceptance all read this
+ * shape so the two modes share ONE presentation without pretending the Host
+ * preview is the body.
+ */
+interface HistoryDisplayRow {
+  readonly id: string
+  /** The bounded result-list label (Remote preview; Direct content). */
+  readonly summary: string
+  /** The Preview source: the exact body when `body === 'ready'`, else the
+   *  bounded Remote preview. */
+  readonly content: string
+  readonly cwd: string | null
+  readonly ts: number | null
+  readonly sessionId?: string
+  readonly body: HistoryRowBody
+  /** The safe exact-body failure/notice shown next to the bounded preview. */
+  readonly bodyMessage?: string
+  /** Remote exact body carries non-text attachments (text-only contract). */
+  readonly hasNonText?: boolean
+}
+
 interface HistoryPanelState {
   scope: HistoryScope
   query: string
-  results: HistorySearchResult[]
+  results: HistoryDisplayRow[]
   selectedIndex: number
   loading: boolean
   error?: string
@@ -331,9 +379,10 @@ interface HistoryPointerAction {
 }
 
 /** The Footer's OWN action set. `useSelected`/`copyAll` are the narrow-frame
- *  fallbacks and carry the selected result identity; Cancel/Scope/Expand are
- *  seat-local and never touch a Host write. */
-type HistoryFooterActionKind = 'cancel' | 'scope' | 'expand' | 'useSelected' | 'copyAll'
+ *  fallbacks and carry the selected result identity; `more`/`retry` are the
+ *  Remote result-region actions; Cancel/Scope/Expand are seat-local and never
+ *  touch a Host write. */
+type HistoryFooterActionKind = 'cancel' | 'scope' | 'expand' | 'useSelected' | 'copyAll' | 'more' | 'retry'
 
 interface HistoryFooterAction {
   readonly kind: HistoryFooterActionKind
@@ -435,6 +484,35 @@ function resultLabel(content: string): string {
   return sanitizedPhysicalLine(first.trim())
 }
 
+/** Project one Direct file result into the shared display row. Its file read
+ *  already returned the EXACT source, so the body is always ready. */
+function directDisplayRow(result: HistorySearchResult): HistoryDisplayRow {
+  return {
+    id: result.id,
+    summary: result.content,
+    content: result.content,
+    cwd: result.cwd,
+    ts: result.ts,
+    ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
+    body: 'ready',
+  }
+}
+
+/** The seat statuses that are a blocking failure for the result surface. */
+function remoteErrorMessage(view: RemoteHistorySeatView): string | undefined {
+  switch (view.status) {
+    case 'incomplete':
+    case 'unavailable':
+    case 'denied':
+    case 'failed':
+    case 'stale':
+    case 'too-long':
+      return view.message
+    default:
+      return undefined
+  }
+}
+
 /** The detail Time value for a row: never a fabricated timestamp. */
 export function formatHistoryTime(ts: number): string {
   const date = new Date(ts)
@@ -487,10 +565,15 @@ function clampLine(text: string, width: number): string {
 export class HistoryPanel implements Component, Focusable {
   private readonly state: HistoryPanelState
   private readonly input: Input
-  private readonly source: HistorySearchSource
+  private readonly source: HistorySearchSource | undefined
+  private readonly remote: RemoteHistorySeat | undefined
+  private readonly defaultScope: HistoryScope
+  /** The LAST committed Remote seat view (undefined on Direct). */
+  private remoteView: RemoteHistorySeatView | undefined
+  private unsubscribeRemote: (() => void) | undefined
   private readonly cwd: string
   /** The live session identity captured at open time (undefined = no session
-   *  yet — the session tab is hidden and the default scope is `current`). */
+   *  yet — the session tab is hidden and the Direct default scope is `current`). */
   private readonly sessionId: string | undefined
   private readonly onAccept: (selection: HistoryAcceptedSelection) => void
   private readonly onClose: () => void
@@ -530,7 +613,19 @@ export class HistoryPanel implements Component, Focusable {
   private previewFocus: SourceTextPoint | undefined
 
   constructor(options: HistoryPanelOptions) {
+    const hasSource = options.source !== undefined
+    const hasRemote = options.remote !== undefined
+    if (hasSource === hasRemote) {
+      throw new TypeError('HistoryPanel requires exactly one of source/remote')
+    }
     this.source = options.source
+    this.remote = options.remote
+    // Direct keeps its historical derivation and ignores the Remote-only
+    // `defaultScope`; Remote uses the host-decided scope (session/all).
+    this.defaultScope = options.remote === undefined
+      ? (options.sessionId !== undefined ? 'session' : 'current')
+      : options.defaultScope ?? (options.sessionId !== undefined ? 'session' : 'all')
+    this.remoteView = options.remote?.view()
     this.cwd = options.cwd
     this.sessionId = options.sessionId
     this.onAccept = options.onAccept
@@ -547,11 +642,12 @@ export class HistoryPanel implements Component, Focusable {
     this.expanded = options.expanded ?? false
     this.debounceMs = options.debounceMs ?? HISTORY_SEARCH_DEBOUNCE_MS
     this.input = new Input()
-    // The default scope: `session` when a live session identity exists (the
-    // current session's inputs are the most relevant), `current` otherwise (a
-    // deferred start has no session yet; a session tab would always be empty).
+    // Direct keeps its historical derivation: `session` when a live session
+    // identity exists (the current session's inputs are the most relevant),
+    // `current` otherwise (a deferred start has no session yet; a session tab
+    // would always be empty). Remote uses the host-decided default scope.
     this.state = {
-      scope: options.sessionId !== undefined ? 'session' : 'current',
+      scope: this.defaultScope,
       query: options.initialQuery ?? '',
       results: [],
       selectedIndex: 0,
@@ -589,7 +685,7 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /** The selected result, or undefined when the list is empty. */
-  selected(): HistorySearchResult | undefined {
+  selected(): HistoryDisplayRow | undefined {
     return this.state.results[this.state.selectedIndex]
   }
 
@@ -623,6 +719,7 @@ export class HistoryPanel implements Component, Focusable {
     if (!this.plan(this.lastWidth()).acceptEnabled) return false
     const selected = this.selected()
     if (selected === undefined) return false
+    if (this.remote !== undefined && !this.remoteExactBodyReady(selected)) return false
     return this.frame?.paintedResultIds.has(selected.id) === true
   }
 
@@ -675,7 +772,13 @@ export class HistoryPanel implements Component, Focusable {
     if (next !== this.state.query) {
       this.state.query = next
       this.state.selectedIndex = 0
-      this.scheduleSearch()
+      if (this.remote !== undefined) {
+        // The seat owns the 75ms debounce and the async fence: the panel must
+        // never run a second search beside it.
+        this.remote.setQuery(next)
+      } else {
+        this.scheduleSearch()
+      }
     }
   }
 
@@ -763,7 +866,11 @@ export class HistoryPanel implements Component, Focusable {
         const index = this.state.results.findIndex(candidate => candidate.id === hit.id)
         if (index === -1) return undefined
         this.gesture = { kind: 'result', generation: frame.generation, x: event.x, y: event.y, id: hit.id }
-        if (this.state.selectedIndex !== index) {
+        if (this.remote !== undefined) {
+          // The shared owner is the selection authority: a More/refresh fence
+          // rejects the request and the painted selection never diverges.
+          this.remote.select(hit.id)
+        } else if (this.state.selectedIndex !== index) {
           this.state.selectedIndex = index
           this.reanchorPreview()
           this.onResultsChanged?.()
@@ -786,6 +893,8 @@ export class HistoryPanel implements Component, Focusable {
         if (action === undefined) return undefined
         if (action.kind === 'useSelected' && !this.canAccept()) return undefined
         if (action.kind === 'copyAll' && !this.canAcceptCopy()) return undefined
+        if (action.kind === 'more' && !this.canRequestMore()) return undefined
+        if (action.kind === 'retry' && !this.canRequestRetry()) return undefined
         this.gesture = {
           kind: 'footer',
           generation: frame.generation,
@@ -799,7 +908,10 @@ export class HistoryPanel implements Component, Focusable {
         return { handled: true }
       }
       if (hit.kind === 'preview') {
-        // A press inside the painted Preview starts the exact source drag.
+        // A press inside the painted Preview starts the exact source drag — ONLY
+        // when a Remote body is verified: a bounded preview is never draggable
+        // into an "exact" copy.
+        if (!this.remoteExactBodyAvailable()) return undefined
         this.gesture = { kind: 'preview', generation: frame.generation, x: event.x, y: event.y }
         const point = { row: hit.row, col: Math.max(0, event.x) }
         this.previewAnchor = point
@@ -862,6 +974,16 @@ export class HistoryPanel implements Component, Focusable {
           this.onResultsChanged?.()
           return { handled: true, render: true }
         }
+        if (current.kind === 'more') {
+          if (!this.canRequestMore()) return undefined
+          this.requestMore()
+          return { handled: true, render: true }
+        }
+        if (current.kind === 'retry') {
+          if (!this.canRequestRetry()) return undefined
+          this.requestRetry()
+          return { handled: true, render: true }
+        }
         if (current.kind === 'copyAll') {
           if (!this.canAcceptCopy()) return undefined
           this.copyAll()
@@ -917,7 +1039,9 @@ export class HistoryPanel implements Component, Focusable {
       && event.height === frame.height
       && hit !== undefined
       && hit.kind === 'preview'
-    if (!inside) {
+    // A Remote body that lost readiness (a selection/query/body change) makes
+    // the bounded preview non-draggable: never copy it as if it were exact.
+    if (!inside || !this.remoteExactBodyAvailable()) {
       this.resetPreviewSelection()
       this.onResultsChanged?.()
       return { handled: true, render: true }
@@ -945,9 +1069,94 @@ export class HistoryPanel implements Component, Focusable {
   /** Open-time init: run the initial (empty-query) search immediately. */
   start(): void {
     if (this.disposed) return
+    if (this.remote !== undefined) {
+      this.startRemote()
+      return
+    }
     // `refresh()` never rejects: source failures land in the panel state and a
     // stale-subject page is dropped without any teardown call.
     void this.refresh() // allowlist: refresh() never rejects (see above)
+  }
+
+  /** Remote open: the seat owns the query/page/body chain; the panel only
+   *  consumes its committed views. The initial view is committed explicitly
+   *  because `open()` publishes its synchronous searching state before the
+   *  subscription below exists. */
+  private startRemote(): void {
+    const seat = this.remote
+    if (seat === undefined || this.unsubscribeRemote !== undefined) return
+    seat.open(this.defaultScope, this.state.query)
+    this.unsubscribeRemote = seat.subscribe(() => { this.onRemoteView() })
+    this.onRemoteView()
+  }
+
+  /**
+   * Commit one Remote seat view into the panel's presentation state. The seat
+   * already fenced serial/query/selection/currentness for this exact commit;
+   * the panel only maps the committed facts (never re-derives a Host state).
+   */
+  private onRemoteView(): void {
+    const seat = this.remote
+    if (seat === undefined || this.disposed) return
+    const view = seat.view()
+    this.remoteView = view
+    // One commit = one new painted generation: a pointer gesture armed against
+    // the previous frame can never act on this page/body/status.
+    this.state.generation += 1
+    this.state.scope = view.scope
+    this.state.query = view.query
+    this.state.results = this.remoteRows(view)
+    const selectedIndex = view.selectedId === undefined
+      ? 0
+      : this.state.results.findIndex(row => row.id === view.selectedId)
+    this.state.selectedIndex = selectedIndex < 0 ? 0 : selectedIndex
+    this.state.loading = view.status === 'searching' || view.status === 'loading-host' || view.moreLoading
+    this.state.error = remoteErrorMessage(view)
+    this.reanchorPreview()
+    this.onResultsChanged?.()
+  }
+
+  /** Map the committed Remote rows into the shared display shape: the exact
+   *  body only for the selected row once its read is verified, otherwise the
+   *  bounded preview with its honest body state. */
+  private remoteRows(view: RemoteHistorySeatView): HistoryDisplayRow[] {
+    const body = view.body
+    return view.rows.map(row => {
+      const selected = body.kind !== 'none' && body.row.id === row.id
+      if (selected && body.kind === 'ready') {
+        return {
+          id: row.id,
+          summary: row.preview,
+          content: body.text,
+          cwd: row.effectiveCwd,
+          ts: row.acceptedAt,
+          sessionId: row.sessionId,
+          body: 'ready',
+          hasNonText: body.hasNonText,
+        }
+      }
+      if (selected && body.kind === 'failed') {
+        return {
+          id: row.id,
+          summary: row.preview,
+          content: body.preview,
+          cwd: row.effectiveCwd,
+          ts: row.acceptedAt,
+          sessionId: row.sessionId,
+          body: 'failed',
+          bodyMessage: body.message,
+        }
+      }
+      return {
+        id: row.id,
+        summary: row.preview,
+        content: row.preview,
+        cwd: row.effectiveCwd,
+        ts: row.acceptedAt,
+        sessionId: row.sessionId,
+        body: selected && body.kind === 'loading' ? 'loading' : 'none',
+      }
+    })
   }
 
   /** Cancel and forget (called by the host through the seat lease). */
@@ -962,6 +1171,11 @@ export class HistoryPanel implements Component, Focusable {
     this.timer = undefined
     this.controller?.abort()
     this.controller = undefined
+    this.unsubscribeRemote?.()
+    this.unsubscribeRemote = undefined
+    // The host/lease owns the seat's scope lifetime. Disposing this component
+    // must not close the preserved capture before an accepted Restore re-proves
+    // it; the lease closes the seat on its normal teardown route.
     this.frame = undefined
     this.resetPointerGesture()
   }
@@ -1026,11 +1240,17 @@ export class HistoryPanel implements Component, Focusable {
       const paintedSelection = selectedId !== undefined
         && paintedResultIds.has(selectedId)
         && this.tenantIsCurrent()
+      // Direct keeps its historical eligibility (Copy works while a query
+      // settles). A Remote action is offered ONLY for the verified exact body
+      // and never while the seat is searching/More-loading.
+      const remoteCopyEligible = this.remote === undefined
+        || (!this.state.loading && this.remoteExactBodyReady(this.selected()))
       const footer = this.renderFooter(
         layout.width,
         paintedHeadingActions,
-        paintedSelection && layout.acceptEnabled && !this.state.loading && this.state.error === undefined,
-        paintedSelection && this.state.error === undefined,
+        paintedSelection && layout.acceptEnabled && !this.state.loading && this.state.error === undefined
+          && remoteCopyEligible,
+        paintedSelection && this.state.error === undefined && remoteCopyEligible,
       )
       push(footer.text, footer.hit)
     }
@@ -1141,7 +1361,10 @@ export class HistoryPanel implements Component, Focusable {
   } {
     const wide = width >= 85
     const sessionLabel = this.sessionId !== undefined ? (wide ? 'Current Session' : 'Session') : null
-    const currentLabel = wide ? 'Current Directory' : 'Directory'
+    // Remote paints Directory only while THIS open proved a Host path; Direct
+    // keeps its historical single-file scope always present.
+    const directoryAvailable = this.remote === undefined || this.remoteView?.directory.available === true
+    const currentLabel = directoryAvailable ? (wide ? 'Current Directory' : 'Directory') : null
     const allLabel = wide ? 'All Directories' : 'All'
     const parts: Array<{ plain: string; styled: string; scope: HistoryScope; from: number; to: number }> = []
     let cursor = 2 // the fixed two-cell lead before the first tab
@@ -1160,7 +1383,7 @@ export class HistoryPanel implements Component, Focusable {
       cursor += visibleWidth(plain) + 1
     }
     if (sessionLabel !== null) push('session', sessionLabel)
-    push('current', currentLabel)
+    if (currentLabel !== null) push('current', currentLabel)
     push('all', allLabel)
     return {
       plain: `  ${parts.map(part => part.plain).join(' ')}`,
@@ -1180,6 +1403,17 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   private renderMessage(width: number): string {
+    if (this.remote !== undefined) {
+      // The seat's own safe message is the status authority: searching, Host
+      // loading, incomplete/unavailable/denied/failed/stale/too-long and the
+      // honest `No matches` all arrive from ONE committed view.
+      const failed = this.state.error !== undefined
+      const text = this.state.error ?? (this.remoteView?.message || 'Loading history…')
+      // Remote status text may carry a stable Host failure code: it is display
+      // material, never a terminal protocol byte. The raw state stays untouched.
+      const plain = clampLine(`  ${sanitizedPhysicalLine(text)}`, width)
+      return failed ? color.error(plain) : color.textDim(plain)
+    }
     const failed = this.state.error !== undefined
     const text = failed
       ? this.state.error!
@@ -1204,13 +1438,24 @@ export class HistoryPanel implements Component, Focusable {
     const counter = layout.resultsRows >= 2
     const visible = Math.max(1, layout.resultsRows - (counter ? 1 : 0))
     if (counter) {
-      const matches = `${count} match${count === 1 ? '' : 'es'}`
-      const plain = clampLine(`Results · ${matches}`, width)
-      const cut = Math.min(visibleWidth('Results · '), visibleWidth(plain))
-      lines.push({
-        text: `${color.textDim(plain.slice(0, cut))}${color.textMuted(plain.slice(cut))}`,
-        hit: { kind: 'inert' },
-      })
+      // Direct keeps its `Results · N matches` counter. Remote paints the seat's
+      // committed message in the SAME stable row (`Results · N shown`,
+      // `Loading more…`, `Searching…`), so a page/status change is readable.
+      const counterText = this.remote === undefined
+        ? `Results · ${count} match${count === 1 ? '' : 'es'}`
+        : sanitizedPhysicalLine(this.remoteView?.message || `Results · ${String(count)} shown`)
+      const plain = clampLine(counterText, width)
+      if (!counterText.startsWith('Results · ')) {
+        // A transient Remote status (Searching… / Loading more…) is ONE muted
+        // fact; only the `Results · N shown` counter splits its tokens.
+        lines.push({ text: color.textMuted(plain), hit: { kind: 'inert' } })
+      } else {
+        const cut = Math.min(visibleWidth('Results · '), visibleWidth(plain))
+        lines.push({
+          text: `${color.textDim(plain.slice(0, cut))}${color.textMuted(plain.slice(cut))}`,
+          hit: { kind: 'inert' },
+        })
+      }
     }
     // Viewport: center the selection, clamp to the ends — ↓ to row 150 of 200
     // must scroll the window, never hide the `> ` marker.
@@ -1230,7 +1475,7 @@ export class HistoryPanel implements Component, Focusable {
       const cwdPlain = this.state.scope === 'all' && result.cwd !== null
         ? `${shortCwd(result.cwd).padEnd(14)} `
         : ''
-      const labelPlain = resultLabel(result.content)
+      const labelPlain = resultLabel(result.summary)
       let remaining = width
       const take = (text: string, ellipsis = ''): string => {
         const clamped = truncateToWidth(text, remaining, ellipsis)
@@ -1272,7 +1517,8 @@ export class HistoryPanel implements Component, Focusable {
     }
     this.previewTop = Math.max(0, Math.min(this.previewTop, maxTop))
     this.previewAnchorOffset = this.anchorOffsetOf(visual, this.previewTop)
-    const range = this.previewSelectionRangeFor(visual)
+    const exact = this.remoteExactBodyAvailable()
+    const range = exact ? this.previewSelectionRangeFor(visual) : undefined
 
     if (layout.previewHeading) {
       out.push(this.renderPreviewHeading(layout.width, rows.length, layout.previewRows, selected))
@@ -1287,7 +1533,9 @@ export class HistoryPanel implements Component, Focusable {
       out.push({
         kind: 'content',
         text: this.stylePreviewRow(visual, painted, row, range),
-        hit: { kind: 'preview', row },
+        // A Remote preview that is not yet the verified exact body is readable
+        // but never a drag/copy target.
+        hit: exact ? { kind: 'preview', row } : { kind: 'inert' },
       })
     }
     if (layout.metadata) {
@@ -1305,25 +1553,42 @@ export class HistoryPanel implements Component, Focusable {
    * key badge and painted only while the whole item fits; the count yields
    * first. Every clickable cell range is resolved from the final painted plain
    * width (never a pre-clamp string length).
+   *
+   * A Remote body that is still loading (or failed/empty) replaces the copy/use
+   * hints with its honest notice: the bounded preview below stays readable but
+   * the exact-body actions are NOT advertised until the hash-verified text is
+   * ready.
    */
   private renderPreviewHeading(
     width: number,
     totalRows: number,
     previewRows: number,
-    selected: HistorySearchResult | undefined,
+    selected: HistoryDisplayRow | undefined,
   ): { kind: 'heading'; text: string; hit: HistoryMouseHit } {
     const first = totalRows === 0 ? 0 : this.previewTop + 1
     const last = Math.min(totalRows, this.previewTop + previewRows)
     const position = totalRows === 0 ? '' : `rows ${first}-${last}/${totalRows}`
     const label = 'Preview'
+    const notice = this.remotePreviewNotice(selected)
+    const exact = notice.kind === 'none'
 
-    if (!this.pointerEnabled() || selected === undefined) {
-      const hint = `${HISTORY_CHORDS.copy.label} copy · ${HISTORY_CHORDS.accept.label} use`
-      const build = (withPosition: boolean, withHint: boolean): { plain: string; styled: string } => {
+    const noticeText = sanitizedPhysicalLine(notice.text)
+    const noticeStyled = (): { plain: string; styled: string } => notice.kind === 'failed'
+      ? { plain: noticeText, styled: color.error(noticeText) }
+      : { plain: noticeText, styled: color.textMuted(noticeText) }
+
+    if (!this.pointerEnabled() || selected === undefined || !exact) {
+      const hint = exact ? `${HISTORY_CHORDS.copy.label} copy · ${HISTORY_CHORDS.accept.label} use` : ''
+      const build = (withPosition: boolean, withSecond: boolean): { plain: string; styled: string } => {
         const plain: string[] = [label]
         const styled: string[] = [color.textDim(label)]
         if (withPosition && position !== '') { plain.push(position); styled.push(color.textMuted(position)) }
-        if (withHint) { plain.push(hint); styled.push(color.textMuted(hint)) }
+        if (withSecond && exact) { plain.push(hint); styled.push(color.textMuted(hint)) }
+        if (withSecond && !exact) {
+          const painted = noticeStyled()
+          plain.push(painted.plain)
+          styled.push(painted.styled)
+        }
         return { plain: plain.join('  '), styled: styled.join('  ') }
       }
       const chosen = [
@@ -1375,13 +1640,47 @@ export class HistoryPanel implements Component, Focusable {
     }
   }
 
-  private renderMetadata(width: number, selected: HistorySearchResult | undefined): string {
+  /**
+   * The honest Remote exact-body notice for the selected row. Direct rows are
+   * always exact. Until the hash-verified text commits, the Preview heading says
+   * `Loading full text…`; a failed read keeps its safe message and the Footer
+   * offers Retry; a ready empty body says why no action is available.
+   */
+  private remotePreviewNotice(
+    selected: HistoryDisplayRow | undefined,
+  ): { kind: 'none' | 'loading' | 'failed' | 'empty'; text: string } {
+    if (this.remote === undefined) return { kind: 'none', text: '' }
+    // A pending query/More frame freezes the whole action surface: the previous
+    // exact body stays readable, but no copy/restore is offered against a page
+    // that is being replaced.
+    if (this.state.loading) {
+      return { kind: 'loading', text: this.remoteView?.message || 'Searching…' }
+    }
+
+    if (selected === undefined) return { kind: 'loading', text: 'Loading full text…' }
+    if (selected.body === 'ready') {
+      return selected.content === ''
+        ? { kind: 'empty', text: 'No text to restore' }
+        : { kind: 'none', text: '' }
+    }
+    if (selected.body === 'failed') {
+      return { kind: 'failed', text: selected.bodyMessage ?? 'History text is unavailable' }
+    }
+    return { kind: 'loading', text: 'Loading full text…' }
+  }
+
+  private renderMetadata(width: number, selected: HistoryDisplayRow | undefined): string {
     const scope = this.state.scope === 'session' ? 'session' : this.state.scope === 'current' ? 'directory' : 'all'
     const parts = [`Scope: ${scope}`]
     if (selected?.cwd != null) parts.push(`Directory: ${sanitizedPhysicalLine(shortCwd(selected.cwd))}`)
+    else if (this.remote !== undefined && selected !== undefined) parts.push('Directory: Unknown')
     if (selected?.ts != null) parts.push(`Time: ${formatHistoryTime(selected.ts)}`)
     else parts.push('Time unknown')
     if (selected?.sessionId !== undefined) parts.push(`Session: ${sanitizedPhysicalLine(selected.sessionId)}`)
+    if (this.remote !== undefined && selected?.body === 'ready' && selected.hasNonText === true
+      && selected.content !== '') {
+      parts.push('Text only · attachments not restored')
+    }
     // Role 11 (diagnostic facts): labels and facts are `textDim`; this is an
     // inline fact line, so it never carries the standalone status marker.
     return color.textDim(clampLine(`  ${parts.join(' · ')}`, width))
@@ -1402,6 +1701,26 @@ export class HistoryPanel implements Component, Focusable {
     copyEligible: boolean,
   ): { text: string; hit: HistoryMouseHit } {
     if (!this.pointerEnabled()) {
+      if (this.remote !== undefined) {
+        // The Remote action bar advertises ONLY operable verbs: a bounded
+        // preview is never presented as copyable/restorable, More appears only
+        // while older Host history remains and Retry only in a failure state.
+        const segments: ActionBarSegment[] = []
+        if (this.remoteMoreAvailable()) segments.push({ text: 'More · PgDn', priority: 110 })
+        if (this.remoteRetryAvailable()) segments.push({ text: 'Retry · PgDn', priority: 110 })
+        if (useEligible) segments.push({ text: `${HISTORY_CHORDS.accept.label} use`, priority: 100 })
+        segments.push(
+          { text: `${HISTORY_CHORDS.scope.label} scope`, priority: 65 },
+          { text: `${HISTORY_CHORDS.results.label} results`, priority: 50, short: HISTORY_CHORDS.results.label },
+          { text: `${HISTORY_CHORDS.preview.label} preview`, priority: 35, short: HISTORY_CHORDS.preview.label },
+        )
+        if (copyEligible) segments.push({ text: `${HISTORY_CHORDS.copy.label} copy`, priority: 55 })
+        segments.push(
+          { text: `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`, priority: 30 },
+          { text: `${HISTORY_CHORDS.cancel.label} cancel`, priority: 1000 },
+        )
+        return { text: color.textMuted(renderActionBarRow(segments, width)), hit: { kind: 'inert' } }
+      }
       const segments: ActionBarSegment[] = [
         { text: `${HISTORY_CHORDS.accept.label} use`, priority: 100 },
         { text: `${HISTORY_CHORDS.scope.label} scope`, priority: 65 },
@@ -1422,6 +1741,10 @@ export class HistoryPanel implements Component, Focusable {
     const add = (segment: ActionBarSegment, action: HistoryFooterAction): void => {
       targets.set(segments.length, action)
       segments.push(segment)
+    }
+    if (this.remote !== undefined) {
+      if (this.remoteMoreAvailable()) add({ text: 'More · PgDn', priority: 110 }, { kind: 'more', id: null })
+      if (this.remoteRetryAvailable()) add({ text: 'Retry · PgDn', priority: 110 }, { kind: 'retry', id: null })
     }
     if (useEligible && !paintedHeadingActions.has('useSelected')) {
       add({ text: `Use [${HISTORY_CHORDS.accept.label}]`, priority: 100 }, {
@@ -1490,6 +1813,16 @@ export class HistoryPanel implements Component, Focusable {
   private selectScope(target: HistoryScope): void {
     if (target === this.state.scope) return
     if (target === 'session' && this.sessionId === undefined) return
+    if (this.remote !== undefined) {
+      // A Directory this open never proved is not selectable: the bounded Host
+      // preview of a path is not the Host cwd authority.
+      if (target === 'current' && this.remoteView?.directory.available !== true) return
+      this.state.scope = target
+      this.state.selectedIndex = 0
+      this.gesture = undefined
+      this.remote.setScope(target)
+      return
+    }
     this.state.scope = target
     this.state.selectedIndex = 0
     this.gesture = undefined
@@ -1497,6 +1830,10 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   private toggleScope(): void {
+    if (this.remote !== undefined) {
+      this.cycleRemoteScope()
+      return
+    }
     const next: HistoryScope = this.sessionId !== undefined
       ? this.state.scope === 'session' ? 'current'
         : this.state.scope === 'current' ? 'all'
@@ -1505,19 +1842,57 @@ export class HistoryPanel implements Component, Focusable {
     this.selectScope(next)
   }
 
+  /** The Remote scope ring contains ONLY the scopes this open can really search:
+   *  Session needs a live identity, Directory needs the proven Host path, All is
+   *  always available. */
+  private cycleRemoteScope(): void {
+    const ring: HistoryScope[] = []
+    if (this.sessionId !== undefined) ring.push('session')
+    if (this.remoteView?.directory.available === true) ring.push('current')
+    ring.push('all')
+    const index = ring.indexOf(this.state.scope)
+    const next = ring[(index + 1) % ring.length]
+    if (next === undefined || next === this.state.scope) return
+    this.selectScope(next)
+  }
+
   private moveSelection(data: string): void {
     const count = this.state.results.length
+    if (this.remote !== undefined && matchesKey(data, 'pageDown')) {
+      // PiTui keeps its accepted PgDn semantics: PgDn is the ONE keyboard
+      // More/Retry route, admitted by the same painted-frame/currentness
+      // predicate the Footer button uses. ArrowDown still wraps normally.
+      if (this.remoteRetryAvailable()) {
+        this.requestRetry()
+        return
+      }
+      // The last loaded row with older Host history (or a page already in
+      // flight): PgDn drives More instead of stepping past the page.
+      if (count > 0 && this.state.selectedIndex === count - 1
+        && (this.remoteMoreAvailable() || this.remoteView?.moreLoading === true)) {
+        this.requestMore()
+        return
+      }
+    }
     if (count === 0) return
     const index = this.state.selectedIndex
-    if (matchesKey(data, 'up')) this.state.selectedIndex = index === 0 ? count - 1 : index - 1
-    else if (matchesKey(data, 'down')) this.state.selectedIndex = index === count - 1 ? 0 : index + 1
+    let next: number
+    if (matchesKey(data, 'up')) next = index === 0 ? count - 1 : index - 1
+    else if (matchesKey(data, 'down')) next = index === count - 1 ? 0 : index + 1
     else {
       // The page step is the ACTUAL painted result-row count (never a hardcoded
       // six).
       const page = Math.max(1, this.plan(this.lastWidth()).listPage)
-      if (matchesKey(data, 'pageUp')) this.state.selectedIndex = Math.max(0, index - page)
-      else this.state.selectedIndex = Math.min(count - 1, index + page)
+      next = matchesKey(data, 'pageUp')
+        ? Math.max(0, index - page)
+        : Math.min(count - 1, index + page)
     }
+    if (this.remote !== undefined) {
+      const target = this.state.results[next]
+      if (target !== undefined) this.remote.select(target.id)
+      return
+    }
+    this.state.selectedIndex = next
     this.reanchorPreview()
   }
 
@@ -1623,10 +1998,16 @@ export class HistoryPanel implements Component, Focusable {
       if (count === 0) return undefined
       const step = delta > 0 ? 1 : -1
       const index = this.state.selectedIndex
-      this.state.selectedIndex = step < 0
+      const next = step < 0
         ? index === 0 ? count - 1 : index - 1
         : index === count - 1 ? 0 : index + 1
-      this.reanchorPreview()
+      if (this.remote !== undefined) {
+        const target = this.state.results[next]
+        if (target !== undefined) this.remote.select(target.id)
+      } else {
+        this.state.selectedIndex = next
+        this.reanchorPreview()
+      }
       return { handled: true, render: true }
     }
     const inPreview = frame.previewTop !== undefined && frame.previewBottom !== undefined
@@ -1663,12 +2044,96 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /** Copy All may run while a query is still settling (it copies the row the
-   *  user can see), but never for an unpainted or stale selection. */
+   *  user can see), but never for an unpainted or stale selection. A Remote
+   *  row is copyable ONLY after its exact body hash verified; loading and
+   *  failure states keep the bounded preview non-copyable. */
   private canAcceptCopy(): boolean {
     if (this.disposed || this.state.error !== undefined || !this.tenantIsCurrent()) return false
     const selected = this.selected()
     if (selected === undefined) return false
+    if (this.remote !== undefined) {
+      if (this.state.loading) return false
+      if (!this.remoteExactBodyReady(selected)) return false
+    }
     return this.frame?.paintedResultIds.has(selected.id) === true
+  }
+
+  /** Whether the selected Remote row owns a verified, non-empty exact body. */
+  private remoteExactBodyReady(row: HistoryDisplayRow | undefined): boolean {
+    return row !== undefined && row.body === 'ready' && row.content !== ''
+  }
+
+  /** Whether the CURRENT selected row's exact body is ready for a raw Preview
+   *  drag. Direct rows are always exact; a Remote search/More commit and any
+   *  failure state disable every action until its own frame settles. */
+  private remoteExactBodyAvailable(): boolean {
+    if (this.remote === undefined) return true
+    if (this.state.loading || this.state.error !== undefined) return false
+    return this.remoteExactBodyReady(this.selected())
+  }
+
+  /**
+   * The ONE Remote More admission shared by PgDn at the tail and the
+   * painted Footer button. It requires the last painted frame to describe the
+   * CURRENT commit (generation), the selected identity to still be that painted
+   * row, and the live seat currentness — a stale frame, a mid-flight More or a
+   * repainted page can never fire a second request.
+   */
+  private canRequestMore(): boolean {
+    if (!this.tenantIsCurrent() || !this.remoteMoreAvailable()) return false
+    const view = this.remoteView
+    if (view === undefined || view.selectedId === undefined || this.selected()?.id !== view.selectedId) return false
+    const frame = this.frame
+    if (frame === undefined || frame.generation !== this.state.generation) return false
+    return frame.paintedResultIds.has(view.selectedId)
+  }
+
+  /** Paint-time availability (no last-frame generation): the Footer advertises
+   *  More only when THIS page can still load older Host history. */
+  private remoteMoreAvailable(): boolean {
+    if (this.disposed || this.remote === undefined) return false
+    const view = this.remoteView
+    return view !== undefined && view.status === 'ready' && view.hasMore && !view.moreLoading
+      && view.selectedId !== undefined && this.selected()?.id === view.selectedId
+  }
+
+  /**
+   * The ONE Remote Retry admission shared by PgDn and the painted Footer
+   * button. Retry is offered for a blocking seat failure and for a failed exact
+   * body; a stale frame, a pending More or a ready page refuses.
+   */
+  private canRequestRetry(): boolean {
+    if (!this.tenantIsCurrent() || !this.remoteRetryAvailable()) return false
+    const frame = this.frame
+    return frame !== undefined && frame.generation === this.state.generation
+  }
+
+  /** Paint-time availability (no last-frame generation). */
+  private remoteRetryAvailable(): boolean {
+    if (this.disposed || this.remote === undefined) return false
+    const view = this.remoteView
+    if (view === undefined || view.moreLoading) return false
+    if (this.remoteBlockingFailure()) return true
+    // A body failure belongs to a READY page: a pending query/loading status
+    // keeps its own message and must not offer a Retry of an older body.
+    return view.status === 'ready' && view.body.kind === 'failed'
+  }
+
+  /** A seat failure that leaves NO readable page: PgDn is its keyboard Retry. */
+  private remoteBlockingFailure(): boolean {
+    const status = this.remoteView?.status
+    return status === 'loading-host' || status === 'incomplete' || status === 'unavailable'
+      || status === 'denied' || status === 'failed' || status === 'stale'
+  }
+
+  private requestMore(): void {
+    if (!this.canRequestMore()) return
+    this.remote?.more()
+  }
+
+  private requestRetry(): void {
+    if (!this.canRequestRetry()) return
+    this.remote?.retry()
   }
 
   /**
@@ -1710,6 +2175,8 @@ export class HistoryPanel implements Component, Focusable {
   /** Run one search with the CURRENT query/scope; commit only when this
    *  generation is still live (stale results are dropped). */
   private async refresh(): Promise<void> {
+    const source = this.source
+    if (source === undefined) return
     const generation = ++this.state.generation
     this.controller?.abort()
     const controller = new AbortController()
@@ -1726,7 +2193,7 @@ export class HistoryPanel implements Component, Focusable {
     }
     let results: HistorySearchResult[]
     try {
-      const page = await this.source.search(request)
+      const page = await source.search(request)
       results = page.results
     } catch {
       // Second fence for a late failure: the generation was invalidated by
@@ -1752,9 +2219,9 @@ export class HistoryPanel implements Component, Focusable {
     // The stable ID survives a recompute when it is still in the new page; the
     // first valid match is the fallback.
     const previous = this.selected()?.id
-    this.state.results = results
+    this.state.results = results.map(directDisplayRow)
     this.state.loading = false
-    const restored = previous === undefined ? -1 : results.findIndex(candidate => candidate.id === previous)
+    const restored = previous === undefined ? -1 : this.state.results.findIndex(candidate => candidate.id === previous)
     this.state.selectedIndex = restored >= 0 ? restored : 0
     if (restored < 0 || previous === undefined) this.reanchorPreview()
     this.onResultsChanged?.()

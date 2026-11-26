@@ -174,8 +174,8 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly markContextDirty: () => void
     readonly refreshContextMeasurement: (reason: ContextMeasureReason) => void
   }
-  /** The per-session client-local input history (A5b-2 owns it). */
-  readonly history: {
+  /** The per-session client-local input history (A5b-2 owns it; Direct only). */
+  readonly history?: {
     readonly rememberCwd: (cwd: string) => void
     readonly currentCwd: () => string
     readonly records: (cwd: string) => readonly ParsedHistoryRecord[]
@@ -553,7 +553,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     sessionId: string,
     signal: AbortSignal,
   ): Promise<FencedSessionRecallSeed | undefined> => {
-    const readSessionRecall = deps.history.readSessionRecall
+    const readSessionRecall = deps.history?.readSessionRecall
     if (readSessionRecall === undefined) return undefined
     const fence: HydrationRecallFence = {
       generation: deps.currentness.captureGeneration(),
@@ -581,7 +581,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   /** The current cwd file's session rows in the seed shape (the documented
    *  fallback when the cross-cwd reader fails globally). */
   const currentCwdSessionRecallSeed = (sessionId: string): SessionRecallSeed => {
-    const records = deps.history.records(deps.history.currentCwd())
+    const history = deps.history
+    if (history === undefined) return { entries: [], writeIds: [] }
+    const records = history.records(history.currentCwd())
     const scoped = records.filter(record => record.sessionId === sessionId).slice(-HISTORY_RECALL_LIMIT)
     const newestFirst = [...scoped].reverse()
     return {
@@ -716,14 +718,19 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // The session's own workspace joins the known-cwd set (Rule 2 for
     // the all-directory search): a legacy-only history file in this cwd
     // becomes recoverable immediately, even if it predates this process.
-    if (input.cwd !== undefined && input.cwd !== '') deps.history.rememberCwd(input.cwd)
-    // The current cwd file's ACTUAL last row remains the persistence dedupe
-    // anchor (the write policy stays cwd-scoped). It is deliberately NOT used
-    // as the cross-cwd recall seed: the session's rows may live in several
-    // cwd files, and its true newest rows are the async reader's job below.
-    const historyCwd = deps.history.currentCwd()
-    const historyRecords = deps.history.records(historyCwd)
-    deps.history.setLastContent(historyRecords.at(-1)?.content)
+    // The file-backed recall/dedupe anchor exists only on Direct (Feature
+    // History PR2-B); the Split Client has no JSONL capability at all.
+    const history = deps.history
+    if (history !== undefined) {
+      if (input.cwd !== undefined && input.cwd !== '') history.rememberCwd(input.cwd)
+      // The current cwd file's ACTUAL last row remains the persistence dedupe
+      // anchor (the write policy stays cwd-scoped). It is deliberately NOT used
+      // as the cross-cwd recall seed: the session's rows may live in several
+      // cwd files, and its true newest rows are the async reader's job below.
+      const historyCwd = history.currentCwd()
+      const historyRecords = history.records(historyCwd)
+      history.setLastContent(historyRecords.at(-1)?.content)
+    }
     // Session identity commit (create/resume/switch): the title AND the
     // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
@@ -741,7 +748,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // contract. The Split Client's ↑/↓ projection is its process memory, so
     // it schedules no read, opens no abort controller and commits no reset —
     // the anchor read above is the only file touch of this hydration.
-    if (deps.remote === undefined && deps.history.readSessionRecall !== undefined && input.sessionId !== undefined) {
+    if (deps.remote === undefined && deps.history?.readSessionRecall !== undefined && input.sessionId !== undefined) {
       const sessionId = input.sessionId
       const controller = new AbortController()
       historyRecallController = controller

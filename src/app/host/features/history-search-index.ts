@@ -195,6 +195,8 @@ export interface HistoryOccurrenceRow {
  * for the exact-text chunk path.
  */
 export interface HistorySearchRow {
+  /** Host-internal continuation anchor; never part of the public row DTO. */
+  readonly rowId: string
   readonly sessionId: string
   readonly messageId: string
   readonly firstEventSeq: number
@@ -387,6 +389,7 @@ interface RawOccurrenceRow {
 }
 
 interface RawSearchRow {
+  readonly row_id: string
   readonly session_id: string
   readonly message_id: string
   readonly first_seq: number
@@ -430,6 +433,7 @@ function occurrenceOfRaw(row: RawOccurrenceRow): HistoryOccurrenceRow {
 
 function searchRowOfRaw(row: RawSearchRow): HistorySearchRow {
   return {
+    rowId: row.row_id,
     sessionId: row.session_id,
     messageId: row.message_id,
     firstEventSeq: row.first_seq,
@@ -967,8 +971,17 @@ export class HistorySearchIndex {
     if (revokedProofs > 0) this.proofRevocationCount += revokedProofs
   }
 
-  search(request: HistoryIndexSearchRequest): HistoryIndexSearchPage {
-    this.assertOpen()
+  /**
+   * The exact match set shared by a page read and an anchor re-check: the
+   * literal (already lower-cased) needle plus the one scope predicate. A
+   * continuation anchor resolves only while it still belongs to this set.
+   */
+  private searchFilters(request: {
+    readonly scope: 'all' | 'session' | 'directory'
+    readonly sessionId?: string
+    readonly cwd?: string
+    readonly query: string
+  }): { readonly conditions: string[]; readonly parameters: Array<string | number> } {
     const conditions: string[] = []
     const parameters: Array<string | number> = []
     const needle = request.query.toLowerCase()
@@ -983,6 +996,50 @@ export class HistorySearchIndex {
       conditions.push('effective_cwd = ?')
       parameters.push(request.cwd as string)
     }
+    return { conditions, parameters }
+  }
+
+  /**
+   * Resolve one opaque continuation anchor to the original keyset tuple. The
+   * row is found by its SQLite primary key only and must still carry the exact
+   * scope/needle membership; a deleted, rebuilt or re-scoped row is stale. It
+   * never selects the full `content` column.
+   */
+  resolveSearchAnchor(
+    rowId: string,
+    request: {
+      readonly scope: 'all' | 'session' | 'directory'
+      readonly sessionId?: string
+      readonly cwd?: string
+      readonly query: string
+    },
+  ): HistorySearchAfter | undefined {
+    this.assertOpen()
+    const filters = this.searchFilters(request)
+    const row = this.db.prepare(
+      `SELECT accepted_ms, session_id, first_seq, message_id
+       FROM history_occurrences
+       WHERE row_id = CAST(? AS INTEGER)${filters.conditions.length === 0 ? '' : ` AND ${filters.conditions.join(' AND ')}`}`,
+    ).get(rowId, ...filters.parameters) as unknown as {
+      readonly accepted_ms: number
+      readonly session_id: string
+      readonly first_seq: number
+      readonly message_id: string
+    } | undefined
+    if (row === undefined) return undefined
+    return {
+      acceptedAt: row.accepted_ms,
+      sessionId: row.session_id,
+      firstEventSeq: row.first_seq,
+      messageId: row.message_id,
+    }
+  }
+
+  search(request: HistoryIndexSearchRequest): HistoryIndexSearchPage {
+    this.assertOpen()
+    const filters = this.searchFilters(request)
+    const conditions = filters.conditions
+    const parameters = filters.parameters
     const after = request.after
     if (after !== undefined) {
       if (request.scope === 'session') {
@@ -1012,7 +1069,8 @@ export class HistorySearchIndex {
     // bounded preview, the exact UTF-16 length and the immutable hash. Full
     // bodies stay behind occurrence()/readText.
     const rows = this.db.prepare(
-      `SELECT session_id, message_id, first_seq, accepted_ms, effective_cwd,
+      `SELECT CAST(row_id AS TEXT) AS row_id,
+              session_id, message_id, first_seq, accepted_ms, effective_cwd,
               preview, content_length, content_sha256, has_non_text
        FROM history_occurrences
        ${where}

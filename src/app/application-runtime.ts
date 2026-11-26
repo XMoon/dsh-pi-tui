@@ -155,6 +155,8 @@ export interface RemoteApplicationSources {
   readonly liveIngress: RemoteLiveIngressFactory
   /** The official Session-scoped facts (sessionStatus/plan/running). */
   readonly sessionFacts: RemoteSessionFactsSource
+  /** The narrow private Host accepted-history read over this connection. */
+  readonly historySearch: unknown
   /** The branch-specific command authority read (PR4). */
   readonly commandSource: RemoteCommandSourceFace
   /** The M3-5 PR2 Task Center read source (descendant catalog + Job roster). */
@@ -549,6 +551,12 @@ export interface RemoteSessionFactsSource {
    *  retained binding (PR4 §3.3; unknown-shaped — the composer narrows it;
    * an absent capability reads undefined, never a window-fold substitute). */
   sessionStatsProjection(sessionId: string): unknown
+  /** Subscribe the exact retained binding's `workingDirectory` face (the
+   *  per-open History scope uses it for synchronous invalidation). Undefined
+   *  when the Session has no retained binding. */
+  subscribeWorkingDirectory(sessionId: string, listener: () => void): (() => void) | undefined
+  /** The exact retained binding's current `workingDirectory` face value. */
+  workingDirectory(sessionId: string): string | undefined
 }
 
 /** The internal application runtime-selection seam input: which core to adopt

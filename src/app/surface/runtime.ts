@@ -653,11 +653,17 @@ export function createSurfaceDraftImageProjection(
  */
 export interface TspHistorySearchBinding {
   /** The runner-owned search source: the ONLY history read authority. */
-  readonly source: OptionCapability<'historySearchSource'>
+  readonly source: TuiAppOptions['historySearchSource']
   /** The live session cwd, read once per Ctrl+R open by the seat. */
   readonly cwd: () => string
   /** The ONE atomic History currentness capture (exact owner + generation). */
   readonly captureScope: () => HistoryOpenScope
+  /** The Remote-only private Host read; absent on Direct. */
+  readonly read?: unknown
+  /** The composition-owned concrete Remote seat factory; opaque here. */
+  readonly createRemoteSeat?: unknown
+  /** The composition diagnostics channel for the Remote seat's detached reads. */
+  readonly diag?: Diag
 }
 
 /**
@@ -825,7 +831,13 @@ export interface SurfaceMountDeps {
   /** The shared canonical display authority. */
   readonly displayState: OptionCapability<'displayState'>
   /** Ctrl+R input-history source (the runner owns its filesystem IO). */
-  readonly historySearchSource: OptionCapability<'historySearchSource'>
+  readonly historySearchSource: TuiAppOptions['historySearchSource']
+  /** The Remote-only private Host accepted-history read; absent on Direct. */
+  readonly historySearchRead?: unknown
+  /** The composition diagnostics channel for the Remote seat's detached reads. */
+  readonly historySearchDiag?: Diag
+  /** The composition-owned concrete seat factory, forwarded opaquely. */
+  readonly historySeatFactory?: unknown
   /**
    * Feature History PR2-A: the Split Client root's process-lifetime input
    * recall memory, forwarded verbatim to the PiTui mount. Absent on Direct,
@@ -3426,6 +3438,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
     historySearchSource: deps.historySearchSource,
     historySearchCwd: () => deps.sessionCwd(),
+    ...(deps.historySearchRead === undefined ? {} : { historySearchRead: deps.historySearchRead }),
+    ...(deps.historySearchDiag === undefined ? {} : { historySearchDiag: deps.historySearchDiag }),
+    ...(deps.historySeatFactory === undefined ? {} : { historySeatFactory: deps.historySeatFactory }),
     // Feature History PR2-A: the process recall memory forwarded to the PiTui
     // mount (absent on Direct, where the renderer owns the scoped kernel).
     ...(deps.inputRecall === undefined ? {} : { inputRecall: deps.inputRecall }),
@@ -3829,6 +3844,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             source: deps.historySearchSource,
             cwd: () => deps.sessionCwd(),
             captureScope: deps.captureHistoryScope,
+            ...(deps.historySearchRead === undefined ? {} : { read: deps.historySearchRead }),
+            ...(deps.historySearchDiag === undefined ? {} : { diag: deps.historySearchDiag }),
+            ...(deps.historySeatFactory === undefined ? {} : { createRemoteSeat: deps.historySeatFactory }),
           },
           semanticSearchBinding,
           queueManager,

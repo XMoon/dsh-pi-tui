@@ -1,11 +1,11 @@
-# Input history: storage, recall, and migration
+# Input history: storage, recall, and search
 
 ## What this records
 
 Where the TUI keeps the per-directory input history that ↑/↓ recall reads,
 why the settings document was the wrong home for it, what the recall-order
-contract is, and the migration path that moved existing users' history out
-of `~/.dsh/settings.yaml`.
+contract is, and how Direct JSONL search and the Host accepted-history search
+find a submitted prompt.
 
 ## Decision: a dedicated JSONL file, not the settings document
 
@@ -50,21 +50,23 @@ prevents a settings whole-file replacement from erasing another window's input.
   demand. Consecutive repeats and empty lines are skipped (shell-history
   behavior); non-consecutive repeats are legal history and survive.
 - Recall vs. persistence (decoupled):
-  - **Recall (Direct)**: `HISTORY_RECALL_LIMIT` (100) session-scoped entries
-    seed the editor's ↑/↓ history. The Daemon/Split Client instead recalls from
-    its own process memory (see "Daemon/Split Client: process-lifetime recall"
-    below); this file remains its Ctrl+R source and write target. The canonical
-    JSONL is NEVER truncated or rewritten on read — a concurrent append from
-    another window must never land in an orphaned inode. No read-side
-    compaction may rewrite the append-only file or replace the inode while
-    concurrent writers can hold it.
+  - **Direct only**: `HISTORY_RECALL_LIMIT` (100) session-scoped entries
+    seed the editor's ↑/↓ history, and the per-cwd JSONL is the Ctrl+R search
+    source and submission write target. The Daemon/Split Client has no file
+    capability at all: its ↑/↓ recall is process memory and its Ctrl+R reads
+    the Host accepted-history index (see the two Split Client sections below).
+    The canonical JSONL is NEVER truncated or rewritten on read — a concurrent
+    append from another window must never land in an orphaned inode. No
+    read-side compaction may rewrite the append-only file or replace the inode
+    while concurrent writers can hold it.
 - Corrupt lines are skipped on load, never fatal.
 - `!` shell commands are stored verbatim (with the `!`), so ↑ recall
   restores them as text and Enter re-runs the shell branch.
 - The runner loads the file per session on Direct (and once at boot for the
-  launch cwd, so a fresh window recalls immediately — see below) and appends on
-  every submitted line on both backends. The Daemon/Split Client's ↑/↓ never
-  reads these files.
+  launch cwd, so a fresh window recalls immediately — see below), and only
+  Direct appends every submitted line. The Daemon/Split Client neither reads
+  nor writes these files; its ↑/↓ recall is process memory and its Ctrl+R reads
+  the Host accepted-history index.
 
 ## Ctrl+R history search
 
@@ -363,17 +365,84 @@ imported from a history file, the Host, another Client or a previous process.
   publication (`beginInputHistoryScope`) retires the outgoing browse/bookmark
   and never restores the old Session's draft, but it does NOT clear or reseed
   the list — the process memory is not a Session or cwd scope.
-- **No cold recall read.** The Split Client does not call
-  `readSessionRecall`, does not schedule the cross-cwd hydration scan and does
-  not apply a current-cwd fallback; a disk row written by the Ctrl+R writer
-  never seeds ↑/↓. The writer still runs, because Ctrl+R remains the CURRENT
-  local-file search on this backend: rows, `sessionId`/`cwd`/`ts`, the
-  persistence dedupe anchor and the search scopes are unchanged.
+- **No Client history file at all.** The Split Client constructs no
+  `FileHistorySearchSource`, no `InputHistory` writer/anchor and no known-cwd
+  set; it does not call `readSessionRecall`, does not schedule the cross-cwd
+  hydration scan and does not apply a current-cwd fallback. The Client cwd is
+  never a history key and a Client-local file row never seeds ↑/↓ or Ctrl+R.
+  The existing user-history files are left byte-for-byte untouched.
+
+### Daemon/Split Client: Host accepted-history Ctrl+R
+
+Ctrl+R on the Split Client searches the Host's accepted main-Composer
+submissions through the private Owner-only `piTuiHistorySearch/search` and
+`readText` Remotes. The Host's durable Session log is the authority; the
+Client's JSONL files are neither read nor written.
+
+- **Open capture.** ONE atomic `SessionScopeAuthority` capture fixes the
+  Session identity for the open. When a Session is live, the capture subscribes
+  the exact retained binding's official `workingDirectory` face BEFORE one
+  official exact Session Inspector passive **ready** cut (`asOfSeq` and the
+  proven effective cwd). Any relevant publication permanently invalidates the
+  open, including A→B→A where the final value equals the initial one; a
+  same-id binding/generation replacement, a lost token, a removed binding or a
+  source replacement revokes the whole open. An ordinary Inspector `changed`
+  (running/stats/other projection publications) is not a cwd change; only the
+  exact `workingDirectory` face owns that revocation. A missing, failed or
+  stale exact cut refuses `Directory` while leaving `Session`/`All` usable; it
+  does not by itself retire the open. The capture never polls,
+  compares cwd values or substitutes the Session header/status cwd or the
+  Client process cwd. A sessionless Client's `All` is fenced by the same
+  connection generation and, once a CONFIRMED Workspace intent exists, by the
+  seat-lifetime official `workspace.follow` baseline for that exact
+  WorkspaceId/path. A later status/revision/list change, a different path, a
+  removal, a lost generation or a stream end retires the open; a different
+  path is never grafted into the old capture.
+- **Scopes and order.** `Session` filters the captured Session; `Directory`
+  filters the confirmed effective Host directory; `All` is the Host-wide
+  accepted history. Rows are returned newest-first by Host acceptance time;
+  the Server owns the ordering, the Client never re-ranks. Rows whose event-time
+  directory is unknown are absent from `Directory`, never guessed from the
+  open-time cwd.
+- **Paging.** One page is at most 25 rows. `More` is explicit (the button; the
+  PiTui `PgDn` key at the loaded tail, the TSP `↓` key at the loaded tail), reads
+  at most one further page, keeps the
+  current rows/selection/scroll while in flight and appends only a
+  same-generation continuation. A query/scope replacement and a non-ready
+  append clear the prior rows, selection, body and cursor; a stale continuation
+  discards the chain and may perform at most ONE automatic fresh first-page
+  search under a NEW query revision; a second non-ready answer surfaces
+  `Retry`, which always restarts at the first page. While a `More` request is
+  in flight, row selection and `Retry` are refused.
+  The opaque cursor is v2: incarnation + revision + a digest of the exact
+  request context + a canonical signed 64-bit SQLite row anchor, bounded by
+  2048 bytes. It carries no query, path, official id or whole row, and a
+  malformed/legacy/re-scoped/rebuilt anchor is `stale`, never a silently
+  re-ranked page.
+- **Statuses.** `searching`, `loading` (Host index warmup), `incomplete`,
+  `unavailable` (including `service-missing`), `denied`, `failed`, `stale`,
+  `too-long` and `ready` are distinct. A non-ready answer is never rendered as
+  an authoritative empty result; a query over 256 UTF-16 units is refused
+  locally without an RPC.
+- **Exact body.** A result row carries only a bounded preview, its exact
+  UTF-16 length and content hash. Selecting a row lazily reads the body in
+  bounded `readText` chunks; Copy/Restore stay disabled until the assembled
+  text matches the declared length/hash. A changed length, a non-contiguous
+  offset, an unterminated body, a hash mismatch or a non-ready answer fails
+  closed. Copy and Restore keep their existing exact-payload semantics and
+  never submit; attachment-only rows remain visible with `hasNonText`. An
+  accepted Restore retires the visual/request seat but keeps the exact Remote
+  scope observation through the close and re-proves it before the draft write;
+  a replacement in that window writes nothing.
+- **Zero file IO.** The Split Client's Ctrl+R open composes this Host read; no
+  Client history file is opened, read, appended, truncated or re-inode'd, and
+  the old JSONL rows are never imported into ↑/↓ or the Host search.
 
 ### Editor recall scope: session-first (↑/↓), cwd-first (Ctrl+R)
 
 This section documents the DIRECT backend. The Daemon/Split Client's ↑/↓ owner
-is its process memory; its Ctrl+R still follows the file search contract above.
+is its process memory and its Ctrl+R is the Host accepted-history read; neither
+consumes a Client history file.
 
 The EDITOR's ↑/↓ recall is session-scoped once a live session exists: the
 hydration reseed reads the SAME Client-local history source's
@@ -541,30 +610,6 @@ is a short-lived projection of the reports those owners already make — it read
 no file, opens no subscription, decides no persistence, and is not a Session or
 cwd authority; a new mount starts from its own boot seed.
 
-## Migration
-
-One-time, at boot: the legacy `history` map inside the `dsh-pi-tui`
-settings namespace is read from the settings descriptor's RAW user layer
-(`settings.describe()`), written to the per-cwd JSONL files (the stored
-arrays are newest-first; the file wants oldest-first, so they are reversed),
-and the `history` key is then explicitly deleted from the stored section.
-
-### Trap: schemastery does NOT strip unknown keys
-
-`schemastery`'s `z.object` keeps unknown keys in the resolved value, so
-`{ ...settings.get() }` still carries `history` after the schema dropped
-the field — a "cleanup" replace that spreads the resolved doc writes the
-key right back (the file's mtime changed; the content did not). The cleanup
-must `delete doc.history` explicitly before replacing.
-
-### Crash-safe migration
-
-Migration is idempotent per cwd: an existing JSONL file means that cwd was
-already migrated, and the settings key is only deleted once EVERY legacy cwd
-has its file (`allMigrated`). A crash mid-migration (some files written, the
-key still present) therefore resumes on the next boot instead of losing the
-unwritten entries.
-
 ## Where the code lives
 
 - `src/client/history/memory-recall.ts` — the Daemon/Split Client's ONE
@@ -590,16 +635,35 @@ unwritten entries.
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-
   bound continuation cursors, abort). Pinned by
   `test/client/history-reverse-reader.test.ts`.
-- `src/tui/panels/history-panel.ts` — the Ctrl+R modal panel (query input, scope
-  tabs, list, details, responsive layout). Pinned by
-  `test/client/history-panel.test.ts` and the `test/client/ctrl-r.test.ts` integration
-  suite.
-- `src/app/submission/history-persist.ts` — the session-scope persist gate: the pure
-  persist decision (`persistHistoryRecord`) and the deferred-start
-  ordering contract (`persistAfterSession`). Pinned by
-  `test/app/history-persist.test.ts`.
-- Runner wiring in `src/index.ts`: boot seed, per-session seed in
-  `initLiveSession`, append on submit in `dispatchUserInput` (v2 rows,
-  after session creation for agent-facing submissions), migration, and the
-  injected `FileHistorySearchSource`.
+- `src/runtime/history-search-seat.ts` — the ONE transport-neutral Remote
+  open/query/page/body owner shared by PiTui and TSP: 25-row pages, explicit
+  More, one automatic stale-first-page recovery, exact hash/offset/length body
+  assembly and the captured-scope currentness fence. Pinned by
+  `test/client/remote-search-seat.test.ts`.
+- `src/client/history/remote-scope.ts` / `src/app/remote/history-scope.ts` —
+  the structural Remote scope view and its application capture (exact
+  `workingDirectory` face before the passive cut; sessionless Workspace intent
+  subscription plus `workspace.follow`). Pinned by
+  `test/app/remote-history-scope.test.ts`.
+- `src/runtime/history-search-read-port.ts` / `src/runtime/remote/history-search-remote.ts`
+  — the narrow read port and its Remote implementation over the mounted private
+  namespace, with denied/failed/superseded outcomes. Pinned by
+  `test/runtime/remote/history-search-remote.test.ts`.
+- `src/app/host/features/history-search.ts` / `history-search-index.ts` — the
+  Host accepted-history service and its disposable SQLite projection (cursor v2
+  row anchor, typed pages, exact readText). Pinned by
+  `test/app/pi-tui-history-search-host.test.ts` and the Host runtime tests.
+- `src/tui/panels/history-panel.ts` — the Ctrl+R modal panel (Direct file source
+  or the shared Remote seat; query input, scope tabs, list, details, responsive
+  layout). Pinned by the Direct `test/client/history-panel.test.ts` /
+  `test/client/ctrl-r.test.ts` suites and the Remote panel composition test.
+- `src/app/submission/history-persist.ts` — the Direct file-write gate: the pure
+  persist decision (`persistHistoryRecord`) and the deferred-start ordering
+  contract (`persistAfterSession`, which still awaits session resolution when no
+  file writer exists). Pinned by `test/app/history-persist.test.ts`.
+- Runner wiring in `src/app/bootstrap.ts`: Direct boot seed, per-session seed in
+  `initLiveSession`, append on submit (v2 rows, after session creation for
+  agent-facing submissions) and the injected `FileHistorySearchSource`; the
+  Split Client constructs no file owner/source and wires the Remote read and
+  per-open scope capture instead.
 - `docs/README.md` — index.

@@ -30,6 +30,8 @@ test('the Darwin key tokenizer maps the shared cases\u2019 exact control classes
   assert.deepEqual(darwinKeyTokensOf('\r'), [{ kind: 'key', name: 'Enter' }])
   // Tab accept.
   assert.deepEqual(darwinKeyTokensOf('\t'), [{ kind: 'key', name: 'Tab' }])
+  // Ctrl-R History open.
+  assert.deepEqual(darwinKeyTokensOf('\x12'), [{ kind: 'key', name: 'C-r' }])
   // Ctrl-U clear.
   assert.deepEqual(darwinKeyTokensOf('\x15'), [{ kind: 'key', name: 'C-u' }])
   // Ctrl-S steer.

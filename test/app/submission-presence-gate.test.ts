@@ -165,7 +165,7 @@ function steerDepsOf(
     beginLocalSteerEcho: () => {},
     takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
     pinDraftAttachments: () => () => {},
-    persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+    persistAfterSession: async (resolveSession, persist) => { persist?.(await resolveSession()) },
     ensureSession: () => Promise.resolve(),
     withPromptAdmission: async (_agent, _hasImages, task) => task(),
     ...(surface.ackPromptView === undefined ? {} : { ackPromptView: () => surface.ackPromptView!() }),

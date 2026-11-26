@@ -4,7 +4,7 @@
  * demanded.
  *
  * The shape under test: a plain submit is accepted while session A is live;
- * its history persist parks on a gate (the ONE async window between the
+ * its session resolution parks on a gate (the ONE async window between the
  * synchronous admission capture and the session write); the ownership core
  * REPLACES the owner (a committed A→B transition — a different owner ref,
  * published through the real `setCurrentOwner`); the gate releases; the
@@ -47,9 +47,9 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   /** End the controller's lifetime (abort + cleaned up, the real teardown
    * pair) while the submit is parked. */
   readonly endLifetime?: boolean
-  /** Reject the parked history await (the async failure restore's window):
+  /** Reject the parked session-resolution await (the async failure restore's window):
    * the teardown cancellation shape, or an ordinary async failure. */
-  readonly historyRejects?: 'abort' | 'failure'
+  readonly resolutionRejects?: 'abort' | 'failure'
 }): Promise<Recorded> {
   const { createSubmissionController } = await import('../../src/app/submission/controller.ts')
   const { createSessionOwnershipCore } = await import('../../src/app/session/ownership-core.ts')
@@ -81,19 +81,19 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // The live agent A the submit admits against.
   const agentA = { session: { id: 'session-a' }, status: 'idle', inbox: { nextTurn: [], nextStep: [] } }
 
-  // The gated history persist: the ONE async window between the admission
+  // The gated session resolution: the ONE async window between the admission
   // capture and the session write.
-  let releaseHistory!: () => void
-  const historyGate = new Promise<void>(resolve => { releaseHistory = resolve })
-  /** Resolved when the submission REALLY reached the parked history write.
+  let releaseResolution!: () => void
+  const resolutionGate = new Promise<void>(resolve => { releaseResolution = resolve })
+  /** Resolved when the submission REALLY reached the parked session resolution.
    *
    *  The editor is cleared synchronously by `submit()`, but the production path
    *  awaits `submitTurn.wait` BEFORE `persistAfterSession`
    *  (src/app/submission/controller.ts:954). Clearing alone therefore does not
    *  prove the write is parked, and switching the owner before that await lands
    *  would exercise a different (earlier) interleaving than the case names. */
-  let historyEntered!: () => void
-  const enteredHistory = new Promise<void>(resolve => { historyEntered = resolve })
+  let resolutionEntered!: () => void
+  const enteredResolution = new Promise<void>(resolve => { resolutionEntered = resolve })
 
   // The controller's LIFETIME (round 11): the real signal + cleaned-up pair
   // teardown sets, driven here independently of the ownership slot.
@@ -131,7 +131,19 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
       requireLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),
     },
     session: {
-      ensureSession: async () => {},
+      // The controller's revised completion path resolves the Session
+      // directly before the optional history write; park at the real
+      // `ensureSession` await so the owner change still lands between the
+      // synchronous admission capture and the post-resolution settlement.
+      ensureSession: async () => {
+        resolutionEntered()
+        await resolutionGate
+        if (options.resolutionRejects !== undefined) {
+          throw options.resolutionRejects === 'abort'
+            ? new DOMException('the submission was cancelled', 'AbortError')
+            : new Error('the history write failed')
+        }
+      },
       beginCommandSettlement: () => {},
       abortCommandSettlement: () => {},
       settleCommandSettlement: () => {},
@@ -147,24 +159,9 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
     commandPlane: { available: () => false, execute: async () => undefined },
     backendKind: 'direct',
     history: {
-      persistAfterSession: async (
-        resolveSession: () => Promise<string | undefined>,
-        persist: (sessionId: string | undefined) => void,
-      ) => {
-        // The parked window: the owner change (or the lifetime end) lands
-        // while this awaits. Announce that the submission is REALLY here.
-        historyEntered()
-        await historyGate
-        if (options.historyRejects !== undefined) {
-          // The REAL shapes the probe observed: the teardown cancellation (a
-          // DOMException AbortError) and an ordinary async failure.
-          throw options.historyRejects === 'abort'
-            ? new DOMException('the submission was cancelled', 'AbortError')
-            : new Error('the history write failed')
-        }
-        const sessionId = await resolveSession()
-        if (sessionId !== undefined) persist(sessionId)
-      },
+      // The revised controller persists only after the Session resolution;
+      // the observable parking point moved to `ensureSession` above.
+      persist: () => {},
     },
     drafts: { images: new DraftImageStore(), files: new DraftFileStore() },
     direct: { withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task() },
@@ -200,10 +197,10 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   // then the history persist parks.
   controller.submit('queued from A', 'enter')
   assert.equal(editorText, '', 'fixture check: the submit cleared the editor synchronously')
-  // Wait for the REAL parking point (see `enteredHistory`): the owner change
-  // below must land while the history write is in flight, which is the race
+  // Wait for the REAL parking point (see `enteredResolution`): the owner change
+  // below must land while the session resolution is in flight, which is the race
   // this case exists to prove.
-  await enteredHistory
+  await enteredResolution
 
   // The owner change (or the lifetime end) lands INSIDE the awaited window.
   let lifetimeEditorMark = -1
@@ -221,7 +218,7 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
     core.bumpGeneration()
   }
 
-  releaseHistory()
+  releaseResolution()
   // The ENDED-lifetime scenario is the ONE branch with NO positive sink: its
   // whole contract is that the continuation writes and announces NOTHING.
   //
@@ -301,7 +298,7 @@ test('a retaining renderer (PiTui) restores even on a genuinely replaced owner',
 test('the async failure restore with a LIVE lifetime stays the positive control', async () => {
   const recorded = await runQueuedSubmitAcrossOwnerChange({
     retainsStaleDraftRestore: true,
-    historyRejects: 'failure',
+    resolutionRejects: 'failure',
   })
   assert.ok(recorded.editor.some(entry => entry.includes('queued from A')),
     `a live failure still restores the draft: ${JSON.stringify(recorded.editor)}`)
@@ -317,7 +314,7 @@ test('an ENDED lifetime (abort + cleanup) writes and announces NOTHING', async (
       // clean (the review's regression shape).
       retainsStaleDraftRestore: true,
       endLifetime: true,
-      historyRejects: rejection,
+      resolutionRejects: rejection,
     })
     assert.equal(recorded.postLifetimeEditorWrites.length, 0,
       `${rejection}: no editor write survives the lifetime: ${JSON.stringify(recorded.postLifetimeEditorWrites)}`)

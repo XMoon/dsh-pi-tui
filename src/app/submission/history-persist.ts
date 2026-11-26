@@ -74,14 +74,15 @@ export function persistHistoryRecord(context: HistoryPersistContext): boolean {
  * reached a session.
  * @param resolveSession - resolves the FINAL session id (undefined when no
  * session exists — sessionless submissions).
- * @param persist - persists the row under the resolved id.
+ * @param persist - persists the row under the resolved id; absent on the
+ *   Split Client, whose Host accepted-history write needs no Client file row.
  */
 export async function persistAfterSession(
   resolveSession: () => Promise<string | undefined>,
-  persist: (sessionId: string | undefined) => void,
+  persist?: (sessionId: string | undefined) => void,
 ): Promise<void> {
   const sessionId = await resolveSession()
-  persist(sessionId)
+  persist?.(sessionId)
 }
 
 /**

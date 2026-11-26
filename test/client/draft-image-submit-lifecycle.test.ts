@@ -225,7 +225,7 @@ function startHarness(options: { failSessionCreate?: boolean } = {}): Harness {
       persist: () => {},
       persistAfterSession: async (resolveSession, persist) => {
         const sessionId = await resolveSession()
-        persist(sessionId)
+        persist?.(sessionId)
       },
     },
     viewer: { isViewing: () => false },

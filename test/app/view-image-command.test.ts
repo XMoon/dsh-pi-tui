@@ -515,7 +515,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     surface: { refreshPendingInput: () => {} },
     history: {
       persist: () => {},
-      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+      persistAfterSession: async (resolveSession, persist) => { persist?.(await resolveSession()) },
     },
     viewer: { isViewing: () => false },
     extensions: {

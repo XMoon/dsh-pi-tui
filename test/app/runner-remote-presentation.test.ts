@@ -58,7 +58,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
@@ -186,13 +186,14 @@ interface RemoteRunnerFixture {
 export async function mountRemotePresentationHost(
   life: TestLifecycle,
   presetId: string,
-  options: { readonly llmAdapter?: LlmAdapter } = {},
+  options: { readonly llmAdapter?: LlmAdapter; readonly pluginManagerProfile?: boolean } = {},
 ) {
   const { createRemoteApplicationHostFixture } = await import('../support/remote-application-fixture.ts')
   // The streaming stand-in rides the shared fixture's `smoke` route; the
   // official projection rows (TokenMeter/tool-todo) mount after the base.
   const base = await createRemoteApplicationHostFixture(life, presetId, {
     llmAdapter: options.llmAdapter ?? new StubStreamingLlmAdapter(),
+    ...(options.pluginManagerProfile === true ? { pluginManagerProfile: true } : {}),
   })
   await base.ctx.plugin(TokenMeter)
   await base.ctx.plugin(toolTodo, { allowParallelInProgress: false })
@@ -280,11 +281,14 @@ export async function mountRemoteRunner(
     profileDaemonAdmin?: RemoteApplicationOverride['profileDaemonAdmin']
     /** PR2: the public CLI Session launch intent carried by `tuiStartup`. */
     sessionLaunch?: { readonly kind: 'lookup' | 'browse' | 'continue'; readonly query?: string }
+    /** Mount the official profile/credentials prerequisite (Owner peer). */
+    readonly hostPluginManagerProfile?: boolean
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
   const host = options.host ?? await mountRemotePresentationHost(life, presetId, {
     ...options.llmAdapter === undefined ? {} : { llmAdapter: options.llmAdapter },
+    ...(options.hostPluginManagerProfile === true ? { pluginManagerProfile: true } : {}),
   })
   for (const extra of options.extraPresetIds ?? []) {
     await host.ctx.get('agentPresets')!.register({ id: extra, name: `preset ${extra}`, plugins: [] })
@@ -671,9 +675,8 @@ test('the resumed Remote startup accepts and recalls an input while its hydratio
     getDraft(): string
     getInputHistory(): readonly string[]
   }
-  const historyFile = historyFilePath(host.workRoot, host.anchorDir)
-  const ownersOf = (text: string): readonly (string | undefined)[] => loadHistoryRecords(historyFile)
-    .filter(row => row.content === text).map(row => row.sessionId)
+  const diskFile = historyFilePath(dshHome(process.env), process.cwd())
+  const diskBefore = readFileSync(diskFile)
   try {
     assert.deepEqual([...editor.getInputHistory()], [],
       'a new Client process recall starts empty even though a disk row exists')
@@ -682,10 +685,10 @@ test('the resumed Remote startup accepts and recalls an input while its hydratio
     fixture.vt.sendInput('first remote prompt')
     await fixture.vt.waitForRender()
     fixture.vt.sendInput('\r')
-    await waitFor('the held-window submission persisted under the resumed Session', () =>
-      ownersOf('first remote prompt').includes(mainId), 20_000)
     await waitFor('the accepted input is recalled from the process memory', () =>
-      [...editor.getInputHistory()].includes('first remote prompt'), 5_000)
+      [...editor.getInputHistory()].includes('first remote prompt'), 20_000)
+    assert.ok(readFileSync(diskFile).equals(diskBefore),
+      'the Remote submission wrote no Client history file (Feature History PR2-B)')
 
     // Release the official read: the hydration commits the transcript and must
     // NOT reseed or clear the recall list.
@@ -922,36 +925,36 @@ test('a resumed Remote TSP composer recalls only this process\'s accepted inputs
   }
 })
 
-test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and never seeds the process recall', async (t) => {
+test('Remote A: Ctrl+R reads the Host accepted history, leaves the legacy JSONL untouched and never seeds the process recall', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-r11-remote-ctrlr'
   const presetId = 'm3-4-r11-remote-ctrlr-preset'
-  const host = await mountRemotePresentationHost(life, presetId)
-  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const host = await mountRemotePresentationHost(life, presetId, { pluginManagerProfile: true })
+  const agent = await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
   const currentFile = historyFilePath(host.workRoot, host.anchorDir)
-  mkdirSync(dirname(currentFile), { recursive: true })
+  const historyDirectory = dirname(currentFile)
+  mkdirSync(historyDirectory, { recursive: true })
+  const sentinel = 'legacy jsonl sentinel never a remote ctrl r row'
+  appendHistoryRecord(currentFile, {
+    v: 2, content: sentinel, cwd: host.anchorDir, ts: 10, sessionId: mainId,
+  }, undefined)
+  const sentinelBytes = readFileSync(currentFile)
+  const sentinelStat = statSync(currentFile)
+  const filesBefore = readdirSync(historyDirectory).sort()
   const fixture = await mountRemoteRunner(life, {
     presetId,
     resumeSessionId: mainId,
     host,
     productionSerializer: true,
-    beforeRunnerMount: () => {
-      // A disk-only row in the SAME file the legacy Ctrl+R source reads. It is
-      // old Ctrl+R data, never a ↑/↓ process-recall source.
-      appendHistoryRecord(currentFile, {
-        v: 2, content: 'foreign disk-only ctrl r row', cwd: host.anchorDir, ts: 10, sessionId: mainId,
-      }, undefined)
-    },
   })
   const edited = fixture.runnerApp() as unknown as {
     getDraft(): string
     getInputHistory(): readonly string[]
+    historySearchSource?: unknown
+    historySearchRead?: unknown
+    captureHistoryScope?: () => unknown
   }
   const viewport = (): string => fixture.vt.getViewport().join('\n')
-  /** The official Host user/message texts — the submission witness. A Ctrl+R
-   * restore that (incorrectly) submitted would add a durable occurrence; the
-   * pending echo alone is not decisive because a fast accepted submit clears
-   * it again. */
   const hostUserTexts = (): string[] => {
     const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
       snapshotEvents(): Array<{ type: string; data: unknown }>
@@ -966,94 +969,110 @@ test('Remote A: Ctrl+R restores an accepted prompt from the legacy file and neve
           .join('')
       })
   }
-  /** The painted History RESULT rows (between the counter and the Preview
-   * band). The transcript above can carry the same text, so a whole-viewport
-   * substring is not a result-row proof. */
   const historyResultLines = (): string[] => {
     const lines = fixture.vt.getViewport()
-    const start = lines.findIndex(line => line.includes('Results ·'))
+    const start = lines.findIndex(line => line.includes('Results ·') || line.includes('No matches'))
     if (start < 0) return []
     const end = lines.findIndex((line, index) => index > start && line.trimStart().startsWith('Preview'))
     return lines.slice(start + 1, end < 0 ? undefined : end)
   }
+  const remoteView = (): {
+    query: string
+    status: string
+    rows: readonly unknown[]
+    body: { kind: string }
+  } | undefined => (edited as unknown as {
+    historyPanel?: { remote?: { view(): { query: string; status: string; rows: readonly unknown[]; body: { kind: string } } } }
+  }).historyPanel?.remote?.view()
+  const assertLegacyFileUntouched = (): void => {
+    assert.ok(readFileSync(currentFile).equals(sentinelBytes), 'the legacy JSONL bytes changed')
+    const after = statSync(currentFile)
+    assert.equal(after.ino, sentinelStat.ino, 'the legacy JSONL inode was replaced')
+    assert.equal(after.mtimeMs, sentinelStat.mtimeMs, 'the legacy JSONL was rewritten')
+    assert.deepEqual(readdirSync(historyDirectory).sort(), filesBefore,
+      'the Remote Client created or removed a user-history file')
+  }
   try {
-    // A new process recall is empty even though the legacy file already has a row.
+    assert.equal((edited as unknown as { historySearchSource?: unknown }).historySearchSource, undefined,
+      'the Remote Client constructs no Client-local file source')
     assert.deepEqual([...edited.getInputHistory()], [],
       'the resumed Split Client starts with an empty process recall')
-    // A real keyboard submission accepted by the Host: the legacy writer stores
-    // it in the Ctrl+R file, while the accepted boundary fills the process recall.
-    const marker = 'ctrl r remote accepted memory'
+
+    const marker = 'host accepted ctrl r remote'
     fixture.vt.sendInput(marker)
     await fixture.vt.waitForRender()
     fixture.vt.sendInput('\r')
     await waitFor('the accepted prompt is recalled from the process memory', () =>
       [...edited.getInputHistory()].includes(marker), 20_000)
-    await waitFor('the legacy Ctrl+R writer recorded the accepted prompt', () =>
-      loadHistoryRecords(currentFile).some(row => row.content === marker), 20_000)
-    const memoryBefore = [...edited.getInputHistory()]
-    assert.deepEqual(memoryBefore, [marker], 'the process recall holds exactly the accepted input')
     await waitFor('the accepted marker reached the official Host log', () =>
       hostUserTexts().filter(text => text === marker).length === 1, 20_000)
     const hostSubmitsBefore = hostUserTexts()
-    assert.equal(hostSubmitsBefore.filter(text => text === marker).length, 1,
-      'the accepted marker has exactly one official Host occurrence')
+    assertLegacyFileUntouched()
+    const memoryBefore = [...edited.getInputHistory()]
 
-    // Ctrl+R opens the ONE History seat over the REAL file source. The disk-only
-    // row is searchable there (the old source still works) and never becomes a
-    // process-recall entry.
+    // The Remote seat reads the Host accepted row through the private service:
+    // the legacy JSONL sentinel is absent and the real accepted prompt restores.
     fixture.vt.sendInput('\x12')
-    await waitFor('the History seat opened', () => viewport().includes('Input History'), 15_000)
-    fixture.vt.sendInput('foreign disk-only')
-    await waitFor('the disk row is the committed filtered result', () =>
-      viewport().includes('Results · 1 match')
-      && historyResultLines().some(line => line.includes('foreign disk-only ctrl r row')), 15_000)
-    fixture.vt.sendInput('\x1b')
+    await waitFor('the Remote History seat opened', () => viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('host accepted ctrl r remote')
+    await waitFor('the filtered Host query and its exact body committed', () => {
+      const view = remoteView()
+      return view?.query === 'host accepted ctrl r remote' && view.status === 'ready' && view.body.kind === 'ready'
+    }, 20_000)
     await fixture.vt.waitForRender()
-    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
-      'searching the legacy file never seeds the process recall')
-
-    // The marker restores into the editor WITHOUT submitting.
-    fixture.vt.sendInput('\x12')
-    await waitFor('the History seat reopened', () => viewport().includes('Input History'), 15_000)
-    fixture.vt.sendInput('ctrl r remote accepted')
-    // Settle on the painted RESULT ROW (not a transcript substring): one
-    // committed match whose row really carries the accepted marker. Acceptance
-    // stays frozen until the debounced search commits.
-    await waitFor('the accepted marker is the committed filtered result', () =>
-      viewport().includes('Results · 1 match')
-      && historyResultLines().some(line => line.includes(marker))
-      && !historyResultLines().some(line => line.includes('foreign disk-only ctrl r row')), 15_000)
+    assert.ok(historyResultLines().some(line => line.includes(marker)),
+      'the Host accepted marker is the committed result row')
+    assert.ok(!historyResultLines().some(line => line.includes(sentinel)),
+      'the legacy JSONL sentinel is not a Host result')
+    await waitFor('the exact Host body is ready for the action bar', () =>
+      !viewport().includes('Loading full text'), 20_000)
     fixture.vt.sendInput('\r')
     await fixture.vt.waitForRender()
-    assert.equal(edited.getDraft(), marker, 'Ctrl+R restores the accepted prompt into the editor')
+    assert.equal(edited.getDraft(), marker, 'Ctrl+R restores the exact Host accepted text into the editor')
     assert.ok(!viewport().includes('Input History'), 'the seat closed on the real accept boundary')
     assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
       'restoring the accepted prompt from Ctrl+R dispatches no submission')
     assert.deepEqual([...edited.getInputHistory()], memoryBefore,
       'Ctrl+R restore never changes the process recall')
-
-    // DISCRIMINATING NEGATIVE: a text that is ONLY on disk and NOT in memory
-    // (not even adjacent to a memory entry) is restored through the same real
-    // seat. If the restore were treated as a recall record, the list would gain
-    // it; if it were submitted, the Host would gain a durable occurrence.
-    const diskOnly = 'foreign disk-only ctrl r row'
-    fixture.vt.sendInput('\x12')
-    await waitFor('the History seat reopened for the disk-only restore', () =>
-      viewport().includes('Input History'), 15_000)
-    fixture.vt.sendInput('foreign disk-only')
-    await waitFor('the disk-only row is the committed filtered result', () =>
-      viewport().includes('Results · 1 match')
-      && historyResultLines().some(line => line.includes(diskOnly)), 15_000)
+    assertLegacyFileUntouched()
+    // The restore itself never submitted. A LATER Enter is the one submit.
+    const afterAcceptCount = hostUserTexts().length
     fixture.vt.sendInput('\r')
+    await waitFor('the deliberate second Enter submits the restored text', () =>
+      hostUserTexts().length === afterAcceptCount + 1, 20_000)
+    assert.equal(edited.getDraft(), '', 'the submit clears the restored draft')
+    const hostSubmitsAfterAccept = hostUserTexts()
+
+    // A JSONL-only row is NOT a Remote Ctrl+R result; the seat answers the
+    // authoritative empty Host page (No matches), never a legacy-file fallback.
+    fixture.vt.sendInput('\x12')
+    await waitFor('the Remote History seat reopened for the sentinel query', () =>
+      viewport().includes('Input History'), 15_000)
+    fixture.vt.sendInput('legacy jsonl sentinel')
+    await waitFor('the Host answers an authoritative empty page', () => {
+      const view = remoteView()
+      return view?.query === 'legacy jsonl sentinel' && view.status === 'ready' && view.rows.length === 0
+    }, 20_000)
     await fixture.vt.waitForRender()
-    assert.equal(edited.getDraft(), diskOnly, 'Ctrl+R restores the disk-only text into the editor')
-    assert.ok(!viewport().includes('Input History'), 'the seat closed on the disk-only accept boundary')
-    assert.deepEqual([...edited.getInputHistory()], memoryBefore,
-      'a disk-only restore never becomes a process-recall entry')
-    assert.deepEqual(hostUserTexts(), hostSubmitsBefore,
-      'restoring the disk-only text dispatches no submission')
-    assert.equal(hostUserTexts().filter(text => text === diskOnly).length, 0,
-      'the disk-only text has no official Host occurrence')
+    assert.ok(viewport().includes('No matches'))
+    assert.ok(!historyResultLines().some(line => line.includes(sentinel)))
+    fixture.vt.sendInput('\x1b')
+    await fixture.vt.waitForRender()
+    assertLegacyFileUntouched()
+    assert.deepEqual(hostUserTexts(), hostSubmitsAfterAccept,
+      'an empty Host search dispatches no submission')
+
+    // The active-scope face revokes the open seat when the Host working
+    // directory changes, even though no Client file was ever involved.
+    const cwdB = join(host.anchorDir, 'cwd-b')
+    mkdirSync(cwdB, { recursive: true })
+    fixture.vt.sendInput('\x12')
+    await waitFor('the Remote History seat opened before the cwd change', () =>
+      viewport().includes('Input History'), 15_000)
+    await host.ctx.workingDirectory.set(agent, cwdB)
+    await waitFor('the active-scope change retired the Remote History seat', () =>
+      !viewport().includes('Input History'), 20_000)
+    assertLegacyFileUntouched()
   } finally {
     await fixture.dispose()
   }

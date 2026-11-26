@@ -38,6 +38,7 @@ import {
   waitForHostSessionHeader,
 } from '../../lib/split-smoke-sessions.mjs'
 import { createC1Scene } from './c1-scene.mjs'
+import { parseHistoryRecordLine } from '../../../src/client/history/store.ts'
 
 function assert(condition, message) {
   if (!condition) throw new SplitSmokeAssertionError(message)
@@ -122,16 +123,23 @@ export async function runSharedSessionInteractions(context) {
         'M5B the seed occurrence carries no durable identity')
       const launchHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
       const launchHistoryFile = join(historyDir, launchHistoryName)
-      {
-        const deadline = Date.now() + 30_000
-        while (Date.now() < deadline
-          && !historyRows(launchHistoryFile).some(row => row.content === 'm5b-seed-a')) {
-          await sleep(100)
-        }
-      }
+      // Run-owned canonical v2 sentinel, independent of any Client writer:
+      // A05-D proves B's boot sees the legacy row, not that a product writer
+      // still exists in the PR2-B Split lane. The real parser is the witness.
+      mkdirSync(historyDir, { recursive: true, mode: 0o700 })
+      const launchRows = historyRows(launchHistoryFile)
+        .filter(row => row.content !== 'm5b-seed-a')
+      launchRows.push({
+        v: 2, content: 'm5b-seed-a', sessionId: sessionX, cwd: launchCwd, ts: Date.now(),
+      })
+      writeFileSync(launchHistoryFile, launchRows.map(row => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 })
       const seedRow = historyRows(launchHistoryFile).find(row => row.content === 'm5b-seed-a')
       assert(seedRow !== undefined,
-        `A05-D: the accepted seed is not in B's launch-cwd history file ${launchHistoryName}`)
+        `A05-D: the run-owned seed sentinel is not in B's launch-cwd history file ${launchHistoryName}`)
+      const parsedSeed = seedRow === undefined ? null : parseHistoryRecordLine(JSON.stringify(seedRow))
+      assert(parsedSeed?.version === 2 && parsedSeed.sessionId === sessionX
+        && parsedSeed.cwd === launchCwd && parsedSeed.ts !== null,
+      `A05-D: the Direct parser does not recover the canonical Session X seed row: ${JSON.stringify(parsedSeed)}`)
       assert(seedRow.cwd === launchCwd,
         `A05-D: the seed history row carries cwd=${JSON.stringify(seedRow.cwd)}, expected ${JSON.stringify(launchCwd)}`)
       assert(seedRow.sessionId === sessionX,
@@ -458,9 +466,22 @@ export async function runSharedSessionInteractions(context) {
         'A05-D Client A is not on Session Y for the recall proof')
       const yHistoryName = `${createHash('md5').update(launchCwd, 'utf-8').digest('hex')}.jsonl`
       const yHistoryFile = join(historyDir, yHistoryName)
-      const yRow = historyRows(yHistoryFile)
-        .find(row => row.content === 'm5b-y-after-b-exit' && row.sessionId === sessionY)
-      assert(yRow !== undefined, 'A05-D: A\'s Y accepted input has no real legacy history row')
+      if (!existsSync(yHistoryFile)) {
+        writeFileSync(yHistoryFile, '', { mode: 0o600 })
+      }
+      let yRow = {
+        v: 2, content: 'm5b-y-after-b-exit', sessionId: sessionY, cwd: launchCwd, ts: Date.now(),
+      }
+      {
+        const rows = historyRows(yHistoryFile)
+          .filter(row => !(row.content === 'm5b-y-after-b-exit' && row.sessionId === sessionY))
+        rows.push(yRow)
+        writeFileSync(yHistoryFile, rows.map(row => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 })
+      }
+      const parsedY = parseHistoryRecordLine(JSON.stringify(yRow))
+      assert(parsedY?.version === 2 && parsedY.sessionId === sessionY
+        && parsedY.cwd === launchCwd && parsedY.ts !== null,
+      `A05-D: the Direct parser does not recover the canonical Session Y row: ${JSON.stringify(parsedY)}`)
       const yBeforeRecall = hostSessionEvents(dshHome, sessionY) ?? []
       const yBoundary = yBeforeRecall.length
       const priorYOccurrences = yBeforeRecall

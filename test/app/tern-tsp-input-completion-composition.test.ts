@@ -823,7 +823,6 @@ async function mountChain(
     sessionCwd: () => home,
     diag: createDiag({ stderrLevel: 'off' }),
     isCleanedUp: () => false,
-    recallAuthority: 'direct',
   })
   // The live Agent SLOT: the scope authority re-reads its owner on every
   // capture/check, so `replaceSessionOwner` below publishes a NEW owner under the

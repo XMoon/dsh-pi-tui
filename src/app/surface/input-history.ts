@@ -10,15 +10,15 @@
  *   break);
  * - the known-cwd hash map, rebuilt on every call so a session created or
  *   switched after startup is immediately recoverable;
- * - the canonical "last row" persistence anchor and (Direct only) the
- *   per-session recall projection;
+ * - the canonical "last row" persistence anchor and the per-session recall
+ *   projection (Direct only);
  * - the WRITE policy for a submitted row: trim, empty/repeat/attachment
  *   dedupe, the persist-time cwd + file path, the detached append and the
  *   remembered last content (the submission side only decides WHEN);
- * - the boot recall seed (a deferred start has no session yet) — Direct only
- *   since Feature History PR2-A: the Split/Daemon Client's ↑/↓ recall is the
- *   Client process's own bounded memory (`client/history/memory-recall.ts`),
- *   while this owner keeps the JSONL writer and the old Ctrl+R source.
+ * - the boot recall seed (a deferred start has no session yet) — Direct only.
+ *   Feature History PR2-B retires the Split Client's JSONL writer and old
+ *   Ctrl+R source entirely; that Client recalls from its process memory and
+ *   searches the Host's accepted history.
  *
  * It is client-local: the history files live in the CLIENT's `$DSH_HOME` and
  * are read through the repository's own `history.ts`; no Host service is
@@ -46,15 +46,10 @@ export interface InputHistoryDeps {
   /** Whether the surface is torn down (a late write failure never notifies). */
   readonly isCleanedUp: () => boolean
   /**
-   * Which editor-recall authority this composition selected (Feature History
-   * PR2-A). `direct` keeps the existing contract: the boot seed and every row
-   * settlement feed the renderer's scoped kernel and the cold cross-cwd reader
-   * is the Session seed. `none` is the Split Client: recall lives in the
-   * process memory the renderer consumes, so this owner keeps the JSONL writer
-   * (the old Ctrl+R source and its dedupe anchor) but is never a recall
-   * authority — no boot reset, no settlement reports, no cold seed.
+   * The Direct-only file-backed authority. The Split Client does not construct
+   * this owner at all (Feature History PR2-B): it has no JSONL writer, anchor,
+   * known-cwd set or Ctrl+R file source.
    */
-  readonly recallAuthority: 'direct' | 'none'
 }
 
 /** The submission-time facts of one row the owner persists. */
@@ -92,7 +87,7 @@ export interface InputHistory {
   persist(record: InputHistoryPersistRequest): void
   /** The deferred-start ordering gate: resolve the session FIRST, then
    *  persist through the caller's closure (plan M-gate). */
-  persistAfterSession(resolveSession: () => Promise<string | undefined>, persist: (sessionId: string | undefined) => void): Promise<void>
+  persistAfterSession(resolveSession: () => Promise<string | undefined>, persist?: (sessionId: string | undefined) => void): Promise<void>
 }
 
 /** Create the client-local input-history owner (plan §A5b-2). */
@@ -151,11 +146,6 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
   const activateBootRecall = (): void => {
     const entries = loadHistoryFile(historyFilePath(dshHome(process.env), deps.clientCwd))
     lastHistoryContent = entries.at(-1)
-    // Feature History PR2-A: the boot seed is the DIRECT renderer's scoped
-    // recall contract. The Split Client still loads the launch cwd's rows for
-    // the persistence dedupe anchor above (the old Ctrl+R writer needs it),
-    // but its recall starts empty in the new process — never a disk import.
-    if (deps.recallAuthority === 'none') return
     // File order is oldest-first; TuiApp's recall API takes newest-first.
     deps.surface.display.resetInputHistory([...entries].reverse())
   }
@@ -175,21 +165,18 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
     // settles without a row, and its position among the appends is what places
     // the occurrence in the recall. Only a WRITTEN row carries the per-append
     // `writeId` that lets the open recall scope recognise its own persisted
-    // row during the cold reseed. Feature History PR2-A: the Split Client has
-    // no scoped ledger to report into, so its rows stay file-only.
-    const settle = deps.recallAuthority === 'direct'
-      ? (outcome: 'written' | 'skipped', writeId?: string): void => {
-          deps.surface.display.settleScopeInput({
-            ...(record.scopeToken === undefined ? {} : { token: record.scopeToken }),
-            owner: record.sessionId,
-            outcome,
-            text: content,
-            ...(writeId === undefined ? {} : { writeId }),
-          })
-        }
-      : undefined
+    // row during the cold reseed.
+    const settle = (outcome: 'written' | 'skipped', writeId?: string): void => {
+      deps.surface.display.settleScopeInput({
+        ...(record.scopeToken === undefined ? {} : { token: record.scopeToken }),
+        owner: record.sessionId,
+        outcome,
+        text: content,
+        ...(writeId === undefined ? {} : { writeId }),
+      })
+    }
     if (content === '' || content === lastHistoryContent || record.hasAttachments) {
-      settle?.('skipped')
+      settle('skipped')
       return
     }
     // Generated once in the append path (a policy skip never pays for an ID).
@@ -215,7 +202,7 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
       // Settlement evidence for the editor-recall scope: this factory is
       // invoked SYNCHRONOUSLY and the append above is synchronous, so the row is
       // on disk as of this very stack and its position is this append's position.
-      settle?.('written', writeId)
+      settle('written', writeId)
     }, {
       diag: deps.diag,
       notify: (message) => {
