@@ -3656,14 +3656,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       app.noteThemeSelection(value)
       app.clearActivePluginTheme()
       app.trackTerminalTheme(true)
-      detach('theme autodetect', () => app.autoDetectTheme({
-        shouldApply: () => app.themeFollowsTerminal(),
-      }))
+      detach('theme autodetect', () => app.autoDetectTheme())
     } else {
       try {
         if (value === 'dark' || value === 'light') {
-          app.clearActivePluginTheme()
-          app.applyTheme(value)
+          app.applyTheme(value, { value })
         } else {
           // The source identity is resolved AGAIN at commit time: a plugin that
           // unloaded (HMR) or a file that vanished between the choice and the
@@ -3673,20 +3670,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             if (themeRef !== undefined) recordExtensionError?.(themeRef, new Error('theme not found'))
             return { outcome: 'not-saved', reason: `the theme source for ${value} is no longer available` }
           }
-          if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
-          else {
-            app.clearActivePluginTheme()
-            app.applyPalette(selection.palette)
-          }
+          // The palette install commits the deliberate selection (intent, Auto
+          // invalidation, tracking and plugin record) before theme observers run.
+          if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette, { value })
+          else app.applyPalette(selection.palette, { value })
         }
-        app.trackTerminalTheme(false)
         if (themeRef !== undefined) clearExtensionError?.(themeRef)
       } catch (error) {
         if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
         return { outcome: 'not-saved', reason: `the palette could not be applied: ${safeErrorMessage(error)}` }
       }
-      // The runtime really changed: only now does this choice own the query guard.
-      app.noteThemeSelection(value)
     }
     try {
       await serializeTuiSettingsMutation(settings, async () => {

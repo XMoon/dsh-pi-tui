@@ -7748,7 +7748,7 @@ const queryCount = (writes: readonly string[]): number => writes.join('').split(
 /** Model a boot-shaped observation already in flight for the CURRENT screen. */
 const startPendingObservation = (h: Harness): Promise<void> => {
   h.app.noteThemeSelection('auto')
-  const pending = h.app.autoDetectTheme({ shouldApply: () => h.app.themeFollowsTerminal() })
+  const pending = h.app.autoDetectTheme()
   assert.equal(queryCount(h.writes()), 1, 'the observation is issued for the screen that owns the terminal')
   return pending
 }

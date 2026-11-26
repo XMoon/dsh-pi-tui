@@ -784,7 +784,7 @@ test('a bracketed paste ending in an inline skill token opens the dropdown (revi
   app.stop()
 })
 
-test('a terminal observation released by the external-editor suspend is re-sampled on resume', async () => {
+test('a terminal observation parked by the external-editor suspend never queries while $EDITOR owns the PTY', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -796,8 +796,10 @@ test('a terminal observation released by the external-editor suspend is re-sampl
   process.env.CI = ''
   delete process.env.COLORFGBG
   try {
+    let releaseEditor!: (text: string) => void
+    const editorGate = new Promise<string>((resolve) => { releaseEditor = resolve })
     const { vt, app } = startApp({
-      openExternalEditor: async () => 'edited',
+      openExternalEditor: () => editorGate,
       runOwned: owned,
     } as Partial<TuiAppEventsBase>)
     const writes: string[] = []
@@ -810,19 +812,30 @@ test('a terminal observation released by the external-editor suspend is re-sampl
 
     // A boot-shaped observation for the active screen.
     app.noteThemeSelection('auto')
-    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    const pending = app.autoDetectTheme()
     assert.equal(queries(), 1, 'the observation is issued on the active screen')
 
-    // The $EDITOR round trip stops and RESTARTS the same screen object, so its probe is
-    // released without any screen-identity change.
-    await app.launchExternalEditor()
+    // The editor now owns the PTY for an unbounded dwell. The opposite
+    // COLORFGBG is a tripwire: a cancelled observation that falls through to the
+    // environment would repaint while the editor is in front.
+    process.env.COLORFGBG = '0;15'
+    const editing = app.launchExternalEditor()
     await pending
-    await vt.waitForRender()
-    assert.ok(queries() > 1, `the resumed screen issues a FRESH observation:\n${JSON.stringify(writes)}`)
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    assert.equal(queries(), 1,
+      `no OSC 11 may be issued while $EDITOR owns the PTY:\n${JSON.stringify(writes)}`)
+    assert.equal(app.currentTheme(), 'dark', 'the cancelled observation must not fall back to COLORFGBG')
 
-    vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    // The editor returns: the same screen restarts, and the ONE parked demand is
+    // delivered on the completion point.
+    releaseEditor('edited')
+    await editing
     await vt.waitForRender()
-    assert.equal(app.currentTheme(), 'light', 'and applies its answer')
+    assert.equal(queries(), 2, `the resumed screen issues ONE fresh observation:\n${JSON.stringify(writes)}`)
+    vt.sendInput('\x1b]11;rgb:f5f5/f5f5/f5f5\x07')
+    await vt.waitForRender()
+    assert.equal(app.currentTheme(), 'light', 'the fresh real reply commits the light palette')
     app.stop()
   } finally {
     if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR

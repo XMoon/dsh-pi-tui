@@ -141,27 +141,23 @@ export function registerReloadCommand(deps: SkillsCommandDeps): void {
         const settings = runner.tuiSettings
         if (settings !== undefined) {
           const doc = settings.get()
-          // The autodetect guard reads this synchronous snapshot of the
-          // reload-time theme, never a re-read of the doc: a settings write
-          // from the panel may still be in flight when the reply lands.
+          // The reload re-applies this synchronous snapshot of the persisted
+          // theme, never a re-read of the document: a settings write from the
+          // panel may still be in flight when the reply lands. Only an ADMITTED
+          // choice updates the runtime intent; a missing custom source keeps the
+          // previous intent (a legal Auto tenure is never broken by a bad
+          // candidate).
           const reloadTheme = doc.theme
-          // This re-apply makes the persisted preference current again: it becomes the
-          // runtime owner's deliberate intent, so a detection it starts (or a report
-          // arriving later) is fenced on the same fact as every other selection.
-          if (reloadTheme !== undefined && reloadTheme !== '') app.noteThemeSelection(reloadTheme)
           if (reloadTheme === 'auto') {
+            app.noteThemeSelection(reloadTheme)
             app.clearActivePluginTheme()
-            detach('theme autodetect', () => app.autoDetectTheme({
-              // A settings panel write may complete while OSC 11 is in flight;
-              // only apply the late result if auto is still the latest choice.
-              shouldApply: () => settings.get().theme === 'auto',
-            }))
+            detach('theme autodetect', () => app.autoDetectTheme())
             app.trackTerminalTheme(true)
           } else if (reloadTheme === 'dark' || reloadTheme === 'light') {
-            app.clearActivePluginTheme()
-            app.applyTheme(reloadTheme)
-            app.trackTerminalTheme(false)
-          } else if (reloadTheme !== 'auto') {
+            // The palette install commits the deliberate selection (intent, Auto
+            // invalidation, tracking and plugin record) after a successful apply.
+            app.applyTheme(reloadTheme, { value: reloadTheme })
+          } else if (reloadTheme !== undefined && reloadTheme !== '') {
             // Any non-builtin persisted theme: SOURCE-QUALIFIED resolution
             // (the review's P2). The persisted value is the identity —
             // `file:<name>` resolves the file, `plugin:<owner>/<id>`
@@ -177,14 +173,11 @@ export function registerReloadCommand(deps: SkillsCommandDeps): void {
             const themeRef = captureExtensionHealthRef?.('theme', qualified)
             if (selection !== undefined) {
               try {
-                // A PLUGIN palette records the selection (the unload
-                // fallback restores builtin dark when it disappears); a
-                // custom FILE clears it.
-                if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
-                else {
-                  app.clearActivePluginTheme()
-                  app.applyPalette(selection.palette)
-                }
+                // The palette install commits the deliberate selection (intent,
+                // Auto invalidation, tracking and plugin record) before the
+                // theme observers run.
+                if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette, { value: reloadTheme })
+                else app.applyPalette(selection.palette, { value: reloadTheme })
                 if (themeRef !== undefined) clearExtensionError?.(themeRef)
               } catch (error) {
                 if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
@@ -193,12 +186,12 @@ export function registerReloadCommand(deps: SkillsCommandDeps): void {
             } else {
               // A missing selection is a host settings problem, not a
               // plugin contribution failure. Do not create a theme health
-              // row. The plugin selection is cleared (same rationale as
-              // startup).
+              // row. The plugin record is cleared, but the current runtime
+              // intent/tracking stay untouched: an invalid candidate must not
+              // disconnect a legal Auto tenure.
               app.clearActivePluginTheme()
               app.notify(`theme ${reloadTheme} not found`, 'error')
             }
-            app.trackTerminalTheme(false)
           }
           runner.applyFooterSettings(doc)
           app.setFullscreen(doc.fullscreen === 'on')

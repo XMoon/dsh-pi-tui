@@ -1084,12 +1084,25 @@ owns only the lease, focus and write-lifecycle mechanics.
   requested value already in place or an unreadable authority yields
   `Outcome unknown`, a success whose readback could not be performed yields
   `Commit accepted · verification unavailable`, and a success whose readback readably
-  disagrees is a failure. The terminal detections and the live scheme listener are
-  fenced on the runtime owner's own deliberate-selection intent
-  (`TuiApp.noteThemeSelection()`), never on the asynchronous document; the leased
-  workspace screen joins that tracking sync while it owns the terminal, and a detection
-  released by a screen hand-off is re-sampled once on the surface that takes over when the
-  intent still follows the terminal. The Detail names the runtime and the
+  disagrees is a failure. Terminal appearance reports are change HINTS, never a palette
+  decision. `TuiApp` owns exactly ONE automatic observation: a report (including a
+  same-value one), a new `auto` selection/reload or a hand-off with an unfinished demand
+  supersedes the running observation and schedules one follow-up, and only the latest
+  demand may commit. The observed OSC 11 background is authoritative; a scheme report
+  only supplies a fallback for a scheme-only terminal with no confirmed background, and a
+  confirmed background is retained through a real query timeout. A released presentation
+  (screen stop, Fullscreen/workspace hand-off, `$EDITOR` suspend) invalidates the
+  observation as a CANCELLATION — never a timeout or `COLORFGBG` fallback. No
+  observation may start or commit while no live screen presentation owns the terminal
+  (`$EDITOR` owns the PTY during its dwell); the still-current demand is parked and the
+  existing hand-off completion point delivers it once on the screen that now owns the
+  terminal. A shared SIXEL/Zellij per-screen probe is drained before the app's own sample;
+  its colour is never a theme decision. The runtime intent (`noteThemeSelection()`) is the
+  admission fence, never the asynchronous document, and a deliberate selection commits
+  its intent, Auto invalidation, tracking and plugin record BEFORE the theme observers run.
+  The leased workspace screen joins that tracking sync while it owns the terminal, and a
+  detection released by a screen hand-off is re-sampled once on the surface that takes
+  over when the intent still follows the terminal. The Detail names the runtime and the
   persisted fact separately, and the panel keeps no second truth store.
 - **The Detail projection is ambiguity-free.** Terminal sequences and unknown
   controls are stripped at the display boundary, but CR/LF/TAB render as visible

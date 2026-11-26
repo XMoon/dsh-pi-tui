@@ -158,6 +158,7 @@ import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS,
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
 import {
+  currentPalette,
   editorTheme,
   hexPaint,
   HOST_MARKDOWN_OPTIONS,
@@ -166,7 +167,7 @@ import {
   settingsListTheme,
   setTheme,
 } from './tui/theme/runtime.ts'
-import { detectThemeFromBackground, type ColorPalette } from './domain/display/theme.ts'
+import { darkColors, detectThemeFromBackground, lightColors, type ColorPalette } from './domain/display/theme.ts'
 import { detectThemeFromColorFgBg, themeOptOut } from './client/theme/environment.ts'
 import { isDiffResult, summarizeDiffs } from './tui/transcript/diff-projection.ts'
 import { renderDiffLines, renderDiffView } from './tui/components/transcript/diff.ts'
@@ -4230,17 +4231,50 @@ export class TuiApp {
    * the next fullscreen re-entry (v1 semantics, never a private-field
    * hack on the live alt screen). */
   private wheelScrollLines = 1
-  /** One shared in-flight autodetect; concurrent callers coalesce onto it
-   * (overlapping OSC 11 queries would mis-pair replies by FIFO order). */
-  private autoDetectInFlight: Promise<void> | undefined
-  /** The LATEST shouldApply guard of the in-flight autodetect; consulted at
-   * settle time so a late result can never override a newer explicit
-   * choice; reset when the flight settles. */
-  private autoDetectGuard: (() => boolean) | undefined
+  /**
+   * The continuous `auto` tenure's reliable facts. `background` is the family
+   * of the last VALID OSC 11 observation (retained across an internal screen
+   * hand-off); `hint` is the latest live scheme report of the CURRENT
+   * presentation only. A manual selection retires the whole tenure.
+   */
+  private autoThemeTenure: { background?: 'dark' | 'light'; hint?: 'dark' | 'light' } | undefined
+  /**
+   * Presentation lifecycle epoch: bumped BEFORE every physical screen loss
+   * (surface stop, fullscreen swap, workspace lease, $EDITOR suspend). An
+   * observation captured under an older epoch is a CANCELLATION, never a
+   * timeout, so it may never fall back to the environment.
+   */
+  private autoThemePresentationEpoch = 0
+  /**
+   * Whether a live SCREEN presentation actually owns the terminal input now.
+   * A surface that is merely not `stop()`ed may still have handed the PTY to a
+   * child (`$EDITOR`), or be between two screens of a hand-off: an observation
+   * may neither start nor commit in that window. The flag is cleared at every
+   * physical-loss seam and re-armed only by the hand-off completion point.
+   */
+  private autoThemePresentationReady = false
+  /** The latest admitted observation demand (monotonic). Only the latest one
+   *  is kept; a superseded flight drains and never commits. */
+  private autoThemeDemandRevision = 0
+  /** The latest deliberate-selection revision. A detection request is a FRESH
+   *  demand only when a selection happened since the running flight started;
+   *  ordinary concurrent samples (same selection) merge. */
+  private themeSelectionRevision = 0
+  /** A demand whose observation has not started yet (or was superseded). */
+  private autoThemePending = false
+  private autoThemePendingTrigger: 'report' | 'demand' | undefined
+  /** The ONE app-owned in-flight observation, bound to the screen + lifecycle
+   *  epoch + demand it was issued for. */
+  private autoThemeFlight: {
+    readonly revision: number
+    readonly selectionRevision: number
+    readonly screen: TuiMainScreen | TuiAltScreen
+    readonly epoch: number
+    readonly drain: boolean
+  } | undefined
+  private autoThemeFlightPromise: Promise<void> | undefined
   /** Whether the terminal's live scheme reports are being tracked. */
   private followingTerminalTheme = false
-  /** Terminal-scheme listeners, fanned out from every screen's reports. */
-  private readonly terminalSchemeListeners = new Set<(theme: 'dark' | 'light') => void>()
   /** Per-screen scheme-report registrations, rebuilt on screen switches. */
   private schemeDisposers: (() => void)[] = []
   /** The mounted transcript-search overlay, while one is open. */
@@ -6267,18 +6301,16 @@ export class TuiApp {
     // otherwise bill the $EDITOR dwell time to the next post-resume frame.
     this.resetScrollProfileFrame()
     // The PTY is about to belong to $EDITOR: fold the desired progress state
-    // only — never write (or keepalive) into the editor's terminal.
+    // only — never write (or keepalive) into the editor's terminal. The
+    // observation the screen is running is invalidated BEFORE that physical loss,
+    // so its `undefined` can never read as a timeout/fallback.
+    this.invalidateAutoThemeObservation()
     this.leaveTerminalPresentation()
     if (this.fullscreen !== undefined) {
       this.fullscreen.stop({ preserveScreen: true })
     } else {
       this.tui.stop()
     }
-    // That stop RELEASES the OSC 11 observation the screen was running (TuiBase.stop
-    // settles its pending probe). The SAME screen object comes back on resume, so the
-    // screen-identity check cannot notice the loss: mark it here, or a boot-shaped `auto`
-    // query would stay unknown until some later report a terminal may never send.
-    if (this.autoDetectScreen !== undefined) this.themeResamplePending = true
     // A synchronous sink on the retirement write may have re-entered with a
     // NEW acquisition (start()); releasing ownership HERE — after the screen is
     // stopped — keeps the latch consistent with the physical screen no matter
@@ -6328,6 +6360,11 @@ export class TuiApp {
    * tui/process-slot.ts). */
   stop(): void {
     this.surfaceStopped = true
+    // The stop releases the screen's OSC 11 probe and later restarts the SAME
+    // screen object: register the lifecycle invalidation BEFORE the physical
+    // loss, so the released observation is a cancellation and the restarted
+    // surface re-delivers the still-current demand once.
+    this.invalidateAutoThemeObservation()
     this.temporarySearchReaderReturnToRegular = false
     this.temporarySearchReaderTransitionPermit = false
     this.workspaceLeaseFreezeDepth += 1
@@ -6390,12 +6427,6 @@ export class TuiApp {
       () => this.fullscreen?.stop(),
       () => { this.fullscreen = undefined },
       () => { this.fullscreenScroll = undefined },
-      // Those stops RELEASED the OSC 11 observation the screen was running, and a later
-      // start() restarts the SAME screen object, so the identity check in
-      // completeScreenHandoff() cannot notice the loss (exactly like the external-editor
-      // suspend): mark it here so the restarted surface re-samples once when the latest
-      // intent still follows the terminal.
-      () => { if (this.autoDetectScreen !== undefined) this.themeResamplePending = true },
       // A synchronous sink on the retirement write (or on a screen stop) may
       // have re-entered with a NEW acquisition. A lifecycle operation that ends
       // by stopping the screen must end with ownership RELEASED, so the latch
@@ -6809,6 +6840,14 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // No automatic observation survives the surface: the running flight's
+    // disposed check refuses every commit, and the tenure/pending facts retire.
+    this.autoThemePresentationReady = false
+    this.autoThemePresentationEpoch += 1
+    this.autoThemeDemandRevision += 1
+    this.autoThemePending = false
+    this.autoThemePendingTrigger = undefined
+    this.autoThemeTenure = undefined
     this.temporarySearchReaderReturnToRegular = false
     this.temporarySearchReaderTransitionPermit = false
     this.pasteRanges.retireAll()
@@ -6963,7 +7002,6 @@ export class TuiApp {
           this.notifyTimer = undefined
         }
       },
-      () => this.terminalSchemeListeners.clear(),
       () => this.expandedOverride.clear(),
       () => this.pendingUserExpanded.clear(),
       () => this.clearRenderedViewSearch({ rebuild: false }),
@@ -9389,6 +9427,10 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    // The swap is about to stop one screen and start the other: an observation
+    // issued for the current owner is a cancellation from here on, and the
+    // hand-off completion point re-delivers the still-current demand.
+    this.invalidateAutoThemeObservation()
     if (this.temporarySearchReaderReturnToRegular && !temporarySearchReaderTransition) {
       this.temporarySearchReaderReturnToRegular = false
     }
@@ -19959,7 +20001,10 @@ export class TuiApp {
       setTheme: (name) => {
         if (app.disposed) return
         if (name === 'dark' || name === 'light') {
-          app.applyTheme(name)
+          // A live deliberate override: the palette install commits the intent,
+          // Auto invalidation, tracking and the plugin record BEFORE the theme
+          // observers can run, and no Host setting is written.
+          app.applyTheme(name, { value: name })
           return
         }
         // A registered plugin theme name: the runner resolves the palette
@@ -28781,6 +28826,7 @@ export class TuiApp {
       // physical state.
       runSyncDisposalSteps('job workspace close', [
         finalizeOnce,
+        () => this.invalidateAutoThemeObservation(),
         () => screen.stop({ preserveScreen: true }),
         () => panel.dispose(),
         () => {
@@ -28804,6 +28850,7 @@ export class TuiApp {
     record = { token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
     this.jobWorkspace = record
     try {
+      this.invalidateAutoThemeObservation()
       this.leaveTerminalPresentation()
       assertStillOpening()
       returnScreen.stop({ preserveScreen: true })
@@ -29267,6 +29314,7 @@ export class TuiApp {
       if (finalized) return
       runSyncDisposalSteps('workspace close', [
         finalizeOnce,
+        () => this.invalidateAutoThemeObservation(),
         () => screen.stop({ preserveScreen: true }),
         () => panel.dispose?.(),
         () => {
@@ -29294,6 +29342,7 @@ export class TuiApp {
     record = { kind, token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
     this.workspaceLease = record
     try {
+      this.invalidateAutoThemeObservation()
       if (!preserveTerminalPresentation) this.leaveTerminalPresentation()
       assertStillOpening()
       returnScreen.stop({ preserveScreen: true })
@@ -29396,41 +29445,33 @@ export class TuiApp {
   }
 
   /**
-   * A screen hand-off has COMPLETED — a fullscreen swap, a workspace open, or a return to
-   * the surface a workspace paused. The observation that belonged to the previous screen
-   * died with it (`TuiBase.stop()` releases its probe), so the surface that now owns the
-   * terminal re-samples ONCE when the latest DELIBERATE selection still follows the
-   * terminal. Every hand-off calls this, not only the return path: otherwise a palette
-   * would stay stale until some later report that a terminal may never send. The screen
-   * identity check is kept — a stale answer must never colour the new screen — and the
-   * re-sample awaits the abandoned observation first, so it starts a FRESH one.
+   * A screen hand-off has COMPLETED — a fullscreen swap, a workspace open/close,
+   * a surface stop/start or the external-editor resume. The observation that
+   * belonged to the released presentation was invalidated synchronously at the
+   * physical-loss seam (its epoch can never commit), so the surface that now
+   * owns the terminal delivers the ONE still-current demand. No unfinished
+   * demand means no lifecycle query.
    */
   private completeScreenHandoff(): void {
-    if (!this.themeFollowsTerminal()) return
-    const abandoned = this.autoDetectScreen !== undefined && this.autoDetectScreen !== this.activeScreen
-    if (!abandoned && !this.themeResamplePending) return
-    this.themeResamplePending = false
-    this.resampleTerminalTheme()
-  }
-
-  /** Re-issue the single terminal background observation for the CURRENT screen, fenced
-   *  on the runtime-owned intent like every other detection. */
-  private resampleTerminalTheme(): void {
-    const owned = this.events.runOwned
-    if (owned === undefined) return
-    owned('theme autodetect', async () => {
-      // The observation issued for the screen that just went away may still be settling;
-      // await it so the call below starts a FRESH observation on the screen that now owns
-      // the terminal instead of joining the dead one.
-      const abandoned = this.autoDetectInFlight
-      if (abandoned !== undefined) await abandoned
-      if (this.disposed || !this.themeFollowsTerminal()) return
-      await this.autoDetectTheme({ shouldApply: () => this.themeFollowsTerminal() })
-    }, {
-      onError: (error) => {
-        if (!this.disposed) this.notify(`theme detection failed: ${safeErrorMessage(error)}`, 'error')
-      },
-    })
+    // The new presentation really owns the terminal again: only NOW may a parked
+    // observation be admitted/committed.
+    this.autoThemePresentationReady = true
+    if (!this.autoThemeEligible()) {
+      if (this.disposed || !this.themeFollowsTerminal() || themeOptOut()) {
+        this.autoThemePending = false
+        this.autoThemePendingTrigger = undefined
+      }
+      return
+    }
+    if (this.autoThemeFlight !== undefined) {
+      // The released presentation's observation is still settling; its settle
+      // point starts the ONE pending follow-up on the screen that owns input.
+      this.autoThemePending = true
+      this.autoThemePendingTrigger = 'demand'
+      return
+    }
+    if (!this.autoThemePending) return
+    this.startOwnedAutoThemeFlight()
   }
 
   /**
@@ -29995,26 +30036,204 @@ export class TuiApp {
    * a scheme report, the plugin-unload fallback).
    */
   private themeIntent: string | undefined
-  /**
-   * Whether an observation was released by a hand-off the completion point CANNOT detect.
-   * Every ordinary hand-off (a fullscreen swap, a workspace open/close) stops a DIFFERENT
-   * screen object, so `completeScreenHandoff()` sees the identity change SYNCHRONOUSLY —
-   * before the abandoned observation's continuation runs. The external-editor suspend
-   * restarts the SAME screen object, so only it re-arms this latch explicitly.
-   */
-  private themeResamplePending = false
-  /** The screen the in-flight terminal observation belongs to. A screen hand-off kills it
-   *  (its stop() releases the probe), so the resumed screen must know to re-sample. */
-  private autoDetectScreen: TuiMainScreen | TuiAltScreen | undefined
+
+  /** Commit one deliberate selection. The intent and the tenure are ONE runtime
+   *  fact: leaving `auto` retires the tenure's background/hint evidence and any
+   *  uncommitted detection immediately; re-entering it starts a fresh tenure.
+   *  Repeated `auto` confirmations stay in the SAME tenure (the confirmed
+   *  background is a retention basis for a later timeout), while the selection
+   *  revision bump makes the next detection a fresh demand. */
+  private commitThemeSelection(value: string): void {
+    this.themeSelectionRevision += 1
+    const wasAuto = this.themeIntent === 'auto'
+    this.themeIntent = value
+    if (value === 'auto') {
+      if (!wasAuto || this.autoThemeTenure === undefined) this.autoThemeTenure = {}
+      return
+    }
+    this.autoThemeTenure = undefined
+    this.autoThemePending = false
+    this.autoThemePendingTrigger = undefined
+    // Any flight still running now belongs to a tenure that no longer exists.
+    this.autoThemeDemandRevision += 1
+  }
 
   /** Record one deliberate theme selection (see {@link themeFollowsTerminal}). */
   noteThemeSelection(value: string): void {
-    this.themeIntent = value
+    this.commitThemeSelection(value)
   }
 
   /** Whether the latest deliberate selection still follows the terminal (`auto`). */
   themeFollowsTerminal(): boolean {
     return this.themeIntent === 'auto'
+  }
+
+  /** Whether an automatic observation may be admitted at all: the live selection
+   *  still follows the terminal, the environment did not opt out, and the surface
+   *  actually owns a live presentation. */
+  private autoThemeEligible(): boolean {
+    return !this.disposed && !this.surfaceStopped && this.autoThemePresentationReady
+      && this.themeFollowsTerminal() && !themeOptOut()
+  }
+
+  /** Register the ONE latest admitted demand. A superseded flight is detected by
+   *  the revision mismatch at its settle point; no per-event queue is kept. */
+  private registerAutoThemeDemand(trigger: 'report' | 'demand'): void {
+    if (!this.autoThemeEligible()) return
+    this.autoThemeDemandRevision += 1
+    if (trigger === 'report' || this.autoThemePendingTrigger === undefined) {
+      this.autoThemePendingTrigger = trigger
+    }
+    this.autoThemePending = true
+  }
+
+  /** Invalidate the observation that belonged to a presentation that is being
+   *  released. It can never commit (a newer epoch), while the still-current
+   *  demand is delivered at the hand-off completion point. */
+  private invalidateAutoThemeObservation(): void {
+    this.autoThemePresentationReady = false
+    this.autoThemePresentationEpoch += 1
+    if (this.autoThemeTenure !== undefined) this.autoThemeTenure.hint = undefined
+    if (this.autoThemeFlight !== undefined || this.autoThemePending) {
+      if (this.themeFollowsTerminal()) {
+        this.autoThemePending = true
+        this.autoThemePendingTrigger = 'demand'
+      }
+    }
+  }
+
+  /** Whether the managed graphics handle can hold the SAME per-screen OSC 11
+   *  probe (SIXEL / Zellij negotiated): a live report's first narrow call is then
+   *  only a drain of that possibly-shared old probe. */
+  private autoThemeUsesSharedBackgroundProbe(): boolean {
+    const graphics = this.graphics
+    return graphics !== undefined && (graphics.mode === 'sixel' || graphics.mode === 'zellij-negotiated')
+  }
+
+  private autoThemeObservationCurrent(flight: {
+    readonly revision: number
+    readonly screen: TuiMainScreen | TuiAltScreen
+    readonly epoch: number
+  }): boolean {
+    return !this.disposed
+      && this.themeFollowsTerminal()
+      && !themeOptOut()
+      && this.activeScreen === flight.screen
+      && this.autoThemePresentationEpoch === flight.epoch
+      && this.autoThemeDemandRevision === flight.revision
+  }
+
+  /** Start the ONE app-owned observation for the latest demand. The factory is
+   *  invoked synchronously so the owner slot is established before any await. */
+  private startAutoThemeFlight(): Promise<void> {
+    if (!this.autoThemeEligible()) {
+      // A temporary presentation loss parks the still-valid demand; only a
+      // retired intent (manual/opt-out/dispose) discards it.
+      if (this.disposed || !this.themeFollowsTerminal() || themeOptOut()) {
+        this.autoThemePending = false
+        this.autoThemePendingTrigger = undefined
+      }
+      return Promise.resolve()
+    }
+    const flight = {
+      revision: this.autoThemeDemandRevision,
+      selectionRevision: this.themeSelectionRevision,
+      screen: this.activeScreen,
+      epoch: this.autoThemePresentationEpoch,
+      drain: this.autoThemePendingTrigger === 'report' && this.autoThemeUsesSharedBackgroundProbe(),
+    }
+    this.autoThemePending = false
+    this.autoThemePendingTrigger = undefined
+    this.autoThemeFlight = flight
+    const promise = this.runAutoThemeFlight(flight)
+    if (this.autoThemeFlight === flight) this.autoThemeFlightPromise = promise
+    return promise
+  }
+
+  /** Start a follow-up observation through the app-owned task entry (a report
+   *  or hand-off start, never the boot/settings caller's boundary). */
+  private startOwnedAutoThemeFlight(): void {
+    const owned = this.events.runOwned
+    if (owned === undefined) return
+    owned('theme autodetect', () => this.startAutoThemeFlight(), {
+      onError: (error) => {
+        if (!this.disposed) this.notify(`theme detection failed: ${safeErrorMessage(error)}`, 'error')
+      },
+    })
+  }
+
+  private async runAutoThemeFlight(flight: {
+    readonly revision: number
+    readonly screen: TuiMainScreen | TuiAltScreen
+    readonly epoch: number
+    readonly drain: boolean
+  }): Promise<void> {
+    try {
+      // §4.4: on a live report the graphics owner may already hold the same
+      // per-screen probe; the first call only drains it and its colour is never
+      // a palette decision. The one committable sample follows on the now-
+      // current screen.
+      if (flight.drain) {
+        await flight.screen.queryTerminalBackgroundColor({ timeoutMs: 800 })
+        if (!this.autoThemeObservationCurrent(flight)) return
+      }
+      const background = await flight.screen.queryTerminalBackgroundColor({ timeoutMs: 800 })
+      if (!this.autoThemeObservationCurrent(flight)) return
+      this.commitAutoThemeObservation(background)
+    } finally {
+      if (this.autoThemeFlight === flight) {
+        this.autoThemeFlight = undefined
+        this.autoThemeFlightPromise = undefined
+        this.followUpAutoThemeObservation()
+      }
+    }
+  }
+
+  /** Apply the §4.2 decision table to ONE current observation. A cancelled or
+   *  superseded observation never reaches this method, so `undefined` here is a
+   *  real timeout. */
+  private commitAutoThemeObservation(background: { r: number; g: number; b: number } | undefined): void {
+    if (!this.autoThemeEligible()) return
+    const tenure = this.autoThemeTenure ?? (this.autoThemeTenure = {})
+    let family: 'dark' | 'light' | undefined
+    if (background !== undefined) {
+      family = detectThemeFromBackground(background)
+      tenure.background = family
+    } else {
+      // A confirmed background outranks a contradicting hint/environment; a
+      // scheme-only terminal falls back to its latest live report.
+      family = tenure.background ?? tenure.hint ?? detectThemeFromColorFgBg()
+    }
+    if (family === undefined) return
+    // The live palette owner is the REAL installed fact: a matching app id is
+    // not enough (another surface/test may have changed the process palette),
+    // and a custom palette must be replaced by the detected family.
+    const installed = currentPalette === darkColors ? 'dark' : currentPalette === lightColors ? 'light' : undefined
+    if (this.currentThemeId === family && installed === family) return
+    this.applyTheme(family)
+  }
+
+  /** Queue the ONE follow-up observation for a demand that arrived while a
+   *  flight was running (or whose flight was released). A microtask is a
+   *  scheduling boundary, not a retry timer: no new event means no new flight. */
+  private followUpAutoThemeObservation(): void {
+    if (!this.autoThemePending) return
+    queueMicrotask(() => {
+      if (!this.autoThemePending || this.autoThemeFlight !== undefined) return
+      if (!this.autoThemeEligible()) return
+      this.startOwnedAutoThemeFlight()
+    })
+  }
+
+  /** A live scheme report is a change HINT, never a palette decision. It records
+   *  the current presentation's hint and makes the latest demand supersede any
+   *  uncommitted observation. A fixed theme/opt-out admits nothing. */
+  private handleTerminalColorSchemeReport(scheme: 'dark' | 'light'): void {
+    if (!this.autoThemeEligible()) return
+    const tenure = this.autoThemeTenure ?? (this.autoThemeTenure = {})
+    tenure.hint = scheme
+    this.registerAutoThemeDemand('report')
+    if (this.autoThemeFlight === undefined) this.startOwnedAutoThemeFlight()
   }
 
   /** Push the runtime facts of an open Settings workspace back through its pull
@@ -30031,9 +30250,27 @@ export class TuiApp {
    * re-renders from its semantic state with the NEW palette: header,
    * footer, dock, todo panel, queue pane, busy indicator, messages, and
    * the editor. (Overlays like settings construct their theme per open, so
-   * they pick up the new palette on their next render too.) */
-  applyTheme(theme: 'dark' | 'light'): void {
-    setTheme(theme)
+   * they pick up the new palette on their next render too.)
+   * An optional DELIBERATE selection commits its intent before the observers. */
+  applyTheme(theme: 'dark' | 'light', selection?: { readonly value: string }): void {
+    this.installThemePalette(theme, undefined, selection, undefined)
+  }
+
+  /**
+   * The ONE palette-install transaction. The palette/runtime state is installed
+   * first (a failure here must never steal the previous intent); a DELIBERATE
+   * selection then commits the intent, Auto tenure, tracking and plugin record
+   * BEFORE the observer/repaint callbacks, so a callback that synchronously
+   * chooses a newer theme already sees — and wins over — the committed
+   * selection. A derived apply passes no selection and records no intent.
+   */
+  private installThemePalette(
+    theme: 'dark' | 'light' | 'custom',
+    custom: ColorPalette | undefined,
+    selection: { readonly value: string } | undefined,
+    pluginName: string | undefined,
+  ): void {
+    setTheme(theme, custom)
     // Phase 4: track the current theme id (the advanced host-state
     // facade's getTheme).
     this.currentThemeId = theme
@@ -30044,6 +30281,11 @@ export class TuiApp {
     // outlet refresh reads the revision from the store, so the order
     // matters (F-14 — a theme switch must re-bake extension ANSI).
     this.extensionHost?.updateSurface({ themeId: theme, themeRevision: this.themeRevision })
+    this.activePluginThemeName = pluginName
+    if (selection !== undefined) {
+      this.commitThemeSelection(selection.value)
+      this.trackTerminalTheme(false)
+    }
     // A throwing observer must not abort the switch: the repaint runs whatever
     // the observers did, and the first observer failure is reported afterwards.
     try {
@@ -30051,6 +30293,9 @@ export class TuiApp {
     } finally {
       this.repaintAllSurfaces()
     }
+    // The plugin RECORD and the deliberate intent are runtime facts the open
+    // Settings workspace projects; refresh its pull snapshot after the commit.
+    if (pluginName !== undefined || selection !== undefined) this.refreshSettingsWorkspaceFacts()
   }
 
   /** The theme identity the surface is currently painted with (`dark`, `light`
@@ -30088,18 +30333,8 @@ export class TuiApp {
   }
 
   /** Apply a resolved custom palette and repaint everything. */
-  applyPalette(palette: ColorPalette): void {
-    setTheme('custom', palette)
-    // Phase 4: track the current theme id.
-    this.currentThemeId = 'custom'
-    this.themeRevision += 1
-    // Same ordering as applyTheme (F-14).
-    this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
-    try {
-      this.notifyThemeChanged()
-    } finally {
-      this.repaintAllSurfaces()
-    }
+  applyPalette(palette: ColorPalette, selection?: { readonly value: string }): void {
+    this.installThemePalette('custom', palette, selection, undefined)
   }
 
   /** Apply a PLUGIN theme palette and remember which plugin theme is the
@@ -30107,18 +30342,8 @@ export class TuiApp {
    * hook consults {@link activePluginTheme} and restores the builtin
    * fallback — a gone plugin must not leave its palette on screen (the
    * review's P2). */
-  applyPluginPalette(name: string, palette: ColorPalette): void {
-    // The record must describe the palette really ON SCREEN: `applyPalette` is the
-    // fallible step (a malformed contribution palette throws in the palette
-    // normalisation BEFORE any state changes), and a recorded-but-never-applied
-    // theme would make its later unload force the builtin dark fallback over a
-    // theme the user has selected since (a stored `auto`, for instance). Nothing
-    // reads this record during the apply itself.
-    this.applyPalette(palette)
-    this.activePluginThemeName = name
-    // The plugin RECORD is part of the runtime fact and is assigned only once the
-    // palette is really live, so the projection follows it here as well.
-    this.refreshSettingsWorkspaceFacts()
+  applyPluginPalette(name: string, palette: ColorPalette, selection?: { readonly value: string }): void {
+    this.installThemePalette('custom', palette, selection, name)
   }
 
   /** Drop the plugin-theme selection (a builtin or custom-file theme is
@@ -30170,71 +30395,42 @@ export class TuiApp {
   }
 
   /**
-   * Observe the terminal's default BACKGROUND (one narrow OSC 11 query through
-   * the screen's `queryTerminalBackgroundColor`) and apply the palette matching
-   * it, with the kimi detection chain: colour-opt-out environments (NO_COLOR /
-   * FORCE_COLOR=0 / CI) stay dark without querying; a terminal that never
-   * answers falls back to COLORFGBG (VT100/xterm convention); a terminal with
-   * neither leaves the current theme untouched.
+   * Request the terminal-background observation for the CURRENT Auto intent.
+   * This is the ONE entry every production selection uses (boot restore, the
+   * Settings theme row, the reload re-apply and the hand-off completion point).
    *
-   * The observation targets the screen that OWNS the terminal input handler
-   * (the alt screen in fullscreen mode): a query on the stopped main screen
-   * would have its reply swallowed by the alt screen's consumer and time out,
-   * silently turning `auto` into a no-op.
-   *
-   * Concurrent calls COALESCE onto one shared in-flight observation, and the
-   * settled result is dropped when the active screen changed while it was in
-   * flight (a Main↔Fullscreen switch must not colour the new screen from the
-   * old one's observation). The LATEST {@link AutoDetectOptions.shouldApply}
-   * guard is consulted at settle time, so a late result can never override a
-   * newer explicit theme choice.
-   * @param options.shouldApply - returns false to drop the settled result
-   *   instead of applying it (default: always apply).
+   * A call merges onto the running observation when no new deliberate selection
+   * happened since it started (ordinary concurrent sampling never issues a
+   * second OSC 11). A selection revision change — or any live report — makes the
+   * previous observation non-current: it drains without committing and exactly
+   * one follow-up observation reads the latest screen/intent/hint. Boot/settings
+   * callers keep their existing `runDetached`/`detach` boundary; report/hand-off
+   * follow-ups use the app-owned task entry.
    */
-  async autoDetectTheme(options?: { shouldApply?: () => boolean }): Promise<void> {
-    if (themeOptOut() || this.disposed) return
-    if (options?.shouldApply !== undefined) this.autoDetectGuard = options.shouldApply
-    if (this.autoDetectInFlight === undefined) {
-      this.autoDetectScreen = this.activeScreen
-      this.autoDetectInFlight = this.runAutoDetect().finally(() => {
-        this.autoDetectInFlight = undefined
-        this.autoDetectScreen = undefined
-        this.autoDetectGuard = undefined
-      })
-    }
-    return this.autoDetectInFlight
-  }
-
-  private async runAutoDetect(): Promise<void> {
-    const screen = this.activeScreen
-    const background = await screen.queryTerminalBackgroundColor({ timeoutMs: 800 })
-    if (this.disposed) return
-    // The observation belongs to the screen that owned the terminal when it was
-    // issued: after a Main↔Fullscreen switch its result is about a screen the
-    // user is no longer looking at, so it must not colour the new one.
-    if (this.activeScreen !== screen) {
-      // The screen that owned the observation is gone (its stop() released the probe), so
-      // the answer can never be trusted. It is NOT re-armed here: the hand-off that stopped
-      // the screen already ran `completeScreenHandoff()` synchronously (before this
-      // continuation) and scheduled the re-sample then. Latching it again would leave a
-      // stale flag that fires an unnecessary query at the next hand-off.
+  async autoDetectTheme(): Promise<void> {
+    if (!this.autoThemeEligible()) {
+      // Park a real demand while the screen presentation is unavailable; the
+      // hand-off completion point delivers it exactly once. A retired intent is
+      // never revived.
+      if (!this.disposed && this.themeFollowsTerminal() && !themeOptOut()) {
+        this.autoThemeDemandRevision += 1
+        this.autoThemePendingTrigger = 'demand'
+        this.autoThemePending = true
+      }
       return
     }
-    // A newer DELIBERATE selection owns the surface: the runtime owner's intent
-    // outranks this answer whatever guard the caller passed, because the persisted
-    // document can still read `auto` while an explicit choice's write is in flight.
-    // NO recorded intent keeps the documented default (a direct caller's answer
-    // applies) — `themeIntent` is only ever written by a real selection.
-    if (this.themeIntent !== undefined && !this.themeFollowsTerminal()) return
-    const guard = this.autoDetectGuard
-    const apply = (): boolean => guard === undefined || guard()
-    const rgb = background
-    if (rgb !== undefined) {
-      if (apply()) this.applyTheme(detectThemeFromBackground(rgb))
+    const running = this.autoThemeFlight
+    if (running !== undefined && running.selectionRevision === this.themeSelectionRevision && !this.autoThemePending) {
+      await this.autoThemeFlightPromise ?? Promise.resolve()
       return
     }
-    const fromEnv = detectThemeFromColorFgBg()
-    if (fromEnv !== undefined && apply()) this.applyTheme(fromEnv)
+    this.registerAutoThemeDemand('demand')
+    if (running !== undefined) {
+      // A newer demand supersedes it; its settle starts the ONE follow-up.
+      await this.autoThemeFlightPromise ?? Promise.resolve()
+      return
+    }
+    await this.startAutoThemeFlight()
   }
 
   /**
@@ -30243,9 +30439,9 @@ export class TuiApp {
    * owns the terminal writes the mode; a stopped screen records the flag so its
    * next start restores the right mode). The initial sample comes exclusively
    * from {@link autoDetectTheme}, so enabling tracking never re-queries the
-   * terminal. Reported schemes fan out to the {@link onTerminalThemeChange}
-   * listeners (which guard whether to apply, typically against the persisted
-   * `auto` preference). Idempotent.
+   * terminal. A report is a change HINT: it supersedes any uncommitted
+   * observation and triggers ONE background re-observation while the live
+   * selection still follows the terminal. Idempotent.
    * @param following - whether reported scheme changes should keep arriving.
    */
   trackTerminalTheme(following: boolean): void {
@@ -30259,25 +30455,6 @@ export class TuiApp {
     // lease ended. Job and Settings are the two leases.
     this.jobWorkspace?.screen.setTerminalColorSchemeNotifications(following)
     this.workspaceLease?.screen.setTerminalColorSchemeNotifications(following)
-  }
-
-  /**
-   * Register a live terminal-theme listener (colour-scheme reports). The
-   * listener is registered on EVERY screen: reports arrive only at the
-   * screen that owns the terminal input handler (the alt screen in
-   * fullscreen mode), so the registrations never double-fire. The caller
-   * guards whether to apply (typically: only while the persisted preference
-   * is `auto`).
-   * @param listener - receives the detected palette family.
-   * @returns a disposer.
-   */
-  onTerminalThemeChange(listener: (theme: 'dark' | 'light') => void): () => void {
-    this.terminalSchemeListeners.add(listener)
-    this.refreshSchemeRegistrations()
-    return () => {
-      this.terminalSchemeListeners.delete(listener)
-      this.refreshSchemeRegistrations()
-    }
   }
 
   /** (Re)register the scheme-report fan-out on every screen. */
@@ -30303,7 +30480,7 @@ export class TuiApp {
         // composited: a semi-transparent picture must never keep blending over the
         // previous background. (No SIXEL handle: nothing to do.)
         (this.graphics?.mode === 'sixel' || this.graphics?.mode === 'zellij-negotiated') && this.graphics.resample()
-        for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
+        this.handleTerminalColorSchemeReport(scheme)
       }))
     }
   }

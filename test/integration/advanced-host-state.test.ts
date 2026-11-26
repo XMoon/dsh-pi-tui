@@ -126,6 +126,40 @@ test('host state: setTheme fires the runner handler for non-built-in names; dark
   app.stop()
 })
 
+test('host state: a fixed override beats a pending Auto observation and stops tracking', async () => {
+  const saved = { NO_COLOR: process.env.NO_COLOR, FORCE_COLOR: process.env.FORCE_COLOR, CI: process.env.CI }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  try {
+  const { vt, app } = await appWithHostState()
+  const writes: string[] = []
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string): void => { writes.push(data); originalWrite(data) }
+  app.noteThemeSelection('auto')
+  app.trackTerminalTheme(true)
+  assert.equal(writes.includes('\x1b[?2031h'), true, 'precondition: Auto tracking is enabled')
+  const pending = app.autoDetectTheme()
+  assert.ok(writes.join('').includes('\x1b]11;?'), 'precondition: the Auto observation is in flight')
+  const host = app.advancedHostStateForTest()
+  host.setTheme('dark') // a live override, never a Host settings write
+  assert.equal(app.themeFollowsTerminal(), false, 'the fixed override leaves Auto')
+  vt.sendInput('\x1b]11;#F5F5F5\x07') // the superseded Auto answer arrives late
+  await pending
+  await vt.waitForRender()
+  assert.equal(host.getTheme(), 'dark', 'the late Auto answer must not colour the fixed override')
+  assert.deepEqual(writes.filter(data => data === '\x1b[?2031h' || data === '\x1b[?2031l'), ['\x1b[?2031h', '\x1b[?2031l'],
+    'the fixed override stops the live scheme subscription')
+  app.stop()
+  } finally {
+    for (const key of ['NO_COLOR', 'FORCE_COLOR', 'CI'] as const) {
+      const value = saved[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
 test('host state: a disposed surface is inert', async () => {
   const { app } = await appWithHostState()
   const host = app.advancedHostStateForTest()

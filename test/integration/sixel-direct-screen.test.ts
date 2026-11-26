@@ -61,6 +61,8 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import { darkColors } from '../../src/domain/display/theme.ts'
 import { formatBytes } from '../../src/domain/media/format.ts'
 import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -75,8 +77,11 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
  * replies into the SAME input chain the app listens to, exactly like a real tty.
  */
 class SixelAppTerminal extends VirtualTerminal {
-  constructor(columns: number, rows: number) {
+  private readonly holdBackgroundReplies: boolean
+
+  constructor(columns: number, rows: number, holdBackgroundReplies = false) {
     super(columns, rows)
+    this.holdBackgroundReplies = holdBackgroundReplies
   }
 
   private readonly sixelListeners = new Set<(supported: boolean) => void>()
@@ -113,7 +118,7 @@ class SixelAppTerminal extends VirtualTerminal {
     if (data.includes('\x1b[16t')) {
       setImmediate(() => this.sendInput('\x1b[6;20;10t'))
     }
-    if (data.includes('\x1b]11;?')) {
+    if (data.includes('\x1b]11;?') && !this.holdBackgroundReplies) {
       setImmediate(() => this.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07'))
     }
   }
@@ -261,6 +266,8 @@ async function startSixelApp(
     skipSixelReadiness?: boolean
     /** Whether the terminal's passive DA1 declares SIXEL; defaults to true. */
     da1?: boolean
+    /** Hold OSC 11 replies so the test can hand over a shared probe's answer. */
+    holdBackgroundReplies?: boolean
   } = {},
 ): Promise<AppFixture> {
   const home = testLifecycle(t).tempDir('sixel-app-')
@@ -271,7 +278,7 @@ async function startSixelApp(
     else process.env.DSH_HOME = previousHome
   })
 
-  const terminal = new SixelAppTerminal(100, 24)
+  const terminal = new SixelAppTerminal(100, 24, options.holdBackgroundReplies === true)
   const store = new DraftImageStore()
   const app = new TuiApp(
     terminal,
@@ -694,6 +701,78 @@ test('a colour-scheme report re-observes the real background (RFL-005)', async (
   terminal.sendInput('\x1b[?997;1n')
   await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the re-observed geometry query')
   await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the re-observed background query')
+})
+
+test('a shared graphics probe is drained, never used as the Auto palette decision', async (t) => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  try {
+    // The fixture holds every OSC 11 reply: the Direct SIXEL readiness probe is
+    // therefore already in flight (and owned by the graphics handle) when the
+    // live report arrives.
+    const { terminal, app, store } = await startSixelApp(t, { holdBackgroundReplies: true })
+    setTheme('dark')
+    app.noteThemeSelection('auto')
+    // A DISTINCT installed palette makes the app-side commit observable: a
+    // dropped follow-up stays custom, a stale drain would show light.
+    const custom = { ...darkColors, primary: '#123456' }
+    app.applyPalette(custom)
+    assert.equal(app.currentTheme(), 'custom', 'precondition: a non-builtin installed palette')
+    const applied: string[] = []
+    app.onThemeChanged(() => applied.push(app.currentTheme()))
+    terminal.writes.length = 0
+    terminal.sendInput('\x1b[?997;2n') // the wrong light appearance report
+    await tick()
+    assert.equal(terminal.writes.join('').includes('\x1b]11;?'), false,
+      'the app drains the existing per-screen probe instead of issuing a competing query')
+    // The shared probe answers LIGHT: the opposite of the real background. It is
+    // a drain only and may never colour the surface.
+    terminal.sendInput('\x1b]11;rgb:f5f5/f5f5/f5f5\x07')
+    await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the committable observation after the drain')
+    assert.equal(app.currentTheme(), 'custom', 'the drained answer committed nothing')
+    assert.deepEqual(applied, [], 'no theme commit from the drained answer')
+    terminal.sendInput('\x1b]11;rgb:2828/2a2a/3636\x07')
+    await tick()
+    assert.equal(app.currentTheme(), 'dark', 'the fresh real sample commits the dark family')
+    assert.equal(currentPalette, darkColors, 'and the installed palette is the dark family')
+    assert.deepEqual(applied, ['dark'], 'exactly the fresh builtin commit, not the stale drain')
+
+    // The graphics owner must still receive the REAL background after the shared
+    // probe was drained: a later report re-observes it, and a semi-transparent
+    // draft raster proves the encoder composited over #282c34 rather than the
+    // stale light answer.
+    terminal.writes.length = 0
+    terminal.sendInput('\x1b[?997;1n')
+    await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the graphics re-observation')
+    terminal.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07')
+    await until(() => terminal.writes.join('').split('\x1b]11;?').length - 1 >= 2,
+      'the app follow-up after the graphics re-observation')
+    terminal.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07')
+    await tick()
+    const png = await pngFromRgba(fill(8, 8, () => [34, 197, 94, 128]), 8, 8)
+    const image = store.add({ bytes: png, mediaType: 'image/png', width: 8, height: 8, name: 'blend.png' })
+    const beforeRaster = paintedRasters(terminal).length
+    terminal.sendInput(image.placeholder)
+    await until(() => paintedRasters(terminal).length > beforeRaster, 'the draft raster after the shared drain')
+    const decoded = decodeSixel(paintedRasters(terminal).at(-1)!)
+    const [cr, cg, cb] = pixelAt(decoded, 2, 2)
+    assert.ok(Math.abs(cr - 37) <= 12 && Math.abs(cg - 120) <= 16 && Math.abs(cb - 73) <= 12,
+      `the graphics encoder still blends over the real #282c34 background: ${cr},${cg},${cb}`)
+  } finally {
+    for (const key of ['NO_COLOR', 'FORCE_COLOR', 'CI', 'COLORFGBG'] as const) {
+      const value = saved[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
 })
 
 test('a workspace lease re-binds the owner, and closing it re-certifies the return screen (RFL-011)', async (t) => {
