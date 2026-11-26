@@ -971,7 +971,7 @@ export function applyRunnerWithRuntime(
           capability: programResumeCapability,
           currentSessionId: () => ownership.currentSessionId(),
           canWrite: () => terminalOutput.applicationOwnsTerminal(),
-          write: frame => { notificationWriter.write(frame) },
+          write: (frame, callback) => { notificationWriter.write(frame, callback) },
           diag,
         })
     if (programResumeReporter !== undefined) startupSettlement?.programResume?.attach(programResumeReporter)

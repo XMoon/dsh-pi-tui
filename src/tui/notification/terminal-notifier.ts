@@ -22,12 +22,12 @@ import { isTernTerminal } from '../terminal/tern.ts'
 /** The writer seam: tests inject a recorder, the runner passes
  * `process.stdout`. */
 export interface TerminalNotifierWriter {
-  write(sequence: string): void
+  write(sequence: string, callback?: (error?: Error | null) => void): void
 }
 
 /** The minimal stream surface the writer guard needs. */
 export interface GuardedWriteStream {
-  write(data: string): unknown
+  write(data: string, callback?: (error?: Error | null) => void): unknown
   on(event: 'error', listener: () => void): unknown
 }
 
@@ -68,8 +68,15 @@ export function guardedStreamWriter(stream: GuardedWriteStream): TerminalNotifie
     })
   }
   return {
-    write(sequence: string): void {
-      stream.write(sequence)
+    write(sequence: string, callback?: (error?: Error | null) => void): void {
+      if (callback === undefined) {
+        stream.write(sequence)
+        return
+      }
+      // Node reports this write's completion/error to the callback before the
+      // stream-level 'error' event. Existing callers that omit the callback
+      // keep the process-wide guard and its previous behavior.
+      stream.write(sequence, error => { callback(error ?? undefined) })
     },
   }
 }

@@ -10,9 +10,10 @@
  * write is retried only by the next legitimate commit or terminal regain; there
  * is no timer, poll, queue or background resource.
  *
- * A synchronous sink throw is observable here and never becomes a clear. The
- * process-wide `guardedStreamWriter` owns asynchronous stream errors with no
- * per-write association, so this reporter makes no async-delivery or ACK claim.
+ * A synchronous sink throw and the guarded writer's write-completion failure
+ * are both observable here and never become a clear. A late failure from an
+ * older offer cannot dirty a newer offer or a closed reporter. Neither is an
+ * ACK: the terminal has not confirmed that it accepted the record.
  *
  * @module @xmoon76/dsh-pi-tui/client/program-resume/reporter
  */
@@ -44,7 +45,7 @@ export function createProgramResumeReporter(input: {
   readonly capability: ProgramResumeCapability
   readonly currentSessionId: () => string | undefined
   readonly canWrite: () => boolean
-  readonly write: (frame: string) => void
+  readonly write: (frame: string, callback?: (error?: Error | null) => void) => void
   readonly diag: Diag
 }): ProgramResumeReporter {
   let installed = false
@@ -54,6 +55,8 @@ export function createProgramResumeReporter(input: {
   let lastKind: 'report' | 'clear' | undefined
   /** The last successfully offered canonical Session id (only for reports). */
   let lastSessionId: string | undefined
+  /** The Session id whose clean clear was caused by an unencodable report. */
+  let lastCleanClearSessionId: string | undefined
   /** A failed write keeps the intent dirty so the next legitimate event retries. */
   let dirty = false
   /**
@@ -67,13 +70,55 @@ export function createProgramResumeReporter(input: {
 
   const now = (): number => Math.floor(Date.now() / 1000)
 
-  const emitClear = (): void => {
-    const frame = encodeProgramResumeClear({
-      token: input.capability.token,
-      pid: input.capability.facts.ownerPid,
-      time: now(),
-    })
-    input.write(frame)
+  /** Fixed diagnostics categories; never raw errors, argv or the token. */
+  const warn = (reason: string): void => {
+    try { input.diag.warn(`program resume: ${reason}`, { reason }) } catch { /* no lower sink */ }
+  }
+
+  /**
+   * Write one frame and report only THIS emission's observable failure. The
+   * callback is asynchronous on a real Writable; a late callback from an older
+   * emission cannot pollute a newer offer or a closed reporter.
+   */
+  const writeFrame = (frame: string, epoch: number, reason: string): boolean => {
+    let failed = false
+    let warned = false
+    const fail = (): void => {
+      failed = true
+      if (isCurrentEmission(epoch) && !closed) dirty = true
+      if (!warned) {
+        warned = true
+        warn(reason)
+      }
+    }
+    try {
+      input.write(frame, error => {
+        if (error === undefined || error === null) return
+        if (!isCurrentEmission(epoch) || closed) return
+        fail()
+      })
+    } catch {
+      if (isCurrentEmission(epoch) && !closed) dirty = true
+      if (!warned) warn(reason)
+      return false
+    }
+    if (!isCurrentEmission(epoch)) return false
+    return !failed
+  }
+
+  const emitClear = (epoch: number, reason: string): boolean => {
+    let frame: string
+    try {
+      frame = encodeProgramResumeClear({
+        token: input.capability.token,
+        pid: input.capability.facts.ownerPid,
+        time: now(),
+      })
+    } catch {
+      warn(reason)
+      return false
+    }
+    return writeFrame(frame, epoch, reason)
   }
 
   const emit = (force: boolean): void => {
@@ -85,23 +130,20 @@ export function createProgramResumeReporter(input: {
     const sessionId = input.currentSessionId()
     const target = programResumeTarget(input.capability, sessionId)
     if (target === undefined) {
-      // A sessionless/unrepresentable owner withdraws the previous target once.
-      if (!force && (lastKind === 'clear' || lastKind === undefined)) return
-      if (lastKind === 'clear' && !dirty) return
+      // A clean clear is a no-op; an unoffered/dirty clear must be retried by
+      // the next legitimate event (including a failed initial mount clear).
+      if (!force && !dirty && (lastKind === 'clear' || lastKind === undefined)) return
       const epoch = beginEmission()
-      try {
-        emitClear()
-      } catch {
-        if (isCurrentEmission(epoch)) dirty = true
-        try { input.diag.warn('program resume: clear write failed', { reason: 'clear-write-failed' }) } catch { /* no lower sink */ }
-        return
-      }
+      if (!emitClear(epoch, 'clear-write-failed')) return
       if (!isCurrentEmission(epoch)) return
       lastKind = 'clear'
       lastSessionId = undefined
+      lastCleanClearSessionId = undefined
       dirty = false
       return
     }
+    // A clean clear for this exact unencodable target is already current.
+    if (!dirty && lastKind === 'clear' && lastCleanClearSessionId === sessionId) return
     if (!force && !dirty && lastKind === 'report' && lastSessionId === sessionId) return
     const epoch = beginEmission()
     let frame: string
@@ -117,30 +159,21 @@ export function createProgramResumeReporter(input: {
     } catch {
       // An over-budget or otherwise unencodable command must not leave the old
       // target in place. A clear is the protocol's only legal substitute.
-      try {
-        emitClear()
-        if (!isCurrentEmission(epoch)) return
-        lastKind = 'clear'
-        lastSessionId = undefined
-        dirty = false
-      } catch {
-        if (isCurrentEmission(epoch)) dirty = true
-        try { input.diag.warn('program resume: report and clear write failed', { reason: 'report-unencodable-clear-write-failed' }) } catch { /* no lower sink */ }
-      }
+      if (!emitClear(epoch, 'report-unencodable-clear-write-failed')) return
+      if (!isCurrentEmission(epoch)) return
+      lastKind = 'clear'
+      lastSessionId = undefined
+      lastCleanClearSessionId = sessionId
+      dirty = false
       return
     }
-    try {
-      input.write(frame)
-    } catch {
-      // A sink failure is NOT an unrepresentable target: preserve the last
-      // record and retry only on the next legitimate owner event/regain.
-      if (isCurrentEmission(epoch)) dirty = true
-      try { input.diag.warn('program resume: report write failed', { reason: 'report-write-failed' }) } catch { /* no lower sink */ }
-      return
-    }
+    // A sink failure is NOT an unrepresentable target: preserve the last
+    // record and retry only on the next legitimate owner event/regain.
+    if (!writeFrame(frame, epoch, 'report-write-failed')) return
     if (!isCurrentEmission(epoch)) return
     lastKind = 'report'
     lastSessionId = sessionId
+    lastCleanClearSessionId = undefined
     dirty = false
   }
 
@@ -160,35 +193,23 @@ export function createProgramResumeReporter(input: {
     humanExit: () => {
       if (closed) return
       // The same physical grant as report: installed, not suspended, and the
-      // application owns the tty. A pre-mount/editor exit writes nothing.
-      const shouldClear = lastKind !== 'clear' && installed && !suspended && input.canWrite()
+      // application owns the tty. A pre-mount/editor exit writes nothing. A
+      // dirty previous clear still needs one best-effort withdrawal.
+      const shouldClear = (lastKind !== 'clear' || dirty) && installed && !suspended && input.canWrite()
       closed = true
       installed = false
       if (!shouldClear) return
       const epoch = beginEmission()
-      try {
-        emitClear()
-        if (isCurrentEmission(epoch)) lastKind = 'clear'
-      } catch {
-        // Best-effort terminal offer: the business exit still proceeds, but
-        // the failed write is recorded with a fixed category.
-        try { input.diag.warn('program resume: human-exit clear failed', { reason: 'human-exit-clear-write-failed' }) } catch { /* no lower sink */ }
-      }
+      if (emitClear(epoch, 'human-exit-clear-write-failed') && isCurrentEmission(epoch)) lastKind = 'clear'
     },
     unsupportedReloadAccepted: () => {
       if (closed) return
-      const shouldClear = lastKind !== 'clear' && installed && !suspended && input.canWrite()
+      const shouldClear = (lastKind !== 'clear' || dirty) && installed && !suspended && input.canWrite()
       closed = true
       installed = false
       if (!shouldClear) return
       const epoch = beginEmission()
-      try {
-        emitClear()
-        if (isCurrentEmission(epoch)) lastKind = 'clear'
-      } catch {
-        // Reload acceptance must not fail on the terminal offer; record it.
-        try { input.diag.warn('program resume: unsupported-reload clear failed', { reason: 'unsupported-reload-clear-write-failed' }) } catch { /* no lower sink */ }
-      }
+      if (emitClear(epoch, 'unsupported-reload-clear-write-failed') && isCurrentEmission(epoch)) lastKind = 'clear'
     },
     dispose: () => {
       closed = true

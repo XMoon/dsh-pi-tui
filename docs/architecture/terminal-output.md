@@ -78,11 +78,13 @@ clear, but only under that same grant; signal, PTY loss, fatal, generic disposal
 and a compatible Client reexec never withdraw the record. A valid report whose
 terminal write fails leaves the previous record in place and is retried only on
 the next legitimate owner notification or regain; it is never converted to a
-clear. Asynchronous stream errors are owned by the existing process-wide
-`guardedStreamWriter` error listener and cannot be attributed to one OSC write,
-so the sender makes no per-write asynchronous-delivery or ACK claim. The protocol
-has no ACK: the sender never claims that the terminal accepted a record or that a
-later resume succeeded.
+clear. A synchronous write throw and the write-completion failure reported by
+the existing guarded writer share the same state: the offer is marked dirty and
+the next legitimate owner notification or terminal regain reoffers the current
+target. A late failure from an older offer never overwrites a newer offer or a
+closed reporter. The protocol has no ACK: neither the write completion nor the
+absence of an error means that the terminal accepted a record, and the sender
+never claims that a later resume succeeded.
 
 ## The two policies
 

@@ -36,7 +36,7 @@ function capability(overrides: Partial<ProgramResumeCapability['facts']> = {}): 
 
 function harness(initialSession: string | undefined, options: {
   readonly canWrite?: () => boolean
-  readonly write?: (frame: string) => void
+  readonly write?: (frame: string, callback?: (error?: Error | null) => void) => void
 } = {}) {
   let current = initialSession
   const frames: string[] = []
@@ -259,6 +259,97 @@ test('canWrite=false emits nothing and the next real commit succeeds', () => {
   assert.equal(h.frames.length, 1)
 })
 
+test('an asynchronous report failure marks the offer dirty and retries on the next event', () => {
+  let current = SESSION_A
+  let callbacks: Array<(error?: Error | null) => void> = []
+  const frames: string[] = []
+  const reporter = createProgramResumeReporter({
+    capability: capability(),
+    currentSessionId: () => current,
+    canWrite: () => true,
+    write: (frame, callback) => {
+      frames.push(frame)
+      if (callback !== undefined) callbacks.push(callback)
+    },
+    diag,
+  })
+  reporter.install()
+  assert.equal(frames.length, 1)
+  callbacks.shift()?.(new Error('async report failure'))
+  current = SESSION_B
+  reporter.observe()
+  assert.equal(frames.length, 2, 'the failed offer is retried by the next legitimate event')
+  assert.deepEqual(decodedArgv(bodyOf(frames[1] as string).body).slice(-1), [SESSION_B])
+})
+
+test('an asynchronous clear failure is retried instead of being deduplicated', () => {
+  let callbacks: Array<(error?: Error | null) => void> = []
+  const frames: string[] = []
+  const h = harness(undefined, {
+    write: (frame, callback) => {
+      frames.push(frame)
+      if (callback !== undefined) callbacks.push(callback)
+    },
+  })
+  h.reporter.install()
+  assert.equal(frames.length, 1)
+  callbacks.shift()?.(new Error('async clear failure'))
+  h.reporter.observe()
+  assert.equal(frames.length, 2, 'a dirty clear is not treated as a clean duplicate')
+  assert.match(bodyOf(frames[1] as string).body, /clear=1$/u)
+})
+
+test('a late failure callback never pollutes a newer offer', () => {
+  let current = SESSION_A
+  let callbacks: Array<(error?: Error | null) => void> = []
+  const frames: string[] = []
+  const reporter = createProgramResumeReporter({
+    capability: capability(),
+    currentSessionId: () => current,
+    canWrite: () => true,
+    write: (frame, callback) => {
+      frames.push(frame)
+      if (callback !== undefined) callbacks.push(callback)
+    },
+    diag,
+  })
+  reporter.install()
+  const first = callbacks.shift()
+  current = SESSION_B
+  reporter.observe()
+  assert.equal(frames.length, 2)
+  first?.(new Error('late A failure'))
+  reporter.observe()
+  assert.equal(frames.length, 2, 'the late A failure cannot dirty the current B offer')
+  callbacks.shift()?.(new Error('B failure'))
+  reporter.observe()
+  assert.equal(frames.length, 3, 'the current B failure alone retries B')
+  assert.deepEqual(decodedArgv(bodyOf(frames[2] as string).body).slice(-1), [SESSION_B])
+})
+
+test('a failed initial clear is retried by the next legitimate observation', () => {
+  let fail = true
+  const frames: string[] = []
+  const reporter = createProgramResumeReporter({
+    capability: capability(),
+    currentSessionId: () => undefined,
+    canWrite: () => true,
+    write: frame => {
+      if (fail) {
+        fail = false
+        throw new Error('initial clear failed')
+      }
+      frames.push(frame)
+    },
+    diag,
+  })
+  reporter.install()
+  assert.equal(frames.length, 0)
+  reporter.observe()
+  assert.equal(frames.length, 1)
+  assert.match(bodyOf(frames[0] as string).body, /clear=1$/u)
+})
+
 test('a report sink failure preserves the old record and never clears', () => {
   let current = SESSION_A
   let fail = false
@@ -323,4 +414,6 @@ test('an unencodable report falls back to a legal clear on each target transitio
   reporter.observe()
   assert.equal(frames.length, 2)
   assert.match(bodyOf(frames[1] as string).body, /clear=1$/u)
+  reporter.observe()
+  assert.equal(frames.length, 2, 'a clean clear for the same unencodable target is deduplicated')
 })
