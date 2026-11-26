@@ -235,8 +235,8 @@ The internal split-process entry is one Host process plus zero or more Client
 processes from ONE installed npm package. The Host lifetime is independent of
 Client attachment and may continue with zero active Clients. The local Host
 transport is supported on Linux and macOS for interactive Clients; Windows
-supports the same independent headless Host and management plane in PR2, while
-the interactive Client remains unavailable until PR3. The kernel admission
+supports the same independent headless Host and management plane today, while
+the interactive Client remains unavailable. The kernel admission
 authority is platform-owned: Linux uses abstract AF_UNIX sockets for the Host
 Singleton and the qualification-only Client seat; macOS uses `O_EXLOCK`-held
 seat files, re-proved by inode and directory identity before Ready; Windows uses
@@ -250,7 +250,7 @@ before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID file,
 `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in for
 the kernel seat where one is required. Windows `daemon install`/`uninstall` are
 unsupported because no Windows service manager owns the Host; ACP ingress is
-truthfully unavailable until PR4.
+truthfully unavailable on Windows.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
@@ -293,7 +293,7 @@ truthfully unavailable until PR4.
   Context, webserver, Agent or Session. Only the frozen `qualification` Client
   binds the second, qualification-only claim for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
-  a Host. On Windows PR2 creates no qualification/Client seat because no Windows
+  a Host. On Windows no qualification/Client seat is created because no Windows
   Client entry is admitted yet; the Host and the short-lived admin seat are the
   only mutex users. A real `surface` Client — and the non-TUI `peer` — binds no
   profile-global seat; it is admitted automatically by the authenticated

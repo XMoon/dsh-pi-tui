@@ -18,8 +18,8 @@ service definition a cold start keeps the basic detached Host. Windows supports
 only the independent process: `status`, `start`, `stop`, `restart` and `logs`
 are available, there is no Windows service manager, and `install`/`uninstall`
 are explicitly `UNSUPPORTED_PLATFORM` before any scope or manager work. The
-Windows Host is headless in PR2; the interactive Client remains unsupported
-until PR3, and ACP remains truthfully unavailable until PR4.
+Windows Host is headless; the interactive Client remains unsupported, and ACP
+remains truthfully unavailable on Windows.
 
 - **Manager vs. authentication authority.** The manager answers "how is the Host
   OS process supervised", never "is a Host ready". When a live Host is already

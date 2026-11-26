@@ -3,9 +3,9 @@
 Daemon mode gives one DSH Profile an independently running local Host and, on
 Linux/macOS, a terminal Client that attaches to it. The Host can keep sessions
 and turns alive after the terminal Client disconnects. It is a **local** mode,
-not a remote-network login or a second session authority. On Windows this PR
-supports the independent headless Host, `daemon` management and the official
-Web frontend; the interactive TUI Client, service install/uninstall and ACP
+not a remote-network login or a second session authority. On Windows the
+independent headless Host, `daemon` management and the official Web frontend
+are available; the interactive TUI Client, service install/uninstall and ACP
 remain unavailable.
 
 ## Select a backend

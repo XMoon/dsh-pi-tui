@@ -84,6 +84,7 @@ interface Win32Bridge {
   readonly koffi: typeof import('koffi')
   readonly closeHandle: (handle: Win32Handle) => boolean
   readonly getLastError: () => number
+  readonly setLastError: (code: number) => void
   readonly openProcess: (access: number, inherit: boolean, pid: number) => Win32Handle | null
   readonly getProcessTimes: (handle: Win32Handle, creation: Buffer, exit: Buffer, kernel: Buffer, user: Buffer) => boolean
   readonly getExitCodeProcess: (handle: Win32Handle, exitCode: Buffer) => boolean
@@ -164,6 +165,7 @@ function loadBridge(): { readonly ok: true; readonly bridge: Win32Bridge } | { r
         koffi,
         closeHandle: bind(context, kernel32, 'CloseHandle', 'int', ['void *']) as unknown as Win32Bridge['closeHandle'],
         getLastError: bind(context, kernel32, 'GetLastError', 'uint32', []) as unknown as Win32Bridge['getLastError'],
+        setLastError: bind(context, kernel32, 'SetLastError', 'void', ['uint32']) as unknown as Win32Bridge['setLastError'],
         openProcess: bind(context, kernel32, 'OpenProcess', 'void *', ['uint32', 'bool', 'uint32']) as unknown as Win32Bridge['openProcess'],
         getProcessTimes: bind(context, kernel32, 'GetProcessTimes', 'int', ['void *', 'void *', 'void *', 'void *', 'void *']) as unknown as Win32Bridge['getProcessTimes'],
         getExitCodeProcess: bind(context, kernel32, 'GetExitCodeProcess', 'int', ['void *', 'void *']) as unknown as Win32Bridge['getExitCodeProcess'],
@@ -284,14 +286,18 @@ export function openWin32Process(pid: number): Win32ProcessOpen {
     if (code === ERROR_ACCESS_DENIED) return { kind: 'unknown', code: 'ACCESS_DENIED' }
     return { kind: 'unknown', code: 'READ_FAILED' }
   }
+  const fail = (code: KernelReadFailureCode): Win32ProcessOpen => {
+    bridge.closeHandle(handle)
+    return { kind: 'unknown', code }
+  }
   try {
     const times = Buffer.alloc(32)
     if (!bridge.getProcessTimes(handle, times, Buffer.alloc(32), Buffer.alloc(32), Buffer.alloc(32))) {
-      return { kind: 'unknown', code: lastError(bridge) === ERROR_ACCESS_DENIED ? 'ACCESS_DENIED' : 'READ_FAILED' }
+      return fail(lastError(bridge) === ERROR_ACCESS_DENIED ? 'ACCESS_DENIED' : 'READ_FAILED')
     }
     const token = Buffer.alloc(8)
     if (!bridge.openProcessToken(handle, TOKEN_QUERY, token)) {
-      return { kind: 'unknown', code: lastError(bridge) === ERROR_ACCESS_DENIED ? 'ACCESS_DENIED' : 'READ_FAILED' }
+      return fail(lastError(bridge) === ERROR_ACCESS_DENIED ? 'ACCESS_DENIED' : 'READ_FAILED')
     }
     const tokenHandle = token.readBigUInt64LE(0) as unknown as Win32Handle
     let sid: string | undefined
@@ -299,27 +305,21 @@ export function openWin32Process(pid: number): Win32ProcessOpen {
       const needed = Buffer.alloc(4)
       bridge.getTokenInformation(tokenHandle, 1, Buffer.alloc(0), 0, needed)
       const length = needed.readUInt32LE(0)
-      if (length === 0) return { kind: 'unknown', code: 'READ_FAILED' }
+      if (length === 0) return fail('READ_FAILED')
       const info = Buffer.alloc(length)
-      if (!bridge.getTokenInformation(tokenHandle, 1, info, length, needed)) return { kind: 'unknown', code: 'READ_FAILED' }
+      if (!bridge.getTokenInformation(tokenHandle, 1, info, length, needed)) return fail('READ_FAILED')
       const sidAddress = info.readBigUInt64LE(0)
       sid = parseSid(info, Number(sidAddress - (bridge.koffi.address(info) as unknown as bigint)))
     } finally {
       bridge.closeHandle(tokenHandle)
     }
-    if (sid === undefined) {
-      bridge.closeHandle(handle)
-      return { kind: 'unknown', code: 'READ_FAILED' }
-    }
+    if (sid === undefined) return fail('READ_FAILED')
     const wait = bridge.waitForSingleObject(handle, 0)
     if (wait === WAIT_OBJECT_0) {
       bridge.closeHandle(handle)
       return { kind: 'gone' }
     }
-    if (wait !== WAIT_TIMEOUT) {
-      bridge.closeHandle(handle)
-      return { kind: 'unknown', code: 'READ_FAILED' }
-    }
+    if (wait !== WAIT_TIMEOUT) return fail('READ_FAILED')
     return {
       kind: 'ok',
       capture: {
@@ -473,6 +473,12 @@ class NamedMutexSeat implements Win32KernelSeat {
     if (this.bridge.waitForSingleObject(this.handle, 0) !== WAIT_OBJECT_0) {
       throw new Error(`native win32: seat ${this.name} is no longer held`)
     }
+    // The wait above acquired one additional recursion level of the mutex this
+    // thread already owns. Release exactly that level so close() stays the one
+    // real release of the seat.
+    if (!this.bridge.releaseMutex(this.handle)) {
+      throw new Error(`native win32: seat ${this.name} could not release its currentness probe`)
+    }
   }
 
   async close(): Promise<void> {
@@ -587,8 +593,10 @@ export function createWin32StopWaiter(scopeId: string, instanceId: string): Win3
   let stopExists = false
   let cancelExists = false
   try {
+    bridge.setLastError(0)
     stopHandle = bridge.createEventW(security.attributes, 0, 0, eventName)
     stopExists = stopHandle !== null && lastError(bridge) === 183
+    bridge.setLastError(0)
     cancelHandle = bridge.createEventW(security.attributes, 0, 0, win32CancelEventName(scopeId, instanceId))
     cancelExists = cancelHandle !== null && lastError(bridge) === 183
   } finally {
