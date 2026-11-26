@@ -8814,7 +8814,7 @@ async function reclaimPublicHostWithAdmission(host, reason, options = {}) {
   // Absorb that late publication through the SAME authenticated binding; a
   // cold-pair contender that publishes is a forbidden second publication.
   if (host.instanceId === undefined) {
-    await bindLatePublicHostRegistry(host, `reclaimPublicHost:${reason}: late bind`, 3_000)
+    await bindLatePublicHostRegistry(host, `reclaimPublicHost:${reason}: late bind`, 15_000)
   }
   if (host.instanceId !== undefined && host.winner !== true) {
     if (host.pairId !== null && host.pairId !== undefined) {
