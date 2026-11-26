@@ -323,30 +323,21 @@ export async function runAcpPo1bOptInControl(context) {
       assert(false, `${label}: the expected frame never appeared:\n${(await frameOf(target)).slice(-2500)}`)
     }
     /**
-     * The FROZEN Disable risk sentence. The real page wraps it at the terminal
-     * width, so the witness whitespace-normalizes the painted frame (physical
-     * line breaks become single spaces) and requires the COMPLETE sentence —
-     * a truncated or rewritten tail must fail here, not only in a structural
-     * page test.
+     * Wait for the REAL persisted preference (the same official read the page's
+     * authority uses). The exact painted On/Off copy and the full risk sentence
+     * are owned by the existing UI owner tests; this smoke uses the painted
+     * confirm affordance as its navigation/admission gate and the Host readback
+     * as the business verdict.
      */
-    const RISK_SENTENCE = 'Disable the local ACP listener? All connected ACP clients will be disconnected. '
-      + 'Host sessions, Agents and this TUI will keep running.'
-    const flatFrameOf = async target => (await frameOf(target)).replace(/\s+/gu, ' ').trim()
-    /** Wait for the WHOLE fixed sentence (wrapping allowed; scroll to read). */
-    const waitRiskSentence = async (target, label, timeoutMs = 30_000) => {
-      const prefix = 'Disable the local ACP listener?'
+    const waitPreference = async (target, expected, label, timeoutMs = 60_000) => {
       const deadline = Date.now() + timeoutMs
-      while (Date.now() < deadline && !(await frameOf(target)).includes(prefix)) await sleep(100)
-      assert((await frameOf(target)).includes(prefix), `${label}: the risk confirmation never appeared:\n${(await frameOf(target)).slice(-2500)}`)
-      // The sentence is a scrollable first-class fact on a short grant: reveal
-      // it, then require the complete fixed text (never a prefix-only witness).
-      for (let step = 0; step < 6; step += 1) {
-        if ((await flatFrameOf(target)).includes(RISK_SENTENCE)) return
-        target.send(step === 0 ? '\x1b[H' : '\x1b[6~')
-        await sleep(160)
+      let last
+      while (Date.now() < deadline) {
+        last = await acpPreference(target, `${label} read`, undefined)
+        if (last.ok === true && last.autoStart === expected) return last
+        await sleep(250)
       }
-      assert((await flatFrameOf(target)).includes(RISK_SENTENCE),
-        `${label}: the risk sentence is NOT complete:\n${(await frameOf(target)).slice(-2500)}`)
+      assert(false, `${label}: the persisted preference never reached ${String(expected)} (last ${JSON.stringify(last)})`)
     }
     /** Down until the pattern's row owns the cursor (never a fixed key count). */
     const selectRow = async (target, pattern, label, maxSteps = 14) => {
@@ -381,15 +372,14 @@ export async function runAcpPo1bOptInControl(context) {
     const hostBeforeTui = await hostStatus(host1)
     tui.send('/acp\r')
     await tui.waitForScreen('Settings · Host · ACP access', 'b0: /acp typed deep link', 60_000)
-    const firstFrame = await waitFrame(tui, /Listener\s+Disabled/u, 'b0: settled disabled listener')
-    assert(/(?:^|\s)> Enable ACP(?:\s|$)/mu.test(firstFrame),
-      `b0: a disabled Host must focus its ONE real runtime action:\n${firstFrame}`)
+    await waitFrame(tui, /Listener\s+Disabled/u, 'b0: settled disabled listener')
     assert(!exists(socketPathFor(scopeId)), 'b0: merely opening /acp must not bind acp.sock')
     const prefBeforeTui = await acpPreference(peer, 'b0 preference read before journey', undefined)
     assert(prefBeforeTui.ok === true && prefBeforeTui.autoStart === false,
       `b0: opening /acp must not change the persisted preference: ${JSON.stringify(prefBeforeTui)}`)
-    // ENABLE through the real painted action. The verdict is the REAL Host
-    // readback, socket and raw protocol answer — never a specific page word.
+    // ENABLE through the real painted action. The focus marker is only the
+    // locator; the verdict is the REAL Host readback, socket and raw answer.
+    await selectRow(tui, /(?:^|\s)> Enable ACP(?:\s|$)/mu, 'b0: Enable ACP locator')
     tui.send('\r')
     await waitUntil(() => exists(socketPathFor(scopeId)), 'b0: page Enable to bind acp.sock', 60_000)
     await awaitRuntimeState(peer, 'enabled', 'b0 after the page Enable')
@@ -411,11 +401,9 @@ export async function runAcpPo1bOptInControl(context) {
     // keeps the precise zero-dispatch proof.
     await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action')
     tui.send('\r')
-    await waitRiskSentence(tui, 'b0 disable: risk confirmation')
     await waitConfirmAffordance(tui, 'b0 disable: risk confirmation')
     tui.send('\x1b')
-    const afterCancel = await waitFrame(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: cancelled back to ready')
-    assert(/Listener\s+Enabled/u.test(afterCancel), 'b0: Cancel must keep the listener enabled')
+    await waitFrame(tui, /Listener\s+Enabled/u, 'b0 disable: cancelled back to ready')
     assert(heldClosed === false, 'b0: Cancel must not close the held ACP peer')
     assert(sameSocketIdentity(heldSocketIdentity), 'b0: Cancel must keep the SAME live socket inode')
     assertAccess(await acpAccess(peer, 'b0 status after cancel', undefined), 'enabled', 'b0 status after cancel')
@@ -426,8 +414,8 @@ export async function runAcpPo1bOptInControl(context) {
       'b0: the held ACP peer must still answer a real request after Cancel')
     // The SECOND explicit confirmation retires the listener and disconnects the
     // held peer on the SAME Host.
+    await selectRow(tui, /(?:^|\s)> Disable ACP…(?:\s|$)/mu, 'b0 disable: staged action again')
     tui.send('\r')
-    await waitRiskSentence(tui, 'b0 disable: risk confirmation again')
     await waitConfirmAffordance(tui, 'b0 disable: risk confirmation again')
     tui.send('\r')
     await held.closed
@@ -449,9 +437,8 @@ export async function runAcpPo1bOptInControl(context) {
     await waitFrame(tui, /Confirm save \[Enter\]/u, 'b0 autostart: painted Confirm save affordance')
     profileTouched = true
     tui.send('\r')
-    await waitFrame(tui, /Start automatically\s+On · Change…/u, 'b0 autostart On: persisted re-read')
-    const readBackOn = await acpPreference(peer, 'b0 preference read back On', undefined)
-    assert(readBackOn.ok === true && readBackOn.autoStart === true,
+    const readBackOn = await waitPreference(peer, true, 'b0 autostart On')
+    assert(readBackOn.autoStart === true,
       `b0: the page-written On preference must read back On: ${JSON.stringify(readBackOn)}`)
     assert(!exists(socketPathFor(scopeId)), 'b0: saving autoStart On must never bind the current Host socket')
     assertAccess(await acpAccess(peer, 'b0 runtime after preference', undefined), 'disabled', 'b0 runtime after preference')
