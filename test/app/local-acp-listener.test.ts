@@ -1513,12 +1513,14 @@ test('a Host Session View advertises resume/close and serves new/close over the 
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {},
       'an unknown Session close is an idempotent empty result')
 
-    // A prompt on the closed A View is refused with the View's stable code and
-    // never reaches the Host; the active B View remains a separate claim.
+    // A prompt on the closed A View is refused with the standard not-active
+    // Session error and the REQUESTED id, and never reaches the Host; the
+    // active B View remains a separate claim.
     client.send({ jsonrpc: '2.0', id: 8, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: 'hi' }] } })
-    const prompt = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(prompt.error?.code, -32602)
+    const prompt = (await client.next()) as { error?: { code: number; data?: { code?: string; sessionId?: string } } }
+    assert.equal(prompt.error?.code, -32002)
     assert.equal(prompt.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(prompt.error?.data?.sessionId, sessionId, 'the refusal carries the requested Session id')
     assert.equal(fake.prompts.length, 0, 'an unattached prompt never reaches the Host')
     client.send({ jsonrpc: '2.0', id: 9, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'B remains active' }] } })
     const promptB = await waitForFact(() => fake.prompts[0], 'the B prompt')
@@ -1544,14 +1546,29 @@ test('a Host Session View advertises resume/close and serves new/close over the 
     }
     assert.equal(answerB.result?.stopReason, 'end_turn')
 
-    // The SAME physical connection cannot allocate a second View for a Session
-    // it already owns; the refusal is connection-local and happens before any
-    // Host resolve/create.
+    // The SAME physical connection may REATTACH its own settled View: the
+    // request replaces only this connection's claim generation, borrows the
+    // SAME live Host Agent through the one official resolver (no Session
+    // create, no second slot) and replays no conversation history on resume.
+    const resolvesBefore = fake.resolveCalls().filter(id => id === sessionB).length
     client.send({ jsonrpc: '2.0', id: 10, method: 'session/resume', params: { sessionId: sessionB, cwd: '/host/proj' } })
-    const duplicate = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
-    assert.equal(duplicate.id, 10)
-    assert.equal(duplicate.error?.code, -32602)
-    assert.equal(duplicate.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    let reattached: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      reattached = frame
+      break
+    }
+    assert.equal(reattached.id, 10)
+    assert.equal(reattached.error, undefined, 'a settled same-connection View can be resumed again')
+    assert.deepEqual(reattached.result, {}, 'resume answers the standard empty result and replays no history')
+    assert.equal(fake.resolveCalls().filter(id => id === sessionB).length, resolvesBefore + 1,
+      'the reattach borrows the Agent through the one official resolve')
+    assert.equal(fake.agentOf(sessionB), agentB, 'the reattach keeps the exact live Host Agent identity')
+    // The refreshed generation is a working View on the SAME Host Session.
+    client.send({ jsonrpc: '2.0', id: 11, method: 'session/prompt', params: { sessionId: sessionB, prompt: [{ type: 'text', text: 'after reattach' }] } })
+    const promptAfter = await waitForFact(() => fake.prompts[1], 'the post-reattach prompt')
+    assert.equal(promptAfter.sessionId, sessionB, 'the reattached View reaches the same Host Session')
   } finally {
     client.close()
   }
@@ -1598,6 +1615,65 @@ test('a second ACP connection cannot attach an already-held Session; invalid req
   } finally {
     a.close()
     b.close()
+  }
+})
+
+test('an unknown or closed Session answers the standard not-active error on every scoped method', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess({
+    sessionRead: true,
+    sessionHistory: sessionId => ({ header: { sessionId, cwd: '/host/proj' }, events: [] }),
+  })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    // This connection holds no View for the id: prompt/set_mode/set_config
+    // answer -32002 with the REQUESTED id and never reach the Host.
+    for (const [id, method, params] of [
+      [2, 'session/prompt', { sessionId: 'missing', prompt: [{ type: 'text', text: 'x' }] }],
+      [3, 'session/set_mode', { sessionId: 'missing', modeId: 'plan' }],
+      [4, 'session/set_config_option', { sessionId: 'missing', configId: 'model', value: '["p1","b"]' }],
+    ] as const) {
+      client.send({ jsonrpc: '2.0', id, method, params })
+      const frame = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string; sessionId?: string } } }
+      assert.equal(frame.id, id)
+      assert.equal(frame.error?.code, -32002, `${method} uses the standard not-active class`)
+      assert.equal(frame.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+      assert.equal(frame.error?.data?.sessionId, 'missing')
+    }
+    assert.equal(fake.prompts.length, 0, 'a not-active prompt never reaches the Host')
+    // resume/load of a Session the official owner does not know: -32002 plus
+    // the requested id, never a malformed-params or conflict class.
+    for (const [id, method, params] of [
+      [5, 'session/resume', { sessionId: 'ghost', cwd: '/host/proj' }],
+      [6, 'session/load', { sessionId: 'ghost', cwd: '/host/proj', mcpServers: [] }],
+    ] as const) {
+      client.send({ jsonrpc: '2.0', id, method, params })
+      const frame = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string; sessionId?: string } } }
+      assert.equal(frame.id, id)
+      assert.equal(frame.error?.code, -32002)
+      assert.equal(frame.error?.data?.code, 'LOCAL_ACP_VIEW_SESSION_NOT_FOUND')
+      assert.equal(frame.error?.data?.sessionId, 'ghost')
+    }
+    assert.deepEqual(fake.sessionHistoryReads(), [], 'a definite not-found load reads no history')
+    // Malformed requests keep their own -32602 invalid class; an invalid mode
+    // is still checked before any ownership lookup.
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/resume', params: { sessionId: '', cwd: '/host/proj' } })
+    const emptyId = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(emptyId.error?.code, -32602)
+    assert.equal(emptyId.error?.data?.code, 'LOCAL_ACP_VIEW_INVALID_REQUEST')
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/set_mode', params: { sessionId: '', modeId: 'nope' } })
+    const badMode = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(badMode.error?.code, -32602)
+    assert.equal(badMode.error?.data?.code, 'LOCAL_ACP_CONFIG_INVALID_OPTION')
+    // An unknown Session close stays the standard idempotent `{}`.
+    client.send({ jsonrpc: '2.0', id: 9, method: 'session/close', params: { sessionId: 'ghost' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+  } finally {
+    client.close()
   }
 })
 
@@ -1863,12 +1939,144 @@ test('a single socket bounds live View slots at eight and reuses a released slot
     assert.equal(ninth.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
     assert.equal(fake.agentOf('session-9'), undefined, 'the capacity refusal precedes Host create')
 
+    // A full connection can still refresh a View it already holds: the reattach
+    // reuses its existing slot and never allocates a ninth one.
+    client.send({ jsonrpc: '2.0', id: 19, method: 'session/resume', params: { sessionId: sessionIds[7], cwd: '/host/7' } })
+    let refreshed: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      refreshed = frame
+      break
+    }
+    assert.equal(refreshed.id, 19)
+    assert.equal(refreshed.error, undefined, 'a settled View refreshes even at the eight-slot bound')
+    assert.deepEqual(refreshed.result, {})
+    assert.equal(fake.agentOf('session-9'), undefined, 'the refresh never created a Session')
+    client.send({ jsonrpc: '2.0', id: 20, method: 'session/new', params: { cwd: '/host/still-ninth', mcpServers: [] } })
+    const stillFull = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(stillFull.id, 20)
+    assert.equal(stillFull.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY', 'the refresh did not free a capacity slot')
+
     client.send({ jsonrpc: '2.0', id: 21, method: 'session/close', params: { sessionId: sessionIds[0] } })
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
     client.send({ jsonrpc: '2.0', id: 22, method: 'session/new', params: { cwd: '/host/reused', mcpServers: [] } })
     const reused = (await client.next()) as { result?: { sessionId?: string } }
     assert.equal(reused.result?.sessionId, 'session-9', 'a settled close frees its slot for the ninth View')
     assert.notEqual(reused.result?.sessionId, sessionIds[0])
+  } finally {
+    client.close()
+  }
+})
+
+test('a same-slot request lifetime refuses a competing repeat, and close retires an in-flight refresh generation', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-view', '/host/view')
+  fake.seed('session-sibling', '/host/sibling')
+  const attachGate = Promise.withResolvers<void>()
+  const attachEntered = Promise.withResolvers<void>()
+  let heldAttach = false
+  fake.access.modelOptions = async () => {
+    if (!heldAttach) {
+      heldAttach = true
+      attachEntered.resolve()
+      await attachGate.promise
+    }
+    throw new AcpModelError('LOCAL_ACP_MODEL_UNAVAILABLE', 'no model catalog', -32042)
+  }
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    // The View is attached, but its INITIAL config read is still the admitted
+    // request's lifetime: a competing repeat must not supersede it.
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-view', cwd: '/host/view' } })
+    await attachEntered.promise
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-view', cwd: '/host/view' } })
+    const busy = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(busy.id, 3)
+    assert.equal(busy.error?.code, -32602)
+    assert.equal(busy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    assert.deepEqual(fake.resolveCalls(), ['session-view'], 'the refused repeat never reaches the official resolver')
+    // A sibling slot is independent: it is answered while the first is held.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-sibling', cwd: '/host/sibling' } })
+    let sibling: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      if (frame.id === 2) throw new Error('the held attach answered before the sibling slot was served')
+      sibling = frame
+      break
+    }
+    assert.equal(sibling.id, 4)
+    assert.equal(sibling.error, undefined, 'a sibling View is not serialized behind the held slot')
+    attachGate.resolve()
+    let original: { id?: number; result?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      if (frame.id !== 2) continue
+      original = frame
+      break
+    }
+    assert.deepEqual(original.result, {})
+
+    // The slot is settled now: its own repeat is admitted.
+    const originalResolve = fake.access.resolveAgent
+    const repeatGate = Promise.withResolvers<void>()
+    const repeatEntered = Promise.withResolvers<void>()
+    const liveAgent = fake.agentOf('session-view')
+    let heldResolve = false
+    fake.access.resolveAgent = async () => {
+      if (!heldResolve) {
+        heldResolve = true
+        repeatEntered.resolve()
+        await repeatGate.promise
+      }
+      return liveAgent === undefined
+        ? { error: { code: 'session/not-found', message: 'not found' } }
+        : { agent: liveAgent }
+    }
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: { sessionId: 'session-view', cwd: '/host/view' } })
+    await repeatEntered.promise
+    // While the refresh owns the slot, competing prompt/repeat requests are
+    // refused before dispatch instead of interleaving with the new generation.
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId: 'session-view', prompt: [{ type: 'text', text: 'too early' }] } })
+    const promptBusy = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(promptBusy.id, 6)
+    assert.equal(promptBusy.error?.code, -32602)
+    assert.equal(promptBusy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    assert.equal(fake.prompts.length, 0, 'the refused prompt never reached the Host')
+    client.send({ jsonrpc: '2.0', id: 7, method: 'session/resume', params: { sessionId: 'session-view', cwd: '/host/view' } })
+    const repeatBusy = (await client.next()) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(repeatBusy.id, 7)
+    assert.equal(repeatBusy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    // close is never blocked by the refresh marker: it retires the exact new
+    // generation, and the late resolve can no longer attach it.
+    client.send({ jsonrpc: '2.0', id: 8, method: 'session/close', params: { sessionId: 'session-view' } })
+    const closed = (await client.next()) as { id?: number; result?: unknown }
+    assert.equal(closed.id, 8)
+    assert.deepEqual(closed.result, {})
+    repeatGate.resolve()
+    const superseded = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(superseded.id, 5)
+    assert.equal(superseded.error?.data?.code, 'LOCAL_ACP_VIEW_CLOSED', 'the closed refresh generation never attaches')
+    // The exact Host Agent identity survived and the Session attaches normally.
+    fake.access.resolveAgent = originalResolve
+    client.send({ jsonrpc: '2.0', id: 9, method: 'session/resume', params: { sessionId: 'session-view', cwd: '/host/view' } })
+    let after: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      after = frame
+      break
+    }
+    assert.equal(after.id, 9)
+    assert.equal(after.error, undefined, 'a later ordinary attach succeeds after the superseded refresh')
+    assert.equal(fake.agentOf('session-view'), liveAgent, 'the same exact Host Agent identity is reused')
   } finally {
     client.close()
   }
@@ -2355,9 +2563,10 @@ test('session/prompt keeps uninitialized, unattached, invalid and in-flight requ
     initialize(client, 2)
     await client.next()
     client.send({ jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'session-resume', prompt: [{ type: 'text', text: 'x' }] } })
-    const unattached = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(unattached.error?.code, -32602)
+    const unattached = (await client.next()) as { error?: { code: number; data?: { code?: string; sessionId?: string } } }
+    assert.equal(unattached.error?.code, -32002, 'a Session this connection does not hold is the standard not-active class')
     assert.equal(unattached.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(unattached.error?.data?.sessionId, 'session-resume')
 
     client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-resume', cwd: '/host/proj' } })
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
@@ -2373,8 +2582,10 @@ test('session/prompt keeps uninitialized, unattached, invalid and in-flight requ
       assert.equal(refused.error?.data?.code, 'LOCAL_ACP_PROMPT_INVALID_CONTENT')
     }
     client.send({ jsonrpc: '2.0', id: 8, method: 'session/prompt', params: { sessionId: 'other-session', prompt: [{ type: 'text', text: 'x' }] } })
-    const wrongSession = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    const wrongSession = (await client.next()) as { error?: { code: number; data?: { code?: string; sessionId?: string } } }
+    assert.equal(wrongSession.error?.code, -32002)
     assert.equal(wrongSession.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(wrongSession.error?.data?.sessionId, 'other-session')
     assert.equal(fake.prompts.length, 0, 'no refused request reached the Host')
 
     // ONE in-flight prompt; a second request on the same View is refused while
@@ -3791,9 +4002,10 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
       method: 'session/set_config_option',
       params: { sessionId: 'other-session', configId: 'model', value: '["p1","b"]' },
     })
-    const wrongSession = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(wrongSession.error?.code, -32602)
+    const wrongSession = (await client.next()) as { error?: { code: number; data?: { code?: string; sessionId?: string } } }
+    assert.equal(wrongSession.error?.code, -32002)
     assert.equal(wrongSession.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(wrongSession.error?.data?.sessionId, 'other-session')
     client.send({
       jsonrpc: '2.0',
       id: 5,
@@ -3828,9 +4040,10 @@ test('ACP v1 config options are served over the real socket for new/resume/set_c
     client.send({ jsonrpc: '2.0', id: 9, method: 'session/close', params: { sessionId } })
     assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
     client.send({ jsonrpc: '2.0', id: 10, method: 'session/set_config_option', params: { sessionId, configId: 'model', value: '["p1","b"]' } })
-    const closed = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
-    assert.equal(closed.error?.code, -32602)
+    const closed = (await client.next()) as { error?: { code: number; data?: { code?: string; sessionId?: string } } }
+    assert.equal(closed.error?.code, -32002)
     assert.equal(closed.error?.data?.code, 'LOCAL_ACP_VIEW_NOT_OWNED')
+    assert.equal(closed.error?.data?.sessionId, sessionId)
   } finally {
     client.close()
   }
@@ -4677,11 +4890,23 @@ test('G-ACP2-PR2 LOAD-01 wire: session/load replays the canonical history before
     assert.deepEqual(frames[frames.length - 1]?.result, {})
     assert.deepEqual(fake.sessionHistoryReads(), ['loaded'])
 
-    // A second load of the same Session on the same connection is refused as busy.
+    // The SAME connection may load its own settled View again: a fresh claim
+    // generation replays the complete canonical history for THIS request again
+    // (no closed connection, no leaked dedupe state, no stale history).
     client.send({ jsonrpc: '2.0', id: 6, method: 'session/load', params: { sessionId: 'loaded', cwd: '/host/proj', mcpServers: [] } })
-    const busy = (await client.next()) as { error?: { code?: number; data?: { code?: string } } }
-    assert.equal(busy.error?.code, -32602)
-    assert.equal(busy.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    const reloadFrames: Array<{ id?: number; method?: string; params?: { update?: { sessionUpdate?: string; content?: { text?: string } } }; result?: unknown; error?: unknown }> = []
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; method?: string }
+      reloadFrames.push(frame as never)
+      if (frame.id === 6) break
+    }
+    const reloadUpdates = reloadFrames.filter(frame => frame.method === 'session/update')
+    assert.deepEqual(reloadUpdates.map(frame => frame.params?.update?.sessionUpdate), ['user_message_chunk', 'agent_message_chunk'],
+      'the repeat load replays the whole history again instead of reusing the first load')
+    assert.deepEqual(reloadUpdates.map(frame => frame.params?.update?.content?.text), ['earlier question', 'earlier answer'])
+    assert.equal(reloadFrames[reloadFrames.length - 1]?.id, 6, 'the repeat load also answers only after its ordered drain')
+    assert.deepEqual(reloadFrames[reloadFrames.length - 1]?.error, undefined)
+    assert.deepEqual(fake.sessionHistoryReads(), ['loaded', 'loaded'], 'each load request performs its own canonical read')
   } finally {
     client.close()
   }

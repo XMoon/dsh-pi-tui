@@ -522,7 +522,12 @@ export async function runAcpV1ConformanceB3(context) {
       main.client.request(acp.methods.agent.session.prompt, { sessionId: sessionA, prompt: [{ type: 'text', text: 'after close' }] }),
       'B3-06 prompt after close',
     )
-    assert(closedPrompt?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED', `B3-06: closed View prompt: ${JSON.stringify(closedPrompt)}`)
+    // A closed Session is the standard not-active class: -32002 plus the
+    // REQUESTED id, never a malformed-params or conflict classification.
+    assert(closedPrompt?.code === -32002
+      && closedPrompt?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED'
+      && closedPrompt?.data?.sessionId === sessionA,
+    `B3-06: closed View prompt: ${JSON.stringify(closedPrompt)}`)
     const createdB = await main.client.request(acp.methods.agent.session.new, { cwd: hostCwd, mcpServers: [] })
     sessionB = createdB?.sessionId
     assert(typeof sessionB === 'string' && sessionB !== sessionA, `B3-06: post-close new Session: ${JSON.stringify(createdB)}`)
@@ -538,7 +543,10 @@ export async function runAcpV1ConformanceB3(context) {
       other.client.request(acp.methods.agent.session.prompt, { sessionId: sessionB, prompt: [{ type: 'text', text: 'foreign' }] }),
       'B3-06 foreign prompt',
     )
-    assert(foreignPromptB?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED', 'B3-06: foreign prompt must be refused')
+    assert(foreignPromptB?.code === -32002
+      && foreignPromptB?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED'
+      && foreignPromptB?.data?.sessionId === sessionB,
+    `B3-06: foreign prompt must be the standard not-active error: ${JSON.stringify(foreignPromptB)}`)
     assert(eventsOf(sessionB).slice(beforeForeignPromptB)
       .every(event => event.type !== 'user/message' && event.type !== 'assistant/message'),
     'B3-06: a refused foreign prompt must not write a Host user/assistant message')
@@ -583,6 +591,19 @@ export async function runAcpV1ConformanceB3(context) {
     assert(loaded.error?.code === -32602
       && (loaded.error?.data?.code === 'LOCAL_ACP_VIEW_ALREADY_ATTACHED' || loaded.error?.data?.code === 'LOCAL_ACP_VIEW_BUSY'),
     `B3-07: a foreign-attached Session must never get a second View: ${JSON.stringify(loaded)}`)
+    // A definite official `session/not-found` on resume/load is the same
+    // standard not-active class with the requested id; it is never a
+    // malformed request and never queries a Host guess.
+    const unknownResume = await optional.request(16, 'session/resume', { sessionId: 'b3-unknown-session', cwd: hostCwd, mcpServers: [] })
+    assert(unknownResume.error?.code === -32002
+      && unknownResume.error?.data?.code === 'LOCAL_ACP_VIEW_SESSION_NOT_FOUND'
+      && unknownResume.error?.data?.sessionId === 'b3-unknown-session',
+    `B3-07: unknown resume must be the standard not-active error: ${JSON.stringify(unknownResume)}`)
+    const unknownLoad = await optional.request(17, 'session/load', { sessionId: 'b3-unknown-session', cwd: hostCwd, mcpServers: [] })
+    assert(unknownLoad.error?.code === -32002
+      && unknownLoad.error?.data?.code === 'LOCAL_ACP_VIEW_SESSION_NOT_FOUND'
+      && unknownLoad.error?.data?.sessionId === 'b3-unknown-session',
+    `B3-07: unknown load must be the standard not-active error: ${JSON.stringify(unknownLoad)}`)
     const setMode = await optional.request(4, 'session/set_mode', { sessionId: sessionB, modeId: 'x' })
     assert(setMode.error?.code === -32602
       && setMode.error?.data?.code === 'LOCAL_ACP_CONFIG_INVALID_OPTION',
@@ -739,6 +760,13 @@ export async function runAcpV1ConformanceB3(context) {
       },
       sessions: { A: sessionA, B: sessionB },
       unsupported: { list: listed.error?.code, load: loaded.error?.code, setMode: setMode.error?.code, unknown: unknownMethod.error?.code },
+      notActive: {
+        closedPrompt: { code: closedPrompt?.code, dataCode: closedPrompt?.data?.code, sessionId: closedPrompt?.data?.sessionId },
+        foreignPrompt: { code: foreignPromptB?.code, dataCode: foreignPromptB?.data?.code, sessionId: foreignPromptB?.data?.sessionId },
+        unknownResume: { code: unknownResume.error?.code, dataCode: unknownResume.error?.data?.code, sessionId: unknownResume.error?.data?.sessionId },
+        unknownLoad: { code: unknownLoad.error?.code, dataCode: unknownLoad.error?.data?.code, sessionId: unknownLoad.error?.data?.sessionId },
+        close: { exact: '{}', repeated: '{}', unknown: '{}' },
+      },
       systemPrompt: {
         entries: ['new', 'resume', 'load'],
         modes: { new: 'append', resume: 'append-empty-content', load: 'override' },

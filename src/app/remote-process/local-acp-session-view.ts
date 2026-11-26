@@ -1458,6 +1458,13 @@ interface PendingPermissionRequest {
 
 const JSONRPC_INVALID_PARAMS = -32602
 const JSONRPC_INTERNAL_ERROR = -32603
+/**
+ * The standard ACP v1 resource-not-found code. A Session-scoped request for a
+ * Session this View does not hold, and a DEFINITE official
+ * `session/not-found`, both answer `-32002` with the requested `sessionId`;
+ * they are never a malformed-parameters refusal and never a conflict.
+ */
+const JSONRPC_RESOURCE_NOT_FOUND = -32002
 
 /**
  * The official message-source discriminants that prove HUMAN inbox input.
@@ -1703,7 +1710,8 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_NOT_OWNED',
         'this ACP connection holds no view for that session',
-        JSONRPC_INVALID_PARAMS,
+        JSONRPC_RESOURCE_NOT_FOUND,
+        { sessionId },
       )
     }
     return claim
@@ -2245,22 +2253,44 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     request: AcpResumeSessionParams,
     channels?: AcpViewChannels,
     requestSignal?: AbortSignal,
+    reattach = false,
   ): Promise<Record<string, never>> {
-    const op = this.beginAttach(state)
-    try {
-      this.validateResume(request)
-    } catch (error) {
-      this.resetIdleIfCurrent(state, op)
-      throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
-    }
     const sessionId = request.sessionId
-    if (this.claims.has(sessionId)) {
-      this.resetIdleIfCurrent(state, op)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
+    let op: number
+    let claim: ViewClaim
+    let previous: ViewClaim | undefined
+    if (reattach) {
+      // Validate-first: an illegal request or an ineligible held claim leaves the
+      // outgoing claim generation entirely untouched (no sink stopped, no abort).
+      try {
+        this.validateResume(request)
+      } catch (error) {
+        throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
+      }
+      // A reattach only refreshes the View it already owns. Declaring MCP
+      // servers (even the same ones) would require a lease restart, which is the
+      // explicit close -> ordinary attach path, never a silent reuse/replacement.
+      if ((request.mcpServers?.length ?? 0) > 0) throw this.reattachMcpRefused()
+      previous = this.reattachClaim(state, access, sessionId)
+      claim = this.replaceClaim(state, previous)
+      op = state.op
+    } else {
+      op = this.beginAttach(state)
+      try {
+        this.validateResume(request)
+      } catch (error) {
+        this.resetIdleIfCurrent(state, op)
+        throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
+      }
+      if (this.claims.has(sessionId)) {
+        this.resetIdleIfCurrent(state, op)
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
+      }
+      claim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
+      this.claims.set(sessionId, claim)
     }
-    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
-    this.claims.set(sessionId, claim)
     const agent = await this.resolveForView(access, state, op, claim)
+    if (previous !== undefined) this.requireSameGeneration(state, op, claim, previous, agent)
     // cwd is a claim proposal only; a difference is a fixed non-sensitive note,
     // never a Host cwd/model/workspace change.
     if (agent.session.header.cwd !== request.cwd) {
@@ -2314,29 +2344,50 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     request: AcpLoadSessionParams,
     channels?: AcpViewChannels,
     requestSignal?: AbortSignal,
+    reattach = false,
   ): Promise<Record<string, never>> {
-    const op = this.beginAttach(state)
-    try {
-      this.validateLoad(request)
-      if (!access.supportsSessionRead()) {
-        throw new LocalAcpViewError(
-          'LOCAL_ACP_LOAD_UNAVAILABLE',
-          'this Host cannot read canonical Session history',
-          JSONRPC_INVALID_PARAMS,
-        )
-      }
-    } catch (error) {
-      this.resetIdleIfCurrent(state, op)
-      throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
-    }
     const sessionId = request.sessionId
-    if (this.claims.has(sessionId)) {
-      this.resetIdleIfCurrent(state, op)
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
+    let op: number
+    let claim: ViewClaim
+    let previous: ViewClaim | undefined
+    const validate = (): void => {
+      try {
+        this.validateLoad(request)
+        if (!access.supportsSessionRead()) {
+          throw new LocalAcpViewError(
+            'LOCAL_ACP_LOAD_UNAVAILABLE',
+            'this Host cannot read canonical Session history',
+            JSONRPC_INVALID_PARAMS,
+          )
+        }
+      } catch (error) {
+        throw error instanceof AcpScopedMcpError ? mapScopedMcpError(error) : error
+      }
     }
-    const claim: ViewClaim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
-    this.claims.set(sessionId, claim)
+    if (reattach) {
+      // Validate-first: a refusal here never touches the outgoing generation.
+      validate()
+      if (request.mcpServers.length > 0) throw this.reattachMcpRefused()
+      previous = this.reattachClaim(state, access, sessionId)
+      claim = this.replaceClaim(state, previous)
+      op = state.op
+    } else {
+      op = this.beginAttach(state)
+      try {
+        validate()
+      } catch (error) {
+        this.resetIdleIfCurrent(state, op)
+        throw error
+      }
+      if (this.claims.has(sessionId)) {
+        this.resetIdleIfCurrent(state, op)
+        throw new LocalAcpViewError('LOCAL_ACP_VIEW_ALREADY_ATTACHED', 'the session is already attached to an ACP view', JSONRPC_INVALID_PARAMS)
+      }
+      claim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
+      this.claims.set(sessionId, claim)
+    }
     const agent = await this.resolveForView(access, state, op, claim)
+    if (previous !== undefined) this.requireSameGeneration(state, op, claim, previous, agent)
     if (agent.session.header.cwd !== request.cwd) {
       this.diag.warn('local-acp.view.cwd-mismatch', { mismatch: true })
     }
@@ -4151,7 +4202,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       || claim.exactAgent === undefined
       || claim.exactSession === undefined
     ) {
-      throw new LocalAcpViewError('LOCAL_ACP_VIEW_NOT_OWNED', 'this ACP connection holds no view for that session', JSONRPC_INVALID_PARAMS)
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_NOT_OWNED',
+        'this ACP connection holds no view for that session',
+        JSONRPC_RESOURCE_NOT_FOUND,
+        { sessionId: request.sessionId },
+      )
     }
     if (claim.replay !== undefined) {
       // A loaded View is still replaying its complete history. A new prompt is
@@ -5795,6 +5851,122 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * The exact settled claim this connection owns, for a same-connection
+   * reattach. A state that still owns ANY Host obligation refuses the
+   * replacement: a prompt flight, command/policy write, retiring turn, unclaimed
+   * obligation, joined close, open replay, MCP mount/retire/lease, or an open
+   * reverse Form / unresolved continued question is never released, cancelled
+   * or silently dropped by a reattach.
+   *
+   * The exact live Agent/Session identity is verified in the SAME synchronous
+   * stack as this call, immediately before the caller invokes the official
+   * resolver once; a lost identity fails closed instead of cold-resurrecting a
+   * different Agent under this reattach.
+   */
+  private reattachClaim(
+    state: ConnectionViewState,
+    access: HostAcpSessionAccess,
+    sessionId: string,
+  ): ViewClaim {
+    if (state.phase === 'closed') {
+      throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection is closed', JSONRPC_INVALID_PARAMS)
+    }
+    const claim = this.claims.get(sessionId)
+    if (state.phase !== 'attached' || claim === undefined || claim.connectionIdentity !== state
+      || claim.exactAgent === undefined || claim.exactSession === undefined) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_NOT_OWNED',
+        'this ACP connection holds no view for that session',
+        JSONRPC_RESOURCE_NOT_FOUND,
+        { sessionId },
+      )
+    }
+    if (claim.detachedWithFence === true) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_BUSY',
+        'the session view is still retiring its Host obligations',
+        JSONRPC_INVALID_PARAMS,
+      )
+    }
+    if (claim.inflight !== undefined || claim.commandOperation !== undefined || claim.policyWrite !== undefined
+      || claim.retiringTurn !== undefined || claim.unclaimedHostObligation !== undefined
+      || claim.closing !== undefined || claim.replay !== undefined
+      || claim.mcpMountPending === true || claim.mcpRetireRequested === true || claim.mcpLease !== undefined
+      || (claim.questionForms?.size ?? 0) > 0 || (claim.continuedQuestions?.size ?? 0) > 0) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_BUSY',
+        'the session view still owns unsettled ACP work',
+        JSONRPC_INVALID_PARAMS,
+      )
+    }
+    if (!Object.is(access.currentAgent(sessionId), claim.exactAgent)
+      || !Object.is(access.currentSession(sessionId), claim.exactSession)) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE',
+        'the attached session agent is no longer the live Host agent',
+        JSONRPC_INTERNAL_ERROR,
+        { sessionId },
+      )
+    }
+    return claim
+  }
+
+  /**
+   * Commit ONE fresh claim generation for a held Session in a single synchronous
+   * stack: the new reservation and op become current BEFORE the outgoing
+   * generation's config sink, read-only output, read IO and reverse Forms are
+   * retired, so no reentrant callback can observe two owners or deliver into the
+   * replaced generation. The old claim object is never current again.
+   */
+  private replaceClaim(state: ConnectionViewState, previous: ViewClaim): ViewClaim {
+    state.op += 1
+    state.phase = 'attaching'
+    const claim: ViewClaim = {
+      connectionIdentity: state,
+      sessionId: previous.sessionId,
+      readAbort: new AbortController(),
+    }
+    this.claims.set(previous.sessionId, claim)
+    previous.notifyConfigUpdate = undefined
+    this.stopProjectionOutput(previous)
+    this.releaseQuestionForms(previous)
+    return claim
+  }
+
+  /**
+   * A reattach is a refresh of the SAME borrowed Host Owner: the official
+   * resolver's result must be the EXACT captured Agent (and therefore the same
+   * Session), otherwise only this fresh reservation is released and the old
+   * generation is never resurrected.
+   */
+  private requireSameGeneration(
+    state: ConnectionViewState,
+    op: number,
+    claim: ViewClaim,
+    previous: ViewClaim,
+    agent: LiveAgentViewIdentity,
+  ): void {
+    if (Object.is(agent, previous.exactAgent)) return
+    this.releaseReservation(state, claim)
+    this.resetIdleIfCurrent(state, op)
+    throw new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE',
+      'the attached session agent is no longer the live Host agent',
+      JSONRPC_INTERNAL_ERROR,
+      { sessionId: claim.sessionId },
+    )
+  }
+
+  /** The ONE refusal of an MCP declaration on a same-connection reattach. */
+  private reattachMcpRefused(): LocalAcpViewError {
+    return new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_BUSY',
+      'a reattached session view cannot declare MCP servers; close it and attach again',
+      JSONRPC_INVALID_PARAMS,
+    )
+  }
+
+  /**
    * Enforce `idle -> attaching` BEFORE any Host await; a busy/closed view
    * refuses. Returns the attach-operation generation captured by the caller.
    */
@@ -6959,7 +7131,9 @@ function mapResolveError(error: { code: string; message: string }, sessionId: st
   const data = { sessionId }
   switch (error.code) {
     case 'session/not-found':
-      return new LocalAcpViewError('LOCAL_ACP_VIEW_SESSION_NOT_FOUND', 'the session does not exist on this Host', JSONRPC_INVALID_PARAMS, data)
+      // The standard not-active Session error: `-32002` plus the REQUESTED
+      // sessionId, distinguished from the connection's own routing conflict.
+      return new LocalAcpViewError('LOCAL_ACP_VIEW_SESSION_NOT_FOUND', 'the session does not exist on this Host', JSONRPC_RESOURCE_NOT_FOUND, data)
     case 'session/agent-busy':
       return new LocalAcpViewError('LOCAL_ACP_VIEW_SUBAGENT_OWNED', 'the session is owned by subagent routing', JSONRPC_INVALID_PARAMS, data)
     case 'session/writer-held':

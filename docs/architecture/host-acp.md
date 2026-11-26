@@ -260,7 +260,9 @@ profile's independent `autoStart` preference enables it (see below).
     `resolveAgent` (live-first, one cold resume, concurrent-resume dedup). The
     request `cwd` never changes the Session cwd/model/workspace; a difference is
     only recorded as a fixed non-sensitive note. A second ACP connection for a
-    Session already held is refused, and the TUI is never subject to that limit.
+    Session already held is refused, while the SAME connection may refresh the
+    settled View it already owns (see "Same-connection reattach" below), and the
+    TUI is never subject to that limit.
   - **Prompt content admission.** The attached View accepts standard ACP `text`,
     `resource_link`, and capability-negotiated `image` blocks in their original
     order. Adjacent text and resource links become ordered text content using the
@@ -1065,6 +1067,72 @@ ever reported as a complete load. Close, physical disconnect, runtime Off and
 Agent disposal invalidate the replay generation first, so a late read never
 sends a closed View's history. A View loaded this way keeps its exact seq fence
 and never becomes a second history authority.
+
+### Same-connection reattach
+
+`session/resume` and `session/load` on a Session THIS connection already holds
+refresh the View in place instead of conflicting: ONE fresh claim generation on
+the SAME routing slot and the SAME borrowed Host Session/Agent/Writer. It is not
+a second claim, not a new View slot (the eight-slot bound is unchanged, and a
+full connection may still refresh an existing View), and never a new Host
+Session, Agent or Writer.
+
+Eligibility is decided from the current claim's exact facts, validate-first and
+before any Host effect:
+
+- The held claim must be ATTACHED with its exact live Agent/Session identity and
+  no unsettled ACP responsibility: no prompt flight, command operation, policy
+  write, retiring turn, unclaimed Host obligation, joined or repeated close, open
+  replay, pending or owned scoped MCP mount/lease, or open reverse Form /
+  unresolved continued question. Any of them refuses `LOCAL_ACP_VIEW_BUSY` and
+  retires, cancels and drops nothing.
+- The request itself must be legal first; a Session this connection does not
+  hold is the standard not-active error below, never a reattach.
+- A repeat request that declares MCP servers is refused
+  (`LOCAL_ACP_VIEW_BUSY`) after full request validation, even when the current
+  lease declares the same servers: changing MCP is the explicit
+  `session/close` + ordinary attach path, never a silent reuse or replacement.
+- The exact live Agent/Session identity is re-verified in the SAME synchronous
+  stack immediately before the one official `resolveAgent`; a lost identity
+  fails closed (`LOCAL_ACP_VIEW_AGENT_UNAVAILABLE`) instead of attaching a
+  different cold-resumed Agent. The resolve result must be that same exact
+  Agent; otherwise only the fresh reservation is released.
+- The whole View slot admits ONE unsettled wire request for this refresh, from
+  request admission (including the post-attach initial config read) to its
+  response. A competing same-slot prompt / mode / config / repeat is refused
+  with `LOCAL_ACP_VIEW_BUSY` before dispatch; `session/close`, the physical
+  socket end and runtime Off stay admitted and retire the exact generation.
+  Other Sessions' slots are never serialized behind it.
+
+The replacement is ONE synchronous commit: the new claim and op become current
+BEFORE the outgoing generation's config sink, read-only output, read IO and
+reverse Forms are retired, so no reentrant callback can observe two owners or
+deliver into the replaced generation. Frames already submitted to the SDK
+connection's single write queue precede the refresh; an old async
+read/notification result is dropped by the existing exact-claim/epoch/sink
+fences. `load` replays the complete canonical history again for THIS request (a
+fresh generation keeps no previous dedupe or compaction state) and answers after
+its ordered drain, while `resume` replays nothing. A started refresh that later
+fails or is closed retires only its fresh generation and never rolls back to or
+resurrects the old one, so the client may explicitly attach again.
+
+### Session-scoped error classes
+
+An unknown, closed, foreign or detached Session is the standard ACP v1
+not-active class: JSON-RPC `-32002` carrying the REQUESTED `sessionId` plus the
+existing `LOCAL_ACP_VIEW_*` diagnostic `data.code`. This applies to
+`session/prompt`, `session/set_mode`, `session/set_config_option`, and to a
+`session/resume` / `session/load` whose official `resolveAgent` returns a
+definite `session/not-found` (`LOCAL_ACP_VIEW_SESSION_NOT_FOUND`); the requested
+id is never replaced by a Host guess. Malformed parameters (empty id, invalid
+cwd, unsupported mode/config value, malformed MCP declaration) keep their own
+`-32602` invalid-params classes and their existing precedence, and a Session
+held by ANOTHER connection keeps the conflict class
+(`LOCAL_ACP_VIEW_ALREADY_ATTACHED`, `-32602`). An unknown, inactive or foreign
+`session/close` remains the standard empty `{}` with no Host side effect, and
+`session/cancel` for such a Session stays a no-op. Real Host failures (internal
+error, writer-held or subagent-owned refusal, replay/attachment failure) keep
+their own classifications and are never rewritten as not-found.
 
 ### Read-only projections
 
