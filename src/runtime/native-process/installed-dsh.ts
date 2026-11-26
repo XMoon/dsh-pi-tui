@@ -75,7 +75,7 @@ export function installedDshAnchor(explicitAnchor?: string): string | undefined 
 }
 
 /** The nearest `node_modules` directory above a package directory. */
-export function nearestModuleRoot(packageDir: string): string | undefined {
+function nearestModuleRoot(packageDir: string): string | undefined {
   for (let dir = packageDir; ; dir = dirname(dir)) {
     if (basename(dir) === 'node_modules') return dir
     const parent = dirname(dir)

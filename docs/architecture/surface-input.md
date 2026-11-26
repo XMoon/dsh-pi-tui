@@ -462,8 +462,9 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   schema as the settings owner and the Remote ConfigPort reads and writes that
   Host descriptor. The Host validates the Client's requested policy against its
   live setting before preparation and again before spawn; a stale or mismatched
-  request fails closed. Sandbox mode requires Host enforcement `full` and never
-  falls back to bypass.
+  request fails closed. Sandbox mode never falls back to bypass; the accepted
+  enforcement of each Host dialect is owned by the ONE-SHOT execution bullet
+  below.
 - One run is a Host-owned ONE-SHOT execution on Direct and Remote alike: a
   POSIX Host spawns the raw `['bash', '-c', command]` through the official
   `ctx.subprocess.spawn` seam; a Windows Direct Host spawns the exact live

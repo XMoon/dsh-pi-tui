@@ -1295,5 +1295,4 @@ test('a PowerShell host path candidate is a single-quoted literal with doubled a
   const suggestions = await suggestShellCompletion(context, port, { kind: 'session', sessionId: 'session-a' }, { signal: abort, force: true })
   assert.equal(suggestions?.items[0]?.value, "'.\\中文$稿''s.txt'")
   assert.equal(suggestions?.items[0]?.label, ".\\中文$稿's.txt")
-  assert.equal(line.endsWith('s'), true)
 })

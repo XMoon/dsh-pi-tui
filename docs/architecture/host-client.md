@@ -2459,8 +2459,13 @@ pnpm gate:architecture  scripts/application-architecture-gate.mjs
 `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session` imports (type-only counts),
 then compares `(file, pattern)` pairs against the frozen baseline. A new pattern
 in an already-allowlisted file is still new debt and fails. The baseline is
-updated only for a deliberate migration-phase relocation, with the coupling
-contract updated in the same PR.
+normally updated only for a deliberate migration-phase relocation, with the
+coupling contract updated in the same PR. ONE additive case is explicit: a new
+Direct Host adapter capability whose owning contract changes in the same PR may
+add its own Host service resolution site to the baseline — that site belongs to
+the Direct composition/Host adapter plane, not to Client-side state, and its
+semantic port still carries only detached facts. Any broader baseline growth is
+the same new debt and fails review.
 
 The architecture gate enforces the dependency direction (see
 [overview.md](./overview.md)) and the single sanctioned dynamic Remote edge.

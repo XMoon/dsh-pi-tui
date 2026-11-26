@@ -38,7 +38,7 @@ export interface HostShellServiceLike {
 }
 
 /** The immutable public constants of the installed official pwsh-local module. */
-export interface PwshHostShellModule {
+interface PwshHostShellModule {
   readonly encodingPreamble: string
   readonly envOverrides: Readonly<Record<string, string>>
 }
@@ -53,7 +53,7 @@ const loadedModules = new Map<string, Promise<PwshHostShellModule>>()
  *   already holds one (Direct/Split-Host composition); otherwise the
  *   launcher/environment anchor is resolved.
  */
-export async function resolvePwshHostShellModule(explicitAnchor?: string): Promise<PwshHostShellModule> {
+async function resolvePwshHostShellModule(explicitAnchor?: string): Promise<PwshHostShellModule> {
   const anchor = installedDshAnchor(explicitAnchor)
   if (anchor === undefined) {
     throw new Error('the installed @deepseek-ai/dsh anchor is unavailable')
