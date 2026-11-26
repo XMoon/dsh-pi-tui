@@ -54,14 +54,19 @@ import {
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import {
   assertFetchProviderId,
-  assertFetchProviderReplaceable,
   assertSearchApiCount,
   assertSearchProviderId,
-  assertSearchProviderReplaceable,
   assertWebApiBilling,
   readWebApiBilling,
   webApiAdvancedFactsOf,
+  webBillingEligibility,
+  webProviderEffectiveId,
+  webProviderRestoreIsNoOp,
+  webProviderSelectIsNoOp,
+  webProviderSelectRefusal,
+  webProviderSelectionChanged,
   webProviderSelectionFactsOf,
+  WebProviderNoChanges,
 } from '../../domain/web-provider-settings.ts'
 import type {
   AccountBalanceOutcome,
@@ -102,6 +107,7 @@ import type {
   SectionRead,
   SectionMutationOutcome,
   WebProviderConfig,
+  WebProviderMutationOutcome,
   WebProviderSettings,
   TuiSettingsConfig,
   TuiSettingsDoc,
@@ -784,6 +790,11 @@ class RemoteConfigMirror {
    * An optional synchronous `beforeDispatch` predicate runs inside this same
    * write queue against the selected descriptor, and the exact descriptor
    * revision it receives is the revision sent to the Host CAS.
+   *
+   * `freshObservation` makes the queue turn wait for any already-started
+   * refresh and then start a NEW official `describe()` before selecting the
+   * descriptor (the Web admission/guard path). The default keeps the existing
+   * `ensureCurrent()` cache behavior for every other caller.
    */
   async mutate(
     ns: string,
@@ -791,6 +802,7 @@ class RemoteConfigMirror {
     baseRevision?: number,
     refreshFailure: 'reject' | 'record' = 'reject',
     beforeDispatch?: (descriptor: RemoteSettingsNamespaceView, expectedRevision: number | undefined) => void,
+    options?: { readonly freshObservation?: boolean },
   ): Promise<void> {
     // Accepted-work lifetime: registered SYNCHRONOUSLY by the caller's write
     // (before the serialized queue), released only when the enqueued write
@@ -798,7 +810,8 @@ class RemoteConfigMirror {
     const endWrite = this.writeLifetime.begin()
     try {
       await this.enqueueWrite(async () => {
-        await this.ensureCurrent()
+        if (options?.freshObservation === true) await this.describeFresh()
+        else await this.ensureCurrent()
         const snapshot = this.lastKnown()
         if (snapshot === undefined || !this.isCurrent()) {
           // §9.1: a write against a backend that cannot vouch for its values
@@ -1788,24 +1801,44 @@ function readRemoteShellExecutionSection(mirror: RemoteConfigMirror): SectionRea
   return projectRemoteView(snapshot.generation, mirror.namespace(active.namespace)!, projectShellExecutionSettings(active.executor))
 }
 
+/** The narrow opt-in seam the Web owner needs on the existing typed helper:
+ *  one queue-turn fresh observation and one synchronous domain guard after the
+ *  helper's own generation/revision checks but before `dispatchAdmitted`.
+ *  Every other section caller omits it and keeps the historical behavior. */
+interface RemoteSectionMutationSeam {
+  readonly freshObservation?: boolean
+  readonly beforeDispatch?: (
+    descriptor: RemoteSettingsNamespaceView,
+    queuedRevision: number | undefined,
+  ) => void
+}
+
 async function mutateRemoteSection(
   mirror: RemoteConfigMirror,
   namespace: string,
   ops: readonly RemoteSettingsPathOp[],
   expectedRevision: number,
   generation: object,
+  seam?: RemoteSectionMutationSeam,
 ): Promise<SectionMutationOutcome> {
 
   const currentGeneration = mirror.readyGeneration()
-  if (currentGeneration === undefined || !Object.is(currentGeneration, generation)) {
+  // The Web seam may recover a merely STALE mirror by its queue-turn
+  // `describeFresh()`: in that case the original capture stays authoritative
+  // and the synchronous callback re-proves generation/revision after the fresh
+  // observation. Every other caller keeps the historical ready-mirror fence.
+  const deferToFreshQueue = currentGeneration === undefined && seam?.freshObservation === true
+  if (!deferToFreshQueue && (currentGeneration === undefined || !Object.is(currentGeneration, generation))) {
     return { kind: 'rejected', reason: 'the Host authority changed; refresh before saving' }
   }
-  const current = mirror.namespace(namespace)
-  if (current === undefined) {
-    return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
-  }
-  if (current.revision !== expectedRevision) {
-    return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+  if (!deferToFreshQueue) {
+    const current = mirror.namespace(namespace)
+    if (current === undefined) {
+      return { kind: 'rejected', reason: 'the official Host settings section is not mounted' }
+    }
+    if (current.revision !== expectedRevision) {
+      return { kind: 'conflict', reason: 'the Host settings section changed since it was read' }
+    }
   }
   if (ops.length === 0) return { kind: 'rejected', reason: 'no settings fields were staged' }
 
@@ -1818,10 +1851,14 @@ async function mutateRemoteSection(
       if (descriptor.revision !== expectedRevision || queuedRevision !== expectedRevision) {
         throw Object.assign(new Error('the Host settings section changed since it was read'), { code: 'settings/conflict' })
       }
+      seam?.beforeDispatch?.(descriptor, queuedRevision)
       dispatchAdmitted = true
-    })
+    }, seam?.freshObservation === true ? { freshObservation: true } : undefined)
     return { kind: 'accepted' }
   } catch (error) {
+    // The Web no-op is a distinct zero-write result. Keep it typed at the
+    // adapter boundary; every non-Web caller never produces it.
+    if (error instanceof WebProviderNoChanges) throw error
     const reason = remoteFailureMessage(error)
     const code = remoteFailureCode(error)
     if (code === 'settings/conflict' || code === 'SETTINGS_CONFLICT') {
@@ -2468,14 +2505,55 @@ class RemoteWebProviderConfig implements WebProviderConfig {
   }
 
   async read(): Promise<WebProviderSettings | undefined> {
+    return await this.readSnapshot(false)
+  }
+
+  /** ONE explicit fresh official observation: `describeFresh()` first waits for
+   *  any already-started refresh and then starts a NEW describe, so a ready
+   *  cache or an older in-flight read can never stand in for this boundary. */
+  async readFresh(): Promise<WebProviderSettings | undefined> {
+    return await this.readSnapshot(true)
+  }
+
+  /** A synchronous currentness fact over the mirror's already-known authority.
+   *  It never starts a describe: a stale/not-ready mirror is not current, and a
+   *  ready replacement is a different generation. */
+  isObservationCurrent(
+    capture: WebProviderSettings,
+    target: 'both' | 'web' | 'api' = 'both',
+  ): boolean {
+    if (this.mirror.readiness() !== 'ready') return false
+    const generation = this.mirror.readyGeneration()
+    if (generation === undefined || !Object.is(generation, capture.authority.generation)) return false
+    const web = this.mirror.namespace(WEB_PROVIDER_NS)
+    const api = this.mirror.namespace(WEB_SEARCH_API_NS)
+    // A half-mounted observation is never a write authorization, not even for
+    // the one target whose own revision happens to match.
+    if (web === undefined || api === undefined) return false
+    const webCurrent = web.revision === capture.authority.webRevision
+    const apiCurrent = api.revision === capture.authority.apiRevision
+    return target === 'web' ? webCurrent : target === 'api' ? apiCurrent : webCurrent && apiCurrent
+  }
+
+  private async readSnapshot(fresh: boolean): Promise<WebProviderSettings | undefined> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await this.mirror.ensureCurrent()
+      if (fresh) await this.mirror.describeFresh()
+      else await this.mirror.ensureCurrent()
       if (this.mirror.readiness() !== 'ready') {
+        throw new SupersededReadError('the Remote Web settings have no current Host snapshot')
+      }
+      const generation = this.mirror.readyGeneration()
+      if (generation === undefined) {
         throw new SupersededReadError('the Remote Web settings have no current Host snapshot')
       }
       const web = this.mirror.namespace(WEB_PROVIDER_NS)
       const api = this.mirror.namespace(WEB_SEARCH_API_NS)
       if (web === undefined || api === undefined) return undefined
+      // The two revisions are the exact CAS tokens the captured decision will
+      // submit. A malformed one makes the whole read UNAVAILABLE: it can never
+      // authorize a write.
+      if (!validRemoteSettingsRevision(web.revision)
+        || !validRemoteSettingsRevision(api.revision)) return undefined
       const webValue = plainRecord(web.value)
       const apiValue = plainRecord(api.value)
       if (webValue === undefined || apiValue === undefined) return undefined
@@ -2497,7 +2575,10 @@ class RemoteWebProviderConfig implements WebProviderConfig {
       if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
       if (typeof sendOriginalQuestion !== 'boolean') return undefined
       const credential = await this.credentials.describeReference(WEB_API_KEY_REF)
+      // The credential await must not mix two Host states: a generation change,
+      // a readiness change or a replaced descriptor view discards this attempt.
       if (this.mirror.readiness() !== 'ready'
+        || !Object.is(this.mirror.readyGeneration(), generation)
         || this.mirror.namespace(WEB_PROVIDER_NS) !== web
         || this.mirror.namespace(WEB_SEARCH_API_NS) !== api) continue
       return {
@@ -2511,125 +2592,246 @@ class RemoteWebProviderConfig implements WebProviderConfig {
         api: { searchBilling, fetchBilling, count, sendOriginalQuestion },
         advanced: webApiAdvancedFactsOf(apiValue),
         credential,
+        authority: {
+          generation,
+          webRevision: web.revision,
+          apiRevision: api.revision,
+        },
       }
     }
     throw new SupersededReadError('the Remote Web settings read was repeatedly superseded')
   }
 
-  /** One revision-checked official settings mutation on the EXISTING mirror
-   *  write queue (the Host CAS revision is the selected descriptor's own
-   *  revision; the post-settlement `describe` is the only new authority). */
+  /** The actual Remote dispatch boundary: the existing typed mutation helper
+   *  owns the receipt classification; this adapter contributes only the
+   *  plan-authorized queue-turn fresh observation and the synchronous Web
+   *  domain guard (after the helper's own generation/revision checks). */
   private async dispatch(
     ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
     ops: readonly RemoteSettingsPathOp[],
-    guard?: (descriptor: RemoteSettingsNamespaceView) => void,
-  ): Promise<void> {
-    await this.mirror.ensureCurrent()
-    if (this.mirror.readiness() !== 'ready'
-      || this.mirror.namespace(WEB_PROVIDER_NS) === undefined
-      || this.mirror.namespace(WEB_SEARCH_API_NS) === undefined) {
-      throw new Error('the official Host Web settings sections are unavailable or non-current')
-    }
-    await this.mirror.mutate(
-      ns,
-      ops,
-      undefined,
-      'reject',
-      guard === undefined ? undefined : descriptor => { guard(descriptor) },
-    )
-  }
-
-  private async mutate(
-    ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
-    field: string,
-    value: unknown,
-    protectProvider?: 'searchProvider' | 'fetchProvider',
-  ): Promise<void> {
-    await this.dispatch(
-      ns,
-      [{ op: 'set', path: [field], value }],
-      protectProvider === undefined
-        ? undefined
-        : descriptor => {
-            const current = plainRecord(descriptor.value)
-            if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
-            if (protectProvider === 'searchProvider') assertSearchProviderReplaceable(current.searchProvider)
-            else assertFetchProviderReplaceable(current.fetchProvider)
+    capture: WebProviderSettings,
+    expectedRevision: number,
+    guard: (
+      web: RemoteSettingsNamespaceView | undefined,
+      api: RemoteSettingsNamespaceView | undefined,
+    ) => void,
+  ): Promise<WebProviderMutationOutcome> {
+    try {
+      return await mutateRemoteSection(
+        this.mirror,
+        ns,
+        ops,
+        expectedRevision,
+        capture.authority.generation,
+        {
+          freshObservation: true,
+          beforeDispatch: () => {
+            const web = this.mirror.namespace(WEB_PROVIDER_NS)
+            const api = this.mirror.namespace(WEB_SEARCH_API_NS)
+            // Both sections must exist in the SAME fresh snapshot; the target
+            // revision is the one the helper already checked.
+            if (web === undefined || api === undefined) {
+              throw new Error('the official Host Web settings section is not mounted (both must be readable)')
+            }
+            if (!validRemoteSettingsRevision(web.revision) || !validRemoteSettingsRevision(api.revision)) {
+              throw new Error('the official Host Web settings revision is not readable (both must be readable)')
+            }
+            guard(web, api)
           },
-    )
+        },
+      )
+    } catch (error) {
+      if (error instanceof WebProviderNoChanges) return { kind: 'no-changes' }
+      throw error
+    }
   }
 
-  async restoreSearchProvider(): Promise<void> {
-    await this.restoreProvider('searchProvider')
-  }
-
-  async restoreFetchProvider(): Promise<void> {
-    await this.restoreProvider('fetchProvider')
-  }
-
-  /** The ONE official USER-layer reset of one provider selection: a single
-   *  `unset` path op on the mirror's existing write queue. Both layers must be
-   *  readable; an already-absent USER own-field is a real no-op (sending
-   *  `unset` would let the official base substitution PIN it again when a
-   *  sibling USER field exists, so it must never be dispatched blindly).
-   *
-   *  STALE-INTENT FENCE: the facts are captured SYNCHRONOUSLY from the same
-   *  committed mirror view the caller's read used, BEFORE this write joins the
-   *  serialized queue. While it waits, another writer may refresh the mirror to
-   *  a different USER value or deployment default; the synchronous
-   *  `beforeDispatch` then compares the descriptor that supplies the CAS
-   *  revision with those captured facts and REFUSES the reset (zero Host
-   *  mutation) instead of clearing the other writer's newer value. */
-  private async restoreProvider(field: 'searchProvider' | 'fetchProvider'): Promise<void> {
-    const web = this.mirror.namespace(WEB_PROVIDER_NS)
+  private guardProviderSelect(
+    web: RemoteSettingsNamespaceView | undefined,
+    capture: WebProviderSettings,
+    capability: 'search' | 'fetch',
+    id: string,
+  ): void {
     if (web === undefined) throw new Error('the official Host Web settings section is unavailable')
-    const observed = webProviderSelectionFactsOf(web.base, web.user, field)
-    if (observed === undefined) {
+    const value = plainRecord(web.value)
+    if (value === undefined) throw new Error('the official Host Web settings section is unreadable')
+    const field = capability === 'search' ? 'searchProvider' : 'fetchProvider'
+    const selection = webProviderSelectionFactsOf(web.base, web.user, field)
+    if (selection === undefined) {
       throw new Error('the official Host Web settings section does not report its USER/base layers')
     }
-    if (!observed.userSet) return
-    await this.dispatch(
+    const effective = webProviderEffectiveId(value, field)
+    const capturedEffective = capability === 'search' ? capture.searchProvider : capture.fetchProvider
+    if (webProviderSelectionChanged(selection, capture.providerSelection[capability])
+      || effective !== capturedEffective) {
+      throw new Error('the Host Web selection changed since the page read it; nothing was written')
+    }
+    const refusal = webProviderSelectRefusal(capability, effective)
+    if (refusal !== undefined) throw new Error(refusal)
+    if (webProviderSelectIsNoOp(selection, effective, id)) throw new WebProviderNoChanges()
+  }
+
+  private guardProviderRestore(
+    web: RemoteSettingsNamespaceView | undefined,
+    capture: WebProviderSettings,
+    capability: 'search' | 'fetch',
+  ): void {
+    if (web === undefined) throw new Error('the official Host Web settings section is unavailable')
+    const value = plainRecord(web.value)
+    if (value === undefined) throw new Error('the official Host Web settings section is unreadable')
+    const field = capability === 'search' ? 'searchProvider' : 'fetchProvider'
+    const selection = webProviderSelectionFactsOf(web.base, web.user, field)
+    if (selection === undefined) {
+      throw new Error('the official Host Web settings section does not report its USER/base layers')
+    }
+    const effective = webProviderEffectiveId(value, field)
+    const capturedEffective = capability === 'search' ? capture.searchProvider : capture.fetchProvider
+    if (webProviderSelectionChanged(selection, capture.providerSelection[capability])
+      || effective !== capturedEffective) {
+      throw new Error('the Host Web USER selection changed since the page read it; nothing was written')
+    }
+    if (!selection.userSet) {
+      if (webProviderRestoreIsNoOp(selection, effective)) throw new WebProviderNoChanges()
+      throw new Error(`the USER selection is already absent, but the Host reads "${effective ?? 'Automatic'}" instead of the deployment default`)
+    }
+  }
+
+  private guardApiValue(
+    api: RemoteSettingsNamespaceView | undefined,
+    field: 'count' | 'sendOriginalQuestion',
+    value: unknown,
+  ): void {
+    if (api === undefined) throw new Error('the official Host Web settings section is unavailable')
+    const current = plainRecord(api.value)
+    if (current === undefined) throw new Error('the official Host Web settings section is unreadable')
+    if (current[field] === value) throw new WebProviderNoChanges()
+  }
+
+  private guardBilling(
+    web: RemoteSettingsNamespaceView | undefined,
+    api: RemoteSettingsNamespaceView | undefined,
+    capture: WebProviderSettings,
+    capability: 'search' | 'fetch',
+    mode: 'auto' | 'account' | 'api-key',
+  ): void {
+    if (web === undefined || api === undefined) {
+      throw new Error('the official Host Web settings section is unavailable')
+    }
+    if (!validRemoteSettingsRevision(web.revision) || web.revision !== capture.authority.webRevision) {
+      throw Object.assign(new Error('the Host Web provider dependency changed since it was read'), { code: 'settings/conflict' })
+    }
+    const webValue = plainRecord(web.value)
+    const apiValue = plainRecord(api.value)
+    if (webValue === undefined || apiValue === undefined) {
+      throw new Error('the official Host Web settings section is unreadable')
+    }
+    const eligibility = webBillingEligibility(webValue, apiValue, capability)
+    if (!eligibility.ok) throw new Error(eligibility.reason)
+    const field = capability === 'search' ? 'searchBilling' : 'fetchBilling'
+    if (apiValue[field] === mode) throw new WebProviderNoChanges()
+  }
+
+  async setSearchProvider(
+    id: 'deepseek-official' | 'deepseek-search-api',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
+    assertSearchProviderId(id)
+    return await this.dispatch(
       WEB_PROVIDER_NS,
-      [{ op: 'unset', path: [field] }],
-      descriptor => {
-        const live = webProviderSelectionFactsOf(descriptor.base, descriptor.user, field)
-        if (live === undefined) {
-          throw new Error('the official Host Web settings section does not report its USER/base layers')
-        }
-        if (live.baseId !== observed.baseId || live.userSet !== observed.userSet || live.userId !== observed.userId) {
-          throw new Error('the Host Web USER/base selection changed before the reset was dispatched; no reset was dispatched')
-        }
-      },
+      [{ op: 'set', path: ['searchProvider'], value: id }],
+      capture,
+      capture.authority.webRevision,
+      (web) => { this.guardProviderSelect(web, capture, 'search', id) },
     )
   }
 
-  async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
-    assertSearchProviderId(id)
-    await this.mutate(WEB_PROVIDER_NS, 'searchProvider', id, 'searchProvider')
-  }
-
-  async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
+  async setFetchProvider(
+    id: 'http' | 'deepseek-fetch-api',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertFetchProviderId(id)
-    await this.mutate(WEB_PROVIDER_NS, 'fetchProvider', id, 'fetchProvider')
+    return await this.dispatch(
+      WEB_PROVIDER_NS,
+      [{ op: 'set', path: ['fetchProvider'], value: id }],
+      capture,
+      capture.authority.webRevision,
+      (web) => { this.guardProviderSelect(web, capture, 'fetch', id) },
+    )
   }
 
-  async setSearchApiCount(count: number): Promise<void> {
+  async setSearchApiCount(
+    count: number,
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertSearchApiCount(count)
-    await this.mutate(WEB_SEARCH_API_NS, 'count', count)
+    return await this.dispatch(
+      WEB_SEARCH_API_NS,
+      [{ op: 'set', path: ['count'], value: count }],
+      capture,
+      capture.authority.apiRevision,
+      (_web, api) => { this.guardApiValue(api, 'count', count) },
+    )
   }
 
-  async setSendOriginalQuestion(enabled: boolean): Promise<void> {
-    await this.mutate(WEB_SEARCH_API_NS, 'sendOriginalQuestion', enabled)
+  async setSendOriginalQuestion(
+    enabled: boolean,
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
+    return await this.dispatch(
+      WEB_SEARCH_API_NS,
+      [{ op: 'set', path: ['sendOriginalQuestion'], value: enabled }],
+      capture,
+      capture.authority.apiRevision,
+      (_web, api) => { this.guardApiValue(api, 'sendOriginalQuestion', enabled) },
+    )
   }
 
-  async setSearchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+  async setSearchBilling(
+    mode: 'auto' | 'account' | 'api-key',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertWebApiBilling(mode)
-    await this.mutate(WEB_SEARCH_API_NS, 'searchBilling', mode)
+    return await this.dispatch(
+      WEB_SEARCH_API_NS,
+      [{ op: 'set', path: ['searchBilling'], value: mode }],
+      capture,
+      capture.authority.apiRevision,
+      (web, api) => { this.guardBilling(web, api, capture, 'search', mode) },
+    )
   }
 
-  async setFetchBilling(mode: 'auto' | 'account' | 'api-key'): Promise<void> {
+  async setFetchBilling(
+    mode: 'auto' | 'account' | 'api-key',
+    capture: WebProviderSettings,
+  ): Promise<WebProviderMutationOutcome> {
     assertWebApiBilling(mode)
-    await this.mutate(WEB_SEARCH_API_NS, 'fetchBilling', mode)
+    return await this.dispatch(
+      WEB_SEARCH_API_NS,
+      [{ op: 'set', path: ['fetchBilling'], value: mode }],
+      capture,
+      capture.authority.apiRevision,
+      (web, api) => { this.guardBilling(web, api, capture, 'fetch', mode) },
+    )
+  }
+
+  async restoreSearchProvider(capture: WebProviderSettings): Promise<WebProviderMutationOutcome> {
+    return await this.dispatch(
+      WEB_PROVIDER_NS,
+      [{ op: 'unset', path: ['searchProvider'] }],
+      capture,
+      capture.authority.webRevision,
+      (web) => { this.guardProviderRestore(web, capture, 'search') },
+    )
+  }
+
+  async restoreFetchProvider(capture: WebProviderSettings): Promise<WebProviderMutationOutcome> {
+    return await this.dispatch(
+      WEB_PROVIDER_NS,
+      [{ op: 'unset', path: ['fetchProvider'] }],
+      capture,
+      capture.authority.webRevision,
+      (web) => { this.guardProviderRestore(web, capture, 'fetch') },
+    )
   }
 }
 

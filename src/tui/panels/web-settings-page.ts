@@ -33,8 +33,8 @@
  */
 
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { maskWebProviderOverrideUrl, type WebProviderSelectionFacts } from '../../domain/web-provider-settings.ts'
-import type { WebProviderSettings } from '../../runtime/config-port.ts'
+import { isWebApiBilling, maskWebProviderOverrideUrl, sameWebAuthority, type WebProviderSelectionFacts } from '../../domain/web-provider-settings.ts'
+import type { WebProviderAuthority, WebProviderSettings } from '../../runtime/config-port.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { ACTION_BAR_SEPARATOR } from '../presentation/action-bar.ts'
@@ -79,25 +79,57 @@ export const WEB_PROVIDER_AUTOMATIC_KEY = '\u0000automatic'
  *  the custom id. */
 export const WEB_PROVIDER_RESTORE_KEY = '\u0000restore-deployment-default'
 
-/** One CONFIRMED provider selection intent. `observed` carries the same `web`
- *  descriptor layer facts the page painted, so the queue head can refuse a
- *  gesture a newer Host state no longer describes (never silently re-target). */
-export type WebProviderCommitIntent =
+/** One CONFIRMED Web decision. It carries the EXACT painted capture (generation,
+ *  both revisions and the observed facts) plus the semantic action the frame
+ *  offered. The command owner never re-derives it from a later candidate list,
+ *  a live index or a fresher read. */
+export type WebSettingsDecision =
   | {
-      /** Explicitly select this official provider id (`set`). */
+      readonly rowId: 'web-search-provider'
       readonly kind: 'provider-select'
       readonly id: string
-      readonly observed: WebProviderSelectionFacts
+      readonly capture: WebProviderSettings
     }
   | {
-      /** Restore the deployment selection: the ONE official `unset`. */
+      readonly rowId: 'web-search-provider'
       readonly kind: 'provider-restore'
-      readonly observed: WebProviderSelectionFacts
+      readonly capture: WebProviderSettings
     }
-
-/** One commit request: a plain string for the non-provider rows (unchanged),
- *  a typed intent for the two provider rows. */
-export type WebSettingsCommitRequest = string | WebProviderCommitIntent
+  | {
+      readonly rowId: 'web-fetch-provider'
+      readonly kind: 'provider-select'
+      readonly id: string
+      readonly capture: WebProviderSettings
+    }
+  | {
+      readonly rowId: 'web-fetch-provider'
+      readonly kind: 'provider-restore'
+      readonly capture: WebProviderSettings
+    }
+  | {
+      readonly rowId: 'web-search-count'
+      readonly kind: 'set-count'
+      readonly count: number
+      readonly capture: WebProviderSettings
+    }
+  | {
+      readonly rowId: 'web-send-original-question'
+      readonly kind: 'set-original-question'
+      readonly enabled: boolean
+      readonly capture: WebProviderSettings
+    }
+  | {
+      readonly rowId: 'web-search-billing'
+      readonly kind: 'set-search-billing'
+      readonly mode: 'auto' | 'account' | 'api-key'
+      readonly capture: WebProviderSettings
+    }
+  | {
+      readonly rowId: 'web-fetch-billing'
+      readonly kind: 'set-fetch-billing'
+      readonly mode: 'auto' | 'account' | 'api-key'
+      readonly capture: WebProviderSettings
+    }
 
 /** The four recommended result-count presets. The official `count` domain is
  *  1–50; a stored integer outside this list is still reported verbatim and is
@@ -193,35 +225,42 @@ export type WebSettingsFacts =
   | { readonly kind: 'unavailable'; readonly reason: string }
   | { readonly kind: 'ready'; readonly settings: WebProviderSettings }
 
-/** The command owner's verdict for ONE confirmed write intent, decided against
- *  the newest authoritative read-back. `verified` means the Host really HOLDS
- *  the requested identity; `not-saved` means a readable authority keeps another
- *  value (it is reported); `outcome-unknown` means the result could not be
- *  attributed and the next fresh read owns the display. */
+/** The command owner's verdict for ONE confirmed decision. `verified` means a
+ *  trusted post-receipt read proved the Host holds the requested value;
+ *  `no-changes` means a validated request needed no write; `not-saved` is a
+ *  proven pre-dispatch refusal/CAS conflict; `unverified` is an accepted write
+ *  whose readback could not prove it; `outcome-unconfirmed` is a lost/unknown
+ *  receipt. The last two share the same short warning but stay distinct
+ *  internally. `authority` is the observation the verdict was bound to. */
 export type WebCommitResult =
-  | { readonly kind: 'verified'; readonly actual: string }
-  | { readonly kind: 'not-saved'; readonly reason: string; readonly actual?: string }
-  | { readonly kind: 'outcome-unknown'; readonly reason: string }
+  | { readonly kind: 'verified'; readonly actual: string; readonly authority?: WebProviderAuthority }
+  | { readonly kind: 'no-changes'; readonly actual: string; readonly authority?: WebProviderAuthority }
+  | { readonly kind: 'not-saved'; readonly reason: string; readonly actual?: string; readonly authority?: WebProviderAuthority }
+  | { readonly kind: 'unverified'; readonly reason: string; readonly authority?: WebProviderAuthority }
+  | { readonly kind: 'outcome-unconfirmed'; readonly reason: string; readonly authority?: WebProviderAuthority }
 
 /** One transient per-row write phase (presentation only; never a shadow value). */
 export interface WebRowPhase {
-  readonly kind: 'saving' | 'verified' | 'not-saved' | 'outcome-unknown'
+  readonly kind: 'saving' | 'verified' | 'no-changes' | 'not-saved' | 'unverified' | 'outcome-unconfirmed'
   readonly reason?: string
+  /** The authority observation a settled verdict was bound to; a newer
+   *  observation retires it rather than repainting it as current. */
+  readonly authority?: WebProviderAuthority
 }
 
 /** The client-local capabilities and command-owner seams this page consumes. */
 export interface WebSettingsPageIntents {
   /** The LATEST authoritative read state, read synchronously at render time. */
   readonly readFacts: () => WebSettingsFacts
-  /** Why this page may not commit right now (backend non-current/unavailable).
-   *  The page still paints the last read facts, but offers NO confirmable
-   *  candidate and no credential action until it is writable again — the
-   *  command queue would refuse every one of them. */
-  readonly writableRefusal: () => string | undefined
+  /** Why ONE row may not commit right now (backend non-current/unavailable, or
+   *  the row's own namespace observation moved). The page still paints the last
+   *  read facts, but offers NO confirmable candidate and no credential action
+   *  until that row is writable again — the command queue would refuse it. */
+  readonly writableRefusal: (rowId?: import('./web-settings-page.ts').WebSettingRowId) => string | undefined
   /** Whether the official credential store is mounted right now. */
   readonly credentialAvailable: () => boolean
-  /** Queue ONE confirmed intent on the command owner's single Web FIFO. */
-  readonly commit: (id: WebSettingRowId, requested: WebSettingsCommitRequest) => Promise<WebCommitResult>
+  /** Queue ONE confirmed decision on the command owner's single Web FIFO. */
+  readonly commit: (request: WebSettingsDecision) => Promise<WebCommitResult>
   /** Start a fresh authoritative Host read (`r` and page entry). */
   readonly refresh: () => void
   /** The root's narrow page-switch intent: retire this page and open the
@@ -352,13 +391,15 @@ function wholeWording(preferred: BarWording, width: number, shorter: readonly Ba
   return [preferred, ...shorter].find(word => visibleWidth(word.text) <= width) ?? EMPTY_WORDING
 }
 
-/** The state WORD + ink of one transient phase (§4A.2 vocabulary). */
+/** The short feedback WORD + ink of one transient phase (#893 vocabulary). */
 function phaseWord(phase: WebRowPhase): string {
   switch (phase.kind) {
     case 'saving': return color.textDim('Saving…')
-    case 'verified': return color.success('Verified')
-    case 'not-saved': return color.error('Not saved')
-    case 'outcome-unknown': return color.warning('Outcome unknown')
+    case 'verified': return color.success('Saved')
+    case 'no-changes': return color.textMuted('No changes')
+    case 'not-saved': return color.error('Could not save')
+    case 'unverified':
+    case 'outcome-unconfirmed': return color.warning('Could not confirm save')
   }
 }
 
@@ -384,10 +425,27 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  must point at the value the Host holds (an unrelated later read must not
    *  yank a draft the user already moved). */
   private authorityAnchored = false
-  /** The authority facts the LAST painted frame used. A confirmed provider
-   *  gesture carries THESE facts (not a read that settled after the paint), so
-   *  the command queue can detect that the Host changed under the gesture. */
+  /** The authority facts the LAST painted frame used. A confirmed gesture
+   *  carries THESE facts (not a read that settled after the paint), so the
+   *  command queue can detect that the Host changed under the gesture. */
   private paintedFacts: WebSettingsFacts | undefined
+  /** The complete semantic decision the LAST painted frame offered: the typed
+   *  request, its raw candidate key, the highlight index and the frame
+   *  revision. Keyboard Enter and the delegated bar span consume THIS, never a
+   *  live candidate list/index. */
+  private paintedDecision:
+    | {
+      readonly request: WebSettingsDecision
+      readonly rowId: WebSettingRowId
+      readonly candidateKey: string
+      readonly choiceIndex: number
+      readonly revision: number
+    }
+    | undefined
+  /** The last authority observation this page rendered. A changed generation
+   *  or revision set bumps the monotonic gesture revision, so an A→B→A round
+   *  trip can never revive an earlier press/confirm. */
+  private lastAuthority: WebProviderAuthority | undefined
   /** The highlighted credential action. */
   private actionIndex = 0
   private listOffset = 0
@@ -443,6 +501,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // the delegated Confirm target) is stale.
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
+    this.paintedDecision = undefined
   }
 
   private bodyRows(): number {
@@ -543,18 +602,22 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   activateBarSpan(id: string): void {
     if (this.disposed || id !== 'web:confirm') return
     const target = this.paintedConfirmTarget
-    if (target === undefined) return
-    if (target.revision !== this.revision) return
+    const decision = this.paintedDecision
+    if (target === undefined || decision === undefined) return
+    if (target.revision !== this.revision || decision.revision !== this.revision) return
     if (this.region !== 'detail') return
-    if (this.selectedSettingId() !== target.rowId) return
+    if (this.selectedSettingId() !== target.rowId || decision.rowId !== target.rowId) return
+    if (decision.candidateKey !== target.candidate) return
+    if (decision.choiceIndex !== this.choiceIndex) return
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
-    if (this.intents.writableRefusal() !== undefined) return
+    if (!sameWebAuthority(facts.settings.authority, decision.request.capture.authority, this.authorityTarget(decision.request.kind))) return
+    if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return
     if (this.phases.get(target.rowId)?.kind === 'saving') return
-    if (this.choiceValues()[this.choiceIndex] !== target.candidate) return
     if (!this.paintedChoiceVisible(target.candidate)) return
-    // The ONE business sink: the original Enter path (never a second writer).
-    this.confirmSelected()
+    // The ONE business sink: the same typed decision the frame painted, never a
+    // live index/candidate reinterpretation.
+    this.confirmChoice(decision.request)
   }
 
   /** The page's own SEMANTIC identity for a pointer gesture: the region, the
@@ -574,6 +637,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.disposed = true
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
+    this.paintedDecision = undefined
     this.paint = undefined
     this.pressed = undefined
     this.phases.clear()
@@ -712,10 +776,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     })
   }
 
-  /** Enter in the Detail: confirm the highlighted candidate (choice rows) or
-   *  activate one credential deeplink. The read-only override rows offer no
-   *  candidate, so their Enter only re-proves the painted frame (nothing
-   *  writes). Nothing else writes. */
+  /** Enter in the Detail: confirm the EXACT decision the last painted frame
+   *  offered (choice rows) or activate one credential deeplink. The read-only
+   *  override rows offer no candidate, so their Enter only re-proves the
+   *  painted frame (nothing writes). Nothing else writes. */
   private confirmSelected(): void {
     const rowId = this.selectedRowId()
     if (rowId === undefined) return
@@ -723,54 +787,103 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       this.activateCredentialAction()
       return
     }
+    const painted = this.paintedDecision
+    if (painted === undefined || painted.rowId !== rowId) return
+    if (painted.choiceIndex !== this.choiceIndex) return
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return
-    const requested = this.choiceValues()[this.choiceIndex]
-    if (requested === undefined) return
+    if (!sameWebAuthority(facts.settings.authority, painted.request.capture.authority, this.authorityTarget(painted.request.kind))) return
+    if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return
+    if (this.phases.get(rowId)?.kind === 'saving') return
     // The candidate must be VISIBLE in this frame: an off-screen highlight is
     // never confirmed (the same rule the workspace's choice projection keeps).
-    if (!this.paintedChoiceVisible(requested)) return
-    const request = this.commitRequestFor(rowId, requested)
-    if (request === undefined) return
-    this.confirmChoice(rowId, request)
+    if (!this.paintedChoiceVisible(painted.candidateKey)) return
+    this.confirmChoice(painted.request)
   }
 
-  /** The TYPED intent a provider option really means, carrying the page-time
-   *  layer facts. It is decided HERE (not re-derived by the queue head): a
-   *  candidate equal to the deployment default is the official reset, every
-   *  other candidate is an explicit set, and the restore rows are never a
-   *  provider id. Non-provider rows keep their plain string request. */
-  private commitRequestFor(rowId: WebSettingRowId, requested: string): WebSettingsCommitRequest | undefined {
-    if (rowId !== 'web-search-provider' && rowId !== 'web-fetch-provider') return requested
-    // The intent records the read the PAINTED frame was built from: a read
-    // that settles afterwards must make the queue refuse (Not saved), never
-    // silently re-interpret the same key as a different official action.
-    const facts = this.paintedFacts ?? this.intents.readFacts()
-    if (facts.kind !== 'ready') return undefined
-    const capability = rowId === 'web-search-provider' ? 'search' : 'fetch'
-    const observed = facts.settings.providerSelection[capability]
-    const choice = this.providerChoices(rowId, facts.settings).find(entry => entry.key === requested)
-    if (choice === undefined) return undefined
-    if (choice.action === 'restore') return { kind: 'provider-restore', observed }
-    if (choice.id === undefined) return undefined
-    return { kind: 'provider-select', id: choice.id, observed }
+  /** The TYPED decision a candidate really means, built ONLY from the LAST
+   *  painted frame's capture. A candidate equal to the deployment default is
+   *  the official reset, every other candidate is an explicit set, and the
+   *  restore rows are never a provider id. A read that settles afterwards can
+   *  only make the queue refuse; it never re-interprets the same key. */
+  private commitRequestFor(rowId: WebSettingRowId, requested: string): WebSettingsDecision | undefined {
+    const facts = this.paintedFacts
+    if (facts?.kind !== 'ready') return undefined
+    const capture = facts.settings
+    switch (rowId) {
+      case 'web-search-provider':
+      case 'web-fetch-provider': {
+        const choice = this.providerChoices(rowId, capture).find(entry => entry.key === requested)
+        if (choice === undefined) return undefined
+        if (choice.action === 'restore') return { rowId, kind: 'provider-restore', capture }
+        if (choice.id === undefined) return undefined
+        return { rowId, kind: 'provider-select', id: choice.id, capture }
+      }
+      case 'web-search-count': {
+        const count = Number(requested)
+        return Number.isInteger(count) && count >= 1 && count <= 50
+          ? { rowId, kind: 'set-count', count, capture }
+          : undefined
+      }
+      case 'web-send-original-question':
+        return requested === 'on' || requested === 'off'
+          ? { rowId, kind: 'set-original-question', enabled: requested === 'on', capture }
+          : undefined
+      case 'web-search-billing':
+        return isWebApiBilling(requested)
+          ? { rowId, kind: 'set-search-billing', mode: requested, capture }
+          : undefined
+      case 'web-fetch-billing':
+        return isWebApiBilling(requested)
+          ? { rowId, kind: 'set-fetch-billing', mode: requested, capture }
+          : undefined
+      case 'web-search-advanced':
+      case 'web-fetch-advanced':
+        return undefined
+    }
   }
 
   /** ONE explicit confirm → the command owner's FIFO → the painted verdict. The
    *  page never dispatches a second write for the same draft. */
-  private confirmChoice(rowId: WebSettingRowId, requested: WebSettingsCommitRequest): void {
+  private confirmChoice(request: WebSettingsDecision): void {
+    const rowId = request.rowId
     if (this.phases.get(rowId)?.kind === 'saving') return
     this.commitPresentation(() => {
       this.phases.set(rowId, { kind: 'saving' })
     })
     this.intents.run(`web settings ${rowId} write`, async () => {
-      const result = await this.intents.commit(rowId, requested)
+      const result = await this.intents.commit(request)
       if (this.disposed) return
       this.commitPresentation(() => {
-        if (result.kind === 'verified') this.phases.set(rowId, { kind: 'verified' })
-        else if (result.kind === 'not-saved') {
-          this.phases.set(rowId, { kind: 'not-saved', ...result.reason === '' ? {} : { reason: result.reason } })
-        } else this.phases.set(rowId, { kind: 'outcome-unknown', reason: result.reason })
+        switch (result.kind) {
+          case 'verified':
+            this.phases.set(rowId, { kind: 'verified', authority: result.authority })
+            break
+          case 'no-changes':
+            this.phases.set(rowId, { kind: 'no-changes', authority: result.authority })
+            break
+          case 'not-saved':
+            this.phases.set(rowId, {
+              kind: 'not-saved',
+              ...result.reason === '' ? {} : { reason: result.reason },
+              ...result.authority === undefined ? {} : { authority: result.authority },
+            })
+            break
+          case 'unverified':
+            this.phases.set(rowId, {
+              kind: 'unverified',
+              reason: result.reason,
+              ...result.authority === undefined ? {} : { authority: result.authority },
+            })
+            break
+          case 'outcome-unconfirmed':
+            this.phases.set(rowId, {
+              kind: 'outcome-unconfirmed',
+              reason: result.reason,
+              ...result.authority === undefined ? {} : { authority: result.authority },
+            })
+            break
+        }
       })
     })
   }
@@ -779,6 +892,13 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
 
   private selectedRowId(): WebSettingsRowId | undefined {
     return WEB_SETTINGS_ROW_IDS[this.cursor]
+  }
+
+  /** Which namespace revision a confirmed decision actually depends on. */
+  private authorityTarget(kind: WebSettingsDecision['kind']): 'both' | 'web' | 'api' {
+    if (kind === 'provider-select' || kind === 'provider-restore') return 'web'
+    if (kind === 'set-search-billing' || kind === 'set-fetch-billing') return 'both'
+    return 'api'
   }
 
   /** The CONFIGURED row behind the cursor (`undefined` for the credential row). */
@@ -796,7 +916,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     if (rowId === undefined || rowId === 'web-search-advanced' || rowId === 'web-fetch-advanced') return []
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
-    if (this.intents.writableRefusal() !== undefined) return []
+    if (this.intents.writableRefusal(rowId) !== undefined) return []
     switch (rowId) {
       case 'web-search-provider':
         return this.providerChoices(rowId, facts.settings).map(choice => choice.key)
@@ -1022,7 +1142,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
   private credentialActions(): readonly { readonly action: 'configure' | 'clear'; readonly label: string; readonly enabled: boolean }[] {
     const facts = this.intents.readFacts()
     if (facts.kind !== 'ready') return []
-    if (this.intents.writableRefusal() !== undefined) return []
+    if (this.intents.writableRefusal(this.selectedSettingId()) !== undefined) return []
     const state = this.credentialState(facts)
     if (!state.available) return []
     return [
@@ -1212,6 +1332,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     // saving/loading fact) must not leave the previous frame's spans alive.
     this.paintedEscapeSpanValue = undefined
     this.paintedConfirmTarget = undefined
+    this.paintedDecision = undefined
     // A fresh read can invalidate the credential cursor before this frame: clamp
     // it FIRST so the painted cursor, the bar and the Enter target agree.
     if (this.selectedRowId() === 'web-credential') {
@@ -1220,6 +1341,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const grant = this.rowGrant
     const bodyRows = this.bodyRows()
     const facts = this.intents.readFacts()
+    // A changed authority observation invalidates the previous gesture and
+    // retires settled receipts that no longer belong to the visible facts.
+    this.noteAuthority(facts)
+    this.retireStalePhases(facts)
     // Anchor the placeholder highlight on the FIRST readable authority so the
     // Automatic / deployment-default row is never painted as selected while a
     // different option carries `[current]`. A later read keeps the user's draft.
@@ -1264,28 +1389,72 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     this.paintedEscapeSpanValue = escapeSegment === undefined
       ? undefined
       : { startCol: escapeSegment.startCol, endCol: escapeSegment.endCol }
-    const confirmSegment = bar.segments.find(segment => segment.ink === 'confirm')
-    if (confirmSegment !== undefined) {
-      const rowId = this.selectedSettingId()
-      const candidate = rowId === undefined ? undefined : this.choiceValues()[this.choiceIndex]
-      // The delegate may only describe a candidate this frame REALLY painted:
-      // the option must own a painted hit target (a cropped candidate has
-      // none), so the bar can never advertise an unexecutable Confirm.
-      const paintedOption = candidate !== undefined
-        && targets.some(target => target.kind === 'option' && target.id === candidate)
-      if (rowId !== undefined && candidate !== undefined && paintedOption) {
-        this.paintedConfirmTarget = {
-          revision: this.revision,
+    const rowId = this.selectedSettingId()
+    const candidate = rowId === undefined ? undefined : this.choiceValues()[this.choiceIndex]
+    // The decision may only describe a candidate this frame REALLY painted:
+    // the option must own a painted hit target (a cropped candidate has none),
+    // so neither Enter nor the bar can act on an unexecutable candidate.
+    const paintedOption = candidate !== undefined
+      && targets.some(target => target.kind === 'option' && target.id === candidate)
+    if (rowId !== undefined && candidate !== undefined && paintedOption) {
+      const request = this.commitRequestFor(rowId, candidate)
+      if (request !== undefined) {
+        this.paintedDecision = {
+          request,
           rowId,
-          candidate,
-          startCol: confirmSegment.startCol,
-          endCol: confirmSegment.endCol,
+          candidateKey: candidate,
+          choiceIndex: this.choiceIndex,
+          revision: this.revision,
         }
+      }
+    }
+    const confirmSegment = bar.segments.find(segment => segment.ink === 'confirm')
+    if (confirmSegment !== undefined && this.paintedDecision !== undefined
+      && rowId !== undefined && candidate !== undefined) {
+      this.paintedConfirmTarget = {
+        revision: this.revision,
+        rowId,
+        candidate,
+        startCol: confirmSegment.startCol,
+        endCol: confirmSegment.endCol,
       }
     }
     lines.push(fit(this.paintBarWording(bar), width))
     this.paint = { width, rows: grant, bodyRows, targetRows: targets }
     return lines.slice(0, grant)
+  }
+
+  /** A changed authority observation is a new semantic frame: bump the
+   *  monotonic gesture revision and drop the previous frame's decision/target.
+   *  An A→B→A round trip therefore cannot revive an earlier press. */
+  private noteAuthority(facts: WebSettingsFacts): void {
+    const authority = facts.kind === 'ready' ? facts.settings.authority : undefined
+    const changed = !sameWebAuthority(authority, this.lastAuthority)
+    this.lastAuthority = authority
+    if (!changed) return
+    this.revision += 1
+    this.paintedConfirmTarget = undefined
+    this.paintedDecision = undefined
+  }
+
+  /** Retire a settled receipt when the visible observation no longer proves
+   *  it. A success never survives a newer/unreadable observation; a problem
+   *  receipt survives while no newer readable authority replaced it. */
+  private retireStalePhases(facts: WebSettingsFacts): void {
+    for (const [rowId, phase] of this.phases) {
+      if (phase.kind === 'saving') continue
+      if (facts.kind !== 'ready') {
+        if (phase.kind === 'verified' || phase.kind === 'no-changes') this.phases.delete(rowId)
+        continue
+      }
+      if ((phase.kind === 'verified' || phase.kind === 'no-changes') && phase.authority === undefined) {
+        this.phases.delete(rowId)
+        continue
+      }
+      if (phase.authority !== undefined && !sameWebAuthority(facts.settings.authority, phase.authority)) {
+        this.phases.delete(rowId)
+      }
+    }
   }
 
   /** Point the page's placeholder highlight at the FIRST readable authority.
@@ -1450,9 +1619,9 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     const selected = rowId === this.selectedRowId()
     const cursor = selected ? (this.region === 'list' ? color.primary('> ') : color.textMuted('> ')) : '  '
     const phase = rowId === 'web-credential' ? undefined : this.phases.get(rowId)
-    const phaseWordText = phase === undefined || phase.kind === 'verified'
+    const phaseWordText = phase === undefined || phase.kind === 'verified' || phase.kind === 'no-changes'
       ? undefined
-      : phase.kind === 'saving' ? 'Saving…' : phase.kind === 'not-saved' ? 'Not saved' : 'Outcome unknown'
+      : phase.kind === 'saving' ? 'Saving…' : phase.kind === 'not-saved' ? 'Could not save' : 'Could not confirm save'
     const labelOf = (room: number): string => {
       const label = truncateToWidth(this.rowLabel(rowId), Math.max(1, room), '…', false)
       return selected ? color.textStrong(label) : color.text(label)
@@ -1463,7 +1632,8 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
       const lead = `${cursor}${label}`
       const gap = Math.max(1, width - visibleWidth(lead) - wordCells)
       const ink = phase?.kind === 'not-saved' ? color.error(phaseWordText)
-        : phase?.kind === 'outcome-unknown' ? color.warning(phaseWordText) : color.textDim(phaseWordText)
+        : phase?.kind === 'unverified' || phase?.kind === 'outcome-unconfirmed'
+          ? color.warning(phaseWordText) : color.textDim(phaseWordText)
       return fit(`${lead}${' '.repeat(gap)}${ink}`, width)
     }
     const label = this.rowLabel(rowId)
@@ -1533,7 +1703,10 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
    *  stored fact; short values still paint exactly one line. */
   private currentFactLines(rowId: WebSettingRowId, facts: WebSettingsFacts, width: number): DetailLine[] {
     const value = this.authorityValue(rowId, facts)
-    const head = 'Current: '
+    // A readable but non-current authority is a last-known fact, never a
+    // current Host claim (#893 demotion).
+    const readOnly = facts.kind === 'ready' && this.intents.writableRefusal(this.selectedSettingId()) !== undefined
+    const head = readOnly ? 'Last-known · read-only: ' : 'Current: '
     const headWidth = visibleWidth(head)
     const valueLines = (raw: string): DetailLine[] => {
       const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(raw), Math.max(1, width - headWidth))
@@ -1552,7 +1725,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
         ...wrapTextWithAnsi(sanitizedPhysicalLine(facts.reason), Math.max(1, width)).map(text => ({ text: color.textDim(text) })),
       ]
     }
-    const refusal = this.intents.writableRefusal()
+    const refusal = this.intents.writableRefusal(this.selectedSettingId())
     if (refusal !== undefined) {
       return [
         ...valueLines(value),
@@ -1767,20 +1940,39 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     return ['', ...notes.flatMap(note => wrapTextWithAnsi(note, Math.max(1, width)))]
   }
 
-  /** The state word plus its reason, wrapped so a long Host failure text is
-   *  wholly readable (scrollable) instead of being truncated mid-sentence. */
+  /** The short state word plus its real reason, wrapped so a long Host failure
+   *  text is wholly readable (scrollable) instead of being truncated
+   *  mid-sentence. A settled success under a non-current authority is demoted
+   *  to the #893 recovery sentence instead of claiming a current save. */
   private phaseLines(phase: WebRowPhase, width: number): DetailLine[] {
+    const readOnly = this.intents.writableRefusal(this.selectedSettingId()) !== undefined
+    if ((phase.kind === 'verified' || phase.kind === 'no-changes') && readOnly) {
+      return [{ text: color.textDim('Previous save completed; refresh to review.') }]
+    }
     const word = phaseWord(phase)
-    if (phase.reason === undefined || phase.reason === '') return [{ text: word }]
-    const separator = ' · '
-    const headWidth = visibleWidth(word) + visibleWidth(separator)
-    const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(phase.reason), Math.max(1, width - headWidth))
-    if (wrapped.length === 0) return [{ text: word }]
-    return wrapped.map((chunk, index) => ({
-      text: index === 0
-        ? `${word}${color.textDim(separator)}${color.textDim(chunk)}`
-        : `${' '.repeat(headWidth)}${color.textDim(chunk)}`,
-    }))
+    const lines: DetailLine[] = []
+    if (phase.reason === undefined || phase.reason === '') {
+      lines.push({ text: word })
+    } else {
+      const separator = ' · '
+      const headWidth = visibleWidth(word) + visibleWidth(separator)
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(phase.reason), Math.max(1, width - headWidth))
+      if (wrapped.length === 0) {
+        lines.push({ text: word })
+      } else {
+        lines.push({
+          text: `${word}${color.textDim(separator)}${color.textDim(wrapped[0] ?? '')}`,
+        })
+        for (const chunk of wrapped.slice(1)) {
+          lines.push({ text: `${' '.repeat(headWidth)}${color.textDim(chunk)}` })
+        }
+      }
+    }
+    if (phase.kind === 'unverified' || phase.kind === 'outcome-unconfirmed') {
+      lines.push(...wrapTextWithAnsi('The change may have been saved. Refresh and check.', Math.max(1, width))
+        .map(text => ({ text: color.textDim(text) })))
+    }
+    return lines
   }
 
   private credentialDetail(width: number, facts: WebSettingsFacts): DetailLine[] {
@@ -1797,7 +1989,7 @@ export class WebSettingsPage implements EmbeddedSpecialistPage {
     ]
     const actions = this.credentialActions()
     if (actions.length === 0 && facts.kind === 'ready') {
-      const refusal = this.intents.writableRefusal()
+      const refusal = this.intents.writableRefusal(this.selectedSettingId())
       if (refusal !== undefined) {
         lines.push(...wrapTextWithAnsi(refusal, Math.max(1, width)).map(text => ({ text: color.warning(text) })))
       } else {

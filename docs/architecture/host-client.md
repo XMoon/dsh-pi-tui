@@ -846,11 +846,44 @@ descriptor values (`searchBilling`/`fetchBilling` MUST be one of the official
 defaulted to `auto`; a missing single endpoint is NOT an error) plus read-only
 `advanced` facts copied from the Host descriptor (`search*`/`fetch*` values;
 the retired `baseURL`/`apiKeyEnv`/`apiKey` contribute only a
-`legacyOverrideDetected` presence fact, never a value). Writes are exactly the
-existing provider/count/question setters and the two Billing `set` operations
-against the official revision-checked `settings.mutate` path; there is no
-`baseURL` setter, no automatic migration and no TUI-side endpoint store. A
-non-empty Search/Fetch override is the Host's effective configuration for that
+`legacyOverrideDetected` presence fact, never a value). The same read carries
+the opaque Host settings-authority generation and BOTH namespace revisions; a
+read that cannot prove all three is unavailable and authorizes no write.
+`readFresh()` is the explicit observation: Direct performs a real descriptor
+read, and Remote waits for any already-started refresh and starts a NEW official
+`describe`, never accepting a ready cache. Page entry, explicit `r`, queue
+admission and post-write verification use that fresh path.
+
+Writes are exactly the existing provider/count/question setters and the two
+Billing `set` operations against the official revision-checked
+`settings.mutate` path; there is no `baseURL` setter, no automatic migration and
+no TUI-side endpoint store. Every write is bound to the ORIGINAL capture: the
+adapter re-proves the captured generation, the target namespace revision and
+the relevant raw facts synchronously at its actual dispatch boundary (Direct:
+immediately before `settings.mutate`; Remote: inside the mirror write queue
+after its fresh `describe`, before the official call). A moved target revision
+— including a sibling field in the same `web` namespace — is a definite
+refusal; a genuinely independent namespace is never compared for count,
+question or provider. Billing additionally binds the `web` provider dependency
+revision and re-reads the raw eligibility: its own API must still be the
+explicitly selected route and that capability's YAML override must still be
+unset. These are TWO namespace observations, not one atomic cross-namespace
+transaction: the official Settings CAS is per namespace, so a provider change
+that lands after Billing has already been dispatched is a real post-dispatch
+outcome, never retroactively a proven pre-dispatch refusal. A synchronous
+currentness fact over the adapter's known authority (Direct: the live service
+identity and ONE coherent descriptor read; Remote: the ready mirror generation
+and both descriptor revisions) drives the launcher freshness, the per-row
+affordance and the command owner's admission/receipt attribution. It starts no
+Host RPC. Count/question require the API observation, provider writes require
+the `web` observation and Billing requires both; a genuinely independent
+namespace revision never blocks another row. A legal no-op is a distinct
+zero-write `no-changes` outcome; `accepted`
+is only a receipt, and `Saved` requires a trusted fresh readback that still
+belongs to the captured generation and proves the requested raw value/action.
+An accepted-but-unattributable readback is `unverified`, and a lost/ambiguous
+receipt is `outcome-unconfirmed`; neither is ever reported as a proven refusal.
+A non-empty Search/Fetch override is the Host's effective configuration for that
 capability: the TUI never writes the matching Billing field, and it never
 derives a request endpoint or credential from the override or from the
 credential-presence metadata — the Host operation decides the actual route and

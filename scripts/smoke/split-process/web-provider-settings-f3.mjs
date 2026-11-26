@@ -194,10 +194,27 @@ async function frameOf(client) {
  * list cell and the Detail cell RIGHT-ALIGNED on the same physical rows, so a
  * fixed column does not exist: the Detail's own tokens (`Current: `, `› `, the
  * verdicts) are unambiguous within the page region and are matched WHEREVER
- * their whole cell landed. The list cell never prints `Current: `.
+ * their whole cell landed. The list cell never prints `Current: `, and it also
+ * suppresses the success words (`Saved`/`No changes`), so a whole-page success
+ * match can only describe the selected Detail.
  */
 function pageDetailText(frame) {
-  return frame.split('\n').join('\n').replace(/\s+/gu, ' ').trim()
+  const lines = frame.split('\n')
+  // The Detail cell starts at the left edge of its own tokens; the list cell
+  // never prints `Current:`, `› `, a success word, `Reference:` or the Detail
+  // notes. Slice from the earliest such token so the oracle reads the selected
+  // Detail region, not the whole page.
+  const markers = ['Current: ', '› ', 'Saved', 'No changes', 'Reference: ',
+    'Billing is ', 'Results requested', 'Overridden by Host YAML:']
+  let start = Number.POSITIVE_INFINITY
+  for (const line of lines) {
+    for (const marker of markers) {
+      const index = line.indexOf(marker)
+      if (index >= 0) start = Math.min(start, index)
+    }
+  }
+  const body = Number.isFinite(start) ? lines.map(line => line.slice(start)).join('\n') : lines.join('\n')
+  return body.replace(/\s+/gu, ' ').trim()
 }
 
 /** The profile document the official Settings service persists into. It is
@@ -245,7 +262,7 @@ async function waitForScreenText(client, text, label, timeoutMs = 60_000) {
     await waitForCondition(async () => (await frameOf(client)).includes(text), label, timeoutMs)
   } catch (error) {
     const frame = await client.viewport()
-    const lines = frame.filter(line => /Web|Search|Fetch|Provider|Current|State|Saved|Verified|Billing|Override|Question|Settings/u.test(line))
+    const lines = frame.filter(line => /Web|Search|Fetch|Provider|Current|State|Saved|No changes|Could not|Billing|Override|Question|Settings/u.test(line))
     throw new SplitSmokeAssertionError(`${label}: ${JSON.stringify({ wanted: text, diagnosticLines: lines.slice(-18) })}`, { cause: error })
   }
 }
@@ -503,13 +520,31 @@ async function selectCandidate(client, index, label, candidateLabel) {
     `${label}: the Detail cursor never reached ${JSON.stringify(candidateLabel)}: ${JSON.stringify(frame.split('\n'))}`)
 }
 
+/** Wait for the selected Detail's settled EXPECTED verdict. The page
+ *  deliberately suppresses `Saved`/`No changes` on the list rows, so these
+ *  words can only come from the selected Detail; `settings-web-visual.test.ts`
+ *  locks that invariant. The caller names the intended outcome (a changed
+ *  mutation is `Saved`; a validated zero-write confirm is `No changes`), so a
+ *  prior/other success word cannot satisfy this confirm. */
+async function waitForDetailVerdict(client, expected, label, timeoutMs = 20_000) {
+  let detail = ''
+  try {
+    await waitForCondition(async () => {
+      detail = pageDetailText(await frameOf(client))
+      return detail.includes(expected)
+    }, label, timeoutMs)
+  } catch (error) {
+    throw new SplitSmokeAssertionError(`${label}: the selected Detail never stated ${expected}: ${JSON.stringify(detail)}`, { cause: error })
+  }
+  return detail
+}
+
 /** ONE explicit Detail confirm; the read-back is the authority (a verdict on
  *  its own could still describe an older write of the same row). */
-async function confirmCandidate(client, expectedCurrent, label) {
+async function confirmCandidate(client, expectedCurrent, label, expectedVerdict = 'Saved') {
   client.send('\r')
   await waitForCurrentValue(client, expectedCurrent, `${label} authoritative read-back`)
-  await waitForScreenText(client, 'Verified', `${label} verified verdict`, 20_000)
-  return pageDetailText(await frameOf(client))
+  return await waitForDetailVerdict(client, expectedVerdict, `${label} ${expectedVerdict} verdict`)
 }
 
 /** Every page row's Host-returned value, read through the real Detail. Each
@@ -627,8 +662,8 @@ async function assertInertBilling(client, documentPath, row, expectedValue, expe
   await sleep(700)
   assert(snapshot(namespaceConfig(documentPath, WEB_API_NS)) === before,
     `${label}: an inert Billing row reached the official Host document`)
-  assert(!(await frameOf(client)).includes('Verified'),
-    `${label}: an inert Billing row painted a Verified verdict`)
+  assert(!(await frameOf(client)).includes('Saved'),
+    `${label}: an inert Billing row painted a Saved verdict`)
   await returnToWebList(client, `${label} list`)
   return detail
 }
@@ -826,10 +861,18 @@ export async function runWebProviderSettingsF3(context) {
       assertNoLegacyEndpointKeys(config, 'UI_L6 A search provider')
     }, 'UI_L6 A search provider')
     // Server-side Search is not the billed Search API: its Billing row is inert
-    // and says so instead of pretending to be writable.
+    // and says so instead of pretending to be writable. The official mutation
+    // ingress is the decisive zero-call witness.
+    const searchRouteBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A search billing route before')
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, 'Not selected',
       'Billing is EDITABLE HERE',
       'UI_L6 A search billing route gate')
+    const searchRouteAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A search billing route after')
+    assert(JSON.stringify(searchRouteAfter.mutationCounts) === JSON.stringify(searchRouteBefore.mutationCounts)
+      && totalMutationsOf(searchRouteAfter) === totalMutationsOf(searchRouteBefore),
+    `UI_L6 A search billing route gate: the inert row called the official mutation ingress (${JSON.stringify(searchRouteBefore.mutationCounts)} -> ${JSON.stringify(searchRouteAfter.mutationCounts)})`)
 
     const beforeSearchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.searchProvider, 'UI_L6 A search provider back')
@@ -846,9 +889,16 @@ export async function runWebProviderSettingsF3(context) {
     // `web` user layer, which is the effective HTTP/Search-API baseline.
     assertWebEffective(documentPath, { searchProvider: 'deepseek-search-api', fetchProvider: 'http' },
       'UI_L6 A fetch provider')
+    const fetchRouteBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A fetch billing route before')
     await assertInertBilling(clientA, documentPath, ROW.fetchBilling, 'Not selected',
       'Billing is EDITABLE HERE',
       'UI_L6 A fetch billing route gate')
+    const fetchRouteAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A fetch billing route after')
+    assert(JSON.stringify(fetchRouteAfter.mutationCounts) === JSON.stringify(fetchRouteBefore.mutationCounts)
+      && totalMutationsOf(fetchRouteAfter) === totalMutationsOf(fetchRouteBefore),
+    `UI_L6 A fetch billing route gate: the inert row called the official mutation ingress (${JSON.stringify(fetchRouteBefore.mutationCounts)} -> ${JSON.stringify(fetchRouteAfter.mutationCounts)})`)
 
     const beforeFetchProviderBack = sectionsSnapshot(documentPath)
     await openWebRow(clientA, ROW.fetchProvider, 'UI_L6 A fetch provider back')
@@ -899,6 +949,15 @@ export async function runWebProviderSettingsF3(context) {
     await openWebRow(clientA, ROW.count, 'UI_L6 A result count')
     await selectCandidate(clientA, COUNT_CANDIDATES.indexOf('20'), 'UI_L6 A result count', '20')
     await confirmCandidate(clientA, '20', 'UI_L6 A result count write')
+    // The SAME current candidate is a validated zero-write no-op, not a save.
+    const noOpBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A result count no-op before')
+    await confirmCandidate(clientA, '20', 'UI_L6 A result count no-op', 'No changes')
+    const noOpAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A result count no-op after')
+    assert(JSON.stringify(noOpAfter.mutationCounts) === JSON.stringify(noOpBefore.mutationCounts)
+      && totalMutationsOf(noOpAfter) === totalMutationsOf(noOpBefore),
+    `UI_L6 A result count no-op: the validated no-op called the official mutation ingress (${JSON.stringify(noOpBefore.mutationCounts)} -> ${JSON.stringify(noOpAfter.mutationCounts)})`)
     assertApiSection(documentPath, beforeCount, {
       count: 20,
       sendOriginalQuestion: SEED_SEND_ORIGINAL_QUESTION,
@@ -933,9 +992,22 @@ export async function runWebProviderSettingsF3(context) {
       fetchAdvanced: OVERRIDE_UNSET_FACT,
       credentialState: 'Configured',
     }
-    const staleB = pageDetailText(await frameOf(clientB))
-    assert(staleB.includes(`Current: ${String(SEED_COUNT)}`),
-      `UI_L6 B: another Client's write must not silently repaint B's already-read count: ${JSON.stringify(staleB)}`)
+    // B must actually OBSERVE the Host's new revision before its cached A
+    // value is demoted. A harmless repaint key never performs a Web read or
+    // changes the selection; wait on the painted frame (not a timer) for the
+    // last-known state, then require no Confirm.
+    const lastKnownB = `Last-known · read-only: ${String(SEED_COUNT)}`
+    let staleB = ''
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      clientB.send('x')
+      await sleep(150)
+      staleB = pageDetailText(await frameOf(clientB))
+      if (staleB.includes(lastKnownB)) break
+    }
+    assert(staleB.includes(lastKnownB),
+      `UI_L6 B: after observing the Host update, a cached count must be Last-known read-only, never Current: ${JSON.stringify(staleB)}`)
+    assert(!hasConfirmAffordance(actionBarOf(await frameOf(clientB))),
+      'UI_L6 B: a stale cached count must not offer a Confirm affordance')
     clientB.send('r')
     await waitForCurrentValue(clientB, '20', 'UI_L6 B refreshed result count')
     await assertPageFacts(clientB, crossExpected, 'UI_L6 B cross-client')
@@ -1100,9 +1172,16 @@ export async function runWebProviderSettingsF3(context) {
     'UI_L6 A search override: Enter on the read-only override row reached the official Host document')
     await returnToWebList(clientA, 'UI_L6 A search override list')
     // The override owns Search Billing: no candidate, no Confirm, zero writes.
+    const overrideBillingBefore = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A overridden billing before')
     await assertInertBilling(clientA, documentPath, ROW.searchBilling, overriddenSearchBilling,
       'Overridden by Host YAML: the advanced searchBaseURL field(s) own',
       'UI_L6 A overridden search billing')
+    const overrideBillingAfter = await requestWebProvider(root, 'observe', undefined,
+      'UI_L6 A overridden billing after')
+    assert(JSON.stringify(overrideBillingAfter.mutationCounts) === JSON.stringify(overrideBillingBefore.mutationCounts)
+      && totalMutationsOf(overrideBillingAfter) === totalMutationsOf(overrideBillingBefore),
+    `UI_L6 A overridden search billing: the inert row called the official mutation ingress (${JSON.stringify(overrideBillingBefore.mutationCounts)} -> ${JSON.stringify(overrideBillingAfter.mutationCounts)})`)
     // Fetch Billing is NOT overridden: it stays independently writable, and its
     // second exact CAS read-back cannot move the Search field or the override.
     const beforeFetchBillingAfterOverride = sectionsSnapshot(documentPath)

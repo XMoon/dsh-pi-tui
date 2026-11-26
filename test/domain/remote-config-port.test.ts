@@ -23,7 +23,9 @@ import { DirectWebProviderConfig, type HostContextLike } from '../../src/runtime
 import type { ProviderCatalogEntry } from '../../src/domain/catalog/provider.ts'
 import { serializeTuiSettingsMutation, type ProviderProfileConfig, type TuiSettingsDoc } from '../../src/runtime/config-port.ts'
 import { UNPARSEABLE_WEB_OVERRIDE_URL } from '../../src/domain/web-provider-settings.ts'
+import type { WebProviderSettings } from '../../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
+import { RemoteConfigWriteLifetime } from '../../src/runtime/remote/config-write-lifetime.ts'
 import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
 
 /* ------------------------------------------------------------------------- *
@@ -419,11 +421,12 @@ function createBackend(seed?: (state: FakeState) => void, options: { readonly au
   for (const [key, value] of Object.entries(remote)) {
     Object.defineProperty(wire, key, { get: () => value, enumerable: false, configurable: false })
   }
+  const writeLifetime = new RemoteConfigWriteLifetime()
   const port = new RemoteConfigPort({
     remote: wire as never,
     connection: { generation: generation.source },
-  })
-  return { port, state, generation, emit, listeners, wire }
+  }, { writeLifetime })
+  return { port, state, generation, emit, listeners, wire, writeLifetime }
 }
 
 /** The create decision over the REAL Remote provider adapter: the other
@@ -1934,6 +1937,19 @@ function seedWebNamespaces(state: FakeState, options: { readonly omit?: 'web' | 
   }
 }
 
+
+async function webCaptureOf(source: { web: { read(): Promise<WebProviderSettings | undefined> } }): Promise<WebProviderSettings> {
+  const capture = await source.web.read()
+  assert.ok(capture !== undefined, 'the fake Host must produce a readable Web capture')
+  return capture
+}
+
+function withoutWebAuthority(read: WebProviderSettings | undefined): Omit<WebProviderSettings, 'authority'> | undefined {
+  if (read === undefined) return undefined
+  const { authority: _authority, ...rest } = read
+  return rest
+}
+
 test('the Remote Web adapter reads both Host sections and writes each exact field through the mirror', async () => {
   const { port, state } = createBackend(current => {
     seedWebNamespaces(current)
@@ -1942,7 +1958,7 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
   assert.equal(port.web.available(), false, 'an undescribed mirror has not observed the Host sections')
   await port.describe()
   assert.equal(port.web.available(), true)
-  assert.deepEqual(await port.web.read(), {
+  assert.deepEqual(withoutWebAuthority(await port.web.read()), {
     searchProvider: 'deepseek-official',
     fetchProvider: 'http',
     providerSelection: {
@@ -1954,12 +1970,12 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
     credential: { configured: true, source: 'file' },
   })
 
-  await port.web.setSearchProvider('deepseek-search-api')
-  await port.web.setFetchProvider('deepseek-fetch-api')
-  await port.web.setSearchApiCount(20)
-  await port.web.setSendOriginalQuestion(false)
-  await port.web.setSearchBilling('account')
-  await port.web.setFetchBilling('api-key')
+  await port.web.setSearchProvider('deepseek-search-api', await webCaptureOf(port))
+  await port.web.setFetchProvider('deepseek-fetch-api', await webCaptureOf(port))
+  await port.web.setSearchApiCount(20, await webCaptureOf(port))
+  await port.web.setSendOriginalQuestion(false, await webCaptureOf(port))
+  await port.web.setSearchBilling('account', await webCaptureOf(port))
+  await port.web.setFetchBilling('api-key', await webCaptureOf(port))
   assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops })), [
     { ns: WEB_NS, ops: [{ op: 'set', path: ['searchProvider'], value: 'deepseek-search-api' }] },
     { ns: WEB_NS, ops: [{ op: 'set', path: ['fetchProvider'], value: 'deepseek-fetch-api' }] },
@@ -1968,7 +1984,7 @@ test('the Remote Web adapter reads both Host sections and writes each exact fiel
     { ns: WEB_API_NS, ops: [{ op: 'set', path: ['searchBilling'], value: 'account' }] },
     { ns: WEB_API_NS, ops: [{ op: 'set', path: ['fetchBilling'], value: 'api-key' }] },
   ])
-  assert.deepEqual(await port.web.read(), {
+  assert.deepEqual(withoutWebAuthority(await port.web.read()), {
     searchProvider: 'deepseek-search-api',
     fetchProvider: 'deepseek-fetch-api',
     providerSelection: {
@@ -2074,12 +2090,19 @@ test('the Remote Web adapter preserves a valid Host count outside the UI presets
 
 test('missing Web settings sections stay unavailable and no defaults or writes are invented', async () => {
   for (const missing of ['web', 'api'] as const) {
-    const { port, state } = createBackend(current => { seedWebNamespaces(current, { omit: missing }) })
-    assert.equal(port.web.available(), false)
+    const { port, state } = createBackend(current => { seedWebNamespaces(current) })
     await port.describe()
+    const capture = await webCaptureOf(port)
+    state.namespaces.delete(missing === 'web' ? WEB_NS : WEB_API_NS)
+    await port.describe()
+    assert.equal(port.web.available(), false)
     assert.equal(await port.web.read(), undefined)
     const callsBefore = state.mutateCalls.length
-    await assert.rejects(port.web.setSearchApiCount(10), /sections are unavailable/u)
+    const outcome = missing === 'web'
+      ? await port.web.setSearchProvider('deepseek-search-api', capture)
+      : await port.web.setSearchBilling('account', capture)
+    assert.equal(outcome.kind, 'rejected')
+    assert.match(outcome.reason, /not mounted/u)
     assert.equal(state.mutateCalls.length, callsBefore)
   }
 })
@@ -2094,7 +2117,9 @@ test('a stale provider intent is refused after the Remote mirror already refresh
   assert.equal((await port.web.read())?.searchProvider, 'custom-search',
     'the Host document update has already committed into the current mirror')
   const callsBefore = state.mutateCalls.length
-  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /custom route/u)
+  const outcome = await port.web.setSearchProvider('deepseek-search-api', await webCaptureOf(port))
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /custom route/u)
   assert.equal(state.mutateCalls.length, callsBefore, 'the older provider intent never dispatches with the refreshed revision')
   assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-search')
 })
@@ -2102,14 +2127,17 @@ test('a stale provider intent is refused after the Remote mirror already refresh
 test('invalid Remote Web candidates match Direct validation and never read or mutate the Host', async () => {
   const remote = createBackend()
   const direct = new DirectWebProviderConfig({ get: (_name: string) => undefined } satisfies HostContextLike)
+  // The invalid-value guards throw before the capture is consulted; the object
+  // only satisfies the compile-time write contract.
+  const dummyCapture = { authority: { generation: {}, webRevision: 0, apiRevision: 0 } } as WebProviderSettings
   for (const count of [0, 51, 2.5, Number.NaN]) {
     let remoteMessage = ''
     let directMessage = ''
-    await assert.rejects(remote.port.web.setSearchApiCount(count), error => {
+    await assert.rejects(remote.port.web.setSearchApiCount(count, dummyCapture), error => {
       remoteMessage = (error as Error).message
       return true
     })
-    await assert.rejects(direct.setSearchApiCount(count), error => {
+    await assert.rejects(direct.setSearchApiCount(count, dummyCapture), error => {
       directMessage = (error as Error).message
       return true
     })
@@ -2123,19 +2151,19 @@ test('invalid Remote Web candidates match Direct validation and never read or mu
     let remoteFetchMessage = ''
     let directSearchMessage = ''
     let directFetchMessage = ''
-    await assert.rejects(remote.port.web.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+    await assert.rejects(remote.port.web.setSearchBilling(mode as 'auto' | 'account' | 'api-key', dummyCapture), error => {
       remoteSearchMessage = (error as Error).message
       return true
     })
-    await assert.rejects(remote.port.web.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+    await assert.rejects(remote.port.web.setFetchBilling(mode as 'auto' | 'account' | 'api-key', dummyCapture), error => {
       remoteFetchMessage = (error as Error).message
       return true
     })
-    await assert.rejects(direct.setSearchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+    await assert.rejects(direct.setSearchBilling(mode as 'auto' | 'account' | 'api-key', dummyCapture), error => {
       directSearchMessage = (error as Error).message
       return true
     })
-    await assert.rejects(direct.setFetchBilling(mode as 'auto' | 'account' | 'api-key'), error => {
+    await assert.rejects(direct.setFetchBilling(mode as 'auto' | 'account' | 'api-key', dummyCapture), error => {
       directFetchMessage = (error as Error).message
       return true
     })
@@ -2189,7 +2217,9 @@ test('a Host revision change before Remote Web dispatch rejects the stale mutati
     web.value.searchProvider = 'custom-concurrent-writer'
     web.revision += 1
   }
-  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /revision 4 != 5/u)
+  const outcome = await port.web.setSearchProvider('deepseek-search-api', await webCaptureOf(port))
+  assert.equal(outcome.kind, 'conflict')
+  assert.match(outcome.reason, /revision 4 != 5/u)
   assert.equal(state.namespaces.get(WEB_NS)?.value.searchProvider, 'custom-concurrent-writer')
   assert.equal(port.configReadiness(), 'ready', 'the failure path refreshed the authoritative winner')
 })
@@ -2212,13 +2242,15 @@ test('the Remote Web adapter projects the SAME namespace view value/base/user', 
 
   // A non-object/missing layer is unreadable, never "no USER override".
   for (const layer of ['base', 'user'] as const) {
-    const missing = createBackend(current => {
-      seedWebNamespaces(current)
-      Reflect.deleteProperty(current.namespaces.get(WEB_NS)!, layer)
-    })
+    const missing = createBackend(current => { seedWebNamespaces(current) })
+    await missing.port.describe()
+    const capture = await webCaptureOf(missing.port)
+    Reflect.deleteProperty(missing.state.namespaces.get(WEB_NS)!, layer)
     await missing.port.describe()
     assert.equal(await missing.port.web.read(), undefined, `a missing ${layer} layer is unavailable`)
-    await assert.rejects(missing.port.web.restoreSearchProvider(), /USER\/base layers/u)
+    const outcome = await missing.port.web.restoreSearchProvider(capture)
+    assert.equal(outcome.kind, 'rejected')
+    assert.match(outcome.reason, /USER\/base layers/u)
     assert.deepEqual(missing.state.mutateCalls, [])
   }
 })
@@ -2226,7 +2258,7 @@ test('the Remote Web adapter projects the SAME namespace view value/base/user', 
 test('the Remote Web reset dispatches the exact official unset on the mirror revision', async () => {
   const { port, state } = createBackend(current => { seedWebNamespaces(current) })
   await port.describe()
-  await port.web.restoreSearchProvider()
+  await port.web.restoreSearchProvider(await webCaptureOf(port))
   assert.deepEqual(state.mutateCalls.map(call => ({ ns: call.ns, ops: call.ops, revision: call.revision })), [
     { ns: WEB_NS, ops: [{ op: 'unset', path: ['searchProvider'] }], revision: 4 },
   ], 'one unset op carrying the descriptor revision, never a provider id write')
@@ -2236,7 +2268,7 @@ test('the Remote Web reset dispatches the exact official unset on the mirror rev
   assert.equal(read?.fetchProvider, 'http', 'the Fetch sibling keeps its value')
   // A reset with no USER own-field is a real no-op.
   const before = state.mutateCalls.length
-  await port.web.restoreFetchProvider()
+  await port.web.restoreFetchProvider(await webCaptureOf(port))
   assert.equal(state.mutateCalls.length, before, 'no unset is dispatched when the USER field is absent')
 })
 
@@ -2253,7 +2285,7 @@ test('an rc.5 sibling keeps an explicit USER value equal to the deployment base 
     web.user = { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' }
   })
   await port.describe()
-  await port.web.restoreFetchProvider()
+  await port.web.restoreFetchProvider(await webCaptureOf(port))
   const read = await port.web.read()
   assert.equal(read?.fetchProvider, 'http', 'the effective value returns to the deployment HTTP')
   assert.deepEqual(read?.providerSelection.fetch, { baseId: 'http', userSet: true, userId: 'http' },
@@ -2272,9 +2304,11 @@ test('a custom effective Remote provider is restorable through unset while an ex
   })
   await port.describe()
   assert.equal((await port.web.read())?.providerSelection.search.baseId, 'deepseek-official')
-  await assert.rejects(port.web.setSearchProvider('deepseek-search-api'), /custom route/u)
+  const refused = await port.web.setSearchProvider('deepseek-search-api', await webCaptureOf(port))
+  assert.equal(refused.kind, 'rejected')
+  assert.match(refused.reason, /custom route/u)
   assert.equal(state.mutateCalls.length, 0, 'the explicit-set guard refuses before the Host mutate')
-  await port.web.restoreSearchProvider()
+  await port.web.restoreSearchProvider(await webCaptureOf(port))
   assert.deepEqual(state.mutateCalls.map(call => call.ops), [[{ op: 'unset', path: ['searchProvider'] }]])
   assert.equal((await port.web.read())?.searchProvider, 'deepseek-official',
     'the deployment default applies after the official reset')
@@ -2283,17 +2317,21 @@ test('a custom effective Remote provider is restorable through unset while an ex
 test('a stale mirrored USER layer never authorizes a reset after the Host moved', async () => {
   const { port, state, emit } = createBackend(current => { seedWebNamespaces(current) })
   await port.describe()
+  const capture = await webCaptureOf(port)
   // Another writer removes the USER override; an invalidation marks the mirror
-  // stale. The reset must re-read (the adapter's ensureCurrent + beforeDispatch)
-  // and then dispatch NOTHING, instead of unsetting the last-known layer.
+  // stale. The reset must re-read (the adapter's queue-turn describeFresh) and
+  // then dispatch NOTHING, instead of unsetting the last-known layer.
   const web = state.namespaces.get(WEB_NS)!
   delete web.user!.searchProvider
   web.value = { fetchProvider: 'http' }
   web.revision += 1
   emit('settings/document-updated')
-  // The captured layer no longer matches the refreshed descriptor: the reset is
-  // REFUSED at the dispatch fence with zero Host mutations (never re-targeted).
-  await assert.rejects(port.web.restoreSearchProvider(), /USER\/base selection changed before the reset was dispatched/u)
+  // The captured target revision no longer matches the refreshed descriptor:
+  // the reset is REFUSED at the dispatch fence with zero Host mutations (never
+  // re-targeted to the newer revision).
+  const outcome = await port.web.restoreSearchProvider(capture)
+  assert.equal(outcome.kind, 'conflict')
+  assert.match(outcome.reason, /changed since it was read/u)
   assert.deepEqual(state.mutateCalls, [], 'the refreshed layer no longer matches the captured facts')
   assert.equal((await port.web.read())?.providerSelection.search.userSet, false)
 })
@@ -2308,11 +2346,11 @@ test('a queued Remote reset is refused when another writer moved the USER value 
   let releaseMutate: () => void = () => {}
   state.mutateGate = () => new Promise<void>(resolve => { releaseMutate = resolve })
   // Block the ONE shared mirror write queue with an unrelated API-section write.
-  const held = port.web.setSendOriginalQuestion(false)
+  const held = port.web.setSendOriginalQuestion(false, await webCaptureOf(port))
   for (let attempt = 0; attempt < 100 && state.mutateCalls.length === 0; attempt += 1) await tick()
   assert.equal(state.mutateCalls.length, 1, 'the unrelated write reached the Host and is held')
   // The reset observes the CURRENT USER value and queues behind the held write.
-  const reset = port.web.restoreSearchProvider()
+  const reset = port.web.restoreSearchProvider(await webCaptureOf(port))
   // Let the adapter pass its pre-queue readiness check and join the queue.
   await tick()
   // Another writer moves the SAME field while the reset is queued.
@@ -2323,7 +2361,9 @@ test('a queued Remote reset is refused when another writer moved the USER value 
   emit('settings/document-updated')
   releaseMutate()
   await held
-  await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
+  const refused = await reset
+  assert.equal(refused.kind, 'conflict')
+  assert.match(refused.reason, /changed since it was read/u)
   assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0,
     'the stale reset never reached the official Host mutate')
   const read = await port.web.read()
@@ -2336,10 +2376,10 @@ test('a queued Remote reset is refused when the deployment default moved before 
   await port.describe()
   let releaseMutate: () => void = () => {}
   state.mutateGate = () => new Promise<void>(resolve => { releaseMutate = resolve })
-  const held = port.web.setSendOriginalQuestion(false)
+  const held = port.web.setSendOriginalQuestion(false, await webCaptureOf(port))
   for (let attempt = 0; attempt < 100 && state.mutateCalls.length === 0; attempt += 1) await tick()
   assert.equal(state.mutateCalls.length, 1)
-  const reset = port.web.restoreSearchProvider()
+  const reset = port.web.restoreSearchProvider(await webCaptureOf(port))
   await tick()
   const web = state.namespaces.get(WEB_NS)!
   // Same USER value, different deployment default: the gesture's meaning (the
@@ -2349,7 +2389,9 @@ test('a queued Remote reset is refused when the deployment default moved before 
   emit('settings/document-updated')
   releaseMutate()
   await held
-  await assert.rejects(reset, /USER\/base selection changed before the reset was dispatched/u)
+  const refused = await reset
+  assert.equal(refused.kind, 'conflict')
+  assert.match(refused.reason, /changed since it was read/u)
   assert.equal(state.mutateCalls.filter(call => call.ns === WEB_NS).length, 0)
   assert.equal(state.namespaces.get(WEB_NS)?.base?.searchProvider, 'deepseek-official')
 })
@@ -2364,4 +2406,180 @@ test('the three Remote scalar reads reject a malformed numeric revision', async 
   assert.equal(port.visualTools.read(), undefined)
   assert.equal(port.webStartupPreference.read(), undefined)
   assert.equal(port.backendStartupPreference.read(), undefined)
+})
+
+// ── SUX-06A: Billing dependency and unrelated-namespace isolation ───────────
+
+test('a Remote Billing write is refused when the web provider dependency revision moved', async () => {
+  const { port, state } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_NS)!.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+    current.namespaces.get(WEB_NS)!.user = { searchProvider: 'deepseek-search-api' }
+  })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  // The API section (the CAS target) stays at revision 8; only the `web`
+  // provider dependency moves.
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+  web.user = { searchProvider: 'deepseek-official' }
+  web.revision += 1
+  await port.describe()
+  const callsBefore = state.mutateCalls.length
+  const outcome = await port.web.setSearchBilling('account', capture)
+  assert.equal(outcome.kind, 'conflict')
+  assert.match(outcome.reason, /dependency changed since it was read/u)
+  assert.equal(state.mutateCalls.length, callsBefore, 'the API revision never dispatches without its web dependency')
+  assert.equal(state.namespaces.get(WEB_API_NS)?.value.searchBilling, 'auto')
+})
+
+test('a web-namespace revision change never blocks a Remote count write', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  // The OTHER Web namespace changes; the count's target API revision stays.
+  // Count binds only `web-deepseek-api`.
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { ...web.value, fetchProvider: 'deepseek-fetch-api' }
+  web.user = { ...web.user, fetchProvider: 'deepseek-fetch-api' }
+  web.revision += 1
+  await port.describe()
+  assert.equal(port.web.isObservationCurrent(capture, 'api'), true)
+  assert.equal(port.web.isObservationCurrent(capture, 'web'), false)
+  const outcome = await port.web.setSearchApiCount(20, capture)
+  assert.equal(outcome.kind, 'accepted')
+  assert.deepEqual(state.mutateCalls.at(-1)?.ops, [{ op: 'set', path: ['count'], value: 20 }])
+  assert.equal(state.namespaces.get(WEB_API_NS)?.value.count, 20)
+})
+
+test('a Remote explicit select already pinned in the USER layer is a zero-write no-changes', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  assert.equal(capture.providerSelection.search.userSet, true)
+  const outcome = await port.web.setSearchProvider('deepseek-official', capture)
+  assert.equal(outcome.kind, 'no-changes')
+  assert.deepEqual(state.mutateCalls, [], 'the explicit pin needs no Host mutation')
+})
+
+test('a Remote provider write re-proves the same-revision USER facts', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  const web = state.namespaces.get(WEB_NS)!
+  // Same numeric revision, different USER projection: the captured decision no
+  // longer describes this Host state.
+  web.value = { ...web.value, searchProvider: 'deepseek-search-api' }
+  web.user = { ...web.user, searchProvider: 'deepseek-search-api' }
+  await port.describe()
+  const outcome = await port.web.setSearchProvider('deepseek-official', capture)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /selection changed since the page read it/u)
+  assert.deepEqual(state.mutateCalls, [], 'a same-revision semantic drift never reaches the Host mutate')
+})
+
+test('a Web capture is current only for the ready mirror generation and both revisions', async () => {
+  const { port, state, generation } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  assert.equal(port.web.isObservationCurrent(capture), true)
+  // Same target revisions/values, a replacement Host generation: the old
+  // capture is never current for B.
+  generation.set({ id: 'gen-2' })
+  assert.equal(port.web.isObservationCurrent(capture), false)
+  await port.describe()
+  const fresh = (await webCaptureOf(port))!
+  assert.equal(port.web.isObservationCurrent(fresh), true)
+  // Same generation, one of the two namespace revisions moves: not current.
+  state.namespaces.get(WEB_NS)!.revision += 1
+  await port.describe()
+  assert.equal(port.web.isObservationCurrent(fresh), false)
+  assert.equal(port.web.isObservationCurrent((await webCaptureOf(port))!), true)
+})
+
+test('Remote Billing re-proves the web dependency in the actual queue turn', async () => {
+  const { port, state, writeLifetime, generation } = createBackend(current => {
+    seedWebNamespaces(current)
+    current.namespaces.get(WEB_NS)!.value = { searchProvider: 'deepseek-search-api', fetchProvider: 'http' }
+    current.namespaces.get(WEB_NS)!.user = { searchProvider: 'deepseek-search-api' }
+    current.namespaces.set('subagent', {
+      ns: 'subagent',
+      value: { maxDepth: 1, maxActiveSubagents: 8 },
+      base: { maxDepth: 1, maxActiveSubagents: 8 },
+      revision: 5,
+    })
+  })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  let release: () => void = () => {}
+  let entered: () => void = () => {}
+  const enteredGate = new Promise<void>(resolve => { entered = resolve })
+  state.mutateGate = () => {
+    entered()
+    return new Promise<void>(resolve => { release = resolve })
+  }
+  // The predecessor is on the UNRELATED subagent section, so neither the
+  // billing target's API revision nor the web dependency is touched by it.
+  const predecessor = port.subagentLimits.mutate(
+    { maxActiveSubagents: { kind: 'set', value: 9 } },
+    5,
+    generation.source.getSnapshot()!,
+  )
+  await enteredGate
+  // Queue the Billing write behind the held predecessor.
+  const billing = port.web.setSearchBilling('account', capture)
+  for (let attempt = 0; attempt < 100 && writeLifetime.pendingCount() < 2; attempt += 1) await tick()
+  assert.equal(writeLifetime.pendingCount(), 2,
+    'the billing write was admitted to the actual queue behind the predecessor')
+  // Hold the predecessor's OWN post-write describe after it captured the OLD
+  // web dependency, then move web without an invalidation and release it. The
+  // committed mirror stays old; only the Billing queue turn's fresh describe
+  // can see the change.
+  let releaseDescribe: () => void = () => {}
+  let describeEntered: () => void = () => {}
+  const describeReleased = new Promise<void>(resolve => { releaseDescribe = resolve })
+  const describeStarted = new Promise<void>(resolve => { describeEntered = resolve })
+  state.describeGate = () => {
+    state.describeGate = undefined
+    describeEntered()
+    return describeReleased
+  }
+  release()
+  await describeStarted
+  const web = state.namespaces.get(WEB_NS)!
+  web.value = { searchProvider: 'deepseek-official', fetchProvider: 'http' }
+  web.user = { searchProvider: 'deepseek-official' }
+  web.revision += 1
+  releaseDescribe()
+  await predecessor
+  const outcome = await billing
+  assert.equal(outcome.kind, 'conflict')
+  assert.match(outcome.reason, /dependency changed since it was read/u)
+  assert.equal(state.mutateCalls.filter(call =>
+    call.ns === WEB_API_NS && call.ops.some(op => op.path[0] === 'searchBilling')).length, 0,
+  'the billing target never dispatches without the fresh dependency proof')
+  assert.equal(state.namespaces.get(WEB_API_NS)?.value.searchBilling, 'auto')
+})
+
+test('a half-mounted Remote Web observation is never current', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  assert.equal(port.web.isObservationCurrent(capture, 'api'), true)
+  state.namespaces.delete(WEB_NS)
+  await port.describe()
+  assert.equal(port.web.isObservationCurrent(capture, 'api'), false,
+    'a missing web namespace cannot authorize even an API-only write')
+})
+
+test('the Remote actual boundary refuses a capture whose OTHER Web section disappeared', async () => {
+  const { port, state } = createBackend(current => { seedWebNamespaces(current) })
+  await port.describe()
+  const capture = await webCaptureOf(port)
+  state.namespaces.delete(WEB_NS)
+  await port.describe()
+  const outcome = await port.web.setSearchApiCount(20, capture)
+  assert.equal(outcome.kind, 'rejected')
+  assert.match(outcome.reason, /is not mounted/u)
+  assert.equal(state.mutateCalls.length, 0)
 })

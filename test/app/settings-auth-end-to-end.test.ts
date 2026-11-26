@@ -31,6 +31,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { bundleVersion } from '../../src/client/launcher/version.ts'
 
 const ACP_STARTUP_PREFERENCE_GENERATION: object = {}
+const WEB_AUTHORITY_GENERATION: object = {}
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -149,6 +150,22 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
    *  was already written (never a setTimeout guess at the frame throttle). */
   const catalogReadWrites: number[] = []
   const credentialListWrites: number[] = []
+  /** The current Web DTO; both the cached read and the explicit fresh read
+   *  answer from the SAME fake official store, with one stable authority. */
+  const readWebFacts = (): Record<string, unknown> => ({
+    searchProvider: 'deepseek-official',
+    fetchProvider: 'http',
+    providerSelection: {
+      search: { baseId: 'deepseek-official', userSet: false, userId: undefined },
+      fetch: { baseId: 'http', userSet: false, userId: undefined },
+    },
+    api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
+    advanced: {},
+    credential: configuredRefs.has('DEEPSEEK_API_KEY')
+      ? { configured: true, source: 'file' }
+      : { configured: false },
+    authority: { generation: WEB_AUTHORITY_GENERATION, webRevision: 4, apiRevision: 8 },
+  })
   const base: Record<string, unknown> = {
     ctx,
     app,
@@ -251,19 +268,9 @@ function open(width = 120, height = 40, authorizationOverride?: unknown): Harnes
       // C2-R4: the Tools Web page is mountable for the credential deeplink case.
       web: {
         available: () => true,
-        read: async () => ({
-          searchProvider: 'deepseek-official',
-          fetchProvider: 'http',
-          providerSelection: {
-            search: { baseId: 'deepseek-official', userSet: false, userId: undefined },
-            fetch: { baseId: 'http', userSet: false, userId: undefined },
-          },
-          api: { searchBilling: 'auto', fetchBilling: 'auto', count: 10, sendOriginalQuestion: true },
-          advanced: {},
-          credential: configuredRefs.has('DEEPSEEK_API_KEY')
-            ? { configured: true, source: 'file' }
-            : { configured: false },
-        }),
+        read: async () => readWebFacts(),
+        readFresh: async () => readWebFacts(),
+        isObservationCurrent: () => true,
       },
       providers: {
         available: () => true,

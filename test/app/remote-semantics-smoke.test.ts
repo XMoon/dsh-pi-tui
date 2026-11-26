@@ -39,6 +39,25 @@ import { createClientCommandRegistry } from '../../src/app/command/client-comman
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import type { WebProviderSettings } from '../../src/runtime/config-port.ts'
+
+/** ONE real readable capture; every Web write is bound to the observation the
+ *  caller captured, never to a fresher revision. */
+async function captureOf(source: { read(): Promise<WebProviderSettings | undefined> }): Promise<WebProviderSettings> {
+  const capture = await source.read()
+  assert.ok(capture !== undefined, 'the assembled Host must produce a readable Web capture')
+  return capture
+}
+
+function webCaptureOf(config: { web: { read(): Promise<WebProviderSettings | undefined> } }): Promise<WebProviderSettings> {
+  return captureOf(config.web)
+}
+
+function withoutWebAuthority(read: WebProviderSettings | undefined): Omit<WebProviderSettings, 'authority'> | undefined {
+  if (read === undefined) return undefined
+  const { authority: _authority, ...rest } = read
+  return rest
+}
 import { selectSettingsCategory } from '../support/settings-rail.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -1618,7 +1637,7 @@ test('the REAL /settings workspace commits through the Remote adapter over the w
     forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
       if (failMutate) {
         failMutate = false
-        throw Object.assign(new Error('settings write refused (injected)'), { code: 'settings/rejected' })
+        throw Object.assign(new Error('settings write refused (injected)'), { code: 'gateway/bad-request' })
       }
       const accepted = originalMutate.apply(this, args)
       // Arm the authoritative refresh from the moment THIS write is ACCEPTED (the
@@ -1839,7 +1858,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     assert.equal(config.configReadiness(), 'ready')
     assert.equal(config.credentials.available(), true, 'the generated credential Remote is available on this generation')
     assert.equal(config.web.available(), true)
-    assert.deepEqual(await config.web.read(), {
+    assert.deepEqual(withoutWebAuthority(await config.web.read()), {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
       providerSelection: {
@@ -1866,15 +1885,15 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       credentialProvider.describe = originalCredentialDescribe
     }
 
-    await config.web.setSearchProvider('deepseek-search-api')
-    await config.web.setFetchProvider('deepseek-fetch-api')
-    await config.web.setSearchApiCount(20)
-    await config.web.setSendOriginalQuestion(false)
+    await config.web.setSearchProvider('deepseek-search-api', await webCaptureOf(config))
+    await config.web.setFetchProvider('deepseek-fetch-api', await webCaptureOf(config))
+    await config.web.setSearchApiCount(20, await webCaptureOf(config))
+    await config.web.setSendOriginalQuestion(false, await webCaptureOf(config))
     // rc.2's API writes are the two official billing enums: each CAS lands on
     // its exact `web-deepseek-api` field and both stay independent.
-    await config.web.setSearchBilling('account')
-    await config.web.setFetchBilling('api-key')
-    assert.deepEqual(await config.web.read(), {
+    await config.web.setSearchBilling('account', await webCaptureOf(config))
+    await config.web.setFetchBilling('api-key', await webCaptureOf(config))
+    assert.deepEqual(withoutWebAuthority(await config.web.read()), {
       searchProvider: 'deepseek-search-api',
       fetchProvider: 'deepseek-fetch-api',
       providerSelection: {
@@ -1893,7 +1912,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.searchBilling, 'account')
     assert.equal(hostValues.find(entry => entry.ns === 'web-deepseek-api')?.value?.fetchBilling, 'api-key')
     const directWeb = new DirectWebProviderConfig(host.ctx as never)
-    assert.deepEqual(await directWeb.read(), await config.web.read(),
+    assert.deepEqual(withoutWebAuthority(await directWeb.read()), withoutWebAuthority(await config.web.read()),
       'Direct and Remote project the same Host fields and credential metadata')
 
     // The configured provider is the NEXT operation's actual Host authority.
@@ -1947,7 +1966,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       assert.equal(requests.length, 0, 'the failed account-billing probe dispatched no request')
       // Switch the SAME capability to `api-key` billing through the port: the
       // real Host search then runs on the API-key credential.
-      await config.web.setSearchBilling('api-key')
+      await config.web.setSearchBilling('api-key', await webCaptureOf(config))
       const result = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 route probe' }))
       assert.deepEqual(result.sources.map(source => source.url), ['https://result.example.test/f3'])
       assert.equal(requests.length, 1)
@@ -1958,7 +1977,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       assert.deepEqual(requests[0]?.body, { query: 'f3 route probe', count: 20, need_content: false },
         'the Remote-written provider uses count 20 and omits ori_question when disabled')
 
-      await config.web.setSendOriginalQuestion(true)
+      await config.web.setSendOriginalQuestion(true, await webCaptureOf(config))
       const withOriginalQuestion = await agents.withInitiator(webAgent, () => web.search({ query: 'f3 question probe' }))
       assert.deepEqual(withOriginalQuestion.sources.map(source => source.url), ['https://result.example.test/f3'])
       assert.deepEqual(requests[1]?.body, {
@@ -1970,7 +1989,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       assert.doesNotMatch(JSON.stringify(requests[1]?.body), /earlier private context/u,
         'the earlier turn history never enters the Web request')
 
-      await directWeb.setSearchApiCount(21)
+      await directWeb.setSearchApiCount(21, await captureOf(directWeb))
       assert.equal((await config.web.read())?.api.count, 21,
         'Remote observes the same Host field written by Direct')
       const directConsumer = await agents.withInitiator(webAgent, () => web.search({ query: 'direct parity probe' }))
@@ -2012,7 +2031,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       }
       return originalMutate.apply(this, args)
     }
-    const staleWrite = config.web.setSearchProvider('deepseek-official')
+    const staleWrite = config.web.setSearchProvider('deepseek-official', await webCaptureOf(config))
     await waitA
     try {
       const secondSettings = await secondClient.remote.settings.describe()
@@ -2024,7 +2043,9 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       ], secondWeb.revision)
       assert.equal(secondWrite.ok, true, 'Client B commits through the official generated Settings Remote')
       releaseA()
-      await assert.rejects(staleWrite, /settings\.mutate\(web\).*revision|settings\.mutate\(web\).*conflict/u)
+      const stale = await staleWrite
+      assert.equal(stale.kind, 'conflict')
+      assert.match(stale.reason, /revision|conflict/u)
     } finally {
       releaseA()
       forms.mutate = originalMutate
@@ -2034,7 +2055,7 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     await remoteConfig.describe()
     assert.equal((await config.web.read())?.searchProvider, 'custom-f3-route',
       'Client A refreshes the same Host winner')
-    assert.deepEqual(await directWeb.read(), await config.web.read(),
+    assert.deepEqual(withoutWebAuthority(await directWeb.read()), withoutWebAuthority(await config.web.read()),
       'custom provider ids and credential metadata remain identical in Direct and Remote')
 
     // Prove that the official Host document-updated event makes Client A's
@@ -2060,8 +2081,10 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       assert.equal((await config.web.read())?.searchProvider, 'custom-f3-event',
         'the new generated describe supplies the only current value')
       const refreshedCustomRevision = forms.describe().find(entry => entry.ns === 'web')?.revision
-      await assert.rejects(config.web.setSearchProvider('deepseek-search-api'), /custom route/u,
+      const customRefusal = await config.web.setSearchProvider('deepseek-search-api', await webCaptureOf(config))
+      assert.equal(customRefusal.kind, 'rejected',
         'a stale provider intent entering the Remote setter after mirror refresh is still refused')
+      assert.match(customRefusal.reason, /custom route/u)
       assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, refreshedCustomRevision,
         'the real generated Remote never dispatches a setter based on the refreshed custom route')
     } finally {
@@ -2123,19 +2146,22 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     assert.match(fixture.view(), /› DeepSeek Search API/u, 'the intended candidate is highlighted before Confirm')
     await fixture.key('\r')
     await fixture.settleUntil(/Current: DeepSeek Search API/u, 'the Remote Web provider write from /settings')
-    assert.match(fixture.view(), /Verified/u)
+    assert.match(fixture.view(), /Saved/u)
     assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider,
       'deepseek-search-api', 'the UI-confirmed setting is stored by the official Host authority')
 
-    // Inject one official Host rejection; the existing command owner must keep
-    // its refusal taxonomy and show the still-authoritative value.
+    // Inject one official Host rejection. The generated Settings controller
+    // maps an arbitrary Host mutate failure to `settings/rejected`, which
+    // cannot prove the profile stayed unchanged (a post-persistence Loader
+    // failure has the same shape). The command owner therefore reports
+    // `Could not confirm save`, never a proven `Could not save`.
     const formsMutate = forms.mutate
     let failNextMutation = true
     forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
       const [ns] = args as unknown as [string]
       if (failNextMutation && ns === 'web') {
         failNextMutation = false
-        return Promise.reject(Object.assign(new Error('f3 injected settings refusal'), { code: 'settings/rejected' }))
+        return Promise.reject(Object.assign(new Error('f3 injected settings refusal'), { code: 'gateway/bad-request' }))
       }
       return formsMutate.apply(this, args)
     }
@@ -2144,17 +2170,20 @@ test('the official Web settings Remotes and /settings page use the same Host aut
       await fixture.key('\r')
       await fixture.key('\x1b[A')
       await fixture.key('\r')
-      await fixture.settleUntil(/Not saved/u, 'the refused Remote Web provider write')
+      await fixture.settleUntil(/Could not confirm save/u, 'the rejected Remote Web provider write')
+      assert.match(fixture.view(), /The change may have been saved\. Refresh and check\./u)
+      assert.doesNotMatch(fixture.view(), /Could not save/u)
       assert.equal(forms.describe().find(entry => entry.ns === 'web')?.value?.searchProvider,
-        'deepseek-search-api', 'the refused write leaves the Host value unchanged')
+        'deepseek-search-api', 'the rejected write leaves the Host value unchanged')
     } finally {
       forms.mutate = formsMutate
     }
 
     // The next official write succeeds at the Host, but its Remote read-back
-    // is made unavailable. The command owner must report Outcome unknown, not
-    // Verified or Not saved, while the Host's actual committed value remains
-    // independently observable through the original unbound method.
+    // is made unavailable. The command owner must report `Could not confirm
+    // save`, not Saved or a proven refusal, while the Host's actual committed
+    // value remains independently observable through the original unbound
+    // method.
     const mutateBeforeReadback = forms.mutate
     const originalDescribe = forms.describe
     let failReadback = false
@@ -2169,11 +2198,11 @@ test('the official Web settings Remotes and /settings page use the same Host aut
     }
     try {
       await fixture.key('\r')
-      await fixture.settleUntil(/Outcome unknown/u, 'the committed Remote Web write with unavailable read-back')
+      await fixture.settleUntil(/Could not confirm save/u, 'the committed Remote Web write with unavailable read-back')
       const authoritative = originalDescribe.call(forms).find(entry => entry.ns === 'web')
       assert.equal(authoritative?.value?.searchProvider, 'deepseek-official',
         'the official Host mutation committed despite the unreadable Remote read-back')
-      assert.doesNotMatch(fixture.view(), /Verified|Not saved/u,
+      assert.doesNotMatch(fixture.view(), /Saved|Could not save/u,
         'an unreadable post-write authority is neither success nor a proven refusal')
     } finally {
       failReadback = false
@@ -2224,7 +2253,12 @@ test('an official Host missing either Web settings namespace keeps the generated
         return originalMutate.apply(this, args)
       }
       try {
-        await assert.rejects(config.web.setSearchApiCount(10), /sections are unavailable/u)
+        // No readable capture exists for an absent namespace; the writer must
+        // still refuse before touching the Host (a fabricated capture can never
+        // be a negative-control success).
+        const dummyCapture = { authority: { generation: {}, webRevision: 0, apiRevision: 0 } } as WebProviderSettings
+        const refused = await config.web.setSearchApiCount(10, dummyCapture)
+        assert.equal(refused.kind, 'rejected')
         assert.equal(mutations, 0, `${omitted}: the Remote adapter refuses before any Host write`)
       } finally {
         forms.mutate = originalMutate
@@ -2263,11 +2297,11 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     const remoteConfig = config as RemoteConfigPort
     assert.equal(config.configReadiness(), 'ready')
     assert.equal(config.credentials.available(), true, 'credential availability follows the current Client generation')
-    await config.web.setSearchApiCount(7)
+    await config.web.setSearchApiCount(7, await webCaptureOf(config))
     assert.equal((await config.web.read())?.api.count, 7)
     // Search Billing exists only for the official Search API route; the fixture
     // profile keeps the stored Messages selection, so switch routes first.
-    await config.web.setSearchProvider('deepseek-search-api')
+    await config.web.setSearchProvider('deepseek-search-api', await webCaptureOf(config))
     assert.equal((await config.web.read())?.searchProvider, 'deepseek-search-api')
     fixture = await mountSettingsWorkspace(host.anchorDir, config, 'remote')
     const page = fixture
@@ -2324,7 +2358,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     }
     try {
       await page.key('\r')
-      await page.settleUntil(/Verified/u, 'the current default provider confirmation')
+      await page.settleUntil(/No changes/u, 'the current default provider confirmation')
       assert.equal(noOpMutationCalls, 0, 'confirming the official default dispatches no Host mutation')
       assert.equal(forms.describe().find(entry => entry.ns === 'web')?.revision, searchRevision)
     } finally {
@@ -2340,7 +2374,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await waitFor('the explicit Remote count confirmation reaches the Host', () =>
       forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.count === 20)
     await page.settleUntil(/Current: 20/u, 'the confirmed count read-back')
-    assert.match(page.view(), /Verified/u)
+    assert.match(page.view(), /Saved/u)
 
     // Share Original Question is independently confirmed, and the displayed
     // boolean agrees with the official Host form after read-back.
@@ -2352,7 +2386,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await waitFor('the original-question choice reaches the Host', () =>
       forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.sendOriginalQuestion === false)
     await page.settleUntil(/Current: off/u, 'the original-question read-back')
-    assert.match(page.view(), /Verified/u)
+    assert.match(page.view(), /Saved/u)
 
     // The rc.2 Search billing row replaces the retired single-endpoint editor:
     // browsing the candidates writes nothing, Esc cancels without a write, and
@@ -2375,7 +2409,7 @@ test('the Remote Web page confirms each field, keeps credential values hidden, a
     await waitFor('the Account billing Confirm is authoritative on the Host', () =>
       forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.searchBilling === 'account')
     await page.settleUntil(/Current: Account/u, 'the confirmed Search billing read-back')
-    assert.match(page.view(), /Verified/u)
+    assert.match(page.view(), /Saved/u)
     assert.equal((await config.web.read())?.api.searchBilling, 'account')
     assert.equal(forms.describe().find(entry => entry.ns === 'web-deepseek-api')?.value?.fetchBilling, 'auto',
       'a Search billing write never touches the Fetch capability')

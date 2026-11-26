@@ -1703,9 +1703,16 @@ async function startSurfaceLocalClient(
             // probe records the official refusal instead of claiming the guard.
             const web = backend.config.web
             const attempts: { readonly attempt: string; readonly rejected: boolean; readonly message?: string }[] = []
-            const attempt = async (label: string, operation: () => Promise<void>): Promise<void> => {
+            const attempt = async (label: string, operation: () => Promise<unknown>): Promise<void> => {
               try {
-                await operation()
+                const outcome = await operation()
+                const typed = typeof outcome === 'object' && outcome !== null
+                  ? outcome as { readonly kind?: unknown; readonly reason?: unknown }
+                  : undefined
+                if (typed?.kind === 'rejected' || typed?.kind === 'conflict') {
+                  attempts.push({ attempt: label, rejected: true, message: String(typed.reason ?? '') })
+                  return
+                }
                 attempts.push({ attempt: label, rejected: false })
               } catch (error) {
                 attempts.push({
@@ -1715,11 +1722,19 @@ async function startSurfaceLocalClient(
                 })
               }
             }
+            // Every typed write is bound to the ORIGINAL read capture. The
+            // mounted port refuses invalid input before consulting it, and the
+            // custom-route guard re-proves it at the actual dispatch boundary.
+            let capture = await web.readFresh()
+            if (capture === undefined) {
+              emit({ phase: 'failed', error: 'the mounted Remote ConfigPort could not read a Web capture' })
+              return
+            }
             {
-              await attempt('invalid-search-provider', () => web.setSearchProvider('legacy-custom-search' as never))
-              await attempt('invalid-fetch-provider', () => web.setFetchProvider('legacy-custom-fetch' as never))
-              await attempt('count-zero', () => web.setSearchApiCount(0))
-              await attempt('count-51', () => web.setSearchApiCount(51))
+              await attempt('invalid-search-provider', () => web.setSearchProvider('legacy-custom-search' as never, capture!))
+              await attempt('invalid-fetch-provider', () => web.setFetchProvider('legacy-custom-fetch' as never, capture!))
+              await attempt('count-zero', () => web.setSearchApiCount(0, capture!))
+              await attempt('count-51', () => web.setSearchApiCount(51, capture!))
             }
             const settings = officialSettingsFace()
             let customRouteSeeded = false
@@ -1736,16 +1751,17 @@ async function startSurfaceLocalClient(
                 for (let attempt = 0; attempt < 40; attempt += 1) {
                   const facts = await web.read()
                   visible = facts?.fetchProvider === 'legacy-custom-fetch'
-                  if (visible) break
+                  if (visible) {
+                    capture = facts
+                    break
+                  }
                   await new Promise(resolve => setTimeout(resolve, 50))
                 }
                 if (visible) {
-                  try {
-                    await web.setFetchProvider('http')
-                    customRouteRefusal = { rejected: false }
-                  } catch (error) {
-                    customRouteRefusal = { rejected: true, message: error instanceof Error ? error.message : String(error) }
-                  }
+                  const outcome = await web.setFetchProvider('http', capture!)
+                  customRouteRefusal = outcome.kind === 'rejected'
+                    ? { rejected: true, message: outcome.reason }
+                    : { rejected: false }
                 } else {
                   customRouteRefusal = { rejected: false, message: 'the mounted port never observed the seeded custom route' }
                 }

@@ -29,4 +29,10 @@ export class RemoteConfigWriteLifetime {
   hasUnsettledWrites(): boolean {
     return this.pending > 0
   }
+
+  /** The exact accepted-work count (read-only lifecycle fact; no second
+   *  in-flight authority). */
+  pendingCount(): number {
+    return this.pending
+  }
 }
