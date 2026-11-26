@@ -13,11 +13,12 @@
  *
  * EVIDENCE LEVEL: application-composed / SDK wire. The `SurfaceRuntime`, its
  * mount, the ownership core, the scope authority, the search source, the TSP
- * renderer and the SDK are PRODUCTION. STANDS-IN: the scripted tty (the real
- * client lane is `scripts/tern-pane-history-search-ux.mjs`), and the submit
- * sink below `events.onSubmit` is this composition's recorder — the REAL
- * `SubmissionController`, `DirectSessionWriter` and prompt-count witness are
- * `test/integration/tern-tsp-history-search-direct.test.ts`.
+ * renderer and the SDK are PRODUCTION. STANDS-IN: the scripted tty, and the
+ * submit sink below `events.onSubmit` is this composition's recorder — the
+ * REAL `SubmissionController`, `DirectSessionWriter` and prompt-count witness
+ * are `test/integration/tern-tsp-history-search-direct.test.ts`. Historical
+ * real-client qualification is recorded in PR #566; new client claims require
+ * an actual client run.
  *
  * What THIS file owns and no other lane proves: the mount receives the SAME
  * search source the surface was given, the scope is captured exactly once per

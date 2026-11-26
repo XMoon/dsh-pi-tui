@@ -17,11 +17,11 @@
  * `$DSH_HOME`, and the real TSP renderer over the shipped SDK.
  *
  * STAND-INS: the scripted streaming model (the endpoint only) and the scripted
- * tty. A REAL client keyboard/pointer/layout run is
- * `scripts/tern-pane-history-search-ux.mjs`, and the OS clipboard write, IME and
- * physical input stay `NOT_VERIFIED` in this file: the copy witness here is the
- * payload the Client-local policy received, never a claim about the desktop
- * clipboard.
+ * tty. Historical real-client keyboard/pointer/layout qualification is
+ * recorded in PR #566; new client claims require an actual client run. The OS
+ * clipboard write, IME and physical input stay `NOT_VERIFIED` in this file:
+ * the copy witness here is the payload the Client-local policy received, never
+ * a claim about the desktop clipboard.
  * @module @xmoon76/dsh-pi-tui/test/integration/tern-tsp-history-search-direct
  */
 

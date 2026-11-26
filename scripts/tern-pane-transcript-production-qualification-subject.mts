@@ -11,10 +11,9 @@
  * This file owns exactly three things:
  *  1. a READ-ONE-TO-ONE observation of the production commit
  *     (`renderer.display.setTranscript`) and of the real SDK `error` event,
- *     installed by `module.registerHooks` the same way
- *     `tern-pane-history-search-ux-subject.mts` does it: the original function
- *     is called once with the original arguments in the original order, its
- *     result is returned unchanged and its errors are never caught;
+ *     installed by `module.registerHooks`: the original function is called
+ *     once with the original arguments in the original order, its result is
+ *     returned unchanged and its errors are never caught;
  *  2. the isolated deterministic test INPUT (`PROMPTS`, written once to
  *     `prompts.json`, which the flow reads as its only prompt source);
  *  3. a TEST-ONLY command channel (`case.json` / `case-result.json`) whose five
