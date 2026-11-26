@@ -704,7 +704,6 @@ export function createReplyDebtStream(
   let terminal = false
   let inputDone = false
   const reader = stream.readable.getReader()
-  const writer = stream.writable.getWriter()
   let readerReleased = false
   const releaseReader = (): void => {
     if (readerReleased) return
@@ -778,7 +777,15 @@ export function createReplyDebtStream(
     async write(message) {
       if (terminal || options.isClosed()) throw new Error('local acp: reply stream already closed')
       const response = replyDebtKind(message) === 'response'
-      await writer.write(message)
+      // The SDK shutdown path cancels its receive reader but does not close
+      // this outer writable. Hold the public SDK writer only for the operation
+      // that needs it; a connection-long lock would survive the real terminal.
+      const writer = stream.writable.getWriter()
+      try {
+        await writer.write(message)
+      } finally {
+        try { writer.releaseLock() } catch { /* already released */ }
+      }
       if (response) {
         if (debt <= 0) throw new Error('local acp: reply debt underflow')
         debt -= 1
@@ -786,10 +793,14 @@ export function createReplyDebtStream(
     },
     async close() {
       terminal = true
+      if (stream.writable.locked) return
+      const writer = stream.writable.getWriter()
       try { await writer.close() } finally { try { writer.releaseLock() } catch { /* already released */ } }
     },
     async abort(reason) {
       terminal = true
+      if (stream.writable.locked) return
+      const writer = stream.writable.getWriter()
       try { await writer.abort(reason) } finally { try { writer.releaseLock() } catch { /* already released */ } }
     },
   })

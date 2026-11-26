@@ -788,7 +788,8 @@ test('the public SDK Stream reply-debt owner admits 40 and refuses the 41st befo
   })
   let closed = false
   const failures: Array<{ code: string; detail?: { reason?: string; limit?: number; observedCount?: number } }> = []
-  const stream = createReplyDebtStream(ndJsonStream(output, input), {
+  const rawStream = ndJsonStream(output, input)
+  const stream = createReplyDebtStream(rawStream, {
     isClosed: () => closed,
     fail: (code, detail) => {
       failures.push({ code, detail })
@@ -873,6 +874,12 @@ test('the public SDK Stream reply-debt owner admits 40 and refuses the 41st befo
     assert.equal(handlers, 40, 'the refused record must never reach a handler')
     await withTimeout(connection.closed, 5_000, 'debt refusal closes the SDK connection')
     assert.equal(frames.some(({ frame }) => frame.id === 140), false, 'the refused record has no response')
+    // The SDK terminal cancels its receive reader but does not close the
+    // outer writable. Settle the held write, then observe the public SDK
+    // stream locks rather than inferring teardown from connection.closed.
+    gate.resolve()
+    await waitFor(() => !rawStream.readable.locked && !rawStream.writable.locked,
+      'actual SDK terminal releases the public stream reader and writer locks')
   } finally {
     gate.resolve()
     try { connection.close() } catch {}
