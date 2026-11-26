@@ -1977,6 +1977,10 @@ async function cleanup(reason, options = {}) {
         }
         try {
           const problems = await terminateAllProcessEntries(reason)
+          if (publicAuthorityBlocking.length > 0) {
+            clean = false
+            appendNote('public-authority-cleanup-blocking', { blocking: publicAuthorityBlocking })
+          }
           if (problems.length > 0) {
             clean = false
             for (const problem of problems) appendNote('process-entry-termination-failed', problem)
@@ -7750,6 +7754,7 @@ async function handlePublicDaemonState(message) {
       cliState: publicRowIdentityState(handle, handle.cli),
       clientState: publicRowIdentityState(handle, handle.client),
       hostState: publicRowIdentityState(handle, handle.host),
+      hostBirth: handle.host?.birth ?? null,
     }
   }
   const state = await withProcessNativeOperation('public-daemon-state', handle.launchId, () => handle.terminal.state())
@@ -7771,6 +7776,7 @@ async function handlePublicDaemonState(message) {
     cliState: publicRowIdentityState(handle, handle.cli),
     clientState: publicRowIdentityState(handle, handle.client),
     hostState: publicRowIdentityState(handle, handle.host),
+    hostBirth: handle.host?.birth ?? null,
     cols: state.cols,
     rows: state.rows,
   }
@@ -8112,12 +8118,20 @@ if pid == 0:
     env_p=(ctypes.c_char_p*(len(env)+1))(*[x.encode() for x in env],None)
     libc.execve(node.encode(),argv_p,env_p)
     os._exit(127)
-with open(os.environ["P1D_AUTH_CHILD_PID_OUT"], "w") as out:
-    json.dump({"pid": pid}, out)
 while True:
     time.sleep(1)
 `, { mode: 0o600 })
-  return { child, parent, other, python }
+  const wrapper = join(dir, 'execve-wrapper.mjs')
+  writeFileSync(wrapper, `import {spawn} from 'node:child_process'
+const [python, node, child] = process.argv.slice(2)
+spawn(python, [process.argv[1].replace(/execve-wrapper\\.mjs$/u, 'execve.py'), node, child], {
+  stdio: 'ignore',
+  env: process.env,
+  detached: false,
+})
+setInterval(() => {}, 1000)
+`, { mode: 0o600 })
+  return { child, parent, other, python, wrapper }
 }
 
 async function waitForAuthorityFile(path, label, timeoutMs = 30_000) {
@@ -8167,6 +8181,7 @@ async function handlePublicAuthorityControl(message) {
     sentinel: {},
   }
   try {
+    publicAuthorityBlocking = []
     const split = createSplitTerminal({
       prefix: 'public-authority',
       traceDirectory: join(scene.workDir, 'trace'),
@@ -8198,9 +8213,7 @@ async function handlePublicAuthorityControl(message) {
       detached: join(dir, 'detached.json'),
       missing: join(dir, 'missing.json'),
       duplicate: join(dir, 'duplicate.json'),
-      duplicatePid: join(dir, 'duplicate-child-pid.json'),
       malformed: join(dir, 'malformed.json'),
-      malformedPid: join(dir, 'malformed-child-pid.json'),
       trigger: join(dir, 'spawn-second'),
     }
     const baseEnv = {
@@ -8370,24 +8383,16 @@ async function handlePublicAuthorityControl(message) {
     }).map(([key, value]) => `${key}=${value}`)
     execEnv.push('FOO=two')
     assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
-    const duplicateChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
+    const duplicateChild = spawn(process.execPath, [files.wrapper, '/usr/bin/python3', process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv), P1D_AUTH_CHILD_PID_OUT: out.duplicatePid },
+      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(execEnv) },
     })
     const duplicateHandle = registerAuthorityHelper({
       entryId: 'public-authority-duplicate-env', kind: 'authority-duplicate-env', label: 'authority duplicate-env',
       child: duplicateChild, dir,
     })
     helpers.push(duplicateHandle)
-    const duplicatePidFacts = await waitForAuthorityFile(out.duplicatePid, 'duplicate-env child pid')
-    // The wrapper's own Darwin process UUID is refreshed by its controlled
-    // fork; bind the stable wrapper identity after that fork. This is not a
-    // child/exec leader birth overwrite.
-    duplicateHandle.birth = captureEntryBirth(duplicateChild, 'duplicate-env stable wrapper')
     const duplicateGround = await waitForAuthorityFile(out.duplicate, 'duplicate-env child')
-    if (duplicatePidFacts.pid !== duplicateGround.pid) {
-      throw new Error('PUBLIC_AUTHORITY_CONTROL: the duplicate execve wrapper published a different child PID')
-    }
     const duplicateObservation = obs.observeFull(duplicateGround.pid)
     facts.negative.duplicateEnv = duplicateObservation.kind === 'alive'
       ? reason(duplicateObservation, { ...parentExpected, birth: duplicateObservation.birth, entry: files.child })
@@ -8399,21 +8404,16 @@ async function handlePublicAuthorityControl(message) {
       'NOEQUALS',
     ]
     assertPublicAuthorityAdmission('PUBLIC_AUTHORITY_CONTROL before next producer')
-    const malformedChild = spawn('/usr/bin/python3', [files.python, process.execPath, files.child], {
+    const malformedChild = spawn(process.execPath, [files.wrapper, '/usr/bin/python3', process.execPath, files.child], {
       cwd: dir, stdio: 'ignore', detached: true,
-      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: out.malformed, P1D_AUTH_CHILD_PID_OUT: out.malformedPid },
+      env: { ...baseEnv, P1D_AUTH_EXEC_ENV: JSON.stringify(malformedOnly), P1D_AUTH_OUT: out.malformed },
     })
     const malformedHandle = registerAuthorityHelper({
       entryId: 'public-authority-malformed-env', kind: 'authority-malformed-env', label: 'authority malformed-env',
       child: malformedChild, dir,
     })
     helpers.push(malformedHandle)
-    const malformedPidFacts = await waitForAuthorityFile(out.malformedPid, 'malformed-env child pid')
-    malformedHandle.birth = captureEntryBirth(malformedChild, 'malformed-env stable wrapper')
     const malformedGround = await waitForAuthorityFile(out.malformed, 'malformed-env child')
-    if (malformedPidFacts.pid !== malformedGround.pid) {
-      throw new Error('PUBLIC_AUTHORITY_CONTROL: the malformed execve wrapper published a different child PID')
-    }
     const malformedObservation = obs.observeFull(malformedGround.pid)
     facts.negative.malformedEnv = malformedObservation.kind === 'alive'
       ? reason(malformedObservation, { ...parentExpected, birth: malformedObservation.birth, entry: files.child })
@@ -8506,6 +8506,10 @@ async function handlePublicAuthorityControl(message) {
       }
     }
     const producer = publicAuthorityProducer
+    if (producer?.closeError !== undefined && !closeErrors.includes(producer.closeError)) {
+      closeErrors.push(`producer-close:${producer.closeError}`)
+    }
+    const sentinelGone = sentinel === undefined ? undefined : readKernelProcess(sentinel.pid).kind === 'gone'
     facts.cleanup = {
       registered: helpers.length,
       leaked: liveHelpers.length,
@@ -8520,15 +8524,19 @@ async function handlePublicAuthorityControl(message) {
       foregroundGroupTerminal: producer?.foregroundGroupTerminal === true,
       helpersTerminal: liveHelpers.length === 0,
       unfinishedHelpers: unfinishedHelpers.map(handle => handle.entryId),
-      sentinelGone: readKernelProcess(sentinel.pid).kind === 'gone',
+      sentinelGone,
     }
     facts.cleanup.blocking = [
       ...(producerSettlementError === undefined ? [] : [`producer:${producerSettlementError}`]),
       ...(producer?.settled === true ? [] : ['producer-not-settled']),
       ...(liveHelpers.length > 0 ? [`live-helpers:${liveHelpers.length}`] : []),
-      ...terminationProblems.map(problem => `termination:${JSON.stringify(problem)}`),
+      ...(unknownHelpers.length > 0 ? [`unknown-helpers:${unknownHelpers.length}`] : []),
+      ...(unregistered.length > 0 ? [`unregistered:${unregistered.length}`] : []),
+      ...(terminationProblems.length > 0 ? terminationProblems.map(problem => `termination:${JSON.stringify(problem)}`) : []),
       ...closeErrors,
+      ...(sentinel === undefined ? ['sentinel-not-spawned'] : []),
     ]
+    publicAuthorityBlocking = facts.cleanup.blocking
     writeReceipt({ publicAuthorityControl: facts })
     if (facts.cleanup.blocking.length > 0) {
       throw new Error(`PUBLIC_AUTHORITY_CONTROL: cleanup is not quiesced: ${JSON.stringify(facts.cleanup.blocking)}`)
@@ -9583,6 +9591,7 @@ const ENTRY_REDACTED_KEYS = new Set([
 /** The real detached helper processes this Scene owns beyond Host/Client. */
 const qualificationHelpers = []
 let publicAuthorityProducer
+let publicAuthorityBlocking = []
 let qualificationHelperSequence = 0
 /**
  * The ONE scoped installed-copy mutation of a process Scene, or undefined.

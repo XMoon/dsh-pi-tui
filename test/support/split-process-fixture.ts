@@ -324,6 +324,7 @@ export interface PublicDaemonKernelState {
   clientPid: number | null
   hostPid: number | null
   hostInstanceId: string | null
+  hostBirth: string | null
 }
 
 export interface PublicDaemonStatusFacts {
