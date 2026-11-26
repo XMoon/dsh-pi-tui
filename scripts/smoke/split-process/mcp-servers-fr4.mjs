@@ -416,22 +416,23 @@ export async function runMcpServersFr4(context) {
     const beforeRefusedDelete = patchText(context.installation.profileDir)
     client.send('d')
     await sleep(400)
-    assert(!(await frameOf(client)).includes(`Delete ${INHERITED_NAME}?`),
+    const refusedDelete = await frameOf(client)
+    assert(!refusedDelete.includes(`Permanently delete server ${INHERITED_NAME}`),
       'FR4: an inherited server must offer no Delete confirmation')
+    assert(!refusedDelete.includes('Delete [D]'),
+      'FR4: an inherited Detail must not advertise a permanent Delete')
     assert(patchText(context.installation.profileDir) === beforeRefusedDelete,
       'FR4: a refused Delete must write nothing')
     trace('fr4.inherited-delete-refused', { writes: 0 })
 
     // Override it (Disable), then Reset to the inherited configuration.
     client.send('t')
-    await waitForPattern(client, /Disable server fr4-user|Enable server fr4-user/u, 'FR4 override confirmation')
+    await waitForPattern(client, new RegExp(`(Disable|Enable) server ${INHERITED_NAME}\\.`, 'u'), 'FR4 override confirmation')
     client.send('y')
     await waitForScreenText(client, 'State: Disabled', 'FR4 inherited overridden state')
     await waitForScreenText(client, 'Configuration: Overridden (user)', 'FR4 inherited now overridden')
     client.send('u')
-    // The bar compacts to `Reset <name>?` when the full sentence does not fit;
-    // the SUBJECT is the safety fact either way.
-    await waitForPattern(client, new RegExp(`(Remove your override|Reset ${INHERITED_NAME}\\?)`, 'u'), 'FR4 reset confirmation')
+    await waitForPattern(client, new RegExp(`Reset server ${INHERITED_NAME}\\b`, 'u'), 'FR4 reset confirmation')
     client.send('y')
     await waitForScreenText(client, 'Inherited configuration restored', 'FR4 reset result')
     await waitForScreenText(client, 'Configuration: Inherited', 'FR4 inherited restored')
@@ -474,7 +475,7 @@ export async function runMcpServersFr4(context) {
 
     // B disables the same server, moving the namespace revision.
     clientB.send('t')
-    await waitForPattern(clientB, /Disable server fr4-user|Enable server fr4-user/u, 'FR4 B toggle confirmation')
+    await waitForPattern(clientB, new RegExp(`(Disable|Enable) server ${USER_HTTP}\\.`, 'u'), 'FR4 B toggle confirmation')
     clientB.send('y')
     await waitForScreenText(clientB, 'Configuration saved · the server will stop', 'FR4 B saved')
 
@@ -508,7 +509,7 @@ export async function runMcpServersFr4(context) {
     await openMcpPage(client, 'FR4 delete')
     await openRow(client, USER_STDIO, 'FR4 delete')
     client.send('d')
-    await waitForPattern(client, new RegExp(`Delete ${USER_STDIO}\\?`, 'u'), 'FR4 delete confirmation')
+    await waitForPattern(client, new RegExp(`Permanently delete server ${USER_STDIO}\\b`, 'u'), 'FR4 delete confirmation')
     client.send('y')
     await waitForScreenText(client, 'Config removed · waiting for Host reconcile', 'FR4 delete result')
     assert(!configuredNames(context.installation.profileDir).has(USER_STDIO),
