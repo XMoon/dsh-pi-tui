@@ -514,8 +514,14 @@ export async function runMcpServersFr4(context) {
     // The adaptive List is 34 cells wide here, so the honest receipt wraps
     // across two physical lines. Wait for the complete fact, not a contiguous
     // single-line spelling.
-    await waitForScreenPattern(client, /Config removed[\s\S]*waiting for Host reconcile/u,
-      'FR4 delete result (wrapped receipt)')
+    // The controller may retire the generation-bound receipt before the List
+    // paints it; the load-bearing fact is that the deleted target is gone and
+    // the page is the ACTIVE List, not the fallback server's Detail.
+    await waitForCondition(async () => {
+      const frame = await frameOf(client)
+      return !frame.includes(USER_STDIO)
+        && /^\[MCP servers \(\d+\)\]\s+Details/mu.test(frame)
+    }, 'FR4 delete result: target gone and List active', 90_000)
     assert(!configuredNames(context.installation.profileDir).has(USER_STDIO),
       'FR4: a User-added Delete must remove the entry from the profile configuration')
     trace('fr4.delete-user', { removed: true })

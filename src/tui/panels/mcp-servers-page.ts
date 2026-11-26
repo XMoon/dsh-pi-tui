@@ -824,7 +824,6 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private reconcileDetailRemoval(snapshot: McpServersSnapshot): void {
     if (!this.deleteReturnPending) return
     const status = snapshot.configStatus
-    if (status !== undefined) this.deleteLocalReceipt = false
     const savedDelete = status?.kind === 'saved' && status.text.startsWith('Config removed')
     const refusedDelete = status?.kind === 'rejected'
       || status?.kind === 'conflict'
@@ -838,7 +837,10 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return
     }
     this.deleteReturnPending = false
-    this.deleteLocalReceipt = status === undefined
+    // Keep this fallback even when a transient `saving`/`saved` receipt is
+    // visible now: the controller may retire that generation-bound status
+    // before the List can paint it.
+    this.deleteLocalReceipt = true
     this.detailRemovalTarget = undefined
     this.region = 'list'
     this.receiptRegion = 'list'
