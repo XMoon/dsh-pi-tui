@@ -1118,7 +1118,7 @@ export interface SteerSubmissionDeps {
   }) => void
   readonly takeSubmitTurn: () => { readonly wait: Promise<void>; readonly release: () => void }
   readonly pinDraftAttachments: (text: string) => () => void
-  readonly persistAfterSession: (
+  readonly persistAfterSession?: (
     resolveSession: () => Promise<string | undefined>,
     persist?: (sessionId: string | undefined) => void,
   ) => Promise<void>
@@ -1306,27 +1306,29 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       await submitTurn.wait
       if (deps.isDisposed()) return
       // The deferred-start gate: the steered draft's history row is written
-      // AFTER the session exists, with the FINAL session id.
-      await deps.persistAfterSession(
-        async () => {
-          await deps.ensureSession()
-          if (deps.isDisposed()) return undefined
-          if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) return undefined
-          return deps.currentAgent()?.session.id
-        },
-        (sessionId) => {
-          if (deps.isDisposed()) return
-          if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) return
-          // PR2: the accepted-history row completes at the Host acceptance,
-          // never at the attempt's dispatch (a proven-unreceived prompt
-          // leaves no "sent" row).
-          if (input.attempt !== undefined && input.deferAccepted !== undefined) {
-            input.deferAccepted(() => { persistHistory?.(sessionId) })
-          } else {
-            persistHistory?.(sessionId)
-          }
-        },
-      )
+      // AFTER the session exists, with the FINAL session id. The Split Client
+      // has no file writer, but its resolver still runs so session creation,
+      // FIFO and owner-token ordering are identical.
+      const resolveSession = async (): Promise<string | undefined> => {
+        await deps.ensureSession()
+        if (deps.isDisposed()) return undefined
+        if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) return undefined
+        return deps.currentAgent()?.session.id
+      }
+      const persist = (sessionId: string | undefined): void => {
+        if (deps.isDisposed()) return
+        if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) return
+        // PR2: the accepted-history row completes at the Host acceptance,
+        // never at the attempt's dispatch (a proven-unreceived prompt
+        // leaves no "sent" row).
+        if (input.attempt !== undefined && input.deferAccepted !== undefined) {
+          input.deferAccepted(() => { persistHistory?.(sessionId) })
+        } else {
+          persistHistory?.(sessionId)
+        }
+      }
+      if (deps.persistAfterSession === undefined) await resolveSession()
+      else await deps.persistAfterSession(resolveSession, persist)
       if (deps.isDisposed()) return
       if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) {
         // PR3-B §7.3 (F2): the stale restore may be suppressed — only when

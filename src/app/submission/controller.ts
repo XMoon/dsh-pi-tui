@@ -28,7 +28,6 @@ import { ImageInputError } from '../../domain/media/errors.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { recoverableWorkspaceSelection } from '../session/workspace-selection-recovery.ts'
 import { runReservedSubmit } from './submit-flow.ts'
-import { persistAfterSession } from './history-persist.ts'
 
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
@@ -1399,26 +1398,26 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // failed) persists nothing — the submission never reached a
         // session; a resolution that resolves undefined (sessionless)
         // persists a row without a sessionId.
-        const afterSession = deps.history?.persistAfterSession ?? persistAfterSession
-        await afterSession(
-          async () => {
-            if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return undefined
-            await deps.session.ensureSession()
-            if (deps.isCleanedUp()) return undefined
-            return deps.liveAgent()?.session.id
-          },
-          (sessionId) => {
-            if (deps.isCleanedUp()) return
-            if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return
-            // PR2: the history row's completion boundary is the Host
-            // acceptance, never the submission attempt: a proven-unreceived
-            // prompt leaves no "sent" row. The row keeps the original submit
-            // timestamp and the FINAL session id.
-            if (deps.history === undefined) return
-            if (activeHold !== undefined) activeHold.deferAccepted(() => persistHistory(sessionId))
-            else persistHistory(sessionId)
-          },
-        )
+        const resolveSession = async (): Promise<string | undefined> => {
+          if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) return undefined
+          await deps.session.ensureSession()
+          if (deps.isCleanedUp()) return undefined
+          return deps.liveAgent()?.session.id
+        }
+        const sessionId = await resolveSession()
+        if (deps.isCleanedUp()) return
+        if (deps.history === undefined) {
+          // The Split Client has no file writer: the resolver still ran so
+          // session creation/FIFO/currentness ordering is unchanged.
+        } else if (submittedAgent === undefined || deps.captureMatches(submittedSubject)) {
+          // PR2: the history row's completion boundary is the Host acceptance,
+          // never the submission attempt: a proven-unreceived prompt leaves no
+          // "sent" row. The row keeps the original submit timestamp and the
+          // FINAL session id.
+          const persist = (): void => persistHistory(sessionId)
+          if (activeHold !== undefined) activeHold.deferAccepted(persist)
+          else persist()
+        }
         if (deps.isCleanedUp()) return
         const agent = deps.liveAgent()
         if (agent === undefined) {
@@ -2041,7 +2040,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       },
       takeSubmitTurn,
       pinDraftAttachments: (value) => pinDraftAttachments(value, deps.drafts.images, deps.drafts.files),
-      persistAfterSession: deps.history?.persistAfterSession ?? persistAfterSession,
+      persistAfterSession: deps.history?.persistAfterSession,
       ensureSession: () => deps.session.ensureSession(),
       withPromptAdmission: (agent, hasImages, task) =>
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),

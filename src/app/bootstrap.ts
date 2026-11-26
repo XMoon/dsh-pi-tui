@@ -3933,7 +3933,10 @@ export function applyRunnerWithRuntime(
           },
        },
       ...(history === undefined ? {} : {
-        history: { persist: (record) => history.persist(record) },
+        history: {
+          persist: (record) => history.persist(record),
+          persistAfterSession: (resolve, persist) => history.persistAfterSession(resolve, persist),
+        },
       }),
       viewer: { isViewing: () => viewer.isViewing() },
       extensions: {

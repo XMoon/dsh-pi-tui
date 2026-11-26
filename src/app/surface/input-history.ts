@@ -87,7 +87,7 @@ export interface InputHistory {
   persist(record: InputHistoryPersistRequest): void
   /** The deferred-start ordering gate: resolve the session FIRST, then
    *  persist through the caller's closure (plan M-gate). */
-  persistAfterSession(resolveSession: () => Promise<string | undefined>, persist: (sessionId: string | undefined) => void): Promise<void>
+  persistAfterSession(resolveSession: () => Promise<string | undefined>, persist?: (sessionId: string | undefined) => void): Promise<void>
 }
 
 /** Create the client-local input-history owner (plan §A5b-2). */
