@@ -4402,6 +4402,11 @@ export function applyRunnerWithRuntime(
     // Direct external `./tui` entries must exist before the first surface
     // attach; later refreshes reconcile through the Plugin Manager callback.
     if (directClientExtensionActivation !== undefined) await directClientExtensionActivation
+    // The concrete seat module is deliberately loaded only on the Remote
+    // branch and never statically from the public runner facade.
+    const historySeatFactory = remoteSources === undefined
+      ? undefined
+      : (await import('../runtime/history-search-seat.ts')).createRemoteHistorySeat
     try {
       surface.start({
       // M6 UX PR1: the LIVE authoritative activity fact for the renderer-level
@@ -4422,6 +4427,7 @@ export function applyRunnerWithRuntime(
       // SAME source instance also backs the cold session-recall reader above.
       historySearchSource,
       ...(remoteSources === undefined ? {} : { historySearchRead: remoteSources.historySearch }),
+      ...(historySeatFactory === undefined ? {} : { historySeatFactory }),
       historySearchDiag: diag,
       // Feature History PR2-A: the Split Client's process recall memory. The
       // surface forwards it to the PiTui mount options; Direct passes nothing

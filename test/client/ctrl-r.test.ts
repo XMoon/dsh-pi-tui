@@ -207,13 +207,14 @@ test('a live blocking Question REFUSES Ctrl+R (silent no-op, question untouched)
   assert.ok(!panelVisible(vt.getViewport()), 'the refused History never appears after the settle')
 })
 
-test('a REFUSED Remote History open disposes its captured Host scope', async (t) => {
+test('a REFUSED Remote History open acquires no Host scope or reader', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
   const { TuiApp } = await import('../../src/tui-app.ts')
   const vt = new VirtualTerminal(80, 24)
   let disposed = 0
+  let captured = 0
   const remote = {
     initialScope: 'all' as const,
     directory: () => ({ available: false, reason: 'directory-unavailable' }),
@@ -222,7 +223,7 @@ test('a REFUSED Remote History open disposes its captured Host scope', async (t)
     dispose: () => { disposed += 1 },
   }
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true, remote }),
+    captureHistoryScope: () => { captured += 1; return { sessionId: undefined, isCurrent: () => true, remote } },
     historySearchRead: {
       search: async () => { throw new Error('a refused open must not search') },
       readText: async () => { throw new Error('a refused open must not read') },
@@ -237,7 +238,8 @@ test('a REFUSED Remote History open disposes its captured Host scope', async (t)
   await vt.waitForRender()
   app.openHistorySearch() // refused by the optional-seat gate, after capture
   await vt.waitForRender()
-  assert.equal(disposed, 1, 'the refused open disposed its Remote capture exactly once')
+  assert.equal(captured, 0, 'the refused open never created a Host scope capture')
+  assert.equal(disposed, 0, 'the refused open never acquired the Remote transport observation')
   assert.ok(!panelVisible(vt.getViewport()))
   vt.sendInput('\r')
   vt.sendInput('\r')

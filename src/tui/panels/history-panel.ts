@@ -52,7 +52,7 @@ import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../client/history/search.ts'
-import type { RemoteHistorySeat, RemoteHistorySeatView } from '../../runtime/history-search-seat.ts'
+import type { RemoteHistorySeat, RemoteHistorySeatView } from '../../runtime/history-search-seat-contract.ts'
 import { HISTORY_CHORDS, type HistoryChordId } from '../keybindings/hints.ts'
 import { ACTION_BAR_SEPARATOR, layoutActionBarRow, renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -1170,8 +1170,9 @@ export class HistoryPanel implements Component, Focusable {
     this.controller = undefined
     this.unsubscribeRemote?.()
     this.unsubscribeRemote = undefined
-    // Idempotent: the host also closes the seat on its own teardown route.
-    this.remote?.close()
+    // The host/lease owns the seat's scope lifetime. Disposing this component
+    // must not close the preserved capture before an accepted Restore re-proves
+    // it; the lease closes the seat on its normal teardown route.
     this.frame = undefined
     this.resetPointerGesture()
   }

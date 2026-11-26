@@ -29,13 +29,12 @@ import { View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo } from '@stencil-hq/tern'
 import type { HistoryScope, HistorySearchResult } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS, HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
-import {
-  createRemoteHistorySeat,
-  type RemoteHistoryBodyView,
-  type RemoteHistoryRow,
-  type RemoteHistorySeat,
-  type RemoteHistorySeatView,
-} from '../../runtime/history-search-seat.ts'
+import type {
+  RemoteHistoryBodyView,
+  RemoteHistoryRow,
+  RemoteHistorySeat,
+  RemoteHistorySeatView,
+} from '../../runtime/history-search-seat-contract.ts'
 import type { TspHistorySearchBinding } from '../../app/surface/runtime.ts'
 import type { HistoryOpenScope } from '../../tui-app.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -480,6 +479,7 @@ export function createTspHistorySearch(
     if (owner.phase !== 'open') return false
     if (!ports.admitted()) return false
     return owner.scopeCapture.isCurrent()
+      && (owner.remote === undefined || owner.scopeCapture.remote?.isCurrent() !== false)
   }
 
   const clearTimer = (owner: HistorySeatState): void => {
@@ -502,7 +502,7 @@ export function createTspHistorySearch(
     ports.requestRender()
   }
 
-  const retire = (): void => {
+  const retire = (options?: { readonly preserveScope?: boolean }): void => {
     const owner = state
     if (owner === undefined) return
     state = undefined
@@ -514,7 +514,7 @@ export function createTspHistorySearch(
     // this seat can never re-enter the callback that retired it.
     owner.remoteUnsubscribe?.()
     owner.remoteUnsubscribe = undefined
-    owner.remote?.close()
+    owner.remote?.close(options)
     owner.remote = undefined
     owner.remoteView = undefined
     frameIds = new Map()
@@ -545,14 +545,15 @@ export function createTspHistorySearch(
   /** Retry is the honest recovery for a failed/stale/incomplete/unavailable/
    *  denied search, and for a selected row whose exact body read failed. */
   const remoteRetryEnabled = (view: RemoteHistorySeatView): boolean =>
-    REMOTE_RETRY_STATUSES.has(view.status)
-    || (view.status === 'ready' && view.body.kind === 'failed')
+    !view.moreLoading
+    && (REMOTE_RETRY_STATUSES.has(view.status)
+      || (view.status === 'ready' && view.body.kind === 'failed'))
 
   /** The one exact body this card may copy or restore: committed, ready and
    *  still the row the painted action belongs to. */
   const remoteBodyReady = (owner: HistorySeatState): Extract<RemoteHistoryBodyView, { readonly kind: 'ready' }> | undefined => {
     const view = owner.remoteView
-    if (view === undefined || view.status !== 'ready') return undefined
+    if (view === undefined || view.status !== 'ready' || view.moreLoading) return undefined
     const body = view.body
     if (body.kind !== 'ready') return undefined
     if (body.row.id !== view.selectedId) return undefined
@@ -619,7 +620,7 @@ export function createTspHistorySearch(
     const remote = owner.remote
     const view = owner.remoteView
     if (remote === undefined || view === undefined) return
-    if (step === 'down' && REMOTE_RETRY_STATUSES.has(view.status)) {
+    if (step === 'down' && (REMOTE_RETRY_STATUSES.has(view.status) || view.body.kind === 'failed')) {
       remoteRetry(owner)
       return
     }
@@ -972,8 +973,16 @@ export function createTspHistorySearch(
           // Re-prove the captured Host scope at the restore admission; a
           // same-id transport/binding replacement must not receive the draft.
           if (!owner.scopeCapture.isCurrent()) return
-          retire()
-          ports.restoreToComposer(raw)
+          const remoteScope = owner.scopeCapture.remote
+          // Keep the scope observation through the close; the post-close proof
+          // is the only currentness fact that governs the draft write.
+          retire({ preserveScope: true })
+          try {
+            if (remoteScope?.isCurrent() !== true) return
+            ports.restoreToComposer(raw)
+          } finally {
+            remoteScope?.dispose()
+          }
           return
         }
         const row = settledSelected(owner)
@@ -1365,7 +1374,11 @@ export function createTspHistorySearch(
         if (read !== undefined && diag !== undefined) {
           // ONE shared Remote owner per open. It owns query/page/body/More/
           // Retry and currentness; this seat only follows its committed view.
-          const remote = createRemoteHistorySeat({
+          const createRemoteSeat = binding?.createRemoteSeat as
+            | ((options: unknown) => RemoteHistorySeat)
+            | undefined
+          if (createRemoteSeat === undefined) throw new Error('the Remote History seat factory is unavailable')
+          const remote = createRemoteSeat({
             read,
             diag,
             sessionId: scopeCapture.sessionId,

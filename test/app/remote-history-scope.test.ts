@@ -62,12 +62,35 @@ class FollowHandle implements WorkspaceFactsHandle {
 
 const WORKSPACE = { workspaceId: 'workspace-a', path: '/repo/a', title: 'a', sessionIds: [] }
 
-function workspacePort(handle: FollowHandle): SessionWorkspaceFactsPort {
+function readyInspector(
+  sessionId = 'session-a',
+  cwd = '/repo/a',
+  hooks: { open?: () => void; read?: () => void; dispose?: () => void } = {},
+): {
+  read(signal?: AbortSignal): Promise<{ kind: 'ready'; data: { sessionId: string; asOfSeq: number; effectiveCwd: string } }>
+  dispose(): void
+} {
   return {
+    async read() {
+      hooks.read?.()
+      return { kind: 'ready', data: { sessionId, asOfSeq: 7, effectiveCwd: cwd } }
+    },
+    dispose() { hooks.dispose?.() },
+  }
+}
+
+function workspacePort(
+  handle: FollowHandle,
+  inspector?: { read(signal?: AbortSignal): Promise<unknown>; dispose(): void } | null,
+): SessionWorkspaceFactsPort {
+  const base = {
     readActivity: async () => [],
     observeActivity: () => { throw new Error('not used') },
     followWorkspaces: () => handle,
-  } as unknown as SessionWorkspaceFactsPort
+  }
+  if (inspector === undefined) return { ...base, openInspector: () => readyInspector() } as unknown as SessionWorkspaceFactsPort
+  if (inspector === null) return base as unknown as SessionWorkspaceFactsPort
+  return { ...base, openInspector: () => inspector } as unknown as SessionWorkspaceFactsPort
 }
 
 function activeFacts(overrides: {
@@ -89,40 +112,53 @@ function activeFacts(overrides: {
   } as unknown as RemoteSessionFacts
 }
 
-test('the exact workingDirectory face is subscribed before its passive value read', () => {
+test('the exact workingDirectory face is subscribed before the exact passive cut', async () => {
   const order: string[] = []
   let face: (() => void) | undefined
   let unsubscribed = 0
+  let inspectorDisposed = 0
   const facts = activeFacts({
     subscribeWorkingDirectory: (_sessionId, listener) => {
       order.push('subscribe')
       face = listener
       return () => { unsubscribed += 1 }
     },
-    workingDirectory: () => {
-      order.push('read')
-      return '/repo/a'
-    },
   })
+  const inspector = readyInspector('session-a', '/repo/a', {
+    open: () => order.push('open'),
+    read: () => order.push('read'),
+    dispose: () => { inspectorDisposed += 1 },
+  })
+  let opened: ((reason: 'changed' | 'source-replaced') => void) | undefined
+  const port = {
+    ...workspacePort(new FollowHandle(), inspector),
+    openInspector: (id: string, onInvalidated: (reason: 'changed' | 'source-replaced') => void) => {
+      order.push('open')
+      opened = onInvalidated
+      return inspector
+    },
+  } as unknown as SessionWorkspaceFactsPort
   const scope = createRemoteHistoryOpenScope({
     sessionId: 'session-a',
     isScopeCurrent: () => true,
     sessionFacts: facts,
-    workspaceFacts: workspacePort(new FollowHandle()),
+    workspaceFacts: port,
     workspaceIntent: undefined,
     diag: DIAG,
   })
-  assert.deepEqual(order, ['subscribe', 'read'])
-  assert.equal(scope.directory().available, true)
+  await waitFor(() => scope.directory().available, 'the exact cut')
+  assert.deepEqual(order, ['subscribe', 'open', 'read'])
   assert.equal(scope.directory().cwd, '/repo/a')
   face?.()
   assert.equal(scope.isCurrent(), false, 'a face publication permanently revokes the open')
   assert.equal(scope.directory().available, false)
+  opened?.('source-replaced')
   scope.dispose()
   assert.equal(unsubscribed, 1)
+  assert.equal(inspectorDisposed, 1)
 })
 
-test('an A→B→A face notification leaves the original A capture dead, never value-equal acceptance', () => {
+test('an A→B→A face notification leaves the original A capture dead, never value-equal acceptance', async () => {
   let face: (() => void) | undefined
   const facts = activeFacts({
     subscribeWorkingDirectory: (_sessionId, listener) => {
@@ -138,7 +174,7 @@ test('an A→B→A face notification leaves the original A capture dead, never v
     workspaceIntent: undefined,
     diag: DIAG,
   })
-  assert.equal(scope.directory().available, true)
+  await waitFor(() => scope.directory().available, 'the exact cut')
   assert.equal(scope.directory().cwd, '/repo/a')
   face?.()
   face?.()
@@ -147,7 +183,7 @@ test('an A→B→A face notification leaves the original A capture dead, never v
   scope.dispose()
 })
 
-test('a stale transport token or a missing retained binding revokes the open', () => {
+test('a stale transport token or a missing retained binding revokes the open', async () => {
   const stale = createRemoteHistoryOpenScope({
     sessionId: 'session-a',
     isScopeCurrent: () => true,
@@ -169,7 +205,7 @@ test('a stale transport token or a missing retained binding revokes the open', (
     workspaceIntent: undefined,
     diag: DIAG,
   })
-  assert.equal(midOpen.isCurrent(), true)
+  await waitFor(() => midOpen.directory().available, 'the exact cut')
   live = false
   assert.equal(midOpen.isCurrent(), false, 'a same-id transport replacement revokes the open')
   assert.equal(midOpen.directory().available, false)
@@ -188,17 +224,56 @@ test('a stale transport token or a missing retained binding revokes the open', (
   unretained.dispose()
 })
 
-test('the official Session status supplies the same effective cwd when the face has not materialized', () => {
-  const scope = createRemoteHistoryOpenScope({
+test('a missing or stale exact cut refuses Directory but keeps the Session/All open', async () => {
+  const missing = createRemoteHistoryOpenScope({
     sessionId: 'session-a',
     isScopeCurrent: () => true,
-    sessionFacts: activeFacts({ workingDirectory: () => undefined }),
-    workspaceFacts: workspacePort(new FollowHandle()),
+    sessionFacts: activeFacts(),
+    workspaceFacts: workspacePort(new FollowHandle(), null),
     workspaceIntent: undefined,
     diag: DIAG,
   })
-  assert.equal(scope.directory().available, true)
-  assert.equal(scope.directory().cwd, '/repo/a')
+  assert.equal(missing.directory().available, false)
+  assert.equal(missing.directory().reason, 'directory-unavailable')
+  assert.equal(missing.isCurrent(), true)
+  missing.dispose()
+
+  const stale = createRemoteHistoryOpenScope({
+    sessionId: 'session-a',
+    isScopeCurrent: () => true,
+    sessionFacts: activeFacts(),
+    workspaceFacts: workspacePort(new FollowHandle(), {
+      read: async () => ({ kind: 'unavailable' as const, message: 'stale' }),
+      dispose: () => {},
+    }),
+    workspaceIntent: undefined,
+    diag: DIAG,
+  })
+  await waitFor(() => stale.directory().available === false, 'the stale cut')
+  assert.equal(stale.isCurrent(), true)
+  stale.dispose()
+})
+
+test('an inspector invalidation revokes the captured authority', async () => {
+  let invalidate: ((reason: 'changed' | 'source-replaced') => void) | undefined
+  const port = {
+    ...workspacePort(new FollowHandle()),
+    openInspector: (_id: string, onInvalidated: (reason: 'changed' | 'source-replaced') => void) => {
+      invalidate = onInvalidated
+      return readyInspector()
+    },
+  } as unknown as SessionWorkspaceFactsPort
+  const scope = createRemoteHistoryOpenScope({
+    sessionId: 'session-a',
+    isScopeCurrent: () => true,
+    sessionFacts: activeFacts(),
+    workspaceFacts: port,
+    workspaceIntent: undefined,
+    diag: DIAG,
+  })
+  await waitFor(() => scope.directory().available, 'the exact cut')
+  invalidate?.('source-replaced')
+  assert.equal(scope.isCurrent(), false)
   scope.dispose()
 })
 

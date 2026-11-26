@@ -22,7 +22,6 @@
  * @module @xmoon76/dsh-pi-tui/app/application-runtime
  */
 
-import type { HistorySearchReadPort } from '../runtime/history-search-read-port.ts'
 import type { PresentationReader } from '../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../runtime/session-reader-port.ts'
 import type { ImageAttachmentRefLike } from '../domain/media/types.ts'
@@ -157,7 +156,7 @@ export interface RemoteApplicationSources {
   /** The official Session-scoped facts (sessionStatus/plan/running). */
   readonly sessionFacts: RemoteSessionFactsSource
   /** The narrow private Host accepted-history read over this connection. */
-  readonly historySearch: HistorySearchReadPort
+  readonly historySearch: unknown
   /** The branch-specific command authority read (PR4). */
   readonly commandSource: RemoteCommandSourceFace
   /** The M3-5 PR2 Task Center read source (descendant catalog + Job roster). */

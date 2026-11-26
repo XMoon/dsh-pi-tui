@@ -15,7 +15,7 @@ import type {
   HistoryReadTextResponse,
   HistorySearchRequest,
   HistorySearchResponse,
-} from './remote/pi-tui-history-search-contract.ts'
+} from './history-search-dto.ts'
 
 export interface HistorySearchReadPort {
   search(request: HistorySearchRequest, signal: AbortSignal): Promise<HistorySearchResponse>

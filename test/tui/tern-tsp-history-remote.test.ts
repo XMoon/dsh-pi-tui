@@ -35,6 +35,7 @@ import {
   RemoteHistorySearchFailedError,
 } from '../../src/runtime/remote/history-search-remote.ts'
 import { createTspHistorySearch, type TspHistorySearchIntent, type TspHistorySearchSeat } from '../../src/tui/tsp/history-search.ts'
+import { createRemoteHistorySeat } from '../../src/runtime/history-search-seat.ts'
 import {
   historySearchView,
   HISTORY_SEARCH_ROLES,
@@ -246,6 +247,7 @@ function makeSeat(t: { after(fn: () => unknown): void }, options: SeatOptions = 
       return { sessionId, isCurrent: () => scope.face.isCurrent(), remote: scope.face }
     },
     read: port.port,
+    createRemoteSeat: createRemoteHistorySeat,
     diag,
   }, () => true)
   t.after(() => { seat.retire() })
@@ -550,6 +552,22 @@ test('the bounded preview stays honest until the exact body is ready; Copy and R
   assert.deepEqual(h.restored, [exact], 'Restore writes the same exact text')
   assert.equal(h.seat.renderState(), undefined, 'Restore closes the one card')
   assert.equal(h.scope().disposeCount(), 1)
+})
+
+test('Down on a failed exact body retries the first page instead of browsing', async (t) => {
+  const h = makeSeat(t)
+  h.seat.open()
+  await waitUntil('the first search', () => h.port.pendingSearches() === 1)
+  h.port.answerSearch(page([row(0, 'alpha full text'), row(1, 'beta text')], 'cursor-1'))
+  await waitUntil('the body request', () => h.port.pendingReads() === 1)
+  h.port.failRead(new RemoteHistorySearchFailedError(undefined, 'the hash did not match'))
+  await waitUntil('the body failure',
+    () => h.seat.renderState()?.preview?.notice === 'History text failed')
+  const before = h.port.searchRequests.length
+  assert.equal(h.seat.handleKey(key('down')), true)
+  await waitUntil('the first-page retry', () => h.port.searchRequests.length === before + 1)
+  assert.equal(h.port.lastSearchRequest().cursor, undefined)
+  assert.equal(h.port.lastSearchRequest().query, '')
 })
 
 test('a failed exact body keeps the bounded preview, states the reason and Retry restarts the first page', async (t) => {

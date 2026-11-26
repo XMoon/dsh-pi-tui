@@ -20,6 +20,40 @@
  */
 
 import { createHash } from 'node:crypto'
+import type {
+  HistoryReadTextRequest,
+  HistoryReadTextResponse,
+  HistorySearchIncompleteReason,
+  HistorySearchItem,
+  HistorySearchRequest,
+  HistorySearchResponse,
+  HistorySearchScope,
+  HistorySearchUnavailableReason,
+  HistoryReadTextUnavailableReason,
+} from '../history-search-dto.ts'
+
+export type {
+  HistoryReadTextRequest,
+  HistoryReadTextResponse,
+  HistorySearchIncompleteReason,
+  HistorySearchItem,
+  HistorySearchRequest,
+  HistorySearchResponse,
+  HistorySearchScope,
+  HistorySearchUnavailableReason,
+  HistoryReadTextUnavailableReason,
+} from '../history-search-dto.ts'
+import {
+  HISTORY_SEARCH_LIMIT_MAX,
+  HISTORY_SEARCH_QUERY_MAX_CHARS,
+  HISTORY_SEARCH_READ_TEXT_LIMIT_MAX,
+} from '../history-search-limits.ts'
+
+export {
+  HISTORY_SEARCH_LIMIT_MAX,
+  HISTORY_SEARCH_QUERY_MAX_CHARS,
+  HISTORY_SEARCH_READ_TEXT_LIMIT_MAX,
+} from '../history-search-limits.ts'
 import { isAbsolute } from 'node:path'
 import type {
   InvocationDescriptor,
@@ -40,91 +74,17 @@ export const PI_TUI_HISTORY_SEARCH_SEARCH_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiH
 export const PI_TUI_HISTORY_SEARCH_READ_TEXT_ENDPOINT = '@xmoon76/dsh-pi-tui#piTuiHistorySearch/readText'
 
 /** The literal query bound (UTF-16 code units, never trimmed). */
-export const HISTORY_SEARCH_QUERY_MAX_CHARS = 256
 
 /** Inclusive page-size bound of one search request. */
 export const HISTORY_SEARCH_LIMIT_MIN = 1
-export const HISTORY_SEARCH_LIMIT_MAX = 25
 
 /** The preview is a bounded prefix, never recoverable full content. */
 export const HISTORY_SEARCH_PREVIEW_MAX_CHARS = 4096
 
 /** Inclusive chunk-size bound of one readText request. */
-export const HISTORY_SEARCH_READ_TEXT_LIMIT_MAX = 16_384
 
 /** The encoded keyset cursor bound in bytes. */
 export const HISTORY_SEARCH_CURSOR_MAX_BYTES = 2048
-
-export type HistorySearchScope = 'all' | 'session' | 'directory'
-
-export type HistorySearchIncompleteReason =
-  | 'source-uncertain'
-  | 'reconciling'
-  | 'resource-limit'
-  | 'source-read-failed'
-
-export type HistorySearchUnavailableReason = 'index-unavailable' | 'service-missing'
-
-export type HistoryReadTextUnavailableReason =
-  | 'not-found'
-  | 'stale-content'
-  | 'index-unavailable'
-  | 'service-missing'
-
-/** One search request; the scope discriminates the exact key set. */
-export type HistorySearchRequest =
-  | { readonly scope: 'all'; readonly query: string; readonly limit: number; readonly cursor?: string }
-  | { readonly scope: 'session'; readonly sessionId: string; readonly query: string; readonly limit: number; readonly cursor?: string }
-  | { readonly scope: 'directory'; readonly cwd: string; readonly query: string; readonly limit: number; readonly cursor?: string }
-
-/** One ready search row: a bounded preview plus the immutable content identity. */
-export interface HistorySearchItem {
-  readonly sessionId: string
-  readonly messageId: string
-  readonly firstEventSeq: number
-  /** Host first-admission event time (Unix epoch milliseconds). */
-  readonly acceptedAt: number
-  /** Effective event-time cwd, or `null` when the Session never proved one. */
-  readonly effectiveCwd: string | null
-  /** At most {@link HISTORY_SEARCH_PREVIEW_MAX_CHARS} UTF-16 code units. */
-  readonly preview: string
-  /** Full original text length in UTF-16 code units. */
-  readonly contentLength: number
-  readonly contentSha256: string
-  readonly hasNonText: boolean
-}
-
-/** One exact-text read request. */
-export interface HistoryReadTextRequest {
-  readonly sessionId: string
-  readonly messageId: string
-  readonly contentSha256: string
-  readonly offset: number
-  readonly limit: number
-}
-
-export type HistorySearchResponse =
-  | {
-    readonly kind: 'ready'
-    readonly generation: string
-    readonly items: readonly HistorySearchItem[]
-    readonly nextCursor: string | null
-  }
-  | { readonly kind: 'loading' }
-  | { readonly kind: 'incomplete'; readonly reason: HistorySearchIncompleteReason }
-  | { readonly kind: 'unavailable'; readonly reason: HistorySearchUnavailableReason }
-  | { readonly kind: 'stale'; readonly reason: 'cursor-stale' }
-
-export type HistoryReadTextResponse =
-  | {
-    readonly kind: 'ready'
-    readonly chunk: string
-    readonly nextOffset: number | null
-    readonly contentLength: number
-  }
-  | { readonly kind: 'loading' }
-  | { readonly kind: 'incomplete'; readonly reason: HistorySearchIncompleteReason }
-  | { readonly kind: 'unavailable'; readonly reason: HistoryReadTextUnavailableReason }
 
 /**
  * The decoded keyset-position cursor. It carries the Host's SQLite row anchor

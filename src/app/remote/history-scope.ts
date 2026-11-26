@@ -19,7 +19,7 @@
  */
 
 import { isAbsolute } from 'node:path'
-import type { SessionWorkspaceFactsPort } from '../../runtime/session-workspace-facts-port.ts'
+import type { SessionInspectorSource, SessionWorkspaceFactsPort } from '../../runtime/session-workspace-facts-port.ts'
 import { type Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import type { WorkspaceNextIntentOwner } from '../session/workspace-next-intent.ts'
@@ -53,6 +53,11 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
   private transportToken: unknown
   private transportSessionId: string | undefined
   private transportFacts: RemoteSessionFacts | undefined
+  private inspector: SessionInspectorSource | undefined
+  private connectionGeneration: unknown
+  private connectionGenerationKnown = false
+  private unsubscribeConnection: (() => void) | undefined
+  private workspaceHandle: { isCurrent(): boolean; dispose(): void } | undefined
 
   private readonly deps: RemoteHistoryScopeDeps
 
@@ -78,6 +83,15 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       this.invalidate('session-transport-replaced')
       return false
     }
+    if (this.connectionGenerationKnown
+      && this.deps.workspaceFacts.connectionGeneration?.() !== this.connectionGeneration) {
+      this.invalidate('workspace-generation-lost')
+      return false
+    }
+    if (this.workspaceHandle !== undefined && !this.workspaceHandle.isCurrent()) {
+      this.invalidate('workspace-generation-lost')
+      return false
+    }
     return this.deps.isScopeCurrent()
   }
 
@@ -94,6 +108,10 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
     this.unsubscribeFace = undefined
     this.unsubscribeIntent?.()
     this.unsubscribeIntent = undefined
+    this.unsubscribeConnection?.()
+    this.unsubscribeConnection = undefined
+    this.inspector?.dispose()
+    this.inspector = undefined
     this.listeners.clear()
   }
 
@@ -127,7 +145,7 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       this.directoryState = { available: false, reason: 'directory-unavailable' }
       return
     }
-    // Subscribe BEFORE the passive value read: a change after this point is a
+    // Subscribe BEFORE the passive read: a change after this point is a
     // permanent revocation even if the value later returns to its initial one.
     this.unsubscribeFace = facts.subscribeWorkingDirectory(sessionId, () => {
       this.invalidate('working-directory-changed')
@@ -144,18 +162,54 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       this.invalidate('session-transport-replaced')
       return
     }
-    // The exact retained binding's own face is the first authority. The
-    // official Session status carries the SAME effective directory when the
-    // face has not materialized yet; it is never the Client cwd or the header.
-    const cwd = facts.workingDirectory(sessionId) ?? facts.sessionStatus(sessionId)?.cwd
-    if (typeof cwd !== 'string' || cwd === '' || !isAbsolute(cwd)) {
+    const openInspector = this.deps.workspaceFacts.openInspector
+    if (openInspector === undefined) {
+      // No official exact cut is available: refuse Directory, keep Session/All.
       this.directoryState = { available: false, reason: 'directory-unavailable' }
       return
     }
-    this.directoryState = { available: true, cwd }
+    const inspector = openInspector.call(this.deps.workspaceFacts, sessionId, (reason) => {
+      this.invalidate(reason === 'changed' ? 'working-directory-changed' : 'session-transport-replaced')
+    })
+    this.inspector = inspector
+    runDetached('history open scope inspector', async () => {
+      const result = await inspector.read(this.abort.signal)
+      if (this.disposed || this.invalidated || this.abort.signal.aborted) return
+      if (result.kind !== 'ready') {
+        this.directoryState = { available: false, reason: 'directory-unavailable' }
+        this.publish()
+        return
+      }
+      if (result.data.sessionId !== sessionId
+        || !facts.isTransportTokenCurrent(sessionId, token)
+        || !this.deps.isScopeCurrent()) {
+        this.invalidate('session-transport-replaced')
+        return
+      }
+      const cwd = result.data.effectiveCwd
+      if (typeof cwd !== 'string' || cwd === '' || !isAbsolute(cwd)) {
+        this.directoryState = { available: false, reason: 'directory-unavailable' }
+        this.publish()
+        return
+      }
+      this.setDirectory({ available: true, cwd })
+    }, { diag: this.deps.diag })
   }
 
   private observeSessionlessWorkspace(): void {
+    const connectionGeneration = this.deps.workspaceFacts.connectionGeneration
+    if (connectionGeneration !== undefined) {
+      this.connectionGeneration = connectionGeneration.call(this.deps.workspaceFacts)
+      this.connectionGenerationKnown = true
+      const observe = this.deps.workspaceFacts.observeConnectionGeneration
+      if (observe !== undefined) {
+        this.unsubscribeConnection = observe.call(this.deps.workspaceFacts, () => {
+          if (this.deps.workspaceFacts.connectionGeneration?.() !== this.connectionGeneration) {
+            this.invalidate('workspace-generation-lost')
+          }
+        })
+      }
+    }
     const intent = this.deps.workspaceIntent
     const follow = this.deps.workspaceFacts.followWorkspaces
     if (intent === undefined || follow === undefined) {
@@ -181,6 +235,7 @@ class RemoteHistoryScope implements RemoteHistoryOpenScope {
       }
     })
     const handle = follow.call(this.deps.workspaceFacts, this.abort.signal, 'single-generation')
+    this.workspaceHandle = handle
     let baseline = false
     runDetached('history open scope workspace', async () => {
       try {

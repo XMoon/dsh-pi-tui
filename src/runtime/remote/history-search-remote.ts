@@ -22,7 +22,7 @@ import type {
   HistoryReadTextResponse,
   HistorySearchRequest,
   HistorySearchResponse,
-} from './pi-tui-history-search-contract.ts'
+} from '../history-search-dto.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { HistorySearchReadPort } from '../history-search-read-port.ts'
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'

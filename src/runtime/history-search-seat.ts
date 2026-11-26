@@ -14,90 +14,32 @@ import {
   HISTORY_SEARCH_LIMIT_MAX,
   HISTORY_SEARCH_QUERY_MAX_CHARS,
   HISTORY_SEARCH_READ_TEXT_LIMIT_MAX,
-  type HistoryReadTextRequest,
-  type HistorySearchItem,
-  type HistorySearchRequest,
-  type HistorySearchResponse,
-} from './remote/pi-tui-history-search-contract.ts'
+} from './history-search-limits.ts'
+import type {
+  HistoryReadTextRequest,
+  HistorySearchItem,
+  HistorySearchRequest,
+  HistorySearchResponse,
+} from './history-search-dto.ts'
 import {
   RemoteHistorySearchDeniedError,
   RemoteHistorySearchFailedError,
   RemoteHistorySearchSupersededError,
 } from './remote/history-search-remote.ts'
 import type { HistorySearchReadPort } from './history-search-read-port.ts'
+import type {
+  HistoryScope,
+  RemoteHistoryBodyView,
+  RemoteHistoryDirectoryState,
+  RemoteHistoryOpenScopeLike,
+  RemoteHistoryRow,
+  RemoteHistorySeat,
+  RemoteHistorySeatStatus,
+  RemoteHistorySeatView,
+} from './history-search-seat-contract.ts'
 import type { Diag } from './process/diagnostics.ts'
 import { runDetached } from './process/tasks.ts'
 
-
-/** The three accepted-history scopes. */
-export type HistoryScope = 'session' | 'current' | 'all'
-
-/** The Directory availability the per-open application capture proved. */
-export interface RemoteHistoryDirectoryState {
-  readonly available: boolean
-  /** The exact Host path captured at this open; present only when available. */
-  readonly cwd?: string
-  /** A safe reason shown only while Directory is not available. */
-  readonly reason?: string
-}
-
-/** The narrow per-open capture the seat consumes; owned by the application. */
-export interface RemoteHistoryOpenScopeLike {
-  readonly initialScope: 'session' | 'all'
-  directory(): RemoteHistoryDirectoryState
-  isCurrent(): boolean
-  subscribe(listener: () => void): () => void
-  dispose(): void
-}
-
-/** One committed result row. `preview` is bounded; `text` only lives in a body. */
-export interface RemoteHistoryRow {
-  readonly id: string
-  readonly sessionId: string
-  readonly messageId: string
-  readonly firstEventSeq: number
-  readonly acceptedAt: number
-  readonly effectiveCwd: string | null
-  readonly preview: string
-  readonly contentLength: number
-  readonly contentSha256: string
-  readonly hasNonText: boolean
-}
-
-export type RemoteHistoryBodyView =
-  | { readonly kind: 'none' }
-  | { readonly kind: 'preview'; readonly row: RemoteHistoryRow }
-  | { readonly kind: 'loading'; readonly row: RemoteHistoryRow; readonly preview: string }
-  | { readonly kind: 'ready'; readonly row: RemoteHistoryRow; readonly text: string; readonly hasNonText: boolean }
-  | { readonly kind: 'failed'; readonly row: RemoteHistoryRow; readonly preview: string; readonly message: string }
-
-export type RemoteHistorySeatStatus =
-  | 'idle'
-  | 'searching'
-  | 'loading-host'
-  | 'incomplete'
-  | 'unavailable'
-  | 'denied'
-  | 'failed'
-  | 'stale'
-  | 'too-long'
-  | 'ready'
-
-export interface RemoteHistorySeatView {
-  readonly serial: number
-  readonly queryRevision: number
-  readonly scope: HistoryScope
-  readonly query: string
-  readonly status: RemoteHistorySeatStatus
-  /** Safe status text; never a Host error detail or a content byte. */
-  readonly message: string
-  readonly rows: readonly RemoteHistoryRow[]
-  readonly selectedId: string | undefined
-  readonly hasMore: boolean
-  readonly moreLoading: boolean
-  readonly directory: RemoteHistoryDirectoryState
-  readonly body: RemoteHistoryBodyView
-}
 
 export interface RemoteHistorySeatOptions {
   readonly read: HistorySearchReadPort
@@ -112,17 +54,16 @@ export interface RemoteHistorySeatOptions {
   readonly debounceMs?: number
 }
 
-export interface RemoteHistorySeat {
-  open(scope: HistoryScope, query: string): void
-  setQuery(query: string): void
-  setScope(scope: HistoryScope): void
-  select(id: string): void
-  more(): void
-  retry(): void
-  close(): void
-  view(): RemoteHistorySeatView
-  subscribe(listener: () => void): () => void
-}
+export type {
+  HistoryScope,
+  RemoteHistoryBodyView,
+  RemoteHistoryDirectoryState,
+  RemoteHistoryOpenScopeLike,
+  RemoteHistoryRow,
+  RemoteHistorySeat,
+  RemoteHistorySeatStatus,
+  RemoteHistorySeatView,
+} from './history-search-seat-contract.ts'
 
 const DEFAULT_DEBOUNCE_MS = 75
 
@@ -438,17 +379,18 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
     if (!staleAutoUsed) {
       staleAutoUsed = true
       moreLoading = false
+      queryRevision += 1
       status = 'searching'
       message = 'Refreshing history…'
       publish()
-      runSearch({ serial: round.serial, revision: round.revision }, undefined, false)
+      runSearch({ serial: round.serial, revision: queryRevision }, undefined, false)
       return
     }
     moreLoading = false
     finishWithStatus('stale', 'History changed — Retry')
   }
 
-  const startFresh = (): void => {
+  const resetChain = (): void => {
     cancelSearch()
     cancelBody()
     queryRevision += 1
@@ -459,6 +401,10 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
     nextCursor = null
     generation = undefined
     body = { kind: 'none' }
+  }
+
+  const startFresh = (): void => {
+    resetChain()
     if (closed) return
     if (query.length > HISTORY_SEARCH_QUERY_MAX_CHARS) {
       status = 'too-long'
@@ -486,8 +432,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
   }
 
   const scheduleFresh = (): void => {
-    cancelSearch()
-    queryRevision += 1
+    resetChain()
     if (closed) return
     if (query.length > HISTORY_SEARCH_QUERY_MAX_CHARS) {
       status = 'too-long'
@@ -623,7 +568,7 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       startFresh()
     },
     select(id) {
-      if (closed || status !== 'ready') return
+      if (closed || status !== 'ready' || moreLoading) return
       const row = rows.find(candidate => candidate.id === id)
       if (row === undefined) return
       userChanged = true
@@ -639,18 +584,18 @@ export function createRemoteHistorySeat(options: RemoteHistorySeatOptions): Remo
       runSearch({ serial, revision: queryRevision }, nextCursor, true)
     },
     retry() {
-      if (closed) return
+      if (closed || moreLoading) return
       staleAutoUsed = false
       startFresh()
     },
-    close() {
+    close(closeOptions) {
       if (closed) return
       closed = true
       cancelSearch()
       cancelBody()
       scopeSub?.()
       scopeSub = undefined
-      options.scope.dispose()
+      if (closeOptions?.preserveScope !== true) options.scope.dispose()
       listeners.clear()
     },
     view() {

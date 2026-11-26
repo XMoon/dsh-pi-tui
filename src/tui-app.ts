@@ -297,8 +297,6 @@ import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
 import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
-import { createRemoteHistorySeat, type RemoteHistorySeat } from './runtime/history-search-seat.ts'
-import type { HistorySearchReadPort } from './runtime/history-search-read-port.ts'
 import type { Diag } from './runtime/process/diagnostics.ts'
 import { createHistoryRecallScope, type HistoryRecallScope, type HistoryScopeSettlement } from './client/history/recall-scope.ts'
 import type { InputMemoryRecall } from './client/history/memory-recall.ts'
@@ -2733,10 +2731,15 @@ export interface TuiAppOptions {
    * itself. Optional — absent, Ctrl+R falls through unbound.
    */
   historySearchSource?: import('./client/history/search.ts').HistorySearchSource
-  /** The Remote-only private Host accepted-history read; absent on Direct. */
-  historySearchRead?: HistorySearchReadPort
+  /** The Remote-only private Host accepted-history read; absent on Direct.
+   *  Kept opaque in the public options surface: the concrete port and its
+   *  private wire contract must not enter the published declaration graph. */
+  historySearchRead?: unknown
   /** The composition diagnostics channel for the Remote seat's detached reads. */
   historySearchDiag?: Diag
+  /** The composition-owned concrete Remote seat factory; opaque here so the
+   *  private wire contract never enters the published declaration graph. */
+  historySeatFactory?: unknown
   /**
    * Feature History PR2-A: the Split/Daemon Client root's process-lifetime
    * input-recall memory, injected by the composition root. When present this
@@ -4455,8 +4458,9 @@ export class TuiApp {
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
-  private readonly historySearchRead: HistorySearchReadPort | undefined
+  private readonly historySearchRead: unknown
   private readonly historySearchDiag: Diag | undefined
+  private readonly historySeatFactory: unknown
   /** The live working directory for the panel's `current` scope — a GETTER
    * (the runner's `sessionCwd()`), never a snapshot: a session switch moves
    * the whole surface's cwd with the new session header, so the panel must
@@ -5851,6 +5855,7 @@ export class TuiApp {
     this.captureHistoryScope = options.captureHistoryScope
     this.historySearchRead = options.historySearchRead
     this.historySearchDiag = options.historySearchDiag
+    this.historySeatFactory = options.historySeatFactory
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -10081,44 +10086,49 @@ export class TuiApp {
   openHistorySearch(): void {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined && this.historySearchRead === undefined) return
+    if ((this.historySearchRead === undefined) !== (this.historySearchDiag === undefined)) return
     if (this.disposed) return
     const captureHistoryScope = this.captureHistoryScope
     if (captureHistoryScope === undefined) return
     const source = this.historySearchSource
-    // ONE atomic Session-scope capture for this open. The cwd is a live getter
-    // like before; the identity and its currentness come from the SAME capture,
-    // so no later read can recombine a different session id with this scope.
-    const captured = captureHistoryScope()
-    const remote = captured.remote
     const read = this.historySearchRead
     const diag = this.historySearchDiag
-    if (remote !== undefined && (read === undefined || diag === undefined)) {
-      remote.dispose()
-      return
-    }
     const cwd = this.historySearchCwd?.() ?? this.status.cwd
-    const sessionId = captured.sessionId
+    let captured: ReturnType<typeof captureHistoryScope> | undefined
     let panel: HistoryPanel | undefined
     let lease: { close(): void } | undefined
-    let seat: RemoteHistorySeat | undefined
+    let seat: { close(options?: { readonly preserveScope?: boolean }): void } | undefined
     let createdPanel: HistoryPanel | undefined
     // The ONE caller subject predicate: the same panel is still the live tenant
-    // AND the captured Session scope (exact owner + generation) is still
-    // current. The seam reads it at every revalidation entry AND the panel reads
-    // it at every ACTING entry of its own (pointer, acceptance/copy, async
-    // commit), because the fork dispatches pointer events outside the Host key
-    // ladder. The panel-instance half answers component lifecycle; the scope
-    // half is the Session owner authority — neither substitutes for the other.
+    // AND the captured Session/Remote scope is still current. The capture is
+    // created only AFTER the optional-seat admission succeeds.
     const isCurrent = (): boolean => panel !== undefined
       && this.historyPanel === panel
       && !this.disposed
+      && captured !== undefined
       && captured.isCurrent()
-      // The Remote capture is the exact Host transport/binding/scope proof;
-      // the SessionScopeAuthority alone cannot see a same-id replacement.
-      && (remote?.isCurrent() ?? true)
+      && (captured.remote?.isCurrent() ?? true)
     lease = this.tryOpenOptionalSeatTenant(() => {
+      captured = captureHistoryScope()
+      const remote = captured.remote
+      const sessionId = captured.sessionId
+      if (remote !== undefined && (read === undefined || diag === undefined)) {
+        remote.dispose()
+        return undefined as never
+      }
       if (remote !== undefined && read !== undefined && diag !== undefined) {
-        seat = createRemoteHistorySeat({
+        const factory = this.historySeatFactory as ((options: {
+          read: unknown
+          diag: unknown
+          sessionId: string | undefined
+          scope: NonNullable<HistoryOpenScope['remote']>
+          onRetire: () => void
+        }) => { close(options?: { readonly preserveScope?: boolean }): void }) | undefined
+        if (factory === undefined) {
+          remote.dispose()
+          return undefined as never
+        }
+        seat = factory({
           read,
           diag,
           sessionId,
@@ -10130,7 +10140,7 @@ export class TuiApp {
       }
       const created = new HistoryPanel({
         ...(source === undefined ? {} : { source }),
-        ...(seat === undefined ? {} : { remote: seat }),
+        ...(seat === undefined ? {} : { remote: seat as never }),
         ...(remote === undefined ? {} : { defaultScope: remote.initialScope }),
         cwd,
         sessionId,
@@ -10147,27 +10157,30 @@ export class TuiApp {
         onResultsChanged: () => this.requestRender(),
         onCopy: (text) => this.copyHistorySelection(created, text),
         onAccept: (selection) => {
-          // Prove the exact Remote capture BEFORE retiring it: lease.close()
-          // disposes the capture, so a literal post-close call would always be
-          // false. The Session scope is re-proved after close as before.
-          const remoteCurrent = remote?.isCurrent() ?? true
-          // Retire THIS lease first (the panel is disposed and the seat
-          // re-projects the live editor owner), then re-validate the CAPTURED
-          // Session scope — never the now-closed panel instance. A session
-          // switch, a same-id reopen or a same-owner generation bump that landed
-          // during the (potentially re-entrant) retirement must never receive a
-          // prior-session prompt.
-          lease?.close()
-          if (!captured.isCurrent() || !remoteCurrent) return
-          // A new optional tenant, a Question/Approval/Save blocker or a focused
-          // capturing overlay that took the seat during the close is the NEWER
-          // fact: the accept must not overwrite the current Editor/owner.
-          if (this.optionalSeatBlocking() || this.optionalSeat !== undefined) return
-          if (this.overlayBroker.hasFocusedOverlay()) return
-          // Accept = "bring back and EDIT", never submit: the text replaces the
-          // editor draft through the seat setter; the seat projection focuses
-          // the CURRENT winner.
-          this.setEditorText(selection.content)
+          const scope = captured
+          if (scope === undefined) return
+          const historyLease = lease
+          if (scope.remote !== undefined) {
+            // Close the seat but KEEP the exact Host scope through the close;
+            // the lease close below only clears the optional-seat record.
+            seat?.close({ preserveScope: true })
+          }
+          historyLease?.close()
+          try {
+            if (scope.remote !== undefined && !scope.remote.isCurrent()) return
+            if (!scope.isCurrent()) return
+            // A new optional tenant, a Question/Approval/Save blocker or a
+            // focused capturing overlay that took the seat during the close is
+            // the NEWER fact: the accept must not overwrite the current owner.
+            if (this.optionalSeatBlocking() || this.optionalSeat !== undefined) return
+            if (this.overlayBroker.hasFocusedOverlay()) return
+            // Accept = "bring back and EDIT", never submit: the text replaces
+            // the editor draft through the seat setter; the seat projection
+            // focuses the CURRENT winner.
+            this.setEditorText(selection.content)
+          } finally {
+            scope.remote?.dispose()
+          }
         },
         onClose: () => lease?.close(),
       })
@@ -10180,24 +10193,19 @@ export class TuiApp {
       return {
         component: created,
         isCurrent,
-        close: () => {
+        close: (closeOptions?: { readonly preserveScope?: boolean }) => {
           if (this.historyPanel === created) {
             this.historyPanel = undefined
             this.historyLease = undefined
           }
-          seat?.close()
+          seat?.close(closeOptions)
           created.dispose()
         },
       }
     })
-    if (lease === undefined) {
-      // The optional-seat admission refused: no panel/seat owns the capture.
-      remote?.dispose()
-      return
-    }
+    if (lease === undefined) return
     if (panel === undefined) {
       lease.close()
-      remote?.dispose()
       return
     }
     this.historyLease = lease
