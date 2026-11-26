@@ -356,9 +356,11 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private formTargetName: string | undefined
   private formTargetToken: object | undefined
   /** A delete that may remove the current Detail target; return to the List. */
-  private detailRemovalTarget: string | undefined
+  private detailRemovalTarget: { readonly name: string; readonly token: object | undefined } | undefined
   /** The delete settlement must win even if an early frame cleared the target. */
   private deleteReturnPending = false
+  /** A saved Delete was observed, even if the roster had not reconciled yet. */
+  private deleteSawSaved = false
   /** Keep the confirmed removal visible when the controller's receipt retired. */
   private deleteLocalReceipt = false
   /** The ACTIVE text input of the form (its row + the value being typed). */
@@ -579,6 +581,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         this.unknownLeave = false
         this.deleteReturnPending = false
         this.detailRemovalTarget = undefined
+        this.deleteSawSaved = false
         this.deleteLocalReceipt = false
         this.controller.refresh()
         this.bumpRevision()
@@ -600,8 +603,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       if (data === 'y' || data === 'Y') {
         if (this.confirmationVerdict(snapshot) === 'ready') {
           if (snapshot.configConfirm?.kind === 'delete') {
-            this.detailRemovalTarget = snapshot.configConfirm.name
+            const targetName = snapshot.configConfirm.name
+            this.detailRemovalTarget = {
+              name: targetName,
+              token: snapshot.rows.find(row => row.name === targetName)?.entryToken,
+            }
             this.deleteReturnPending = true
+            this.deleteSawSaved = false
             this.deleteLocalReceipt = false
           }
           this.controller.answerConfigConfirm(true)
@@ -730,6 +738,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     if (data === 'r' || data === 'R') {
       this.deleteReturnPending = false
       this.detailRemovalTarget = undefined
+      this.deleteSawSaved = false
       this.deleteLocalReceipt = false
       this.controller.refresh()
       return
@@ -843,11 +852,14 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const refusedDelete = status?.kind === 'rejected'
       || status?.kind === 'conflict'
       || status?.kind === 'unconfirmed'
+    if (savedDelete) this.deleteSawSaved = true
+    if (refusedDelete) this.deleteSawSaved = false
     const target = this.detailRemovalTarget
-    const targetGone = target !== undefined && !snapshot.rows.some(row => row.name === target)
+    const targetGone = target !== undefined && !snapshot.rows.some(row => row.name === target.name
+      && (target.token === undefined || row.entryToken === target.token))
     if (!targetGone) {
       // A receipt or ACK is not removal proof. Keep the Detail until the
-      // roster stops listing the exact target; a refusal ends the intent.
+      // roster stops listing the exact instance; a refusal ends the intent.
       if (refusedDelete) {
         this.deleteReturnPending = false
         this.detailRemovalTarget = undefined
@@ -859,20 +871,22 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     this.region = 'list'
     this.receiptRegion = 'list'
     this.detailOffset = 0
-    if (savedDelete) {
-      // ONLY a confirmed saved Delete may leave a synthetic receipt for the
-      // generation-bound controller status it replaces.
-      this.deleteReturnPending = false
-      this.deleteLocalReceipt = true
-      this.bumpRevision()
-      return
-    }
     if (refusedDelete) {
       // The target is gone, but the write did NOT succeed. Return to the
       // List with the controller's truthful refused/unconfirmed status and
       // never synthesize a successful removal.
       this.deleteReturnPending = false
+      this.deleteSawSaved = false
       this.deleteLocalReceipt = false
+      this.bumpRevision()
+      return
+    }
+    if (this.deleteSawSaved) {
+      // ONLY a saved Delete (observed at any earlier frame) may leave a
+      // synthetic receipt for the generation-bound controller status it
+      // replaces.
+      this.deleteReturnPending = false
+      this.deleteLocalReceipt = true
       this.bumpRevision()
       return
     }
@@ -1298,8 +1312,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
         if (this.confirmationVerdict(snapshot) !== 'ready') return
         if (snapshot.configConfirm !== undefined) {
           if (snapshot.configConfirm.kind === 'delete') {
-            this.detailRemovalTarget = snapshot.configConfirm.name
+            const targetName = snapshot.configConfirm.name
+            this.detailRemovalTarget = {
+              name: targetName,
+              token: snapshot.rows.find(row => row.name === targetName)?.entryToken,
+            }
             this.deleteReturnPending = true
+            this.deleteSawSaved = false
             this.deleteLocalReceipt = false
           }
           this.controller.answerConfigConfirm(true)
@@ -1358,6 +1377,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       case 'refresh':
         this.deleteReturnPending = false
         this.detailRemovalTarget = undefined
+        this.deleteSawSaved = false
         this.deleteLocalReceipt = false
         this.controller.refresh()
         return
@@ -1622,6 +1642,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       || (snapshot.configConfirm !== undefined && !newDeleteQuestion)) {
       this.deleteReturnPending = false
       this.detailRemovalTarget = undefined
+      this.deleteSawSaved = false
       this.deleteLocalReceipt = false
     }
     this.reconcileDetailRemoval(snapshot)

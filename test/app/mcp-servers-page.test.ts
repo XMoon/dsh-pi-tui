@@ -2050,6 +2050,75 @@ test('a saved Delete does not leave the Detail before the roster proves removal'
   assert.match(render(page, 100, 16).join('\n'), /Server: alpha/u)
 })
 
+test('a Delete is bound to the exact entry token, not a same-name replacement', () => {
+  const oldToken = {}
+  const newToken = {}
+  const { page, controller } = makePage(snapshot({
+    rows: [
+      { ...connected('alpha'), entryToken: oldToken },
+      { ...connected('beta'), entryToken: {} },
+    ],
+    selectedConfig: CONFIG_FACET,
+  }))
+  render(page, 100, 16)
+  page.handleInput('\r')
+  const detail = controller.snapshotValue
+  controller.snapshotValue = {
+    ...detail,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }
+  render(page, 100, 16)
+  page.handleInput('y')
+  const saving = controller.snapshotValue
+  controller.snapshotValue = {
+    ...saving,
+    configConfirm: undefined,
+    rows: [
+      { ...connected('alpha'), entryToken: newToken },
+      { ...connected('beta'), entryToken: {} },
+    ],
+    selectedName: 'alpha',
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+  }
+  render(page, 100, 16)
+  assert.equal(pageRegion(page), 'list',
+    'a same-name new token is NOT the deleted instance; the old Detail must return to the List')
+})
+
+test('a saved Delete seen before the roster change keeps its receipt after the status retires', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 100, 16)
+  page.handleInput('\r')
+  const detail = controller.snapshotValue
+  controller.snapshotValue = {
+    ...detail,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }
+  render(page, 100, 16)
+  page.handleInput('y')
+  const saving = controller.snapshotValue
+  controller.snapshotValue = {
+    ...saving,
+    configConfirm: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+  }
+  render(page, 100, 16)
+  assert.equal(pageRegion(page), 'detail', 'the roster still lists alpha')
+  // The saved status is observed, then retired, and only later does the roster
+  // prove the target gone.
+  controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
+  render(page, 100, 16)
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    rows: controller.snapshotValue.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+    selectedConfig: undefined,
+  }
+  const frame = render(page, 100, 16).join('\n')
+  assert.equal(pageRegion(page), 'list')
+  assert.match(frame, /Config removed/u, 'a previously observed saved Delete is not lost')
+})
+
 test('an unconfirmed Delete with the target gone never paints a success receipt', () => {
   const { page, controller } = makePage(snapshot({
     selectedConfig: CONFIG_FACET,

@@ -1792,7 +1792,9 @@ with the truthful unavailable/refusal status. A confirmed Delete likewise
 returns to the List once the roster proves the deleted target gone; a nearest
 fallback selection is never presented as the original target. A removal receipt
 is retained only for a saved Delete, and the next explicit configuration action
-clears it; an unconfirmed/refused Delete never becomes a success receipt.
+clears it; an unconfirmed/refused Delete never becomes a success receipt. An
+exact Edit/Delete target means the same roster entry instance, not merely the
+same name: a removed and same-name re-added entry is a new instance.
 
 An Edit keeps the name read-only; a rename is two explicit actions. A stored
 plain value is shown only as `Set (hidden)` in a non-editing row, while a
