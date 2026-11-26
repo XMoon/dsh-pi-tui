@@ -465,6 +465,33 @@ function identityLiveness(kernel, pid, birth) {
   return kernel.serialize(observation.identity) === birth ? 'live' : 'foreign'
 }
 
+/** Read one exact live identity and its current parent edge. */
+function liveIdentity(kernel, pid, birth, label) {
+  if (identityLiveness(kernel, pid, birth) !== 'live') return undefined
+  let observation
+  try {
+    observation = kernel.read(pid)
+  } catch {
+    return undefined
+  }
+  if (kernel.classify(observation).state !== 'alive') return undefined
+  return observation.identity
+}
+
+function assertLiveParentEdge(kernel, childPid, childBirth, parentPid, parentBirth, label) {
+  const child = liveIdentity(kernel, childPid, childBirth, label)
+  const parent = liveIdentity(kernel, parentPid, parentBirth, label)
+  if (child === undefined || parent === undefined) {
+    fail(`${label}: the live parent/child identities are not both the registered births`)
+  }
+  if (child.ppid !== parentPid || child.ppid !== parent.pid) {
+    fail(`${label}: the live child PID ${String(childPid)} is not parented by ${String(parentPid)}`)
+  }
+  if (kernel.serialize(parent) !== parentBirth) {
+    fail(`${label}: the live parent birth changed`)
+  }
+}
+
 /**
  * Capture the REAL kernel identity of the probe-owned Vitest main right after
  * spawn. Every destructive signal re-reads this identity and the current
@@ -645,6 +672,28 @@ function checkProcessReceiptResources(receipt, kernel, options = {}) {
       if (state !== 'gone' && state !== 'foreign') {
         problems.push(`public daemon launch ${String(launch.label)} ${String(entry.entry)} PID is ${state}: ${String(entry.pid)}`)
       }
+    }
+    if (launch.cli !== null && launch.cli !== undefined
+      && launch.cli.pid !== launch.shellPid && launch.cli.parentBirth !== launch.shellBirth) {
+      problems.push(`public daemon launch ${String(launch.label)} CLI parent birth is not the native shell`)
+    }
+    if (launch.client !== null && launch.client !== undefined
+      && launch.client.parentBirth !== launch.cli?.birth) {
+      problems.push(`public daemon launch ${String(launch.label)} Client parent birth is not the CLI`)
+    }
+    if (launch.host !== null && launch.host !== undefined
+      && launch.host.parentBirthAtCapture !== launch.client?.birth) {
+      problems.push(`public daemon launch ${String(launch.label)} Host parent birth is not the Client`)
+    }
+    if (launch.client !== null && launch.client !== undefined
+      && (launch.client.officialProfile !== launch.profile || typeof launch.client.officialAnchor !== 'string')) {
+      problems.push(`public daemon launch ${String(launch.label)} Client official profile/anchor is unproven`)
+    }
+    if (launch.host !== null && launch.host !== undefined
+      && (launch.host.officialProfile !== launch.profile
+        || launch.host.reservedProfile !== launch.profile
+        || typeof launch.host.officialAnchor !== 'string')) {
+      problems.push(`public daemon launch ${String(launch.label)} Host official profile/anchor is unproven`)
     }
     if (launch.shellPid !== null && launch.shellPid !== undefined) {
       const shellState = identityLiveness(kernel, launch.shellPid, launch.shellBirth)
@@ -1416,15 +1465,14 @@ try {
             fail(`public-daemon-before-registry: the captured ${kind} edge is not live immediately before SIGKILL`)
           }
         }
-        if (launch.cli.pid !== launch.shellPid && launch.cli.ppid !== launch.shellPid) {
-          fail('public-daemon-before-registry: the CLI is not the native shell direct child')
+        if (launch.cli.pid !== launch.shellPid) {
+          assertLiveParentEdge(kernel, launch.cli.pid, launch.cli.birth,
+            launch.shellPid, launch.shellBirth, 'public-daemon-before-registry: CLI/shell')
         }
-        if (launch.client.ppid !== launch.cli.pid) {
-          fail('public-daemon-before-registry: the Client is not the CLI direct child')
-        }
-        if (launch.host.ppidAtCapture !== launch.client.pid) {
-          fail('public-daemon-before-registry: the Host was not captured on the Client direct child edge')
-        }
+        assertLiveParentEdge(kernel, launch.client.pid, launch.client.birth,
+          launch.cli.pid, launch.cli.birth, 'public-daemon-before-registry: Client/CLI')
+        assertLiveParentEdge(kernel, launch.host.pid, launch.host.birth,
+          launch.client.pid, launch.client.birth, 'public-daemon-before-registry: Host/Client')
       }
       if (process.kill(killedWorkerPid, 'SIGKILL') === false) {
         fail(`could not SIGKILL verified process worker PID ${String(killedWorkerPid)}`)
