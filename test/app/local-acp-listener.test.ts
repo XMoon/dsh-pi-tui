@@ -35,6 +35,7 @@ import {
   deriveImageOutputBounds,
 } from '../../src/app/remote-process/local-acp-listener.ts'
 import {
+  AcpSessionPolicyError,
   type AcpSessionPolicyRequest,
   type AcpSessionPolicyState,
 } from '../../src/app/remote-process/local-acp-session-policy.ts'
@@ -2079,6 +2080,154 @@ test('a same-slot request lifetime refuses a competing repeat, and close retires
     assert.equal(fake.agentOf('session-view'), liveAgent, 'the same exact Host Agent identity is reused')
   } finally {
     client.close()
+  }
+})
+
+test('a refused competitor during a refresh never poisons the slot request bookkeeping', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-counter', '/host/counter')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-counter', cwd: '/host/counter' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    const liveAgent = fake.agentOf('session-counter')
+    const originalResolve = fake.access.resolveAgent
+    const gate = Promise.withResolvers<void>()
+    const entered = Promise.withResolvers<void>()
+    let held = false
+    fake.access.resolveAgent = async () => {
+      if (!held) {
+        held = true
+        entered.resolve()
+        await gate.promise
+      }
+      return liveAgent === undefined
+        ? { error: { code: 'session/not-found', message: 'not found' } }
+        : { agent: liveAgent }
+    }
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-counter', cwd: '/host/counter' } })
+    await entered.promise
+    // The competing prompt is refused before dispatch. Its handler still runs
+    // its `finally`, which must release exactly what its own admission added —
+    // never a count the refresh still owns.
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/prompt', params: { sessionId: 'session-counter', prompt: [{ type: 'text', text: 'x' }] } })
+    const refused = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(refused.id, 4)
+    assert.equal(refused.error?.code, -32602)
+    assert.equal(refused.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    assert.equal(fake.prompts.length, 0, 'the refused prompt never reached the Host')
+    gate.resolve()
+    let firstRefresh: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      firstRefresh = frame
+      break
+    }
+    assert.equal(firstRefresh.id, 3)
+    assert.equal(firstRefresh.error, undefined, 'the held refresh completes after the competing refusal')
+    // The SAME slot refreshes again: no negative lifetime was left behind by the
+    // refused competitor.
+    client.send({ jsonrpc: '2.0', id: 5, method: 'session/resume', params: { sessionId: 'session-counter', cwd: '/host/counter' } })
+    let secondRefresh: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await client.next()) as { id?: number; result?: unknown; error?: unknown; method?: string }
+      if (frame.method !== undefined) continue
+      secondRefresh = frame
+      break
+    }
+    assert.equal(secondRefresh.id, 5)
+    assert.equal(secondRefresh.error, undefined, 'a later refresh on the same slot is admitted')
+    client.send({ jsonrpc: '2.0', id: 6, method: 'session/close', params: { sessionId: 'session-counter' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    fake.access.resolveAgent = originalResolve
+  } finally {
+    client.close()
+  }
+})
+
+test('a claim still detached-with-fence answers the retryable busy class instead of not-active', async t => {
+  const { scope } = newScope(t)
+  const retireGate = Promise.withResolvers<void>()
+  const fake = makeFakeAccess({
+    mountScopedMcp: async (agent, session) => ({ agent: agent as never, session, serverNames: ['s1'], fibers: [] }),
+    requestRetireScopedMcp: async () => { await retireGate.promise },
+  })
+  fake.seed('session-fenced', '/host/fenced')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  const other = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    initialize(other, 1)
+    await other.next()
+    client.send({
+      jsonrpc: '2.0', id: 2, method: 'session/resume',
+      params: { sessionId: 'session-fenced', cwd: '/host/fenced', mcpServers: [{ name: 's1', command: '/bin/true', args: [], env: [] }] },
+    })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    // The close detaches immediately but its exact MCP retirement is still in
+    // flight: the claim stays fenced and the View is NOT unknown.
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-fenced' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    client.send({ jsonrpc: '2.0', id: 4, method: 'session/resume', params: { sessionId: 'session-fenced', cwd: '/host/fenced' } })
+    const fenced = (await client.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(fenced.id, 4)
+    assert.equal(fenced.error?.code, -32602, 'a fenced View is transient, never the standard not-active class')
+    assert.equal(fenced.error?.data?.code, 'LOCAL_ACP_VIEW_BUSY')
+    other.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-fenced', cwd: '/host/fenced' } })
+    const heldOther = (await other.next()) as { id?: number; error?: { code: number; data?: { code?: string } } }
+    assert.equal(heldOther.id, 2)
+    assert.equal(heldOther.error?.code, -32602)
+    assert.equal(heldOther.error?.data?.code, 'LOCAL_ACP_VIEW_ALREADY_ATTACHED',
+      'the fenced claim still owns the Session until its Host terminal settles')
+    retireGate.resolve()
+  } finally {
+    client.close()
+    other.close()
+  }
+})
+
+test('a refresh whose post-attach config read fails retires only its fresh generation', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-config-fail', '/host/cfgfail')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  const other = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    initialize(other, 1)
+    await other.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-config-fail', cwd: '/host/cfgfail' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    fake.access.readSessionPolicy = () => {
+      throw new AcpSessionPolicyError('LOCAL_ACP_CONFIG_STALE', 'the attached session changed during the config read', -32042)
+    }
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-config-fail', cwd: '/host/cfgfail' } })
+    const failed = (await client.next()) as { id?: number; error?: unknown; result?: unknown }
+    assert.equal(failed.id, 3)
+    assert.notEqual(failed.error, undefined, 'the refresh answers its real config failure')
+    fake.access.readSessionPolicy = () => ({})
+    // The fresh generation is retired, so a DIFFERENT connection can attach the
+    // Session instead of being told it is already held by a dead request.
+    other.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-config-fail', cwd: '/host/cfgfail' } })
+    const afterFailure = (await other.next()) as { id?: number; result?: unknown; error?: unknown }
+    assert.equal(afterFailure.id, 2)
+    assert.equal(afterFailure.error, undefined, 'no fresh claim leaks after a failed post-attach config read')
+    assert.deepEqual(afterFailure.result, {})
+  } finally {
+    client.close()
+    other.close()
   }
 })
 

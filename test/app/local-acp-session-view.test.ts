@@ -8640,3 +8640,84 @@ test('a repeat resume with declared MCP servers is refused after full request va
     isViewError('LOCAL_ACP_MCP_INVALID_DECLARATION'),
   )
 })
+
+test('a claim still fenced by an MCP retirement answers the retryable busy class and releases on its terminal', async () => {
+  const view = promptView('RE9', { mcp: true })
+  await view.attach()
+  const retireGate = deferred<void>()
+  view.access.retireScopedMcpImpl = async () => { await retireGate.promise }
+  assert.deepEqual(await view.registry.closeSession(view.conn, view.access, 'RE9'), {})
+  assert.equal(view.registry.claimCount(), 1, 'the fenced claim is retained until its exact Host terminal')
+  await assert.rejects(
+    view.registry.resumeSession(view.conn, view.access, { sessionId: 'RE9', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_BUSY'),
+  )
+  assert.equal(view.registry.claimCount(), 1, 'a refused reattach never drops the Host obligation fence')
+  retireGate.resolve()
+  await flushOutput()
+  assert.equal(view.registry.claimCount(), 0, 'the settled retirement releases the claim')
+  await view.registry.resumeSession(view.conn, view.access, { sessionId: 'RE9', cwd: '/w' })
+  assert.equal(view.registry.phaseOf(view.conn), 'attached', 'a later ordinary attach works on the same connection')
+})
+
+test('a reattach whose live identity changed fails closed without resurrecting a different Agent', async () => {
+  const access = new FakeAccess()
+  const agentA = makeAgent('RE8', '/w')
+  access.seed(agentA)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'RE8', cwd: '/w' })
+  // 1. The exact live identity was replaced before the official resolver ran:
+  // the reattach fails closed and the ORIGINAL generation is preserved.
+  access.seed(makeAgent('RE8', '/w'))
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE8', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(registry.claimCount(), 1, 'a pre-admission identity loss keeps the original claim')
+  assert.equal(registry.phaseOf(conn), 'attached')
+  // 2. The Host replaces the live Agent BETWEEN the identity precheck and the
+  // official resolve, so the resolver legitimately returns the NEW live owner:
+  // the reattach must fail closed and release only its fresh reservation instead
+  // of attaching a different Host owner under this View.
+  access.seed(agentA)
+  const agentB = makeAgent('RE8', '/w')
+  access.resolveAgentImpl = async () => {
+    access.seed(agentB)
+    return { agent: agentB }
+  }
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE8', cwd: '/w' }, undefined, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(registry.claimCount(), 0, 'a post-admission mismatch releases only the fresh reservation')
+  assert.equal(registry.phaseOf(conn), 'idle', 'the connection is idle, ready for an explicit re-attach')
+})
+
+test('a failed refresh retires only its fresh claim and leaves the Session attachable', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('RE10', '/w')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const channels: AcpViewChannels = {
+    capabilities: PR2_CAPABILITIES,
+    notifyProjection: async () => {},
+  }
+  await registry.resumeSession(conn, access, { sessionId: 'RE10', cwd: '/w' }, channels)
+  // The reattach commits its fresh generation, then the listener's post-attach
+  // phase fails; the exact generation must be retired, not left attached.
+  await registry.resumeSession(conn, access, { sessionId: 'RE10', cwd: '/w' }, channels, undefined, true)
+  assert.equal(registry.claimCount(), 1)
+  registry.retireFailedRefresh(conn, 'RE10')
+  assert.equal(registry.claimCount(), 0, 'the failed refresh leaves no claim behind')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  await registry.resumeSession(conn, access, { sessionId: 'RE10', cwd: '/w' }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached', 'a later ordinary attach succeeds')
+  // The retirement is exact: a foreign connection's claim is never touched.
+  const other = registry.createConnection()
+  registry.retireFailedRefresh(other, 'RE10')
+  assert.equal(registry.claimCount(), 1, 'another connection cannot retire this claim')
+})

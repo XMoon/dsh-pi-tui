@@ -838,10 +838,12 @@ export async function runAcpPo2SessionView(context) {
 
     const { client: connK } = await openInitialized(scopeDir, 'K foreign session')
     const missing = await sendRequest(connK, 2, 'session/resume', { sessionId: foreignSessionId, cwd: hostCwd })
-    assert(missing?.error?.code === -32602,
-      `K: an unknown session must be -32602 (got ${JSON.stringify(missing?.error ?? missing?.result)})`)
+    assert(missing?.error?.code === -32002,
+      `K: an unknown session must be the standard not-active -32002 (got ${JSON.stringify(missing?.error ?? missing?.result)})`)
     assert(missing?.error?.data?.code === 'LOCAL_ACP_VIEW_SESSION_NOT_FOUND',
       `K: an unknown session must name LOCAL_ACP_VIEW_SESSION_NOT_FOUND (got ${JSON.stringify(missing?.error?.data)})`)
+    assert(missing?.error?.data?.sessionId === foreignSessionId,
+      `K: an unknown session must carry the requested Session id (got ${JSON.stringify(missing?.error?.data)})`)
     connK.close()
     await connK.closed
 
@@ -866,10 +868,12 @@ export async function runAcpPo2SessionView(context) {
     //    session/list reads the authorized roster without owning any View.
     const { client: connM } = await openInitialized(scopeDir, 'M unsupported methods')
     const promptReject = await sendRequest(connM, 2, 'session/prompt', { sessionId: sessionA, prompt: [{ type: 'text', text: 'hi' }] })
-    assert(promptReject?.error?.code === -32602,
-      `M: an unattached session/prompt must be -32602 (got ${JSON.stringify(promptReject?.error ?? promptReject?.result)})`)
+    assert(promptReject?.error?.code === -32002,
+      `M: an unattached session/prompt must be the standard not-active -32002 (got ${JSON.stringify(promptReject?.error ?? promptReject?.result)})`)
     assert(promptReject?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED',
       `M: an unattached session/prompt must name LOCAL_ACP_VIEW_NOT_OWNED (got ${JSON.stringify(promptReject?.error?.data)})`)
+    assert(promptReject?.error?.data?.sessionId === sessionA,
+      `M: an unattached session/prompt must carry the requested Session id (got ${JSON.stringify(promptReject?.error?.data)})`)
     const listed = await sendRequest(connM, 3, 'session/list', {})
     const listedIds = (listed?.result?.sessions ?? []).map(session => session.sessionId)
     assert(Array.isArray(listed?.result?.sessions),

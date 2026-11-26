@@ -912,12 +912,15 @@ function buildAgentApp(
     /**
      * Admit ONE ordinary same-slot request (prompt/mode/config). It is refused
      * only while a reattach owns the slot; ordinary requests are NOT serialized
-     * behind each other — the existing per-claim Host obligations do that.
+     * behind each other — the existing per-claim Host obligations do that. The
+     * lifetime count is recorded BEFORE the refusal so the caller's `finally`
+     * has exactly one matching decrement on every path (including a refusal);
+     * the refused entry never outlives this synchronous frame.
      */
     const admitSameSlotRequest = (view: ConnectionViewState): void => {
       const activity = activityOf(view)
-      if (activity.refreshing) throw slotBusy('this ACP connection is refreshing that session view')
       activity.pending += 1
+      if (activity.refreshing) throw slotBusy('this ACP connection is refreshing that session view')
     }
     /**
      * Reserve the EXCLUSIVE same-slot reattach gate. It is taken synchronously
@@ -1067,8 +1070,19 @@ function buildAgentApp(
           beginSlotRefresh(existing)
           view = existing
           const result = await views.resumeSession(existing, access, params, viewChannelsFor(client), signal, true)
-          const config = await readConfigStateOrLog(params.sessionId, existing)
-          return { ...result, ...config }
+          try {
+            const config = await readConfigStateOrLog(params.sessionId, existing)
+            signal.throwIfAborted()
+            return { ...result, ...config }
+          } catch (error) {
+            // The refresh already committed a fresh claim the client never saw
+            // succeed: a post-commit config failure or an abort retires ONLY
+            // that exact generation (never the old one, never a Host cancel or
+            // close). A concurrent close/EOF that already retired it is a no-op.
+            views.retireFailedRefresh(existing, params.sessionId)
+            signal.throwIfAborted()
+            throw error
+          }
         }
         view = createSessionViewSlot(slots, views)
         beginSlotRequest(view)
@@ -1110,8 +1124,17 @@ function buildAgentApp(
           beginSlotRefresh(existing)
           view = existing
           const result = await views.loadSession(existing, access, params, viewChannelsFor(client), signal, true)
-          const config = await readConfigStateOrLog(params.sessionId, existing)
-          return { ...result, ...config }
+          try {
+            const config = await readConfigStateOrLog(params.sessionId, existing)
+            signal.throwIfAborted()
+            return { ...result, ...config }
+          } catch (error) {
+            // A replay success followed by a failed/aborted post-attach config
+            // read is still this refresh's fresh generation: retire exactly it.
+            views.retireFailedRefresh(existing, params.sessionId)
+            signal.throwIfAborted()
+            throw error
+          }
         }
         view = createSessionViewSlot(slots, views)
         beginSlotRequest(view)

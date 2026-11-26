@@ -303,8 +303,11 @@ export async function runAcpPo1(context) {
       // its own connection.
       c1.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: 'unused', prompt: [{ type: 'text', text: 'x' }] } })
       const promptReject = await c1.next()
-      assert(promptReject?.error?.code === -32602, 'an unattached session/prompt must fail closed with -32602')
+      // An unattached Session is the standard ACP not-active class: -32002 with
+      // the REQUESTED id, never a malformed-params refusal.
+      assert(promptReject?.error?.code === -32002, 'an unattached session/prompt must fail closed with -32002')
       assert(promptReject?.error?.data?.code === 'LOCAL_ACP_VIEW_NOT_OWNED', 'an unattached session/prompt must name LOCAL_ACP_VIEW_NOT_OWNED')
+      assert(promptReject?.error?.data?.sessionId === 'unused', 'an unattached session/prompt must carry the requested Session id')
       c1.send({ jsonrpc: '2.0', id: 6, method: 'session/list', params: {} })
       const listed = await c1.next()
       assert(Array.isArray(listed?.result?.sessions),

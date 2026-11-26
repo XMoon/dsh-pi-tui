@@ -5872,8 +5872,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       throw new LocalAcpViewError('LOCAL_ACP_VIEW_CLOSED', 'the ACP connection is closed', JSONRPC_INVALID_PARAMS)
     }
     const claim = this.claims.get(sessionId)
-    if (state.phase !== 'attached' || claim === undefined || claim.connectionIdentity !== state
-      || claim.exactAgent === undefined || claim.exactSession === undefined) {
+    // NOT_OWNED is reserved for a Session this connection holds NO claim for.
+    // An owned claim in ANY other state (attaching, a held terminal fence, or an
+    // attached generation without its verified identities) is a TRANSIENT
+    // refusal, never the standard not-active class: the client could otherwise
+    // drop its local Session state for a View that is still alive on this
+    // connection.
+    if (claim === undefined || claim.connectionIdentity !== state) {
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_NOT_OWNED',
         'this ACP connection holds no view for that session',
@@ -5885,6 +5890,13 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       throw new LocalAcpViewError(
         'LOCAL_ACP_VIEW_BUSY',
         'the session view is still retiring its Host obligations',
+        JSONRPC_INVALID_PARAMS,
+      )
+    }
+    if (state.phase !== 'attached' || claim.exactAgent === undefined || claim.exactSession === undefined) {
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_BUSY',
+        'the session view is not a settled attached generation',
         JSONRPC_INVALID_PARAMS,
       )
     }
@@ -5909,6 +5921,29 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       )
     }
     return claim
+  }
+
+  /**
+   * Retire the exact fresh claim generation a same-connection reattach just
+   * committed when its post-attach phase fails or the request is aborted.
+   *
+   * Identity is the connection's current claim for that exact Session plus the
+   * listener's exclusive refresh marker (no newer generation can exist while
+   * the refresh owns the slot), so a claim this request did not create — a
+   * concurrent close's fence, another connection's View — is never touched.
+   * Only connection-local resources are dropped: no Host Session/Agent/Writer
+   * operation, cancellation or close is performed, and the connection returns
+   * to idle so a later ordinary attach can proceed.
+   */
+  retireFailedRefresh(state: ConnectionViewState, sessionId: string): void {
+    const claim = this.claims.get(sessionId)
+    if (claim === undefined || claim.connectionIdentity !== state || claim.detachedWithFence === true) return
+    claim.notifyConfigUpdate = undefined
+    this.stopProjectionOutput(claim)
+    this.releaseQuestionForms(claim)
+    if (this.claims.get(sessionId) === claim) this.claims.delete(sessionId)
+    if (state.phase === 'attached') state.phase = 'idle'
+    this.notifyWorkSettled()
   }
 
   /**

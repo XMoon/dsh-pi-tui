@@ -1086,6 +1086,11 @@ before any Host effect:
   replay, pending or owned scoped MCP mount/lease, or open reverse Form /
   unresolved continued question. Any of them refuses `LOCAL_ACP_VIEW_BUSY` and
   retires, cancels and drops nothing.
+- A held claim that is NOT a settled attached generation — still attaching, or
+  detached-but-fenced by a close/disposal whose exact Host terminal is still
+  unproven — also refuses `LOCAL_ACP_VIEW_BUSY` and keeps that transient state
+  and its fence. The standard not-active error below is only for a Session this
+  connection holds NO claim for.
 - The request itself must be legal first; a Session this connection does not
   hold is the standard not-active error below, never a reattach.
 - A repeat request that declares MCP servers is refused
@@ -1113,22 +1118,27 @@ read/notification result is dropped by the existing exact-claim/epoch/sink
 fences. `load` replays the complete canonical history again for THIS request (a
 fresh generation keeps no previous dedupe or compaction state) and answers after
 its ordered drain, while `resume` replays nothing. A started refresh that later
-fails or is closed retires only its fresh generation and never rolls back to or
-resurrects the old one, so the client may explicitly attach again.
+fails — including a failed or aborted post-attach initial config read — or is
+closed retires ONLY its fresh generation (its sink, read IO and reverse Forms;
+no Host cancel, close or rollback) and never resurrects the old one, so the
+Session is not left attached to a request the client never saw succeed and an
+explicit attach may follow.
 
 ### Session-scoped error classes
 
-An unknown, closed, foreign or detached Session is the standard ACP v1
-not-active class: JSON-RPC `-32002` carrying the REQUESTED `sessionId` plus the
-existing `LOCAL_ACP_VIEW_*` diagnostic `data.code`. This applies to
-`session/prompt`, `session/set_mode`, `session/set_config_option`, and to a
-`session/resume` / `session/load` whose official `resolveAgent` returns a
-definite `session/not-found` (`LOCAL_ACP_VIEW_SESSION_NOT_FOUND`); the requested
-id is never replaced by a Host guess. Malformed parameters (empty id, invalid
-cwd, unsupported mode/config value, malformed MCP declaration) keep their own
-`-32602` invalid-params classes and their existing precedence, and a Session
-held by ANOTHER connection keeps the conflict class
-(`LOCAL_ACP_VIEW_ALREADY_ATTACHED`, `-32602`). An unknown, inactive or foreign
+A Session this connection holds NO View for is the standard ACP v1 not-active
+class: JSON-RPC `-32002` carrying the REQUESTED `sessionId` plus the existing
+`LOCAL_ACP_VIEW_*` diagnostic `data.code`. This applies to `session/prompt`,
+`session/set_mode`, `session/set_config_option`, and to a `session/resume` /
+`session/load` whose official `resolveAgent` returns a definite
+`session/not-found` (`LOCAL_ACP_VIEW_SESSION_NOT_FOUND`); the requested id is
+never replaced by a Host guess. A HELD View whose claim is still transient
+(attaching, or detached with an unproven Host terminal) is not that class: it
+answers the retryable `LOCAL_ACP_VIEW_BUSY`. Malformed parameters (empty id,
+invalid cwd, unsupported mode/config value, malformed MCP declaration) keep
+their own `-32602` invalid-params classes and their existing precedence, and a
+Session held by ANOTHER connection's View keeps the conflict class
+(`LOCAL_ACP_VIEW_ALREADY_ATTACHED`, `-32602`) for `resume`/`load`. An unknown, inactive or foreign
 `session/close` remains the standard empty `{}` with no Host side effect, and
 `session/cancel` for such a Session stays a no-op. Real Host failures (internal
 error, writer-held or subagent-owned refusal, replay/attachment failure) keep
