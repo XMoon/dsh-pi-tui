@@ -1790,7 +1790,9 @@ to the page's REAL origin, the List; Edit returns to the original server's
 active Detail while that exact target is still listable, otherwise to the List
 with the truthful unavailable/refusal status. A confirmed Delete likewise
 returns to the List once the roster proves the deleted target gone; a nearest
-fallback selection is never presented as the original target.
+fallback selection is never presented as the original target. A removal receipt
+is retained only for a saved Delete, and the next explicit configuration action
+clears it; an unconfirmed/refused Delete never becomes a success receipt.
 
 An Edit keeps the name read-only; a rename is two explicit actions. A stored
 plain value is shown only as `Set (hidden)` in a non-editing row, while a
@@ -1841,8 +1843,8 @@ operation.
 
 Pointer ownership is the last painted frame's. A List click, including the
 passive rail preview, only selects and hands the keyboard to the List; a Detail
-body click outside a painted action only transfers focus; a form-row click only
-selects its field. The form's
+body click outside a painted action is inert; a form-row click only selects its
+field. The form's
 body verb, the bar's complete spans and the Detail body fallback all use the ONE
 existing action sink. The wheel reaches only the region under the pointer inside
 the REAL child body box (translated with the child's own width/height): the List

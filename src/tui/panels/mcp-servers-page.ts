@@ -354,6 +354,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private formOrigin: 'list' | 'detail' | undefined
   /** The exact server an Edit opened from; a fallback selection is not it. */
   private formTargetName: string | undefined
+  private formTargetToken: object | undefined
   /** A delete that may remove the current Detail target; return to the List. */
   private detailRemovalTarget: string | undefined
   /** The delete settlement must win even if an early frame cleared the target. */
@@ -576,6 +577,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       }
       if (data === 'r' || data === 'R') {
         this.unknownLeave = false
+        this.deleteReturnPending = false
+        this.detailRemovalTarget = undefined
+        this.deleteLocalReceipt = false
         this.controller.refresh()
         this.bumpRevision()
         return
@@ -598,6 +602,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           if (snapshot.configConfirm?.kind === 'delete') {
             this.detailRemovalTarget = snapshot.configConfirm.name
             this.deleteReturnPending = true
+            this.deleteLocalReceipt = false
           }
           this.controller.answerConfigConfirm(true)
         }
@@ -723,6 +728,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       return
     }
     if (data === 'r' || data === 'R') {
+      this.deleteReturnPending = false
+      this.detailRemovalTarget = undefined
+      this.deleteLocalReceipt = false
       this.controller.refresh()
       return
     }
@@ -783,9 +791,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   // ── FR4: the configuration form ───────────────────────────────────────────
 
   private enterEditor(): void {
-    this.formTargetName = this.formOrigin === 'detail'
-      ? this.controller.snapshot().editor?.name
-      : undefined
+    const openEditor = this.controller.snapshot().editor
+    this.formTargetName = this.formOrigin === 'detail' ? openEditor?.name : undefined
+    this.formTargetToken = this.formOrigin === 'detail' ? openEditor?.entryToken : undefined
     this.region = this.formOrigin === 'list' ? 'list' : 'detail'
     this.formFocus = 0
     this.formOffset = 0
@@ -804,14 +812,21 @@ export class McpServersPage implements EmbeddedSpecialistPage {
     const snapshot = this.controller.snapshot()
     const origin = this.formOrigin
     const targetName = this.formTargetName
+    const targetToken = this.formTargetToken
     this.formOrigin = undefined
     this.formTargetName = undefined
+    this.formTargetToken = undefined
     // An Edit returns only to the SAME target. If a watch removed it, the
     // controller's nearest fallback selection is NOT that target; stay on the
     // List with the truthful receipt instead of showing another server.
+    const targetRow = targetName === undefined
+      ? undefined
+      : snapshot.rows.find(row => row.name === targetName)
     const targetStillSelected = targetName !== undefined
       && snapshot.selectedName === targetName
-      && snapshot.rows.some(row => row.name === targetName)
+      && targetRow !== undefined
+      && targetToken !== undefined
+      && targetRow.entryToken === targetToken
     this.region = origin === 'detail' && targetStillSelected ? 'detail' : 'list'
     this.receiptRegion = this.region
     if (unknown) this.receiptRegion = this.region
@@ -830,22 +845,41 @@ export class McpServersPage implements EmbeddedSpecialistPage {
       || status?.kind === 'unconfirmed'
     const target = this.detailRemovalTarget
     const targetGone = target !== undefined && !snapshot.rows.some(row => row.name === target)
-    if (!savedDelete && !targetGone && !refusedDelete) return
-    if (!savedDelete && !targetGone) {
-      this.deleteReturnPending = false
-      this.detailRemovalTarget = undefined
+    if (!targetGone) {
+      // A receipt or ACK is not removal proof. Keep the Detail until the
+      // roster stops listing the exact target; a refusal ends the intent.
+      if (refusedDelete) {
+        this.deleteReturnPending = false
+        this.detailRemovalTarget = undefined
+      }
       return
     }
-    this.deleteReturnPending = false
-    // Keep this fallback even when a transient `saving`/`saved` receipt is
-    // visible now: the controller may retire that generation-bound status
-    // before the List can paint it.
-    this.deleteLocalReceipt = true
+    const alreadyList = this.region === 'list' && this.receiptRegion === 'list'
     this.detailRemovalTarget = undefined
     this.region = 'list'
     this.receiptRegion = 'list'
     this.detailOffset = 0
-    this.bumpRevision()
+    if (savedDelete) {
+      // ONLY a confirmed saved Delete may leave a synthetic receipt for the
+      // generation-bound controller status it replaces.
+      this.deleteReturnPending = false
+      this.deleteLocalReceipt = true
+      this.bumpRevision()
+      return
+    }
+    if (refusedDelete) {
+      // The target is gone, but the write did NOT succeed. Return to the
+      // List with the controller's truthful refused/unconfirmed status and
+      // never synthesize a successful removal.
+      this.deleteReturnPending = false
+      this.deleteLocalReceipt = false
+      this.bumpRevision()
+      return
+    }
+    // target gone while the write is still saving (or its status is absent):
+    // return to the List, but keep the intent open until a saved/refused
+    // settlement arrives.
+    if (!alreadyList) this.bumpRevision()
   }
 
   /** The non-Esc Action-Bar spans this page's own bar really painted. The
@@ -1266,6 +1300,7 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           if (snapshot.configConfirm.kind === 'delete') {
             this.detailRemovalTarget = snapshot.configConfirm.name
             this.deleteReturnPending = true
+            this.deleteLocalReceipt = false
           }
           this.controller.answerConfigConfirm(true)
         } else if (snapshot.confirmingName !== undefined) this.controller.answerRestart(true)
@@ -1321,6 +1356,9 @@ export class McpServersPage implements EmbeddedSpecialistPage {
           && snapshot.restartOutcomeUnconfirmed !== true) this.controller.beginRestart()
         return
       case 'refresh':
+        this.deleteReturnPending = false
+        this.detailRemovalTarget = undefined
+        this.deleteLocalReceipt = false
         this.controller.refresh()
         return
       case 'save':
@@ -1579,6 +1617,13 @@ export class McpServersPage implements EmbeddedSpecialistPage {
   private renderForGrant(bodyWidth: number, bodyRows: number, rawWidth: number): string[] {
     const snapshot = this.controller.snapshot()
     this.currentBarWidth = this.barWidth(rawWidth)
+    const newDeleteQuestion = snapshot.configConfirm?.kind === 'delete' && this.deleteReturnPending
+    if (snapshot.editor !== undefined || snapshot.phase === 'loading'
+      || (snapshot.configConfirm !== undefined && !newDeleteQuestion)) {
+      this.deleteReturnPending = false
+      this.detailRemovalTarget = undefined
+      this.deleteLocalReceipt = false
+    }
     this.reconcileDetailRemoval(snapshot)
     // A saved/retired editor closes itself: return to its REAL origin so the ONE
     // current configuration receipt is visible without an extra key.

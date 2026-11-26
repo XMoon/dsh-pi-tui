@@ -241,6 +241,23 @@ test('a removed and re-listed name is a NEW entry: its late probe is discarded',
   assert.equal(h.controller.snapshot().operation?.phase, 'failed')
 })
 
+test('Edit captures a new entry token after a same-name removal and re-add', async () => {
+  const h = await readyHarness([{ name: 'mine', provenance: 'user-added', effective: stdioEffective() }])
+  h.controller.beginEdit()
+  const first = h.controller.snapshot().editor?.entryToken
+  assert.ok(first !== undefined, 'an Edit carries the exact entry token')
+  h.controller.discardEditor()
+  h.port.roster([], GENERATION_1)
+  await h.flush()
+  h.port.roster([view('mine')], GENERATION_1)
+  await h.flush()
+  h.controller.beginEdit()
+  const second = h.controller.snapshot().editor?.entryToken
+  assert.ok(second !== undefined)
+  assert.notEqual(second, first, 'a same-name re-add is a NEW instance, not the old Edit target')
+  assert.equal(h.controller.snapshot().rows[0]?.entryToken, second)
+})
+
 test('a dispatched restart that loses its settlement is never reported as "could not be dispatched"', async () => {
   const h = harness()
   h.sources.value = { kind: 'ready', configuredNames: ['alpha'], generation: GENERATION_1 }

@@ -71,11 +71,13 @@ class StubController {
   beginEdit(): void {
     this.calls.push('beginEdit')
     if (this.snapshotValue.editor === undefined) {
+      const row = this.snapshotValue.rows.find(candidate => candidate.name === this.snapshotValue.selectedName)
       this.snapshotValue = {
         ...this.snapshotValue,
         editor: {
-          mode: 'edit', name: 'alpha', nameEditable: false, transport: 'stdio', command: '/bin/echo', args: [],
+          mode: 'edit', name: row?.name ?? 'alpha', nameEditable: false, transport: 'stdio', command: '/bin/echo', args: [],
           env: [], cwd: '', url: '', headers: [], enabled: true, dirty: false, issues: [], capturedRevision: 3,
+          ...row?.entryToken === undefined ? {} : { entryToken: row.entryToken },
         },
       }
     }
@@ -147,6 +149,10 @@ function makePage(state: McpServersSnapshot, done: () => void = () => {}): {
 /** Render at one size through a realistic workbench grant. Page-level cases
  *  supply the grant explicitly; the Root projection itself is proved by the
  *  mounted suite. */
+function pageRegion(page: McpServersPage): 'list' | 'detail' {
+  return (page as unknown as { region: 'list' | 'detail' }).region
+}
+
 function render(page: McpServersPage, width: number, rows: number): string[] {
   const bodyRows = Math.max(0, rows - 1)
   page.setWebWorkbenchGrant({
@@ -2003,17 +2009,136 @@ test('a proven delete keeps its removal receipt when the controller retires the 
   render(page, 100, 16)
   page.handleInput('y')
   const before = controller.snapshotValue
+  const removedRows = before.rows.filter(row => row.name !== 'alpha')
   controller.snapshotValue = {
     ...before,
     configConfirm: undefined,
-    configStatus: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+    rows: removedRows,
+    selectedName: 'beta',
+    selectedConfig: undefined,
+  }
+  assert.match(render(page, 100, 16).join('\n'), /Config removed/u)
+  // The controller may now retire its generation-bound status. The page keeps
+  // the truthful fallback only because a SAVED Delete was observed first.
+  controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
+  const frame = render(page, 100, 16).join('\n')
+  assert.match(frame, /Config removed/u)
+  assert.match(frame, /waiting for Host reconcile/u,
+    'the List receipt stays visible after a generation-bound saved status retires')
+})
+
+test('a saved Delete does not leave the Detail before the roster proves removal', () => {
+  const { page, controller } = makePage(snapshot({ selectedConfig: CONFIG_FACET }))
+  render(page, 100, 16)
+  page.handleInput('\r')
+  const detail = controller.snapshotValue
+  controller.snapshotValue = {
+    ...detail,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }
+  render(page, 100, 16)
+  page.handleInput('y')
+  const before = controller.snapshotValue
+  controller.snapshotValue = {
+    ...before,
+    configConfirm: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
+  }
+  render(page, 100, 16)
+  assert.equal(pageRegion(page), 'detail', 'the exact Detail stays active while alpha is still listed')
+  assert.match(render(page, 100, 16).join('\n'), /Server: alpha/u)
+})
+
+test('an unconfirmed Delete with the target gone never paints a success receipt', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }))
+  render(page, 100, 16)
+  page.handleInput('y')
+  const before = controller.snapshotValue
+  controller.snapshotValue = {
+    ...before,
+    configConfirm: undefined,
+    rows: before.rows.filter(row => row.name !== 'alpha'),
+    selectedName: 'beta',
+    selectedConfig: undefined,
+    configStatus: { kind: 'unconfirmed', text: 'Outcome unconfirmed; inspect the Host configuration before retrying' },
+  }
+  const frame = render(page, 100, 16).join('\n')
+  assert.equal(pageRegion(page), 'list', 'the List is safe to browse after an unknown outcome')
+  assert.match(frame, /Outcome unconfirmed/u, 'the truthful unknown receipt stays visible')
+  assert.doesNotMatch(frame, /Config removed/u, 'a refused/unknown delete must never become a success')
+  // Once the controller retires the unknown status there is still NO proof of
+  // success, so no synthetic removal receipt may appear.
+  controller.snapshotValue = { ...controller.snapshotValue, configStatus: undefined }
+  assert.doesNotMatch(render(page, 100, 16).join('\n'), /Config removed/u,
+    'a retired unknown status is not a saved Delete')
+})
+
+test('a new Add/Edit action clears the old Delete receipt fallback', () => {
+  const { page, controller } = makePage(snapshot({
+    selectedConfig: CONFIG_FACET,
+    configConfirm: { question: 1, kind: 'delete', name: 'alpha', capturedRevision: 3 },
+  }))
+  render(page, 100, 16)
+  page.handleInput('y')
+  const before = controller.snapshotValue
+  controller.snapshotValue = {
+    ...before,
+    configConfirm: undefined,
+    configStatus: { kind: 'saved', text: 'Config removed · waiting for Host reconcile' },
     rows: before.rows.filter(row => row.name !== 'alpha'),
     selectedName: 'beta',
     selectedConfig: undefined,
   }
+  render(page, 100, 16)
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    editor: editorSnapshot({ mode: 'add', name: '', nameEditable: true, dirty: true }),
+    configStatus: undefined,
+  }
+  render(page, 100, 16)
+  controller.snapshotValue = {
+    ...controller.snapshotValue,
+    editor: undefined,
+    rows: [connected('beta')],
+    selectedName: 'beta',
+    selectedConfig: CONFIG_FACET,
+  }
   const frame = render(page, 100, 16).join('\n')
-  assert.match(frame, /Name/u)
-  assert.match(frame, /Config removed/u)
-  assert.match(frame, /waiting for Host reconcile/u,
-    'the List receipt stays visible after a generation-bound status retires')
+  assert.doesNotMatch(frame, /Config removed/u, 'an unrelated new action must not resurrect an old removal receipt')
+})
+
+test('a same-name removed/re-added Edit target is not the old instance', () => {
+  const oldToken = {}
+  const newToken = {}
+  const { page, controller } = makePage(snapshot({
+    rows: [
+      { ...connected('alpha'), entryToken: oldToken },
+      { name: 'beta', configured: true, status: { state: 'disabled' }, source: 'Plugin-owned', entryToken: {} },
+    ],
+    selectedConfig: CONFIG_FACET,
+  }))
+  render(page, 100, 16)
+  page.handleInput('\r')
+  render(page, 100, 16)
+  page.handleInput('e')
+  render(page, 100, 16)
+  assert.equal(controller.snapshotValue.editor?.entryToken, oldToken)
+  const before = controller.snapshotValue
+  controller.snapshotValue = {
+    ...before,
+    editor: undefined,
+    rows: [
+      { ...connected('alpha'), entryToken: newToken },
+      { ...connected('beta'), entryToken: {} },
+    ],
+    selectedName: 'alpha',
+    selectedConfig: CONFIG_FACET,
+  }
+  render(page, 100, 16)
+  assert.equal(pageRegion(page), 'list',
+    'a same-name replacement is a new instance; the old Edit must return to the List')
 })

@@ -62,6 +62,9 @@ export type McpServerSourceLabel = 'Configured' | 'Plugin-owned' | 'Retained/rem
 /** One row of the validated projection. */
 export interface McpServersRow {
   readonly name: string
+  /** Opaque continuity token for this exact roster entry. A removed and
+   *  re-added same-name entry is a new instance with a new token. */
+  readonly entryToken?: object
   /** Whether the official manager still holds a LIVE entry for this name. A
    *  retained cleanup record (`false`) is diagnostic only and NOT operable. */
   readonly configured: boolean
@@ -159,6 +162,8 @@ export interface McpSelectedConfigFacet {
 export interface McpEditorSnapshot {
   readonly mode: 'add' | 'edit'
   readonly name: string
+  /** The exact Edit target; absent for Add. */
+  readonly entryToken?: object
   /** Edit keeps the name read-only (rename = Add then Delete). */
   readonly nameEditable: boolean
   readonly transport: McpServerTransport
@@ -254,6 +259,8 @@ interface McpEditorState {
   readonly mode: 'add' | 'edit'
   /** The exact entry an Edit was opened on (absent for Add). */
   readonly entry: McpClassifiedServerEntry | undefined
+  /** Continuity token captured when Edit opened; absent for Add. */
+  readonly entryToken: object | undefined
   readonly generation: McpServerGeneration
   readonly revision: number
   draft: McpEditorDraftState
@@ -498,7 +505,13 @@ export class McpServersController {
   snapshot(): McpServersSnapshot {
     const rows: McpServersRow[] = this.order.map(name => {
       const view = this.servers.get(name) as McpServerView
-      return { name, configured: view.configured, status: view.status, source: this.sourceOf(view) }
+      return {
+        name,
+        entryToken: this.entryTokens.get(name),
+        configured: view.configured,
+        status: view.status,
+        source: this.sourceOf(view),
+      }
     })
     const selectedFacet = this.selectedConfigFacet()
     return {
@@ -752,6 +765,7 @@ export class McpServersController {
     this.editor = {
       mode: 'add',
       entry: undefined,
+      entryToken: undefined,
       generation: this.generation,
       revision: this.configuration.revision,
       draft: emptyDraft(),
@@ -770,6 +784,7 @@ export class McpServersController {
     this.editor = {
       mode: 'edit',
       entry,
+      entryToken: this.entryTokens.get(entry.name),
       generation: this.generation,
       revision: this.configuration.revision,
       draft: draftFromEntry(entry),
@@ -1280,6 +1295,7 @@ export class McpServersController {
     return {
       mode: editor.mode,
       name: editor.draft.name,
+      ...editor.entryToken === undefined ? {} : { entryToken: editor.entryToken },
       nameEditable: editor.mode === 'add',
       transport: editor.draft.transport,
       command: editor.draft.command,
