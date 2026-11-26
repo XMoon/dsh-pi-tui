@@ -1918,6 +1918,14 @@ async function cleanup(reason, options = {}) {
       // reclaim it BEFORE the Host generations and before the scene root.
       await terminateQualificationClient(reason)
       if (scene?.kind === 'process') {
+        for (const authorityTerminal of publicAuthorityTerminals.splice(0).reverse()) {
+          try {
+            await authorityTerminal.closeQuiet()
+          } catch (error) {
+            clean = false
+            appendNote('public-authority-terminal-close-failed', { reason: boundedErrorText(error) })
+          }
+        }
         try {
           const problems = await terminateAllProcessEntries(reason)
           if (problems.length > 0) {
@@ -7091,7 +7099,7 @@ async function handleStartPublicDaemonColdPair(message) {
     const failures = results.filter(result => result.status === 'rejected')
     if (failures.length > 0) {
       pair.admissionOpen = false
-      const details = failures.map(result => boundedError(result.reason))
+      const details = failures.map(result => boundedErrorText(result.reason))
       appendNote('public-cold-pair-failed', { details })
       throw new AggregateError(
         failures.map(result => result.reason),
@@ -8070,6 +8078,7 @@ async function handlePublicAuthorityControl(message) {
       artifactsDirectory: join(scene.workDir, 'artifacts'),
     })
     terminal = split.terminal
+    publicAuthorityTerminals.push(terminal)
     const out = {
       parent: join(dir, 'parent.json'),
       child: join(dir, 'child.json'),
@@ -8358,6 +8367,8 @@ async function handlePublicAuthorityControl(message) {
         }
       }
     }
+    const terminalIndex = publicAuthorityTerminals.indexOf(terminal)
+    if (terminalIndex >= 0) publicAuthorityTerminals.splice(terminalIndex, 1)
     facts.cleanup = {
       registered: helpers.length,
       leaked: liveHelpers.length,
@@ -9399,6 +9410,7 @@ const ENTRY_REDACTED_KEYS = new Set([
 
 /** The real detached helper processes this Scene owns beyond Host/Client. */
 const qualificationHelpers = []
+const publicAuthorityTerminals = []
 let qualificationHelperSequence = 0
 /**
  * The ONE scoped installed-copy mutation of a process Scene, or undefined.

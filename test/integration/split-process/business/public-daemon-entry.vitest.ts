@@ -337,6 +337,7 @@ test.skipIf(process.env.SPLIT_VITEST_PUBLIC_AUTHORITY_CONTROL !== '1')(
       expect(facts.signalAdmission.gone).toMatch(/gone/iu)
       expect(facts.signalAdmission.signalsSent).toBe(0)
       expect(facts.cleanup.helpersTerminal).toBe(true)
+      expect(facts.cleanup.terminationProblems).toEqual([])
       expect(facts.sentinel.after).toBe(facts.sentinel.birth)
       expect(facts.cleanup.sentinelGone).toBe(true)
       expect(facts.cleanup.leaked).toBe(0)
