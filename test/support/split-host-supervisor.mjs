@@ -6761,6 +6761,7 @@ async function handleStartPublicDaemon(message) {
   }
   publicLaunches.push(handle)
   handle.settlement = Promise.withResolvers()
+  try {
   syncPublicLaunchReceipt()
   let aliasPath
   if (alias !== undefined) {
@@ -6824,7 +6825,6 @@ exec ${JSON.stringify(scene.installation.dshInvocation[0])} ${JSON.stringify(sce
   handle.loaderDumpPath = loaderDumpPath
   handle.herdr = herdr
   syncPublicLaunchReceipt()
-  try {
     const cold = !publicHosts.some(host => host.reclaimed !== true)
       && !publicLaunches.some(candidate => candidate.host !== undefined && candidate.host.reclaimed !== true)
     let warmHost
@@ -7526,7 +7526,7 @@ function assertPublicHostOwnership(host, reason, expectedBirth = host.birth) {
     if (files.registryMode !== 0o600 || files.launchMode !== 0o600) {
       throw new Error(`${reason}: the public Host material is not 0600 (${String(files.registryMode)}/${String(files.launchMode)})`)
     }
-    if (host.instanceId !== undefined && host.authenticatedAt === undefined) {
+    if (host.authenticatedAt === undefined) {
       throw new Error(`${reason}: the published public Host was never authenticated`)
     }
     assertPublicHostRecord(host, files.registry, files.launch)
