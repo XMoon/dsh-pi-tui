@@ -895,6 +895,7 @@ export function assertSelectedVerdict(caseId, result) {
       && result?.inputResourceLinkExact === true
       && result?.inputImageStoredVerified === true
       && result?.inputLargeImageViaSdk === true
+      && result?.inputFileViaSdk === true
       && result?.markdownBlocksExact === true
       && result?.workspaceLocalityProven === true
       && result?.negativeAdmissionNoHostMessage === true
@@ -914,6 +915,7 @@ export function assertSelectedVerdict(caseId, result) {
       && isDigest(evidence?.candidateSha256)
       && evidence?.sdkVersion === pinnedSdkVersion()
       && evidence?.protocolVersion === 1
+      && isName(evidence?.actualDshVersion)
       && isHostPid(input?.hostPid)
       && isName(input?.hostInstanceId)
       && isName(input?.sessionId)
@@ -930,6 +932,20 @@ export function assertSelectedVerdict(caseId, result) {
       && input?.missingPathErrno === 'ENOENT'
       && input?.unreadablePathErrno === 'EACCES'
       && input?.negativeRejectedBeforeMessage === true
+      && isRef(input?.po4eFileAttachmentId)
+      && isDigest(input?.po4eFileSha256)
+      && input.po4eFileAttachmentId === `sha256:${input.po4eFileSha256}`
+      && Number.isInteger(input?.po4eFileBytes)
+      && input.po4eFileBytes > 0
+      && isTurn(input?.po4eFileTurn)
+      && isName(input?.po4eFileRpcId)
+      && input?.po4eModelHandleCount === 1
+      && isDigest(input?.po4eToolSha256)
+      && isName(input?.po4eNegativeRetiredReceipt)
+      && isName(input?.po4eHeldRetiredReceipt)
+      && input?.po4eHeldCloseStopped === true
+      && isName(input?.po4eQueuedRetiredReceipt)
+      && input?.po4eQueuedTuiTurnCompleted === true
       && isHostPid(output?.hostPid)
       && isName(output?.hostInstanceId)
       && isName(output?.sessionId)

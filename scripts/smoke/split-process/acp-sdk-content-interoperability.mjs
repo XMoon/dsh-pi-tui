@@ -14,7 +14,7 @@ import * as acp from '@agentclientprotocol/sdk'
 import sharp from 'sharp'
 
 import { SplitSmokeAssertionError } from '../../lib/split-smoke-diagnostics.mjs'
-import { waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
+import { readC1WorkEvents, waitForC1WorkEvent } from '../../lib/split-smoke-fixtures.mjs'
 import { hostSessionEvents, waitForHostSessionEventAfter } from '../../lib/split-smoke-sessions.mjs'
 import { waitForSurfaceStatus } from '../../lib/split-smoke-processes.mjs'
 import { installedSdkVersion, pinnedSdkVersion } from '../../lib/split-smoke-sdk.mjs'
@@ -81,6 +81,9 @@ async function openSdkClient(scopeDir) {
     connection,
     async request(method, params) {
       return await deadline(connection.agent.request(method, params), `SDK ${method}`)
+    },
+    notify(method, params) {
+      connection.agent.notify(method, params)
     },
     assertWindow() {
       requireFact(updates.length === accountedUpdates, 'no notification escaped its settled prompt window')
@@ -430,7 +433,7 @@ async function runScene(context, kind, env, operation, prime) {
     'the connection advertises its shared Session View')
     assert.equal(capabilities.promptCapabilities.image, input)
     assert.equal(capabilities.promptCapabilities.audio, false)
-    assert.equal(capabilities.promptCapabilities.embeddedContext, false)
+    assert.equal(capabilities.promptCapabilities.embeddedContext, true)
     // G-ACP2-PR2: a Host with the official Controller/Query read seams
     // advertises the canonical history and roster methods.
     requireFact(capabilities.loadSession === true && capabilities.sessionCapabilities?.list !== undefined,
@@ -448,7 +451,7 @@ async function runScene(context, kind, env, operation, prime) {
     const attachProjection = sdk.finishWindow(0, sdk.updates.length, sessionId)
     requireFact(attachProjection.every(params => READ_ONLY_PROJECTION_KINDS.has(params.update.sessionUpdate)),
       `resume emits only read-only projections before a prompt (got ${JSON.stringify(attachProjection.map(params => params.update.sessionUpdate))})`)
-    const session = { context, scene, sdk, sessionId, workRoot, identity, workspace, primed }
+    const session = { context, scene, sdk, sessionId, workRoot, identity, workspace, primed, tui }
     result = await operation(session)
     sdk.assertWindow()
     assert.deepEqual(await sdk.request(acp.methods.agent.session.close, { sessionId }), {})
@@ -494,11 +497,13 @@ async function runScene(context, kind, env, operation, prime) {
 async function inputScene(context) {
   const probeDir = join(context.workDir, 'sdk-input-probes')
   mkdirSync(probeDir, { mode: 0o700 })
+  const po4eHold = join(context.workDir, 'po4e-upload-hold')
   const small = await sharp({ create: { width: 1, height: 1, channels: 3, background: '#20a040' } }).png().toBuffer()
   const large = await sharp(randomBytes(640 * 640 * 3), { raw: { width: 640, height: 640, channels: 3 } }).png({ compressionLevel: 1 }).toBuffer()
   requireFact(large.length > 1024 * 1024 && large.length < 2 * 1024 * 1024, 'native SDK input PNG exceeds 1 MiB within the Store limit')
   return await runScene(context, 'input', {
     C1_PO4A_IMAGE_CAPABLE: '1', C1_PO4A_IMAGE_PROBE_DIR: probeDir,
+    C1_PO4E: '1', C1_PO4E_HOLD: po4eHold, C1_PO4A_TUI_HOLD: join(context.workDir, 'po4a-tui-hold'),
     C1_PO4B_EXPECTED_WORKSPACE: sceneWorkspace(context, 'input'), DSH_PI_TUI_ACP_MAX_CONNECTIONS: '8',
   }, async session => {
     const { sdk, sessionId, workspace, workRoot, identity } = session
@@ -542,6 +547,79 @@ async function inputScene(context) {
     mkdirSync(local, { mode: 0o700 })
     assert.throws(() => readFileSync(join(local, '.po4b', 'report.md')), error => error.code === 'ENOENT')
 
+    // A3: the REAL production wire accepts one mixed standard-resource prompt;
+    // the official model handle is consumed by the real bash tool and the
+    // durable user content is read back through the official Store.
+    const po4eBytes = deterministicFileBytes(941, 4096 + 7)
+    const po4eUri = 'file:///fixture/报告 1 (file).bin?x=1#frag'
+    const po4eNote = 'literal {{file}} 中文\r\nsecond'
+    const po4eHeader = `\n[resource uri=${JSON.stringify(po4eUri)} mimeType="application/octet-stream"]\n`
+    const po4eMarker = 'po4e:file-input:v1'
+    const po4eFlight = await prompt(session, [
+      { type: 'text', text: `${po4eMarker}\nbefore` },
+      { type: 'resource', resource: { uri: po4eUri, mimeType: 'application/octet-stream', blob: po4eBytes.toString('base64') } },
+      { type: 'resource', resource: { uri: 'urn:po4e:note', text: po4eNote } },
+      { type: 'text', text: 'after' },
+    ], value => authoredText(value).includes(po4eMarker) && value.content.some(block => block.type === 'file'),
+    'embedded file input')
+    const po4eUser = po4eFlight.user
+    requireFact(po4eUser.content.map(block => block.type).join(',') === 'text,file,text',
+      `embedded file input keeps ordered durable text/file/text (got ${po4eUser.content.map(block => block.type).join(',')})`)
+    const po4eFile = po4eUser.content.find(block => block.type === 'file')
+    requireFact(po4eFile?.attachment?.name === '报告 1 (file).bin'
+      && po4eFile.attachment.bytes === po4eBytes.length
+      && po4eFile.attachment.attachmentId === `sha256:${hash(po4eBytes)}`,
+    `embedded file input durable ref/name/bytes: ${JSON.stringify(po4eFile?.attachment)}`)
+    const po4eProbe = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-file-probe'
+      && event.sessionId === sessionId, 'PO-4E durable file probe', 120_000)
+    requireFact(po4eProbe.sha256 === hash(po4eBytes) && po4eProbe.bytes === po4eBytes.length
+      && po4eProbe.refBytes === po4eBytes.length, 'PO-4E official Store read is byte/hash exact')
+    requireFact(po4eProbe.contentTypes.join(',') === 'text,file,text', 'PO-4E durable content order')
+    requireFact(po4eProbe.text.includes(po4eHeader) && po4eProbe.text.includes(po4eNote)
+      && po4eProbe.text.includes('after'), 'PO-4E descriptive header/literal text is the ordinary user content')
+    requireFact(typeof po4eProbe.rpcId === 'string' && po4eProbe.rpcId.length > 0, 'PO-4E real source.rpcId')
+    const po4eModel = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-model'
+      && event.sessionId === sessionId && event.afterTool === false, 'PO-4E model file handle', 120_000)
+    requireFact(po4eModel.handleCount === 1 && po4eModel.handlePaths.length === 1,
+      'PO-4E model sees exactly one official file handle')
+    const po4eTool = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-tool'
+      && event.sessionId === sessionId, 'PO-4E real bash tool read', 120_000)
+    requireFact(po4eTool.toolText.includes(hash(po4eBytes))
+      && po4eTool.toolText.includes(po4eModel.handlePaths[0]),
+    'PO-4E bash tool stdout matches the exact stored digest and handle path')
+    assertTextChunks(po4eFlight.updates.filter(params => params.update.sessionUpdate === 'agent_message_chunk'),
+      assistantMessage(po4eFlight), sessionId)
+
+    // A4: the second real upload is rejected by the official byte admission;
+    // the first returned receipt is cleaned through the production D4 binding,
+    // no Controller prompt is called and no authored user/message appears.
+    const a4Start = hostSessionEvents(context.dshHome, sessionId)?.length ?? 0
+    const a4WorkStart = readC1WorkEvents(workRoot).length
+    const a4Bytes = deterministicFileBytes(942, 2048 + 3)
+    const a4Error = await sdk.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: [
+        { type: 'text', text: 'po4e:a4-negative' },
+        { type: 'resource', resource: { uri: 'file:///a4-first.bin', blob: a4Bytes.toString('base64') } },
+        { type: 'resource', resource: { uri: 'file:///a4-second.bin', blob: 'not-base64' } },
+      ],
+    }).then(() => undefined, error => error)
+    requireFact(a4Error instanceof acp.RequestError
+      && a4Error.data?.code === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+      && a4Error.data?.hostCode === 'session/attachment-invalid',
+    `PO-4E malformed second blob reaches real official admission: ${JSON.stringify(a4Error?.data)}`)
+    const a4Retire = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-retire'
+      && event.liveAfter?.length === 1 && event.liveAfter[0] === false, 'PO-4E cleanup-only retirement', 120_000)
+    const a4Events = readC1WorkEvents(workRoot).slice(a4WorkStart)
+    const a4Upload = a4Events.find(event => event.kind === 'po4e-upload-returned' && event.name === 'a4-first.bin')
+    requireFact(a4Upload !== undefined && a4Retire.receiptIds.length === 1
+      && a4Retire.receiptIds[0] === a4Upload.receiptId,
+    'PO-4E cleanup retired the exact first returned receipt')
+    const a4Authored = (hostSessionEvents(context.dshHome, sessionId) ?? [])
+      .slice(a4Start)
+      .filter(event => event.type === 'user/message' && event.data.source?.kind === 'user')
+    requireFact(a4Authored.length === 0, `PO-4E rejected file prompt authored no user/message (got ${String(a4Authored.length)})`)
+
     sdk.assertWindow()
     const negativeStart = (hostSessionEvents(context.dshHome, sessionId) ?? []).length
     const from = sdk.updates.length
@@ -571,11 +649,85 @@ async function inputScene(context) {
       .filter(event => event.type === 'user/message' && event.data.source?.kind === 'user')
     requireFact(negativeAuthored.length === 1 && negativeAuthored[0].data.id === healthy.user.id,
       `the rejected admission left no durable authored user/message (got ${String(negativeAuthored.length)} authored message(s) in the negative window)`)
+
+    // A6: a real queued file occurrence is removed by the ACP cancel intent;
+    // the production D5 terminal must retire the exact request receipts while
+    // the unrelated TUI turn remains alive.
+    const tuiHoldStart = hostSessionEvents(context.dshHome, sessionId)?.length ?? 0
+    const tuiHoldBarrier = join(context.workDir, 'po4a-tui-hold')
+    session.tui.send('po4a-held-tui\r')
+    await waitForC1WorkEvent(workRoot, event => event.kind === 'po4a-tui-turn-held'
+      && event.sessionId === sessionId, 'PO-4A TUI turn held for queue', 120_000)
+    const queueBytes = deterministicFileBytes(944, 768 + 7)
+    const queuedPrompt = sdk.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: [
+        { type: 'text', text: 'po4e:a6-queued' },
+        { type: 'resource', resource: { uri: 'file:///queued/queued.bin', blob: queueBytes.toString('base64') } },
+      ],
+    }).then(value => ({ ok: true, value }), error => ({ ok: false, error }))
+    const queueUpload = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-upload-returned'
+      && event.sessionId === sessionId && event.name === 'queued.bin', 'PO-4E queued upload returned', 120_000)
+    const queueBind = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-bind'
+      && event.sessionId === sessionId && event.receiptIds.includes(queueUpload.receiptId),
+    'PO-4E queued prompt bound', 120_000)
+    sdk.notify(acp.methods.agent.session.cancel, { sessionId })
+    const queueRetire = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-retire'
+      && event.receiptIds.includes(queueBind.receiptIds[0]) && event.liveAfter.every(live => live === false),
+    'PO-4E queued removal retirement', 120_000)
+    writeFileSync(tuiHoldBarrier, '', { mode: 0o600 })
+    const queueOutcome = await queuedPrompt
+    requireFact(queueOutcome.ok === true && queueOutcome.value?.stopReason === 'cancelled',
+      'PO-4E removed queued prompt must report the clean cancelled terminal')
+    const discarded = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4a-inbox-discarded'
+      && event.sessionId === sessionId && event.rpcId === queueBind.requestId,
+    'PO-4E real inbox discard for the queued prompt', 120_000)
+    requireFact(discarded.rpcId === queueBind.requestId, 'PO-4E queued removal is the exact request')
+    const tuiTerminal = await waitForHostSessionEventAfter(context.dshHome, sessionId, tuiHoldStart,
+      event => event.type === 'turn/end' && event.data.reason.kind === 'completed',
+      'PO-4A held TUI turn completes after queue removal', 120_000)
+    requireFact(queueBind.receiptIds.length === 1 && queueRetire.receiptIds.includes(queueBind.receiptIds[0]),
+      'PO-4E queued removal retired the exact staged receipt')
+    requireFact(tuiTerminal.data.reason.kind === 'completed', 'PO-4E queue removal left the unrelated TUI turn alive')
+
+    // A5: a real upload whose Promise already returned its receipt is held at
+    // the test-only observer while the real ACP View is closed. The production
+    // staging owner must observe the late receipt, clean it and never dispatch.
+    const holdStart = hostSessionEvents(context.dshHome, sessionId)?.length ?? 0
+    const holdBytes = deterministicFileBytes(943, 1024 + 5)
+    const holdPrompt = sdk.request(acp.methods.agent.session.prompt, {
+      sessionId,
+      prompt: [
+        { type: 'text', text: 'po4e:a5-held' },
+        { type: 'resource', resource: { uri: 'file:///held/hold.bin', blob: holdBytes.toString('base64') } },
+      ],
+    }).then(value => ({ ok: true, value }), error => ({ ok: false, error }))
+    const held = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-upload-held'
+      && event.sessionId === sessionId, 'PO-4E held real upload', 120_000)
+    const closeStarted = sdk.request(acp.methods.agent.session.close, { sessionId })
+    writeFileSync(po4eHold, '', { mode: 0o600 })
+    assert.deepEqual(await closeStarted, {}, 'PO-4E real close settles after the held upload returns')
+    await holdPrompt
+    const holdRetire = await waitForC1WorkEvent(workRoot, event => event.kind === 'po4e-retire'
+      && event.receiptIds.includes(held.receiptId) && event.liveAfter.every(live => live === false),
+    'PO-4E late receipt cleanup after close', 120_000)
+    const holdAuthored = (hostSessionEvents(context.dshHome, sessionId) ?? [])
+      .slice(holdStart)
+      .filter(event => event.type === 'user/message' && event.data.source?.kind === 'user')
+    requireFact(holdAuthored.length === 0, 'PO-4E closed held file prompt inserted no user/message')
+    requireFact(holdRetire.receiptIds.includes(held.receiptId), 'PO-4E late receipt retired by exact id')
+
     return {
       imageAttachmentId: images[0].ref.attachmentId, imageSha256: images[0].digest, largeImageBytes: large.length,
       resourceLinkTurn: link.turn, imageTurn: images[0].turn, largeImageTurn: images[1].turn,
       markdownTurn: markdown.turn, markdownMessageId: message.id, hostReportSha256: fileProof.reportSha256,
       missingPathErrno: fileProof.missing, unreadablePathErrno: fileProof.unreadable, negativeRejectedBeforeMessage: true,
+      po4eFileAttachmentId: po4eFile.attachment.attachmentId, po4eFileBytes: po4eBytes.length, po4eFileSha256: hash(po4eBytes),
+      po4eFileTurn: po4eFlight.turn, po4eFileRpcId: po4eProbe.rpcId, po4eModelHandleCount: po4eModel.handleCount,
+      po4eToolSha256: po4eTool.toolSha256, po4eNegativeRetiredReceipt: a4Retire.receiptIds[0],
+      po4eHeldRetiredReceipt: held.receiptId, po4eHeldCloseStopped: true,
+      po4eQueuedRetiredReceipt: queueRetire.receiptIds[0], po4eQueuedTuiTurnCompleted: true,
+      po4eQueuedStopReason: queueOutcome.ok ? queueOutcome.value?.stopReason : undefined,
     }
   })
 }
@@ -809,13 +961,21 @@ export async function runAcpSdkContentInteroperability(context) {
   const result = {
     status: 'PASS', scope: 'REAL_SPLIT_PROCESS_L6', officialSdkClient: true,
     inputResourceLinkExact: true, inputImageStoredVerified: true, inputLargeImageViaSdk: true,
+    inputFileViaSdk: true,
     markdownBlocksExact: true, workspaceLocalityProven: true, negativeAdmissionNoHostMessage: true,
     assistantBlocksOrdered: true, outputImageVerified: true, imageOnlyAccepted: true,
     toolResultOrdered: true, toolFailedStatusVerified: true, missingStoreObjectFailedClosed: true,
     tuiFileCommitted: true, assistantFileProjected: true, toolFileProjected: true,
     loadFileReplayVerified: true, missingStoreFileFailedClosed: true,
     healthyAfterFailure: true, tuiHostSurvivedClientClose: true,
-    evidence: { candidateSha256: context.candidateSha256, sdkVersion: SDK_VERSION, protocolVersion: acp.PROTOCOL_VERSION, input, output },
+    evidence: {
+      candidateSha256: context.candidateSha256,
+      sdkVersion: SDK_VERSION,
+      protocolVersion: acp.PROTOCOL_VERSION,
+      actualDshVersion: JSON.parse(readFileSync(context.installation.anchor, 'utf8')).version,
+      input,
+      output,
+    },
   }
   context.trace('acp-sdk/evidence-final', result)
   return result

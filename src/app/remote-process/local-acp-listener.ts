@@ -356,6 +356,8 @@ interface ConnectionState {
   closed: boolean
   /** Whether THIS connection negotiated inline image prompts during its initialize. */
   imageEnabled: boolean
+  /** Whether THIS connection negotiated standard embedded text/blob resources. */
+  resourceEnabled: boolean
   /**
    * Whether THIS connection declared the standard ACP v1 form-based
    * elicitation capability during its initialize. A connection that did not
@@ -937,6 +939,9 @@ function buildAgentApp(
         notices: params.clientCapabilities?.session?.notices != null,
         booleanConfigOptions: params.clientCapabilities?.session?.configOptions?.boolean != null,
       }
+      state.resourceEnabled = context.sessionAccess !== undefined
+        && state.views !== undefined
+        && context.sessionAccess.supportsFileInput() === true
       if (context.sessionAccess !== undefined && state.views !== undefined) {
         const imageEnabled = await context.sessionAccess.supportsImagePrompts()
         const bounds = imageEnabled ? deriveImageInputBounds(context.sessionAccess.imageLimits()) : undefined
@@ -955,7 +960,7 @@ function buildAgentApp(
         agentInfo: { name: AGENT_NAME, title: AGENT_NAME, version: context.bundleVersion },
         agentCapabilities: {
           loadSession: sessionReadReady,
-          promptCapabilities: { image: state.imageEnabled, audio: false, embeddedContext: false },
+          promptCapabilities: { image: state.imageEnabled, audio: false, embeddedContext: state.resourceEnabled },
           // HTTP MCP support follows the REAL Session View composition: without
           // Session access/View slots this listener cannot mount a scoped lease,
           // so it must not advertise the transport. Legacy SSE has no official
@@ -1414,7 +1419,7 @@ function buildAgentApp(
             toolCall: permissionParams.toolCall,
             options: permissionParams.options,
           }, options === undefined ? undefined : { cancellationSignal: options.signal })
-        })
+        }, { enabled: state.resourceEnabled, budget: MAX_INPUT_FRAME_BYTES })
       } catch (error) {
         throw asRequestError(error)
       } finally {
@@ -1514,6 +1519,7 @@ function serveConnection(socket: Socket, context: ListenerContext): void {
     pendingCloseRequests: 0,
     closed: false,
     imageEnabled: false,
+    resourceEnabled: false,
     elicitationForm: false,
     capabilities: { plan: false, compaction: false, subagents: false, notices: false, booleanConfigOptions: false },
     inputBounds: TEXT_ONLY_BOUNDS,

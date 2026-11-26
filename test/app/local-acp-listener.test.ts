@@ -412,6 +412,79 @@ test('a bound listener answers ACP v1 initialize with the installed bundle versi
   assert.ok(!pathExists(listener.socketPath), 'a graceful close must retire the socket path')
 })
 
+test('initialize advertises embeddedContext only when the real Host file seam is complete', async t => {
+  for (const [fileInput, expected] of [[true, true], [false, false]] as const) {
+    const { scope } = newScope(t)
+    const fake = makeFakeAccess({ fileInput })
+    const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+    t.after(() => listener.close())
+    const client = await RawClient.open(listener.socketPath)
+    try {
+      initialize(client, 1)
+      const init = (await client.next()) as {
+        result?: { agentCapabilities: { promptCapabilities: { image: boolean; audio: boolean; embeddedContext: boolean } } }
+      }
+      assert.equal(init.result?.agentCapabilities.promptCapabilities.embeddedContext, expected)
+      assert.equal(init.result?.agentCapabilities.promptCapabilities.audio, false)
+    } finally {
+      client.close()
+    }
+    await listener.close()
+  }
+})
+
+test('an image-widened raw frame never widens the legacy embedded-resource budget', async t => {
+  const { scope } = newScope(t)
+  const limits = {
+    maxImageBytes: 2 * 1024 * 1024,
+    maxImagesPerMessage: 1,
+    maxMessageImageBytes: 2 * 1024 * 1024,
+    mediaTypes: ['image/png'],
+  }
+  const fake = makeFakeAccess({ fileInput: true, imageLimits: limits, supportsImagePrompts: () => Promise.resolve(true) })
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    const init = (await client.next()) as { result?: { agentCapabilities: { promptCapabilities: { image: boolean; embeddedContext: boolean } } } }
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.image, true)
+    assert.equal(init.result?.agentCapabilities.promptCapabilities.embeddedContext, true)
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: '/host', mcpServers: [] } })
+    const created = (await client.next()) as { result?: { sessionId?: string } }
+    const sessionId = created.result?.sessionId as string
+    assert.equal(typeof sessionId, 'string')
+    const huge = 'x'.repeat(1024 * 1024 + 64)
+    client.send({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/prompt',
+      params: {
+        sessionId,
+        prompt: [
+          { type: 'text', text: 'use this context' },
+          { type: 'resource', resource: { uri: 'file:///huge.txt', text: huge } },
+        ],
+      },
+    })
+    const rejected = (await client.next()) as { error?: { code: number; data?: { code?: string } } }
+    assert.equal(rejected.error?.code, -32602, 'the resource budget rejection is a business invalid-params error')
+    assert.equal(rejected.error?.data?.code, 'LOCAL_ACP_PROMPT_INVALID_CONTENT')
+    assert.equal(fake.prompts.length, 0, 'the oversized resource never reaches the Controller')
+    const sibling = await RawClient.open(listener.socketPath)
+    try {
+      initialize(sibling, 1)
+      const siblingInit = (await sibling.next()) as { result?: { protocolVersion: number } }
+      assert.equal(siblingInit.result?.protocolVersion, 1, 'the sibling connection stays healthy')
+    } finally {
+      sibling.close()
+    }
+  } finally {
+    client.close()
+  }
+  await listener.close()
+})
+
 test('two connections reuse JSON-RPC id 1 independently and one closing does not affect the other', async t => {
   const { scope } = newScope(t)
   const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG })
@@ -1413,6 +1486,7 @@ test('a stale PRIVATE bind socket left by SIGKILL is recovered on the next start
 
 /** A minimal in-memory Host Session access that keeps EXACT object identity. */
 function makeFakeAccess(options: {
+  readonly fileInput?: boolean
   readonly imageLimits?: AcpImageLimits
   readonly supportsImagePrompts?: () => Promise<boolean>
   readonly readOutputImage?: (ref: AcpStoredImageRef, signal: AbortSignal) => Promise<AcpStoredImage>
@@ -1491,6 +1565,14 @@ function makeFakeAccess(options: {
   const resolveCalls: string[] = []
   return {
     access: {
+      supportsFileInput() {
+        return options.fileInput === true
+      },
+      async stageFile() {
+        throw new Error('file staging is not configured for this listener test')
+      },
+      cleanupStagedFiles() {},
+      retirePromptReceipts() {},
       hasQuestionService() {
         return options.questionService === true
       },
@@ -2848,6 +2930,14 @@ test('an Agent disposal releases only its own View and leaves the sibling Sessio
 test('session/new carries the authoritative created session id in JSON-RPC error data on published-with-error', async t => {
   const { scope } = newScope(t)
   const access: HostAcpSessionAccess = {
+    supportsFileInput() {
+      return false
+    },
+    async stageFile() {
+      throw new Error('file staging is not configured for this listener test')
+    },
+    cleanupStagedFiles() {},
+    retirePromptReceipts() {},
     hasQuestionService() {
       return false
     },

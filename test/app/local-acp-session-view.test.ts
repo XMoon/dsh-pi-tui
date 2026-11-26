@@ -214,6 +214,45 @@ class FakeAccess implements HostAcpSessionAccess {
     }
   }
 
+  readonly stageCalls: Array<{ readonly agent: LiveAgentViewIdentity; readonly session: object; readonly data: string; readonly name?: string }> = []
+  readonly cleanupCalls: Array<{ readonly requestId: string; readonly receiptIds: readonly string[] }> = []
+  readonly retiredRequestIds: string[] = []
+  readonly stagedReceipts = new Set<string>()
+  private receiptSequence = 0
+  stageFileImpl: (
+    agent: LiveAgentViewIdentity,
+    session: object,
+    data: string,
+    name: string | undefined,
+    signal: AbortSignal,
+  ) => Promise<{ readonly receiptId: string }> = async () => {
+    const receiptId = `receipt-${++this.receiptSequence}`
+    this.stagedReceipts.add(receiptId)
+    return { receiptId }
+  }
+
+  supportsFileInput(): boolean { return true }
+
+  async stageFile(
+    agent: LiveAgentViewIdentity,
+    session: object,
+    data: string,
+    name: string | undefined,
+    signal: AbortSignal,
+  ): Promise<{ readonly receiptId: string }> {
+    this.stageCalls.push({ agent, session, data, ...(name === undefined ? {} : { name }) })
+    return await this.stageFileImpl(agent, session, data, name, signal)
+  }
+
+  cleanupStagedFiles(_agent: LiveAgentViewIdentity, requestId: string, receiptIds: readonly string[]): void {
+    this.cleanupCalls.push({ requestId, receiptIds })
+    for (const receiptId of receiptIds) this.stagedReceipts.delete(receiptId)
+  }
+
+  retirePromptReceipts(_agent: LiveAgentViewIdentity, requestId: string): void {
+    this.retiredRequestIds.push(requestId)
+  }
+
   async prompt(request: AcpSessionPromptRequest, signal: AbortSignal): Promise<{ readonly accepted: true }> {
     this.promptCalls.push(request)
     return await this.promptImpl(request, signal)
@@ -1009,6 +1048,60 @@ test('the production Host pending lookup reads both official inbox lists and rej
   assert.equal(access.pendingMessage('S', agent, session, 'absent'), 'stale', 'the Agent must still drive the exact Session')
 })
 
+test('the Host file facade stages on the exact identity and performs cleanup-only retirement', async () => {
+  const session = { id: 'S-file', header: { cwd: '/w' } }
+  const agent = { id: session.id, session }
+  let liveAgent: typeof agent | undefined = agent
+  const calls: string[] = []
+  const receipts = new Set(['receipt-1'])
+  let guardDisposed = false
+  const fileUploads = {
+    upload: async (receiver: object, request: { data: string; name?: string }) => {
+      calls.push(`upload:${String(receiver === agent)}:${request.data}:${request.name ?? ''}`)
+      return { receiptId: 'receipt-1' }
+    },
+    resolve: (_receiver: object, receiptId: string) => receipts.has(receiptId) ? { receiptId } : undefined,
+    bindPrompt: (_receiver: object, ids: readonly string[], requestId: string) => {
+      calls.push(`bind:${ids.join(',')}:${requestId}`)
+      return { [Symbol.dispose]: () => { guardDisposed = true; calls.push('dispose') } }
+    },
+    retirePrompt: (receiver: object, requestId: string) => {
+      calls.push(`retire:${String(receiver === agent)}:${requestId}`)
+      receipts.clear()
+    },
+  }
+  const context = {
+    reflect: { get(name: string) {
+      if (name === 'workspaceController') return {}
+      if (name === 'sessionController') return { create: async () => ({ sessionId: session.id }), modelCatalog: async () => ({ groups: [] }) }
+      if (name === 'agents') return { get: () => liveAgent }
+      if (name === 'sessions') return { get: () => session }
+      if (name === 'attachments') return { imageLimits: { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: 1, mediaTypes: [] } }
+      if (name === 'llm') return { resolveModelInfo: async () => ({}) }
+      if (name === 'tools') return { definitions: () => [] }
+      if (name === 'fileUploads') return fileUploads
+      return undefined
+    } },
+  } as unknown as Parameters<typeof createHostAcpSessionAccess>[0]
+  const access = createHostAcpSessionAccess(context)
+  assert.equal(access.supportsFileInput(), true)
+  assert.deepEqual(await access.stageFile(agent, session, 'AQID', 'x.bin', new AbortController().signal), { receiptId: 'receipt-1' })
+  assert.deepEqual(calls, ['upload:true:AQID:x.bin'])
+
+  liveAgent = { ...agent }
+  await assert.rejects(access.stageFile(agent, session, 'AQID', 'x.bin', new AbortController().signal),
+    (error: unknown) => (error as { code?: string }).code === 'session/not-found')
+  liveAgent = agent
+
+  access.cleanupStagedFiles(agent, 'flight-1', ['receipt-1', 'receipt-1', 'absent'])
+  assert.deepEqual(calls.slice(-3), ['bind:receipt-1:flight-1', 'retire:true:flight-1', 'dispose'])
+  assert.equal(guardDisposed, true)
+  assert.equal(receipts.has('receipt-1'), false)
+
+  access.retirePromptReceipts(agent, 'flight-2')
+  assert.deepEqual(calls.at(-1), 'retire:true:flight-2')
+})
+
 test('the Host image facade reads the default and exact live model routes and refuses unknown or stale admission', async () => {
   const session = { id: 'S-image', header: { cwd: '/w' } }
   let route: { provider: string; model: string } | undefined = { provider: 'provider', model: 'image' }
@@ -1326,7 +1419,7 @@ function promptView(sessionId = 'P1', options: { readonly mcp?: boolean; readonl
   notifications: SessionUpdate[]
   permissionRequests: Array<{ params: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionParams; signal?: AbortSignal; respond: (response: import('../../src/app/remote-process/local-acp-session-view.ts').AcpRequestPermissionResponse) => void; fail: (error: unknown) => void }>
   attach: () => Promise<void>
-  start: (text?: string, signal?: AbortSignal, prompt?: readonly unknown[], imageEnabled?: boolean) => Promise<{ stopReason: string }>
+  start: (text?: string, signal?: AbortSignal, prompt?: readonly unknown[], imageEnabled?: boolean, resourceEnabled?: boolean, resourceBudget?: number) => Promise<{ stopReason: string }>
   insert: (rpcId: string, messageId: string, text?: string) => void
   claim: (messageId: string, turn: number, rpcId?: string) => void
   commit: (type: string, data: Record<string, unknown>, time?: number) => void
@@ -1369,7 +1462,7 @@ function promptView(sessionId = 'P1', options: { readonly mcp?: boolean; readonl
     lastSeq: () => committedSeq,
     stream: (frame: unknown) => { registry.onAssistantStream(agent, frame) },
     attach: async () => { await registry.resumeSession(conn, access, { sessionId, cwd: '/w', ...(mcpServers.length === 0 ? {} : { mcpServers }) }, options.channels) },
-    start: (text = 'hello', signal = new AbortController().signal, prompt = [{ type: 'text', text }], imageEnabled = false) =>
+    start: (text = 'hello', signal = new AbortController().signal, prompt = [{ type: 'text', text }], imageEnabled = false, resourceEnabled = false, resourceBudget = 1024 * 1024) =>
       registry.promptSession(conn, access, { sessionId, prompt }, signal, imageEnabled, sendUpdate, (params, options) =>
         new Promise((resolveAsk, rejectAsk) => {
           permissionRequests.push({
@@ -1378,7 +1471,7 @@ function promptView(sessionId = 'P1', options: { readonly mcp?: boolean; readonl
             respond: resolveAsk,
             fail: rejectAsk,
           })
-        })),
+        }), { enabled: resourceEnabled, budget: resourceBudget }),
     insert: (rpcId: string, messageId: string, text = 'hello') => {
       access.pendingInbox.add(messageId)
       registry.onInboxInserted(agent, message(messageId, rpcId))
@@ -1740,6 +1833,278 @@ test('resource_link becomes the official ordered text hint and negotiated images
   view.insert(request.requestId, 'm-mixed')
   view.claim('m-mixed', 1, request.requestId)
   view.commit('assistant/message', assistantData(1, 'm-mixed', [{ type: 'text', text: 'accepted' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('negotiated standard resources fold descriptive text and stage blobs in original order', async () => {
+  const view = promptView()
+  await view.attach()
+  const prompt = [
+    { type: 'text', text: 'before' },
+    { type: 'resource', resource: {
+      uri: 'file:///报告 1 (b).bin?x=1#frag',
+      mimeType: 'application/octet-stream',
+      blob: 'AQID',
+    } },
+    { type: 'text', text: 'middle' },
+    { type: 'resource', resource: { uri: 'urn:demo:thing', text: 'literal {{x}} 中文\r\n' } },
+    { type: 'text', text: 'after' },
+    { type: 'resource', resource: { uri: 'file:///zero.bin', blob: '' } },
+  ]
+  view.access.promptImpl = async request => {
+    view.insert(request.requestId, 'm-resource')
+    return { accepted: true }
+  }
+  const attempt = view.start('', undefined, prompt, false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  const request = view.access.promptCalls[0]!
+  assert.deepEqual(request.content, [
+    { type: 'text', text: 'before\n[resource uri="file:///报告 1 (b).bin?x=1#frag" mimeType="application/octet-stream"]\n' },
+    { type: 'file', receiptId: 'receipt-1' },
+    { type: 'text', text: 'middle\n[resource uri="urn:demo:thing"]\nliteral {{x}} 中文\r\n\nafter\n[resource uri="file:///zero.bin"]\n' },
+    { type: 'file', receiptId: 'receipt-2' },
+  ])
+  assert.deepEqual(view.access.stageCalls.map(call => ({ data: call.data, name: call.name })), [
+    { data: 'AQID', name: '报告 1 (b).bin' },
+    { data: '', name: 'zero.bin' },
+  ])
+  view.claim('m-resource', 1, request.requestId)
+  view.commit('assistant/message', assistantData(1, 'm-resource', [{ type: 'text', text: 'accepted' }]))
+  view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+})
+
+test('an unnegotiated legal resource is refused before any upload or prompt', async () => {
+  const view = promptView()
+  await view.attach()
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///x.txt', text: 'x' } }], false, false),
+    isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
+  )
+  assert.equal(view.access.stageCalls.length, 0)
+  assert.equal(view.access.promptCalls.length, 0)
+})
+
+test('resource shape, aggregate budget and the 16-blob cap are atomic before upload', async () => {
+  const view = promptView()
+  await view.attach()
+  for (const prompt of [
+    [{ type: 'resource', resource: { uri: 'file:///x', text: 'x', blob: 'AA==' } }],
+    [{ type: 'resource', resource: { uri: 'file:///x' } }],
+    [{ type: 'resource', resource: { uri: 1, text: 'x' } }],
+    [{ type: 'resource', resource: { uri: 'file:///x', mimeType: 1, text: 'x' } }],
+  ]) {
+    await assert.rejects(view.start('', undefined, prompt, false, true), isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'))
+  }
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'resource', resource: { uri: 'u', text: '12345' } }], false, true, 5),
+    isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
+  )
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'resource', resource: { uri: 'u', text: '12345' } }], true, true, 5),
+    isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'),
+  )
+  const boundary = promptView()
+  await boundary.attach()
+  const attempt = boundary.start('', undefined, [{ type: 'resource', resource: { uri: 'u', text: '1234' } }], false, true, 5)
+  const request = boundary.access.promptCalls[0]!
+  assert.deepEqual(request.content, [{ type: 'text', text: '\n[resource uri="u"]\n1234\n' }])
+  boundary.insert(request.requestId, 'm-budget')
+  boundary.claim('m-budget', 1, request.requestId)
+  boundary.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(await attempt, { stopReason: 'end_turn' })
+
+  const tooMany = promptView()
+  await tooMany.attach()
+  const seventeen = Array.from({ length: 17 }, (_, index) => ({
+    type: 'resource', resource: { uri: `file:///zero-${String(index)}`, blob: '' },
+  }))
+  await assert.rejects(tooMany.start('', undefined, seventeen, false, true), isPromptError('LOCAL_ACP_PROMPT_INVALID_CONTENT'))
+  assert.equal(tooMany.access.stageCalls.length, 0)
+  assert.equal(tooMany.access.promptCalls.length, 0)
+})
+
+test('a later blob admission failure retires the earlier real receipt and never calls the Controller', async () => {
+  const view = promptView()
+  await view.attach()
+  let calls = 0
+  view.access.stageFileImpl = async () => {
+    calls += 1
+    if (calls === 1) {
+      view.access.stagedReceipts.add('receipt-first')
+      return { receiptId: 'receipt-first' }
+    }
+    throw { code: 'session/attachment-invalid', details: { reason: 'INVALID_BASE64' } }
+  }
+  const prompt = [
+    { type: 'resource', resource: { uri: 'file:///one.bin', blob: 'AQID' } },
+    { type: 'resource', resource: { uri: 'file:///two.bin', blob: 'not-base64' } },
+  ]
+  await assert.rejects(view.start('', undefined, prompt, false, true), (error: unknown) =>
+    error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+      && error.data.hostCode === 'session/attachment-invalid')
+  assert.equal(view.access.cleanupCalls.length, 1)
+  assert.deepEqual(view.access.cleanupCalls[0]?.receiptIds, ['receipt-first'])
+  assert.equal(view.access.promptCalls.length, 0, 'a staging failure never reaches the Controller')
+})
+
+test('a held real upload is cleaned after cancellation and no later upload or prompt starts', async () => {
+  const view = promptView()
+  await view.attach()
+  const held = deferred<{ readonly receiptId: string }>()
+  const controller = new AbortController()
+  view.access.stageFileImpl = async () => await held.promise
+  const prompt = [
+    { type: 'resource', resource: { uri: 'file:///one.bin', blob: 'AQID' } },
+    { type: 'resource', resource: { uri: 'file:///two.bin', blob: 'BAUG' } },
+  ]
+  const attempt = view.start('', controller.signal, prompt, false, true)
+  assert.equal(view.access.stageCalls.length, 1)
+  controller.abort()
+  held.resolve({ receiptId: 'receipt-late' })
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.equal(view.access.stageCalls.length, 1, 'a cancelled flight never starts the next upload')
+  assert.equal(view.access.promptCalls.length, 0)
+  assert.deepEqual(view.access.cleanupCalls.at(-1)?.receiptIds, ['receipt-late'])
+})
+
+test('Agent disposal during a held upload waits for its settlement, cleans it, and never dispatches', async () => {
+  const view = promptView()
+  await view.attach()
+  const held = deferred<{ readonly receiptId: string }>()
+  view.access.stageFileImpl = async () => await held.promise
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///late.bin', blob: 'AQID' } }], false, true)
+  assert.equal(view.access.stageCalls.length, 1)
+  view.registry.onAgentDisposed(view.agent)
+  held.resolve({ receiptId: 'receipt-disposed' })
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+  assert.equal(view.access.promptCalls.length, 0)
+  assert.deepEqual(view.access.cleanupCalls.at(-1)?.receiptIds, ['receipt-disposed'])
+})
+
+test('a pre-insertion Controller rejection cleans the real receipt and preserves the host code', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.promptImpl = async () => { throw { code: 'session/agent-busy', message: 'busy' } }
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///rejected.bin', blob: 'AQID' } }], false, true),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_PROMPT_HOST_REJECTED'
+      && error.data.hostCode === 'session/agent-busy',
+  )
+  assert.equal(view.access.promptCalls.length, 1)
+  assert.deepEqual(view.access.cleanupCalls.at(-1)?.receiptIds, ['receipt-1'])
+})
+
+test('an unconfirmed file receipt retirement is never reported as a clean rejection', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.cleanupStagedFiles = () => { throw new Error('retirement unavailable') }
+  view.access.promptImpl = async () => { throw { code: 'session/agent-busy', message: 'busy' } }
+  await assert.rejects(
+    view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///lost.bin', blob: 'AQID' } }], false, true),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
+      && error.data.reason === 'file-receipt-retirement-unconfirmed',
+  )
+  assert.equal(view.access.promptCalls.length, 1, 'the original Controller call is never retried')
+})
+
+test('disposal during a rejecting held upload retains the disposal failure, not a clean cancel', async () => {
+  const view = promptView()
+  await view.attach()
+  const held = deferred<{ readonly receiptId: string }>()
+  view.access.stageFileImpl = async () => await held.promise
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///reject.bin', blob: 'AQID' } }], false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.access.stageCalls.length, 1)
+  view.registry.onAgentDisposed(view.agent)
+  held.reject({ code: 'session/not-found' })
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+})
+
+test('disposal during a held upload also clears a previous dead retiring-turn fence', async () => {
+  const view = promptView()
+  await view.attach()
+  const first = view.start('first')
+  const firstRequest = view.access.promptCalls[0]!
+  view.insert(firstRequest.requestId, 'm-first')
+  view.claim('m-first', 1, firstRequest.requestId)
+  view.registry.onAgentError(view.agent, 1)
+  await assert.rejects(first, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED')
+  const held = deferred<{ readonly receiptId: string }>()
+  view.access.stageFileImpl = async () => await held.promise
+  const fileAttempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///fence.bin', blob: 'AQID' } }], false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  view.registry.onAgentDisposed(view.agent)
+  held.resolve({ receiptId: 'receipt-fence' })
+  await assert.rejects(fileAttempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_TURN_FAILED' && error.data.reason === 'agent-disposed')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(view.registry.claimCount(), 0, 'the dead retiring-turn fence must be released')
+})
+
+test('a queued removal whose receipt retirement fails is not reported as clean cancellation', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.retirePromptReceipts = () => { throw new Error('retirement unavailable') }
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///queued-fail.bin', blob: 'AQID' } }], false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-queued-fail')
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  await assert.rejects(attempt, (error: unknown) => error instanceof LocalAcpViewError
+    && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
+    && error.data.reason === 'file-receipt-retirement-unconfirmed')
+  await assert.rejects(view.registry.closeSession(view.conn, view.access, 'P1'),
+    (error: unknown) => error instanceof LocalAcpViewError
+      && error.code === 'LOCAL_ACP_PROMPT_CANCEL_UNCONFIRMED'
+      && error.data.reason === 'file-receipt-retirement-unconfirmed',
+    'a retried close must not claim a clean detach after unconfirmed retirement')
+})
+
+test('a proved queued removal retires the same request receipts exactly once', async () => {
+  const view = promptView()
+  await view.attach()
+  const attempt = view.start('', undefined, [{ type: 'resource', resource: { uri: 'file:///queued.bin', blob: 'AQID' } }], false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  const request = view.access.promptCalls[0]!
+  view.insert(request.requestId, 'm-queued')
+  view.registry.cancelSession(view.conn, view.access, 'P1')
+  assert.deepEqual(await attempt, { stopReason: 'cancelled' })
+  assert.ok(view.access.retiredRequestIds.includes(request.requestId))
+  assert.equal(view.access.retiredRequestIds.filter(id => id === request.requestId).length, 1)
+})
+
+test('a resource body never becomes a leading command and null MIME/repeated blobs keep their own occurrences', async () => {
+  const view = promptView()
+  await view.attach()
+  view.access.promptImpl = async request => {
+    view.insert(request.requestId, 'm-resource-edge')
+    return { accepted: true }
+  }
+  const prompt = [
+    { type: 'resource', resource: { uri: 'urn:null', mimeType: null, text: '/compact' } },
+    { type: 'resource', resource: { uri: 'file:///same.bin', blob: 'AQID' } },
+    { type: 'resource', resource: { uri: 'file:///same.bin', blob: 'AQID' } },
+  ]
+  const attempt = view.start('', undefined, prompt, false, true)
+  await new Promise(resolve => setImmediate(resolve))
+  const request = view.access.promptCalls[0]!
+  assert.deepEqual(request.content, [
+    { type: 'text', text: '\n[resource uri="urn:null"]\n/compact\n\n[resource uri="file:///same.bin"]\n' },
+    { type: 'file', receiptId: 'receipt-1' },
+    { type: 'text', text: '\n[resource uri="file:///same.bin"]\n' },
+    { type: 'file', receiptId: 'receipt-2' },
+  ])
+  assert.equal(view.access.stageCalls.length, 2, 'repeated URI/bytes are separate occurrences')
+  assert.equal(view.access.standaloneCommandCalls.length, 0, 'resource text never becomes a slash command')
+  view.claim('m-resource-edge', 1, request.requestId)
   view.commit('turn/end', { turn: 1, reason: { kind: 'completed' } })
   assert.deepEqual(await attempt, { stopReason: 'end_turn' })
 })
