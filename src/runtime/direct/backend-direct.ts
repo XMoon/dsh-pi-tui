@@ -40,7 +40,9 @@ import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort } from './host-user-shell-direct.ts'
+import type { HostShellServiceLike } from '../host-shell-capability.ts'
 import { DirectHostShellCompletionPort, type DirectShellCandidateReader } from './host-shell-completion-direct.ts'
+import { createHostShellPathCompletionBridge } from '../remote/pi-tui-host-user-shell-host-bridge.ts'
 import type { WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 import { DirectSessionWorkspaceFacts } from './session-workspace-facts-direct.ts'
@@ -179,6 +181,9 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
   // service coupling.
   const sessionReader = new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections)
   const sessionMarkdown = new DirectSessionMarkdown(deps.ctx)
+  // The Direct Windows Host shell completion reuses the SAME Host path bridge
+  // as the split Host; POSIX Direct keeps its existing fork path provider.
+  const hostPathCompletion = createHostShellPathCompletionBridge()
   return createDirectBackend(
     new DirectSubagentPort(deps.ctx),
     sessionReader,
@@ -217,8 +222,17 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
         return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
       },
       shellPolicy: () => deps.tuiSettings?.get().localShellSandbox === 'sandbox' ? 'sandbox' : 'bypass',
+      // The live official local shell capability and the official profile
+      // install anchor are resolved lazily on EVERY attempt; a composition
+      // without them keeps running and answers a truthful unavailable on a
+      // Windows Host instead of dropping the normal application start.
+      shell: () => deps.ctx.get('shell') as HostShellServiceLike | undefined,
+      installAnchor: () => {
+        const profileContext = deps.ctx.get('profileContext') as { readonly installAnchor?: unknown } | undefined
+        return typeof profileContext?.installAnchor === 'string' ? profileContext.installAnchor : undefined
+      },
     }),
-    new DirectHostShellCompletionPort(deps.sessionCwd, deps.agentFor, deps.shellCandidates),
+    new DirectHostShellCompletionPort(deps.sessionCwd, deps.agentFor, deps.shellCandidates, hostPathCompletion),
     // Delivered files PR2: the official Host file service read in-process,
     // under the same Session-derived scope the official Remote lookup uses.
     new DirectDeliveredFileReadPort(deps.ctx),

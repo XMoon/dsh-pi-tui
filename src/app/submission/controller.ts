@@ -253,6 +253,7 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
    *  gesture's accepted business-write lifetime at the shell owner's terminal
    *  settlement (M4 PR4). */
   readonly shell: {
+    isAvailable(): boolean
     capturePlacement(): UserShellPresentationPlacement
     run(text: string, ackToken: number | undefined, endWrite: () => void, placement: UserShellPresentationPlacement): void
     interrupt(): void
@@ -2485,6 +2486,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       if (shellCommandOf(text) === '') {
         // A bare `!`/`!!` (no command) is a no-op — sessionless.
         persistHistory(undefined)
+        return
+      }
+      // A composition without a supported Host shell (for example Windows
+      // without the official PowerShell capability) is truthful BEFORE any
+      // Session creation: refusing here keeps the draft and paints the one
+      // notice, instead of starting a deferred Session whose shell result is
+      // unavailable and can race the fresh surface.
+      if (!deps.shell.isAvailable()) {
+        deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+        deps.app().notify('Host user shell is unavailable in this composition — nothing was executed', 'error')
         return
       }
       // Local submit acknowledgement (plan D), armed AT THE GESTURE —

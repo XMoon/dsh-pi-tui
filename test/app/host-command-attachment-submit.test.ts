@@ -300,6 +300,7 @@ function startHarness(options: { readonly sessionId?: string } = {}): Harness {
     },
     artifacts: { start: () => {} },
     shell: {
+      isAvailable: () => true,
       capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }),
       run: () => {},
       interrupt: () => {},

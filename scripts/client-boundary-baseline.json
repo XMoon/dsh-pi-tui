@@ -60,7 +60,8 @@
     "import:dsh-agent"
   ],
   "runtime/direct/backend-direct.ts": [
-    "sandboxPolicy"
+    "sandboxPolicy",
+    "shell"
   ],
   "runtime/direct/catalog-direct.ts": [
     "agentDefaultModel",

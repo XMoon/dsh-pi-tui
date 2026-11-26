@@ -462,22 +462,32 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   schema as the settings owner and the Remote ConfigPort reads and writes that
   Host descriptor. The Host validates the Client's requested policy against its
   live setting before preparation and again before spawn; a stale or mismatched
-  request fails closed. Sandbox mode requires Host enforcement `full` and never
-  falls back to bypass.
-- One run is a Host-owned ONE-SHOT execution on Direct and Remote alike: both
-  policies spawn the raw `['bash', '-c', command]` through the official
-  `ctx.subprocess.spawn` seam in the Host workspace/environment and settle once
-  with the process's real exit code or terminating signal. `sandbox` first
-  resolves the exact live Session's policy, calls the official
-  `ctx.sandbox.confine` exactly ONCE before the spawn, requires
-  `enforcement: 'full'`, and spawns the EXACT argv that one call returned; a
-  composition without the required official capabilities refuses before any
-  spawn instead of degrading to bypass. The Client never spawns the command or
-  supplies Host environment facts; on the Remote path, the Owner-only Host
-  admission requires the exact live Session named by the request, and an unknown
-  or mismatched Session fails closed before execution. Direct remains the
-  production default and serves this contract in-process; Remote is the
-  split-process transport of the same contract.
+  request fails closed. Sandbox mode never falls back to bypass; the accepted
+  enforcement of each Host dialect is owned by the ONE-SHOT execution bullet
+  below.
+- One run is a Host-owned ONE-SHOT execution on Direct and Remote alike: a
+  POSIX Host spawns the raw `['bash', '-c', command]` through the official
+  `ctx.subprocess.spawn` seam; a Windows Direct Host spawns the exact live
+  official `ctx.shell.pwshPath` with the official composed argv
+  (`-NoLogo -NoProfile -NonInteractive -Command <ENCODING_PREAMBLE><command>`,
+  the command as ONE argv element) and the official public `ENV_OVERRIDES` as
+  its only explicit environment layer. Both settle once with the process's real
+  exit code or terminating signal in the Host workspace/environment, and a
+  Windows composition with no live official shell capability refuses before any
+  spawn — it never falls back to a bare `pwsh`, `cmd`, Git Bash or WSL. `sandbox`
+  first resolves the exact live Session's policy, calls the official
+  `ctx.sandbox.confine` exactly ONCE before the spawn, and spawns the EXACT argv
+  that one call returned. A POSIX Host requires `enforcement: 'full'`; the
+  official Windows ACL backend reports `partial` by design (reads, network and
+  NTFS hard links stay outside its write boundary) and that real result is
+  accepted, while an unknown enforcement, a missing capability or a
+  `danger-full-access` request refuses before any spawn instead of degrading to
+  bypass. The Client never spawns the command or supplies Host environment
+  facts; on the Remote path, the Owner-only Host admission requires the exact
+  live Session named by the request, and an unknown or mismatched Session fails
+  closed before execution. Direct remains the production default and serves this
+  contract in-process; Remote is the split-process transport of the same
+  contract (Windows Remote user-shell execution is not open in this version).
 - Output is collected through the subprocess provider's per-stream collect/spill
   dispositions: each stream keeps a bounded in-memory tail and reports its own
   truncation instead of claiming lossless bytes, and the Host-local spill file —
@@ -506,7 +516,43 @@ Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
   outcome, distinct from the sandbox reason-unknown above: the card states that
   the command may have executed, the run is never replayed, and an unknown
   result is never written to the Session.
-- Completion uses one shell grammar over the selected semantic port. Direct keeps its existing `bash -lc` compgen and fork path provider. Remote queries command names, variables, git subcommands and paths on the Host, scoped by the ONE completion target captured with the request: a live Session answers from that Session's effective cwd and Host environment; a sessionless surface whose Workspace selection confirmed a Host-issued id answers from that Workspace's Host directory and Host environment (zero Session, zero Agent, zero Session write); a sessionless surface with no selected Workspace answers `unavailable` with no Host read and no Client fallback. A Host refusal never falls back to Client PATH or filesystem, and a Workspace that is unregistered, revoked or unreadable during the completion is `unavailable` rather than a stale or empty success. A completion RESULT may not cross a Connection generation: a candidate reply that arrives (or is applied as an asynchronous result) after the Connection generation changed is refused, matching the official Client lifecycle (request abort, menu generation, editor document currentness, plus Host re-validation at execution). An A→B→A Workspace switch is a new selection revision: a candidate produced before it is never applied to the new editor state. Accepting an already-displayed candidate that only edits the user's draft is NOT itself a Connection-generation check; execution admission remains the authority for whether a command runs.
+- Completion uses one shell grammar over the selected semantic port. POSIX
+  Direct keeps its existing `bash -lc` compgen and fork path provider. A Windows
+  Direct Host exposes ONLY literal-path completion through the SAME Host path
+  bridge the split Host uses: relative `.\\`/`..\\`, separator-relative,
+  drive-absolute, plain/quoted path arguments and unquoted `~\\`/`~/` are
+  completed from a simple single-line argument position; leading whitespace
+  never changes the command role, only an explicit initial `&` call operator
+  admits executable-position completion, and compound/operator prefixes are
+  refused. A bare command position never fakes a command candidate,
+  command/variable/git-subcommand positions are explicitly unavailable, and a
+  quoted `~` stays a literal filename (never home). Drive-relative `C:foo`, PowerShell
+  provider/PSDrive paths and UNC/network spellings are refused instead of
+  guessed. An accepted candidate is ONE single-quoted PowerShell literal
+  (every recognized single-quote character — ASCII and U+2018/U+2019/U+201A/
+  U+201B — doubled) replacing the exact raw token including a matching
+  closing quote; a directory keeps its closing quote and parks the caret before
+  it. Backslash is ordinary filename content, `$`/backtick/subexpression/mixed
+  quoting/here-string/uncertain token boundaries yield no candidates at all and
+  never fall back to Bash or the Client filesystem. Remote queries command names,
+  variables, git subcommands and paths on the Host, scoped by the ONE completion
+  target captured with the request: a live Session answers from that Session's
+  effective cwd and Host environment; a sessionless surface whose Workspace
+  selection confirmed a Host-issued id answers from that Workspace's Host
+  directory and Host environment (zero Session, zero Agent, zero Session write);
+  a sessionless surface with no selected Workspace answers `unavailable` with no
+  Host read and no Client fallback. A Host refusal never falls back to Client
+  PATH or filesystem, and a Workspace that is unregistered, revoked or unreadable
+  during the completion is `unavailable` rather than a stale or empty success. A
+  completion RESULT may not cross a Connection generation: a candidate reply that
+  arrives (or is applied as an asynchronous result) after the Connection
+  generation changed is refused, matching the official Client lifecycle (request
+  abort, menu generation, editor document currentness, plus Host re-validation at
+  execution). An A→B→A Workspace switch is a new selection revision: a candidate
+  produced before it is never applied to the new editor state. Accepting an
+  already-displayed candidate that only edits the user's draft is NOT itself a
+  Connection-generation check; execution admission remains the authority for
+  whether a command runs.
 - The user-shell card is one-shot. Every `!`/`!!` gesture freezes a
   Client-local display placement captured synchronously at acceptance; the card
   is a standalone transcript block and is never appended to the live tail by
@@ -551,6 +597,8 @@ Authority: `src/tui/interaction/editor-input-mode.ts`
 `src/app/host/pi-tui-host-runtime.ts`, `src/runtime/remote/config-remote.ts`,
 `src/runtime/host-user-shell-port.ts`,
 `src/runtime/host-user-shell-execution.ts`,
+`src/runtime/host-shell-capability.ts`,
+`src/runtime/native-process/installed-dsh.ts`,
 `src/runtime/host-shell-completion-port.ts`,
 `src/runtime/direct/host-user-shell-direct.ts`,
 `src/runtime/direct/host-shell-completion-direct.ts`,
@@ -565,5 +613,7 @@ once, spawn an argv other than the one it returned, skip the official
 `ctx.subprocess.spawn` seam, replace the one-shot bounded collect with an
 arbitrary-length byte-perfect stream or a custom ACK/backpressure/mux/relay, add
 a second file channel, a second process owner, polling/jobs or a public API for
-this path, cache a failed compgen run, or let a mode-less plugin seat inject
-`prompt` into a Host `!` submit.
+this path, cache a failed compgen run, let a mode-less plugin seat inject
+`prompt` into a Host `!` submit, fall back from a missing Windows official shell
+capability or its real `partial` enforcement to a bare `pwsh`, Bash, `cmd` or
+Client filesystem path, or claim full Windows enforcement.

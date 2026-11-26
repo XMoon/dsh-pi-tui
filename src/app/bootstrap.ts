@@ -3999,6 +3999,7 @@ export function applyRunnerWithRuntime(
       },
       artifacts: { start: (name, agent) => artifacts.start(name, agent) },
       shell: {
+        isAvailable: () => localShell.isAvailable(),
         capturePlacement: () => localShell.capturePlacement(),
         run: (text, ackToken, endWrite, placement) => localShell.run(text, ackToken, endWrite, placement),
         interrupt: () => localShell.interrupt(),

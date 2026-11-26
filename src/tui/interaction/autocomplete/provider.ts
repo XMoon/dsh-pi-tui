@@ -22,7 +22,15 @@ import {
   type AutocompleteSuggestions,
   type SlashCommand,
 } from '@xmoon76/pi-tui'
-import { shellCommandIsOpen, shellCompletionContext, shellWordRange, shellWordSuffix, suggestShellCompletion } from './shell.ts'
+import {
+  powershellCompletionContext,
+  powershellWordRange,
+  shellCommandIsOpen,
+  shellCompletionContext,
+  shellWordRange,
+  shellWordSuffix,
+  suggestShellCompletion,
+} from './shell.ts'
 import type { HostShellCompletionPort, HostShellCompletionTarget } from '../../../runtime/host-shell-completion-port.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
@@ -298,14 +306,18 @@ export class MentionProvider implements AutocompleteProvider {
     // a session/workspace switch mid-request must not bake the NEW scope
     // into this request's snapshot — the apply fence compares it).
     const requestScope = this.scopeOf()
-    // An OPEN shell continuation (the previous physical line leaves a quote,
-    // backtick, substitution or trailing backslash unfinished) has no
-    // trustworthy single-line boundary. Offer NOTHING for it: no guessed shell
-    // candidate, no Client path fallback and no stale dropdown.
-    if (this.inputModeSource() !== 'prompt' && cursorLine > 0
-      && shellCommandIsOpen(lines.slice(0, cursorLine))) {
-      if (generation === this.requestGeneration) this.requestSnapshot = null
-      return null
+    const shellDialect = this.hostShellCompletion?.pathLiteralDialect ?? 'bash'
+    // A PowerShell shell-mode line after the first has no proven single-line
+    // boundary: the Bash continuation scanner does not model PowerShell block
+    // comments, here-strings or subexpressions. Refuse that unproven multiline
+    // context rather than borrowing Bash proof. An OPEN Bash continuation keeps
+    // its existing refusal. Prompt lines are independent, so they stay usable.
+    if (this.inputModeSource() !== 'prompt' && cursorLine > 0) {
+      if (shellDialect === 'powershell'
+        || shellCommandIsOpen(lines.slice(0, cursorLine))) {
+        if (generation === this.requestGeneration) this.requestSnapshot = null
+        return null
+      }
     }
     // 1. The shell grammar runs before file/attachment completion. Direct keeps
     // the existing fork path provider; Remote routes every shell word/path only
@@ -314,8 +326,16 @@ export class MentionProvider implements AutocompleteProvider {
     const shellLine = wire ?? { line: currentLine, cursorCol, prefixLength: 0 }
     const shellContext = this.hostShellCompletion === undefined
       ? undefined
-      : shellCompletionContext(shellLine.line, shellLine.cursorCol)
-    if (shellContext !== undefined) {
+      : shellDialect === 'powershell'
+        ? powershellCompletionContext(shellLine.line, shellLine.cursorCol)
+        : shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    // A PowerShell empty argument position lists the Host cwd only on an
+    // explicit Tab; a natural trigger stays quiet.
+    const quietPowerShellArgument = shellDialect === 'powershell'
+      && shellContext?.kind === 'paths'
+      && shellContext.word?.valuePrefix === ''
+      && options.force !== true
+    if (shellContext !== undefined && !quietPowerShellArgument) {
       const port = this.hostShellCompletion!
       const directPath = shellContext.kind === 'paths' && port.pathAuthority === 'client'
       if (!directPath) {
@@ -432,7 +452,7 @@ export class MentionProvider implements AutocompleteProvider {
     const literalShellLine = textBeforeCursor.trimStart().startsWith('!')
     if (semantic !== null || literalShellLine) {
       const port = this.hostShellCompletion
-      if (port === undefined || port.pathAuthority === 'host') {
+      if (port === undefined || port.pathAuthority === 'host' || port.pathLiteralDialect === 'powershell') {
         return this.withRequestSnapshot(generation, requestScope, requestMode, requestLocalCwd, lines, cursorLine, cursorCol, null, false)
       }
       try {
@@ -857,7 +877,10 @@ export class MentionProvider implements AutocompleteProvider {
     // nothing about the RAW range the accepted Bash-safe word must replace.
     // Those two kinds apply as WHOLE-WORD replacements below; every other kind
     // keeps the prefix fence.
-    const shellContext = shellCompletionContext(shellLine.line, shellLine.cursorCol)
+    const shellDialect = this.hostShellCompletion?.pathLiteralDialect ?? 'bash'
+    const shellContext = shellDialect === 'powershell'
+      ? powershellCompletionContext(shellLine.line, shellLine.cursorCol)
+      : shellCompletionContext(shellLine.line, shellLine.cursorCol)
     const wholeWordShell = shellContext?.kind === 'command' || shellContext?.kind === 'subcommand'
     const start = cursorCol - bodyPrefix.length
     if (!wholeWordShell && (start < 0 || currentLine.slice(start, cursorCol) !== bodyPrefix)) {
@@ -901,6 +924,28 @@ export class MentionProvider implements AutocompleteProvider {
       // for another document/cursor/mode/Session must never be written here.
       if (!this.shellResultIsCurrent(item, lines, cursorLine, cursorCol)) {
         return { lines, cursorLine, cursorCol }
+      }
+      if (shellDialect === 'powershell') {
+        // PowerShell literal-path acceptance: replace the WHOLE raw token
+        // (including a matching closing quote) with one single-quoted literal.
+        // A directory keeps the closing quote and parks the caret before it so
+        // the next completion continues in the same token; a file keeps the
+        // original following spacing.
+        const scanPrefixLength = wire === null
+          ? (currentLine.startsWith('!!') ? 2 : 1)
+          : wire.prefixLength
+        const range = powershellWordRange(shellLine.line, scanPrefixLength, shellLine.cursorCol)
+        if (range === undefined) return { lines, cursorLine, cursorCol }
+        const directory = item.label.endsWith('/') || item.label.endsWith('\\')
+        const rawStart = range.start - shellLine.prefixLength
+        const rawEnd = range.end - shellLine.prefixLength
+        const newLines = [...lines]
+        newLines[cursorLine] = `${currentLine.slice(0, rawStart)}${item.value}${currentLine.slice(rawEnd)}`
+        return {
+          lines: newLines,
+          cursorLine,
+          cursorCol: rawStart + item.value.length - (directory ? 1 : 0),
+        }
       }
       // Bash-style whole-word replacement: the cursor can sit mid-token, so
       // the already-typed suffix of THIS word is part of the accepted range.

@@ -1,12 +1,17 @@
 /**
- * Direct Host user-shell adapter coverage: both policies run the raw
- * `['bash', '-c', command]` argv through the SAME official subprocess core the
- * split Host uses; sandbox confines exactly once with the exact Session policy
- * and fails closed before spawn unless enforcement is full.
+ * Direct Host user-shell adapter coverage: both policies run the Host-local
+ * shell dialect through the SAME official subprocess core the split Host uses.
+ * POSIX runs the raw Bash argv; a simulated Windows Host resolves the fixture
+ * installed pwsh capability's public constants and live getter. Sandbox
+ * confines exactly once with the exact Session policy and fails closed before
+ * spawn unless the selected official backend reports full (POSIX) or its real
+ * partial/full result (Windows).
  * @module @xmoon76/dsh-pi-tui/host-user-shell-direct.test
  */
 
 import assert from 'node:assert/strict'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import type { ConfinedArgv } from '@deepseek-ai/dsh-sandbox'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
@@ -20,6 +25,8 @@ import {
   MAX_HOST_USER_SHELL_STREAM_BYTES,
   type HostUserShellResult,
 } from '../../src/runtime/host-user-shell-port.ts'
+import { writeInstalledPwshFixture } from '../support/installed-pwsh-fixture.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const idle = new AbortController().signal
 const session = { id: 's' }
@@ -117,6 +124,8 @@ function makeFixture(options: {
   readonly sessionFor?: DirectHostUserShellDeps['sessionFor']
   readonly effectiveCwdFor?: DirectHostUserShellDeps['effectiveCwdFor']
   readonly shellPolicy?: DirectHostUserShellDeps['shellPolicy']
+  readonly shell?: DirectHostUserShellDeps['shell']
+  readonly installAnchor?: DirectHostUserShellDeps['installAnchor']
 } = {}): Fixture {
   const subprocess = fakeSubprocess(options.handle)
   const confineCalls: { readonly argv: readonly string[]; readonly policy: unknown }[] = []
@@ -135,7 +144,21 @@ function makeFixture(options: {
       sessionFor: sessions,
       effectiveCwdFor: options.effectiveCwdFor ?? (() => process.cwd()),
       shellPolicy: options.shellPolicy ?? (() => 'bypass'),
+      ...(options.shell === undefined ? {} : { shell: options.shell }),
+      ...(options.installAnchor === undefined ? {} : { installAnchor: options.installAnchor }),
     },
+  }
+}
+
+/** Run one test body under a simulated Host platform. */
+async function withPlatform<T>(platform: NodeJS.Platform, run: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  assert.ok(descriptor?.configurable)
+  Object.defineProperty(process, 'platform', { ...descriptor, value: platform })
+  try {
+    return await run()
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor)
   }
 }
 
@@ -600,4 +623,104 @@ test('truncation markers stay short and terminal after the raw tails and long sp
   assert.ok(unknownStdout < notice && unknownStderr < notice && notice < unknownExit)
   assert.ok(unknownStdout >= unknownLines.length - 4 && unknownStderr >= unknownLines.length - 4,
     'the short markers survive alongside the reason-unknown notice')
+})
+
+// ── Windows Host dialect: the live official pwsh capability through the same core ──
+
+test('a Windows Host spawns the live official pwsh argv and official env overrides', async t => {
+  const life = testLifecycle(t)
+  const installed = writeInstalledPwshFixture(life)
+  let liveExecutable = installed.firstExecutable
+  const fixture = makeFixture({
+    shell: () => ({ pwshPath: liveExecutable }),
+    installAnchor: () => installed.anchor,
+  })
+  const direct = port(fixture)
+  await withPlatform('win32', async () => {
+    assert.deepEqual(direct.availability, { supported: true, policies: ['bypass', 'sandbox'] })
+    const first = await direct.execute(request({ command: 'Get-ChildItem', policy: 'bypass' }))
+    assert.equal(first.kind, 'settled')
+    const firstSpec = fixture.subprocess.spawns[0]!
+    assert.deepEqual(firstSpec.argv, [
+      installed.firstExecutable,
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `${installed.encodingPreamble}Get-ChildItem`,
+    ])
+    assert.deepEqual(firstSpec.env, installed.envOverrides,
+      'the official public ENV_OVERRIDES are the only explicit child environment layer')
+    liveExecutable = installed.secondExecutable
+    const second = await direct.execute(request({ command: 'Get-ChildItem', policy: 'bypass' }))
+    assert.equal(second.kind, 'settled')
+    assert.equal(fixture.subprocess.spawns[1]!.argv[0], installed.secondExecutable,
+      'the next attempt re-reads the live official executable getter')
+    assert.equal(fixture.subprocess.spawns.length, 2)
+  })
+})
+
+test('a Windows Host without the live official shell capability is unavailable with zero spawn', async () => {
+  const fixture = makeFixture()
+  const direct = port(fixture)
+  await withPlatform('win32', async () => {
+    assert.deepEqual(direct.availability, { supported: false, policies: [] })
+    const outcome = await direct.execute(request())
+    assert.equal(outcome.kind, 'unavailable')
+    if (outcome.kind !== 'unavailable') throw new Error('expected a missing-capability refusal')
+    assert.match(outcome.reason.message, /official Host shell capability is unavailable/u)
+    assert.equal(fixture.subprocess.spawns.length, 0)
+  })
+})
+
+test('a Windows Host whose installed official module cannot be resolved fails closed with zero spawn', async t => {
+  const life = testLifecycle(t)
+  const anchorDir = life.tempDir('dsh-broken-anchor-')
+  const anchor = join(anchorDir, 'package.json')
+  writeFileSync(anchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5' }))
+  const fixture = makeFixture({
+    shell: () => ({ pwshPath: 'C:\\fixture\\pwsh.exe' }),
+    installAnchor: () => anchor,
+  })
+  const outcome = await withPlatform('win32', async () => port(fixture).execute(request()))
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected a module-resolution refusal')
+  assert.match(outcome.reason.message, /official Host shell capability could not be resolved/u)
+  assert.equal(fixture.subprocess.spawns.length, 0)
+})
+
+test('a Windows Host accepts the official partial/full sandbox result and spawns the exact confined argv', async t => {
+  const life = testLifecycle(t)
+  const installed = writeInstalledPwshFixture(life)
+  for (const enforcement of ['partial', 'full'] as const) {
+    const confined = fullConfined(['C:\\runner.exe', '--', installed.firstExecutable], { enforcement })
+    let confineCalls = 0
+    const fixture = makeFixture({
+      shellPolicy: () => 'sandbox',
+      shell: () => ({ pwshPath: installed.firstExecutable }),
+      installAnchor: () => installed.anchor,
+      sandbox: () => ({ confine: async () => { confineCalls += 1; return confined } }),
+    })
+    const outcome = await withPlatform('win32', async () => port(fixture).execute(request({ policy: 'sandbox' })))
+    assert.equal(outcome.kind, 'settled', enforcement)
+    assert.equal(confineCalls, 1)
+    assert.strictEqual(fixture.subprocess.spawns[0]!.argv, confined.argv,
+      'the exact argv returned by the one confine call is spawned')
+  }
+})
+
+test('a Windows Host refuses an unknown sandbox enforcement before any spawn', async t => {
+  const life = testLifecycle(t)
+  const installed = writeInstalledPwshFixture(life)
+  const fixture = makeFixture({
+    shellPolicy: () => 'sandbox',
+    shell: () => ({ pwshPath: installed.firstExecutable }),
+    installAnchor: () => installed.anchor,
+    sandbox: () => ({ confine: async argv => fullConfined(argv, { enforcement: 'unknown-backend' as never }) }),
+  })
+  const outcome = await withPlatform('win32', async () => port(fixture).execute(request({ policy: 'sandbox' })))
+  assert.equal(outcome.kind, 'unavailable')
+  if (outcome.kind !== 'unavailable') throw new Error('expected a fail-closed enforcement refusal')
+  assert.match(outcome.reason.message, /neither the official partial nor full/u)
+  assert.equal(fixture.subprocess.spawns.length, 0)
 })

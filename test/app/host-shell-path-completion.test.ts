@@ -4,6 +4,8 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHostShellPathCompletionBridge } from '../../src/runtime/remote/pi-tui-host-user-shell-host-bridge.ts'
 import { DirectHostDiscoveryDriver } from '../../src/runtime/direct/file-completion/host-discovery.ts'
+import { discoverForQuery } from '../../src/domain/file-completion/discovery-policy.ts'
+import { resolvePathQuery, separatorOfRaw } from '../../src/domain/file-completion/query.ts'
 import type { LocalDiscoveryDriver } from '../../src/domain/file-completion/discovery-policy.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -74,7 +76,7 @@ test('Host shell paths keep a leading double-quote filename byte in the Host que
   }, 'the semantic prefix queries the filename beginning with a double quote, not its unquoted name')
 })
 
-test('Remote Host Bash path completion fails closed for Windows Host facts in this version', async () => {
+test('Windows Host path completion refuses ambiguous local-path spellings without touching the Host driver', async () => {
   let calls = 0
   const bridge = createHostShellPathCompletionBridge({
     environment: { homeDir: 'C:\\Users\\host', windowsHost: true },
@@ -83,11 +85,28 @@ test('Remote Host Bash path completion fails closed for Windows Host facts in th
       async find() { calls += 1; return [] },
     },
   })
-  assert.deepEqual(await bridge.complete('C:\\workspace', '.\\src', new AbortController().signal), {
-    kind: 'unavailable',
-    reason: 'Host Bash path completion is unsupported on Windows in this version',
-  })
-  assert.equal(calls, 0, 'an unsupported Windows path shell never enters the POSIX discovery driver')
+  const reason = 'the Windows path form is not an unambiguous local NTFS path (drive-relative, provider or UNC spellings are not supported)'
+  for (const prefix of ['C:foo', '\\\\server\\share\\x', 'HKLM:\\Software', 'Env:PATH']) {
+    assert.deepEqual(await bridge.complete('C:\\workspace', prefix, new AbortController().signal), {
+      kind: 'unavailable',
+      reason,
+    }, `${JSON.stringify(prefix)} must be refused`)
+  }
+  assert.equal(calls, 0, 'an ambiguous Windows token never enters the discovery driver')
+})
+
+test('a Windows Host path query keeps the native separator algebra and explicit scope', async () => {
+  const query = resolvePathQuery('src\\', 'C:\\ws', { homeDir: 'C:\\Users\\fixture', windowsHost: true })
+  assert.equal(query.searchBase, 'C:\\ws\\src\\')
+  assert.equal(query.displayBase, 'src\\')
+  assert.equal(separatorOfRaw('src\\', query.winAbsolute), '\\')
+  const seen: string[] = []
+  const discovered = await discoverForQuery(query, {
+    async listDirectory(baseDir) { seen.push(baseDir); return [{ name: 'host-only.ts', kind: 'file', descendable: false }] },
+    async find() { return null },
+  }, new AbortController().signal)
+  assert.deepEqual(discovered, [{ path: 'host-only.ts', kind: 'file' }])
+  assert.deepEqual(seen, ['C:\\ws\\src\\'], 'the Host query is the only directory the driver reads')
 })
 
 test('Host Bash path completion keeps its 50-candidate bound over a larger Host match set', async t => {

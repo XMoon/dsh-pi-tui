@@ -22,9 +22,17 @@ export type HostShellCompletionOutcome =
   | { readonly kind: 'ok'; readonly candidates: readonly string[] }
   | { readonly kind: 'unavailable'; readonly reason: string }
 
+/** The Host shell's literal-path grammar the Client must use when accepting
+ * one of THIS port's Host path candidates. It is an adapter-local presentation
+ * fact, never a wire field and never inferred from the Client OS. */
+export type HostShellPathLiteralDialect = 'bash' | 'powershell'
+
 export interface HostShellCompletionPort {
-  /** Direct preserves its existing fork path provider; Remote owns paths on the Host. */
+  /** Direct POSIX preserves its existing fork path provider; Remote and a
+   * Windows Direct Host own paths on the Host. */
   readonly pathAuthority: 'client' | 'host'
+  /** The literal-path grammar of the Host shell behind this port. */
+  readonly pathLiteralDialect: HostShellPathLiteralDialect
   complete(input: {
     readonly target: HostShellCompletionTarget
     readonly request: HostShellCompletionRequest

@@ -120,7 +120,7 @@ function setup(options: {
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
+    hostShellCompletion: { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -530,6 +530,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     shell: {
       // The user-shell sink (a `!`/`!!` line). A different route from the
       // model prompt above; `/view-image` must reach neither.
+      isAvailable: () => true,
       capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }),
       run: (text) => { shellRuns.push(text) },
       interrupt: () => {},
@@ -589,7 +590,7 @@ test('a user Enter on /view-image routes through the REAL controller into the pi
     commandRegistry: undefined,
     clientCommands,
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
+    hostShellCompletion: { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) },
     interaction: {
       questions: { onRequest: () => true, subscribe: () => undefined, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const },
       onApprovalRequest: () => {},

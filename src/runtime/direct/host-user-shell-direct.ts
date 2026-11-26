@@ -1,11 +1,13 @@
 /**
  * The Direct Host user-shell adapter (shell amendment, M3-4 PR3): the
  * in-process deployment of the SAME Host-owned one-shot execution authority as
- * the split Host. Both policies run the raw `['bash', '-c', command]` argv
- * through the installed official `ctx.subprocess` provider; `sandbox` first
- * resolves the exact live Session's policy and confines the raw argv exactly
- * once through the official `ctx.sandbox` provider, requiring full enforcement
- * before the one spawn.
+ * the split Host. Both policies run the Host-local shell dialect selected from
+ * the live official capability (POSIX Bash, or the Windows official
+ * `ctx.shell.pwshPath` with the public PowerShell constants) through the
+ * installed official `ctx.subprocess` provider; `sandbox` first resolves the
+ * exact live Session's policy and confines the raw argv exactly once through
+ * the official `ctx.sandbox` provider, requiring full POSIX enforcement or the
+ * official Windows ACL backend's real partial/full result before the one spawn.
  *
  * A composition without the required official capabilities fails closed with a
  * visible `policy-unavailable` admission — it NEVER downgrades to unsandboxed
@@ -18,11 +20,17 @@
 import {
   executeHostShellOnce,
   HostShellExecutionVeto,
+  hostShellDiagnostic,
   type HostSessionLike,
+  type HostShellLocal,
   type SandboxPolicyServiceLike,
   type SandboxServiceLike,
   type SubprocessServiceLike,
 } from '../host-user-shell-execution.ts'
+import {
+  hostShellLocalForAttempt,
+  type HostShellServiceLike,
+} from '../host-shell-capability.ts'
 import {
   HostUserShellSandboxRunnerError,
   type HostUserShellOutcome,
@@ -46,6 +54,11 @@ export interface DirectHostUserShellDeps {
   readonly effectiveCwdFor: (session: HostSessionLike) => string | undefined
   /** The current Direct user-shell policy, read live on every call. */
   readonly shellPolicy: () => HostUserShellPolicy
+  /** The live official `ctx.shell` service on Windows; undefined when the
+   * composition has no official local shell capability. */
+  readonly shell?: () => HostShellServiceLike | undefined
+  /** The official profile install anchor when the composition holds one. */
+  readonly installAnchor?: () => string | undefined
 }
 
 /**
@@ -61,6 +74,9 @@ export class DirectHostUserShellPort implements HostUserShellPort {
 
   get availability(): { readonly supported: boolean; readonly policies: readonly ('bypass' | 'sandbox')[] } {
     if (this.deps.subprocess() === undefined) return { supported: false, policies: [] }
+    // The subprocess seam alone never proves a Windows Host shell: the exact
+    // live official local shell capability is required for every attempt.
+    if (process.platform === 'win32' && this.deps.shell?.() === undefined) return { supported: false, policies: [] }
     return this.deps.sandbox() !== undefined && this.deps.sandboxPolicy() !== undefined
       ? { supported: true, policies: ['bypass', 'sandbox'] }
       : { supported: true, policies: ['bypass'] }
@@ -91,6 +107,20 @@ export class DirectHostUserShellPort implements HostUserShellPort {
       return unavailable('the user shell policy changed — refresh settings and retry; nothing was executed')
     }
 
+    let shellLocal: HostShellLocal | undefined
+    try {
+      shellLocal = await hostShellLocalForAttempt({
+        platform: process.platform,
+        shell: this.deps.shell?.(),
+        anchor: this.deps.installAnchor?.(),
+      })
+    } catch (error) {
+      return unavailable(`the official Host shell capability could not be resolved: ${hostShellDiagnostic(error)} — nothing was executed`)
+    }
+    if (shellLocal === undefined) {
+      return unavailable('the official Host shell capability is unavailable in this composition — nothing was executed')
+    }
+
     let outcome
     try {
       outcome = await executeHostShellOnce({
@@ -99,6 +129,7 @@ export class DirectHostUserShellPort implements HostUserShellPort {
         policy: request.policy,
         signal: request.signal,
         subprocess,
+        shell: shellLocal,
         session,
         sandboxPolicy: this.deps.sandboxPolicy(),
         sandbox: this.deps.sandbox(),

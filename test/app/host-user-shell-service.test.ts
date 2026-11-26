@@ -18,6 +18,7 @@ import {
 } from '../../src/runtime/host-user-shell-port.ts'
 import { parseHostUserShellRunOutcome } from '../../src/runtime/remote/pi-tui-host-user-shell-contract.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { writeInstalledPwshFixture } from '../support/installed-pwsh-fixture.ts'
 
 async function mount(deps: PiTuiHostUserShellHostDeps, remoteInvocation?: unknown): Promise<{ service: PiTuiHostUserShellService; ctx: Context }> {
   const ctx = new Context()
@@ -170,6 +171,18 @@ async function run(service: PiTuiHostUserShellService, options: {
   )
 }
 
+/** Run one test body under a simulated Host platform. */
+async function withPlatform<T>(platform: NodeJS.Platform, body: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  assert.ok(descriptor?.configurable)
+  Object.defineProperty(process, 'platform', { ...descriptor, value: platform })
+  try {
+    return await body()
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor)
+  }
+}
+
 function fullConfined(argv: readonly string[], overrides: Partial<ConfinedArgv> = {}): ConfinedArgv {
   return {
     argv: [...argv],
@@ -180,30 +193,128 @@ function fullConfined(argv: readonly string[], overrides: Partial<ConfinedArgv> 
   }
 }
 
-test('Windows Host Bash execution fails closed before Session lookup or spawn', async () => {
+test('a Windows Host without the official shell capability refuses truthfully after identity, with zero spawn', async () => {
   let lookups = 0
   const subprocess = fakeSubprocess(() => fakeHandle())
+  const { session, agent } = hostDeps()
   const { deps } = hostDeps({
-    agentFor: () => { lookups += 1; return undefined },
-    sessionFor: () => { lookups += 1; return undefined },
+    agentFor: () => { lookups += 1; return agent },
+    sessionFor: () => { lookups += 1; return session },
     subprocess: () => subprocess.subprocess,
   })
   const { service, ctx } = await mount(deps, ownerInvocation())
-  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
-  assert.ok(platform?.configurable)
-  try {
-    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
-    const outcome = await run(service)
-    assert.equal(outcome.kind, 'refused')
-    if (outcome.kind !== 'refused') throw new Error('expected a refusal')
-    assert.equal(outcome.reason, 'policy-unavailable')
-    assert.match(outcome.message, /unsupported on Windows/u)
-    assert.equal(lookups, 0)
-    assert.equal(subprocess.spawns.length, 0)
-  } finally {
-    Object.defineProperty(process, 'platform', platform)
-    await ctx.fiber.dispose()
-  }
+  await withPlatform('win32', async () => {
+    try {
+      const outcome = await run(service)
+      assert.equal(outcome.kind, 'refused')
+      if (outcome.kind !== 'refused') throw new Error('expected a missing-capability refusal')
+      assert.equal(outcome.reason, 'policy-unavailable')
+      assert.match(outcome.message, /official Host shell capability is unavailable/u)
+      assert.ok(lookups > 0, 'the exact Owner/Session identity is still validated first')
+      assert.equal(subprocess.spawns.length, 0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+test('a Windows Host runs the live official pwsh argv through the same one-shot core', async (t) => {
+  const life = testLifecycle(t)
+  const installed = writeInstalledPwshFixture(life)
+  let liveExecutable = installed.firstExecutable
+  const subprocess = fakeSubprocess(() => fakeHandle())
+  const { deps } = hostDeps({
+    shell: () => ({ pwshPath: liveExecutable }),
+    installAnchor: () => installed.anchor,
+    subprocess: () => subprocess.subprocess,
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation())
+  await withPlatform('win32', async () => {
+    try {
+      const first = await run(service, { command: 'Get-ChildItem' })
+      assert.equal(first.kind, 'settled')
+      const spec = subprocess.spawns[0]!
+      assert.deepEqual(spec.argv, [
+        installed.firstExecutable,
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `${installed.encodingPreamble}Get-ChildItem`,
+      ])
+      assert.deepEqual(spec.env, installed.envOverrides)
+      liveExecutable = installed.secondExecutable
+      const second = await run(service, { command: 'Get-ChildItem' })
+      assert.equal(second.kind, 'settled')
+      assert.equal(subprocess.spawns[1]!.argv[0], installed.secondExecutable,
+        'the next attempt re-reads the live official executable getter')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+test('a Windows Host sandbox accepts the official partial result and spawns the exact confined argv', async (t) => {
+  const life = testLifecycle(t)
+  const installed = writeInstalledPwshFixture(life)
+  const confined = fullConfined(['C:\\runner.exe', '--', installed.firstExecutable], { enforcement: 'partial' })
+  const subprocess = fakeSubprocess(() => fakeHandle())
+  const { deps } = hostDeps({
+    shellPolicy: () => 'sandbox',
+    shell: () => ({ pwshPath: installed.firstExecutable }),
+    installAnchor: () => installed.anchor,
+    sandbox: () => ({ confine: async () => confined }),
+    sandboxPolicy: () => ({ resolve: async () => ({ mode: 'workspace-write', workspaceRoot: process.cwd() }) }),
+    subprocess: () => subprocess.subprocess,
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation())
+  await withPlatform('win32', async () => {
+    try {
+      const outcome = await run(service, { command: 'Set-Content x', policy: 'sandbox' })
+      assert.equal(outcome.kind, 'settled')
+      assert.strictEqual(subprocess.spawns[0]!.argv, confined.argv,
+        'the exact argv returned by the one official confine call is spawned')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+})
+
+test('a Windows Host serves Host paths only; command/variable/git completion stays unavailable', async () => {
+  const signal = new AbortController().signal
+  const calls: string[] = []
+  const subprocess = fakeSubprocess(() => fakeHandle())
+  const { deps } = hostDeps({
+    subprocess: () => subprocess.subprocess,
+    pathCompletion: {
+      complete: async (cwd, prefix) => {
+        calls.push(`${cwd}|${prefix}`)
+        return { kind: 'ok', candidates: [`${prefix}file.txt`] }
+      },
+    },
+  })
+  const { service, ctx } = await mount(deps, ownerInvocation(signal))
+  await withPlatform('win32', async () => {
+    try {
+      assert.deepEqual(await service.complete('session-a', { kind: 'paths', prefix: 'C:\\work\\' }, signal), {
+        kind: 'ok', candidates: ['C:\\work\\file.txt'],
+      })
+      assert.deepEqual(calls, [`${process.cwd()}|C:\\work\\`])
+      for (const request of [
+        { kind: 'commands' as const, prefix: 'gi' },
+        { kind: 'variables' as const, prefix: 'HO' },
+        { kind: 'subcommands' as const, command: 'git', prefix: 'che' },
+      ]) {
+        const outcome = await service.complete('session-a', request, signal)
+        assert.equal(outcome.kind, 'unavailable', JSON.stringify(request))
+        if (outcome.kind !== 'unavailable') throw new Error('expected an unavailable non-path completion')
+        assert.match(outcome.reason, /unsupported on Windows/u)
+      }
+      assert.equal(subprocess.spawns.length, 0, 'no Bash compgen or git helper may run on a Windows Host')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 test('a non-owner or missing Gateway invocation refuses before any Host lookup', async () => {

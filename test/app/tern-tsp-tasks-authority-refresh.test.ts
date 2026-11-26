@@ -213,7 +213,7 @@ async function mountChain(): Promise<Chain> {
       hostFile: {} as never,
       webAccess: undefined as never,
       acpAccess: undefined as never,
-      hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
+      hostShellCompletion: { pathAuthority: 'host' as const, pathLiteralDialect: 'bash', complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     },
     session: {
       ensureSession: async () => {},

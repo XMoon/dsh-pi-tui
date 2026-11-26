@@ -268,7 +268,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
-    hostShellCompletion: { pathAuthority: 'client', complete: async () => ({ kind: 'ok', candidates: [] }) },
+    hostShellCompletion: { pathAuthority: 'client', pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok', candidates: [] }) },
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     requestExit: () => {},

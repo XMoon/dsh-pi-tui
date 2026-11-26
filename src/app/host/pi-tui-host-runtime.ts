@@ -57,6 +57,7 @@ import {
 import { PiTuiWebAccessHostService } from './features/web-access.ts'
 import { PiTuiAcpAccessHostService } from './features/acp-access.ts'
 import { PiTuiHostUserShellService } from './features/host-user-shell.ts'
+import type { HostShellServiceLike } from '../../runtime/host-shell-capability.ts'
 import {
   PiTuiSkillsHostService,
   type AgentPresetRegistryLike,
@@ -270,6 +271,14 @@ export async function apply(ctx: Context, _config: TuiConfigValue): Promise<void
         subprocess: () => ctx.reflect.get('subprocess') as import('./features/host-user-shell.ts').SubprocessServiceLike | undefined,
         pathCompletion: createHostShellPathCompletionBridge(),
         shellPolicy: () => preferences.localShellSandbox.get() === 'sandbox' ? 'sandbox' : 'bypass',
+        // The live official local shell capability and the official profile
+        // install anchor are resolved lazily per attempt; a Host without them
+        // still starts and answers a truthful unavailable.
+        shell: () => ctx.reflect.get('shell') as HostShellServiceLike | undefined,
+        installAnchor: () => {
+          const profileContext = ctx.reflect.get('profileContext') as { readonly installAnchor?: unknown } | undefined
+          return typeof profileContext?.installAnchor === 'string' ? profileContext.installAnchor : undefined
+        },
         workspaces: () => ctx.reflect.get('workspaceRegistry') as WorkspaceRegistryPort | undefined,
       })
     })

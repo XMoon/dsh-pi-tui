@@ -131,7 +131,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'client' as const, complete: async () => ({ kind: 'ok' as const, candidates: [] }) },
+    hostShellCompletion: { pathAuthority: 'client' as const, pathLiteralDialect: 'bash', complete: async () => ({ kind: 'ok' as const, candidates: [] }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -581,7 +581,7 @@ function mountedHarness(options: {
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: { pathAuthority: 'host' as const, complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
+    hostShellCompletion: { pathAuthority: 'host' as const, pathLiteralDialect: 'bash', complete: async () => ({ kind: 'unavailable' as const, reason: 'test Host unavailable' }) },
     interaction: {
       questions: {
         onRequest: () => true,
@@ -1072,7 +1072,7 @@ function cardlessController(options: {
       clearError: () => {},
     },
     artifacts: { start: () => {} },
-    shell: { capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
+    shell: { isAvailable: () => true, capturePlacement: () => ({ anchor: undefined, turn: undefined, target: 'beginning' as const, acceptedOrder: 0 }), run: () => {}, interrupt: () => {}, cancelRun: () => false },
     supportsLocalShellCards: false,
     supportsTuiBuiltinUi: options.supportsTuiBuiltinUi ?? false,
     retainsStaleDraftRestore: false,

@@ -14,6 +14,7 @@ import {
   expandHomeToken,
   reattachDisplayBase,
   resolvePathQuery,
+  resolveWindowsHostPrefix,
   separatorOfRaw,
   termOfRaw,
   type PathQueryEnvironment,
@@ -93,6 +94,30 @@ test('`~` forms expand through the INJECTED homeDir AND the injected host algebr
   assert.equal(resolvePathQuery('~/../pics', CWD, WINDOWS).searchTerm, 'pics')
   assert.equal(resolvePathQuery('~/../pics', CWD, POSIX).searchBase, posix.join('/home/fixture', '..'))
   assert.equal(resolvePathQuery('~', CWD, WINDOWS).searchBase, 'C:\\Users\\fixture')
+})
+
+test('a Windows Host home token is admitted as an ABSOLUTE prefix; quoted literals stay literal', () => {
+  const home = 'C:\\Users\\fixture'
+  assert.deepEqual(resolveWindowsHostPrefix('~', home), { kind: 'ok', prefix: 'C:\\Users\\fixture\\' })
+  assert.deepEqual(resolveWindowsHostPrefix('~\\', home), { kind: 'ok', prefix: 'C:\\Users\\fixture\\' })
+  assert.deepEqual(resolveWindowsHostPrefix('~/', home), { kind: 'ok', prefix: 'C:\\Users\\fixture\\' })
+  assert.deepEqual(resolveWindowsHostPrefix('~\\sub dir', home), { kind: 'ok', prefix: 'C:\\Users\\fixture\\sub dir' })
+  assert.deepEqual(resolveWindowsHostPrefix('~/sub/file', home), { kind: 'ok', prefix: 'C:\\Users\\fixture\\sub\\file' })
+  // A quoted `~` is sent by the Client as the literal `./~...` form and is
+  // never expanded as home.
+  assert.deepEqual(resolveWindowsHostPrefix('./~literal', home), { kind: 'ok', prefix: './~literal' })
+  // Ordinary relative/drive-absolute tokens pass through unchanged.
+  assert.deepEqual(resolveWindowsHostPrefix('.\\src', home), { kind: 'ok', prefix: '.\\src' })
+  assert.deepEqual(resolveWindowsHostPrefix('C:\\work\\src', home), { kind: 'ok', prefix: 'C:\\work\\src' })
+})
+
+test('ambiguous Windows spellings are a truthful unavailable, not a guessed path', () => {
+  const home = 'C:\\Users\\fixture'
+  for (const raw of ['C:foo', '\\\\server\\share\\x', '//server/share/x', 'HKLM:\\Software', 'Env:PATH', 'Registry::HKEY_LOCAL_MACHINE']) {
+    assert.equal(resolveWindowsHostPrefix(raw, home).kind, 'unavailable', raw)
+  }
+  assert.equal(resolveWindowsHostPrefix('C:\\work', home).kind, 'ok')
+  assert.equal(resolveWindowsHostPrefix('sub\\file', home).kind, 'ok')
 })
 
 test('bare scope forms list their own directory with an explicit display base', () => {

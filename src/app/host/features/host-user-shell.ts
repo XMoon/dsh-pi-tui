@@ -12,10 +12,15 @@ import {
   HostShellExecutionVeto,
   hostShellDiagnostic,
   type HostSessionLike,
+  type HostShellLocal,
   type SandboxPolicyServiceLike,
   type SandboxServiceLike,
   type SubprocessServiceLike,
 } from '../../../runtime/host-user-shell-execution.ts'
+import {
+  hostShellLocalForAttempt,
+  type HostShellServiceLike,
+} from '../../../runtime/host-shell-capability.ts'
 import {
   MAX_HOST_SHELL_COMPLETION_ITEMS,
   MAX_HOST_SHELL_COMPLETION_ITEM_BYTES,
@@ -63,6 +68,11 @@ export interface PiTuiHostUserShellHostDeps {
   readonly subprocess: () => SubprocessServiceLike | undefined
   readonly pathCompletion: HostShellPathCompletionBridge
   readonly shellPolicy: () => HostUserShellPolicy
+  /** The live official `ctx.shell` service on Windows; absent when the
+   * composition has no official local shell capability. */
+  readonly shell?: () => HostShellServiceLike | undefined
+  /** The official profile install anchor when the Host composition holds one. */
+  readonly installAnchor?: () => string | undefined
   /** The official Host `workspaceRegistry` (resolved PER CALL): the sessionless
    *  Workspace completion's ONLY id/path authority. */
   readonly workspaces: () => WorkspaceRegistryPort | undefined
@@ -273,9 +283,6 @@ export class PiTuiHostUserShellService extends TypertRemoteService {
     if (this.disposed || this.lifecycle.signal.aborted) {
       return refused('scope-unavailable', 'Host shell service is stopping')
     }
-    if (process.platform === 'win32') {
-      return refused('policy-unavailable', 'Host Bash execution is unsupported on Windows in this version — nothing was executed')
-    }
     const exact = this.exactIdentity(sessionId)
     if (exact === undefined) {
       return refused('scope-unavailable', 'the requested live Host Session is unavailable')
@@ -313,6 +320,19 @@ export class PiTuiHostUserShellService extends TypertRemoteService {
     readonly runSignal: AbortSignal
   }): Promise<HostUserShellRunOutcome> {
     const { sessionId, exact, cwd, command, policy, subprocess, runSignal } = input
+    let shellLocal: HostShellLocal | undefined
+    try {
+      shellLocal = await hostShellLocalForAttempt({
+        platform: process.platform,
+        shell: this.deps.shell?.(),
+        anchor: this.deps.installAnchor?.(),
+      })
+    } catch (error) {
+      return refused('policy-unavailable', `the official Host shell capability could not be resolved: ${hostShellDiagnostic(error)} — nothing was executed`)
+    }
+    if (shellLocal === undefined) {
+      return refused('policy-unavailable', 'the official Host shell capability is unavailable in this composition — nothing was executed')
+    }
     let execution
     try {
       execution = await executeHostShellOnce({
@@ -321,6 +341,7 @@ export class PiTuiHostUserShellService extends TypertRemoteService {
         policy,
         signal: runSignal,
         subprocess,
+        shell: shellLocal,
         session: exact.session,
         sandboxPolicy: this.deps.sandboxPolicy(),
         sandbox: this.deps.sandbox(),
@@ -421,6 +442,9 @@ export class PiTuiHostUserShellService extends TypertRemoteService {
   ): Promise<HostShellCompletionOutcome> {
     if (request.kind === 'paths') {
       return this.deps.pathCompletion.complete(cwd, request.prefix, operationSignal)
+    }
+    if (process.platform === 'win32') {
+      return unavailable('Host command, variable and git completion is unsupported on Windows — the Host PowerShell shell has no native candidate source')
     }
     const subprocess = this.deps.subprocess()
     if (subprocess === undefined) return unavailable('the Host subprocess provider is unavailable')
