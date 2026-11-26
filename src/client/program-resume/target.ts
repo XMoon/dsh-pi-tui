@@ -171,13 +171,16 @@ function profileAdmitted(input: {
   return true
 }
 
+/** An absolute, control-free path string. */
+function pathTextAdmitted(value: string): boolean {
+  return isAbsolute(value) && !FORBIDDEN_PATH_TEXT.test(value)
+}
+
 /** Validate the profile name/path text the command must carry verbatim. */
 function scopeTextAdmitted(input: ProgramResumeProfileContext): boolean {
   if (input.name === '' || input.name.startsWith('-') || FORBIDDEN_PATH_TEXT.test(input.name)) return false
-  for (const value of [input.home, input.cwd]) {
-    if (!isAbsolute(value) || FORBIDDEN_PATH_TEXT.test(value)) return false
-  }
-  return directory(input.home) && directory(input.cwd)
+  return pathTextAdmitted(input.home) && pathTextAdmitted(input.cwd)
+    && directory(input.home) && directory(input.cwd)
 }
 
 /** Build the non-secret facts once the caller has the trusted token. */
@@ -192,6 +195,7 @@ function capabilityOf(input: {
 }): ProgramResumeCapability | undefined {
   if (!isProgramResumeToken(input.token)) return undefined
   if (!Number.isSafeInteger(input.ownerPid) || input.ownerPid <= 0) return undefined
+  if (!pathTextAdmitted(input.nodePath) || !pathTextAdmitted(input.cliPath)) return undefined
   if (!executableFile(ENV) || !executableFile(input.nodePath) || !regularFile(input.cliPath)) return undefined
   if (!scopeTextAdmitted(input.profileContext)) return undefined
   return {
@@ -303,6 +307,9 @@ export function clientProgramResumeCapability(input: {
   const facts = decodeProgramResumeHandoff(input.handoff)
   if (facts === undefined || facts.backend !== 'daemon') return undefined
   if (facts.profile !== input.expectedProfile) return undefined
+  if (facts.profile === '' || facts.profile.startsWith('-') || FORBIDDEN_PATH_TEXT.test(facts.profile)) return undefined
+  if (!pathTextAdmitted(facts.home) || !pathTextAdmitted(facts.cwd)) return undefined
+  if (!pathTextAdmitted(facts.nodePath) || !pathTextAdmitted(facts.cliPath)) return undefined
   if (facts.ownerPid === process.pid) return undefined
   if (!input.isReexec && facts.ownerPid !== input.parentPid) return undefined
   let home: string
