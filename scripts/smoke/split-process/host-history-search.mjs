@@ -132,7 +132,23 @@ async function runUiCtrlR({ client, dshHome, sessionId, target, legacySentinel, 
   // The exact body is loaded lazily and the action bar appears only after it
   // is verified. Wait for that readiness, then send the ONE restore Enter.
   await client.waitForScreen('Copy All [Alt+C]', `${label} exact body`, 120_000)
-  client.send('\r')
+  // The panel becomes the physical key owner asynchronously after the seat
+  // mount. A first Enter that lands before that focus handoff is an editor
+  // no-op; retry the SAME restore gesture once only while History is still
+  // mounted, then prove the seat is gone before the deliberate second Enter.
+  let restored = false
+  for (let attempt = 0; attempt < 2 && !restored; attempt += 1) {
+    client.send('\r')
+    const closeDeadline = Date.now() + 5_000
+    while (Date.now() < closeDeadline) {
+      if (!(await client.viewport()).some(line => line.includes('Input History'))) {
+        restored = true
+        break
+      }
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+  }
+  assert(restored, `${label}: History stayed mounted after Restore: ${JSON.stringify(await client.viewport())}`)
   await client.waitForScreen(`❯ ${target}`, `${label} exact draft`, 120_000)
   assert(acceptedCount() === before,
     `${label}: the restore submitted the history row`)
