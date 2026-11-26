@@ -1100,10 +1100,12 @@ before any Host effect:
   lease declares the same servers: changing MCP is the explicit
   `session/close` + ordinary attach path, never a silent reuse or replacement.
 - The exact live Agent/Session identity is re-verified in the SAME synchronous
-  stack immediately before the one official `resolveAgent`; a lost identity
-  fails closed (`LOCAL_ACP_VIEW_AGENT_UNAVAILABLE`) instead of attaching a
-  different cold-resumed Agent. The resolve result must be that same exact
-  Agent; otherwise only the fresh reservation is released.
+  stack after the outgoing generation's read callbacks are retired and
+  immediately before the one official `resolveAgent`; a lost identity fails
+  closed (`LOCAL_ACP_VIEW_AGENT_UNAVAILABLE`) instead of attaching a different
+  cold-resumed Agent. The resolve result must be that same exact Agent AND its
+  captured Session, and still the current Host identity; otherwise only the
+  fresh reservation is released.
 - The whole View slot admits ONE unsettled wire request for this refresh, from
   request admission (including the post-attach initial config read) to its
   response. A competing same-slot prompt / mode / config / repeat is refused

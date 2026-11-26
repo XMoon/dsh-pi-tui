@@ -2293,6 +2293,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
       this.claims.set(sessionId, claim)
     }
+    if (previous !== undefined) this.admitRefreshDispatch(state, op, claim, previous, access, requestSignal)
     const agent = await this.resolveForView(access, state, op, claim)
     if (previous !== undefined) this.requireSameGeneration(state, op, claim, previous, agent)
     // cwd is a claim proposal only; a difference is a fixed non-sensitive note,
@@ -2394,6 +2395,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
       claim = { connectionIdentity: state, sessionId, readAbort: new AbortController() }
       this.claims.set(sessionId, claim)
     }
+    if (previous !== undefined) this.admitRefreshDispatch(state, op, claim, previous, access, requestSignal)
     const agent = await this.resolveForView(access, state, op, claim)
     if (previous !== undefined) this.requireSameGeneration(state, op, claim, previous, agent)
     if (agent.session.header.cwd !== request.cwd) {
@@ -6008,10 +6010,64 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
   }
 
   /**
+   * Reattach dispatch gate: `replaceClaim` has just retired the outgoing
+   * generation's read callbacks; the official resolver is cold-capable, so the
+   * captured live identity must be re-proved in the SAME synchronous stack
+   * BEFORE dispatch. A retirement callback that rolled the Agent/Session over,
+   * a concurrent close/fence, or an already-aborted request must fail closed
+   * here — never reach the resolver and never resurrect the old generation.
+   * The cancellation case also covers an abort that arrived before the abort
+   * watcher was registered (`addEventListener` does not replay it).
+   */
+  private admitRefreshDispatch(
+    state: ConnectionViewState,
+    op: number,
+    claim: ViewClaim,
+    previous: ViewClaim,
+    access: HostAcpSessionAccess,
+    requestSignal?: AbortSignal,
+  ): void {
+    if (requestSignal?.aborted === true) {
+      this.releaseReservation(state, claim)
+      this.resetIdleIfCurrent(state, op)
+      requestSignal.throwIfAborted()
+    }
+    const current = this.claims.get(claim.sessionId) === claim
+      && claim.connectionIdentity === state
+      && this.isCurrentOp(state, op)
+      && claim.detachedWithFence !== true
+    if (!current) {
+      // A concurrent close/cancel already owns this fresh generation's phase.
+      throw new LocalAcpViewError(
+        'LOCAL_ACP_VIEW_CLOSED',
+        'the ACP view was released before it attached',
+        JSONRPC_INVALID_PARAMS,
+        { sessionId: claim.sessionId },
+      )
+    }
+    const capturedAgent = previous.exactAgent
+    const capturedSession = previous.exactSession
+    const exact = capturedAgent !== undefined && capturedSession !== undefined
+      && Object.is(access.currentAgent(claim.sessionId), capturedAgent)
+      && Object.is(access.currentSession(claim.sessionId), capturedSession)
+      && Object.is(capturedAgent.session, capturedSession)
+    if (exact) return
+    this.releaseReservation(state, claim)
+    this.resetIdleIfCurrent(state, op)
+    throw new LocalAcpViewError(
+      'LOCAL_ACP_VIEW_AGENT_UNAVAILABLE',
+      'the attached session agent is no longer the live Host agent',
+      JSONRPC_INTERNAL_ERROR,
+      { sessionId: claim.sessionId },
+    )
+  }
+
+  /**
    * A reattach is a refresh of the SAME borrowed Host Owner: the official
-   * resolver's result must be the EXACT captured Agent (and therefore the same
-   * Session), otherwise only this fresh reservation is released and the old
-   * generation is never resurrected.
+   * resolver's result must be the EXACT captured Agent AND its captured
+   * Session, otherwise only this fresh reservation is released and the old
+   * generation is never resurrected. `commitAttached` still proves that exact
+   * pair is the CURRENT Host identity before the View becomes attached.
    */
   private requireSameGeneration(
     state: ConnectionViewState,
@@ -6020,7 +6076,7 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     previous: ViewClaim,
     agent: LiveAgentViewIdentity,
   ): void {
-    if (Object.is(agent, previous.exactAgent)) return
+    if (Object.is(agent, previous.exactAgent) && Object.is(agent.session, previous.exactSession)) return
     this.releaseReservation(state, claim)
     this.resetIdleIfCurrent(state, op)
     throw new LocalAcpViewError(

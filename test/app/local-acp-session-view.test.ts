@@ -8836,3 +8836,45 @@ test('a repeat cancelled while the official resolve is pending returns the conne
   await registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' })
   assert.equal(registry.phaseOf(conn), 'attached', 'a later explicit attach succeeds')
 })
+
+test('a reattach fails closed when the old-read retirement callback replaced the captured Agent', async () => {
+  const access = new FakeAccess()
+  const agentA = makeAgent('RE14', '/w')
+  access.seed(agentA)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  const channels: AcpViewChannels = { capabilities: PR2_CAPABILITIES, notifyProjection: async () => {} }
+  // The settled View owns a REAL detached catalog read on its readAbort
+  // lifetime. Hold that read and let the replacement's retirement abort it: the
+  // fake Host replaces the captured live Agent at exactly that callback, i.e.
+  // the accepted pre-dispatch identity boundary.
+  const entered = deferred<void>()
+  let held = false
+  const originalSkills = access.readNativeSkillsImpl
+  access.readNativeSkillsImpl = async (agent, session, signal) => {
+    if (held) return await originalSkills(agent, session, signal)
+    held = true
+    entered.resolve()
+    return await new Promise<AcpNativeSkillCatalog>((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        access.seed(makeAgent('RE14', '/w'))
+        reject(signal.reason)
+      }, { once: true })
+    })
+  }
+  await registry.resumeSession(conn, access, { sessionId: 'RE14', cwd: '/w' }, channels)
+  await entered.promise
+  const resolvesBefore = access.resolveCalls.length
+  await assert.rejects(
+    registry.resumeSession(conn, access, { sessionId: 'RE14', cwd: '/w' }, channels, undefined, true),
+    isViewError('LOCAL_ACP_VIEW_AGENT_UNAVAILABLE'),
+  )
+  assert.equal(access.resolveCalls.length, resolvesBefore,
+    'the official resolver is never dispatched after the retirement callback lost the captured identity')
+  assert.equal(registry.claimCount(), 0, 'only the fresh reservation is released')
+  assert.equal(registry.phaseOf(conn), 'idle')
+  await registry.resumeSession(conn, access, { sessionId: 'RE14', cwd: '/w' }, channels)
+  assert.equal(registry.phaseOf(conn), 'attached', 'a later explicit attach uses the real live owner')
+  assert.equal(registry.claimCount(), 1)
+})
