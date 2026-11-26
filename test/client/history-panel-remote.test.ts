@@ -248,7 +248,7 @@ function makeHarness(options: HarnessOptions): Harness {
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     geometry: geometry(options.columns ?? 120, options.rows ?? 40),
     pointerEnabled: options.pointerEnabled ?? (() => false),
-    tenantIsCurrent: options.tenantIsCurrent ?? (() => seat.isCurrent()),
+    tenantIsCurrent: options.tenantIsCurrent ?? (() => scope.isCurrent()),
     ...(options.initialQuery === undefined ? {} : { initialQuery: options.initialQuery }),
     onAccept: (selection) => { accepted.push(selection) },
     onCopy: (text) => { copied.push(text) },

@@ -2065,7 +2065,7 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /**
-   * The ONE Remote More admission shared by ArrowDown at the tail and the
+   * The ONE Remote More admission shared by PgDn at the tail and the
    * painted Footer button. It requires the last painted frame to describe the
    * CURRENT commit (generation), the selected identity to still be that painted
    * row, and the live seat currentness — a stale frame, a mid-flight More or a
@@ -2090,7 +2090,7 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /**
-   * The ONE Remote Retry admission shared by ArrowDown and the painted Footer
+   * The ONE Remote Retry admission shared by PgDn and the painted Footer
    * button. Retry is offered for a blocking seat failure and for a failed exact
    * body; a stale frame, a pending More or a ready page refuses.
    */
