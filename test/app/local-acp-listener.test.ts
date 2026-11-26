@@ -2189,7 +2189,6 @@ test('a cancelled repeat load retires its fresh generation instead of replaying 
     initialize(other, 1)
     await other.next()
     client.send({ jsonrpc: '2.0', id: 2, method: 'session/load', params: { sessionId: 'session-cancel-load', cwd: '/host/cancel', mcpServers: [] } })
-    const updatesBeforeCancel = 0
     for (;;) {
       const frame = (await client.next()) as { id?: number; method?: string }
       if (frame.method === 'session/update') continue
@@ -2243,10 +2242,79 @@ test('a cancelled repeat load retires its fresh generation instead of replaying 
     }
     assert.deepEqual(cutClose?.result, {}, 'the cancelling connection holds no View after the cancellation')
     assert.deepEqual(afterCancel, [], 'the cancelled replay wrote no uncommitted history after the cancel')
-    assert.equal(updatesBeforeCancel, 0)
     // The new owner of the Session is untouched by the old generation's late
     // read settling.
     other.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-cancel-load' } })
+    assert.deepEqual(((await other.next()) as { result?: unknown }).result, {})
+    assert.deepEqual(fake.removedMessageIds, [], 'no Host inbox cancellation was issued')
+    assert.deepEqual(fake.cancelledTurns, [], 'no Host turn cancellation was issued')
+  } finally {
+    client.close()
+    other.close()
+  }
+})
+
+test('a repeat cancelled during the official resolve releases its View slot at the capacity bound', async t => {
+  const { scope } = newScope(t)
+  const fake = makeFakeAccess()
+  fake.seed('session-resolve-cancel', '/host/resolve-cancel')
+  const listener = await startLocalAcpListener({ scope, maxConnections: 4, diag: QUIET_DIAG, sessionAccess: fake.access })
+  t.after(() => listener.close())
+  const client = await RawClient.open(listener.socketPath)
+  const other = await RawClient.open(listener.socketPath)
+  try {
+    initialize(client, 1)
+    await client.next()
+    initialize(other, 1)
+    await other.next()
+    client.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-resolve-cancel', cwd: '/host/resolve-cancel' } })
+    assert.deepEqual(((await client.next()) as { result?: unknown }).result, {})
+    const liveAgent = fake.agentOf('session-resolve-cancel')
+    const entered = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    let held = false
+    const originalResolve = fake.access.resolveAgent
+    fake.access.resolveAgent = async (sessionId: string) => {
+      if (sessionId !== 'session-resolve-cancel') return await originalResolve(sessionId)
+      if (!held) {
+        held = true
+        entered.resolve()
+        await gate.promise
+      }
+      return liveAgent === undefined
+        ? { error: { code: 'session/not-found', message: 'not found' } }
+        : { agent: liveAgent }
+    }
+    client.send({ jsonrpc: '2.0', id: 3, method: 'session/resume', params: { sessionId: 'session-resolve-cancel', cwd: '/host/resolve-cancel' } })
+    await entered.promise
+    // The official resolve is a real Host await: cancelling here must retire the
+    // fresh generation immediately. The other connection is the positive fact
+    // that the cancellation was actually processed before the resolve returns.
+    client.send({ jsonrpc: '2.0', method: '$/cancel_request', params: { requestId: 3 } })
+    other.send({ jsonrpc: '2.0', id: 2, method: 'session/resume', params: { sessionId: 'session-resolve-cancel', cwd: '/host/resolve-cancel' } })
+    let otherAttach: { id?: number; result?: unknown; error?: unknown } | undefined
+    for (;;) {
+      const frame = (await other.next()) as { id?: number; method?: string; result?: unknown; error?: unknown }
+      if (frame.method !== undefined) continue
+      otherAttach = frame
+      break
+    }
+    assert.equal(otherAttach.id, 2)
+    assert.equal(otherAttach.error, undefined, 'the cancelled resolve retired its fresh generation immediately')
+    gate.resolve()
+    const cancelled = (await client.next(5_000)) as { id?: number; error?: { data?: { code?: string } } }
+    assert.equal(cancelled.id, 3)
+    assert.equal(cancelled.error?.data?.code, 'LOCAL_ACP_VIEW_CLOSED', 'the cancelled resolve never attaches')
+    // The connection's full eight-slot budget stays usable: a leaked attaching
+    // slot would refuse the eighth new View here.
+    for (let index = 0; index < 8; index += 1) {
+      client.send({ jsonrpc: '2.0', id: 10 + index, method: 'session/new', params: { cwd: `/host/after-cancel-${String(index)}`, mcpServers: [] } })
+      const created = (await client.next()) as { id?: number; result?: { sessionId?: string }; error?: { data?: { code?: string } } }
+      assert.equal(created.id, 10 + index)
+      assert.equal(typeof created.result?.sessionId, 'string',
+        `slot ${String(index + 1)} of 8 must be admitted after the cancelled resolve (${JSON.stringify(created.error)})`)
+    }
+    other.send({ jsonrpc: '2.0', id: 3, method: 'session/close', params: { sessionId: 'session-resolve-cancel' } })
     assert.deepEqual(((await other.next()) as { result?: unknown }).result, {})
     assert.deepEqual(fake.removedMessageIds, [], 'no Host inbox cancellation was issued')
     assert.deepEqual(fake.cancelledTurns, [], 'no Host turn cancellation was issued')

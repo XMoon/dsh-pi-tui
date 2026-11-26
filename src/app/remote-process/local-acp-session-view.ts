@@ -5962,7 +5962,12 @@ export class AcpSessionViewRegistry implements AcpPromptFactListener {
     this.stopProjectionOutput(claim)
     this.releaseQuestionForms(claim)
     this.claims.delete(claim.sessionId)
-    if (state.phase === 'attached') state.phase = 'idle'
+    // A cancellation can land while the fresh claim is still ATTACHING (the
+    // official resolve is a real Host await): the connection must return to
+    // idle in that phase too, otherwise the listener's slot release and the
+    // eight-slot budget would leak an orphaned View. `closed` keeps its own
+    // teardown owner.
+    if (state.phase === 'attaching' || state.phase === 'attached') state.phase = 'idle'
     this.notifyWorkSettled()
   }
 

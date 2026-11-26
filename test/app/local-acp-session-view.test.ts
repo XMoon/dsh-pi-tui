@@ -8802,3 +8802,37 @@ test('a repeat load cancelled during its canonical read retires only the fresh g
   await registry.resumeSession(conn, access, { sessionId: 'RE12', cwd: '/w' }, channels)
   assert.equal(registry.phaseOf(conn), 'attached', 'an explicit later attach succeeds on the same connection')
 })
+
+test('a repeat cancelled while the official resolve is pending returns the connection to idle', async () => {
+  const access = new FakeAccess()
+  const agent = makeAgent('RE13', '/w')
+  access.seed(agent)
+  const registry = new AcpSessionViewRegistry(QUIET_DIAG)
+  registry.bindAccess(access)
+  const conn = registry.createConnection()
+  await registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' })
+  const entered = deferred<void>()
+  const gate = deferred<void>()
+  let held = false
+  access.resolveAgentImpl = async () => {
+    if (!held) {
+      held = true
+      entered.resolve()
+      await gate.promise
+    }
+    return { agent }
+  }
+  const controller = new AbortController()
+  const pending = registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' }, undefined, controller.signal, true)
+  await entered.promise
+  // The cancellation lands while the fresh claim is still ATTACHING: the claim
+  // retires and the connection returns to idle immediately.
+  controller.abort()
+  assert.equal(registry.claimCount(), 0, 'the fresh claim is retired by the cancellation')
+  assert.equal(registry.phaseOf(conn), 'idle', 'the attaching phase returns to idle')
+  gate.resolve()
+  await assert.rejects(pending, isViewError('LOCAL_ACP_VIEW_CLOSED'))
+  assert.equal(registry.phaseOf(conn), 'idle', 'the late resolve never leaves an attaching orphan')
+  await registry.resumeSession(conn, access, { sessionId: 'RE13', cwd: '/w' })
+  assert.equal(registry.phaseOf(conn), 'attached', 'a later explicit attach succeeds')
+})
